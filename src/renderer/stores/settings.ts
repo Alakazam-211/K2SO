@@ -1,14 +1,15 @@
 import { create } from 'zustand'
-import { trpc } from '@/lib/trpc'
+import { invoke } from '@tauri-apps/api/core'
 import { getDefaultKeybindings } from '@shared/hotkeys'
 
-export type SettingsSection = 'general' | 'terminal' | 'editors-agents' | 'keybindings' | 'projects'
+export type SettingsSection = 'general' | 'terminal' | 'editors-agents' | 'keybindings' | 'projects' | 'ai-assistant'
 
 export interface TerminalSettings {
   fontFamily: string
   fontSize: number
   cursorStyle: 'bar' | 'block' | 'underline'
   scrollback: number
+  naturalTextEditing: boolean
 }
 
 interface SettingsState {
@@ -24,11 +25,17 @@ interface SettingsState {
   // Per-project settings
   projectSettings: Record<string, { defaultEditor?: string }>
 
+  // AI Assistant
+  aiAssistantEnabled: boolean
+
+  // Pre-select a specific project in the projects section
+  initialProjectId: string | null
+
   // Loading state
   loaded: boolean
 
   // Actions
-  openSettings: (section?: SettingsSection) => void
+  openSettings: (section?: SettingsSection, projectId?: string) => void
   closeSettings: () => void
   setSection: (section: SettingsSection) => void
   updateTerminalSettings: (partial: Partial<TerminalSettings>) => void
@@ -36,6 +43,7 @@ interface SettingsState {
   resetKeybinding: (id: string) => void
   resetAllKeybindings: () => void
   updateProjectSetting: (projectId: string, editor: string) => void
+  setAiAssistantEnabled: (enabled: boolean) => void
   resetAllSettings: () => void
   fetchSettings: () => Promise<void>
 }
@@ -44,7 +52,8 @@ const DEFAULT_TERMINAL: TerminalSettings = {
   fontFamily: 'MesloLGM Nerd Font',
   fontSize: 13,
   cursorStyle: 'bar',
-  scrollback: 5000
+  scrollback: 5000,
+  naturalTextEditing: true
 }
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
@@ -53,10 +62,16 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   terminal: { ...DEFAULT_TERMINAL },
   keybindings: {},
   projectSettings: {},
+  aiAssistantEnabled: true,
+  initialProjectId: null,
   loaded: false,
 
-  openSettings: (section?: SettingsSection) => {
-    set({ settingsOpen: true, activeSection: section ?? get().activeSection })
+  openSettings: (section?: SettingsSection, projectId?: string) => {
+    set({
+      settingsOpen: true,
+      activeSection: section ?? get().activeSection,
+      initialProjectId: projectId ?? null
+    })
   },
 
   closeSettings: () => {
@@ -68,53 +83,94 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   updateTerminalSettings: async (partial: Partial<TerminalSettings>) => {
-    const newTerminal = { ...get().terminal, ...partial }
+    const prev = get().terminal
+    const newTerminal = { ...prev, ...partial }
     set({ terminal: newTerminal })
-    await trpc.settings.update.mutate({ terminal: newTerminal })
+    try {
+      await invoke('settings_update', { terminal: newTerminal })
+    } catch (err) {
+      console.error('[settings] Failed to persist terminal settings:', err)
+      set({ terminal: prev })
+    }
   },
 
   updateKeybinding: async (id: string, combo: string) => {
-    const keybindings = { ...get().keybindings, [id]: combo }
+    const prev = get().keybindings
+    const keybindings = { ...prev, [id]: combo }
     set({ keybindings })
-    await trpc.settings.update.mutate({ keybindings })
+    try {
+      await invoke('settings_update', { keybindings })
+    } catch (err) {
+      console.error('[settings] Failed to persist keybinding:', err)
+      set({ keybindings: prev })
+    }
   },
 
   resetKeybinding: async (id: string) => {
-    const keybindings = { ...get().keybindings }
+    const prev = get().keybindings
+    const keybindings = { ...prev }
     delete keybindings[id]
     set({ keybindings })
-    await trpc.settings.update.mutate({ keybindings })
+    try {
+      await invoke('settings_update', { keybindings })
+    } catch (err) {
+      console.error('[settings] Failed to persist keybinding reset:', err)
+      set({ keybindings: prev })
+    }
   },
 
   resetAllKeybindings: async () => {
+    const prev = get().keybindings
     set({ keybindings: {} })
-    await trpc.settings.update.mutate({ keybindings: {} })
+    try {
+      await invoke('settings_update', { keybindings: {} })
+    } catch (err) {
+      console.error('[settings] Failed to persist keybindings reset:', err)
+      set({ keybindings: prev })
+    }
   },
 
   updateProjectSetting: async (projectId: string, editor: string) => {
+    const prev = get().projectSettings
     const projectSettings = {
-      ...get().projectSettings,
-      [projectId]: { ...get().projectSettings[projectId], defaultEditor: editor }
+      ...prev,
+      [projectId]: { ...prev[projectId], defaultEditor: editor }
     }
     set({ projectSettings })
-    await trpc.settings.update.mutate({ projects: projectSettings })
+    try {
+      await invoke('settings_update', { projectSettings })
+    } catch (err) {
+      console.error('[settings] Failed to persist project setting:', err)
+      set({ projectSettings: prev })
+    }
+  },
+
+  setAiAssistantEnabled: async (enabled: boolean) => {
+    const prev = get().aiAssistantEnabled
+    set({ aiAssistantEnabled: enabled })
+    try {
+      await invoke('settings_update', { aiAssistantEnabled: enabled })
+    } catch (err) {
+      console.error('[settings] Failed to persist AI assistant setting:', err)
+      set({ aiAssistantEnabled: prev })
+    }
   },
 
   resetAllSettings: async () => {
-    const result = await trpc.settings.reset.mutate()
+    const result = await invoke<any>('settings_reset')
     set({
       terminal: result.terminal,
       keybindings: result.keybindings,
-      projectSettings: result.projects
+      projectSettings: result.projectSettings ?? {}
     })
   },
 
   fetchSettings: async () => {
-    const result = await trpc.settings.get.query()
+    const result = await invoke<any>('settings_get')
     set({
       terminal: result.terminal,
       keybindings: result.keybindings,
-      projectSettings: result.projects,
+      projectSettings: result.projectSettings ?? {},
       loaded: true
     })
   }

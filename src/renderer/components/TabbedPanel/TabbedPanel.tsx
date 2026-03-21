@@ -4,12 +4,15 @@ import {
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_DEFAULT_WIDTH
 } from '../../../shared/constants'
+import { usePanelsStore } from '../../stores/panels'
+import { showContextMenu } from '../../lib/context-menu'
 
-type PanelTab = 'files' | 'changes'
+type PanelTab = 'files' | 'changes' | 'history'
 
 const TAB_LABELS: Record<PanelTab, string> = {
   files: 'Files',
-  changes: 'Changes'
+  changes: 'Changes',
+  history: 'Chats'
 }
 
 interface TabbedPanelProps {
@@ -18,7 +21,7 @@ interface TabbedPanelProps {
   onTabChange: (tab: PanelTab) => void
   width: number
   onWidthChange: (width: number) => void
-  /** Which side the resize handle is on */
+  /** Which side this panel is on */
   resizeSide: 'left' | 'right'
   children: ReactNode
 }
@@ -46,8 +49,8 @@ function PanelResizeHandle({
         if (!isDragging.current) return
         const delta = moveEvent.clientX - startX
         const newWidth = side === 'right'
-          ? Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, startWidth - delta))
-          : Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, startWidth + delta))
+          ? Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, startWidth + delta))
+          : Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, startWidth - delta))
         onWidthChange(newWidth)
       }
 
@@ -91,6 +94,45 @@ export default function TabbedPanel({
   resizeSide,
   children
 }: TabbedPanelProps): React.JSX.Element {
+  // Determine which side this panel is on based on resizeSide
+  // resizeSide='right' means the resize handle is on the right edge → this is the LEFT panel
+  // resizeSide='left' means the resize handle is on the left edge → this is the RIGHT panel
+  const thisSide = resizeSide === 'right' ? 'left' : 'right'
+  const oppositeSide = thisSide === 'left' ? 'right' : 'left'
+  const oppositeLabel = oppositeSide === 'left' ? 'Left' : 'Right'
+
+  const handleTabContextMenu = useCallback(async (e: React.MouseEvent, tab: PanelTab) => {
+    e.preventDefault()
+
+    const clickedId = await showContextMenu([
+      { id: 'move', label: `Move to ${oppositeLabel} Panel` },
+      { id: 'separator', label: '', type: 'separator' },
+      { id: 'close', label: 'Close Panel' }
+    ])
+
+    if (clickedId === 'move') {
+      const store = usePanelsStore.getState()
+      if (oppositeSide === 'left') {
+        store.moveTabToLeft(tab)
+        // Auto-open the target panel if it's closed
+        if (!store.leftPanelOpen) {
+          store.toggleLeftPanel()
+        }
+      } else {
+        store.moveTabToRight(tab)
+        if (!store.rightPanelOpen) {
+          store.toggleRightPanel()
+        }
+      }
+    } else if (clickedId === 'close') {
+      if (thisSide === 'left') {
+        usePanelsStore.getState().toggleLeftPanel()
+      } else {
+        usePanelsStore.getState().toggleRightPanel()
+      }
+    }
+  }, [oppositeSide, oppositeLabel, thisSide])
+
   return (
     <div
       className="relative flex flex-col h-full bg-[var(--color-bg-surface)] overflow-hidden"
@@ -109,6 +151,7 @@ export default function TabbedPanel({
                 : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]'
             }`}
             onClick={() => onTabChange(tab)}
+            onContextMenu={(e) => handleTabContextMenu(e, tab)}
           >
             {TAB_LABELS[tab]}
           </button>

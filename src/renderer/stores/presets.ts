@@ -1,7 +1,7 @@
 import { create } from 'zustand'
-import { trpc } from '@/lib/trpc'
+import { invoke } from '@tauri-apps/api/core'
 import { useTabsStore } from './tabs'
-import type { TerminalPane } from './tabs'
+import type { TerminalPane, Tab, PaneGroup, Item } from './tabs'
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -68,7 +68,7 @@ export const usePresetsStore = create<PresetsState>((set, get) => ({
 
   fetchPresets: async () => {
     try {
-      const result = await trpc.presets.list.query()
+      const result = await invoke<AgentPreset[]>('presets_list')
       set({ presets: result })
     } catch (err) {
       console.error('Failed to fetch presets:', err)
@@ -81,37 +81,22 @@ export const usePresetsStore = create<PresetsState>((set, get) => ({
 
   launchPreset: (presetId: string, cwd: string, mode: 'tab' | 'split') => {
     const preset = get().presets.find((p) => p.id === presetId)
-    if (!preset) return
+    if (!preset) {
+      console.error(`[presets] Preset not found: ${presetId}`)
+      return
+    }
 
     const { command, args } = parseCommand(preset.command)
     const tabsStore = useTabsStore.getState()
 
     if (mode === 'tab') {
-      // Create a new tab with the preset command
-      const tabId = crypto.randomUUID()
-      const paneId = crypto.randomUUID()
-
-      const pane: TerminalPane = {
-        type: 'terminal',
-        terminalId: paneId,
-        cwd,
+      // Use addTabToGroup which respects the active group
+      const activeGroup = tabsStore.activeGroupIndex
+      tabsStore.addTabToGroup(activeGroup, cwd, {
+        title: preset.label,
         command,
         args
-      }
-
-      // Use the tabs store internal pattern: manually construct the tab
-      const tab = {
-        id: tabId,
-        title: preset.label,
-        mosaicTree: paneId as any,
-        panes: new Map([[paneId, pane]])
-      }
-
-      // Directly push into tabs store
-      useTabsStore.setState((state) => ({
-        tabs: [...state.tabs, tab],
-        activeTabId: tabId
-      }))
+      })
     } else {
       // Split mode: split the active tab
       const activeTab = tabsStore.tabs.find((t) => t.id === tabsStore.activeTabId)

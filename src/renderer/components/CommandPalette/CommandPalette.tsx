@@ -3,6 +3,7 @@ import { useCommandPaletteStore } from '../../stores/command-palette'
 import { useProjectsStore } from '../../stores/projects'
 import { useFocusGroupsStore } from '../../stores/focus-groups'
 import { useSidebarStore } from '../../stores/sidebar'
+import ProjectAvatar from '../Sidebar/ProjectAvatar'
 
 interface FocusGroupResult {
   type: 'focus-group'
@@ -19,6 +20,7 @@ interface ProjectResult {
   path: string
   color: string
   focusGroupId: string | null
+  iconUrl?: string | null
 }
 
 type Result = FocusGroupResult | ProjectResult
@@ -87,7 +89,8 @@ export default function CommandPalette(): React.JSX.Element | null {
         name: p.name,
         path: p.path,
         color: p.color,
-        focusGroupId: p.focusGroupId
+        focusGroupId: p.focusGroupId,
+        iconUrl: p.iconUrl
       })
     }
 
@@ -298,7 +301,6 @@ export default function CommandPalette(): React.JSX.Element | null {
               {projectResults.map((result, i) => {
                 const globalIndex = projectIndexOffset + i
                 const isSelected = globalIndex === selectedIndex
-                const initial = result.name.charAt(0).toUpperCase()
                 return (
                   <div
                     key={`proj-${result.id}`}
@@ -310,17 +312,14 @@ export default function CommandPalette(): React.JSX.Element | null {
                     onClick={() => selectResult(result)}
                     onMouseEnter={() => setSelectedIndex(globalIndex)}
                   >
-                    {/* Avatar letter */}
-                    <div
-                      className="w-6 h-6 flex items-center justify-center flex-shrink-0 text-[10px] font-semibold"
-                      style={{
-                        background: `${result.color}30`,
-                        color: result.color,
-                        border: `1px solid ${result.color}50`
-                      }}
-                    >
-                      {initial}
-                    </div>
+                    <ProjectAvatar
+                      projectPath={result.path}
+                      projectName={result.name}
+                      projectColor={result.color}
+                      projectId={result.id}
+                      iconUrl={result.iconUrl}
+                      size={24}
+                    />
                     <div className="flex-1 min-w-0">
                       <span className="text-xs truncate block">{result.name}</span>
                       <span

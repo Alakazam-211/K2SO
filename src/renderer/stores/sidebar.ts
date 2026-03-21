@@ -4,7 +4,7 @@ import {
   SIDEBAR_MIN_WIDTH,
   SIDEBAR_MAX_WIDTH
 } from '../../shared/constants'
-import { trpc } from '../lib/trpc'
+import { invoke } from '@tauri-apps/api/core'
 
 interface SidebarState {
   isCollapsed: boolean
@@ -24,7 +24,7 @@ export const useSidebarStore = create<SidebarState>((set, get) => ({
   toggle: () => {
     const next = !get().isCollapsed
     set({ isCollapsed: next })
-    trpc.settings.update.mutate({ sidebarCollapsed: next }).catch((e: unknown) => console.error('[sidebar]', e))
+    invoke('settings_update', { sidebarCollapsed: next }).catch((e: unknown) => console.error('[sidebar]', e))
   },
 
   setWidth: (width: number) =>
@@ -32,17 +32,17 @@ export const useSidebarStore = create<SidebarState>((set, get) => ({
 
   collapse: () => {
     set({ isCollapsed: true })
-    trpc.settings.update.mutate({ sidebarCollapsed: true }).catch((e: unknown) => console.error('[sidebar]', e))
+    invoke('settings_update', { sidebarCollapsed: true }).catch((e: unknown) => console.error('[sidebar]', e))
   },
 
   expand: () => {
     set({ isCollapsed: false })
-    trpc.settings.update.mutate({ sidebarCollapsed: false }).catch((e: unknown) => console.error('[sidebar]', e))
+    invoke('settings_update', { sidebarCollapsed: false }).catch((e: unknown) => console.error('[sidebar]', e))
   },
 
   initFromSettings: async () => {
     try {
-      const settings = await trpc.settings.get.query()
+      const settings = await invoke<any>('settings_get')
       set({ isCollapsed: settings.sidebarCollapsed })
     } catch {
       // ignore — use defaults

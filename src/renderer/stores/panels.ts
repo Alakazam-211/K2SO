@@ -4,9 +4,9 @@ import {
   SIDEBAR_MIN_WIDTH,
   SIDEBAR_MAX_WIDTH
 } from '../../shared/constants'
-import { trpc } from '../lib/trpc'
+import { invoke } from '@tauri-apps/api/core'
 
-type PanelTab = 'files' | 'changes'
+type PanelTab = 'files' | 'changes' | 'history'
 
 interface PanelsState {
   // Left auxiliary panel (between projects sidebar and terminal)
@@ -44,18 +44,18 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
 
   rightPanelOpen: false,
   rightPanelWidth: SIDEBAR_DEFAULT_WIDTH,
-  rightPanelActiveTab: 'changes',
-  rightPanelTabs: ['changes'],
+  rightPanelActiveTab: 'history',
+  rightPanelTabs: ['history', 'changes'],
 
   toggleLeftPanel: () => {
     const next = !get().leftPanelOpen
     set({ leftPanelOpen: next })
-    trpc.settings.update.mutate({ leftPanelOpen: next }).catch((e: unknown) => console.error('[panels]', e))
+    invoke('settings_update', { leftPanelOpen: next }).catch((e: unknown) => console.error('[panels]', e))
   },
   toggleRightPanel: () => {
     const next = !get().rightPanelOpen
     set({ rightPanelOpen: next })
-    trpc.settings.update.mutate({ rightPanelOpen: next }).catch((e: unknown) => console.error('[panels]', e))
+    invoke('settings_update', { rightPanelOpen: next }).catch((e: unknown) => console.error('[panels]', e))
   },
 
   setLeftPanelWidth: (width) =>
@@ -63,10 +63,16 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
   setRightPanelWidth: (width) =>
     set({ rightPanelWidth: Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, width)) }),
 
-  setLeftPanelActiveTab: (tab) => set({ leftPanelActiveTab: tab }),
-  setRightPanelActiveTab: (tab) => set({ rightPanelActiveTab: tab }),
+  setLeftPanelActiveTab: (tab) => {
+    set({ leftPanelActiveTab: tab })
+    invoke('settings_update', { leftPanelActiveTab: tab }).catch((e: unknown) => console.error('[panels]', e))
+  },
+  setRightPanelActiveTab: (tab) => {
+    set({ rightPanelActiveTab: tab })
+    invoke('settings_update', { rightPanelActiveTab: tab }).catch((e: unknown) => console.error('[panels]', e))
+  },
 
-  moveTabToLeft: (tab) =>
+  moveTabToLeft: (tab) => {
     set((s) => ({
       leftPanelTabs: s.leftPanelTabs.includes(tab) ? s.leftPanelTabs : [...s.leftPanelTabs, tab],
       rightPanelTabs: s.rightPanelTabs.filter((t) => t !== tab),
@@ -75,9 +81,17 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
         s.rightPanelActiveTab === tab
           ? s.rightPanelTabs.find((t) => t !== tab) ?? s.rightPanelActiveTab
           : s.rightPanelActiveTab
-    })),
+    }))
+    const s = get()
+    invoke('settings_update', {
+      leftPanelTabs: s.leftPanelTabs,
+      rightPanelTabs: s.rightPanelTabs,
+      leftPanelActiveTab: s.leftPanelActiveTab,
+      rightPanelActiveTab: s.rightPanelActiveTab
+    }).catch((e: unknown) => console.error('[panels]', e))
+  },
 
-  moveTabToRight: (tab) =>
+  moveTabToRight: (tab) => {
     set((s) => ({
       rightPanelTabs: s.rightPanelTabs.includes(tab)
         ? s.rightPanelTabs
@@ -88,11 +102,19 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
         s.leftPanelActiveTab === tab
           ? s.leftPanelTabs.find((t) => t !== tab) ?? s.leftPanelActiveTab
           : s.leftPanelActiveTab
-    })),
+    }))
+    const s = get()
+    invoke('settings_update', {
+      leftPanelTabs: s.leftPanelTabs,
+      rightPanelTabs: s.rightPanelTabs,
+      leftPanelActiveTab: s.leftPanelActiveTab,
+      rightPanelActiveTab: s.rightPanelActiveTab
+    }).catch((e: unknown) => console.error('[panels]', e))
+  },
 
   initFromSettings: async () => {
     try {
-      const settings = await trpc.settings.get.query()
+      const settings = await invoke<any>('settings_get')
       set({
         leftPanelOpen: settings.leftPanelOpen,
         rightPanelOpen: settings.rightPanelOpen

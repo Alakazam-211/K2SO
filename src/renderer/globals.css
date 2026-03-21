@@ -24,7 +24,12 @@ body {
 
 /* macOS traffic light drag region — only the top bar is draggable */
 /* The .drag class is applied explicitly to draggable areas (TopBar) */
+/* Works for both Electron (-webkit-app-region) and Tauri (data-tauri-drag-region) */
 .drag {
+  -webkit-app-region: drag;
+}
+
+[data-tauri-drag-region] {
   -webkit-app-region: drag;
 }
 
@@ -277,6 +282,177 @@ a,
   background: rgba(255, 255, 255, 0.2);
 }
 
+/* ── DOCX pane content ────────────────────────────────────────────── */
+
+.docx-body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
+.docx-body h1 {
+  font-size: 1.75em;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin: 0 0 16px 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.docx-body h2 {
+  font-size: 1.4em;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin: 24px 0 12px 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.docx-body h3 {
+  font-size: 1.15em;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 20px 0 8px 0;
+}
+
+.docx-body h4 {
+  font-size: 1em;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 16px 0 8px 0;
+}
+
+.docx-body h5,
+.docx-body h6 {
+  font-size: 0.9em;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  margin: 12px 0 6px 0;
+}
+
+.docx-body p {
+  margin: 0 0 12px 0;
+  color: var(--color-text-secondary);
+}
+
+.docx-body a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+
+.docx-body a:hover {
+  text-decoration: underline;
+}
+
+.docx-body strong,
+.docx-body b {
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+.docx-body em,
+.docx-body i {
+  font-style: italic;
+}
+
+.docx-body ul,
+.docx-body ol {
+  margin: 0 0 12px 0;
+  padding-left: 24px;
+  color: var(--color-text-secondary);
+}
+
+.docx-body li {
+  margin: 4px 0;
+}
+
+.docx-body li > ul,
+.docx-body li > ol {
+  margin-bottom: 0;
+}
+
+.docx-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 16px 0;
+  font-size: 13px;
+}
+
+.docx-body th {
+  background: #1a1a1a;
+  color: var(--color-text-primary);
+  font-weight: 600;
+  text-align: left;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+}
+
+.docx-body td {
+  padding: 6px 12px;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+}
+
+.docx-body tr:nth-child(even) {
+  background: #111111;
+}
+
+.docx-body tr:nth-child(odd) {
+  background: #0a0a0a;
+}
+
+.docx-body img {
+  max-width: 100%;
+  height: auto;
+}
+
+.docx-body blockquote {
+  margin: 0 0 12px 0;
+  padding: 8px 16px;
+  border-left: 3px solid var(--color-accent);
+  background: #111111;
+  color: var(--color-text-muted);
+}
+
+.docx-body blockquote p {
+  margin: 0;
+}
+
+.docx-body hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 20px 0;
+}
+
+.docx-body sup {
+  font-size: 0.75em;
+  vertical-align: super;
+}
+
+.docx-body sub {
+  font-size: 0.75em;
+  vertical-align: sub;
+}
+
+/* DOCX scrollbar */
+.docx-body::-webkit-scrollbar {
+  width: 6px;
+}
+
+.docx-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.docx-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 0;
+}
+
+.docx-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
 /* ── Status dot pulse animation ───────────────────────────────────── */
 
 @keyframes status-pulse {
@@ -349,4 +525,29 @@ a,
 
 .xterm-viewport::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.2);
+}
+
+/* ── Square range slider (matches K2SO toggle style) ─────────────── */
+
+.k2so-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 3.5px;
+  background: var(--color-border, #2a2a2a);
+  outline: none;
+  cursor: pointer;
+}
+
+.k2so-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  background: white;
+  border: none;
+  cursor: pointer;
+}
+
+.k2so-slider::-webkit-slider-thumb:hover {
+  background: var(--color-accent, #3b82f6);
 }

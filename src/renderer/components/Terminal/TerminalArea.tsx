@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import React, { useState, useRef, useCallback, useEffect } from 'react'
 import { TabBar } from '@/components/TabBar/TabBar'
 import { PaneLayout } from '@/components/PaneLayout/PaneLayout'
 import { PresetsBar } from '@/components/PresetsBar/PresetsBar'
@@ -9,56 +9,281 @@ interface TerminalAreaProps {
   cwd: string
 }
 
-export function TerminalArea({ cwd }: TerminalAreaProps): React.JSX.Element {
-  const { tabs, activeTabId, addTab } = useTabsStore()
-  const prevActiveTabRef = useRef<string | null>(null)
+// ── Global drag state ────────────────────────────────────────────────────
+// Uses mousedown/mousemove/mouseup instead of HTML5 drag-and-drop
+// because xterm swallows drag events and the overlay timing is unreliable.
 
-  // Register keyboard shortcuts
+interface TabDragState {
+  groupIndex: number
+  tabId: string
+  tabTitle: string
+  mouseX: number
+  mouseY: number
+}
+
+let globalDrag: TabDragState | null = null
+const dragListeners = new Set<() => void>()
+
+function notifyDragListeners(): void {
+  dragListeners.forEach((fn) => fn())
+}
+
+export function startTabDrag(data: { groupIndex: number; tabId: string; tabTitle: string; mouseX: number; mouseY: number }): void {
+  globalDrag = data
+  notifyDragListeners()
+
+  const handleMouseMove = (e: MouseEvent): void => {
+    if (!globalDrag) return
+    globalDrag = { ...globalDrag, mouseX: e.clientX, mouseY: e.clientY }
+    notifyDragListeners()
+  }
+
+  const handleMouseUp = (): void => {
+    // Find which column the mouse is over
+    if (globalDrag) {
+      const elements = document.elementsFromPoint(globalDrag.mouseX, globalDrag.mouseY)
+      for (const el of elements) {
+        const groupAttr = (el as HTMLElement).dataset?.tabGroupIndex
+        if (groupAttr !== undefined) {
+          const targetGroup = parseInt(groupAttr, 10)
+          if (targetGroup !== globalDrag.groupIndex) {
+            useTabsStore.getState().moveTabToGroup(globalDrag.groupIndex, targetGroup, globalDrag.tabId)
+          }
+          break
+        }
+      }
+    }
+
+    globalDrag = null
+    notifyDragListeners()
+    document.removeEventListener('mousemove', handleMouseMove)
+    document.removeEventListener('mouseup', handleMouseUp)
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+  }
+
+  document.addEventListener('mousemove', handleMouseMove)
+  document.addEventListener('mouseup', handleMouseUp)
+  document.body.style.cursor = 'grabbing'
+  document.body.style.userSelect = 'none'
+}
+
+function useTabDragState(): TabDragState | null {
+  const [state, setState] = useState(globalDrag)
+  useEffect(() => {
+    const handler = (): void => setState(globalDrag ? { ...globalDrag } : null)
+    dragListeners.add(handler)
+    return () => { dragListeners.delete(handler) }
+  }, [])
+  return state
+}
+
+// ── Resize Handle between columns ────────────────────────────────────────
+
+function ColumnResizeHandle({
+  onDrag
+}: {
+  onDrag: (deltaX: number) => void
+}): React.JSX.Element {
+  const startXRef = useRef(0)
+  const draggingRef = useRef(false)
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    startXRef.current = e.clientX
+    draggingRef.current = true
+
+    const handleMouseMove = (ev: MouseEvent): void => {
+      if (!draggingRef.current) return
+      const delta = ev.clientX - startXRef.current
+      startXRef.current = ev.clientX
+      onDrag(delta)
+    }
+
+    const handleMouseUp = (): void => {
+      draggingRef.current = false
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+  }, [onDrag])
+
+  return (
+    <div
+      className="flex-shrink-0 hover:bg-[var(--color-accent)] transition-colors"
+      style={{
+        width: 4,
+        cursor: 'col-resize',
+        backgroundColor: 'var(--color-border)',
+      }}
+      onMouseDown={handleMouseDown}
+    />
+  )
+}
+
+// ── Single Tab Group Column ──────────────────────────────────────────────
+
+function TabGroupColumn({
+  groupIndex,
+  cwd,
+  isActive,
+  onFocus,
+  style
+}: {
+  groupIndex: number
+  cwd: string
+  isActive: boolean
+  onFocus: () => void
+  style?: React.CSSProperties
+}): React.JSX.Element {
+  const tabs = useTabsStore((s) => groupIndex === 0 ? s.tabs : s.extraGroups[groupIndex - 1]?.tabs ?? [])
+  const activeTabId = useTabsStore((s) => groupIndex === 0 ? s.activeTabId : s.extraGroups[groupIndex - 1]?.activeTabId ?? null)
+  const dragState = useTabDragState()
+
+  // Show drop highlight when dragging a tab from a different group
+  const showDropHighlight = dragState !== null && dragState.groupIndex !== groupIndex
+
+  return (
+    <div
+      className="relative flex h-full flex-col overflow-hidden"
+      style={style}
+      onMouseDown={onFocus}
+      data-tab-group-index={groupIndex}
+    >
+      <TabBar cwd={cwd} groupIndex={groupIndex} />
+      <div className="relative flex-1 overflow-hidden">
+        {tabs.map((tab) => {
+          const isActiveTab = tab.id === activeTabId
+          if (!isActiveTab) return null
+          return (
+            <div
+              key={tab.id}
+              data-tab-id={tab.id}
+              className="absolute inset-0"
+            >
+              <PaneLayout tabId={tab.id} />
+            </div>
+          )
+        })}
+        {tabs.length === 0 && (
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-[var(--color-text-muted)]">
+            <span>Press <kbd className="px-1.5 py-0.5 bg-white/[0.06] text-[var(--color-text-secondary)] font-mono text-xs">&#8984;T</kbd> for a terminal</span>
+          </div>
+        )}
+
+        {/* Drop highlight */}
+        {showDropHighlight && (
+          <div
+            className="absolute inset-0 pointer-events-none"
+            style={{
+              zIndex: 10,
+              backgroundColor: 'rgba(59, 130, 246, 0.08)',
+              border: '2px solid var(--color-accent)',
+            }}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Drag ghost (follows cursor) ──────────────────────────────────────────
+
+function DragGhost(): React.JSX.Element | null {
+  const dragState = useTabDragState()
+  if (!dragState) return null
+
+  return (
+    <div
+      className="fixed pointer-events-none"
+      style={{
+        left: dragState.mouseX + 8,
+        top: dragState.mouseY - 12,
+        zIndex: 9999,
+        backgroundColor: '#1a1a1a',
+        border: '1px solid var(--color-border)',
+        padding: '4px 10px',
+        fontSize: '11px',
+        color: 'var(--color-text-primary)',
+        fontFamily: 'inherit',
+        whiteSpace: 'nowrap',
+        opacity: 0.9,
+      }}
+    >
+      {dragState.tabTitle}
+    </div>
+  )
+}
+
+// ── Main Terminal Area ───────────────────────────────────────────────────
+
+export function TerminalArea({ cwd }: TerminalAreaProps): React.JSX.Element {
+  const splitCount = useTabsStore((s) => s.splitCount)
+  const activeGroupIndex = useTabsStore((s) => s.activeGroupIndex)
+  const setActiveGroup = useTabsStore((s) => s.setActiveGroup)
+
+  const [flexes, setFlexes] = useState([50, 25, 25])
+  const containerRef = useRef<HTMLDivElement>(null)
+
   useTerminalShortcuts(cwd)
 
-  // Create initial tab if none exist
-  useEffect(() => {
-    if (tabs.length === 0) {
-      addTab(cwd)
-    }
-  }, []) // intentionally run only once
+  const handleResize = useCallback((handleIndex: number, deltaX: number) => {
+    const container = containerRef.current
+    if (!container) return
+    const totalWidth = container.offsetWidth
+    const deltaPct = (deltaX / totalWidth) * 100
 
-  // Focus the terminal when the active tab changes
-  useEffect(() => {
-    if (activeTabId && activeTabId !== prevActiveTabRef.current) {
-      prevActiveTabRef.current = activeTabId
-      // Small delay to let the tab render, then focus the first xterm in the active tab
-      requestAnimationFrame(() => {
-        const activeTabEl = document.querySelector(`[data-tab-id="${activeTabId}"]`)
-        if (activeTabEl) {
-          const textarea = activeTabEl.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement
-          if (textarea) textarea.focus()
-        }
-      })
-    }
-  }, [activeTabId])
+    setFlexes((prev) => {
+      const next = [...prev]
+      const minPct = 15
+      let newLeft = next[handleIndex] + deltaPct
+      let newRight = next[handleIndex + 1] - deltaPct
+
+      if (newLeft < minPct) { newRight += newLeft - minPct; newLeft = minPct }
+      if (newRight < minPct) { newLeft += newRight - minPct; newRight = minPct }
+
+      next[handleIndex] = newLeft
+      next[handleIndex + 1] = newRight
+      return next
+    })
+  }, [])
+
+  const prevSplitCountRef = useRef(splitCount)
+  if (splitCount !== prevSplitCountRef.current) {
+    prevSplitCountRef.current = splitCount
+    if (splitCount === 2) setFlexes([50, 50, 0])
+    else if (splitCount === 3) setFlexes([34, 33, 33])
+    else setFlexes([100, 0, 0])
+  }
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden">
-      <TabBar cwd={cwd} />
       <PresetsBar cwd={cwd} />
-      <div className="relative flex-1 overflow-hidden">
-        {tabs.map((tab) => (
-          <div
-            key={tab.id}
-            data-tab-id={tab.id}
-            className="absolute inset-0"
-            style={{ display: tab.id === activeTabId ? 'block' : 'none' }}
-          >
-            <PaneLayout tabId={tab.id} />
-          </div>
+      <div ref={containerRef} className="flex flex-1 overflow-hidden">
+        {Array.from({ length: splitCount }, (_, i) => (
+          <React.Fragment key={i}>
+            {i > 0 && (
+              <ColumnResizeHandle
+                onDrag={(delta) => handleResize(i - 1, delta)}
+              />
+            )}
+            <TabGroupColumn
+              groupIndex={i}
+              cwd={cwd}
+              isActive={i === activeGroupIndex}
+              onFocus={() => setActiveGroup(i)}
+              style={{ flex: `${flexes[i]} 0 0%`, minWidth: 0 }}
+            />
+          </React.Fragment>
         ))}
-        {tabs.length === 0 && (
-          <div className="flex h-full items-center justify-center text-sm text-[var(--color-text-muted)]">
-            Press Cmd+T to open a new terminal tab
-          </div>
-        )}
       </div>
+      <DragGhost />
     </div>
   )
 }

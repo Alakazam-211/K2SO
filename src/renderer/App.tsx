@@ -4,6 +4,7 @@ import FocusLayout from './components/Layout/FocusLayout'
 import Sidebar from './components/Sidebar/Sidebar'
 import FileTree from './components/FileTree/FileTree'
 import ChangesPanel from './components/ChangesPanel/ChangesPanel'
+import ChatHistory from './components/ChatHistory/ChatHistory'
 import TabbedPanel from './components/TabbedPanel/TabbedPanel'
 import { TerminalArea } from './components/Terminal/TerminalArea'
 import Settings from './components/Settings/Settings'
@@ -11,10 +12,15 @@ import GitInitDialog from './components/GitInitDialog/GitInitDialog'
 import WorktreeBar from './components/FocusWindow/WorktreeBar'
 import CommandPalette from './components/CommandPalette/CommandPalette'
 import ContextMenu from './components/ContextMenu/ContextMenu'
+import Toast from './components/Toast/Toast'
+import AssistantBar from './components/WorkspaceAssistant/AssistantBar'
 import { useProjectsStore } from './stores/projects'
 import { usePanelsStore } from './stores/panels'
 import { useSettingsStore } from './stores/settings'
 import { useCommandPaletteStore } from './stores/command-palette'
+import { useTerminalSettingsStore } from './stores/terminal-settings'
+import { useAssistantStore } from './stores/assistant'
+import { useTabsStore } from './stores/tabs'
 
 /** Parse focus mode project ID from URL hash (#focus=<projectId>) */
 function parseFocusProjectId(): string | null {
@@ -45,6 +51,7 @@ function LeftPanelContent({ rootPath }: { rootPath?: string }): React.JSX.Elemen
     >
       {activeTab === 'files' && rootPath && <FileTree rootPath={rootPath} />}
       {activeTab === 'changes' && <ChangesPanel />}
+      {activeTab === 'history' && <ChatHistory />}
     </TabbedPanel>
   )
 }
@@ -69,6 +76,7 @@ function RightPanelContent({ rootPath }: { rootPath?: string }): React.JSX.Eleme
     >
       {activeTab === 'files' && rootPath && <FileTree rootPath={rootPath} />}
       {activeTab === 'changes' && <ChangesPanel />}
+      {activeTab === 'history' && <ChatHistory />}
     </TabbedPanel>
   )
 }
@@ -86,7 +94,9 @@ export default function App(): React.JSX.Element {
 
   const toggleCommandPalette = useCommandPaletteStore((s) => s.toggle)
 
-  // Cmd+, to open settings, Cmd+K to toggle command palette
+  const toggleAssistant = useAssistantStore((s) => s.toggle)
+
+  // Cmd+, to open settings, Cmd+K to toggle command palette, Cmd+L to toggle assistant
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
       if (e.metaKey && e.key === ',') {
@@ -97,16 +107,55 @@ export default function App(): React.JSX.Element {
         e.preventDefault()
         toggleCommandPalette()
       }
+      if (e.metaKey && e.key === 'l') {
+        e.preventDefault()
+        toggleAssistant()
+      }
+      // Cmd+Shift++ to increase terminal font size
+      if (e.metaKey && e.shiftKey && e.key === '+') {
+        e.preventDefault()
+        useTerminalSettingsStore.getState().incrementFontSize()
+      }
+      // Cmd+Shift+- to decrease terminal font size
+      if (e.metaKey && e.shiftKey && e.key === '-') {
+        e.preventDefault()
+        useTerminalSettingsStore.getState().decrementFontSize()
+      }
+      // Cmd+= (plus) to zoom in the entire app
+      if (e.metaKey && !e.shiftKey && (e.key === '=' || e.key === '+')) {
+        e.preventDefault()
+        const current = parseFloat(document.documentElement.style.zoom || '1')
+        const next = Math.min(current + 0.1, 2.0)
+        document.documentElement.style.zoom = String(next)
+      }
+      // Cmd+- (minus) to zoom out the entire app
+      if (e.metaKey && !e.shiftKey && e.key === '-') {
+        e.preventDefault()
+        const current = parseFloat(document.documentElement.style.zoom || '1')
+        const next = Math.max(current - 0.1, 0.5)
+        document.documentElement.style.zoom = String(next)
+      }
+      // Cmd+0 to reset app zoom
+      if (e.metaKey && !e.shiftKey && e.key === '0') {
+        e.preventDefault()
+        document.documentElement.style.zoom = '1'
+      }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [openSettings, toggleCommandPalette])
+  }, [openSettings, toggleCommandPalette, toggleAssistant])
 
-  // Listen for menu:open-settings from main process
+  // Listen for menu:open-settings from Tauri backend
   useEffect(() => {
-    const handler = (): void => openSettings()
-    window.api.on('menu:open-settings', handler)
-    return () => window.api.off('menu:open-settings', handler)
+    let unlisten: (() => void) | undefined
+    import('@tauri-apps/api/event').then(({ listen }) => {
+      listen('menu:open-settings', () => openSettings()).then((fn) => {
+        unlisten = fn
+      })
+    })
+    return () => {
+      unlisten?.()
+    }
   }, [openSettings])
 
   // In focus mode, set the active project to the focused project on mount
@@ -120,6 +169,50 @@ export default function App(): React.JSX.Element {
     }
   }, [focusProjectId, projects, focusInitialized, setActiveProject])
 
+  // Before app close: detect CLI tool session IDs and save workspace layout
+  useEffect(() => {
+    const handleBeforeUnload = (): void => {
+      const tabsStore = useTabsStore.getState()
+      const projectsStore = useProjectsStore.getState()
+
+      // Synchronously detect and save — we can't await in beforeunload,
+      // but we trigger the async detection. The session IDs are also
+      // periodically detected by the polling mechanism.
+      if (projectsStore.activeProjectId && projectsStore.activeWorkspaceId) {
+        tabsStore.saveLayoutForWorkspace(
+          projectsStore.activeProjectId,
+          projectsStore.activeWorkspaceId
+        )
+      }
+    }
+
+    window.addEventListener('beforeunload', handleBeforeUnload)
+
+    // Also listen for Tauri's close event for more reliable detection
+    let unlisten: (() => void) | undefined
+    import('@tauri-apps/api/event').then(({ listen }) => {
+      listen('tauri://close-requested', async () => {
+        const tabsStore = useTabsStore.getState()
+        const projectsStore = useProjectsStore.getState()
+
+        // Detect session IDs before save (async is OK here since Tauri waits)
+        await tabsStore.detectAndSaveSessionIds()
+
+        if (projectsStore.activeProjectId && projectsStore.activeWorkspaceId) {
+          tabsStore.saveLayoutForWorkspace(
+            projectsStore.activeProjectId,
+            projectsStore.activeWorkspaceId
+          )
+        }
+      }).then((fn) => { unlisten = fn }).catch(() => {})
+    })
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+      unlisten?.()
+    }
+  }, [])
+
   const effectiveProjectId = focusProjectId ?? activeProjectId
   const activeProject = projects.find((p) => p.id === effectiveProjectId)
   const activeWorkspace = activeProject?.workspaces.find((w) => w.id === activeWorkspaceId)
@@ -130,13 +223,22 @@ export default function App(): React.JSX.Element {
     return (
       <>
         <div className="flex h-screen w-screen flex-col overflow-hidden bg-[var(--color-bg)]">
-          <div className="h-[38px] flex-shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-surface)] drag" />
+          <div
+            className="h-[38px] flex-shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-surface)]"
+            data-tauri-drag-region
+            onMouseDown={() => {
+              import('@tauri-apps/api/window').then(m => m.getCurrentWindow().startDragging())
+            }}
+          />
           <div className="flex-1 overflow-hidden">
             <Settings />
           </div>
         </div>
+        <GitInitDialog />
         <CommandPalette />
         <ContextMenu />
+        <Toast />
+        <AssistantBar />
       </>
     )
   }
@@ -164,6 +266,8 @@ export default function App(): React.JSX.Element {
         <GitInitDialog />
         <CommandPalette />
         <ContextMenu />
+        <Toast />
+        <AssistantBar />
       </>
     )
   }
@@ -193,6 +297,7 @@ export default function App(): React.JSX.Element {
       <GitInitDialog />
       <CommandPalette />
       <ContextMenu />
+      <AssistantBar />
     </>
   )
 }

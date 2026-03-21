@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { trpc } from '@/lib/trpc'
+import { invoke } from '@tauri-apps/api/core'
+import { GIT_POLL_INTERVAL } from '@shared/constants'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -47,7 +48,7 @@ export function useGitInfo(projectPath?: string): UseGitInfoResult {
 
     try {
       setLoading((prev) => (prev ? prev : true))
-      const result = await trpc.git.info.query({ path: projectPath })
+      const result = await invoke<GitInfo>('git_info', { path: projectPath })
       setData(result)
       setError(null)
     } catch (e) {
@@ -61,7 +62,7 @@ export function useGitInfo(projectPath?: string): UseGitInfoResult {
     fetch()
 
     // Auto-refresh every 5 seconds
-    intervalRef.current = setInterval(fetch, 5000)
+    intervalRef.current = setInterval(fetch, GIT_POLL_INTERVAL)
 
     return () => {
       if (intervalRef.current) {
@@ -89,7 +90,7 @@ export function useGitChanges(projectPath?: string): UseGitChangesResult {
 
     try {
       setLoading((prev) => (prev ? prev : true))
-      const result = await trpc.git.changes.query({ path: projectPath })
+      const result = await invoke<ChangedFile[]>('git_changes', { path: projectPath })
       setData(result)
       setError(null)
     } catch (e) {
@@ -102,7 +103,7 @@ export function useGitChanges(projectPath?: string): UseGitChangesResult {
   useEffect(() => {
     fetch()
 
-    intervalRef.current = setInterval(fetch, 5000)
+    intervalRef.current = setInterval(fetch, GIT_POLL_INTERVAL)
 
     return () => {
       if (intervalRef.current) {

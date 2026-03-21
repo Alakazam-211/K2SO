@@ -1,5 +1,6 @@
 import { create } from 'zustand'
-import { trpc } from '@/lib/trpc'
+import { invoke } from '@tauri-apps/api/core'
+import { useToastStore } from './toast'
 
 export interface FocusGroup {
   id: string
@@ -32,8 +33,8 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
 
   fetchFocusGroups: async () => {
     try {
-      const groups = await trpc.focusGroups.list.query()
-      set({ focusGroups: groups as FocusGroup[] })
+      const groups = await invoke<FocusGroup[]>('focus_groups_list')
+      set({ focusGroups: groups })
     } catch (err) {
       console.error('[focus-groups] fetchFocusGroups failed:', err)
     }
@@ -45,8 +46,9 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
 
   createFocusGroup: async (name: string, color?: string) => {
     try {
-      await trpc.focusGroups.create.mutate({ name, color })
+      await invoke('focus_groups_create', { name, color })
       await get().fetchFocusGroups()
+      useToastStore.getState().addToast('Focus group created', 'success')
     } catch (err) {
       console.error('[focus-groups] createFocusGroup failed:', err)
     }
@@ -58,7 +60,7 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
       if (state.activeFocusGroupId === id) {
         set({ activeFocusGroupId: null })
       }
-      await trpc.focusGroups.delete.mutate({ id })
+      await invoke('focus_groups_delete', { id })
       await get().fetchFocusGroups()
     } catch (err) {
       console.error('[focus-groups] deleteFocusGroup failed:', err)
@@ -67,7 +69,7 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
 
   renameFocusGroup: async (id: string, name: string) => {
     try {
-      await trpc.focusGroups.update.mutate({ id, name })
+      await invoke('focus_groups_update', { id, name })
       await get().fetchFocusGroups()
     } catch (err) {
       console.error('[focus-groups] renameFocusGroup failed:', err)
@@ -76,7 +78,7 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
 
   updateFocusGroupColor: async (id: string, color: string | null) => {
     try {
-      await trpc.focusGroups.update.mutate({ id, color })
+      await invoke('focus_groups_update', { id, color })
       await get().fetchFocusGroups()
     } catch (err) {
       console.error('[focus-groups] updateFocusGroupColor failed:', err)
@@ -85,7 +87,7 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
 
   assignProjectToGroup: async (projectId: string, focusGroupId: string | null) => {
     try {
-      await trpc.focusGroups.assignProject.mutate({ projectId, focusGroupId })
+      await invoke('focus_groups_assign_project', { projectId, focusGroupId })
     } catch (err) {
       console.error('[focus-groups] assignProjectToGroup failed:', err)
     }
@@ -97,7 +99,7 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
       if (!enabled) {
         set({ activeFocusGroupId: null })
       }
-      await trpc.settings.update.mutate({ focusGroupsEnabled: enabled })
+      await invoke('settings_update', { focusGroupsEnabled: enabled })
     } catch (err) {
       console.error('[focus-groups] setFocusGroupsEnabled failed:', err)
     }
@@ -105,7 +107,7 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
 
   initFromSettings: async () => {
     try {
-      const settings = await trpc.settings.get.query()
+      const settings = await invoke<any>('settings_get')
       set({ focusGroupsEnabled: settings.focusGroupsEnabled ?? false })
       await get().fetchFocusGroups()
     } catch (err) {

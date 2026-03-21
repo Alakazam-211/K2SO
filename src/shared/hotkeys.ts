@@ -33,15 +33,15 @@ export const HOTKEYS: HotkeyDefinition[] = [
   { id: 'closeTab', label: 'Close Tab', defaultKey: 'Meta+W', category: 'Tabs' },
   { id: 'prevTab', label: 'Previous Tab', defaultKey: 'Meta+Alt+ArrowLeft', category: 'Tabs' },
   { id: 'nextTab', label: 'Next Tab', defaultKey: 'Meta+Alt+ArrowRight', category: 'Tabs' },
-  { id: 'tab1', label: 'Go to Tab 1', defaultKey: 'Meta+1', category: 'Tabs' },
-  { id: 'tab2', label: 'Go to Tab 2', defaultKey: 'Meta+2', category: 'Tabs' },
-  { id: 'tab3', label: 'Go to Tab 3', defaultKey: 'Meta+3', category: 'Tabs' },
-  { id: 'tab4', label: 'Go to Tab 4', defaultKey: 'Meta+4', category: 'Tabs' },
-  { id: 'tab5', label: 'Go to Tab 5', defaultKey: 'Meta+5', category: 'Tabs' },
-  { id: 'tab6', label: 'Go to Tab 6', defaultKey: 'Meta+6', category: 'Tabs' },
-  { id: 'tab7', label: 'Go to Tab 7', defaultKey: 'Meta+7', category: 'Tabs' },
-  { id: 'tab8', label: 'Go to Tab 8', defaultKey: 'Meta+8', category: 'Tabs' },
-  { id: 'tab9', label: 'Go to Tab 9', defaultKey: 'Meta+9', category: 'Tabs' },
+  { id: 'workspace1', label: 'Switch to Workspace 1', defaultKey: 'Meta+1', category: 'Navigation' },
+  { id: 'workspace2', label: 'Switch to Workspace 2', defaultKey: 'Meta+2', category: 'Navigation' },
+  { id: 'workspace3', label: 'Switch to Workspace 3', defaultKey: 'Meta+3', category: 'Navigation' },
+  { id: 'workspace4', label: 'Switch to Workspace 4', defaultKey: 'Meta+4', category: 'Navigation' },
+  { id: 'workspace5', label: 'Switch to Workspace 5', defaultKey: 'Meta+5', category: 'Navigation' },
+  { id: 'workspace6', label: 'Switch to Workspace 6', defaultKey: 'Meta+6', category: 'Navigation' },
+  { id: 'workspace7', label: 'Switch to Workspace 7', defaultKey: 'Meta+7', category: 'Navigation' },
+  { id: 'workspace8', label: 'Switch to Workspace 8', defaultKey: 'Meta+8', category: 'Navigation' },
+  { id: 'workspace9', label: 'Switch to Workspace 9', defaultKey: 'Meta+9', category: 'Navigation' },
 
   // ── Navigation ──────────────────────────────────────────────────────
   {
@@ -65,7 +65,8 @@ export const HOTKEYS: HotkeyDefinition[] = [
 
   // ── App ──────────────────────────────────────────────────────────────
   { id: 'openSettings', label: 'Open Settings', defaultKey: 'Meta+,', category: 'App' },
-  { id: 'newWindow', label: 'New Window', defaultKey: 'Meta+Shift+N', category: 'App' }
+  { id: 'newWindow', label: 'New Window', defaultKey: 'Meta+Shift+N', category: 'App' },
+  { id: 'toggleAssistant', label: 'Toggle Assistant', defaultKey: 'Meta+L', category: 'App' }
 ]
 
 /** Build a map of id -> defaultKey for quick lookup */

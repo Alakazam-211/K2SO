@@ -11,3 +11,25 @@ export const TERMINAL_FONT_SIZE_DEFAULT = 13
 
 // ── App constants ─────────────────────────────────────────────────────
 export const APP_NAME = 'K2SO'
+
+// ── File size limits ──────────────────────────────────────────────────
+export const MAX_FILE_SIZE = 10 * 1024 * 1024  // 10MB
+export const MAX_ICON_SIZE = 256 * 1024  // 256KB
+
+// ── Polling intervals ────────────────────────────────────────────────
+export const GIT_POLL_INTERVAL = 5000  // 5 seconds
+export const FILE_POLL_INTERVAL = 2000  // 2 seconds
+
+// ── Terminal ─────────────────────────────────────────────────────────
+export const TERMINAL_SCROLLBACK = 5000
+
+// ── UI timing ────────────────────────────────────────────────────────
+export const CONTEXT_MENU_DISMISS_DELAY = 50  // ms
+
+// ── Resumable CLI tools ─────────────────────────────────────────────
+// Tools that support session resume via a --resume flag.
+// Used to detect active sessions before app close and restore on reopen.
+export const RESUMABLE_CLI_TOOLS: Record<string, { resumeFlag: string; provider: string }> = {
+  'claude': { resumeFlag: '--resume', provider: 'claude' },
+  'cursor-agent': { resumeFlag: '--resume', provider: 'cursor' },
+}

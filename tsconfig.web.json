@@ -23,7 +23,6 @@
   "include": [
     "src/renderer/**/*.ts",
     "src/renderer/**/*.tsx",
-    "src/shared/**/*.ts",
-    "src/main/lib/**/*.ts"
+    "src/shared/**/*.ts"
   ]
 }

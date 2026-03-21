@@ -1,6 +1,7 @@
 node_modules/
 out/
 dist/
+src-tauri/target/
 *.dmg
 *.zip
 *.app

@@ -1,6 +1,8 @@
 import { useEffect } from 'react'
 import { useTabsStore } from '@/stores/tabs'
 import { usePresetsStore } from '@/stores/presets'
+import { useProjectsStore } from '@/stores/projects'
+import { useFocusGroupsStore } from '@/stores/focus-groups'
 import type { TerminalPane } from '@/stores/tabs'
 
 /**
@@ -12,7 +14,7 @@ import type { TerminalPane } from '@/stores/tabs'
  * - Cmd+Shift+D   — Split pane horizontally
  * - Cmd+Alt+Left  — Previous tab
  * - Cmd+Alt+Right — Next tab
- * - Cmd+1-9       — Jump to tab by index
+ * - Cmd+1-9       — Switch to workspace by index
  * - Cmd+K         — Clear active terminal (sends clear sequence)
  * - Ctrl+1-9      — Launch preset by position
  */
@@ -101,13 +103,28 @@ export function useTerminalShortcuts(cwd: string): void {
         }
 
         default: {
-          // Cmd+1-9 — jump to tab
+          // Cmd+1-9 — switch to workspace by index
           const num = parseInt(e.key, 10)
           if (num >= 1 && num <= 9 && !e.shiftKey && !e.altKey) {
             e.preventDefault()
+            const projectsState = useProjectsStore.getState()
+            const focusState = useFocusGroupsStore.getState()
+
+            // Apply the same focus group filter as the sidebar
+            let filteredProjects = projectsState.projects
+            if (focusState.focusGroupsEnabled && focusState.activeFocusGroupId !== null) {
+              filteredProjects = filteredProjects.filter(
+                (p) => p.focusGroupId === focusState.activeFocusGroupId
+              )
+            }
+
             const targetIdx = num - 1
-            if (targetIdx < state.tabs.length) {
-              state.setActiveTab(state.tabs[targetIdx].id)
+            if (targetIdx < filteredProjects.length) {
+              const project = filteredProjects[targetIdx]
+              const firstWorkspace = project.workspaces[0]
+              if (firstWorkspace) {
+                projectsState.setActiveWorkspace(project.id, firstWorkspace.id)
+              }
             }
           }
           break

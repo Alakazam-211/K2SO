@@ -1,8 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { trpc } from '@/lib/trpc'
+import { invoke } from '@tauri-apps/api/core'
+import { PDFViewer } from './PDFViewer'
+import { DocxViewer } from './DocxViewer'
 import { useTabsStore } from '@/stores/tabs'
+import { FILE_POLL_INTERVAL } from '@shared/constants'
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -13,18 +16,22 @@ interface FileViewerPaneProps {
   onClose?: () => void
 }
 
-type FileCategory = 'markdown' | 'image' | 'text'
+type FileCategory = 'markdown' | 'image' | 'pdf' | 'docx' | 'text'
 type ViewMode = 'rendered' | 'raw'
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 const MARKDOWN_EXTS = ['.md', '.markdown', '.mdx']
 const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico']
+const PDF_EXTS = ['.pdf']
+const DOCX_EXTS = ['.docx', '.doc']
 
 function getFileCategory(filePath: string): FileCategory {
   const ext = filePath.toLowerCase().replace(/^.*(\.[^.]+)$/, '$1')
   if (MARKDOWN_EXTS.includes(ext)) return 'markdown'
   if (IMAGE_EXTS.includes(ext)) return 'image'
+  if (PDF_EXTS.includes(ext)) return 'pdf'
+  if (DOCX_EXTS.includes(ext)) return 'docx'
   return 'text'
 }
 
@@ -46,18 +53,28 @@ function getShortPath(filePath: string): string {
 
 export function FileViewerPane({ filePath, paneId, tabId, onClose }: FileViewerPaneProps): React.JSX.Element {
   const [content, setContent] = useState<string>('')
+  const [editedContent, setEditedContent] = useState<string | null>(null) // null = not edited
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
 
   const category = getFileCategory(filePath)
   const [viewMode, setViewMode] = useState<ViewMode>(getDefaultViewMode(category))
+  const isDirty = editedContent !== null && editedContent !== content
+  const setTabDirty = useTabsStore((s) => s.setTabDirty)
 
   const pinned = useTabsStore((s) => {
     const tab = s.tabs.find((t) => t.id === tabId)
     if (!tab) return false
-    const pane = tab.panes.get(paneId)
-    if (!pane || pane.type !== 'file-viewer') return false
-    return pane.pinned
+    // Search all paneGroups for an item matching paneId
+    for (const [, pg] of tab.paneGroups) {
+      for (const item of pg.items) {
+        if (item.id === paneId && item.type === 'file-viewer') {
+          return item.pinned ?? false
+        }
+      }
+    }
+    return false
   })
   const pinPane = useTabsStore((s) => s.pinPane)
   const unpinPane = useTabsStore((s) => s.unpinPane)
@@ -77,8 +94,8 @@ export function FileViewerPane({ filePath, paneId, tabId, onClose }: FileViewerP
   }, [filePath])
 
   const loadFile = useCallback(async () => {
-    // Images don't need to be read via trpc
-    if (getFileCategory(filePath) === 'image') {
+    // Images, PDFs, and DOCX files don't need text content
+    if (getFileCategory(filePath) === 'image' || getFileCategory(filePath) === 'pdf' || getFileCategory(filePath) === 'docx') {
       setLoading(false)
       setError(null)
       return
@@ -87,7 +104,7 @@ export function FileViewerPane({ filePath, paneId, tabId, onClose }: FileViewerP
     setLoading(true)
     setError(null)
     try {
-      const result = await trpc.fs.readFile.query({ path: filePath })
+      const result = await invoke<{ content: string }>('fs_read_file', { path: filePath })
       setContent(result.content)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to read file'
@@ -101,26 +118,46 @@ export function FileViewerPane({ filePath, paneId, tabId, onClose }: FileViewerP
     loadFile()
   }, [loadFile])
 
-  // Auto-refresh: poll for file changes every 2 seconds
+  // Sync dirty state to tab
   useEffect(() => {
-    if (getFileCategory(filePath) === 'image') return
+    setTabDirty(tabId, isDirty)
+  }, [isDirty, tabId, setTabDirty])
+
+  // Auto-refresh: poll for file changes every 2 seconds (only when not editing)
+  useEffect(() => {
+    if (getFileCategory(filePath) === 'image' || getFileCategory(filePath) === 'pdf' || getFileCategory(filePath) === 'docx') return
+    if (isDirty) return // Don't overwrite user edits
 
     const interval = setInterval(async () => {
       try {
-        const result = await trpc.fs.readFile.query({ path: filePath })
-        // Only update if content actually changed
+        const result = await invoke<{ content: string }>('fs_read_file', { path: filePath })
         if (result.content !== content) {
           setContent(result.content)
         }
       } catch {
-        // Ignore polling errors — file might be temporarily locked by an editor
+        // Ignore polling errors
       }
-    }, 2000)
+    }, FILE_POLL_INTERVAL)
 
     return () => clearInterval(interval)
-  }, [filePath, content])
+  }, [filePath, content, isDirty])
 
-  // Cmd+F search shortcut
+  // Save file (Cmd+S)
+  const saveFile = useCallback(async () => {
+    if (!isDirty || editedContent === null) return
+    setSaving(true)
+    try {
+      await invoke('fs_write_file', { path: filePath, content: editedContent })
+      setContent(editedContent)
+      setEditedContent(null)
+    } catch (err) {
+      console.error('[file-viewer] Save failed:', err)
+    } finally {
+      setSaving(false)
+    }
+  }, [filePath, editedContent, isDirty])
+
+  // Cmd+F search and Cmd+S save shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent): void => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
@@ -131,6 +168,11 @@ export function FileViewerPane({ filePath, paneId, tabId, onClose }: FileViewerP
           searchInputRef.current?.focus()
           searchInputRef.current?.select()
         })
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+        e.preventDefault()
+        e.stopPropagation()
+        saveFile()
       }
       if (e.key === 'Escape' && searchVisible) {
         setSearchVisible(false)
@@ -143,7 +185,7 @@ export function FileViewerPane({ filePath, paneId, tabId, onClose }: FileViewerP
       container.addEventListener('keydown', handleKeyDown)
       return () => container.removeEventListener('keydown', handleKeyDown)
     }
-  }, [searchVisible])
+  }, [searchVisible, saveFile])
 
   // Highlight search matches
   useEffect(() => {
@@ -202,7 +244,7 @@ export function FileViewerPane({ filePath, paneId, tabId, onClose }: FileViewerP
     }
   }, [pinned, tabId, paneId, pinPane, unpinPane])
 
-  // Show toggle only for markdown and image files
+  // Show toggle only for markdown and image files (not PDF)
   const showViewToggle = category === 'markdown' || category === 'image'
 
   if (loading) {
@@ -262,6 +304,13 @@ export function FileViewerPane({ filePath, paneId, tabId, onClose }: FileViewerP
         <span className="text-[10px] text-[var(--color-text-muted)] truncate hidden sm:inline" title={filePath}>
           {shortPath}
         </span>
+
+        {/* Dirty / saving indicator */}
+        {isDirty && (
+          <span className="text-[10px] text-[var(--color-accent)] flex-shrink-0">
+            {saving ? 'Saving...' : 'Modified'}
+          </span>
+        )}
 
         <div className="flex-1" />
 
@@ -387,6 +436,15 @@ export function FileViewerPane({ filePath, paneId, tabId, onClose }: FileViewerP
       )}
 
       {/* Content */}
+      {category === 'pdf' ? (
+        <div className="flex-1 overflow-hidden">
+          <PDFViewer filePath={filePath} />
+        </div>
+      ) : category === 'docx' ? (
+        <div className="flex-1 overflow-hidden">
+          <DocxViewer filePath={filePath} />
+        </div>
+      ) : (
       <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef}>
         {category === 'image' && viewMode === 'rendered' ? (
           <div className="flex items-center justify-center p-4 min-h-full bg-[#0a0a0a]">
@@ -405,11 +463,15 @@ export function FileViewerPane({ filePath, paneId, tabId, onClose }: FileViewerP
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
           </div>
         ) : (
-          <pre className="p-4 text-xs text-[var(--color-text-secondary)] whitespace-pre-wrap break-words font-mono leading-5">
-            <code>{content}</code>
-          </pre>
+          <textarea
+            className="w-full h-full p-4 text-xs text-[var(--color-text-secondary)] whitespace-pre font-mono leading-5 bg-transparent border-none outline-none resize-none"
+            value={editedContent ?? content}
+            onChange={(e) => setEditedContent(e.target.value)}
+            spellCheck={false}
+          />
         )}
       </div>
+      )}
     </div>
   )
 }

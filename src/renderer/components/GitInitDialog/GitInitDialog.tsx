@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect } from 'react'
 import { useGitInitDialogStore } from '../../stores/git-init-dialog'
 import { useProjectsStore } from '../../stores/projects'
-import { trpc } from '../../lib/trpc'
+import { invoke } from '@tauri-apps/api/core'
 
 export default function GitInitDialog(): React.JSX.Element | null {
   const isOpen = useGitInitDialogStore((s) => s.isOpen)
@@ -39,7 +39,7 @@ export default function GitInitDialog(): React.JSX.Element | null {
     if (!path) return
     setIsPending(true)
     try {
-      await trpc.projects.initGitAndOpen.mutate({ path, branch: branchName })
+      await invoke('projects_init_git_and_open', { path, branch: branchName })
       close()
       await selectNewProject()
     } catch (err: unknown) {
@@ -52,7 +52,7 @@ export default function GitInitDialog(): React.JSX.Element | null {
     if (!path) return
     setIsPending(true)
     try {
-      await trpc.projects.addWithoutGit.mutate({ path })
+      await invoke('projects_add_without_git', { path })
       close()
       await selectNewProject()
     } catch (err: unknown) {

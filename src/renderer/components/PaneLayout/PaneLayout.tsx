@@ -1,19 +1,50 @@
-import { useCallback } from 'react'
+import React, { useCallback } from 'react'
 import { Mosaic, MosaicWindow } from 'react-mosaic-component'
 import type { MosaicBranch, MosaicNode } from 'react-mosaic-component'
-import { TerminalView } from '@/components/Terminal/TerminalView'
-import { FileViewerPane } from '@/components/FileViewerPane/FileViewerPane'
+import { PaneGroupView } from './PaneGroupView'
 import { useTabsStore } from '@/stores/tabs'
 import 'react-mosaic-component/react-mosaic-component.css'
+
+// Error boundary to catch react-dnd "two MultiBackends" errors
+// that can happen transiently during mosaic tree structure changes.
+// Limited to 3 retries to prevent infinite error-recovery loops.
+class MosaicErrorBoundary extends React.Component<
+  { children: React.ReactNode; onError?: () => void },
+  { hasError: boolean; retryCount: number }
+> {
+  state = { hasError: false, retryCount: 0 }
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true }
+  }
+  componentDidCatch(): void {
+    if (this.state.retryCount < 3) {
+      setTimeout(() => this.setState((s) => ({
+        hasError: false,
+        retryCount: s.retryCount + 1
+      })), 200)
+    }
+  }
+  render(): React.ReactNode {
+    if (this.state.hasError) return null
+    return this.props.children
+  }
+}
 
 interface PaneLayoutProps {
   tabId: string
 }
 
 export function PaneLayout({ tabId }: PaneLayoutProps): React.JSX.Element | null {
-  const tab = useTabsStore((s) => s.tabs.find((t) => t.id === tabId))
+  const tab = useTabsStore((s) => {
+    const found = s.tabs.find((t) => t.id === tabId)
+    if (found) return found
+    for (const g of s.extraGroups) {
+      const f = g.tabs.find((t) => t.id === tabId)
+      if (f) return f
+    }
+    return undefined
+  })
   const updateMosaicTree = useTabsStore((s) => s.updateMosaicTree)
-  const removePaneFromTab = useTabsStore((s) => s.removePaneFromTab)
 
   const handleChange = useCallback(
     (newTree: MosaicNode<string> | null) => {
@@ -30,12 +61,19 @@ export function PaneLayout({ tabId }: PaneLayoutProps): React.JSX.Element | null
     )
   }
 
-  const renderTile = (paneId: string, path: MosaicBranch[]): React.JSX.Element => {
-    const pane = tab.panes.get(paneId)
-    if (!pane) {
-      return <div className="h-full w-full bg-[#0a0a0a]" />
-    }
+  // Single pane (leaf node) — render directly without Mosaic wrapper.
+  // This avoids react-dnd "two MultiBackends" conflicts when multiple
+  // tab groups are rendered simultaneously.
+  if (typeof tab.mosaicTree === 'string') {
+    return (
+      <div className="h-full w-full">
+        <PaneGroupView tabId={tabId} paneGroupId={tab.mosaicTree} />
+      </div>
+    )
+  }
 
+  // Multi-pane (split) — use Mosaic for drag-to-resize
+  const renderTile = (paneGroupId: string, path: MosaicBranch[]): React.JSX.Element => {
     return (
       <MosaicWindow<string>
         path={path}
@@ -44,38 +82,22 @@ export function PaneLayout({ tabId }: PaneLayoutProps): React.JSX.Element | null
         createNode={() => ''}
         renderPreview={() => <div />}
       >
-        {pane.type === 'file-viewer' ? (
-          <FileViewerPane
-            filePath={pane.filePath}
-            paneId={paneId}
-            tabId={tabId}
-            onClose={() => {
-              removePaneFromTab(tabId, paneId)
-            }}
-          />
-        ) : pane.type === 'terminal' ? (
-          <TerminalView
-            terminalId={pane.terminalId}
-            cwd={pane.cwd}
-            command={pane.command}
-            args={pane.args}
-            onExit={() => {
-              removePaneFromTab(tabId, paneId)
-            }}
-          />
-        ) : null}
+        <PaneGroupView tabId={tabId} paneGroupId={paneGroupId} />
       </MosaicWindow>
     )
   }
 
   return (
-    <div className="mosaic-dark h-full w-full">
-      <Mosaic<string>
-        renderTile={renderTile}
-        value={tab.mosaicTree}
-        onChange={handleChange}
-        className=""
-      />
-    </div>
+    <MosaicErrorBoundary>
+      <div className="mosaic-dark h-full w-full">
+        <Mosaic<string>
+          key={tabId}
+          renderTile={renderTile}
+          value={tab.mosaicTree}
+          onChange={handleChange}
+          className=""
+        />
+      </div>
+    </MosaicErrorBoundary>
   )
 }

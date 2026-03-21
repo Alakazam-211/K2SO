@@ -1,6 +1,8 @@
 import { create } from 'zustand'
-import { trpc } from '@/lib/trpc'
+import { invoke } from '@tauri-apps/api/core'
 import { useGitInitDialogStore } from './git-init-dialog'
+import { useToastStore } from './toast'
+import { useTabsStore } from './tabs'
 
 interface Workspace {
   id: string
@@ -34,6 +36,7 @@ interface Project {
   worktreeMode: number
   iconUrl: string | null
   focusGroupId: string | null
+  pinned: number
   createdAt: number
 }
 
@@ -68,21 +71,21 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   fetchProjects: async () => {
     try {
-      const projectList = await trpc.projects.list.query()
+      const projectList = await invoke<Project[]>('projects_list')
 
       // Fetch workspaces and sections for each project
       const projectsWithWorkspaces: ProjectWithWorkspaces[] = await Promise.all(
         projectList.map(async (project: Project) => {
-          const ws = await trpc.workspaces.list.query({ projectId: project.id })
+          const ws = await invoke<Workspace[]>('workspaces_list', { projectId: project.id })
           let secs: WorkspaceSection[] = []
           try {
-            secs = (await trpc.sections.list.query({ projectId: project.id })) as WorkspaceSection[]
+            secs = await invoke<WorkspaceSection[]>('sections_list', { projectId: project.id })
           } catch {
             // sections table might not exist yet
           }
           return {
             ...project,
-            workspaces: ws as Workspace[],
+            workspaces: ws,
             sections: secs
           }
         })
@@ -94,10 +97,17 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
       const state = get()
       if (!state.activeProjectId && projectsWithWorkspaces.length > 0) {
         const firstProject = projectsWithWorkspaces[0]
+        const firstWorkspaceId = firstProject.workspaces[0]?.id ?? null
         set({
           activeProjectId: firstProject.id,
-          activeWorkspaceId: firstProject.workspaces[0]?.id ?? null
+          activeWorkspaceId: firstWorkspaceId
         })
+
+        // Load saved layout for the initial workspace (if any)
+        if (firstWorkspaceId) {
+          const cwd = firstProject.workspaces[0]?.worktreePath ?? firstProject.path ?? '~'
+          useTabsStore.getState().loadLayoutForWorkspace(firstProject.id, firstWorkspaceId, cwd)
+        }
       }
     } catch (err) {
       console.error('[projects] fetchProjects failed:', err)
@@ -106,11 +116,13 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   addProject: async (path: string) => {
     try {
-      const result = await trpc.projects.addFromPath.mutate({ path })
+      const result = await invoke<any>('projects_add_from_path', { path })
+      console.log('[projects] addFromPath result:', JSON.stringify(result))
 
       // Check if the folder needs git initialization
-      if (result && typeof result === 'object' && 'needsGitInit' in result && result.needsGitInit) {
+      if (result && typeof result === 'object' && 'needsGitInit' in result) {
         const r = result as { needsGitInit: true; path: string; name: string }
+        console.log('[projects] Opening git init dialog for:', r.path)
         useGitInitDialogStore.getState().open(r.path, r.name)
         return
       }
@@ -119,24 +131,46 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
       // Set the newly added project as active
       const state = get()
+      const tabsStore = useTabsStore.getState()
+
+      // Save layout for the workspace we're leaving
+      if (state.activeProjectId && state.activeWorkspaceId) {
+        tabsStore.saveLayoutForWorkspace(state.activeProjectId, state.activeWorkspaceId)
+      }
+
       const newProject = state.projects[state.projects.length - 1]
       if (newProject) {
+        const newWorkspaceId = newProject.workspaces[0]?.id ?? null
         set({
           activeProjectId: newProject.id,
-          activeWorkspaceId: newProject.workspaces[0]?.id ?? null
+          activeWorkspaceId: newWorkspaceId
         })
+
+        // New project — clear tabs and create a fresh one
+        if (newWorkspaceId) {
+          const cwd = newProject.workspaces[0]?.worktreePath ?? newProject.path ?? '~'
+          tabsStore.loadLayoutForWorkspace(newProject.id, newWorkspaceId, cwd)
+        } else {
+          tabsStore.clearAllTabs()
+        }
       }
+
+      useToastStore.getState().addToast('Workspace added', 'success')
     } catch (err) {
       console.error('[projects] addProject failed:', err)
+      useToastStore.getState().addToast('Failed to add workspace', 'error')
     }
   },
 
   removeProject: async (id: string) => {
     try {
-      await trpc.projects.delete.mutate({ id })
+      await invoke('projects_delete', { id })
 
       const state = get()
+      const tabsStore = useTabsStore.getState()
+
       if (state.activeProjectId === id) {
+        tabsStore.clearAllTabs()
         set({ activeProjectId: null, activeWorkspaceId: null })
       }
 
@@ -146,41 +180,91 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
       const updated = get()
       if (!updated.activeProjectId && updated.projects.length > 0) {
         const first = updated.projects[0]
+        const firstWorkspaceId = first.workspaces[0]?.id ?? null
         set({
           activeProjectId: first.id,
-          activeWorkspaceId: first.workspaces[0]?.id ?? null
+          activeWorkspaceId: firstWorkspaceId
         })
+
+        if (firstWorkspaceId) {
+          const cwd = first.workspaces[0]?.worktreePath ?? first.path ?? '~'
+          tabsStore.loadLayoutForWorkspace(first.id, firstWorkspaceId, cwd)
+        }
       }
+
+      useToastStore.getState().addToast('Workspace removed', 'info')
     } catch (err) {
       console.error('[projects] removeProject failed:', err)
     }
   },
 
   setActiveProject: (id: string | null) => {
+    const state = get()
+    const tabsStore = useTabsStore.getState()
+
+    // Save the current layout before switching
+    if (state.activeProjectId && state.activeWorkspaceId) {
+      tabsStore.saveLayoutForWorkspace(state.activeProjectId, state.activeWorkspaceId)
+    }
+
     if (id === null) {
+      tabsStore.clearAllTabs()
       set({ activeProjectId: null, activeWorkspaceId: null })
       return
     }
 
-    const project = get().projects.find((p) => p.id === id)
+    const project = state.projects.find((p) => p.id === id)
     if (project) {
+      const newWorkspaceId = project.workspaces[0]?.id ?? null
       set({
         activeProjectId: id,
-        activeWorkspaceId: project.workspaces[0]?.id ?? null
+        activeWorkspaceId: newWorkspaceId
       })
+
+      // Restore layout for the new workspace
+      if (newWorkspaceId) {
+        const cwd = project.workspaces[0]?.worktreePath ?? project.path ?? '~'
+        try {
+          tabsStore.loadLayoutForWorkspace(id, newWorkspaceId, cwd)
+        } catch (err) {
+          console.error('[projects] Failed to restore layout, clearing tabs:', err)
+          tabsStore.clearAllTabs()
+        }
+      } else {
+        tabsStore.clearAllTabs()
+      }
     }
   },
 
   setActiveWorkspace: (projectId: string, workspaceId: string) => {
+    const state = get()
+    const tabsStore = useTabsStore.getState()
+
+    // Save the current layout before switching
+    if (state.activeProjectId && state.activeWorkspaceId) {
+      tabsStore.saveLayoutForWorkspace(state.activeProjectId, state.activeWorkspaceId)
+    }
+
     set({
       activeProjectId: projectId,
       activeWorkspaceId: workspaceId
     })
+
+    // Restore layout for the new workspace
+    const project = state.projects.find((p) => p.id === projectId)
+    const workspace = project?.workspaces.find((w) => w.id === workspaceId)
+    const cwd = workspace?.worktreePath ?? project?.path ?? '~'
+    try {
+      tabsStore.loadLayoutForWorkspace(projectId, workspaceId, cwd)
+    } catch (err) {
+      console.error('[projects] Failed to restore layout, clearing tabs:', err)
+      tabsStore.clearAllTabs()
+    }
   },
 
   reorderProjects: async (ids: string[]) => {
     try {
-      await trpc.projects.reorder.mutate({ ids })
+      await invoke('projects_reorder', { ids })
       await get().fetchProjects()
     } catch (err) {
       console.error('[projects] reorderProjects failed:', err)
@@ -189,7 +273,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   renameProject: async (id: string, name: string) => {
     try {
-      await trpc.projects.update.mutate({ id, name })
+      await invoke('projects_update', { id, name })
       await get().fetchProjects()
     } catch (err) {
       console.error('[projects] renameProject failed:', err)
@@ -198,7 +282,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   createSection: async (projectId: string, name: string, color?: string) => {
     try {
-      await trpc.sections.create.mutate({ projectId, name, color })
+      await invoke('sections_create', { projectId, name, color })
       await get().fetchProjects()
     } catch (err) {
       console.error('[projects] createSection failed:', err)
@@ -207,7 +291,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   deleteSection: async (id: string) => {
     try {
-      await trpc.sections.delete.mutate({ id })
+      await invoke('sections_delete', { id })
       await get().fetchProjects()
     } catch (err) {
       console.error('[projects] deleteSection failed:', err)
@@ -216,7 +300,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   renameSection: async (id: string, name: string) => {
     try {
-      await trpc.sections.update.mutate({ id, name })
+      await invoke('sections_update', { id, name })
       await get().fetchProjects()
     } catch (err) {
       console.error('[projects] renameSection failed:', err)
@@ -225,7 +309,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   updateSection: async (id: string, updates: { name?: string; color?: string | null; isCollapsed?: number }) => {
     try {
-      await trpc.sections.update.mutate({ id, ...updates })
+      await invoke('sections_update', { id, ...updates })
       await get().fetchProjects()
     } catch (err) {
       console.error('[projects] updateSection failed:', err)
@@ -234,7 +318,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   assignWorkspaceToSection: async (workspaceId: string, sectionId: string | null) => {
     try {
-      await trpc.sections.assignWorkspace.mutate({ workspaceId, sectionId })
+      await invoke('sections_assign_workspace', { workspaceId, sectionId })
       await get().fetchProjects()
     } catch (err) {
       console.error('[projects] assignWorkspaceToSection failed:', err)

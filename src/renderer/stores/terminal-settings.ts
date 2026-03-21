@@ -32,23 +32,26 @@ export const useTerminalSettingsStore = create<TerminalSettingsState>((set) => (
   }
 }))
 
-// ── Wire up IPC listeners from menu ──────────────────────────────────
+// ── Wire up Tauri event listeners for zoom ──────────────────────────
 
-function initTerminalZoomListeners(): void {
-  const api = (window as any).api
-  if (!api?.terminalZoom) return
+async function initTerminalZoomListeners(): Promise<void> {
+  try {
+    const { listen } = await import('@tauri-apps/api/event')
 
-  api.terminalZoom.onZoomIn(() => {
-    useTerminalSettingsStore.getState().incrementFontSize()
-  })
+    listen('terminal:zoom-in', () => {
+      useTerminalSettingsStore.getState().incrementFontSize()
+    })
 
-  api.terminalZoom.onZoomOut(() => {
-    useTerminalSettingsStore.getState().decrementFontSize()
-  })
+    listen('terminal:zoom-out', () => {
+      useTerminalSettingsStore.getState().decrementFontSize()
+    })
 
-  api.terminalZoom.onZoomReset(() => {
-    useTerminalSettingsStore.getState().resetFontSize()
-  })
+    listen('terminal:zoom-reset', () => {
+      useTerminalSettingsStore.getState().resetFontSize()
+    })
+  } catch {
+    // Tauri API not available (e.g. in tests)
+  }
 }
 
 // Initialize listeners on import

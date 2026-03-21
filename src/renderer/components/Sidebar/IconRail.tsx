@@ -4,7 +4,7 @@ import { useFocusGroupsStore } from '../../stores/focus-groups'
 import { useSidebarStore } from '../../stores/sidebar'
 import { useSettingsStore } from '../../stores/settings'
 import { useGitInfo, useGitChanges } from '../../hooks/useGit'
-import { trpc } from '../../lib/trpc'
+import { invoke } from '@tauri-apps/api/core'
 import { showContextMenu } from '../../lib/context-menu'
 import ProjectAvatar from './ProjectAvatar'
 
@@ -65,6 +65,8 @@ function ProjectIcon({
         projectPath={project.path}
         projectName={project.name}
         projectColor={project.color}
+        projectId={project.id}
+        iconUrl={project.iconUrl}
         size={20}
       />
       {hasDirtyFiles && <span className="icon-rail-badge status-dot-dirty" />}
@@ -84,13 +86,21 @@ export default function IconRail(): React.JSX.Element {
   const focusGroupsEnabled = useFocusGroupsStore((s) => s.focusGroupsEnabled)
   const activeFocusGroupId = useFocusGroupsStore((s) => s.activeFocusGroupId)
 
+  const pinnedProjects = useMemo(() =>
+    projects.filter((p) => p.pinned), [projects])
+
   const filteredProjects = useMemo(() => {
-    if (!focusGroupsEnabled || activeFocusGroupId === null) return projects
-    return projects.filter((p) => p.focusGroupId === activeFocusGroupId)
+    const unpinned = projects.filter((p) => !p.pinned)
+    if (!focusGroupsEnabled || activeFocusGroupId === null) return unpinned
+    return unpinned.filter((p) => p.focusGroupId === activeFocusGroupId)
   }, [projects, focusGroupsEnabled, activeFocusGroupId])
 
+  // Combined list: pinned first, then filtered — matches expanded sidebar order
+  const orderedProjects = useMemo(() =>
+    [...pinnedProjects, ...filteredProjects], [pinnedProjects, filteredProjects])
+
   const handleAddProject = useCallback(async () => {
-    const folderPath = await trpc.projects.pickFolder.mutate()
+    const folderPath = await invoke<string | null>('projects_pick_folder')
     if (folderPath) {
       await addProject(folderPath)
     }
@@ -112,7 +122,7 @@ export default function IconRail(): React.JSX.Element {
       // Fetch installed editors
       let editors: Array<{ id: string; label: string }> = []
       try {
-        editors = await trpc.projects.getEditors.query()
+        editors = await invoke<Array<{ id: string; label: string }>>('projects_get_editors')
       } catch {
         // ignore
       }
@@ -150,20 +160,19 @@ export default function IconRail(): React.JSX.Element {
       const clickedId = await showContextMenu(menuItems)
 
       if (clickedId === 'settings') {
-        useSettingsStore.getState().openSettings()
-        useSettingsStore.getState().setSection('projects')
+        useSettingsStore.getState().openSettings('projects', projectId)
       } else if (clickedId === 'expand') {
         expand()
       } else if (clickedId === 'open-finder') {
-        await trpc.projects.openInFinder.mutate({ path: project.path })
+        await invoke('projects_open_in_finder', { path: project.path })
       } else if (clickedId === 'focus-window') {
-        await trpc.projects.openFocusWindow.mutate({ projectId: project.id })
+        await invoke('projects_open_focus_window', { projectId: project.id })
       } else if (clickedId?.startsWith('editor:')) {
         const editorId = clickedId.replace('editor:', '')
-        await trpc.projects.openInEditor.mutate({ editorId, path: project.path })
+        await invoke('projects_open_in_editor', { editorId, path: project.path })
       } else if (clickedId === 'toggle-worktree-mode') {
         const newMode = project.worktreeMode ? 0 : 1
-        await trpc.projects.update.mutate({ id: projectId, worktreeMode: newMode })
+        await invoke('projects_update', { id: projectId, worktreeMode: newMode })
         await fetchProjects()
       } else if (clickedId === 'remove') {
         await removeProject(projectId)
@@ -179,7 +188,7 @@ export default function IconRail(): React.JSX.Element {
     >
       {/* Workspace icons */}
       <div className="flex-1 flex flex-col items-center gap-1 overflow-y-auto overflow-x-hidden">
-        {filteredProjects.map((project) => (
+        {orderedProjects.map((project) => (
           <ProjectIcon
             key={project.id}
             project={project}

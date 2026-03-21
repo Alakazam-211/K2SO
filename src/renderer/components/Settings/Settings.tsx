@@ -1,10 +1,13 @@
+import React from 'react'
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useSettingsStore, getEffectiveKeybinding } from '@/stores/settings'
 import type { SettingsSection, TerminalSettings } from '@/stores/settings'
 import { useProjectsStore } from '@/stores/projects'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
 import { usePresetsStore } from '@/stores/presets'
-import { trpc } from '@/lib/trpc'
+import { invoke } from '@tauri-apps/api/core'
+import { useAssistantStore } from '@/stores/assistant'
+import IconCropDialog from './IconCropDialog'
 import {
   HOTKEYS,
   RESERVED_KEYS,
@@ -15,11 +18,51 @@ import {
 import type { HotkeyDefinition } from '@shared/hotkeys'
 import DisableWorktreesDialog from './DisableWorktreesDialog'
 
+// ── Error Boundary ───────────────────────────────────────────────────
+class SectionErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null }
+
+  static getDerivedStateFromError(error: Error): { error: Error } {
+    return { error }
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo): void {
+    console.error('[Settings] Section render error:', error, info.componentStack)
+  }
+
+  render(): React.ReactNode {
+    if (this.state.error) {
+      return (
+        <div className="max-w-xl p-4">
+          <h2 className="text-sm font-medium text-red-400 mb-2">Something went wrong</h2>
+          <p className="text-xs text-[var(--color-text-muted)] mb-3">
+            This section failed to render. Try restarting the app.
+          </p>
+          <pre className="text-[10px] text-red-400/70 bg-red-500/5 border border-red-500/20 p-2 overflow-x-auto whitespace-pre-wrap">
+            {this.state.error.message}
+          </pre>
+          <button
+            onClick={() => this.setState({ error: null })}
+            className="mt-3 px-3 py-1 text-xs text-[var(--color-text-secondary)] border border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] no-drag cursor-pointer"
+          >
+            Try Again
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
 // ── Section nav items ────────────────────────────────────────────────
 const SECTIONS: { id: SettingsSection; label: string }[] = [
   { id: 'general', label: 'General' },
   { id: 'terminal', label: 'Terminal' },
   { id: 'editors-agents', label: 'Editors & Agents' },
+  { id: 'ai-assistant', label: 'AI Assistant' },
   { id: 'keybindings', label: 'Keybindings' },
   { id: 'projects', label: 'Workspaces' }
 ]
@@ -81,7 +124,12 @@ export default function Settings(): React.JSX.Element {
         {activeSection === 'terminal' && <TerminalSection />}
         {activeSection === 'editors-agents' && <EditorsAgentsSection />}
         {activeSection === 'keybindings' && <KeybindingsSection />}
-        {activeSection === 'projects' && <ProjectsSection />}
+        {activeSection === 'ai-assistant' && <AIAssistantSection />}
+        {activeSection === 'projects' && (
+          <SectionErrorBoundary>
+            <ProjectsSection />
+          </SectionErrorBoundary>
+        )}
       </div>
     </div>
   )
@@ -171,7 +219,7 @@ function TerminalSection(): React.JSX.Element {
               step={1}
               value={terminal.fontSize}
               onChange={(e) => updateTerminalSettings({ fontSize: parseInt(e.target.value, 10) })}
-              className="w-40 no-drag accent-[var(--color-accent)]"
+              className="w-40 no-drag k2so-slider"
             />
             <input
               type="number"
@@ -219,6 +267,26 @@ function TerminalSection(): React.JSX.Element {
             className="w-28 px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag text-center"
           />
         </SettingRow>
+
+        {/* Natural Text Editing */}
+        <SettingRow label={
+          <span title="Opt+Arrow to move by word, Cmd+Arrow for line start/end, Opt+Backspace to delete word">
+            Natural Text Editing
+          </span>
+        }>
+          <button
+            onClick={() => updateTerminalSettings({ naturalTextEditing: !terminal.naturalTextEditing })}
+            className={`w-7 h-3.5 flex items-center transition-colors no-drag cursor-pointer flex-shrink-0 ${
+              terminal.naturalTextEditing ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
+            }`}
+          >
+            <span
+              className={`w-2.5 h-2.5 bg-white block transition-transform ${
+                terminal.naturalTextEditing ? 'translate-x-3.5' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
+        </SettingRow>
       </div>
     </div>
   )
@@ -260,7 +328,7 @@ function EditorsAgentsSection(): React.JSX.Element {
   const loadEditors = useCallback(async () => {
     setEditorsLoading(true)
     try {
-      const result = await trpc.projects.getAllEditors.query()
+      const result = await invoke<any[]>('projects_get_all_editors')
       setEditors(result)
     } catch (err) {
       console.error('Failed to load editors:', err)
@@ -272,7 +340,7 @@ function EditorsAgentsSection(): React.JSX.Element {
   const refreshEditors = useCallback(async () => {
     setEditorsLoading(true)
     try {
-      const result = await trpc.projects.refreshEditors.mutate()
+      const result = await invoke<any[]>('projects_refresh_editors')
       setEditors(result)
     } catch (err) {
       console.error('Failed to refresh editors:', err)
@@ -293,7 +361,7 @@ function EditorsAgentsSection(): React.JSX.Element {
   }, [presetForm.visible])
 
   const handleTogglePreset = useCallback(async (id: string, currentEnabled: number) => {
-    await trpc.presets.update.mutate({ id, enabled: currentEnabled ? 0 : 1 })
+    await invoke('presets_update', { id, enabled: currentEnabled ? 0 : 1 })
     fetchPresets()
   }, [fetchPresets])
 
@@ -309,7 +377,7 @@ function EditorsAgentsSection(): React.JSX.Element {
 
   const handleDeletePreset = useCallback(async (id: string) => {
     try {
-      await trpc.presets.delete.mutate({ id })
+      await invoke('presets_delete', { id })
       fetchPresets()
     } catch (err) {
       console.error('Failed to delete preset:', err)
@@ -331,14 +399,14 @@ function EditorsAgentsSection(): React.JSX.Element {
     if (!presetForm.label.trim() || !presetForm.command.trim()) return
     try {
       if (presetForm.editingId) {
-        await trpc.presets.update.mutate({
+        await invoke('presets_update', {
           id: presetForm.editingId,
           label: presetForm.label.trim(),
           command: presetForm.command.trim(),
           icon: presetForm.icon.trim() || undefined
         })
       } else {
-        await trpc.presets.create.mutate({
+        await invoke('presets_create', {
           label: presetForm.label.trim(),
           command: presetForm.command.trim(),
           icon: presetForm.icon.trim() || undefined
@@ -362,7 +430,7 @@ function EditorsAgentsSection(): React.JSX.Element {
   }, [submitForm, cancelForm])
 
   const handleResetBuiltIns = useCallback(async () => {
-    await trpc.presets.resetBuiltIns.mutate()
+    await invoke('presets_reset_built_ins')
     fetchPresets()
   }, [fetchPresets])
 
@@ -387,7 +455,7 @@ function EditorsAgentsSection(): React.JSX.Element {
     sorted.splice(targetIdx, 0, moved)
 
     const ids = sorted.map((p) => p.id)
-    await trpc.presets.reorder.mutate({ ids })
+    await invoke('presets_reorder', { ids })
     fetchPresets()
 
     setDragIdx(null)
@@ -825,9 +893,18 @@ function ProjectsSection(): React.JSX.Element {
   const renameFocusGroup = useFocusGroupsStore((s) => s.renameFocusGroup)
   const assignProjectToGroup = useFocusGroupsStore((s) => s.assignProjectToGroup)
 
+  const initialProjectId = useSettingsStore((s) => s.initialProjectId)
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
-    projects.length > 0 ? projects[0].id : null
+    initialProjectId ?? (projects.length > 0 ? projects[0].id : null)
   )
+
+  // When initialProjectId changes (e.g. right-click a different project), update selection
+  useEffect(() => {
+    if (initialProjectId) {
+      setSelectedProjectId(initialProjectId)
+    }
+  }, [initialProjectId])
+
   const [newGroupName, setNewGroupName] = useState('')
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [dragProjectId, setDragProjectId] = useState<string | null>(null)
@@ -862,6 +939,12 @@ function ProjectsSection(): React.JSX.Element {
 
   const [disableWorktreeProject, setDisableWorktreeProject] = useState<typeof projects[number] | null>(null)
 
+  // State for git init when enabling worktrees on non-git workspace
+  const [gitInitForWorktree, setGitInitForWorktree] = useState<{ projectId: string; projectPath: string; projectName: string } | null>(null)
+  const [gitInitBranch, setGitInitBranch] = useState('main')
+  const [gitInitPending, setGitInitPending] = useState(false)
+  const [gitInitError, setGitInitError] = useState<string | null>(null)
+
   const handleToggleWorktree = useCallback(async (projectId: string, currentMode: number) => {
     if (currentMode === 1) {
       // Disabling worktrees — check if worktrees exist
@@ -869,18 +952,53 @@ function ProjectsSection(): React.JSX.Element {
       if (project) {
         const worktrees = project.workspaces.filter((ws) => ws.type === 'worktree')
         if (worktrees.length > 0) {
-          // Show the dialog
           setDisableWorktreeProject(project)
           return
         }
       }
+    } else {
+      // Enabling worktrees — check if git is initialized
+      const project = projects.find((p) => p.id === projectId)
+      if (project) {
+        try {
+          const gitInfo = await invoke<any>('git_info', { path: project.path })
+          if (!gitInfo.isRepo) {
+            // Not a git repo — need to initialize first
+            setGitInitForWorktree({ projectId: project.id, projectPath: project.path, projectName: project.name })
+            setGitInitBranch('main')
+            setGitInitError(null)
+            return
+          }
+        } catch {
+          // If we can't check, assume it's fine and proceed
+        }
+      }
     }
-    // Enabling, or no worktrees to worry about
+    // Enable/disable normally
     const newMode = currentMode ? 0 : 1
-    const { trpc } = await import('@/lib/trpc')
-    await trpc.projects.update.mutate({ id: projectId, worktreeMode: newMode })
+    await invoke('projects_update', { id: projectId, worktreeMode: newMode })
     await fetchProjects()
   }, [fetchProjects, projects])
+
+  const handleGitInitForWorktree = useCallback(async () => {
+    if (!gitInitForWorktree) return
+    setGitInitPending(true)
+    setGitInitError(null)
+    try {
+      await invoke('projects_init_git_and_open', {
+        path: gitInitForWorktree.projectPath,
+        branch: gitInitBranch
+      })
+      // Git initialized — now enable worktrees
+      await invoke('projects_update', { id: gitInitForWorktree.projectId, worktreeMode: 1 })
+      await fetchProjects()
+      setGitInitForWorktree(null)
+    } catch (err) {
+      setGitInitError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setGitInitPending(false)
+    }
+  }, [gitInitForWorktree, gitInitBranch, fetchProjects])
 
   // Workspace row component (reused in groups and ungrouped)
   const ProjectRow = useCallback(({ project: p }: { project: typeof projects[number] }) => {
@@ -1110,6 +1228,78 @@ function ProjectsSection(): React.JSX.Element {
           onClose={() => setDisableWorktreeProject(null)}
         />
       )}
+
+      {/* Git init dialog for enabling worktrees on non-git workspace */}
+      {gitInitForWorktree && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center no-drag"
+          style={{ backgroundColor: 'rgba(0, 0, 0, 0.6)', backdropFilter: 'blur(4px)' }}
+          onClick={gitInitPending ? undefined : () => setGitInitForWorktree(null)}
+        >
+          <div
+            className="w-[440px] border border-[var(--color-border)] bg-[var(--color-bg-surface)] shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 pt-5 pb-2">
+              <h2 className="text-sm font-medium text-[var(--color-text-primary)]">
+                Initialize Git to Enable Worktrees
+              </h2>
+            </div>
+
+            <div className="px-5 pb-4">
+              <p className="text-xs text-[var(--color-text-secondary)] leading-relaxed">
+                <span className="text-[var(--color-text-primary)] font-medium">{gitInitForWorktree.projectName}</span>{' '}
+                doesn't have git initialized. Worktrees require a git repository. Would you like to initialize one?
+              </p>
+              <p className="text-[10px] text-[var(--color-text-muted)] mt-1.5 break-all">
+                {gitInitForWorktree.projectPath}
+              </p>
+            </div>
+
+            <div className="px-5 pb-4">
+              <label className="text-[10px] text-[var(--color-text-muted)] block mb-1">
+                Initial branch name
+              </label>
+              <input
+                type="text"
+                value={gitInitBranch}
+                onChange={(e) => setGitInitBranch(e.target.value)}
+                placeholder="main"
+                className="w-full px-2 py-1.5 text-xs bg-[var(--color-bg)] border border-[var(--color-border)] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
+                disabled={gitInitPending}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !gitInitPending) handleGitInitForWorktree()
+                }}
+              />
+            </div>
+
+            {gitInitError && (
+              <div className="px-5 pb-4">
+                <div className="border border-red-500/30 bg-red-500/10 px-3 py-2">
+                  <p className="text-[11px] text-red-400 whitespace-pre-wrap">{gitInitError}</p>
+                </div>
+              </div>
+            )}
+
+            <div className="px-5 pb-5 flex items-center justify-end gap-2">
+              <button
+                className="px-3 py-1.5 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] bg-white/[0.04] hover:bg-white/[0.08] border border-[var(--color-border)] transition-colors disabled:opacity-40 no-drag cursor-pointer"
+                onClick={() => setGitInitForWorktree(null)}
+                disabled={gitInitPending}
+              >
+                Cancel
+              </button>
+              <button
+                className="px-3 py-1.5 text-xs text-[var(--color-bg)] bg-[var(--color-text-primary)] hover:bg-[var(--color-text-secondary)] border border-transparent transition-colors disabled:opacity-40 no-drag cursor-pointer"
+                onClick={handleGitInitForWorktree}
+                disabled={gitInitPending || !gitInitBranch.trim()}
+              >
+                {gitInitPending ? 'Initializing...' : 'Initialize Git & Enable Worktrees'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -1131,8 +1321,7 @@ function WorktreeFoldersOnDisk({
   useEffect(() => {
     let cancelled = false
     setLoading(true)
-    trpc.git.worktrees
-      .query({ path: project.path })
+    invoke<any[]>('git_worktrees', { path: project.path })
       .then((wts) => {
         if (!cancelled) {
           setDiskWorktrees(wts)
@@ -1159,7 +1348,7 @@ function WorktreeFoldersOnDisk({
   const handleReopen = async (wt: { path: string; branch: string }): Promise<void> => {
     setReopening(wt.path)
     try {
-      await trpc.git.reopenWorktree.mutate({
+      await invoke('git_reopen_worktree', {
         projectId: project.id,
         worktreePath: wt.path,
         branch: wt.branch
@@ -1271,11 +1460,13 @@ function ProjectDetail({
   fetchProjects: () => Promise<void>
 }): React.JSX.Element {
   const [iconLoading, setIconLoading] = useState(false)
+  const [cropImage, setCropImage] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const handleDetectIcon = async (): Promise<void> => {
     setIconLoading(true)
     try {
-      await trpc.projects.detectIcon.mutate({ projectId: project.id })
+      await invoke('projects_detect_icon', { projectId: project.id })
       await fetchProjects()
     } catch (err) {
       console.error('Icon detection failed:', err)
@@ -1284,13 +1475,32 @@ function ProjectDetail({
     }
   }
 
-  const handleUploadIcon = async (): Promise<void> => {
+  const handleUploadClick = (): void => {
+    fileInputRef.current?.click()
+  }
+
+  const handleFileSelected = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    const reader = new FileReader()
+    reader.onload = () => {
+      setCropImage(reader.result as string)
+    }
+    reader.readAsDataURL(file)
+
+    // Reset input so the same file can be re-selected
+    e.target.value = ''
+  }
+
+  const handleCropConfirm = async (croppedDataUrl: string): Promise<void> => {
+    setCropImage(null)
     setIconLoading(true)
     try {
-      await trpc.projects.uploadIcon.mutate({ projectId: project.id })
+      await invoke('projects_update', { id: project.id, iconUrl: croppedDataUrl })
       await fetchProjects()
     } catch (err) {
-      console.error('Icon upload failed:', err)
+      console.error('Icon save failed:', err)
     } finally {
       setIconLoading(false)
     }
@@ -1299,7 +1509,7 @@ function ProjectDetail({
   const handleClearIcon = async (): Promise<void> => {
     setIconLoading(true)
     try {
-      await trpc.projects.clearIcon.mutate({ projectId: project.id })
+      await invoke('projects_clear_icon', { projectId: project.id })
       await fetchProjects()
     } catch (err) {
       console.error('Icon clear failed:', err)
@@ -1311,6 +1521,14 @@ function ProjectDetail({
   const firstLetter = project.name.charAt(0).toUpperCase()
 
   return (
+    <>
+    {cropImage && (
+      <IconCropDialog
+        imageDataUrl={cropImage}
+        onConfirm={handleCropConfirm}
+        onCancel={() => setCropImage(null)}
+      />
+    )}
     <div className="max-w-xl space-y-6">
       {/* ── Header ── */}
       <div>
@@ -1338,8 +1556,7 @@ function ProjectDetail({
               <img
                 src={project.iconUrl}
                 alt={project.name}
-                className="object-contain"
-                style={{ width: 44, height: 44, display: 'block' }}
+                style={{ width: '100%', height: '100%', objectFit: 'cover', objectPosition: 'center', display: 'block' }}
               />
             ) : (
               <span
@@ -1361,12 +1578,19 @@ function ProjectDetail({
               {iconLoading ? 'Working...' : 'Detect'}
             </button>
             <button
-              onClick={handleUploadIcon}
+              onClick={handleUploadClick}
               disabled={iconLoading}
               className="px-2.5 py-1 text-xs text-[var(--color-text-secondary)] border border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)] no-drag cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               Upload
             </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/svg+xml,image/x-icon"
+              className="hidden"
+              onChange={handleFileSelected}
+            />
             {project.iconUrl && (
               <button
                 onClick={handleClearIcon}
@@ -1430,8 +1654,7 @@ function ProjectDetail({
               <button
                 key={color}
                 onClick={async () => {
-                  const { trpc } = await import('@/lib/trpc')
-                  await trpc.projects.update.mutate({ id: project.id, color })
+                  await invoke('projects_update', { id: project.id, color })
                   await fetchProjects()
                 }}
                 className={`w-4 h-4 flex-shrink-0 no-drag cursor-pointer transition-transform ${
@@ -1507,6 +1730,7 @@ function ProjectDetail({
         </button>
       </div>
     </div>
+    </>
   )
 }
 
@@ -1515,13 +1739,198 @@ function SettingRow({
   label,
   children
 }: {
-  label: string
+  label: React.ReactNode
   children: React.ReactNode
 }): React.JSX.Element {
   return (
     <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
       <span className="text-xs text-[var(--color-text-secondary)]">{label}</span>
       {children}
+    </div>
+  )
+}
+
+// ── AI Assistant Section ────────────────────────────────────────────
+
+function AIAssistantSection(): React.JSX.Element {
+  const { isDownloading, downloadProgress, modelLoaded } = useAssistantStore()
+  const aiAssistantEnabled = useSettingsStore((s) => s.aiAssistantEnabled)
+  const setAiAssistantEnabled = useSettingsStore((s) => s.setAiAssistantEnabled)
+  const [modelPath, setModelPath] = useState<string | null>(null)
+  const [modelExists, setModelExists] = useState<boolean | null>(null)
+  const [customPath, setCustomPath] = useState('')
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [loadingModel, setLoadingModel] = useState(false)
+
+  // Check model status on mount
+  useEffect(() => {
+    invoke<{ loaded: boolean; modelPath: string | null; downloading: boolean }>('assistant_status')
+      .then((status) => {
+        setModelPath(status.modelPath)
+        if (status.modelPath) setCustomPath(status.modelPath)
+      })
+      .catch(() => {})
+
+    invoke<boolean>('assistant_check_model')
+      .then((exists) => setModelExists(exists))
+      .catch(() => {})
+  }, [modelLoaded])
+
+  const handleDownload = useCallback(async () => {
+    try {
+      setLoadError(null)
+      await invoke('assistant_download_default_model')
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : String(err))
+    }
+  }, [])
+
+  const handleLoadCustom = useCallback(async () => {
+    if (!customPath.trim()) return
+    setLoadingModel(true)
+    setLoadError(null)
+    try {
+      // Backend copies the file to ~/.k2so/models/ and returns the final path
+      const finalPath = await invoke<string>('assistant_load_model', { path: customPath.trim() })
+      setModelPath(finalPath)
+      setCustomPath(finalPath)
+      useAssistantStore.getState().setModelLoaded(true)
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setLoadingModel(false)
+    }
+  }, [customPath])
+
+  return (
+    <div className="max-w-xl">
+      <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-1">AI Workspace Assistant</h2>
+      <p className="text-xs text-[var(--color-text-muted)] mb-6">
+        A local LLM that translates natural language into workspace operations. Press <kbd className="px-1 py-0.5 bg-white/[0.06] text-[var(--color-text-secondary)] font-mono text-[10px]">&#8984;L</kbd> to open.
+      </p>
+
+      {/* Enable/Disable Toggle */}
+      <div className="mb-6 flex items-center justify-between">
+        <div>
+          <h3 className="text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">Enabled</h3>
+          <p className="text-[10px] text-[var(--color-text-muted)] mt-1">
+            Disabling saves battery by not loading the model into memory
+          </p>
+        </div>
+        <button
+          onClick={() => setAiAssistantEnabled(!aiAssistantEnabled)}
+          className="no-drag cursor-pointer flex-shrink-0 relative"
+          style={{
+            width: 36,
+            height: 20,
+            backgroundColor: aiAssistantEnabled ? 'var(--color-accent)' : '#333',
+            border: 'none',
+            transition: 'background-color 150ms'
+          }}
+        >
+          <span
+            style={{
+              position: 'absolute',
+              top: 2,
+              left: aiAssistantEnabled ? 18 : 2,
+              width: 16,
+              height: 16,
+              backgroundColor: '#fff',
+              transition: 'left 150ms'
+            }}
+          />
+        </button>
+      </div>
+
+      {/* Model Status */}
+      <div className="mb-6">
+        <h3 className="text-xs font-medium text-[var(--color-text-secondary)] mb-3 uppercase tracking-wider">Model Status</h3>
+        <div className="flex items-center gap-2 mb-3">
+          <span
+            className="w-2 h-2 flex-shrink-0"
+            style={{ backgroundColor: modelLoaded ? '#4ade80' : '#ef4444' }}
+          />
+          <span className="text-xs text-[var(--color-text-primary)]">
+            {modelLoaded ? 'Model loaded and ready' : 'No model loaded'}
+          </span>
+        </div>
+        {modelPath && (
+          <p className="text-[10px] font-mono text-[var(--color-text-muted)] break-all mb-2">
+            {modelPath}
+          </p>
+        )}
+      </div>
+
+      {/* Download Default Model */}
+      <div className="mb-6">
+        <h3 className="text-xs font-medium text-[var(--color-text-secondary)] mb-3 uppercase tracking-wider">Default Model</h3>
+        <p className="text-xs text-[var(--color-text-muted)] mb-3">
+          Qwen2.5-1.5B-Instruct (Q4_K_M) — ~1.1GB download. Runs locally with Metal GPU acceleration.
+        </p>
+
+        {isDownloading ? (
+          <div className="mb-3">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs text-[var(--color-text-secondary)]">Downloading...</span>
+              <span className="text-xs font-mono text-[var(--color-text-muted)]">{Math.round(downloadProgress)}%</span>
+            </div>
+            <div className="h-1.5 bg-[var(--color-bg-elevated)] overflow-hidden">
+              <div
+                className="h-full bg-[var(--color-accent)] transition-all duration-300"
+                style={{ width: `${downloadProgress}%` }}
+              />
+            </div>
+          </div>
+        ) : (
+          <button
+            onClick={handleDownload}
+            disabled={modelExists === true && modelLoaded}
+            className="px-3 py-1.5 text-xs bg-[var(--color-bg-elevated)] text-[var(--color-text-primary)] border border-[var(--color-border)] hover:bg-white/[0.08] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-default no-drag"
+          >
+            {modelExists ? (modelLoaded ? 'Downloaded & Loaded' : 'Download & Load') : 'Download Default Model'}
+          </button>
+        )}
+      </div>
+
+      {/* Custom Model Path */}
+      <div className="mb-6">
+        <h3 className="text-xs font-medium text-[var(--color-text-secondary)] mb-3 uppercase tracking-wider">Custom Model</h3>
+        <p className="text-xs text-[var(--color-text-muted)] mb-3">
+          Point to any GGUF model file. It will be copied to <span className="font-mono">~/.k2so/models/</span> automatically. Larger models give better results but use more memory.
+        </p>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={customPath}
+            onChange={(e) => setCustomPath(e.target.value)}
+            placeholder="~/.k2so/models/your-model.gguf"
+            className="flex-1 px-2 py-1.5 text-xs font-mono bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-accent)] no-drag"
+          />
+          <button
+            onClick={handleLoadCustom}
+            disabled={!customPath.trim() || loadingModel}
+            className="px-3 py-1.5 text-xs bg-[var(--color-bg-elevated)] text-[var(--color-text-primary)] border border-[var(--color-border)] hover:bg-white/[0.08] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-default no-drag flex-shrink-0"
+          >
+            {loadingModel ? 'Loading...' : 'Load'}
+          </button>
+        </div>
+      </div>
+
+      {/* Error Display */}
+      {loadError && (
+        <div className="p-2 text-xs text-red-400 bg-red-500/5 border border-red-500/20 mb-4">
+          {loadError}
+        </div>
+      )}
+
+      {/* Info */}
+      <div className="border-t border-[var(--color-border)] pt-4">
+        <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed">
+          The AI assistant runs entirely on your machine — no data is sent to external servers.
+          Models are stored in <span className="font-mono">~/.k2so/models/</span>.
+          Workspace commands use minimal context (2048 tokens) so even small models work well.
+        </p>
+      </div>
     </div>
   )
 }

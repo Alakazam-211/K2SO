@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { trpc } from '../../lib/trpc'
+import { invoke } from '@tauri-apps/api/core'
 import { useProjectsStore, type ProjectWithWorkspaces } from '../../stores/projects'
 
 interface DisableWorktreesDialogProps {
@@ -34,7 +34,7 @@ export default function DisableWorktreesDialog({
       for (const ws of worktrees) {
         if (!ws.worktreePath) continue
         try {
-          const changes = await trpc.git.changes.query({ path: ws.worktreePath })
+          const changes = await invoke<any[]>('git_changes', { path: ws.worktreePath })
           if (!cancelled && changes.length > 0) {
             setHasUnmerged(true)
             return
@@ -75,31 +75,31 @@ export default function DisableWorktreesDialog({
     try {
       if (selectedAction === 'conceal') {
         // Just disable worktreeMode — keep all workspace records
-        await trpc.projects.update.mutate({ id: project.id, worktreeMode: 0 })
+        await invoke('projects_update', { id: project.id, worktreeMode: 0 })
       } else if (selectedAction === 'close') {
         // Delete worktree workspace records, keep files on disk
         for (const ws of worktrees) {
-          await trpc.workspaces.delete.mutate({ id: ws.id })
+          await invoke('workspaces_delete', { id: ws.id })
         }
-        await trpc.projects.update.mutate({ id: project.id, worktreeMode: 0 })
+        await invoke('projects_update', { id: project.id, worktreeMode: 0 })
       } else if (selectedAction === 'recycle') {
         // Trash worktree folders + remove workspace records
         for (const ws of worktrees) {
           if (ws.worktreePath) {
             try {
-              await trpc.git.removeWorktree.mutate({
+              await invoke('git_remove_worktree', {
                 worktreePath: ws.worktreePath,
                 workspaceId: ws.id
               })
             } catch {
               // If git remove fails, just delete the record
-              await trpc.workspaces.delete.mutate({ id: ws.id })
+              await invoke('workspaces_delete', { id: ws.id })
             }
           } else {
-            await trpc.workspaces.delete.mutate({ id: ws.id })
+            await invoke('workspaces_delete', { id: ws.id })
           }
         }
-        await trpc.projects.update.mutate({ id: project.id, worktreeMode: 0 })
+        await invoke('projects_update', { id: project.id, worktreeMode: 0 })
       }
 
       await fetchProjects()

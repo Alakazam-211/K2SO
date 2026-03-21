@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { trpc } from '@/lib/trpc'
+import { invoke } from '@tauri-apps/api/core'
 
 // Cache icon results across component instances
 const iconCache = new Map<string, { found: boolean; dataUrl: string | null }>()
@@ -11,7 +11,6 @@ interface ProjectAvatarProps {
   projectId?: string
   iconUrl?: string | null
   size?: number
-  showActivity?: boolean
 }
 
 export default function ProjectAvatar({
@@ -20,12 +19,10 @@ export default function ProjectAvatar({
   projectColor,
   projectId,
   iconUrl: iconUrlProp,
-  size = 20,
-  showActivity = false
+  size = 28
 }: ProjectAvatarProps): React.JSX.Element {
   const [iconUrl, setIconUrl] = useState<string | null>(iconUrlProp ?? null)
   const [loaded, setLoaded] = useState(!!iconUrlProp)
-  const [activeTerminals, setActiveTerminals] = useState(0)
 
   // Sync prop changes
   useEffect(() => {
@@ -50,8 +47,7 @@ export default function ProjectAvatar({
     }
 
     let cancelled = false
-    trpc.projects.getIcon
-      .query({ path: projectPath, projectId })
+    invoke<{ found: boolean; dataUrl: string | null }>('projects_get_icon', { path: projectPath, projectId })
       .then((result) => {
         iconCache.set(projectPath, result)
         if (!cancelled && result.found && result.dataUrl) {
@@ -69,75 +65,37 @@ export default function ProjectAvatar({
     }
   }, [projectPath, iconUrlProp, projectId])
 
-  // Poll for active terminal count
-  useEffect(() => {
-    if (!showActivity) return
-
-    let cancelled = false
-
-    const poll = (): void => {
-      trpc.terminal.activeCountForPath
-        .query({ path: projectPath })
-        .then((count) => {
-          if (!cancelled) setActiveTerminals(count)
-        })
-        .catch(() => {
-          // ignore
-        })
-    }
-
-    poll()
-    const interval = setInterval(poll, 3000)
-
-    return () => {
-      cancelled = true
-      clearInterval(interval)
-    }
-  }, [projectPath, showActivity])
-
   const firstLetter = projectName.charAt(0).toUpperCase()
-  const hasActivity = showActivity && activeTerminals > 0
-
-  const indicator = hasActivity ? (
-    <span
-      className="terminal-active-indicator"
-      style={{
-        position: 'absolute',
-        bottom: -1,
-        right: -1,
-        width: 8,
-        height: 8,
-        backgroundColor: '#22c55e',
-        border: '1.5px solid var(--color-bg-surface)',
-        display: 'block',
-        zIndex: 1
-      }}
-    />
-  ) : null
 
   if (iconUrl) {
     return (
-      <span className="relative flex-shrink-0" style={{ width: size, height: size }}>
+      <span
+        className="flex-shrink-0"
+        style={{
+          width: size,
+          height: size,
+          border: `2px solid ${projectColor}`,
+          overflow: 'hidden',
+          display: 'block',
+        }}
+      >
         <img
           src={iconUrl}
           alt={projectName}
-          className="object-contain"
           style={{
-            width: size - 4,
-            height: size - 4,
-            border: `2px solid ${projectColor}`,
-            imageRendering: 'auto',
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            objectPosition: 'center',
             display: 'block',
-            marginTop: 0
           }}
         />
-        {indicator}
       </span>
     )
   }
 
   return (
-    <span className="relative flex-shrink-0" style={{ width: size, height: size }}>
+    <span className="flex-shrink-0" style={{ width: size, height: size }}>
       <span
         className="flex items-center justify-center"
         style={{
@@ -154,7 +112,6 @@ export default function ProjectAvatar({
       >
         {firstLetter}
       </span>
-      {indicator}
     </span>
   )
 }

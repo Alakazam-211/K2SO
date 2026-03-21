@@ -2,7 +2,7 @@ import { useState, useCallback, useMemo } from 'react'
 import { useProjectsStore } from '@/stores/projects'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
 import { useSettingsStore } from '@/stores/settings'
-import { trpc } from '@/lib/trpc'
+import { invoke } from '@tauri-apps/api/core'
 import { showContextMenu } from '@/lib/context-menu'
 import { useGitInfo, useGitChanges } from '@/hooks/useGit'
 import ResizeHandle from './ResizeHandle'
@@ -59,7 +59,7 @@ function DiffStats({ path }: { path: string }): React.JSX.Element | null {
   if (added === 0 && deleted === 0) return null
 
   return (
-    <span className="flex items-center gap-1.5 text-[10px] tabular-nums font-medium flex-shrink-0">
+    <span className="flex items-center gap-1 text-[10px] tabular-nums font-medium flex-shrink-0 px-1.5 py-0.5 bg-white/[0.06] font-mono">
       {added > 0 && <span className="text-green-400">+{added}</span>}
       {deleted > 0 && <span className="text-red-400">-{deleted}</span>}
     </span>
@@ -140,7 +140,7 @@ function SingleProjectItem({
   return (
     <div className="no-drag">
       <button
-        className={`w-full flex flex-col gap-0.5 px-3 py-2 text-left text-sm transition-colors ${
+        className={`w-full flex items-stretch gap-2.5 px-3 py-2 text-left text-sm transition-colors ${
           isItemActive
             ? 'bg-white/[0.06] text-[var(--color-text-primary)]'
             : 'text-[var(--color-text-secondary)] hover:bg-white/[0.04] hover:text-[var(--color-text-primary)]'
@@ -151,28 +151,31 @@ function SingleProjectItem({
         onClick={handleClick}
         onContextMenu={(e) => onContextMenu(e, project.id)}
       >
-        <div className="flex items-center gap-2 w-full">
+        <div className="flex items-center flex-shrink-0">
           <ProjectAvatar
             projectPath={project.path}
             projectName={project.name}
             projectColor={project.color}
             projectId={project.id}
             iconUrl={project.iconUrl}
-            size={20}
-            showActivity
+            size={32}
           />
-          <span className="truncate flex-1">{project.name}</span>
-          <AheadBehind path={project.path} />
-          <DiffStats path={project.path} />
         </div>
-        {gitInfo?.isRepo && gitInfo.currentBranch && (
-          <span
-            className="text-[10px] font-mono text-[var(--color-text-muted)] truncate pl-7"
-            title={gitInfo.currentBranch}
-          >
-            {gitInfo.currentBranch}
-          </span>
-        )}
+        <div className="flex flex-col justify-center min-w-0 flex-1">
+          <div className="flex items-center gap-2 w-full">
+            <span className="truncate flex-1">{project.name}</span>
+            <AheadBehind path={project.path} />
+            <DiffStats path={project.path} />
+          </div>
+          {gitInfo?.isRepo && gitInfo.currentBranch && (
+            <span
+              className="text-[10px] font-mono text-[var(--color-text-muted)] truncate"
+              title={gitInfo.currentBranch}
+            >
+              {gitInfo.currentBranch}
+            </span>
+          )}
+        </div>
       </button>
     </div>
   )
@@ -215,38 +218,25 @@ function WorkspaceButton({
           <WorkspaceStatusDot path={workspacePath} />
 
           {isWorktree ? (
-            <svg
-              className="w-3 h-3 flex-shrink-0 opacity-50"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A2 2 0 013 12V7a4 4 0 014-4z"
-              />
+            /* Git branch/worktree icon */
+            <svg className="w-3.5 h-3.5 flex-shrink-0 opacity-60" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="4" cy="4" r="1.5" />
+              <circle cx="12" cy="4" r="1.5" />
+              <circle cx="4" cy="12" r="1.5" />
+              <path d="M4 5.5v5M4 8h6c1.1 0 2-.9 2-2v-.5" />
             </svg>
           ) : (
-            <svg
-              className="w-3 h-3 flex-shrink-0 opacity-50"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M13 10V3L4 14h7v7l9-11h-7z"
-              />
+            /* Local/computer icon for main branch */
+            <svg className="w-3.5 h-3.5 flex-shrink-0 opacity-60" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="2" y="2" width="12" height="9" rx="1" />
+              <path d="M5 14h6" />
+              <path d="M8 11v3" />
             </svg>
           )}
 
           <span className="truncate flex-1">{workspace.name}</span>
 
-          <WorkspaceGitBadge path={workspacePath} />
+          <DiffStats path={workspacePath} />
         </div>
 
         {branchName && (
@@ -274,6 +264,7 @@ function ProjectItem({
   onContextMenu: (e: React.MouseEvent, projectId: string) => void
 }): React.JSX.Element {
   const [isExpanded, setIsExpanded] = useState(isActive)
+  const [showWorktreeDialog, setShowWorktreeDialog] = useState(false)
   const activeWorkspaceId = useProjectsStore((s) => s.activeWorkspaceId)
   const setActiveWorkspace = useProjectsStore((s) => s.setActiveWorkspace)
   const assignWorkspaceToSection = useProjectsStore((s) => s.assignWorkspaceToSection)
@@ -305,7 +296,7 @@ function ProjectItem({
       // Fetch installed editors for the submenu
       let editors: Array<{ id: string; label: string }> = []
       try {
-        editors = await trpc.projects.getEditors.query()
+        editors = await invoke<Array<{ id: string; label: string }>>('projects_get_editors')
       } catch {
         // ignore
       }
@@ -346,10 +337,10 @@ function ProjectItem({
       const clickedId = await showContextMenu(menuItems)
 
       if (clickedId === 'ws-open-finder') {
-        await trpc.projects.openInFinder.mutate({ path: workspacePath })
+        await invoke('projects_open_in_finder', { path: workspacePath })
       } else if (clickedId?.startsWith('ws-editor:')) {
         const editorId = clickedId.replace('ws-editor:', '')
-        await trpc.projects.openInEditor.mutate({ editorId, path: workspacePath })
+        await invoke('projects_open_in_editor', { editorId, path: workspacePath })
       } else if (clickedId === 'section:none') {
         await assignWorkspaceToSection(workspaceId, null)
       } else if (clickedId?.startsWith('section:')) {
@@ -364,7 +355,7 @@ function ProjectItem({
           return
         }
         // Remove from DB only, keep files on disk
-        await trpc.workspaces.delete.mutate({ id: workspaceId })
+        await invoke('workspaces_delete', { id: workspaceId })
         await fetchProjects()
       } else if (clickedId === 'ws-recycle') {
         // Prevent recycling the last worktree
@@ -382,7 +373,7 @@ function ProjectItem({
           { id: 'cancel-recycle', label: 'Cancel' }
         ])
         if (confirmId === 'do-recycle') {
-          await trpc.git.removeWorktree.mutate({
+          await invoke('git_remove_worktree', {
             worktreePath: workspacePath,
             projectPath: project.path,
             workspaceId: workspaceId
@@ -406,7 +397,7 @@ function ProjectItem({
   return (
     <div className="no-drag">
       <button
-        className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
+        className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors group ${
           isActive
             ? 'bg-white/[0.08] text-[var(--color-text-primary)]'
             : 'text-[var(--color-text-secondary)] hover:bg-white/[0.04] hover:text-[var(--color-text-primary)]'
@@ -423,10 +414,25 @@ function ProjectItem({
           size={20}
           showActivity
         />
-        <span className="truncate flex-1">{project.name}</span>
-        <AggregatedDiffStats paths={workspacePaths} />
-        <span className="text-[10px] text-[var(--color-text-muted)] tabular-nums flex-shrink-0">
+        <span className="truncate">{project.name}</span>
+        {/* Worktree count badge — left-justified after name */}
+        <span className="text-[10px] text-[var(--color-text-muted)] tabular-nums flex-shrink-0 px-1.5 py-0.5 bg-white/[0.06] font-mono">
           {project.workspaces.length}
+        </span>
+        <span className="flex-1" />
+        {/* New worktree button — always visible */}
+        <span
+          onClick={(e) => {
+            e.stopPropagation()
+            setShowWorktreeDialog(true)
+            if (!isExpanded) setIsExpanded(true)
+          }}
+          className="flex-shrink-0 w-5 h-5 flex items-center justify-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-white/[0.1] transition-colors cursor-pointer"
+          title="New workspace"
+        >
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+            <path d="M5 1v8M1 5h8" />
+          </svg>
         </span>
         <svg
           className={`w-3 h-3 text-[var(--color-text-muted)] transition-transform flex-shrink-0 ${
@@ -474,6 +480,16 @@ function ProjectItem({
             )
           })}
         </div>
+      )}
+
+      {/* Worktree creation dialog */}
+      {showWorktreeDialog && (
+        <WorktreeDialog
+          projectId={project.id}
+          projectPath={project.path}
+          open={true}
+          onClose={() => setShowWorktreeDialog(false)}
+        />
       )}
     </div>
   )
@@ -524,9 +540,13 @@ export default function Sidebar(): React.JSX.Element {
   const focusGroupsEnabled = useFocusGroupsStore((s) => s.focusGroupsEnabled)
   const activeFocusGroupId = useFocusGroupsStore((s) => s.activeFocusGroupId)
 
+  const pinnedProjects = useMemo(() =>
+    projects.filter((p) => p.pinned), [projects])
+
   const filteredProjects = useMemo(() => {
-    if (!focusGroupsEnabled || activeFocusGroupId === null) return projects
-    return projects.filter((p) => p.focusGroupId === activeFocusGroupId)
+    const unpinned = projects.filter((p) => !p.pinned)
+    if (!focusGroupsEnabled || activeFocusGroupId === null) return unpinned
+    return unpinned.filter((p) => p.focusGroupId === activeFocusGroupId)
   }, [projects, focusGroupsEnabled, activeFocusGroupId])
 
   // Worktree dialog state
@@ -536,7 +556,7 @@ export default function Sidebar(): React.JSX.Element {
   } | null>(null)
 
   const handleAddProject = useCallback(async () => {
-    const folderPath = await trpc.projects.pickFolder.mutate()
+    const folderPath = await invoke<string | null>('projects_pick_folder')
     if (folderPath) {
       await addProject(folderPath)
     }
@@ -551,7 +571,7 @@ export default function Sidebar(): React.JSX.Element {
       // Fetch installed editors for the submenu
       let editors: Array<{ id: string; label: string }> = []
       try {
-        editors = await trpc.projects.getEditors.query()
+        editors = await invoke<Array<{ id: string; label: string }>>('projects_get_editors')
       } catch {
         // ignore
       }
@@ -580,7 +600,7 @@ export default function Sidebar(): React.JSX.Element {
       if (project.worktreeMode) {
         menuItems.push(
           { id: 'separator-wt', label: '', type: 'separator' },
-          { id: 'new-worktree', label: 'New Worktree...' },
+          { id: 'new-worktree', label: 'New Workspace...' },
           { id: 'new-section', label: 'New Section...' }
         )
       }
@@ -595,6 +615,11 @@ export default function Sidebar(): React.JSX.Element {
       )
 
       menuItems.push(
+        { id: 'separator-pin', label: '', type: 'separator' },
+        { id: 'toggle-pin', label: project.pinned ? 'Unpin' : 'Pin to Top' }
+      )
+
+      menuItems.push(
         { id: 'separator', label: '', type: 'separator' },
         { id: 'remove', label: 'Remove Workspace' }
       )
@@ -602,20 +627,19 @@ export default function Sidebar(): React.JSX.Element {
       const clickedId = await showContextMenu(menuItems)
 
       if (clickedId === 'settings') {
-        useSettingsStore.getState().openSettings()
-        useSettingsStore.getState().setSection('projects')
+        useSettingsStore.getState().openSettings('projects', project.id)
       } else if (clickedId === 'rename') {
         const newName = window.prompt('Rename workspace:', project.name)
         if (newName && newName.trim() && newName !== project.name) {
           await renameProject(projectId, newName.trim())
         }
       } else if (clickedId === 'open-finder') {
-        await trpc.projects.openInFinder.mutate({ path: project.path })
+        await invoke('projects_open_in_finder', { path: project.path })
       } else if (clickedId === 'focus-window') {
-        await trpc.projects.openFocusWindow.mutate({ projectId: project.id })
+        await invoke('projects_open_focus_window', { projectId: project.id })
       } else if (clickedId?.startsWith('editor:')) {
         const editorId = clickedId.replace('editor:', '')
-        await trpc.projects.openInEditor.mutate({ editorId, path: project.path })
+        await invoke('projects_open_in_editor', { editorId, path: project.path })
       } else if (clickedId === 'new-worktree') {
         setWorktreeDialog({ projectId: project.id, projectPath: project.path })
       } else if (clickedId === 'new-section') {
@@ -624,8 +648,16 @@ export default function Sidebar(): React.JSX.Element {
           await createSection(project.id, sectionName.trim())
         }
       } else if (clickedId === 'toggle-worktree-mode') {
-        const newMode = project.worktreeMode ? 0 : 1
-        await trpc.projects.update.mutate({ id: projectId, worktreeMode: newMode })
+        if (project.worktreeMode) {
+          // Disabling — just flip the flag
+          await invoke('projects_update', { id: projectId, worktreeMode: 0 })
+        } else {
+          // Enabling — reconcile existing worktrees
+          await invoke('projects_enable_worktrees', { projectId })
+        }
+        await fetchProjects()
+      } else if (clickedId === 'toggle-pin') {
+        await invoke('projects_update', { id: projectId, pinned: project.pinned ? 0 : 1 })
         await fetchProjects()
       } else if (clickedId === 'remove') {
         await removeProject(projectId)
@@ -637,6 +669,34 @@ export default function Sidebar(): React.JSX.Element {
   return (
     <div className="relative flex flex-col h-full">
       <ResizeHandle />
+
+      {/* Pinned workspaces — always visible above focus groups */}
+      {pinnedProjects.length > 0 && (
+        <div className="border-b border-[var(--color-border)]">
+          <div className="px-4 pt-3 pb-1 no-drag">
+            <span className="text-[10px] font-semibold tracking-wider text-[var(--color-text-muted)] uppercase">
+              Pinned
+            </span>
+          </div>
+          {pinnedProjects.map((project) => (
+            <div key={project.id}>
+              {project.worktreeMode === 0 ? (
+                <SingleProjectItem
+                  project={project}
+                  isActive={project.id === activeProjectId}
+                  onContextMenu={handleContextMenu}
+                />
+              ) : (
+                <ProjectItem
+                  project={project}
+                  isActive={project.id === activeProjectId}
+                  onContextMenu={handleContextMenu}
+                />
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Focus Group Selector (replaces branding area) */}
       <FocusGroupSelector />

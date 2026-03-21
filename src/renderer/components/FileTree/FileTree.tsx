@@ -1,5 +1,5 @@
 import { useState, useCallback, useMemo, useRef } from 'react'
-import { trpc } from '@/lib/trpc'
+import { invoke } from '@tauri-apps/api/core'
 import { showContextMenu } from '@/lib/context-menu'
 import { useFileTreeStore } from '@/stores/filetree'
 import { useTabsStore } from '@/stores/tabs'
@@ -174,12 +174,6 @@ function TreeItem({
           {entry.name}
         </span>
 
-        {/* File size (files only) */}
-        {!entry.isDirectory && entry.size > 0 && (
-          <span className="ml-auto pr-2 text-[10px] text-[var(--color-text-muted)] tabular-nums flex-shrink-0 opacity-60">
-            {formatFileSize(entry.size)}
-          </span>
-        )}
       </button>
 
       {/* Children (expanded dirs) */}
@@ -266,7 +260,7 @@ export default function FileTree({ rootPath, onNavigate }: FileTreeProps): React
       })
 
       try {
-        const entries = await trpc.fs.readDir.query({ path: dirPath })
+        const entries = await invoke<FileEntry[]>('fs_read_dir', { path: dirPath })
         setCache((prev) => new Map(prev).set(dirPath, entries))
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Failed to read directory'
@@ -318,9 +312,9 @@ export default function FileTree({ rootPath, onNavigate }: FileTreeProps): React
     ])
 
     if (clickedId === 'open-finder') {
-      await trpc.fs.openInFinder.mutate({ path: entry.path })
+      await invoke('fs_open_in_finder', { path: entry.path })
     } else if (clickedId === 'copy-path') {
-      await trpc.fs.copyPath.mutate({ path: entry.path })
+      await invoke('fs_copy_path', { path: entry.path })
     }
   }, [])
 
@@ -348,13 +342,6 @@ export default function FileTree({ rootPath, onNavigate }: FileTreeProps): React
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header */}
-      <div className="px-3 pt-3 pb-2">
-        <span className="text-xs font-semibold tracking-widest text-[var(--color-text-muted)] uppercase">
-          Files
-        </span>
-      </div>
-
       {/* Search input */}
       <div className="px-3 pb-2">
         <div className="relative">

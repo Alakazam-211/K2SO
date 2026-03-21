@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react'
-import { trpc } from '@/lib/trpc'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { useProjectsStore } from '@/stores/projects'
 
 interface WorktreeDialogProps {
@@ -9,7 +9,7 @@ interface WorktreeDialogProps {
   onClose: () => void
 }
 
-interface BranchData {
+interface BranchList {
   current: string
   local: string[]
   remote: string[]
@@ -21,37 +21,34 @@ export default function WorktreeDialog({
   open,
   onClose
 }: WorktreeDialogProps): React.JSX.Element | null {
-  const [branches, setBranches] = useState<BranchData | null>(null)
-  const [loading, setLoading] = useState(false)
+  const [name, setName] = useState('')
+  const [mode, setMode] = useState<'new' | 'existing'>('new')
+  const [branches, setBranches] = useState<string[]>([])
+  const [selectedBranch, setSelectedBranch] = useState('')
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  const [isNewBranch, setIsNewBranch] = useState(false)
-  const [newBranchName, setNewBranchName] = useState('')
-  const [selectedBranch, setSelectedBranch] = useState<string | null>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
 
   const fetchProjects = useProjectsStore((s) => s.fetchProjects)
+  const setActiveWorkspace = useProjectsStore((s) => s.setActiveWorkspace)
 
-  // Fetch branches when dialog opens
+  // Reset state and auto-focus when dialog opens
   useEffect(() => {
     if (!open) return
-
-    setLoading(true)
+    setName('')
+    setMode('new')
+    setSelectedBranch('')
     setError(null)
-    setIsNewBranch(false)
-    setNewBranchName('')
-    setSelectedBranch(null)
+    setCreating(false)
+    // Focus after a tick so the input is mounted
+    requestAnimationFrame(() => inputRef.current?.focus())
 
-    trpc.git.branches
-      .query({ path: projectPath })
-      .then((data) => {
-        setBranches(data)
-        setLoading(false)
+    // Fetch available branches
+    invoke<BranchList>('git_branches', { path: projectPath })
+      .then((result) => {
+        setBranches(result.local.filter((b) => b !== result.current))
       })
-      .catch((e) => {
-        setError(e instanceof Error ? e.message : 'Failed to load branches')
-        setLoading(false)
-      })
+      .catch(() => setBranches([]))
   }, [open, projectPath])
 
   // Close on Escape
@@ -66,32 +63,39 @@ export default function WorktreeDialog({
   }, [open, onClose])
 
   const handleCreate = useCallback(async () => {
-    const branch = isNewBranch ? newBranchName.trim() : selectedBranch
-    if (!branch) return
+    const branchName = mode === 'new' ? name.trim() : selectedBranch
+    if (!branchName) return
 
     setCreating(true)
     setError(null)
 
     try {
-      await trpc.git.createWorktree.mutate({
-        projectPath,
-        branch,
-        newBranch: isNewBranch,
-        projectId
-      })
+      const result = await invoke<{ workspaceId: string; path: string; branch: string }>(
+        'git_create_worktree',
+        {
+          projectPath,
+          branch: branchName,
+          projectId,
+          existingBranch: mode === 'existing'
+        }
+      )
 
       await fetchProjects()
+      setActiveWorkspace(projectId, result.workspaceId)
       onClose()
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to create worktree')
+      const msg = typeof e === 'string' ? e : (e instanceof Error ? e.message : 'Failed to create workspace')
+      setError(msg)
     } finally {
       setCreating(false)
     }
-  }, [isNewBranch, newBranchName, selectedBranch, projectPath, projectId, fetchProjects, onClose])
+  }, [name, selectedBranch, mode, projectPath, projectId, fetchProjects, setActiveWorkspace, onClose])
 
   if (!open) return null
 
-  const canCreate = isNewBranch ? newBranchName.trim().length > 0 : selectedBranch !== null
+  const canCreate = mode === 'new'
+    ? name.trim().length > 0 && !creating
+    : selectedBranch.length > 0 && !creating
 
   return (
     <div
@@ -104,11 +108,11 @@ export default function WorktreeDialog({
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
 
       {/* Dialog */}
-      <div className="relative w-[400px] max-h-[500px] flex flex-col bg-[var(--color-bg-secondary)]/95 backdrop-blur-xl border border-[var(--color-border)]  shadow-2xl overflow-hidden">
+      <div className="relative w-[350px] flex flex-col bg-[var(--color-bg-secondary)]/95 backdrop-blur-xl border border-[var(--color-border)] shadow-2xl overflow-hidden">
         {/* Header */}
         <div className="px-4 py-3 border-b border-[var(--color-border)] flex items-center justify-between">
           <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">
-            New Worktree
+            New Workspace
           </h2>
           <button
             className="text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
@@ -120,100 +124,73 @@ export default function WorktreeDialog({
           </button>
         </div>
 
-        {/* Toggle: existing branch vs new branch */}
-        <div className="px-4 pt-3 flex gap-2">
+        {/* Mode toggle */}
+        <div className="px-4 pt-3 flex gap-1">
           <button
-            className={`flex-1 px-3 py-1.5 text-xs  transition-colors ${
-              !isNewBranch
-                ? 'bg-[var(--color-accent)]/15 text-[var(--color-accent)] font-medium'
-                : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] bg-white/[0.04]'
+            className={`flex-1 px-2 py-1.5 text-[11px] font-medium transition-colors ${
+              mode === 'new'
+                ? 'bg-[var(--color-accent)]/15 text-[var(--color-accent)] border border-[var(--color-accent)]/30'
+                : 'bg-white/[0.04] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-secondary)]'
             }`}
-            onClick={() => setIsNewBranch(false)}
+            onClick={() => setMode('new')}
           >
-            Existing Branch
+            New branch
           </button>
           <button
-            className={`flex-1 px-3 py-1.5 text-xs  transition-colors ${
-              isNewBranch
-                ? 'bg-[var(--color-accent)]/15 text-[var(--color-accent)] font-medium'
-                : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] bg-white/[0.04]'
+            className={`flex-1 px-2 py-1.5 text-[11px] font-medium transition-colors ${
+              mode === 'existing'
+                ? 'bg-[var(--color-accent)]/15 text-[var(--color-accent)] border border-[var(--color-accent)]/30'
+                : 'bg-white/[0.04] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-secondary)]'
             }`}
-            onClick={() => setIsNewBranch(true)}
+            onClick={() => setMode('existing')}
+            disabled={branches.length === 0}
+            title={branches.length === 0 ? 'No other local branches available' : undefined}
           >
-            New Branch
+            Existing branch
           </button>
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto px-4 py-3 min-h-0">
-          {loading ? (
-            <div className="flex items-center justify-center py-8">
-              <div className="w-5 h-5 border-2 border-[var(--color-accent)] border-t-transparent  animate-spin" />
-            </div>
-          ) : isNewBranch ? (
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs text-[var(--color-text-muted)] block mb-1.5">
-                  Branch name
-                </label>
-                <input
-                  type="text"
-                  value={newBranchName}
-                  onChange={(e) => setNewBranchName(e.target.value)}
-                  placeholder="feature/my-branch"
-                  className="w-full px-3 py-2 text-xs bg-white/[0.04] border border-[var(--color-border)]  text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-accent)]/50 focus:ring-1 focus:ring-[var(--color-accent)]/25"
-                  autoFocus
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && canCreate && !creating) handleCreate()
-                  }}
-                />
-              </div>
-              <div>
-                <label className="text-xs text-[var(--color-text-muted)] block mb-1.5">
-                  Base branch
-                </label>
-                <div className="text-xs text-[var(--color-text-secondary)] px-3 py-2 bg-white/[0.02] border border-[var(--color-border)] ">
-                  {branches?.current ?? 'HEAD'}
-                </div>
-              </div>
-            </div>
+        <div className="px-4 py-4">
+          {mode === 'new' ? (
+            <>
+              <label className="text-xs text-[var(--color-text-muted)] block mb-1.5">
+                Branch name
+              </label>
+              <input
+                ref={inputRef}
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="feature/my-feature"
+                className="w-full px-3 py-2 text-xs font-mono bg-white/[0.04] border border-[var(--color-border)] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-accent)]/50 focus:ring-1 focus:ring-[var(--color-accent)]/25"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && canCreate) handleCreate()
+                }}
+              />
+              <p className="text-[11px] text-[var(--color-text-muted)] mt-2">
+                Creates a new branch and workspace from the current branch.
+              </p>
+            </>
           ) : (
-            <div className="space-y-0.5">
-              {branches?.local.map((branch) => (
-                <button
-                  key={branch}
-                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left  transition-colors ${
-                    selectedBranch === branch
-                      ? 'bg-[var(--color-accent)]/15 text-[var(--color-accent)]'
-                      : 'text-[var(--color-text-secondary)] hover:bg-white/[0.04] hover:text-[var(--color-text-primary)]'
-                  }`}
-                  onClick={() => setSelectedBranch(branch)}
-                >
-                  <svg
-                    className="w-3 h-3 flex-shrink-0 opacity-50"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A2 2 0 013 12V7a4 4 0 014-4z"
-                    />
-                  </svg>
-                  <span className="truncate">{branch}</span>
-                  {branch === branches?.current && (
-                    <span className="ml-auto text-[10px] text-[var(--color-text-muted)]">current</span>
-                  )}
-                </button>
-              ))}
-              {branches?.local.length === 0 && (
-                <p className="text-xs text-[var(--color-text-muted)] text-center py-4">
-                  No local branches found
-                </p>
-              )}
-            </div>
+            <>
+              <label className="text-xs text-[var(--color-text-muted)] block mb-1.5">
+                Select branch
+              </label>
+              <select
+                value={selectedBranch}
+                onChange={(e) => setSelectedBranch(e.target.value)}
+                className="w-full px-3 py-2 text-xs font-mono bg-white/[0.04] border border-[var(--color-border)] text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)]/50 focus:ring-1 focus:ring-[var(--color-accent)]/25"
+              >
+                <option value="" disabled>Choose a branch...</option>
+                {branches.map((b) => (
+                  <option key={b} value={b}>{b}</option>
+                ))}
+              </select>
+              <p className="text-[11px] text-[var(--color-text-muted)] mt-2">
+                Opens an existing branch in its own workspace.
+              </p>
+            </>
           )}
         </div>
 
@@ -234,21 +211,21 @@ export default function WorktreeDialog({
             Cancel
           </button>
           <button
-            className={`px-4 py-1.5 text-xs font-medium  transition-colors ${
-              canCreate && !creating
+            className={`px-4 py-1.5 text-xs font-medium transition-colors ${
+              canCreate
                 ? 'bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90'
                 : 'bg-white/[0.06] text-[var(--color-text-muted)] cursor-not-allowed'
             }`}
             onClick={handleCreate}
-            disabled={!canCreate || creating}
+            disabled={!canCreate}
           >
             {creating ? (
               <span className="flex items-center gap-2">
-                <div className="w-3 h-3 border-2 border-white/40 border-t-white  animate-spin" />
+                <div className="w-3 h-3 border-2 border-white/40 border-t-white animate-spin" />
                 Creating...
               </span>
             ) : (
-              'Create Worktree'
+              'Create'
             )}
           </button>
         </div>

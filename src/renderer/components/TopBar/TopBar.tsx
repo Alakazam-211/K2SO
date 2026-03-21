@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { TOPBAR_HEIGHT } from '../../../shared/constants'
-import { trpc } from '@/lib/trpc'
+import { invoke } from '@tauri-apps/api/core'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useSettingsStore } from '@/stores/settings'
 
 interface TopBarProps {
@@ -37,8 +38,7 @@ export default function TopBar({
     }
 
     let cancelled = false
-    trpc.projectConfig.hasRunCommand
-      .query({ path: projectPath })
+    invoke<boolean>('project_config_has_run_command', { path: projectPath })
       .then((result) => {
         if (!cancelled) setHasRun(result)
       })
@@ -54,7 +54,7 @@ export default function TopBar({
   const handleRun = async (): Promise<void> => {
     if (!projectPath || !onRunCommand) return
     try {
-      const result = await trpc.projectConfig.runCommand.mutate({ path: projectPath })
+      const result = await invoke<{ command: string }>('project_config_run_command', { path: projectPath })
       onRunCommand(result.command)
     } catch {
       // No run command configured
@@ -63,11 +63,15 @@ export default function TopBar({
   return (
     <div
       className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg-surface)] px-3 select-none"
+      data-tauri-drag-region
+      onMouseDown={(e) => {
+        // Only drag if clicking on the bar itself (not buttons)
+        if ((e.target as HTMLElement).closest('button, input, select, .no-drag')) return
+        getCurrentWindow().startDragging()
+      }}
       style={{
         height: TOPBAR_HEIGHT,
-        minHeight: TOPBAR_HEIGHT,
-        // @ts-expect-error -- Electron-specific CSS property
-        WebkitAppRegion: 'drag'
+        minHeight: TOPBAR_HEIGHT
       }}
     >
       {/* Left: traffic lights spacer + K2SO branding + primary sidebar toggle */}
@@ -112,7 +116,7 @@ export default function TopBar({
         {/* Settings gear */}
         <button
           onClick={() => useSettingsStore.getState().openSettings()}
-          className="flex h-6 w-6 items-center justify-center text-[var(--color-text-muted)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)] transition-colors"
+          className="flex h-6 w-6 items-center justify-center text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)] transition-colors"
           style={{
             // @ts-expect-error -- Electron-specific CSS property
             WebkitAppRegion: 'no-drag'

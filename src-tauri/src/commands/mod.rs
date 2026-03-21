@@ -1,0 +1,13 @@
+pub mod projects;
+pub mod workspaces;
+pub mod focus_groups;
+pub mod workspace_sections;
+pub mod agents;
+pub mod terminal;
+pub mod git;
+pub mod filesystem;
+pub mod settings;
+pub mod project_config;
+pub mod workspace_ops;
+pub mod assistant;
+pub mod chat_history;
