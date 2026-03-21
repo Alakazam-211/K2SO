@@ -1,0 +1,12 @@
+node_modules/
+out/
+dist/
+*.dmg
+*.zip
+*.app
+.DS_Store
+*.db
+*.db-journal
+*.db-wal
+drizzle/meta/
+.claude/
