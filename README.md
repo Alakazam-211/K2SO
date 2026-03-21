@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/AlakazamLabs/K2SO/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <a href="https://github.com/Alakazam-211/K2SO/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
   <a href="https://k2so.sh"><img src="https://img.shields.io/badge/download-k2so.sh-8B5CF6.svg" alt="Download"></a>
   <img src="https://img.shields.io/badge/platform-macOS-lightgrey.svg" alt="macOS">
   <img src="https://img.shields.io/badge/built_with-Tauri_v2-24C8D8.svg" alt="Tauri v2">
@@ -69,7 +69,7 @@ Upload custom workspace icons with a built-in crop dialog -- drag to position, s
 ## Installation
 
 ### Download
-Get the latest release from [k2so.sh](https://k2so.sh) or the [GitHub Releases](https://github.com/AlakazamLabs/K2SO/releases) page.
+Get the latest release from [k2so.sh](https://k2so.sh) or the [GitHub Releases](https://github.com/Alakazam-211/K2SO/releases) page.
 
 ### Build from Source
 
@@ -80,7 +80,7 @@ Get the latest release from [k2so.sh](https://k2so.sh) or the [GitHub Releases](
 - Xcode Command Line Tools (macOS)
 
 ```bash
-git clone https://github.com/AlakazamLabs/K2SO.git
+git clone https://github.com/Alakazam-211/K2SO.git
 cd K2SO
 npm install
 cargo tauri dev
