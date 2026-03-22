@@ -420,18 +420,9 @@ pub fn remove_worktree(
         .map_err(|e| format!("Failed to run git worktree remove: {}", e))?;
 
     if !output.status.success() {
-        // Fallback: trash on macOS and prune
+        // Fallback: trash the worktree directory and prune references
         if Path::new(worktree_path).exists() {
-            // Use macOS trash via osascript
-            let _ = Command::new("osascript")
-                .args([
-                    "-e",
-                    &format!(
-                        "tell application \"Finder\" to delete POSIX file \"{}\"",
-                        worktree_path
-                    ),
-                ])
-                .output();
+            let _ = trash::delete(worktree_path);
         }
 
         // Prune stale worktree references

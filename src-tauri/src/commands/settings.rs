@@ -20,6 +20,10 @@ fn default_natural_text_editing() -> bool {
     true
 }
 
+fn default_agent() -> String {
+    "claude".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -32,6 +36,8 @@ pub struct AppSettings {
     pub right_panel_open: bool,
     #[serde(default)]
     pub workspace_layouts: HashMap<String, serde_json::Value>,
+    #[serde(default = "default_agent")]
+    pub default_agent: String,
 }
 
 impl Default for AppSettings {
@@ -51,6 +57,7 @@ impl Default for AppSettings {
             left_panel_open: false,
             right_panel_open: false,
             workspace_layouts: HashMap::new(),
+            default_agent: "claude".to_string(),
         }
     }
 }

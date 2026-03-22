@@ -24,6 +24,7 @@ import { useAssistantStore } from './stores/assistant'
 import { useTabsStore } from './stores/tabs'
 import { useActiveAgentsStore, startAgentPolling, stopAgentPolling } from './stores/active-agents'
 import AgentCloseDialog from './components/AgentCloseDialog/AgentCloseDialog'
+import { useUpdateChecker } from './hooks/useUpdateChecker'
 
 /** Parse focus mode project ID from URL hash (#focus=<projectId>) */
 function parseFocusProjectId(): string | null {
@@ -180,6 +181,9 @@ export default function App(): React.JSX.Element {
     startAgentPolling()
     return () => stopAgentPolling()
   }, [])
+
+  // Check for updates on launch and every 3 hours
+  useUpdateChecker()
 
   // Save layout helper
   const saveCurrentLayout = (): void => {

@@ -23,6 +23,9 @@ export const FILE_POLL_INTERVAL = 2000  // 2 seconds
 // ── Terminal ─────────────────────────────────────────────────────────
 export const TERMINAL_SCROLLBACK = 5000
 
+// ── Update check ────────────────────────────────────────────────────
+export const UPDATE_CHECK_INTERVAL = 3 * 60 * 60 * 1000  // 3 hours
+
 // ── UI timing ────────────────────────────────────────────────────────
 export const CONTEXT_MENU_DISMISS_DELAY = 50  // ms
 

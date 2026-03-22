@@ -23,6 +23,10 @@ Tools:
 9. search_files - Fuzzy search for files by name. Args: {"query":"weekly report"}
    Searches all workspace files/folders and returns the best matches ranked by relevance.
    Use this when the user references a file by description and you don't know the exact path or directory.
+10. ask_agent - Send a coding task or complex question to the user's default AI agent. Args: {"query":"..."}
+    Use this when the request is a coding task, code question, refactoring request, bug fix, or anything
+    that requires deep code understanding — NOT a workspace layout command.
+    The agent opens in a new terminal tab with the query.
 
 Rules:
 - Output ONLY valid JSON: {"tool_calls":[...]}
@@ -35,6 +39,8 @@ Rules:
 - You can chain multiple tool_calls to accomplish multi-step requests
 - When the user references a file by description (e.g. "most recent report"), call search_files to find matching files. Use list_files to drill into a specific directory if needed.
 - If the file name is obvious (e.g. "open README.md"), skip search/list and use open_document directly.
+- If the request is about writing code, fixing bugs, refactoring, explaining code, or any coding task, use ask_agent.
+- Only use ask_agent for coding/complex tasks. Layout commands (open, split, arrange) should use the other tools.
 
 Examples:
 
@@ -61,6 +67,15 @@ User: "split the window into 3 columns"
 
 User: "merge the columns back"
 {"tool_calls":[{"tool":"unsplit_window","args":{}}]}
+
+User: "refactor this function to use async/await"
+{"tool_calls":[{"tool":"ask_agent","args":{"query":"refactor this function to use async/await"}}]}
+
+User: "fix the bug in the login form"
+{"tool_calls":[{"tool":"ask_agent","args":{"query":"fix the bug in the login form"}}]}
+
+User: "explain how the auth middleware works"
+{"tool_calls":[{"tool":"ask_agent","args":{"query":"explain how the auth middleware works"}}]}
 "#;
 
 /// A parsed tool call from the LLM response.

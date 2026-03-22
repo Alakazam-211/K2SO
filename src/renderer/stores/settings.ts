@@ -28,6 +28,9 @@ interface SettingsState {
   // AI Assistant
   aiAssistantEnabled: boolean
 
+  // Default agent CLI tool (e.g. 'claude', 'codex', 'gemini')
+  defaultAgent: string
+
   // Pre-select a specific project in the projects section
   initialProjectId: string | null
 
@@ -44,6 +47,7 @@ interface SettingsState {
   resetAllKeybindings: () => void
   updateProjectSetting: (projectId: string, editor: string) => void
   setAiAssistantEnabled: (enabled: boolean) => void
+  setDefaultAgent: (agent: string) => void
   resetAllSettings: () => void
   fetchSettings: () => Promise<void>
 }
@@ -63,6 +67,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   keybindings: {},
   projectSettings: {},
   aiAssistantEnabled: true,
+  defaultAgent: 'claude',
   initialProjectId: null,
   loaded: false,
 
@@ -156,6 +161,17 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }
   },
 
+  setDefaultAgent: async (agent: string) => {
+    const prev = get().defaultAgent
+    set({ defaultAgent: agent })
+    try {
+      await invoke('settings_update', { defaultAgent: agent })
+    } catch (err) {
+      console.error('[settings] Failed to persist default agent:', err)
+      set({ defaultAgent: prev })
+    }
+  },
+
   resetAllSettings: async () => {
     const result = await invoke<any>('settings_reset')
     set({
@@ -171,6 +187,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       terminal: result.terminal,
       keybindings: result.keybindings,
       projectSettings: result.projectSettings ?? {},
+      defaultAgent: result.defaultAgent ?? 'claude',
       loaded: true
     })
   }

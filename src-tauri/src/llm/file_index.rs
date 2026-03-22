@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
@@ -113,7 +114,8 @@ pub fn search_files(workspace_root: &str, query: &str) -> String {
     let query_parts: Vec<&str> = query_lower.split_whitespace().collect();
 
     let mut matches: Vec<(String, bool, u64, u32)> = Vec::new(); // (rel_path, is_dir, modified, score)
-    search_walk(root, root, 0, &query_parts, &mut matches);
+    let mut visited_inodes = HashSet::new();
+    search_walk(root, root, 0, &query_parts, &mut matches, &mut visited_inodes);
 
     if matches.is_empty() {
         return format!("No files matching \"{query}\"");
@@ -146,16 +148,28 @@ pub fn search_files(workspace_root: &str, query: &str) -> String {
     output
 }
 
-/// Recursively walk and collect fuzzy matches.
+/// Recursively walk and collect fuzzy matches with symlink cycle detection.
 fn search_walk(
     root: &Path,
     dir: &Path,
     depth: usize,
     query_parts: &[&str],
     matches: &mut Vec<(String, bool, u64, u32)>,
+    visited_inodes: &mut HashSet<u64>,
 ) {
     if depth > SEARCH_MAX_DEPTH {
         return;
+    }
+
+    // Track visited directories by inode to prevent symlink cycles
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(meta) = std::fs::metadata(dir) {
+            if !visited_inodes.insert(meta.ino()) {
+                return; // Already visited — symlink cycle
+            }
+        }
     }
 
     let read_dir = match std::fs::read_dir(dir) {
@@ -197,7 +211,7 @@ fn search_walk(
         }
 
         if is_dir {
-            search_walk(root, &path, depth + 1, query_parts, matches);
+            search_walk(root, &path, depth + 1, query_parts, matches, visited_inodes);
         }
     }
 }

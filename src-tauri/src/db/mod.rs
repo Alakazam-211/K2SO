@@ -41,6 +41,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         ("0002_fearless_photon", include_str!("../../drizzle_sql/0002_fearless_photon.sql")),
         ("0003_fancy_thunderball", include_str!("../../drizzle_sql/0003_fancy_thunderball.sql")),
         ("0004_pinned_workspaces", include_str!("../../drizzle_sql/0004_pinned_workspaces.sql")),
+        ("0005_window_state", include_str!("../../drizzle_sql/0005_window_state.sql")),
     ];
 
     for (name, sql) in migrations {

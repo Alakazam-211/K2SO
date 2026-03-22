@@ -11,3 +11,4 @@ pub mod project_config;
 pub mod workspace_ops;
 pub mod assistant;
 pub mod chat_history;
+pub mod updater;

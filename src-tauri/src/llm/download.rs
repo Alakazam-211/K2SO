@@ -36,6 +36,22 @@ pub fn default_model_exists() -> Result<bool, String> {
     Ok(path.exists() && path.metadata().map(|m| m.len() > 0).unwrap_or(false))
 }
 
+/// Clean up stale .tmp files from interrupted downloads.
+/// Called on startup to prevent partial downloads from blocking future attempts.
+pub fn cleanup_stale_downloads() {
+    if let Ok(dir) = models_dir() {
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                    eprintln!("[llm] Removing stale partial download: {}", path.display());
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+    }
+}
+
 /// Downloads a GGUF model file from a URL with progress events.
 ///
 /// Creates the destination directory if needed.

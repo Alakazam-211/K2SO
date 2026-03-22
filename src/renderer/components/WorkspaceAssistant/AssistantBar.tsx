@@ -27,6 +27,7 @@ const VALID_TOOLS = new Set([
   'unsplit_window',    // Remove the rightmost column
   'resume_chat',       // Resume a past AI conversation
   'switch_workspace',  // Switch to a named workspace
+  'ask_agent',         // Delegate a coding task to the default AI agent
 ])
 
 interface ChildDescriptor {
@@ -133,6 +134,12 @@ function validateAndSanitize(toolCalls: ToolCall[], cwd: string): ToolCall[] {
       case 'switch_workspace': {
         if (!args.name || typeof args.name !== 'string') continue
         sanitized.push({ tool: call.tool, args: { name: args.name } })
+        break
+      }
+
+      case 'ask_agent': {
+        if (!args.query || typeof args.query !== 'string') continue
+        sanitized.push({ tool: call.tool, args: { query: args.query } })
         break
       }
     }
@@ -263,6 +270,19 @@ function executeToolCalls(toolCalls: ToolCall[]): string {
 
         case 'switch_workspace': {
           results.push(`Switch: ${call.args.name}`)
+          break
+        }
+
+        case 'ask_agent': {
+          const query = call.args.query as string
+          const agent = useSettingsStore.getState().defaultAgent || 'claude'
+          // Launch the default agent with the query as an argument
+          tabsStore.addTab(cwd, {
+            title: `${agent}: ${query.slice(0, 30)}${query.length > 30 ? '...' : ''}`,
+            command: agent,
+            args: [query]
+          })
+          results.push(`Sent to ${agent}`)
           break
         }
       }

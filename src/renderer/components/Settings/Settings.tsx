@@ -18,6 +18,8 @@ import {
 } from '@shared/hotkeys'
 import type { HotkeyDefinition } from '@shared/hotkeys'
 import DisableWorktreesDialog from './DisableWorktreesDialog'
+import { checkForUpdate } from '@/hooks/useUpdateChecker'
+import type { UpdateInfo } from '@/hooks/useUpdateChecker'
 
 // ── Error Boundary ───────────────────────────────────────────────────
 class SectionErrorBoundary extends React.Component<
@@ -140,16 +142,68 @@ export default function Settings(): React.JSX.Element {
 function GeneralSection(): React.JSX.Element {
   const resetAllSettings = useSettingsStore((s) => s.resetAllSettings)
   const [confirming, setConfirming] = useState(false)
+  const [currentVersion, setCurrentVersion] = useState<string>('')
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
+  const [checking, setChecking] = useState(false)
+
+  // Load current version on mount
+  useEffect(() => {
+    invoke<string>('get_current_version').then(setCurrentVersion).catch(() => {})
+  }, [])
+
+  const handleCheckUpdate = useCallback(async () => {
+    setChecking(true)
+    try {
+      const info = await checkForUpdate(true)
+      setUpdateInfo(info)
+    } finally {
+      setChecking(false)
+    }
+  }, [])
 
   return (
     <div className="max-w-xl">
       <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-4">General</h2>
 
       <div className="space-y-4">
+        {/* Version & Update */}
         <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
           <span className="text-xs text-[var(--color-text-secondary)]">App Version</span>
-          <span className="text-xs text-[var(--color-text-muted)]">0.1.0</span>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-[var(--color-text-muted)]">
+              v{currentVersion || '...'}
+            </span>
+            <button
+              onClick={handleCheckUpdate}
+              disabled={checking}
+              className="px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer disabled:opacity-50"
+            >
+              {checking ? 'Checking...' : 'Check for Updates'}
+            </button>
+          </div>
         </div>
+
+        {/* Update available banner */}
+        {updateInfo?.has_update && (
+          <div className="flex items-center justify-between p-3 bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/30">
+            <div>
+              <p className="text-xs text-[var(--color-text-primary)]">
+                K2SO v{updateInfo.latest_version} is available
+              </p>
+              <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
+                You&apos;re on v{updateInfo.current_version}
+              </p>
+            </div>
+            <a
+              href={updateInfo.download_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-3 py-1 text-xs font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
+            >
+              Download
+            </a>
+          </div>
+        )}
 
         <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
           <span className="text-xs text-[var(--color-text-secondary)]">Config Location</span>
@@ -311,6 +365,37 @@ interface PresetFormState {
   icon: string
 }
 
+function DefaultAgentPicker({ presets }: { presets: { id: string; label: string; command: string }[] }): React.JSX.Element {
+  const defaultAgent = useSettingsStore((s) => s.defaultAgent)
+  const setDefaultAgent = useSettingsStore((s) => s.setDefaultAgent)
+
+  // Extract the base command from each preset for matching
+  const agentOptions = presets.map((p) => ({
+    label: p.label,
+    command: p.command.split(/\s+/)[0],
+  }))
+
+  return (
+    <div>
+      <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-1">Default AI Agent</h2>
+      <p className="text-[10px] text-[var(--color-text-muted)] mb-3">
+        The agent launched when you send coding tasks from the assistant (Cmd+L).
+      </p>
+      <select
+        value={defaultAgent}
+        onChange={(e) => setDefaultAgent(e.target.value)}
+        className="px-2 py-1.5 text-xs bg-[var(--color-bg)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag cursor-pointer font-mono"
+      >
+        {agentOptions.map((opt) => (
+          <option key={opt.command} value={opt.command}>
+            {opt.label} ({opt.command})
+          </option>
+        ))}
+      </select>
+    </div>
+  )
+}
+
 function EditorsAgentsSection(): React.JSX.Element {
   const { presets, fetchPresets } = usePresetsStore()
   const [editors, setEditors] = useState<EditorDetected[]>([])
@@ -468,6 +553,9 @@ function EditorsAgentsSection(): React.JSX.Element {
 
   return (
     <div className="max-w-2xl space-y-8">
+      {/* ── Default Agent ── */}
+      <DefaultAgentPicker presets={presets} />
+
       {/* ── Editors ── */}
       <div>
         <div className="flex items-center justify-between mb-3">

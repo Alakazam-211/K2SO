@@ -1,9 +1,10 @@
 use crate::state::AppState;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 
 #[derive(Debug, Clone, Serialize)]
@@ -43,40 +44,60 @@ pub fn fs_watch_dir(app: tauri::AppHandle, path: String) -> Result<(), String> {
         .watch(Path::new(&watch_path), RecursiveMode::Recursive)
         .map_err(|e| format!("Failed to watch directory: {e}"))?;
 
-    // Spawn a thread to receive events and debounce them
+    // Spawn a thread to receive events, coalesce them, and emit deduplicated changes.
+    // Within each debounce window (200ms), multiple events for the same path are
+    // collapsed into a single emission. This prevents rapid saves from flooding
+    // the frontend with redundant directory reloads.
     std::thread::spawn(move || {
-        let mut last_emit = std::time::Instant::now();
         let debounce = Duration::from_millis(200);
 
         loop {
-            match rx.recv_timeout(Duration::from_secs(5)) {
-                Ok(Ok(event)) => {
-                    let now = std::time::Instant::now();
-                    if now.duration_since(last_emit) < debounce {
-                        // Drain any queued events within the debounce window
-                        while rx.recv_timeout(debounce).is_ok() {}
-                    }
-                    last_emit = now;
+            // Block until the first event arrives (or channel disconnects)
+            let first = match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(Ok(event)) => event,
+                Ok(Err(_)) => continue,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
 
-                    let kind_label = event_kind_label(&event.kind);
-                    for p in &event.paths {
-                        let payload = FsChangePayload {
-                            path: p.to_string_lossy().to_string(),
-                            kind: kind_label.to_string(),
-                        };
-                        let _ = app_handle.emit("fs://change", &payload);
-                    }
-                }
-                Ok(Err(_)) => {
-                    // Watcher error, continue
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // No events, keep waiting
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    // Watcher was dropped, exit thread
+            // Collect unique (path → kind) pairs within the debounce window.
+            // Later events for the same path overwrite earlier ones.
+            let mut coalesced: HashMap<String, String> = HashMap::new();
+
+            for p in &first.paths {
+                coalesced.insert(
+                    p.to_string_lossy().to_string(),
+                    event_kind_label(&first.kind).to_string(),
+                );
+            }
+
+            // Drain additional events within the debounce window
+            let deadline = Instant::now() + debounce;
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
                     break;
                 }
+                match rx.recv_timeout(remaining) {
+                    Ok(Ok(event)) => {
+                        let kind = event_kind_label(&event.kind).to_string();
+                        for p in &event.paths {
+                            coalesced.insert(p.to_string_lossy().to_string(), kind.clone());
+                        }
+                    }
+                    Ok(Err(_)) => {}
+                    Err(mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                }
+            }
+
+            // Emit one event per unique path (deduplicated)
+            for (path, kind) in &coalesced {
+                let payload = FsChangePayload {
+                    path: path.clone(),
+                    kind: kind.clone(),
+                };
+                let _ = app_handle.emit("fs://change", &payload);
             }
         }
     });

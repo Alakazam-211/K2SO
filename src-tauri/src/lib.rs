@@ -48,8 +48,11 @@ pub fn run() {
         .menu(|handle| menu::create_menu(handle))
         .on_menu_event(menu::handle_menu_event)
         .setup(|app| {
+            // Migrate old JSON window state to SQLite (one-time migration)
+            window::migrate_json_window_state(app.handle());
+
             // Apply saved window state on startup
-            if let Some(saved) = window::load_window_state() {
+            if let Some(saved) = window::load_window_state(app.handle()) {
                 if let Some(win) = app.get_webview_window("main") {
                     use tauri::PhysicalPosition;
                     use tauri::PhysicalSize;
@@ -66,27 +69,73 @@ pub fn run() {
                 win.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { .. } = event {
                         window::save_window_state(&app_handle);
-                        // Unload LLM model before exit to release Metal/GPU resources.
-                        // If this isn't done, ggml_metal static destructors call abort()
-                        // during process teardown, causing a SIGABRT crash report.
-                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            if let Some(state) = app_handle.try_state::<AppState>() {
-                                if let Ok(mut manager) = state.llm_manager.lock() {
-                                    manager.unload();
+
+                        // Parallelize LLM unload and terminal kill with a 2-second timeout.
+                        // These have no dependency on each other and can run concurrently.
+                        let handle_for_llm = app_handle.clone();
+                        let handle_for_term = app_handle.clone();
+
+                        let llm_thread = std::thread::spawn(move || {
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                if let Some(state) = handle_for_llm.try_state::<AppState>() {
+                                    // Use try_lock to avoid blocking if model is still loading
+                                    if let Ok(mut manager) = state.llm_manager.try_lock() {
+                                        manager.unload();
+                                    } else {
+                                        eprintln!("[shutdown] LLM lock busy (model loading?) — skipping unload");
+                                    }
+                                }
+                            }));
+                        });
+
+                        let term_thread = std::thread::spawn(move || {
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                if let Some(state) = handle_for_term.try_state::<AppState>() {
+                                    if let Ok(mut manager) = state.terminal_manager.lock() {
+                                        manager.kill_all();
+                                    }
+                                }
+                            }));
+                        });
+
+                        // Wait up to 2 seconds for both to complete.
+                        // Use a parking thread to implement join-with-timeout since
+                        // JoinHandle::join_timeout is not yet stable.
+                        let timeout = std::time::Duration::from_secs(2);
+                        let (done_tx, done_rx) = std::sync::mpsc::channel();
+                        let done_tx2 = done_tx.clone();
+
+                        std::thread::spawn(move || {
+                            let _ = llm_thread.join();
+                            let _ = done_tx.send("llm");
+                        });
+                        std::thread::spawn(move || {
+                            let _ = term_thread.join();
+                            let _ = done_tx2.send("term");
+                        });
+
+                        let start = std::time::Instant::now();
+                        let mut completed = 0u32;
+                        while completed < 2 {
+                            let remaining = timeout.saturating_sub(start.elapsed());
+                            if remaining.is_zero() {
+                                eprintln!("[shutdown] Cleanup timed out after 2s — exiting anyway");
+                                break;
+                            }
+                            match done_rx.recv_timeout(remaining) {
+                                Ok(_) => completed += 1,
+                                Err(_) => {
+                                    eprintln!("[shutdown] Cleanup timed out after 2s — exiting anyway");
+                                    break;
                                 }
                             }
-                        }));
-                        // Kill all PTY processes to prevent zombies.
-                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            if let Some(state) = app_handle.try_state::<AppState>() {
-                                if let Ok(mut manager) = state.terminal_manager.lock() {
-                                    manager.kill_all();
-                                }
-                            }
-                        }));
+                        }
                     }
                 });
             }
+            // Clean up any stale .tmp files from interrupted model downloads
+            llm::download::cleanup_stale_downloads();
+
             // Auto-download AI model on first launch if not present
             {
                 let app_handle_for_download = app.handle().clone();
@@ -248,6 +297,9 @@ pub fn run() {
             commands::chat_history::chat_history_list,
             commands::chat_history::chat_history_list_for_project,
             commands::chat_history::chat_history_detect_active_session,
+            // Updater
+            commands::updater::check_for_update,
+            commands::updater::get_current_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running K2SO");

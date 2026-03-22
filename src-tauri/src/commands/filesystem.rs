@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -230,15 +231,36 @@ fn disambiguate_path(target: &Path) -> PathBuf {
 
 // ── File move/copy for drag-and-drop ────────────────────────────────────
 
-/// Recursively copy a directory tree.
+/// Recursively copy a directory tree with symlink cycle detection.
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    let mut visited = HashSet::new();
+    copy_dir_inner(src, dst, &mut visited)
+}
+
+fn copy_dir_inner(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    visited: &mut HashSet<u64>,
+) -> Result<(), String> {
+    // Track visited directories by inode to prevent symlink cycles
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(meta) = fs::metadata(src) {
+            if !visited.insert(meta.ino()) {
+                // Already visited this inode — symlink cycle, skip
+                return Ok(());
+            }
+        }
+    }
+
     fs::create_dir_all(dst).map_err(|e| format!("Failed to create directory: {e}"))?;
     for entry in fs::read_dir(src).map_err(|e| format!("Failed to read directory: {e}"))? {
         let entry = entry.map_err(|e| format!("Failed to read entry: {e}"))?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
         if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
+            copy_dir_inner(&src_path, &dst_path, visited)?;
         } else {
             fs::copy(&src_path, &dst_path)
                 .map_err(|e| format!("Failed to copy {}: {e}", src_path.display()))?;
@@ -324,20 +346,9 @@ pub fn fs_delete(paths: Vec<String>, permanent: Option<bool>) -> Result<(), Stri
                     .map_err(|e| format!("Failed to delete file: {e}"))?;
             }
         } else {
-            // Move to macOS Trash via NSFileManager
-            let status = Command::new("osascript")
-                .arg("-e")
-                .arg(format!(
-                    "tell application \"Finder\" to delete POSIX file \"{}\"",
-                    path_str.replace('\\', "\\\\").replace('"', "\\\"")
-                ))
-                .output()
-                .map_err(|e| format!("Failed to trash: {e}"))?;
-
-            if !status.status.success() {
-                let stderr = String::from_utf8_lossy(&status.stderr);
-                return Err(format!("Failed to trash {path_str}: {stderr}"));
-            }
+            // Move to native OS Trash (uses NSFileManager on macOS)
+            trash::delete(p)
+                .map_err(|e| format!("Failed to trash {path_str}: {e}"))?;
         }
     }
 
