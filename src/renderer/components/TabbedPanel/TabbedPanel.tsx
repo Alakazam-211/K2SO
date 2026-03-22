@@ -23,6 +23,8 @@ interface TabbedPanelProps {
   onWidthChange: (width: number) => void
   /** Which side this panel is on */
   resizeSide: 'left' | 'right'
+  /** Optional header rendered above the tab strip (e.g. workspace header in focus mode) */
+  header?: ReactNode
   children: ReactNode
 }
 
@@ -92,6 +94,7 @@ export default function TabbedPanel({
   width,
   onWidthChange,
   resizeSide,
+  header,
   children
 }: TabbedPanelProps): React.JSX.Element {
   // Determine which side this panel is on based on resizeSide
@@ -139,6 +142,9 @@ export default function TabbedPanel({
       style={{ width }}
     >
       <PanelResizeHandle side={resizeSide} onWidthChange={onWidthChange} currentWidth={width} />
+
+      {/* Optional header above tabs (e.g. workspace info in focus mode) */}
+      {header}
 
       {/* Tab strip */}
       <div className="flex border-b border-[var(--color-border)] flex-shrink-0">

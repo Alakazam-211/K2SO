@@ -7,6 +7,7 @@ import { showContextMenu } from '@/lib/context-menu'
 import { useGitInfo, useGitChanges } from '@/hooks/useGit'
 import ResizeHandle from './ResizeHandle'
 import WorktreeDialog from './WorktreeDialog'
+import DisableWorktreesDialog from '../Settings/DisableWorktreesDialog'
 import ProjectAvatar from './ProjectAvatar'
 import SectionItem from './SectionItem'
 import FocusGroupDropdown from './FocusGroupDropdown'
@@ -633,6 +634,9 @@ export default function Sidebar(): React.JSX.Element {
     projectPath: string
   } | null>(null)
 
+  // Disable worktrees dialog state
+  const [disableWorktreeProject, setDisableWorktreeProject] = useState<typeof projects[number] | null>(null)
+
   const handleAddProject = useCallback(async () => {
     const folderPath = await invoke<string | null>('projects_pick_folder')
     if (folderPath) {
@@ -727,13 +731,19 @@ export default function Sidebar(): React.JSX.Element {
         }
       } else if (clickedId === 'toggle-worktree-mode') {
         if (project.worktreeMode) {
-          // Disabling — just flip the flag
-          await invoke('projects_update', { id: projectId, worktreeMode: 0 })
+          // Disabling — check if worktrees exist and show dialog
+          const worktrees = project.workspaces.filter((ws) => ws.type === 'worktree')
+          if (worktrees.length > 0) {
+            setDisableWorktreeProject(project)
+          } else {
+            await invoke('projects_update', { id: projectId, worktreeMode: 0 })
+            await fetchProjects()
+          }
         } else {
           // Enabling — reconcile existing worktrees
           await invoke('projects_enable_worktrees', { projectId })
+          await fetchProjects()
         }
-        await fetchProjects()
       } else if (clickedId === 'toggle-pin') {
         await invoke('projects_update', { id: projectId, pinned: project.pinned ? 0 : 1 })
         await fetchProjects()
@@ -866,6 +876,15 @@ export default function Sidebar(): React.JSX.Element {
           projectPath={worktreeDialog.projectPath}
           open={true}
           onClose={() => setWorktreeDialog(null)}
+        />
+      )}
+
+      {/* Disable worktrees dialog */}
+      {disableWorktreeProject && (
+        <DisableWorktreesDialog
+          project={disableWorktreeProject}
+          open={true}
+          onClose={() => setDisableWorktreeProject(null)}
         />
       )}
     </div>

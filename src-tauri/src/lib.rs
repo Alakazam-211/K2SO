@@ -300,6 +300,7 @@ pub fn run() {
             // Updater
             commands::updater::check_for_update,
             commands::updater::get_current_version,
+            commands::updater::broadcast_sync,
         ])
         .run(tauri::generate_context!())
         .expect("error while running K2SO");

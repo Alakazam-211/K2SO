@@ -36,52 +36,67 @@ fn is_newer(current: &str, latest: &str) -> bool {
 }
 
 #[tauri::command]
-pub fn check_for_update() -> Result<UpdateInfo, String> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("K2SO-UpdateChecker")
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e: reqwest::Error| e.to_string())?;
+pub async fn check_for_update() -> Result<UpdateInfo, String> {
+    // Run the blocking HTTP call on a background thread to avoid freezing the UI
+    tokio::task::spawn_blocking(|| {
+        let client = reqwest::blocking::Client::builder()
+            .user_agent("K2SO-UpdateChecker")
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e: reqwest::Error| e.to_string())?;
 
-    let body = client
-        .get(GITHUB_RELEASES_URL)
-        .send()
-        .map_err(|e: reqwest::Error| e.to_string())?
-        .text()
-        .map_err(|e: reqwest::Error| e.to_string())?;
+        let body = client
+            .get(GITHUB_RELEASES_URL)
+            .send()
+            .map_err(|e: reqwest::Error| e.to_string())?
+            .text()
+            .map_err(|e: reqwest::Error| e.to_string())?;
 
-    let resp: serde_json::Value =
-        serde_json::from_str(&body).map_err(|e| e.to_string())?;
+        let resp: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| e.to_string())?;
 
-    let tag = resp["tag_name"]
-        .as_str()
-        .unwrap_or("")
-        .trim_start_matches('v');
+        let tag = resp["tag_name"]
+            .as_str()
+            .unwrap_or("")
+            .trim_start_matches('v');
 
-    // Find the DMG asset download URL
-    let mut download_url = String::new();
-    if let Some(assets) = resp["assets"].as_array() {
-        for asset in assets {
-            let name: &str = asset["name"].as_str().unwrap_or("");
-            if name.ends_with(".dmg") {
-                download_url = asset["browser_download_url"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
-                break;
+        let mut download_url = String::new();
+        if let Some(assets) = resp["assets"].as_array() {
+            for asset in assets {
+                let name: &str = asset["name"].as_str().unwrap_or("");
+                if name.ends_with(".dmg") {
+                    download_url = asset["browser_download_url"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                    break;
+                }
             }
         }
-    }
 
-    Ok(UpdateInfo {
-        current_version: CURRENT_VERSION.to_string(),
-        latest_version: tag.to_string(),
-        download_url,
-        has_update: is_newer(CURRENT_VERSION, tag),
+        Ok(UpdateInfo {
+            current_version: CURRENT_VERSION.to_string(),
+            latest_version: tag.to_string(),
+            download_url,
+            has_update: is_newer(CURRENT_VERSION, tag),
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 pub fn get_current_version() -> String {
     CURRENT_VERSION.to_string()
+}
+
+/// Broadcast an event from one window to all windows (used for tab sync etc.)
+#[tauri::command]
+pub fn broadcast_sync(
+    app: tauri::AppHandle,
+    channel: String,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    use tauri::Emitter;
+    app.emit(&channel, payload).map_err(|e| e.to_string())
 }

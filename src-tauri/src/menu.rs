@@ -104,10 +104,25 @@ pub fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
             emit_to_focused(app, "terminal:zoom-out");
         }
         "new-window" => {
-            // Emit event so the frontend can handle creating a new window if desired
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.emit("menu:new-window", ());
-            }
+            use tauri::WebviewWindowBuilder;
+
+            // Generate a unique label for the new window
+            let label = format!("window-{}", uuid::Uuid::new_v4());
+            let webview_url = if cfg!(debug_assertions) {
+                tauri::WebviewUrl::External(
+                    url::Url::parse("http://localhost:5173").unwrap(),
+                )
+            } else {
+                tauri::WebviewUrl::App("index.html".into())
+            };
+
+            let _ = WebviewWindowBuilder::new(app, &label, webview_url)
+                .title("K2SO")
+                .inner_size(1400.0, 900.0)
+                .min_inner_size(800.0, 600.0)
+                .hidden_title(true)
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .build();
         }
         _ => {}
     }

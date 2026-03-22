@@ -93,9 +93,19 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
       set({ projects: projectsWithWorkspaces })
 
-      // If we have projects but no active one, select the first
+      // If active project was deleted (e.g. in another window), clear selection
       const state = get()
-      if (!state.activeProjectId && projectsWithWorkspaces.length > 0) {
+      if (state.activeProjectId && !projectsWithWorkspaces.find((p) => p.id === state.activeProjectId)) {
+        if (projectsWithWorkspaces.length > 0) {
+          const first = projectsWithWorkspaces[0]
+          set({ activeProjectId: first.id, activeWorkspaceId: first.workspaces[0]?.id ?? null })
+        } else {
+          set({ activeProjectId: null, activeWorkspaceId: null })
+        }
+      }
+
+      // If we have projects but no active one, select the first
+      if (!get().activeProjectId && projectsWithWorkspaces.length > 0) {
         const firstProject = projectsWithWorkspaces[0]
         const firstWorkspaceId = firstProject.workspaces[0]?.id ?? null
         set({

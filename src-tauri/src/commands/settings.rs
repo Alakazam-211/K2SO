@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use tauri::{AppHandle, Emitter};
 
 // ── Settings types ──────────────────────────────────────────────────────
 
@@ -139,18 +140,20 @@ pub fn settings_get() -> Result<AppSettings, String> {
 }
 
 #[tauri::command]
-pub fn settings_update(updates: serde_json::Value) -> Result<AppSettings, String> {
+pub fn settings_update(app: AppHandle, updates: serde_json::Value) -> Result<AppSettings, String> {
     let current = read_settings();
     let mut current_val = serde_json::to_value(&current).map_err(|e| e.to_string())?;
     deep_merge(&mut current_val, &updates);
     let merged: AppSettings = serde_json::from_value(current_val).map_err(|e| e.to_string())?;
     write_settings(&merged);
+    let _ = app.emit("sync:settings", ());
     Ok(merged)
 }
 
 #[tauri::command]
-pub fn settings_reset() -> Result<AppSettings, String> {
+pub fn settings_reset(app: AppHandle) -> Result<AppSettings, String> {
     let defaults = AppSettings::default();
     write_settings(&defaults);
+    let _ = app.emit("sync:settings", ());
     Ok(defaults)
 }

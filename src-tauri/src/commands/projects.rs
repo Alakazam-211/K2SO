@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use crate::db::schema::{FocusGroup, Project, Workspace};
 use crate::editors;
 use crate::editors::EditorInfo;
@@ -300,6 +300,7 @@ pub fn projects_list(state: State<'_, AppState>) -> Result<Vec<Project>, String>
 
 #[tauri::command]
 pub fn projects_create(
+    app: AppHandle,
     state: State<'_, AppState>,
     name: String,
     path: String,
@@ -311,7 +312,7 @@ pub fn projects_create(
     let tab_order = next_tab_order(&conn);
     let color = color.unwrap_or_else(|| "#3b82f6".to_string());
 
-    with_transaction(&conn, || {
+    let result = with_transaction(&conn, || {
         Project::create(&conn, &project_id, &name, &path, &color, tab_order, 1, None, None)
             .map_err(|e| e.to_string())?;
 
@@ -319,11 +320,14 @@ pub fn projects_create(
             .map_err(|e| e.to_string())?;
 
         Project::get(&conn, &project_id).map_err(|e| e.to_string())
-    })
+    })?;
+    let _ = app.emit("sync:projects", ());
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn projects_update(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: String,
     name: Option<String>,
@@ -353,11 +357,14 @@ pub fn projects_update(
         pinned,
     )
     .map_err(|e| e.to_string())?;
-    Project::get(&conn, &id).map_err(|e| e.to_string())
+    let result = Project::get(&conn, &id).map_err(|e| e.to_string())?;
+    let _ = app.emit("sync:projects", ());
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn projects_enable_worktrees(
+    app: AppHandle,
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<Project, String> {
@@ -366,7 +373,7 @@ pub fn projects_enable_worktrees(
     // Get the project
     let project = Project::get(&conn, &project_id).map_err(|e| e.to_string())?;
 
-    with_transaction(&conn, || {
+    let result = with_transaction(&conn, || {
         // Set worktree_mode = 1
         Project::update(&conn, &project_id, None, None, None, None, Some(1), None, None, None)
             .map_err(|e| e.to_string())?;
@@ -410,25 +417,30 @@ pub fn projects_enable_worktrees(
         }
 
         Project::get(&conn, &project_id).map_err(|e| e.to_string())
-    })
+    })?;
+    let _ = app.emit("sync:projects", ());
+    Ok(result)
 }
 
 #[tauri::command]
-pub fn projects_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub fn projects_delete(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     // Delete workspaces first (cascade)
     conn.execute("DELETE FROM workspaces WHERE project_id = ?1", rusqlite::params![id])
         .map_err(|e| e.to_string())?;
-    Project::delete(&conn, &id).map_err(|e| e.to_string())
+    Project::delete(&conn, &id).map_err(|e| e.to_string())?;
+    let _ = app.emit("sync:projects", ());
+    Ok(())
 }
 
 #[tauri::command]
-pub fn projects_reorder(state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
+pub fn projects_reorder(app: AppHandle, state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     for (i, id) in ids.iter().enumerate() {
         Project::update(&conn, id, None, None, None, Some(i as i64), None, None, None, None)
             .map_err(|e| e.to_string())?;
     }
+    let _ = app.emit("sync:projects", ());
     Ok(())
 }
 
@@ -446,6 +458,7 @@ pub enum AddFromPathResult {
 
 #[tauri::command]
 pub fn projects_add_from_path(
+    app: AppHandle,
     state: State<'_, AppState>,
     path: String,
 ) -> Result<AddFromPathResult, String> {
@@ -520,7 +533,7 @@ pub fn projects_add_from_path(
         .unwrap_or_else(|| "main".to_string());
 
     // Default worktree_mode = 0 (disabled); user can enable in settings
-    with_transaction(&conn, || {
+    let result = with_transaction(&conn, || {
         Project::create(
             &conn, &project_id, &name, &path, "#3b82f6", tab_order, 0, None, None,
         )
@@ -539,7 +552,9 @@ pub fn projects_add_from_path(
 
         let project = Project::get(&conn, &project_id).map_err(|e| e.to_string())?;
         Ok(AddFromPathResult::Project(project))
-    })
+    })?;
+    let _ = app.emit("sync:projects", ());
+    Ok(result)
 }
 
 fn reconcile_focus_group(
@@ -570,6 +585,7 @@ fn reconcile_focus_group(
 
 #[tauri::command]
 pub fn projects_add_without_git(
+    app: AppHandle,
     state: State<'_, AppState>,
     path: String,
 ) -> Result<Project, String> {
@@ -583,7 +599,7 @@ pub fn projects_add_without_git(
     let workspace_id = uuid::Uuid::new_v4().to_string();
     let tab_order = next_tab_order(&conn);
 
-    with_transaction(&conn, || {
+    let result = with_transaction(&conn, || {
         Project::create(
             &conn, &project_id, &name, &path, "#3b82f6", tab_order, 0, None, None,
         )
@@ -595,11 +611,14 @@ pub fn projects_add_without_git(
         .map_err(|e| e.to_string())?;
 
         Project::get(&conn, &project_id).map_err(|e| e.to_string())
-    })
+    })?;
+    let _ = app.emit("sync:projects", ());
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn projects_init_git_and_open(
+    app: AppHandle,
     state: State<'_, AppState>,
     path: String,
     branch: Option<String>,
@@ -649,7 +668,7 @@ pub fn projects_init_git_and_open(
     let tab_order = next_tab_order(&conn);
 
     // Default worktree_mode = 0 (disabled)
-    with_transaction(&conn, || {
+    let result = with_transaction(&conn, || {
         Project::create(
             &conn, &project_id, &name, &path, "#3b82f6", tab_order, 0, None, None,
         )
@@ -661,7 +680,9 @@ pub fn projects_init_git_and_open(
         .map_err(|e| e.to_string())?;
 
         Project::get(&conn, &project_id).map_err(|e| e.to_string())
-    })
+    })?;
+    let _ = app.emit("sync:projects", ());
+    Ok(result)
 }
 
 #[tauri::command]
@@ -801,6 +822,7 @@ pub async fn projects_upload_icon(
             )
             .map_err(|e| e.to_string())?;
 
+            let _ = app.emit("sync:projects", ());
             Ok(IconResult {
                 found: true,
                 data_url: Some(data_url),
@@ -811,6 +833,7 @@ pub async fn projects_upload_icon(
 
 #[tauri::command]
 pub fn projects_clear_icon(
+    app: AppHandle,
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<(), String> {
@@ -819,7 +842,9 @@ pub fn projects_clear_icon(
         &conn, &project_id, None, None, None, None, None,
         Some(None), None, None,
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    let _ = app.emit("sync:projects", ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -887,6 +912,8 @@ pub async fn projects_open_focus_window(
     .title(&project_name)
     .inner_size(1200.0, 800.0)
     .min_inner_size(600.0, 400.0)
+    .hidden_title(true)
+    .title_bar_style(tauri::TitleBarStyle::Overlay)
     .build()
     .map_err(|e| e.to_string())?;
 

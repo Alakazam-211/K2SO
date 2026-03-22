@@ -1,4 +1,4 @@
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use crate::db::schema::{FocusGroup, Project};
 use crate::project_config;
 use crate::state::AppState;
@@ -11,6 +11,7 @@ pub fn focus_groups_list(state: State<'_, AppState>) -> Result<Vec<FocusGroup>, 
 
 #[tauri::command]
 pub fn focus_groups_create(
+    app: AppHandle,
     state: State<'_, AppState>,
     name: String,
     color: Option<String>,
@@ -24,11 +25,14 @@ pub fn focus_groups_create(
     FocusGroup::create(&conn, &id, &name, color.as_deref(), max_order)
         .map_err(|e| e.to_string())?;
 
-    FocusGroup::get(&conn, &id).map_err(|e| e.to_string())
+    let result = FocusGroup::get(&conn, &id).map_err(|e| e.to_string())?;
+    let _ = app.emit("sync:focus-groups", ());
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn focus_groups_update(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: String,
     name: Option<String>,
@@ -38,17 +42,22 @@ pub fn focus_groups_update(
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     FocusGroup::update(&conn, &id, name.as_deref(), color.as_deref(), tab_order)
         .map_err(|e| e.to_string())?;
-    FocusGroup::get(&conn, &id).map_err(|e| e.to_string())
+    let result = FocusGroup::get(&conn, &id).map_err(|e| e.to_string())?;
+    let _ = app.emit("sync:focus-groups", ());
+    Ok(result)
 }
 
 #[tauri::command]
-pub fn focus_groups_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub fn focus_groups_delete(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    FocusGroup::delete(&conn, &id).map_err(|e| e.to_string())
+    FocusGroup::delete(&conn, &id).map_err(|e| e.to_string())?;
+    let _ = app.emit("sync:focus-groups", ());
+    Ok(())
 }
 
 #[tauri::command]
 pub fn focus_groups_assign_project(
+    app: AppHandle,
     state: State<'_, AppState>,
     project_id: String,
     focus_group_id: Option<String>,
@@ -82,11 +91,15 @@ pub fn focus_groups_assign_project(
     )
     .ok(); // Don't fail the command if config write fails
 
-    Project::get(&conn, &project_id).map_err(|e| e.to_string())
+    let result = Project::get(&conn, &project_id).map_err(|e| e.to_string())?;
+    let _ = app.emit("sync:focus-groups", ());
+    let _ = app.emit("sync:projects", ());
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn focus_groups_reconcile_project(
+    app: AppHandle,
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<Project, String> {
@@ -134,5 +147,8 @@ pub fn focus_groups_reconcile_project(
         }
     }
 
-    Project::get(&conn, &project_id).map_err(|e| e.to_string())
+    let result = Project::get(&conn, &project_id).map_err(|e| e.to_string())?;
+    let _ = app.emit("sync:focus-groups", ());
+    let _ = app.emit("sync:projects", ());
+    Ok(result)
 }

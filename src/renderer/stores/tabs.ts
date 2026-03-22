@@ -3,6 +3,29 @@ import { invoke } from '@tauri-apps/api/core'
 import type { MosaicNode, MosaicDirection } from 'react-mosaic-component'
 import { RESUMABLE_CLI_TOOLS } from '@shared/constants'
 
+// ── Cross-window tab sync ────────────────────────────────────────────────
+
+export const WINDOW_ID = crypto.randomUUID() // unique per window instance
+
+interface TabSyncPayload {
+  windowId: string
+  action: 'add' | 'remove' | 'title'
+  groupIndex: number
+  tabId: string
+  title?: string
+  terminalId?: string
+  cwd?: string
+  command?: string
+  args?: string[]
+}
+
+function broadcastTabChange(payload: TabSyncPayload): void {
+  invoke('broadcast_sync', {
+    channel: 'sync:tabs',
+    payload,
+  }).catch((e) => console.warn('[tabs] broadcast failed:', e))
+}
+
 // ── Item Types ────────────────────────────────────────────────────────────
 
 export interface TerminalItemData {
@@ -164,6 +187,10 @@ interface TabsState {
   loadWorkspaceLayoutsFromSettings: () => Promise<void>
   clearAllTabs: () => void
   detectAndSaveSessionIds: () => Promise<void>
+
+  // Cross-window sync
+  applyRemoteTabChange: (payload: TabSyncPayload) => void
+  broadcastAllTabs: () => void
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -374,6 +401,21 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       activeTabId: tabId
     }))
 
+    // Broadcast to other windows
+    const termItem = paneGroup.items[0]
+    const termData = termItem?.data as TerminalItemData
+    broadcastTabChange({
+      windowId: WINDOW_ID,
+      action: 'add',
+      groupIndex: 0,
+      tabId,
+      title,
+      terminalId: termData?.terminalId,
+      cwd,
+      command: options?.command,
+      args: options?.args,
+    })
+
     return paneGroupId
   },
 
@@ -406,6 +448,14 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       }
 
       return { tabs: newTabs, activeTabId: newActiveId }
+    })
+
+    // Broadcast removal to other windows
+    broadcastTabChange({
+      windowId: WINDOW_ID,
+      action: 'remove',
+      groupIndex: 0,
+      tabId,
     })
   },
 
@@ -628,6 +678,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       const result = mapTabAcrossGroups(state, tabId, (tab) => ({ ...tab, title }))
       return { tabs: result.tabs, extraGroups: result.extraGroups }
     })
+    broadcastTabChange({ windowId: WINDOW_ID, action: 'title', groupIndex: 0, tabId, title })
   },
 
   setTabDirty: (tabId: string, dirty: boolean) => {
@@ -835,6 +886,22 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         return { extraGroups: newGroups }
       })
     }
+
+    // Broadcast to other windows
+    const termItem = pg.items[0]
+    const termData = termItem?.data as TerminalItemData
+    broadcastTabChange({
+      windowId: WINDOW_ID,
+      action: 'add',
+      groupIndex,
+      tabId,
+      title,
+      terminalId: termData?.terminalId,
+      cwd,
+      command: options?.command,
+      args: options?.args,
+    })
+
     return pgId
   },
 
@@ -1132,18 +1199,25 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       set({ tabs: [], activeTabId: null })
       get().restoreLayout(savedLayout, cwd)
     } else {
-      // No saved layout — clear and create a default single-terminal tab
-      tabCounter++
-      const tabId = crypto.randomUUID()
-      const paneGroupId = crypto.randomUUID()
-      const pg = makeTerminalPaneGroup(paneGroupId, cwd)
-      const tab: Tab = {
-        id: tabId,
-        title: `Terminal ${tabCounter}`,
-        mosaicTree: paneGroupId,
-        paneGroups: new Map([[paneGroupId, pg]])
-      }
-      set({ tabs: [tab], activeTabId: tabId })
+      // No saved layout — start empty temporarily.
+      // If synced tabs arrive from another window, those will populate.
+      // If not (first launch / no other windows), create a default tab after a delay.
+      set({ tabs: [], activeTabId: null })
+      setTimeout(() => {
+        if (get().tabs.length === 0) {
+          tabCounter++
+          const tabId = crypto.randomUUID()
+          const paneGroupId = crypto.randomUUID()
+          const pg = makeTerminalPaneGroup(paneGroupId, cwd)
+          const tab: Tab = {
+            id: tabId,
+            title: `Terminal ${tabCounter}`,
+            mosaicTree: paneGroupId,
+            paneGroups: new Map([[paneGroupId, pg]])
+          }
+          set({ tabs: [tab], activeTabId: tabId })
+        }
+      }, 1500)
     }
   },
 
@@ -1210,6 +1284,104 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
     if (updated) {
       set({ tabs: [...state.tabs] }) // trigger re-render with updated sessionIds
+    }
+  },
+
+  applyRemoteTabChange: (payload: TabSyncPayload) => {
+    // Ignore our own broadcasts
+    if (payload.windowId === WINDOW_ID) return
+
+    if (payload.action === 'add' && payload.terminalId && payload.cwd) {
+      // Check if we already have this tab
+      const existing = findTabAcrossGroups(get(), payload.tabId)
+      if (existing) return
+
+      tabCounter++
+      const pgId = payload.terminalId // reuse the same terminal ID
+      const pg = makeTerminalPaneGroup(pgId, payload.cwd, {
+        command: payload.command,
+        args: payload.args,
+      })
+      // Override the terminalId to match the source window's PTY
+      if (pg.items[0]) {
+        (pg.items[0].data as TerminalItemData).terminalId = payload.terminalId
+      }
+
+      const tab: Tab = {
+        id: payload.tabId,
+        title: payload.title ?? `Terminal ${tabCounter}`,
+        mosaicTree: pgId,
+        paneGroups: new Map([[pgId, pg]])
+      }
+
+      // Add to group 0 (main tabs) — the receiving window shows all synced tabs in main group
+      set((state) => ({
+        tabs: [...state.tabs, tab],
+      }))
+    } else if (payload.action === 'remove') {
+      // Remove the tab without killing the PTY (the source window handles PTY lifecycle)
+      const existing = findTabAcrossGroups(get(), payload.tabId)
+      if (!existing) return
+
+      set((state) => ({
+        tabs: state.tabs.filter((t) => t.id !== payload.tabId),
+        activeTabId: state.activeTabId === payload.tabId
+          ? (state.tabs.find((t) => t.id !== payload.tabId)?.id ?? null)
+          : state.activeTabId,
+      }))
+    } else if (payload.action === 'title') {
+      set((state) => mapTabAcrossGroups(state, payload.tabId, (tab) => ({
+        ...tab,
+        title: payload.title ?? tab.title,
+      })))
+    }
+  },
+
+  broadcastAllTabs: () => {
+    const state = get()
+    // Broadcast all tabs from group 0
+    for (const tab of state.tabs) {
+      for (const [, pg] of tab.paneGroups) {
+        for (const item of pg.items) {
+          if (item.type === 'terminal') {
+            const d = item.data as TerminalItemData
+            broadcastTabChange({
+              windowId: WINDOW_ID,
+              action: 'add',
+              groupIndex: 0,
+              tabId: tab.id,
+              title: tab.title,
+              terminalId: d.terminalId,
+              cwd: d.cwd,
+              command: d.command,
+              args: d.args,
+            })
+          }
+        }
+      }
+    }
+    // Broadcast extra groups
+    for (let gi = 0; gi < state.extraGroups.length; gi++) {
+      for (const tab of state.extraGroups[gi].tabs) {
+        for (const [, pg] of tab.paneGroups) {
+          for (const item of pg.items) {
+            if (item.type === 'terminal') {
+              const d = item.data as TerminalItemData
+              broadcastTabChange({
+                windowId: WINDOW_ID,
+                action: 'add',
+                groupIndex: gi + 1,
+                tabId: tab.id,
+                title: tab.title,
+                terminalId: d.terminalId,
+                cwd: d.cwd,
+                command: d.command,
+                args: d.args,
+              })
+            }
+          }
+        }
+      }
     }
   }
 }))

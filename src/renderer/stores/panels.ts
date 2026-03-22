@@ -21,6 +21,9 @@ interface PanelsState {
   rightPanelActiveTab: PanelTab
   rightPanelTabs: PanelTab[]
 
+  // Focus window: which side shows the workspace header
+  focusWorkspaceHeaderSide: 'left' | 'right'
+
   // Actions
   toggleLeftPanel: () => void
   toggleRightPanel: () => void
@@ -32,6 +35,9 @@ interface PanelsState {
   // Move a tab from one side to the other
   moveTabToLeft: (tab: PanelTab) => void
   moveTabToRight: (tab: PanelTab) => void
+
+  // Move workspace header between sides (focus window)
+  moveFocusWorkspaceHeader: (side: 'left' | 'right') => void
 
   initFromSettings: () => Promise<void>
 }
@@ -46,6 +52,8 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
   rightPanelWidth: SIDEBAR_DEFAULT_WIDTH,
   rightPanelActiveTab: 'history',
   rightPanelTabs: ['history', 'changes'],
+
+  focusWorkspaceHeaderSide: 'left',
 
   toggleLeftPanel: () => {
     const next = !get().leftPanelOpen
@@ -110,6 +118,10 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
       leftPanelActiveTab: s.leftPanelActiveTab,
       rightPanelActiveTab: s.rightPanelActiveTab
     }).catch((e: unknown) => console.error('[panels]', e))
+  },
+
+  moveFocusWorkspaceHeader: (side) => {
+    set({ focusWorkspaceHeaderSide: side })
   },
 
   initFromSettings: async () => {

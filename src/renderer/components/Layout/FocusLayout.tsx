@@ -6,7 +6,6 @@ import { usePanelsStore } from '../../stores/panels'
 interface FocusLayoutProps {
   children: ReactNode
   projectName?: string
-  workspaceBar?: ReactNode
   leftPanel?: ReactNode
   rightPanel?: ReactNode
 }
@@ -14,7 +13,6 @@ interface FocusLayoutProps {
 export default function FocusLayout({
   children,
   projectName,
-  workspaceBar,
   leftPanel,
   rightPanel
 }: FocusLayoutProps): React.JSX.Element {
@@ -103,9 +101,6 @@ export default function FocusLayout({
           </button>
         </div>
       </div>
-
-      {/* Worktree bar */}
-      {workspaceBar}
 
       {/* Content area with optional left/right panels */}
       <div className="flex flex-1 overflow-hidden">

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import Layout from './components/Layout/Layout'
 import FocusLayout from './components/Layout/FocusLayout'
 import Sidebar from './components/Sidebar/Sidebar'
@@ -24,7 +24,9 @@ import { useAssistantStore } from './stores/assistant'
 import { useTabsStore } from './stores/tabs'
 import { useActiveAgentsStore, startAgentPolling, stopAgentPolling } from './stores/active-agents'
 import AgentCloseDialog from './components/AgentCloseDialog/AgentCloseDialog'
+import FocusWorkspaceHeader from './components/FocusWindow/FocusWorkspaceHeader'
 import { useUpdateChecker } from './hooks/useUpdateChecker'
+import { useWindowSync } from './hooks/useWindowSync'
 
 /** Parse focus mode project ID from URL hash (#focus=<projectId>) */
 function parseFocusProjectId(): string | null {
@@ -35,7 +37,7 @@ function parseFocusProjectId(): string | null {
   return decodeURIComponent(match[1])
 }
 
-function LeftPanelContent({ rootPath }: { rootPath?: string }): React.JSX.Element {
+function LeftPanelContent({ rootPath, header }: { rootPath?: string; header?: React.ReactNode }): React.JSX.Element {
   const tabs = usePanelsStore((s) => s.leftPanelTabs)
   const activeTab = usePanelsStore((s) => s.leftPanelActiveTab)
   const setActiveTab = usePanelsStore((s) => s.setLeftPanelActiveTab)
@@ -52,6 +54,7 @@ function LeftPanelContent({ rootPath }: { rootPath?: string }): React.JSX.Elemen
       width={width}
       onWidthChange={setWidth}
       resizeSide="right"
+      header={header}
     >
       {activeTab === 'files' && rootPath && <FileTree rootPath={rootPath} />}
       {activeTab === 'changes' && <ChangesPanel />}
@@ -60,7 +63,7 @@ function LeftPanelContent({ rootPath }: { rootPath?: string }): React.JSX.Elemen
   )
 }
 
-function RightPanelContent({ rootPath }: { rootPath?: string }): React.JSX.Element {
+function RightPanelContent({ rootPath, header }: { rootPath?: string; header?: React.ReactNode }): React.JSX.Element {
   const tabs = usePanelsStore((s) => s.rightPanelTabs)
   const activeTab = usePanelsStore((s) => s.rightPanelActiveTab)
   const setActiveTab = usePanelsStore((s) => s.setRightPanelActiveTab)
@@ -77,11 +80,71 @@ function RightPanelContent({ rootPath }: { rootPath?: string }): React.JSX.Eleme
       width={width}
       onWidthChange={setWidth}
       resizeSide="left"
+      header={header}
     >
       {activeTab === 'files' && rootPath && <FileTree rootPath={rootPath} />}
       {activeTab === 'changes' && <ChangesPanel />}
       {activeTab === 'history' && <ChatHistory />}
     </TabbedPanel>
+  )
+}
+
+class FocusErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null }
+  static getDerivedStateFromError(error: Error): { error: Error } {
+    return { error }
+  }
+  componentDidCatch(error: Error, info: React.ErrorInfo): void {
+    console.error('[FocusModeContent] CRASH:', error, info.componentStack)
+  }
+  render(): React.ReactNode {
+    if (this.state.error) {
+      return (
+        <div className="flex h-screen w-screen items-center justify-center bg-[var(--color-bg)] text-red-400 text-xs p-8">
+          <div>
+            <p className="font-bold mb-2">Focus window error:</p>
+            <pre className="whitespace-pre-wrap">{this.state.error.message}</pre>
+            <pre className="whitespace-pre-wrap text-[var(--color-text-muted)] mt-2">{this.state.error.stack}</pre>
+          </div>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+function FocusModeContent({ activeProject, cwd }: { activeProject: any; cwd: string }): React.JSX.Element {
+  const focusHeaderSide = usePanelsStore((s) => s.focusWorkspaceHeaderSide)
+  const leftHeader = focusHeaderSide === 'left' ? <FocusWorkspaceHeader side="left" /> : undefined
+  const rightHeader = focusHeaderSide === 'right' ? <FocusWorkspaceHeader side="right" /> : undefined
+
+  return (
+    <FocusErrorBoundary>
+      <FocusLayout
+        projectName={activeProject?.name}
+        leftPanel={<LeftPanelContent rootPath={activeProject?.path} header={leftHeader} />}
+        rightPanel={<RightPanelContent rootPath={activeProject?.path} header={rightHeader} />}
+      >
+        {activeProject ? (
+          <TerminalArea cwd={cwd} />
+        ) : (
+          <div className="flex-1 flex items-center justify-center h-full">
+            <div className="text-center">
+              <h2 className="text-lg font-medium text-[var(--color-text-muted)]">Loading...</h2>
+            </div>
+          </div>
+        )}
+      </FocusLayout>
+      <GitInitDialog />
+      <CommandPalette />
+      <ContextMenu />
+      <ConfirmDialog />
+      <Toast />
+      <AssistantBar />
+    </FocusErrorBoundary>
   )
 }
 
@@ -185,6 +248,9 @@ export default function App(): React.JSX.Element {
   // Check for updates on launch and every 3 hours
   useUpdateChecker()
 
+  // Sync state across all windows (main, focus, new)
+  useWindowSync()
+
   // Save layout helper
   const saveCurrentLayout = (): void => {
     const tabsStore = useTabsStore.getState()
@@ -274,33 +340,10 @@ export default function App(): React.JSX.Element {
     )
   }
 
-  // Focus mode: no workspaces sidebar, but still has left/right panels
+  // Focus mode: workspace header above sidebar tabs, no primary sidebar
   if (focusProjectId) {
     return (
-      <>
-        <FocusLayout
-          projectName={activeProject?.name}
-          workspaceBar={activeProject ? <WorktreeBar project={activeProject} /> : undefined}
-          leftPanel={<LeftPanelContent rootPath={activeProject?.path} />}
-          rightPanel={<RightPanelContent rootPath={activeProject?.path} />}
-        >
-          {activeProject ? (
-            <TerminalArea cwd={cwd} />
-          ) : (
-            <div className="flex-1 flex items-center justify-center h-full">
-              <div className="text-center">
-                <h2 className="text-lg font-medium text-[var(--color-text-muted)]">Loading...</h2>
-              </div>
-            </div>
-          )}
-        </FocusLayout>
-        <GitInitDialog />
-        <CommandPalette />
-        <ContextMenu />
-        <ConfirmDialog />
-        <Toast />
-        <AssistantBar />
-      </>
+      <FocusModeContent activeProject={activeProject} cwd={cwd} />
     )
   }
 

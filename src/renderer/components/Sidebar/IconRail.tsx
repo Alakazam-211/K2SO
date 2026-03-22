@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useProjectsStore, type ProjectWithWorkspaces } from '../../stores/projects'
 import { useFocusGroupsStore } from '../../stores/focus-groups'
 import { useSidebarStore } from '../../stores/sidebar'
@@ -7,6 +7,7 @@ import { useGitInfo, useGitChanges } from '../../hooks/useGit'
 import { invoke } from '@tauri-apps/api/core'
 import { showContextMenu } from '../../lib/context-menu'
 import ProjectAvatar from './ProjectAvatar'
+import DisableWorktreesDialog from '../Settings/DisableWorktreesDialog'
 
 const RAIL_WIDTH = 48
 
@@ -82,6 +83,7 @@ export default function IconRail(): React.JSX.Element {
   const addProject = useProjectsStore((s) => s.addProject)
   const fetchProjects = useProjectsStore((s) => s.fetchProjects)
   const expand = useSidebarStore((s) => s.expand)
+  const [disableWorktreeProject, setDisableWorktreeProject] = useState<typeof projects[number] | null>(null)
 
   const focusGroupsEnabled = useFocusGroupsStore((s) => s.focusGroupsEnabled)
   const activeFocusGroupId = useFocusGroupsStore((s) => s.activeFocusGroupId)
@@ -171,9 +173,18 @@ export default function IconRail(): React.JSX.Element {
         const editorId = clickedId.replace('editor:', '')
         await invoke('projects_open_in_editor', { editorId, path: project.path })
       } else if (clickedId === 'toggle-worktree-mode') {
-        const newMode = project.worktreeMode ? 0 : 1
-        await invoke('projects_update', { id: projectId, worktreeMode: newMode })
-        await fetchProjects()
+        if (project.worktreeMode) {
+          const worktrees = project.workspaces.filter((ws) => ws.type === 'worktree')
+          if (worktrees.length > 0) {
+            setDisableWorktreeProject(project)
+          } else {
+            await invoke('projects_update', { id: projectId, worktreeMode: 0 })
+            await fetchProjects()
+          }
+        } else {
+          await invoke('projects_enable_worktrees', { projectId })
+          await fetchProjects()
+        }
       } else if (clickedId === 'remove') {
         await removeProject(projectId)
       }
@@ -215,6 +226,15 @@ export default function IconRail(): React.JSX.Element {
           <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
         </svg>
       </button>
+
+      {/* Disable worktrees dialog */}
+      {disableWorktreeProject && (
+        <DisableWorktreesDialog
+          project={disableWorktreeProject}
+          open={true}
+          onClose={() => setDisableWorktreeProject(null)}
+        />
+      )}
     </div>
   )
 }

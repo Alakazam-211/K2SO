@@ -1,4 +1,4 @@
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use crate::db::schema::AgentPreset;
 use crate::state::AppState;
 
@@ -22,6 +22,7 @@ pub fn presets_list(state: State<'_, AppState>) -> Result<Vec<AgentPreset>, Stri
 
 #[tauri::command]
 pub fn presets_create(
+    app: AppHandle,
     state: State<'_, AppState>,
     label: String,
     command: String,
@@ -38,11 +39,14 @@ pub fn presets_create(
     )
     .map_err(|e| e.to_string())?;
 
-    AgentPreset::get(&conn, &id).map_err(|e| e.to_string())
+    let result = AgentPreset::get(&conn, &id).map_err(|e| e.to_string())?;
+    let _ = app.emit("sync:presets", ());
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn presets_update(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: String,
     label: Option<String>,
@@ -62,11 +66,13 @@ pub fn presets_update(
         sort_order,
     )
     .map_err(|e| e.to_string())?;
-    AgentPreset::get(&conn, &id).map_err(|e| e.to_string())
+    let result = AgentPreset::get(&conn, &id).map_err(|e| e.to_string())?;
+    let _ = app.emit("sync:presets", ());
+    Ok(result)
 }
 
 #[tauri::command]
-pub fn presets_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub fn presets_delete(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
 
     // Prevent deleting built-in presets
@@ -75,21 +81,24 @@ pub fn presets_delete(state: State<'_, AppState>, id: String) -> Result<(), Stri
         return Err("Cannot delete built-in presets. Disable them instead.".to_string());
     }
 
-    AgentPreset::delete(&conn, &id).map_err(|e| e.to_string())
+    AgentPreset::delete(&conn, &id).map_err(|e| e.to_string())?;
+    let _ = app.emit("sync:presets", ());
+    Ok(())
 }
 
 #[tauri::command]
-pub fn presets_reorder(state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
+pub fn presets_reorder(app: AppHandle, state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     for (i, id) in ids.iter().enumerate() {
         AgentPreset::update(&conn, id, None, None, None, None, Some(i as i64))
             .map_err(|e| e.to_string())?;
     }
+    let _ = app.emit("sync:presets", ());
     Ok(())
 }
 
 #[tauri::command]
-pub fn presets_reset_built_ins(state: State<'_, AppState>) -> Result<Vec<AgentPreset>, String> {
+pub fn presets_reset_built_ins(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<AgentPreset>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
 
     // Delete all existing built-in presets and re-insert from catalog
@@ -104,5 +113,7 @@ pub fn presets_reset_built_ins(state: State<'_, AppState>) -> Result<Vec<AgentPr
             .map_err(|e| e.to_string())?;
     }
 
-    AgentPreset::list(&conn).map_err(|e| e.to_string())
+    let result = AgentPreset::list(&conn).map_err(|e| e.to_string())?;
+    let _ = app.emit("sync:presets", ());
+    Ok(result)
 }
