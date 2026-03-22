@@ -696,6 +696,181 @@ function EditorsAgentsSection(): React.JSX.Element {
           </button>
         </div>
       </div>
+
+      {/* ── CLI Install Guide ── */}
+      <CLIInstallGuide />
+    </div>
+  )
+}
+
+// ── CLI Install Guide Data ──────────────────────────────────────────
+const CLI_INSTALL_ENTRIES: {
+  name: string
+  command: string
+  installCommand: string
+  docs: string
+  notes?: string
+}[] = [
+  {
+    name: 'Claude Code',
+    command: 'claude',
+    installCommand: 'npm install -g @anthropic-ai/claude-code',
+    docs: 'https://docs.anthropic.com/en/docs/claude-code',
+    notes: 'Requires Node.js 18+. After install, run "claude" to authenticate with your Anthropic account.'
+  },
+  {
+    name: 'OpenAI Codex',
+    command: 'codex',
+    installCommand: 'npm install -g @openai/codex',
+    docs: 'https://github.com/openai/codex',
+    notes: 'Requires Node.js 22+. After install, set your OPENAI_API_KEY or log in via "codex --login".'
+  },
+  {
+    name: 'Gemini CLI',
+    command: 'gemini',
+    installCommand: 'npm install -g @anthropic-ai/gemini-cli',
+    docs: 'https://github.com/google-gemini/gemini-cli',
+    notes: 'Requires Node.js 18+. Authenticate with your Google account on first run.'
+  },
+  {
+    name: 'GitHub Copilot CLI',
+    command: 'copilot',
+    installCommand: 'npm install -g @anthropic-ai/copilot-cli',
+    docs: 'https://githubnext.com/projects/copilot-cli/',
+    notes: 'Requires an active GitHub Copilot subscription. Authenticate with "gh auth login" first.'
+  },
+  {
+    name: 'Aider',
+    command: 'aider',
+    installCommand: 'pip install aider-chat',
+    docs: 'https://aider.chat/docs/install.html',
+    notes: 'Requires Python 3.9+. Configure your API key for the model provider you want to use.'
+  },
+  {
+    name: 'Cursor Agent',
+    command: 'cursor-agent',
+    installCommand: 'npm install -g cursor-agent',
+    docs: 'https://docs.cursor.com',
+    notes: 'The standalone CLI agent from Cursor. Requires a Cursor subscription.'
+  },
+  {
+    name: 'OpenCode',
+    command: 'opencode',
+    installCommand: 'curl -fsSL https://opencode.ai/install | bash',
+    docs: 'https://opencode.ai',
+    notes: 'A terminal-based AI coding assistant. Supports multiple model providers.'
+  },
+  {
+    name: 'Code Puppy',
+    command: 'codepuppy',
+    installCommand: 'npm install -g codepuppy',
+    docs: 'https://codepuppy.ai',
+    notes: 'Lightweight AI coding assistant for the terminal.'
+  },
+  {
+    name: 'Goose',
+    command: 'goose',
+    installCommand: 'curl -fsSL https://github.com/block/goose/releases/latest/download/install.sh | bash',
+    docs: 'https://github.com/block/goose',
+    notes: 'An open-source AI developer agent from Block. Supports multiple model providers.'
+  },
+  {
+    name: 'Ollama',
+    command: 'ollama',
+    installCommand: 'curl -fsSL https://ollama.ai/install.sh | sh',
+    docs: 'https://ollama.ai',
+    notes: 'Run large language models locally. After install, pull a model with "ollama pull llama3".'
+  }
+]
+
+function CLIInstallGuide(): React.JSX.Element {
+  const [expandedIdx, setExpandedIdx] = useState<number | null>(null)
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
+
+  const handleCopy = useCallback((installCommand: string, idx: number) => {
+    navigator.clipboard.writeText(installCommand)
+    setCopiedIdx(idx)
+    setTimeout(() => setCopiedIdx(null), 2000)
+  }, [])
+
+  return (
+    <div>
+      <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-1">CLI Tools Setup</h2>
+      <p className="text-[10px] text-[var(--color-text-muted)] mb-3">
+        Install instructions for each AI coding agent. Click to expand.
+      </p>
+
+      <div className="border border-[var(--color-border)]">
+        {CLI_INSTALL_ENTRIES.map((entry, i) => {
+          const isExpanded = expandedIdx === i
+          const isCopied = copiedIdx === i
+
+          return (
+            <div
+              key={entry.command}
+              className={i < CLI_INSTALL_ENTRIES.length - 1 ? 'border-b border-[var(--color-border)]' : ''}
+            >
+              {/* Header row — clickable to expand */}
+              <button
+                className="w-full flex items-center gap-3 px-3 py-2 text-left hover:bg-[var(--color-bg-elevated)] transition-colors no-drag cursor-pointer"
+                onClick={() => setExpandedIdx(isExpanded ? null : i)}
+              >
+                <svg
+                  width="8"
+                  height="8"
+                  viewBox="0 0 8 8"
+                  fill="currentColor"
+                  className={`flex-shrink-0 text-[var(--color-text-muted)] transition-transform ${isExpanded ? 'rotate-90' : ''}`}
+                >
+                  <polygon points="1,0 7,4 1,8" />
+                </svg>
+                <span className="text-xs text-[var(--color-text-primary)] font-mono flex-1">
+                  {entry.name}
+                </span>
+                <span className="text-[10px] text-[var(--color-text-muted)] font-mono">
+                  {entry.command}
+                </span>
+              </button>
+
+              {/* Expanded detail */}
+              {isExpanded && (
+                <div className="px-3 pb-3 pt-0 ml-5 space-y-2">
+                  {/* Install command with copy button */}
+                  <div className="flex items-center gap-2">
+                    <code className="flex-1 text-[11px] font-mono bg-[var(--color-bg)] border border-[var(--color-border)] px-2 py-1.5 text-[var(--color-text-primary)] select-all">
+                      {entry.installCommand}
+                    </code>
+                    <button
+                      onClick={() => handleCopy(entry.installCommand, i)}
+                      className="flex-shrink-0 px-2 py-1.5 text-[10px] font-mono border border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)] transition-colors no-drag cursor-pointer"
+                      style={{ color: isCopied ? '#22c55e' : 'var(--color-text-muted)' }}
+                    >
+                      {isCopied ? 'Copied!' : 'Copy'}
+                    </button>
+                  </div>
+
+                  {/* Notes */}
+                  {entry.notes && (
+                    <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed">
+                      {entry.notes}
+                    </p>
+                  )}
+
+                  {/* Docs link */}
+                  <a
+                    href={entry.docs}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-block text-[10px] text-[var(--color-accent)] hover:text-[var(--color-accent)]/80 font-mono transition-colors"
+                  >
+                    Documentation →
+                  </a>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }

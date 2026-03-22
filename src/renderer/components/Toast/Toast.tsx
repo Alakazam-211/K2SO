@@ -28,24 +28,37 @@ function ToastItem({ toast }: { toast: ToastData }): React.JSX.Element {
       style={{ borderLeft: `3px solid ${BORDER_COLORS[toast.type]}` }}
     >
       <div className="flex-1 flex flex-col">
-        <div className="px-3 py-2.5 flex items-start gap-2">
-          <span className="flex-1 leading-relaxed">{toast.message}</span>
-          <button
-            className="flex-shrink-0 w-4 h-4 flex items-center justify-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
-            onClick={() => removeToast(toast.id)}
-          >
-            <svg
-              width="8"
-              height="8"
-              viewBox="0 0 8 8"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
+        <div className="px-3 py-2.5 flex flex-col gap-1.5">
+          <div className="flex items-start gap-2">
+            <span className="flex-1 leading-relaxed">{toast.message}</span>
+            <button
+              className="flex-shrink-0 w-4 h-4 flex items-center justify-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
+              onClick={() => removeToast(toast.id)}
             >
-              <line x1="1" y1="1" x2="7" y2="7" />
-              <line x1="7" y1="1" x2="1" y2="7" />
-            </svg>
-          </button>
+              <svg
+                width="8"
+                height="8"
+                viewBox="0 0 8 8"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+              >
+                <line x1="1" y1="1" x2="7" y2="7" />
+                <line x1="7" y1="1" x2="1" y2="7" />
+              </svg>
+            </button>
+          </div>
+          {toast.action && (
+            <button
+              className="self-start text-[10px] text-[var(--color-accent)] hover:text-[var(--color-accent)]/80 font-mono cursor-pointer transition-colors"
+              onClick={() => {
+                toast.action!.onClick()
+                removeToast(toast.id)
+              }}
+            >
+              {toast.action.label}
+            </button>
+          )}
         </div>
         <div
           ref={progressRef}
@@ -63,7 +76,7 @@ export default function Toast(): React.JSX.Element | null {
   if (toasts.length === 0) return null
 
   return (
-    <div className="fixed bottom-4 right-4 z-[9999] flex flex-col gap-2 pointer-events-auto">
+    <div className="fixed bottom-4 left-4 z-[9999] flex flex-col gap-2 pointer-events-auto">
       {toasts.map((toast) => (
         <ToastItem key={toast.id} toast={toast} />
       ))}

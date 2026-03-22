@@ -182,18 +182,25 @@ pub fn assistant_chat(
 }
 
 /// Get the current status of the assistant.
+/// Uses try_lock to avoid blocking when the model is loading on a
+/// background thread (Metal shader init can take ~9 seconds).
 #[tauri::command]
 pub fn assistant_status(state: State<'_, AppState>) -> Result<AssistantStatus, String> {
-    let manager = state
-        .llm_manager
-        .lock()
-        .map_err(|e| format!("Failed to lock LLM manager: {e}"))?;
-
-    Ok(AssistantStatus {
-        loaded: manager.is_loaded(),
-        model_path: manager.get_model_path(),
-        downloading: manager.is_downloading(),
-    })
+    match state.llm_manager.try_lock() {
+        Ok(manager) => Ok(AssistantStatus {
+            loaded: manager.is_loaded(),
+            model_path: manager.get_model_path(),
+            downloading: manager.is_downloading(),
+        }),
+        Err(_) => {
+            // Lock held by model loading thread — report as loading
+            Ok(AssistantStatus {
+                loaded: false,
+                model_path: None,
+                downloading: false,
+            })
+        }
+    }
 }
 
 /// Load a model from a specific file path.

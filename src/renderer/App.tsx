@@ -326,6 +326,7 @@ export default function App(): React.JSX.Element {
       <CommandPalette />
       <ContextMenu />
       <ConfirmDialog />
+      <Toast />
       <AssistantBar />
       {showQuitDialog && (
         <AgentCloseDialog

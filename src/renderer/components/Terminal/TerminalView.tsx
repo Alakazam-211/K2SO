@@ -8,6 +8,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
+import { useToastStore } from '@/stores/toast'
 import { RESUMABLE_CLI_TOOLS } from '@shared/constants'
 import '@xterm/xterm/css/xterm.css'
 
@@ -97,6 +98,7 @@ export function TerminalView({
   const fitAddonRef = useRef<FitAddon | null>(null)
   const ptyIdRef = useRef<string | null>(null)
   const isExitedRef = useRef(false)
+  const exitHandledRef = useRef(false)
 
   // Stable fit function — debounced to prevent flooding the PTY with
   // SIGWINCH signals during drag-resize, which causes TUI apps (Claude Code,
@@ -277,82 +279,80 @@ export function TerminalView({
     let dataUnlisten: UnlistenFn | undefined
     let exitUnlisten: UnlistenFn | undefined
 
+    // Forward keystrokes to pty — registered once, uses ptyIdRef so it
+    // always writes to the current PTY (survives shell respawn).
+    xterm.onData((data) => {
+      if (ptyIdRef.current && !isExitedRef.current) {
+        invoke('terminal_write', { id: ptyIdRef.current, data }).catch((err) => {
+          if (String(err).includes('not found') || String(err).includes('Write error')) {
+            isExitedRef.current = true
+          }
+          console.error('[terminal] Write failed:', err)
+        })
+      }
+    })
+
     const setup = async (): Promise<void> => {
       try {
         // Check if the terminal already exists (reattaching after tab switch)
         const alreadyExists = await invoke<boolean>('terminal_exists', { id: terminalId })
 
-        let ptyId: string
+        // Subscribe to data and exit events BEFORE creating the terminal.
+        // Fast-failing commands (e.g. "command not found") can exit before
+        // async listener registration completes, causing missed events.
+        dataUnlisten = await listen<string>(`terminal:data:${terminalId}`, (event) => {
+          safeWrite(event.payload)
+        })
+
+        exitUnlisten = await listen<{ exitCode: number; signal?: number }>(`terminal:exit:${terminalId}`, async (event) => {
+          isExitedRef.current = true
+          const code = event.payload.exitCode
+
+          if (code === 127 && command) {
+            // Command not found — show a toast and auto-close the tab.
+            // The toast gives the user a link to install instructions.
+            // Guard against duplicate toasts (React StrictMode double-mount)
+            if (!exitHandledRef.current) {
+              exitHandledRef.current = true
+              useToastStore.getState().addToast(
+                `"${command}" is not installed. View install instructions in Settings.`,
+                'info',
+                8000,
+                {
+                  label: 'Open CLI Tools Setup →',
+                  onClick: () => useSettingsStore.getState().openSettings('editors-agents')
+                }
+              )
+            }
+            onExit?.(code)
+          } else if (code !== 0 && command) {
+            // Command failed for another reason (auth, crash, etc.)
+            // Keep the terminal visible so the user can read the error.
+            xterm.writeln(
+              `\r\n\x1b[90m[${command} exited with code ${code}]\x1b[0m`
+            )
+          } else {
+            xterm.writeln(
+              `\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m`
+            )
+            onExit?.(code)
+          }
+        })
+
+        ptyIdRef.current = terminalId
 
         if (alreadyExists) {
-          // Reattach: replay buffered output, then subscribe to live events
-          ptyId = terminalId
-          ptyIdRef.current = ptyId
-
+          // Reattach: replay buffered output
           try {
-            const buffer = await invoke<string>('terminal_get_buffer', { id: ptyId })
+            const buffer = await invoke<string>('terminal_get_buffer', { id: terminalId })
             if (buffer) {
               safeWrite(buffer)
             }
           } catch {
             // Buffer might not be available — that's OK
           }
-        } else {
-          // New terminal: get initial dimensions and create
-          let initialCols: number | undefined
-          let initialRows: number | undefined
-          try {
-            const dims = fitAddon.proposeDimensions()
-            if (dims) {
-              initialCols = dims.cols
-              initialRows = dims.rows
-            }
-          } catch {
-            // proposeDimensions can fail if container isn't laid out yet
-          }
 
-          const result = await invoke<{ id: string }>('terminal_create', {
-            id: terminalId,
-            cwd,
-            command,
-            args,
-            cols: initialCols,
-            rows: initialRows
-          })
-
-          ptyId = result.id
-          ptyIdRef.current = ptyId
-        }
-
-        // Forward keystrokes to pty
-        xterm.onData((data) => {
-          if (ptyIdRef.current && !isExitedRef.current) {
-            invoke('terminal_write', { id: ptyIdRef.current, data }).catch((err) => {
-              // PTY may have died — mark as exited to stop further writes
-              if (String(err).includes('not found') || String(err).includes('Write error')) {
-                isExitedRef.current = true
-              }
-              console.error('[terminal] Write failed:', err)
-            })
-          }
-        })
-
-        // Subscribe to pty output via Tauri events
-        dataUnlisten = await listen<string>(`terminal:data:${ptyId}`, (event) => {
-          safeWrite(event.payload)
-        })
-
-        // Subscribe to pty exit via Tauri events
-        exitUnlisten = await listen<{ exitCode: number; signal?: number }>(`terminal:exit:${ptyId}`, (event) => {
-          isExitedRef.current = true
-          xterm.writeln(
-            `\r\n\x1b[90m[Process exited with code ${event.payload.exitCode}]\x1b[0m`
-          )
-          onExit?.(event.payload.exitCode)
-        })
-
-        // After reattach, do a fit+resize so the PTY knows the current dimensions
-        if (alreadyExists) {
+          // Fit + resize so the PTY knows the current dimensions
           requestAnimationFrame(() => {
             try {
               fitAddon.fit()
@@ -366,6 +366,28 @@ export function TerminalView({
             } catch {
               // Ignore fit errors
             }
+          })
+        } else {
+          // New terminal: listeners already registered, now create
+          let initialCols: number | undefined
+          let initialRows: number | undefined
+          try {
+            const dims = fitAddon.proposeDimensions()
+            if (dims) {
+              initialCols = dims.cols
+              initialRows = dims.rows
+            }
+          } catch {
+            // proposeDimensions can fail if container isn't laid out yet
+          }
+
+          await invoke<{ id: string }>('terminal_create', {
+            id: terminalId,
+            cwd,
+            command,
+            args,
+            cols: initialCols,
+            rows: initialRows
           })
         }
       } catch (err) {
@@ -399,6 +421,9 @@ export function TerminalView({
       xtermRef.current = null
       fitAddonRef.current = null
       ptyIdRef.current = null
+      // Reset so the next mount's exit handler can fire
+      exitHandledRef.current = false
+      isExitedRef.current = false
     }
   }, [terminalId]) // Only re-run if terminal ID changes
 

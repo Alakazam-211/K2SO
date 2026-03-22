@@ -30,6 +30,7 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
   const activateItem = useTabsStore((s) => s.activateItemInPaneGroup)
   const closeItem = useTabsStore((s) => s.closeItemInPaneGroup)
   const removePaneFromTab = useTabsStore((s) => s.removePaneFromTab)
+  const removeTabFromGroup = useTabsStore((s) => s.removeTabFromGroup)
 
   // Check if this is a split (more than one pane in the mosaic tree)
   const hasSplits = useTabsStore((s) => {
@@ -131,7 +132,23 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
             cwd={terminalData.cwd}
             command={terminalData.command}
             args={terminalData.args}
-            onExit={() => handleClose(activeItem.id)}
+            onExit={(exitCode) => {
+              if (exitCode === 127) {
+                // Command not found — remove the entire tab.
+                // TerminalView shows a toast with install instructions.
+                const store = useTabsStore.getState()
+                const groupIdx = store.tabs.some((t) => t.id === tabId)
+                  ? 0
+                  : store.extraGroups.findIndex((g) => g.tabs.some((t) => t.id === tabId)) + 1
+                if (groupIdx >= 0) {
+                  removeTabFromGroup(groupIdx, tabId)
+                }
+              } else if (exitCode === 0) {
+                // Clean exit — close the pane item
+                handleClose(activeItem.id)
+              }
+              // Other non-zero exits: keep terminal visible for error output
+            }}
           />
         ) : activeItem.type === 'file-viewer' && fileData ? (
           <FileViewerPane
