@@ -4,7 +4,8 @@ import remarkGfm from 'remark-gfm'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import { PDFViewer } from './PDFViewer'
 import { DocxViewer } from './DocxViewer'
-import { CodeViewer, HighlightedCodeBlock, detectLanguage } from './CodeHighlighter'
+import { HighlightedCodeBlock } from './CodeHighlighter'
+import { CodeEditor } from './CodeEditor'
 import { useTabsStore } from '@/stores/tabs'
 import { FILE_POLL_INTERVAL } from '@shared/constants'
 
@@ -143,20 +144,22 @@ export function FileViewerPane({ filePath, paneId, tabId, onClose }: FileViewerP
     return () => clearInterval(interval)
   }, [filePath, content, isDirty])
 
-  // Save file (Cmd+S)
-  const saveFile = useCallback(async () => {
-    if (!isDirty || editedContent === null) return
+  // Save file (Cmd+S) — called directly by CodeEditor with current content
+  const saveFile = useCallback(async (contentToSave?: string) => {
+    const toSave = contentToSave ?? editedContent
+    if (toSave === null || toSave === undefined) return
+    if (toSave === content) return // Nothing changed
     setSaving(true)
     try {
-      await invoke('fs_write_file', { path: filePath, content: editedContent })
-      setContent(editedContent)
+      await invoke('fs_write_file', { path: filePath, content: toSave })
+      setContent(toSave)
       setEditedContent(null)
     } catch (err) {
       console.error('[file-viewer] Save failed:', err)
     } finally {
       setSaving(false)
     }
-  }, [filePath, editedContent, isDirty])
+  }, [filePath, editedContent, content])
 
   // Cmd+F search and Cmd+S save shortcuts
   useEffect(() => {
@@ -173,7 +176,7 @@ export function FileViewerPane({ filePath, paneId, tabId, onClose }: FileViewerP
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
         e.preventDefault()
         e.stopPropagation()
-        saveFile()
+        saveFile(editedContent ?? undefined)
       }
       if (e.key === 'Escape' && searchVisible) {
         setSearchVisible(false)
@@ -186,7 +189,7 @@ export function FileViewerPane({ filePath, paneId, tabId, onClose }: FileViewerP
       container.addEventListener('keydown', handleKeyDown)
       return () => container.removeEventListener('keydown', handleKeyDown)
     }
-  }, [searchVisible, saveFile])
+  }, [searchVisible, saveFile, editedContent])
 
   // Highlight search matches
   useEffect(() => {
@@ -445,38 +448,38 @@ export function FileViewerPane({ filePath, paneId, tabId, onClose }: FileViewerP
         <div className="flex-1 overflow-hidden">
           <DocxViewer filePath={filePath} />
         </div>
-      ) : (
-      <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef}>
-        {category === 'image' && viewMode === 'rendered' ? (
+      ) : category === 'image' && viewMode === 'rendered' ? (
+        <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef}>
           <div className="flex items-center justify-center p-4 min-h-full bg-[#0a0a0a]">
             <img
               src={convertFileSrc(filePath)}
               alt={fileName}
               style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
               onError={(e) => {
-                // Fallback: show error message if asset protocol fails
                 (e.target as HTMLImageElement).style.display = 'none'
                 setError('Failed to load image')
               }}
             />
           </div>
-        ) : category === 'image' && viewMode === 'raw' ? (
+        </div>
+      ) : category === 'image' && viewMode === 'raw' ? (
+        <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef}>
           <div className="p-4 text-xs text-[var(--color-text-muted)]">
             <p>Binary image file. Switch to Rendered mode to view.</p>
           </div>
-        ) : category === 'markdown' && viewMode === 'rendered' ? (
+        </div>
+      ) : category === 'markdown' && viewMode === 'rendered' ? (
+        <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef}>
           <div className="markdown-content p-4">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
               components={{
                 code({ className, children, ...props }) {
-                  // Fenced code blocks get className="language-xxx"
                   const match = /language-(\w+)/.exec(className || '')
                   const codeStr = String(children).replace(/\n$/, '')
                   if (match) {
                     return <HighlightedCodeBlock code={codeStr} language={match[1]} />
                   }
-                  // Inline code
                   return <code className={className} {...props}>{children}</code>
                 }
               }}
@@ -484,21 +487,16 @@ export function FileViewerPane({ filePath, paneId, tabId, onClose }: FileViewerP
               {content}
             </ReactMarkdown>
           </div>
-        ) : editedContent !== null || !detectLanguage(filePath) ? (
-          <textarea
-            className="w-full h-full p-4 text-xs text-[var(--color-text-secondary)] whitespace-pre font-mono leading-5 bg-transparent border-none outline-none resize-none"
-            value={editedContent ?? content}
-            onChange={(e) => setEditedContent(e.target.value)}
-            spellCheck={false}
+        </div>
+      ) : (
+        <div className="flex-1 overflow-hidden">
+          <CodeEditor
+            code={editedContent ?? content}
+            filePath={filePath}
+            onSave={saveFile}
+            onChange={(newContent) => setEditedContent(newContent)}
           />
-        ) : (
-          <CodeViewer
-            code={content}
-            language={detectLanguage(filePath)}
-            className="h-full"
-          />
-        )}
-      </div>
+        </div>
       )}
     </div>
   )

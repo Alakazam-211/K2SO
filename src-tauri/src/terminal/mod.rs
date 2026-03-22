@@ -236,6 +236,9 @@ impl TerminalManager {
                 // interactive apps (claude, cursor) that use full-screen ANSI.
                 let mut buf = [0u8; 16384];
                 let mut first_emit = true;
+                // Leftover bytes from an incomplete UTF-8 sequence at the end
+                // of the previous read. Max 3 bytes (a 4-byte char split at worst).
+                let mut utf8_leftover: Vec<u8> = Vec::with_capacity(4);
 
                 loop {
                     match reader.read(&mut buf) {
@@ -248,12 +251,49 @@ impl TerminalManager {
                                 scrollback.push(&buf[..n]);
                             }
 
-                            let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                            if first_emit {
-                                eprintln!("[terminal] First data emit to event '{}' ({} bytes)", data_event, n);
-                                first_emit = false;
+                            // Prepend any leftover bytes from the previous read
+                            // into a combined buffer for UTF-8 boundary analysis.
+                            let combined: Vec<u8>;
+                            let chunk: &[u8] = if utf8_leftover.is_empty() {
+                                &buf[..n]
+                            } else {
+                                combined = [utf8_leftover.as_slice(), &buf[..n]].concat();
+                                &combined
+                            };
+
+                            // Find how many bytes at the end form an incomplete
+                            // UTF-8 sequence. We check the last 1–3 bytes for a
+                            // leading byte that expects more continuation bytes
+                            // than are present.
+                            let valid_up_to = match std::str::from_utf8(chunk) {
+                                Ok(_) => chunk.len(),
+                                Err(e) => {
+                                    let valid = e.valid_up_to();
+                                    // If there's an error_len, it's truly invalid
+                                    // bytes (not just incomplete). Skip them to
+                                    // avoid infinite accumulation.
+                                    if e.error_len().is_some() {
+                                        // Invalid byte(s) — include them (lossy)
+                                        valid + e.error_len().unwrap()
+                                    } else {
+                                        // Incomplete sequence at end — save for next read
+                                        valid
+                                    }
+                                }
+                            };
+
+                            // Emit the valid portion
+                            if valid_up_to > 0 {
+                                let data = String::from_utf8_lossy(&chunk[..valid_up_to]).to_string();
+                                if first_emit {
+                                    eprintln!("[terminal] First data emit to event '{}' ({} bytes)", data_event, n);
+                                    first_emit = false;
+                                }
+                                let _ = app_for_thread.emit(&data_event, &data);
                             }
-                            let _ = app_for_thread.emit(&data_event, &data);
+
+                            // Save any trailing incomplete bytes for next iteration
+                            utf8_leftover = chunk[valid_up_to..].to_vec();
                         }
                         Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
                             continue;
