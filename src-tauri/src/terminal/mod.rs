@@ -378,6 +378,73 @@ impl TerminalManager {
         }
     }
 
+    /// Get the name of the foreground process running in a terminal.
+    /// Returns None if only the shell is running (no interesting command).
+    #[cfg(unix)]
+    pub fn get_foreground_command(&self, id: &str) -> Result<Option<String>, String> {
+        let instance = match self.terminals.get(id) {
+            Some(i) => i,
+            None => return Ok(None),
+        };
+
+        let master_pty = instance
+            .master_pty
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+
+        let fd = match master_pty.as_raw_fd() {
+            Some(fd) => fd,
+            None => return Ok(None),
+        };
+
+        let fg_pgid = unsafe { libc::tcgetpgrp(fd) };
+        if fg_pgid <= 0 {
+            return Ok(None);
+        }
+
+        // Get the shell's PID to compare — if foreground IS the shell, nothing interesting is running
+        let shell_pid = instance
+            .child
+            .lock()
+            .ok()
+            .and_then(|c| c.process_id());
+
+        if let Some(spid) = shell_pid {
+            if fg_pgid == spid as i32 {
+                return Ok(None); // Shell is in foreground — no agent running
+            }
+        }
+
+        // Get the process name via proc_pidpath (macOS)
+        #[cfg(target_os = "macos")]
+        {
+            let mut buf = [0u8; 4096];
+            let ret = unsafe {
+                libc::proc_pidpath(fg_pgid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32)
+            };
+            if ret > 0 {
+                let path = String::from_utf8_lossy(&buf[..ret as usize]);
+                let name = path.rsplit('/').next().unwrap_or("");
+                if !name.is_empty() {
+                    return Ok(Some(name.to_string()));
+                }
+            }
+        }
+
+        // Fallback for Linux: read /proc/{pid}/comm
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", fg_pgid)) {
+                let name = comm.trim();
+                if !name.is_empty() {
+                    return Ok(Some(name.to_string()));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Check if a terminal with the given ID exists and is still alive.
     pub fn exists(&self, id: &str) -> bool {
         self.terminals.contains_key(id)

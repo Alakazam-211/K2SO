@@ -1,11 +1,12 @@
 use serde::Serialize;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DirEntry {
     pub name: String,
     pub path: String,
@@ -192,4 +193,278 @@ pub fn fs_write_file(path: String, content: String) -> Result<(), String> {
             e.to_string()
         }
     })
+}
+
+// ── Disambiguation helper ───────────────────────────────────────────────
+
+/// Given a target path that may already exist, return a unique path by appending
+/// " copy", " copy 2", etc. to the file stem (before the extension).
+fn disambiguate_path(target: &Path) -> PathBuf {
+    if !target.exists() {
+        return target.to_path_buf();
+    }
+    let stem = target
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ext = target
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let parent = target.parent().unwrap_or(Path::new("/"));
+
+    // Try "name copy.ext", then "name copy 2.ext", etc.
+    let copy_name = parent.join(format!("{stem} copy{ext}"));
+    if !copy_name.exists() {
+        return copy_name;
+    }
+
+    for i in 2..100 {
+        let numbered = parent.join(format!("{stem} copy {i}{ext}"));
+        if !numbered.exists() {
+            return numbered;
+        }
+    }
+    target.to_path_buf() // give up after 100
+}
+
+// ── File move/copy for drag-and-drop ────────────────────────────────────
+
+/// Recursively copy a directory tree.
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| format!("Failed to create directory: {e}"))?;
+    for entry in fs::read_dir(src).map_err(|e| format!("Failed to read directory: {e}"))? {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {e}"))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)
+                .map_err(|e| format!("Failed to copy {}: {e}", src_path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Resolve the destination path: if destination is a directory, append the source's filename.
+fn resolve_destination(source: &std::path::Path, destination: &std::path::Path) -> std::path::PathBuf {
+    if destination.is_dir() {
+        if let Some(name) = source.file_name() {
+            return destination.join(name);
+        }
+    }
+    destination.to_path_buf()
+}
+
+/// Move files/folders to a destination directory.
+/// Default behavior for drag-and-drop without Option key.
+#[tauri::command]
+pub fn fs_move_files(sources: Vec<String>, destination: String) -> Result<(), String> {
+    let dest = std::path::Path::new(&destination);
+    if !dest.exists() {
+        return Err(format!("Destination does not exist: {destination}"));
+    }
+
+    for source in &sources {
+        let src = std::path::Path::new(source);
+        if !src.exists() {
+            return Err(format!("Source does not exist: {source}"));
+        }
+
+        let target = resolve_destination(src, dest);
+
+        // Reject self-referential moves
+        if let (Ok(s), Some(parent)) = (src.canonicalize(), target.parent()) {
+            if let Ok(dp) = parent.canonicalize() {
+                if dp.starts_with(&s) {
+                    return Err("Cannot move a folder into itself".to_string());
+                }
+            }
+        }
+
+        let target = disambiguate_path(&target);
+
+        // Try rename (fast, same-volume). Fall back to copy+delete for cross-volume.
+        if fs::rename(src, &target).is_err() {
+            if src.is_dir() {
+                copy_dir_recursive(src, &target)?;
+                fs::remove_dir_all(src)
+                    .map_err(|e| format!("Moved but failed to remove source: {e}"))?;
+            } else {
+                fs::copy(src, &target)
+                    .map_err(|e| format!("Failed to copy: {e}"))?;
+                fs::remove_file(src)
+                    .map_err(|e| format!("Copied but failed to remove source: {e}"))?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Delete files/folders. Moves to macOS Trash by default (reversible).
+/// Set `permanent` to true to bypass Trash and delete immediately.
+#[tauri::command]
+pub fn fs_delete(paths: Vec<String>, permanent: Option<bool>) -> Result<(), String> {
+    let permanent = permanent.unwrap_or(false);
+
+    for path_str in &paths {
+        let p = Path::new(path_str);
+        if !p.exists() {
+            return Err(format!("Does not exist: {path_str}"));
+        }
+
+        if permanent {
+            if p.is_dir() {
+                fs::remove_dir_all(p)
+                    .map_err(|e| format!("Failed to delete directory: {e}"))?;
+            } else {
+                fs::remove_file(p)
+                    .map_err(|e| format!("Failed to delete file: {e}"))?;
+            }
+        } else {
+            // Move to macOS Trash via NSFileManager
+            let status = Command::new("osascript")
+                .arg("-e")
+                .arg(format!(
+                    "tell application \"Finder\" to delete POSIX file \"{}\"",
+                    path_str.replace('\\', "\\\\").replace('"', "\\\"")
+                ))
+                .output()
+                .map_err(|e| format!("Failed to trash: {e}"))?;
+
+            if !status.status.success() {
+                let stderr = String::from_utf8_lossy(&status.stderr);
+                return Err(format!("Failed to trash {path_str}: {stderr}"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Rename a file or directory.
+#[tauri::command]
+pub fn fs_rename(old_path: String, new_name: String) -> Result<String, String> {
+    let old = Path::new(&old_path);
+    if !old.exists() {
+        return Err(format!("Does not exist: {old_path}"));
+    }
+
+    // Validate the new name
+    if new_name.is_empty() || new_name.contains('/') || new_name.contains('\0') {
+        return Err("Invalid file name".to_string());
+    }
+
+    let parent = old.parent().ok_or("Cannot determine parent directory")?;
+    let new_path = parent.join(&new_name);
+
+    // Check for case-insensitive same-name rename (allowed on macOS)
+    let is_case_rename = old
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase() == new_name.to_lowercase())
+        .unwrap_or(false);
+
+    if !is_case_rename && new_path.exists() {
+        return Err(format!("Already exists: {}", new_path.display()));
+    }
+
+    fs::rename(old, &new_path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            "Permission denied".to_string()
+        } else {
+            format!("Rename failed: {e}")
+        }
+    })?;
+
+    Ok(new_path.to_string_lossy().to_string())
+}
+
+/// Create a new file or directory.
+#[tauri::command]
+pub fn fs_create_entry(path: String, is_directory: bool) -> Result<(), String> {
+    let p = Path::new(&path);
+
+    if p.exists() {
+        return Err(format!("Already exists: {path}"));
+    }
+
+    if is_directory {
+        fs::create_dir_all(&p).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                "Permission denied".to_string()
+            } else {
+                format!("Failed to create directory: {e}")
+            }
+        })?;
+    } else {
+        // Ensure parent directory exists
+        if let Some(parent) = p.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create parent directory: {e}"))?;
+            }
+        }
+        fs::write(&p, "").map_err(|e| {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                "Permission denied".to_string()
+            } else {
+                format!("Failed to create file: {e}")
+            }
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Copy files/folders to a destination directory.
+/// Used when Option key is held during drag-and-drop.
+#[tauri::command]
+pub fn fs_copy_files(sources: Vec<String>, destination: String) -> Result<(), String> {
+    let dest = std::path::Path::new(&destination);
+    if !dest.exists() {
+        return Err(format!("Destination does not exist: {destination}"));
+    }
+
+    for source in &sources {
+        let src = std::path::Path::new(source);
+        if !src.exists() {
+            return Err(format!("Source does not exist: {source}"));
+        }
+
+        let target = resolve_destination(src, dest);
+
+        let target = disambiguate_path(&target);
+
+        if src.is_dir() {
+            copy_dir_recursive(src, &target)?;
+        } else {
+            fs::copy(src, &target)
+                .map_err(|e| format!("Failed to copy: {e}"))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Duplicate a file or folder in-place (same parent directory).
+/// Returns the path of the new copy.
+#[tauri::command]
+pub fn fs_duplicate(path: String) -> Result<String, String> {
+    let src = Path::new(&path);
+    if !src.exists() {
+        return Err(format!("Does not exist: {path}"));
+    }
+
+    let parent = src.parent().unwrap_or(Path::new("/"));
+    let target = disambiguate_path(&resolve_destination(src, parent));
+
+    if src.is_dir() {
+        copy_dir_recursive(src, &target)?;
+    } else {
+        fs::copy(src, &target).map_err(|e| format!("Failed to duplicate: {e}"))?;
+    }
+
+    Ok(target.to_string_lossy().to_string())
 }

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { useAssistantStore } from '../../stores/assistant'
+import { useAssistantStore, type DebugPass, type InteractionLogEntry } from '../../stores/assistant'
 import { useSettingsStore } from '../../stores/settings'
 import { useTabsStore } from '../../stores/tabs'
 import { useProjectsStore } from '../../stores/projects'
@@ -13,16 +13,18 @@ interface ToolCall {
 interface ChatResponse {
   raw: string
   parsed: { toolCalls?: ToolCall[]; tool_calls?: ToolCall[]; message?: string }
+  debugPasses?: DebugPass[]
 }
 
 // ── Tool Registry: the complete, finite set of valid tools ──────────
 
 const VALID_TOOLS = new Set([
   'open_terminal',     // Open a terminal in a new tab
-  'open_document',     // Open a file as a tab in the active pane
+  'open_document',     // Open a file in a new tab
   'add_to_pane',       // Add a terminal or document tab to the current pane
   'arrange_layout',    // Split workspace into multiple panes
-  'split_pane',        // Split the active pane vertically (up to 3)
+  'split_window',      // Add a column to the workspace (max 3)
+  'unsplit_window',    // Remove the rightmost column
   'resume_chat',       // Resume a past AI conversation
   'switch_workspace',  // Switch to a named workspace
 ])
@@ -46,7 +48,6 @@ interface ItemDescriptor {
  */
 function validateAndSanitize(toolCalls: ToolCall[], cwd: string): ToolCall[] {
   const sanitized: ToolCall[] = []
-  let hasArrangeLayout = false
 
   for (const call of toolCalls) {
     // REJECT unknown tools — only our registered tools pass
@@ -59,7 +60,6 @@ function validateAndSanitize(toolCalls: ToolCall[], cwd: string): ToolCall[] {
 
     switch (call.tool) {
       case 'open_terminal': {
-        if (hasArrangeLayout) continue // Skip if arrange_layout already handles it
         sanitized.push({ tool: call.tool, args })
         break
       }
@@ -79,7 +79,6 @@ function validateAndSanitize(toolCalls: ToolCall[], cwd: string): ToolCall[] {
       }
 
       case 'arrange_layout': {
-        hasArrangeLayout = true
         // Validate direction
         if (args.direction !== 'horizontal' && args.direction !== 'vertical') {
           args.direction = 'horizontal'
@@ -112,15 +111,22 @@ function validateAndSanitize(toolCalls: ToolCall[], cwd: string): ToolCall[] {
         break
       }
 
+      case 'split_window': {
+        // Optional: how many columns total (2 or 3)
+        const count = typeof args.count === 'number' ? args.count : undefined
+        sanitized.push({ tool: call.tool, args: { count } })
+        break
+      }
+
+      case 'unsplit_window': {
+        sanitized.push({ tool: call.tool, args: {} })
+        break
+      }
+
       case 'resume_chat': {
         if (!args.sessionId || typeof args.sessionId !== 'string') continue
         const provider = (args.provider as string) ?? 'claude'
         sanitized.push({ tool: call.tool, args: { provider, sessionId: args.sessionId } })
-        break
-      }
-
-      case 'split_pane': {
-        sanitized.push({ tool: call.tool, args: {} })
         break
       }
 
@@ -133,6 +139,14 @@ function validateAndSanitize(toolCalls: ToolCall[], cwd: string): ToolCall[] {
   }
 
   return sanitized
+}
+
+/** Resolve a potentially relative file path against the workspace root. */
+function resolveFilePath(relativePath: string, cwd: string): string {
+  if (relativePath.startsWith('/')) return relativePath
+  // Strip leading ./ if present
+  const clean = relativePath.startsWith('./') ? relativePath.slice(2) : relativePath
+  return `${cwd}/${clean}`
 }
 
 /** Execute validated tool calls on the tabs store */
@@ -164,15 +178,9 @@ function executeToolCalls(toolCalls: ToolCall[]): string {
         }
 
         case 'open_document': {
-          const activeTab = tabsStore.getActiveTab()
-          if (activeTab) {
-            tabsStore.openFileInPane(activeTab.id, call.args.path as string)
-          } else {
-            tabsStore.addTab(cwd)
-            const tab = tabsStore.tabs[tabsStore.tabs.length - 1]
-            if (tab) tabsStore.openFileInPane(tab.id, call.args.path as string)
-          }
-          results.push((call.args.path as string).split('/').pop() ?? 'file')
+          const filePath = resolveFilePath(call.args.path as string, cwd)
+          tabsStore.openFileInNewTab(filePath)
+          results.push(filePath.split('/').pop() ?? 'file')
           break
         }
 
@@ -199,14 +207,42 @@ function executeToolCalls(toolCalls: ToolCall[]): string {
                 results.push(call.args.command as string ?? 'terminal')
               } else {
                 const id = crypto.randomUUID()
+                const resolvedPath = resolveFilePath(call.args.path as string, cwd)
                 tabsStore.addItemToPaneGroup(activeTab.id, paneGroupId, {
                   id,
                   type: 'file-viewer',
-                  data: { filePath: call.args.path as string }
+                  data: { filePath: resolvedPath }
                 })
-                results.push((call.args.path as string).split('/').pop() ?? 'file')
+                results.push(resolvedPath.split('/').pop() ?? 'file')
               }
             }
+          }
+          break
+        }
+
+        case 'split_window': {
+          const targetCount = call.args.count as number | undefined
+          if (targetCount) {
+            // Split to a specific column count (2 or 3)
+            while (tabsStore.splitCount < Math.min(targetCount, 3)) {
+              tabsStore.splitTerminalArea(cwd)
+            }
+            results.push(`${tabsStore.splitCount} columns`)
+          } else if (tabsStore.splitCount < 3) {
+            tabsStore.splitTerminalArea(cwd)
+            results.push(`${tabsStore.splitCount} columns`)
+          } else {
+            results.push('Already at max columns (3)')
+          }
+          break
+        }
+
+        case 'unsplit_window': {
+          if (tabsStore.splitCount > 1) {
+            tabsStore.unsplitTerminalArea()
+            results.push(tabsStore.splitCount === 1 ? 'Single column' : `${tabsStore.splitCount} columns`)
+          } else {
+            results.push('Already single column')
           }
           break
         }
@@ -225,16 +261,6 @@ function executeToolCalls(toolCalls: ToolCall[]): string {
           break
         }
 
-        case 'split_pane': {
-          if (tabsStore.splitCount < 3) {
-            tabsStore.splitTerminalArea(cwd)
-            results.push('Split into columns')
-          } else {
-            results.push('Max 3 columns')
-          }
-          break
-        }
-
         case 'switch_workspace': {
           results.push(`Switch: ${call.args.name}`)
           break
@@ -248,6 +274,122 @@ function executeToolCalls(toolCalls: ToolCall[]): string {
   return results.join(', ')
 }
 
+/** Number of recent history items to show in the dropdown. */
+const VISIBLE_HISTORY = 5
+
+/** Renders a single debug log entry with expandable raw output. */
+function DebugLogEntry({ entry }: { entry: InteractionLogEntry }): React.JSX.Element {
+  const [expanded, setExpanded] = useState(false)
+  const time = new Date(entry.timestamp).toLocaleTimeString()
+  const parsedStr = JSON.stringify(entry.parsed, null, 2)
+
+  return (
+    <div
+      style={{
+        borderBottom: '1px solid #1a1a1a',
+        padding: '8px 16px',
+      }}
+    >
+      {/* Header row */}
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full text-left bg-transparent border-none cursor-pointer outline-none"
+        style={{ fontFamily: 'inherit', padding: 0 }}
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-[var(--color-text-muted)] tabular-nums flex-shrink-0">
+            {time}
+          </span>
+          <span
+            className="text-[10px] flex-shrink-0"
+            style={{ opacity: 0.5 }}
+          >
+            {expanded ? '▼' : '▶'}
+          </span>
+          <span className="text-[11px] text-[var(--color-text-primary)] truncate">
+            {entry.message}
+          </span>
+        </div>
+        <div className="flex items-center gap-2 mt-1">
+          <span className="text-[10px] text-[var(--color-text-muted)] flex-shrink-0" style={{ width: '52px' }} />
+          <span
+            className="text-[10px] truncate"
+            style={{
+              color: entry.result.startsWith('Error')
+                ? '#f87171'
+                : 'var(--color-text-muted)',
+            }}
+          >
+            → {entry.result}
+          </span>
+        </div>
+      </button>
+
+      {/* Expanded detail */}
+      {expanded && (
+        <div className="mt-2 ml-[52px]" style={{ fontSize: '10px' }}>
+          {entry.debugPasses.map((pass, pi) => (
+            <div key={pi} className="mb-2">
+              <div className="text-[var(--color-text-muted)] mb-1">
+                Pass {pi + 1} prompt:
+              </div>
+              <pre
+                className="text-[var(--color-text-muted)]"
+                style={{
+                  background: '#111',
+                  padding: '6px 8px',
+                  margin: 0,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                  maxHeight: '120px',
+                  overflowY: 'auto',
+                  border: '1px solid #1a1a1a',
+                }}
+              >
+                {pass.prompt}
+              </pre>
+              <div className="text-[var(--color-text-muted)] mt-1 mb-1">
+                Pass {pi + 1} raw output:
+              </div>
+              <pre
+                className="text-[var(--color-text-primary)]"
+                style={{
+                  background: '#111',
+                  padding: '6px 8px',
+                  margin: 0,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                  maxHeight: '120px',
+                  overflowY: 'auto',
+                  border: '1px solid #1a1a1a',
+                }}
+              >
+                {pass.rawOutput}
+              </pre>
+            </div>
+          ))}
+          <div className="text-[var(--color-text-muted)] mb-1">Parsed result:</div>
+          <pre
+            className="text-[var(--color-text-primary)]"
+            style={{
+              background: '#111',
+              padding: '6px 8px',
+              margin: 0,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              maxHeight: '150px',
+              overflowY: 'auto',
+              border: '1px solid #1a1a1a',
+            }}
+          >
+            {parsedStr}
+          </pre>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function AssistantBar(): React.JSX.Element | null {
   const isOpen = useAssistantStore((s) => s.isOpen)
   const isLoading = useAssistantStore((s) => s.isLoading)
@@ -255,21 +397,40 @@ export default function AssistantBar(): React.JSX.Element | null {
   const downloadProgress = useAssistantStore((s) => s.downloadProgress)
   const modelLoaded = useAssistantStore((s) => s.modelLoaded)
   const lastResult = useAssistantStore((s) => s.lastResult)
+  const history = useAssistantStore((s) => s.history)
+  const interactionLog = useAssistantStore((s) => s.interactionLog)
+  const showDebugLog = useAssistantStore((s) => s.showDebugLog)
   const close = useAssistantStore((s) => s.close)
   const setLoading = useAssistantStore((s) => s.setLoading)
   const setLastResult = useAssistantStore((s) => s.setLastResult)
+  const addToHistory = useAssistantStore((s) => s.addToHistory)
+  const logInteraction = useAssistantStore((s) => s.logInteraction)
+  const toggleDebugLog = useAssistantStore((s) => s.toggleDebugLog)
+  const clearLog = useAssistantStore((s) => s.clearLog)
 
   const openSettings = useSettingsStore((s) => s.openSettings)
 
   const [message, setMessage] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
   const resultTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Abort flag: when set, the in-flight response is discarded on arrival
+  const abortedRef = useRef(false)
+
+  // History navigation: -1 = not browsing (current draft), 0 = most recent, etc.
+  const [historyIndex, setHistoryIndex] = useState(-1)
+  // Stash what the user was typing before arrowing into history
+  const draftRef = useRef('')
+  // Whether to show the history dropdown
+  const [showHistory, setShowHistory] = useState(false)
 
   // Focus input when bar opens; reset state
   useEffect(() => {
     if (isOpen) {
       setMessage('')
       setLastResult(null)
+      setHistoryIndex(-1)
+      draftRef.current = ''
+      setShowHistory(false)
       requestAnimationFrame(() => {
         inputRef.current?.focus()
       })
@@ -281,6 +442,22 @@ export default function AssistantBar(): React.JSX.Element | null {
       }
     }
   }, [isOpen, setLastResult])
+
+  // Listen for Escape globally during loading (no input is rendered to capture keys)
+  useEffect(() => {
+    if (!isOpen || !isLoading) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        abortedRef.current = true
+        setLoading(false)
+        close()
+      }
+    }
+    window.addEventListener('keydown', handler, true)
+    return () => window.removeEventListener('keydown', handler, true)
+  }, [isOpen, isLoading, setLoading, close])
 
   // Auto-clear result after 2 seconds
   useEffect(() => {
@@ -302,65 +479,165 @@ export default function AssistantBar(): React.JSX.Element | null {
     const trimmed = message.trim()
     if (!trimmed || isLoading) return
 
+    addToHistory(trimmed)
+    setHistoryIndex(-1)
+    draftRef.current = ''
+    setShowHistory(false)
+    abortedRef.current = false
     setLoading(true)
     setMessage('')
-    // Don't close — show "working..." indicator
 
     try {
-      const response = await invoke<ChatResponse>('assistant_chat', { message: trimmed })
+      const activeProject = useProjectsStore.getState().projects.find(
+        p => p.id === useProjectsStore.getState().activeProjectId
+      )
+      const workspacePath = activeProject?.path ?? undefined
+
+      const response = await invoke<ChatResponse>('assistant_chat', {
+        message: trimmed,
+        workspacePath,
+      })
+
+      // If the user pressed Escape while we were waiting, discard the result
+      if (abortedRef.current) {
+        console.log('[AssistantBar] Response discarded (aborted by user)')
+        return
+      }
+
       console.log('[AssistantBar] Response:', JSON.stringify(response, null, 2))
 
-      // Execute tool calls if present (handle both camelCase and snake_case)
       const toolCalls = response.parsed?.toolCalls ?? response.parsed?.tool_calls
       console.log('[AssistantBar] Parsed:', response.parsed, 'Tool calls:', toolCalls)
 
+      let result: string
       if (toolCalls && toolCalls.length > 0) {
-        const summary = executeToolCalls(toolCalls)
-        setLastResult(summary)
+        result = executeToolCalls(toolCalls)
       } else if (response.parsed?.message) {
-        setLastResult(response.parsed.message)
+        result = response.parsed.message
       } else {
-        // Fallback: show raw response
-        setLastResult(response.raw || 'Done')
+        result = response.raw || 'Done'
       }
+
+      setLastResult(result)
+
+      // Log the full interaction for debugging
+      logInteraction({
+        timestamp: Date.now(),
+        message: trimmed,
+        result,
+        parsed: response.parsed,
+        debugPasses: response.debugPasses ?? [],
+      })
     } catch (err) {
+      if (abortedRef.current) return
       const errorMessage = err instanceof Error ? err.message : String(err)
-      setLastResult(`Error: ${errorMessage}`)
+      const result = `Error: ${errorMessage}`
+      setLastResult(result)
+
+      logInteraction({
+        timestamp: Date.now(),
+        message: trimmed,
+        result,
+        parsed: null,
+        debugPasses: [],
+      })
     } finally {
       setLoading(false)
     }
-  }, [message, isLoading, setLoading, setLastResult])
+  }, [message, isLoading, setLoading, setLastResult, addToHistory, logInteraction])
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
-        close()
+        if (showHistory) {
+          setShowHistory(false)
+        } else {
+          close()
+        }
         return
       }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault()
+        // If browsing history and user clicks a history item, submit it
         handleSubmit()
+        return
+      }
+
+      // ── Arrow key history navigation ──────────────────────────
+      if (e.key === 'ArrowUp' && history.length > 0) {
+        e.preventDefault()
+        setShowHistory(true)
+
+        if (historyIndex === -1) {
+          // Entering history — stash current draft
+          draftRef.current = message
+          const idx = 0 // most recent (history is reversed for display)
+          setHistoryIndex(idx)
+          setMessage(history[history.length - 1])
+        } else if (historyIndex < history.length - 1) {
+          // Go further back in history
+          const next = historyIndex + 1
+          setHistoryIndex(next)
+          setMessage(history[history.length - 1 - next])
+        }
+        return
+      }
+
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        if (historyIndex > 0) {
+          // Move forward in history (toward recent)
+          const next = historyIndex - 1
+          setHistoryIndex(next)
+          setMessage(history[history.length - 1 - next])
+        } else if (historyIndex === 0) {
+          // Back to the draft
+          setHistoryIndex(-1)
+          setMessage(draftRef.current)
+          setShowHistory(false)
+        }
+        return
       }
     },
-    [close, handleSubmit]
+    [close, handleSubmit, history, historyIndex, message, showHistory]
   )
 
+  // When the user types normally, reset history navigation
+  const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setMessage(e.target.value)
+    if (historyIndex !== -1) {
+      setHistoryIndex(-1)
+      draftRef.current = ''
+    }
+  }, [historyIndex])
+
+  // Click a history item to fill it in
+  const handleHistoryClick = useCallback((cmd: string) => {
+    setMessage(cmd)
+    setShowHistory(false)
+    setHistoryIndex(-1)
+    draftRef.current = ''
+    inputRef.current?.focus()
+  }, [])
+
   if (!isOpen) return null
+
+  // Shared bar style
+  const barStyle: React.CSSProperties = {
+    background: '#111111',
+    borderTop: '1px solid var(--color-border)',
+    fontFamily: 'var(--font-mono, "MesloLGM Nerd Font", monospace)',
+    animation: 'assistantSlideUp 150ms ease-out',
+  }
 
   // Downloading state: show progress bar
   if (isDownloading) {
     return (
       <div
         className="fixed bottom-0 left-0 right-0 z-[900] flex items-center"
-        style={{
-          height: '48px',
-          background: '#111111',
-          borderTop: '1px solid var(--color-border)',
-          fontFamily: 'var(--font-mono, "MesloLGM Nerd Font", monospace)',
-          animation: 'assistantSlideUp 150ms ease-out'
-        }}
+        style={{ height: '48px', ...barStyle }}
       >
         <div className="flex items-center gap-3 px-4 w-full">
           <span className="text-[11px] text-[var(--color-text-muted)] flex-shrink-0 tracking-wide">
@@ -385,13 +662,7 @@ export default function AssistantBar(): React.JSX.Element | null {
     return (
       <div
         className="fixed bottom-0 left-0 right-0 z-[900] flex items-center"
-        style={{
-          height: '48px',
-          background: '#111111',
-          borderTop: '1px solid var(--color-border)',
-          fontFamily: 'var(--font-mono, "MesloLGM Nerd Font", monospace)',
-          animation: 'assistantSlideUp 150ms ease-out'
-        }}
+        style={{ height: '48px', ...barStyle }}
         onKeyDown={(e) => {
           if (e.key === 'Escape') {
             e.preventDefault()
@@ -434,13 +705,7 @@ export default function AssistantBar(): React.JSX.Element | null {
     return (
       <div
         className="fixed bottom-0 left-0 right-0 z-[900] flex items-center"
-        style={{
-          height: '48px',
-          background: '#111111',
-          borderTop: '1px solid var(--color-border)',
-          fontFamily: 'var(--font-mono, "MesloLGM Nerd Font", monospace)',
-          animation: 'assistantSlideUp 150ms ease-out'
-        }}
+        style={{ height: '48px', ...barStyle }}
       >
         <div className="flex items-center gap-3 px-4 w-full">
           <span className="text-[11px] text-[var(--color-text-muted)] flex-shrink-0 tracking-wide">
@@ -454,35 +719,127 @@ export default function AssistantBar(): React.JSX.Element | null {
     )
   }
 
+  // Recent history for the dropdown (most recent first, capped)
+  const recentHistory = history.length > 0
+    ? [...history].reverse().slice(0, VISIBLE_HISTORY)
+    : []
+
   // Main input state
   return (
-    <div
-      className="fixed bottom-0 left-0 right-0 z-[900] flex items-center"
-      style={{
-        height: '48px',
-        background: '#111111',
-        borderTop: '1px solid var(--color-border)',
-        fontFamily: 'var(--font-mono, "MesloLGM Nerd Font", monospace)',
-        animation: 'assistantSlideUp 150ms ease-out'
-      }}
-    >
-      <div className="flex items-center gap-3 px-4 w-full">
+    <div className="fixed bottom-0 left-0 right-0 z-[900]" style={barStyle}>
+      {/* ── Debug log panel ───────────────────────────────────────── */}
+      {showDebugLog && (
+        <div
+          style={{
+            borderBottom: '1px solid var(--color-border)',
+            background: '#0a0a0a',
+            maxHeight: '50vh',
+            overflowY: 'auto',
+          }}
+        >
+          <div className="flex items-center justify-between px-4 py-2" style={{ borderBottom: '1px solid var(--color-border)' }}>
+            <span className="text-[11px] text-[var(--color-text-muted)] tracking-wide">
+              Assistant Debug Log ({interactionLog.length} entries)
+            </span>
+            {interactionLog.length > 0 && (
+              <button
+                onClick={clearLog}
+                className="text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] bg-transparent border-none cursor-pointer outline-none"
+                style={{ fontFamily: 'inherit' }}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+          {interactionLog.length === 0 ? (
+            <div className="px-4 py-3 text-[11px] text-[var(--color-text-muted)]">
+              No interactions yet. Send a command to see debug output here.
+            </div>
+          ) : (
+            [...interactionLog].reverse().map((entry, i) => (
+              <DebugLogEntry key={`${entry.timestamp}-${i}`} entry={entry} />
+            ))
+          )}
+        </div>
+      )}
+
+      {/* ── History dropdown ──────────────────────────────────────── */}
+      {!showDebugLog && showHistory && recentHistory.length > 0 && (
+        <div
+          style={{
+            borderBottom: '1px solid var(--color-border)',
+            background: '#0d0d0d',
+            maxHeight: '160px',
+            overflowY: 'auto',
+          }}
+        >
+          {recentHistory.map((cmd, i) => {
+            const isActive = historyIndex === i
+            return (
+              <button
+                key={`${i}-${cmd}`}
+                onClick={() => handleHistoryClick(cmd)}
+                className="w-full text-left bg-transparent border-none cursor-pointer outline-none"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  padding: '5px 16px 5px 44px',
+                  fontFamily: 'inherit',
+                  fontSize: '11px',
+                  color: isActive
+                    ? 'var(--color-text-primary)'
+                    : 'var(--color-text-muted)',
+                  background: isActive ? '#1a1a1a' : 'transparent',
+                }}
+              >
+                <span style={{ opacity: 0.4, flexShrink: 0, fontSize: '10px' }}>
+                  {isActive ? '>' : ' '}
+                </span>
+                <span className="truncate">{cmd}</span>
+              </button>
+            )
+          })}
+        </div>
+      )}
+
+      {/* ── Input bar ─────────────────────────────────────────────── */}
+      <div className="flex items-center gap-3 px-4 w-full" style={{ height: '48px' }}>
         <span className="text-[11px] text-[var(--color-text-muted)] flex-shrink-0 tracking-wide">
           K2SO
         </span>
 
         {isLoading ? (
-          <span className="text-[11px] text-[var(--color-text-muted)] flex-1 assistant-pulse">
-            thinking...
-          </span>
+          <>
+            <span className="text-[11px] text-[var(--color-text-muted)] flex-1 assistant-pulse">
+              thinking...
+            </span>
+            <kbd
+              className="text-[10px] px-1.5 py-0.5 border border-[var(--color-border)] text-[var(--color-text-muted)]"
+              style={{ background: '#1a1a1a', opacity: 0.6 }}
+            >
+              ESC to cancel
+            </kbd>
+          </>
         ) : (
           <input
             ref={inputRef}
             type="text"
             value={message}
-            onChange={(e) => setMessage(e.target.value)}
+            onChange={handleChange}
             onKeyDown={handleKeyDown}
-            placeholder="Describe your workspace setup..."
+            onFocus={() => {
+              if (history.length > 0 && !message) setShowHistory(true)
+            }}
+            onBlur={() => {
+              // Delay so click on history item registers before blur hides it
+              setTimeout(() => setShowHistory(false), 150)
+            }}
+            placeholder={
+              history.length > 0
+                ? 'Describe your workspace setup...  (↑↓ history)'
+                : 'Describe your workspace setup...'
+            }
             spellCheck={false}
             autoComplete="off"
             className="flex-1 bg-transparent text-[12px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none border-none"
@@ -510,6 +867,19 @@ export default function AssistantBar(): React.JSX.Element | null {
               }}
             >
               Run
+            </button>
+            <button
+              onClick={toggleDebugLog}
+              title="Toggle debug log"
+              className="text-[11px] px-1.5 py-1 border bg-transparent cursor-pointer outline-none transition-colors"
+              style={{
+                fontFamily: 'inherit',
+                color: showDebugLog ? 'var(--color-accent)' : 'var(--color-text-muted)',
+                borderColor: showDebugLog ? 'var(--color-accent)' : 'var(--color-border)',
+                opacity: interactionLog.length > 0 ? 1 : 0.4,
+              }}
+            >
+              Log
             </button>
             <kbd
               className="text-[10px] px-1.5 py-0.5 border border-[var(--color-border)] text-[var(--color-text-muted)]"

@@ -1,8 +1,15 @@
-import { useState, useCallback, useMemo, useRef } from 'react'
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+import { beginFileDrag } from '@/lib/file-drag'
 import { showContextMenu } from '@/lib/context-menu'
 import { useFileTreeStore } from '@/stores/filetree'
 import { useTabsStore } from '@/stores/tabs'
+import { useToastStore } from '@/stores/toast'
+import { useFileSelectionStore } from '@/stores/file-selection'
+import { useFileClipboardStore } from '@/stores/file-clipboard'
+import { useFileUndoStore } from '@/stores/file-undo'
+import { useConfirmDialogStore } from '@/stores/confirm-dialog'
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -21,11 +28,30 @@ interface FileTreeProps {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-function formatFileSize(bytes: number): string {
-  if (bytes === 0) return '0 B'
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+function parentDir(path: string): string {
+  const idx = path.lastIndexOf('/')
+  return idx > 0 ? path.slice(0, idx) : '/'
+}
+
+/** Collect all visible paths in tree order for shift-click range selection. */
+function collectVisiblePaths(
+  rootPath: string,
+  cache: Map<string, FileEntry[]>,
+  expandedDirs: Set<string>
+): string[] {
+  const result: string[] = []
+  function walk(dirPath: string): void {
+    const entries = cache.get(dirPath)
+    if (!entries) return
+    for (const entry of entries) {
+      result.push(entry.path)
+      if (entry.isDirectory && expandedDirs.has(entry.path)) {
+        walk(entry.path)
+      }
+    }
+  }
+  walk(rootPath)
+  return result
 }
 
 // ── Icons ────────────────────────────────────────────────────────────
@@ -76,13 +102,57 @@ function FolderIcon({ open }: { open: boolean }): React.JSX.Element {
   )
 }
 
-function FileIcon(): React.JSX.Element {
+// ── File type icon colors ────────────────────────────────────────────
+
+const FILE_ICON_COLORS: Record<string, string> = {
+  // Web
+  ts: '#3178C6', tsx: '#3178C6', js: '#F7DF1E', jsx: '#F7DF1E',
+  html: '#E34F26', css: '#1572B6', scss: '#CC6699', less: '#1D365D',
+  vue: '#4FC08D', svelte: '#FF3E00',
+  // Data / config
+  json: '#A8B9CC', yaml: '#CB171E', yml: '#CB171E', toml: '#9C4121',
+  xml: '#F16529', csv: '#237346',
+  // Rust / systems
+  rs: '#DEA584', go: '#00ADD8', c: '#A8B9CC', cpp: '#659AD2', h: '#A8B9CC',
+  zig: '#F7A41D', swift: '#F05138',
+  // Scripting
+  py: '#3776AB', rb: '#CC342D', lua: '#000080', sh: '#4EAA25', bash: '#4EAA25',
+  zsh: '#4EAA25', fish: '#4EAA25', ps1: '#012456',
+  // JVM
+  java: '#B07219', kt: '#A97BFF', scala: '#DC322F',
+  // Docs
+  md: '#519ABA', mdx: '#519ABA', txt: '#9CA3AF', pdf: '#FF0000',
+  // Images
+  png: '#8B5CF6', jpg: '#8B5CF6', jpeg: '#8B5CF6', gif: '#8B5CF6',
+  svg: '#FFB13B', webp: '#8B5CF6', ico: '#8B5CF6',
+  // Config files
+  lock: '#6B7280', env: '#ECD53F',
+  // Docker / infra
+  dockerfile: '#2496ED',
+}
+
+// Special full-name matches
+const FILE_NAME_COLORS: Record<string, string> = {
+  'Dockerfile': '#2496ED', 'Makefile': '#6B7280', 'Cargo.toml': '#DEA584',
+  'package.json': '#CB3837', 'tsconfig.json': '#3178C6',
+  '.gitignore': '#F05032', '.env': '#ECD53F', '.env.local': '#ECD53F',
+}
+
+function getFileColor(name: string): string {
+  if (FILE_NAME_COLORS[name]) return FILE_NAME_COLORS[name]
+  const ext = name.includes('.') ? name.split('.').pop()?.toLowerCase() : ''
+  if (ext && FILE_ICON_COLORS[ext]) return FILE_ICON_COLORS[ext]
+  return '#9CA3AF'
+}
+
+function FileIcon({ name }: { name?: string }): React.JSX.Element {
+  const color = name ? getFileColor(name) : '#9CA3AF'
   return (
     <svg
       className="w-4 h-4 flex-shrink-0"
       viewBox="0 0 24 24"
       fill="none"
-      stroke="#9CA3AF"
+      stroke={color}
       strokeWidth={1.5}
       strokeLinecap="round"
       strokeLinejoin="round"
@@ -93,44 +163,121 @@ function FileIcon(): React.JSX.Element {
   )
 }
 
+// ── Inline name editor ──────────────────────────────────────────────
+
+function InlineNameEditor({
+  initialValue,
+  depth,
+  icon,
+  onConfirm,
+  onCancel,
+  selectStem
+}: {
+  initialValue: string
+  depth: number
+  icon: React.ReactNode
+  onConfirm: (name: string) => void
+  onCancel: () => void
+  selectStem?: boolean
+}): React.JSX.Element {
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    const el = inputRef.current
+    if (!el) return
+    el.focus()
+    if (selectStem && initialValue.includes('.')) {
+      el.setSelectionRange(0, initialValue.lastIndexOf('.'))
+    } else {
+      el.select()
+    }
+  }, [initialValue, selectStem])
+
+  const handleKeyDown = (e: React.KeyboardEvent): void => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      const value = inputRef.current?.value.trim() || ''
+      if (value) onConfirm(value)
+      else onCancel()
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      onCancel()
+    }
+  }
+
+  return (
+    <div
+      className="w-full flex items-center gap-1 py-[2px]"
+      style={{ paddingLeft: depth * 16 + 8 }}
+    >
+      <span className="w-3 flex-shrink-0" />
+      {icon}
+      <input
+        ref={inputRef}
+        type="text"
+        defaultValue={initialValue}
+        onKeyDown={handleKeyDown}
+        onBlur={() => {
+          const value = inputRef.current?.value.trim() || ''
+          if (value && value !== initialValue) onConfirm(value)
+          else onCancel()
+        }}
+        className="flex-1 min-w-0 px-1 py-0 text-[13px] leading-tight bg-[var(--color-bg-primary)] border border-[var(--color-accent)] text-[var(--color-text-primary)] outline-none"
+      />
+    </div>
+  )
+}
+
 // ── TreeItem ─────────────────────────────────────────────────────────
 
-function TreeItem({
-  entry,
-  depth,
-  cache,
-  expandedDirs,
-  loadingDirs,
-  errorDirs,
-  onToggleDir,
-  onClickFile,
-  onContextMenu,
-  searchQuery
-}: {
+interface TreeItemProps {
   entry: FileEntry
   depth: number
   cache: Map<string, FileEntry[]>
   expandedDirs: Set<string>
   loadingDirs: Set<string>
   errorDirs: Map<string, string>
+  selectedPaths: Record<string, true>
+  cutPaths: Set<string>
   onToggleDir: (path: string) => void
-  onClickFile: (entry: FileEntry) => void
+  onItemClick: (entry: FileEntry, e: React.MouseEvent) => void
   onContextMenu: (e: React.MouseEvent, entry: FileEntry) => void
+  onDragOutStart: (entry: FileEntry, e: React.MouseEvent) => void
   searchQuery: string
-}): React.JSX.Element | null {
+  dropTarget: string | null
+  renamingPath: string | null
+  onRenameConfirm: (oldPath: string, newName: string) => void
+  onRenameCancel: () => void
+  newEntryState: { parentPath: string; isDirectory: boolean } | null
+  onNewEntryConfirm: (parentPath: string, name: string, isDirectory: boolean) => void
+  onNewEntryCancel: () => void
+}
+
+function TreeItem(props: TreeItemProps): React.JSX.Element | null {
+  const {
+    entry, depth, cache, expandedDirs, loadingDirs, errorDirs,
+    selectedPaths, cutPaths,
+    onToggleDir, onItemClick, onContextMenu, onDragOutStart,
+    searchQuery, dropTarget, renamingPath, onRenameConfirm, onRenameCancel,
+    newEntryState, onNewEntryConfirm, onNewEntryCancel
+  } = props
+
   const isExpanded = expandedDirs.has(entry.path)
   const isLoading = loadingDirs.has(entry.path)
   const error = errorDirs.get(entry.path)
   const children = cache.get(entry.path)
+  const isDropTarget = dropTarget === entry.path
+  const isRenaming = renamingPath === entry.path
+  const isSelected = !!selectedPaths[entry.path]
+  const isCut = cutPaths.has(entry.path)
+  const showNewEntry = newEntryState && newEntryState.parentPath === entry.path && entry.isDirectory
 
   const filteredChildren = useMemo(() => {
     if (!children) return null
     if (!searchQuery) return children
     return children.filter((child) => {
-      // Show directories that have matching descendants or match themselves
       if (child.isDirectory) {
         if (child.name.toLowerCase().includes(searchQuery.toLowerCase())) return true
-        // If expanded, let recursive rendering handle filtering
         if (expandedDirs.has(child.path)) return true
         return false
       }
@@ -138,13 +285,15 @@ function TreeItem({
     })
   }, [children, searchQuery, expandedDirs])
 
-  const handleClick = useCallback(() => {
-    if (entry.isDirectory) {
-      onToggleDir(entry.path)
-    } else {
-      onClickFile(entry)
-    }
-  }, [entry, onToggleDir, onClickFile])
+  const handleClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (entry.isDirectory && !e.metaKey && !e.shiftKey) {
+        onToggleDir(entry.path)
+      }
+      onItemClick(entry, e)
+    },
+    [entry, onToggleDir, onItemClick]
+  )
 
   const handleContextMenu = useCallback(
     (e: React.MouseEvent) => {
@@ -153,30 +302,71 @@ function TreeItem({
     [entry, onContextMenu]
   )
 
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      if (e.button !== 0) return
+      if ((e.target as HTMLElement).closest('button[data-close]')) return
+      if (e.metaKey || e.shiftKey) return // Don't start drag on selection clicks
+      onDragOutStart(entry, e)
+    },
+    [entry, onDragOutStart]
+  )
+
+  const childProps = {
+    cache, expandedDirs, loadingDirs, errorDirs, selectedPaths, cutPaths,
+    onToggleDir, onItemClick, onContextMenu, onDragOutStart,
+    searchQuery, dropTarget, renamingPath, onRenameConfirm, onRenameCancel,
+    newEntryState, onNewEntryConfirm, onNewEntryCancel
+  }
+
+  if (isRenaming) {
+    return (
+      <div>
+        <InlineNameEditor
+          initialValue={entry.name}
+          depth={depth}
+          icon={entry.isDirectory ? <FolderIcon open={isExpanded} /> : <FileIcon name={entry.name} />}
+          onConfirm={(newName) => onRenameConfirm(entry.path, newName)}
+          onCancel={onRenameCancel}
+          selectStem={!entry.isDirectory}
+        />
+        {entry.isDirectory && isExpanded && (
+          <div>
+            {filteredChildren?.map((child) => (
+              <TreeItem key={child.path} entry={child} depth={depth + 1} {...childProps} />
+            ))}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const selectionClass = isSelected
+    ? 'bg-[var(--color-accent)]/15 ring-1 ring-inset ring-[var(--color-accent)]/40'
+    : isDropTarget
+      ? 'bg-[var(--color-accent)]/10 ring-1 ring-inset ring-[var(--color-accent)]'
+      : ''
+
   return (
     <div>
       <button
-        className="w-full flex items-center gap-1 py-[3px] text-left text-[13px] leading-tight transition-colors  hover:bg-white/[0.06] group"
-        style={{ paddingLeft: depth * 16 + 8 }}
+        className={`w-full flex items-center gap-1 py-[3px] text-left text-[13px] leading-tight transition-colors hover:bg-white/[0.06] group ${selectionClass}`}
+        style={{ paddingLeft: depth * 16 + 8, opacity: isCut ? 0.5 : 1 }}
+        data-path={entry.path}
+        data-is-directory={entry.isDirectory ? 'true' : 'false'}
         onClick={handleClick}
         onContextMenu={handleContextMenu}
+        onMouseDown={handleMouseDown}
       >
-        {/* Chevron (dirs only) */}
         <span className="w-3 flex-shrink-0 flex items-center justify-center">
           {entry.isDirectory ? <ChevronIcon expanded={isExpanded} /> : null}
         </span>
-
-        {/* Icon */}
-        {entry.isDirectory ? <FolderIcon open={isExpanded} /> : <FileIcon />}
-
-        {/* Name */}
+        {entry.isDirectory ? <FolderIcon open={isExpanded} /> : <FileIcon name={entry.name} />}
         <span className="truncate text-[var(--color-text-secondary)] group-hover:text-[var(--color-text-primary)]">
           {entry.name}
         </span>
-
       </button>
 
-      {/* Children (expanded dirs) */}
       {entry.isDirectory && isExpanded && (
         <div>
           {isLoading && (
@@ -195,23 +385,19 @@ function TreeItem({
               {error}
             </div>
           )}
-          {filteredChildren &&
-            filteredChildren.map((child) => (
-              <TreeItem
-                key={child.path}
-                entry={child}
-                depth={depth + 1}
-                cache={cache}
-                expandedDirs={expandedDirs}
-                loadingDirs={loadingDirs}
-                errorDirs={errorDirs}
-                onToggleDir={onToggleDir}
-                onClickFile={onClickFile}
-                onContextMenu={onContextMenu}
-                searchQuery={searchQuery}
-              />
-            ))}
-          {filteredChildren && filteredChildren.length === 0 && !isLoading && !error && (
+          {showNewEntry && (
+            <InlineNameEditor
+              initialValue=""
+              depth={depth + 1}
+              icon={newEntryState.isDirectory ? <FolderIcon open={false} /> : <FileIcon />}
+              onConfirm={(name) => onNewEntryConfirm(entry.path, name, newEntryState.isDirectory)}
+              onCancel={onNewEntryCancel}
+            />
+          )}
+          {filteredChildren?.map((child) => (
+            <TreeItem key={child.path} entry={child} depth={depth + 1} {...childProps} />
+          ))}
+          {filteredChildren && filteredChildren.length === 0 && !isLoading && !error && !showNewEntry && (
             <div
               className="py-1 text-[11px] text-[var(--color-text-muted)] italic"
               style={{ paddingLeft: (depth + 1) * 16 + 8 }}
@@ -227,15 +413,41 @@ function TreeItem({
 
 // ── FileTree ─────────────────────────────────────────────────────────
 
-export default function FileTree({ rootPath, onNavigate }: FileTreeProps): React.JSX.Element {
+export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element {
   const searchQuery = useFileTreeStore((s) => s.searchQuery)
   const setSearchQuery = useFileTreeStore((s) => s.setSearchQuery)
 
-  // Cache: path -> entries
   const [cache, setCache] = useState<Map<string, FileEntry[]>>(new Map())
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set([rootPath]))
   const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set())
   const [errorDirs, setErrorDirs] = useState<Map<string, string>>(new Map())
+  const [dropTarget, setDropTarget] = useState<string | null>(null)
+  const [isDragOver, setIsDragOver] = useState(false)
+  const [renamingPath, setRenamingPath] = useState<string | null>(null)
+  const [newEntryState, setNewEntryState] = useState<{ parentPath: string; isDirectory: boolean } | null>(null)
+
+  // Store subscriptions
+  const selectedPaths = useFileSelectionStore((s) => s.selectedPaths)
+  const clipboardMode = useFileClipboardStore((s) => s.mode)
+  const clipboardPaths = useFileClipboardStore((s) => s.paths)
+
+  // Compute cut paths for dimming
+  const cutPaths = useMemo(() => {
+    if (clipboardMode !== 'cut') return new Set<string>()
+    return new Set(clipboardPaths)
+  }, [clipboardMode, clipboardPaths])
+
+  // Track Option key for copy vs move
+  const optionKeyRef = useRef(false)
+  useEffect(() => {
+    const down = (e: KeyboardEvent): void => { if (e.key === 'Alt') optionKeyRef.current = true }
+    const up = (e: KeyboardEvent): void => { if (e.key === 'Alt') optionKeyRef.current = false }
+    window.addEventListener('keydown', down)
+    window.addEventListener('keyup', up)
+    return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up) }
+  }, [])
+
+  const treeRef = useRef<HTMLDivElement>(null)
 
   // Track the root path so we can reset when it changes
   const prevRootPath = useRef(rootPath)
@@ -245,12 +457,13 @@ export default function FileTree({ rootPath, onNavigate }: FileTreeProps): React
     setExpandedDirs(new Set([rootPath]))
     setLoadingDirs(new Set())
     setErrorDirs(new Map())
+    useFileSelectionStore.getState().clearSelection()
   }
 
   // Load directory contents
   const loadDir = useCallback(
-    async (dirPath: string) => {
-      if (cache.has(dirPath)) return
+    async (dirPath: string, force = false) => {
+      if (!force && cache.has(dirPath)) return
 
       setLoadingDirs((prev) => new Set(prev).add(dirPath))
       setErrorDirs((prev) => {
@@ -276,6 +489,154 @@ export default function FileTree({ rootPath, onNavigate }: FileTreeProps): React
     [cache]
   )
 
+  // Refresh affected directories after a file operation
+  const refreshDirs = useCallback(async (paths: string[]) => {
+    const dirsToRefresh = new Set<string>()
+    for (const p of paths) {
+      dirsToRefresh.add(parentDir(p))
+    }
+    for (const dir of dirsToRefresh) {
+      await loadDir(dir, true)
+    }
+  }, [loadDir])
+
+  // ── FS Watcher ──────────────────────────────────────────────────────
+  useEffect(() => {
+    // Start watching the root path
+    invoke('fs_watch_dir', { path: rootPath }).catch((err) => {
+      console.warn('[filetree] Failed to start watcher:', err)
+    })
+
+    // Listen for FS change events and refresh affected directories
+    let unlisten: (() => void) | null = null
+    listen<{ path: string; kind: string }>('fs://change', (event) => {
+      const changedPath = event.payload.path
+      // Refresh the parent directory of the changed path
+      const dir = parentDir(changedPath)
+      // Only refresh directories we've already loaded and have expanded
+      setCache((prev) => {
+        if (prev.has(dir)) {
+          // Debounced: just trigger a reload
+          loadDir(dir, true)
+        }
+        return prev
+      })
+    }).then((fn) => { unlisten = fn })
+
+    return () => {
+      unlisten?.()
+      invoke('fs_unwatch_dir', { path: rootPath }).catch(() => {})
+    }
+  }, [rootPath, loadDir])
+
+  // ── Drop-in from Finder (Tauri events) ─────────────────────────────
+  useEffect(() => {
+    const unlisteners: Array<() => void> = []
+
+    listen<{ paths: string[]; position: { x: number; y: number } }>('tauri://drag-drop', async (event) => {
+      setIsDragOver(false)
+      setDropTarget(null)
+
+      const { paths, position } = event.payload
+      if (!paths || paths.length === 0) return
+
+      let targetFolder = rootPath
+      const el = document.elementFromPoint(position.x, position.y)
+      if (el) {
+        const btn = (el as HTMLElement).closest('[data-path]') as HTMLElement | null
+        if (btn) {
+          const isDir = btn.dataset.isDirectory === 'true'
+          const path = btn.dataset.path
+          if (path) {
+            targetFolder = isDir ? path : parentDir(path)
+          }
+        }
+      }
+
+      const toast = useToastStore.getState()
+      const undo = useFileUndoStore.getState()
+      const isCopy = optionKeyRef.current
+      const action = isCopy ? 'Copied' : 'Moved'
+
+      try {
+        if (isCopy) {
+          await invoke('fs_copy_files', { sources: paths, destination: targetFolder })
+          undo.push({ type: 'copy', createdPaths: paths.map(p => `${targetFolder}/${p.split('/').pop()}`) })
+        } else {
+          await invoke('fs_move_files', { sources: paths, destination: targetFolder })
+          undo.push({
+            type: 'move',
+            items: paths.map(p => ({ oldPath: p, newPath: `${targetFolder}/${p.split('/').pop()}` }))
+          })
+        }
+        toast.addToast(`${action} ${paths.length} item${paths.length > 1 ? 's' : ''}`, 'success')
+        await loadDir(targetFolder, true)
+      } catch (err) {
+        toast.addToast(`Failed: ${err}`, 'error')
+      }
+    }).then((fn) => unlisteners.push(fn))
+
+    listen('tauri://drag-enter', () => {
+      setIsDragOver(true)
+    }).then((fn) => unlisteners.push(fn))
+
+    listen<{ position: { x: number; y: number } }>('tauri://drag-over', (event) => {
+      const { position } = event.payload
+      const el = document.elementFromPoint(position.x, position.y)
+      if (el) {
+        const btn = (el as HTMLElement).closest('[data-path]') as HTMLElement | null
+        if (btn && btn.dataset.isDirectory === 'true' && btn.dataset.path) {
+          setDropTarget(btn.dataset.path)
+          return
+        }
+      }
+      setDropTarget(rootPath)
+    }).then((fn) => unlisteners.push(fn))
+
+    listen('tauri://drag-leave', () => {
+      setIsDragOver(false)
+      setDropTarget(null)
+    }).then((fn) => unlisteners.push(fn))
+
+    return () => {
+      unlisteners.forEach((fn) => fn())
+    }
+  }, [rootPath, loadDir])
+
+  // ── Drag-out to Finder ─────────────────────────────────────────────
+  // ── Drag-out: in-window (terminal drop) + Finder (OS handoff) ─────
+  const handleDragOutStart = useCallback((entry: FileEntry, e: React.MouseEvent) => {
+    const startX = e.clientX
+    const startY = e.clientY
+    let started = false
+
+    // Drag all selected items if the dragged item is selected, otherwise just drag the one
+    const selection = useFileSelectionStore.getState()
+    const paths = selection.isSelected(entry.path)
+      ? selection.getSelectedPaths()
+      : [entry.path]
+
+    const handleMouseMove = (ev: MouseEvent): void => {
+      if (!started && (Math.abs(ev.clientX - startX) > 5 || Math.abs(ev.clientY - startY) > 5)) {
+        started = true
+        // Use custom in-window drag system.
+        // - mouseup over a terminal → paste path
+        // - mouse leaves window → hands off to OS native drag for Finder
+        beginFileDrag(paths, ev.clientX, ev.clientY)
+        document.removeEventListener('mousemove', handleMouseMove)
+        document.removeEventListener('mouseup', handleMouseUp)
+      }
+    }
+
+    const handleMouseUp = (): void => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+  }, [])
+
   // Toggle directory expand/collapse
   const handleToggleDir = useCallback(
     (dirPath: string) => {
@@ -285,7 +646,6 @@ export default function FileTree({ rootPath, onNavigate }: FileTreeProps): React
           next.delete(dirPath)
         } else {
           next.add(dirPath)
-          // Load contents if not cached
           loadDir(dirPath)
         }
         return next
@@ -294,29 +654,346 @@ export default function FileTree({ rootPath, onNavigate }: FileTreeProps): React
     [loadDir]
   )
 
-  // File click -> open file in a new tab
-  const handleClickFile = useCallback(
-    (entry: FileEntry) => {
-      useTabsStore.getState().openFileInNewTab(entry.path)
+  // ── Selection + Click ──────────────────────────────────────────────
+  const handleItemClick = useCallback(
+    (entry: FileEntry, e: React.MouseEvent) => {
+      const selection = useFileSelectionStore.getState()
+
+      if (e.metaKey) {
+        // Cmd+click: toggle selection
+        selection.toggleSelect(entry.path)
+      } else if (e.shiftKey) {
+        // Shift+click: range select
+        const allPaths = collectVisiblePaths(rootPath, cache, expandedDirs)
+        selection.rangeSelect(entry.path, allPaths)
+      } else {
+        // Plain click: single select
+        selection.select(entry.path)
+        // Open file on plain click
+        if (!entry.isDirectory) {
+          useTabsStore.getState().openFileInNewTab(entry.path)
+        }
+      }
     },
-    []
+    [rootPath, cache, expandedDirs]
   )
+
+  // ── Rename ──────────────────────────────────────────────────────────
+  const handleRenameConfirm = useCallback(async (oldPath: string, newName: string) => {
+    const toast = useToastStore.getState()
+    const undo = useFileUndoStore.getState()
+    try {
+      const newPath = await invoke<string>('fs_rename', { oldPath, newName })
+      toast.addToast(`Renamed to ${newName}`, 'success')
+      undo.push({ type: 'rename', oldPath, newPath })
+      await refreshDirs([oldPath])
+    } catch (err) {
+      toast.addToast(`Rename failed: ${err}`, 'error')
+    }
+    setRenamingPath(null)
+  }, [refreshDirs])
+
+  const handleRenameCancel = useCallback(() => {
+    setRenamingPath(null)
+  }, [])
+
+  // ── New file / folder ─────────────────────────────────────────────
+  const handleNewEntryConfirm = useCallback(async (parentPath: string, name: string, isDirectory: boolean) => {
+    const toast = useToastStore.getState()
+    const undo = useFileUndoStore.getState()
+    const fullPath = `${parentPath}/${name}`
+    try {
+      await invoke('fs_create_entry', { path: fullPath, isDirectory })
+      toast.addToast(`Created ${name}`, 'success')
+      undo.push({ type: 'create', path: fullPath })
+      await loadDir(parentPath, true)
+      if (!isDirectory) {
+        useTabsStore.getState().openFileInNewTab(fullPath)
+      }
+    } catch (err) {
+      toast.addToast(`Create failed: ${err}`, 'error')
+    }
+    setNewEntryState(null)
+  }, [loadDir])
+
+  const handleNewEntryCancel = useCallback(() => {
+    setNewEntryState(null)
+  }, [])
+
+  // ── Delete (with confirmation) ────────────────────────────────────
+  const handleDelete = useCallback(async (paths: string[]) => {
+    if (paths.length === 0) return
+    const toast = useToastStore.getState()
+    const undo = useFileUndoStore.getState()
+    const confirm = useConfirmDialogStore.getState().confirm
+
+    const names = paths.map(p => p.split('/').pop() || p)
+    const message = paths.length === 1
+      ? `Move "${names[0]}" to Trash?`
+      : `Move ${paths.length} items to Trash?\n${names.slice(0, 5).join(', ')}${names.length > 5 ? `, and ${names.length - 5} more` : ''}`
+
+    const confirmed = await confirm({
+      title: 'Move to Trash',
+      message,
+      confirmLabel: 'Move to Trash',
+      destructive: true
+    })
+
+    if (!confirmed) return
+
+    try {
+      await invoke('fs_delete', { paths })
+      const label = paths.length === 1 ? `Moved ${names[0]} to Trash` : `Moved ${paths.length} items to Trash`
+      toast.addToast(label, 'success')
+      undo.push({ type: 'delete', paths, note: 'trashed' })
+      await refreshDirs(paths)
+      useFileSelectionStore.getState().clearSelection()
+    } catch (err) {
+      toast.addToast(`Delete failed: ${err}`, 'error')
+    }
+  }, [refreshDirs])
+
+  // ── Clipboard paste ───────────────────────────────────────────────
+  const handlePaste = useCallback(async (targetDir: string) => {
+    const clipboard = useFileClipboardStore.getState()
+    const toast = useToastStore.getState()
+    const undo = useFileUndoStore.getState()
+
+    if (!clipboard.hasPaths()) return
+
+    try {
+      if (clipboard.mode === 'copy') {
+        await invoke('fs_copy_files', { sources: clipboard.paths, destination: targetDir })
+        undo.push({
+          type: 'copy',
+          createdPaths: clipboard.paths.map(p => `${targetDir}/${p.split('/').pop()}`)
+        })
+        toast.addToast(`Pasted ${clipboard.paths.length} item(s)`, 'success')
+      } else if (clipboard.mode === 'cut') {
+        await invoke('fs_move_files', { sources: clipboard.paths, destination: targetDir })
+        undo.push({
+          type: 'move',
+          items: clipboard.paths.map(p => ({
+            oldPath: p,
+            newPath: `${targetDir}/${p.split('/').pop()}`
+          }))
+        })
+        toast.addToast(`Moved ${clipboard.paths.length} item(s)`, 'success')
+        clipboard.clear()
+        // Refresh source dirs
+        await refreshDirs(clipboard.paths)
+      }
+      await loadDir(targetDir, true)
+    } catch (err) {
+      toast.addToast(`Paste failed: ${err}`, 'error')
+    }
+  }, [loadDir, refreshDirs])
+
+  // ── Duplicate ─────────────────────────────────────────────────────
+  const handleDuplicate = useCallback(async (paths: string[]) => {
+    const toast = useToastStore.getState()
+    const undo = useFileUndoStore.getState()
+    const created: string[] = []
+
+    for (const p of paths) {
+      try {
+        const newPath = await invoke<string>('fs_duplicate', { path: p })
+        created.push(newPath)
+      } catch (err) {
+        toast.addToast(`Duplicate failed: ${err}`, 'error')
+        break
+      }
+    }
+
+    if (created.length > 0) {
+      undo.push({ type: 'copy', createdPaths: created })
+      toast.addToast(`Duplicated ${created.length} item(s)`, 'success')
+      await refreshDirs(created)
+    }
+  }, [refreshDirs])
+
+  // ── Undo ──────────────────────────────────────────────────────────
+  const handleUndo = useCallback(async () => {
+    const undo = useFileUndoStore.getState()
+    const toast = useToastStore.getState()
+    const op = undo.pop()
+    if (!op) return
+
+    try {
+      switch (op.type) {
+        case 'create':
+          await invoke('fs_delete', { paths: [op.path] })
+          toast.addToast('Undid create', 'success')
+          await refreshDirs([op.path])
+          break
+        case 'rename':
+          // Rename back: extract the old name from oldPath
+          const oldName = op.oldPath.split('/').pop() || ''
+          await invoke('fs_rename', { oldPath: op.newPath, newName: oldName })
+          toast.addToast('Undid rename', 'success')
+          await refreshDirs([op.newPath])
+          break
+        case 'move':
+          // Move items back to their original locations
+          for (const item of [...op.items].reverse()) {
+            const origDir = parentDir(item.oldPath)
+            await invoke('fs_move_files', { sources: [item.newPath], destination: origDir })
+          }
+          toast.addToast('Undid move', 'success')
+          await refreshDirs([...op.items.map(i => i.oldPath), ...op.items.map(i => i.newPath)])
+          break
+        case 'copy':
+          // Delete the copies
+          await invoke('fs_delete', { paths: op.createdPaths })
+          toast.addToast('Undid copy', 'success')
+          await refreshDirs(op.createdPaths)
+          break
+        case 'delete':
+          toast.addToast('Cannot undo trash (restore from Finder)', 'info')
+          break
+      }
+    } catch (err) {
+      toast.addToast(`Undo failed: ${err}`, 'error')
+    }
+  }, [refreshDirs])
+
+  // ── Keyboard shortcuts ────────────────────────────────────────────
+  useEffect(() => {
+    const handler = (e: KeyboardEvent): void => {
+      // Only handle when file tree area is focused
+      if (!treeRef.current?.contains(document.activeElement) && document.activeElement !== treeRef.current) {
+        return
+      }
+
+      const selection = useFileSelectionStore.getState()
+      const paths = selection.getSelectedPaths()
+
+      if (e.metaKey && e.key === 'c') {
+        if (paths.length > 0) {
+          e.preventDefault()
+          useFileClipboardStore.getState().copy(paths)
+          useToastStore.getState().addToast(`Copied ${paths.length} item(s)`, 'success')
+        }
+      } else if (e.metaKey && e.key === 'x') {
+        if (paths.length > 0) {
+          e.preventDefault()
+          useFileClipboardStore.getState().cut(paths)
+          useToastStore.getState().addToast(`Cut ${paths.length} item(s)`, 'success')
+        }
+      } else if (e.metaKey && e.key === 'v') {
+        e.preventDefault()
+        // Paste into the first selected directory, or its parent, or root
+        let targetDir = rootPath
+        if (paths.length === 1) {
+          const p = paths[0]
+          // Check if it's a directory (check cache)
+          const parent = parentDir(p)
+          const entries = cache.get(parent)
+          const entry = entries?.find(en => en.path === p)
+          targetDir = entry?.isDirectory ? p : parent
+        }
+        handlePaste(targetDir)
+      } else if (e.metaKey && e.key === 'd') {
+        if (paths.length > 0) {
+          e.preventDefault()
+          handleDuplicate(paths)
+        }
+      } else if (e.metaKey && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        handleUndo()
+      } else if ((e.key === 'Backspace' || e.key === 'Delete') && !e.metaKey) {
+        if (paths.length > 0) {
+          e.preventDefault()
+          handleDelete(paths)
+        }
+      } else if (e.key === 'Enter' && paths.length === 1 && !e.metaKey) {
+        e.preventDefault()
+        setRenamingPath(paths[0])
+      }
+    }
+
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [rootPath, cache, handlePaste, handleDuplicate, handleUndo, handleDelete])
 
   // Context menu
   const handleContextMenu = useCallback(async (e: React.MouseEvent, entry: FileEntry) => {
     e.preventDefault()
 
-    const clickedId = await showContextMenu([
+    // If right-clicking an unselected item, select it
+    const selection = useFileSelectionStore.getState()
+    if (!selection.isSelected(entry.path)) {
+      selection.select(entry.path)
+    }
+
+    const paths = selection.getSelectedPaths()
+    const isSingle = paths.length <= 1
+    const isDir = entry.isDirectory
+    const hasClipboard = useFileClipboardStore.getState().hasPaths()
+
+    const items = [
+      ...(isDir && isSingle
+        ? [
+            { id: 'new-file', label: 'New File' },
+            { id: 'new-folder', label: 'New Folder' },
+            { id: 'separator-new', label: '', type: 'separator' }
+          ]
+        : []),
+      { id: 'copy-items', label: `Copy${!isSingle ? ` (${paths.length})` : ''}` },
+      { id: 'cut-items', label: `Cut${!isSingle ? ` (${paths.length})` : ''}` },
+      ...(hasClipboard
+        ? [{ id: 'paste', label: 'Paste' }]
+        : []),
+      { id: 'separator-clip', label: '', type: 'separator' },
+      ...(isSingle
+        ? [{ id: 'rename', label: 'Rename' }]
+        : []),
+      { id: 'duplicate', label: `Duplicate${!isSingle ? ` (${paths.length})` : ''}` },
+      { id: 'delete', label: `Move to Trash${!isSingle ? ` (${paths.length})` : ''}` },
+      { id: 'separator-util', label: '', type: 'separator' },
       { id: 'open-finder', label: 'Open in Finder' },
       { id: 'copy-path', label: 'Copy Path' }
-    ])
+    ]
+
+    const clickedId = await showContextMenu(items)
 
     if (clickedId === 'open-finder') {
       await invoke('fs_open_in_finder', { path: entry.path })
     } else if (clickedId === 'copy-path') {
       await invoke('fs_copy_path', { path: entry.path })
+    } else if (clickedId === 'rename') {
+      setRenamingPath(entry.path)
+    } else if (clickedId === 'delete') {
+      await handleDelete(paths)
+    } else if (clickedId === 'duplicate') {
+      await handleDuplicate(paths)
+    } else if (clickedId === 'copy-items') {
+      useFileClipboardStore.getState().copy(paths)
+      useToastStore.getState().addToast(`Copied ${paths.length} item(s)`, 'success')
+    } else if (clickedId === 'cut-items') {
+      useFileClipboardStore.getState().cut(paths)
+      useToastStore.getState().addToast(`Cut ${paths.length} item(s)`, 'success')
+    } else if (clickedId === 'paste') {
+      const targetDir = isDir ? entry.path : parentDir(entry.path)
+      await handlePaste(targetDir)
+    } else if (clickedId === 'new-file') {
+      setExpandedDirs((prev) => {
+        const next = new Set(prev)
+        next.add(entry.path)
+        return next
+      })
+      await loadDir(entry.path)
+      setNewEntryState({ parentPath: entry.path, isDirectory: false })
+    } else if (clickedId === 'new-folder') {
+      setExpandedDirs((prev) => {
+        const next = new Set(prev)
+        next.add(entry.path)
+        return next
+      })
+      await loadDir(entry.path)
+      setNewEntryState({ parentPath: entry.path, isDirectory: true })
     }
-  }, [])
+  }, [handleDelete, handleDuplicate, handlePaste, loadDir])
 
   // Load root on first expand
   const rootEntries = cache.get(rootPath)
@@ -340,8 +1017,22 @@ export default function FileTree({ rootPath, onNavigate }: FileTreeProps): React
 
   const rootBasename = rootPath.split('/').pop() || rootPath
 
+  const childProps = {
+    cache, expandedDirs, loadingDirs, errorDirs, selectedPaths, cutPaths,
+    onToggleDir: handleToggleDir,
+    onItemClick: handleItemClick,
+    onContextMenu: handleContextMenu,
+    onDragOutStart: handleDragOutStart,
+    searchQuery, dropTarget, renamingPath,
+    onRenameConfirm: handleRenameConfirm,
+    onRenameCancel: handleRenameCancel,
+    newEntryState,
+    onNewEntryConfirm: handleNewEntryConfirm,
+    onNewEntryCancel: handleNewEntryCancel
+  }
+
   return (
-    <div className="flex flex-col h-full">
+    <div ref={treeRef} className="flex flex-col h-full" tabIndex={-1}>
       {/* Search input */}
       <div className="px-3 pb-2">
         <div className="relative">
@@ -366,7 +1057,7 @@ export default function FileTree({ rootPath, onNavigate }: FileTreeProps): React
           />
           {searchQuery && (
             <button
-              className="absolute right-1.5 top-1/2 -translate-y-1/2 w-4 h-4 flex items-center justify-centertext-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 w-4 h-4 flex items-center justify-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
               onClick={() => setSearchQuery('')}
             >
               <svg
@@ -384,13 +1075,21 @@ export default function FileTree({ rootPath, onNavigate }: FileTreeProps): React
         </div>
       </div>
 
-      {/* Tree */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden px-1 pb-2">
-        {/* Root folder header */}
-        <button
-          className="w-full flex items-center gap-1 py-[3px] px-2 text-left text-[13px] font-medium text-[var(--color-text-primary)] hover:bg-white/[0.06] "
-          onClick={() => handleToggleDir(rootPath)}
-          onContextMenu={(e) =>
+      {/* Drop indicator banner */}
+      {isDragOver && (
+        <div className="mx-3 mb-2 px-2 py-1.5 text-[11px] text-[var(--color-accent)] border border-[var(--color-accent)] bg-[var(--color-accent)]/5 text-center">
+          {optionKeyRef.current ? 'Copy here (Option held)' : 'Move here (hold Option to copy)'}
+        </div>
+      )}
+
+      {/* Tree — root contents rendered directly (root is the implicit workspace) */}
+      <div
+        className="flex-1 overflow-y-auto overflow-x-hidden px-1 pb-2"
+        data-path={rootPath}
+        data-is-directory="true"
+        onContextMenu={(e) => {
+          // Right-click on empty space → context menu for root
+          if ((e.target as HTMLElement).closest('[data-path]') === e.currentTarget) {
             handleContextMenu(e, {
               name: rootBasename,
               path: rootPath,
@@ -399,48 +1098,33 @@ export default function FileTree({ rootPath, onNavigate }: FileTreeProps): React
               modifiedAt: 0
             })
           }
-        >
-          <span className="w-3 flex-shrink-0 flex items-center justify-center">
-            <ChevronIcon expanded={expandedDirs.has(rootPath)} />
-          </span>
-          <FolderIcon open={expandedDirs.has(rootPath)} />
-          <span className="truncate">{rootBasename}</span>
-        </button>
-
-        {/* Root contents */}
-        {expandedDirs.has(rootPath) && (
-          <div>
-            {loadingDirs.has(rootPath) && (
-              <div className="py-1 pl-10 text-[11px] text-[var(--color-text-muted)] italic">
-                Loading...
-              </div>
-            )}
-            {errorDirs.has(rootPath) && (
-              <div className="py-1 pl-10 text-[11px] text-red-400 italic">
-                {errorDirs.get(rootPath)}
-              </div>
-            )}
-            {filteredRootEntries &&
-              filteredRootEntries.map((entry) => (
-                <TreeItem
-                  key={entry.path}
-                  entry={entry}
-                  depth={1}
-                  cache={cache}
-                  expandedDirs={expandedDirs}
-                  loadingDirs={loadingDirs}
-                  errorDirs={errorDirs}
-                  onToggleDir={handleToggleDir}
-                  onClickFile={handleClickFile}
-                  onContextMenu={handleContextMenu}
-                  searchQuery={searchQuery}
-                />
-              ))}
-            {filteredRootEntries && filteredRootEntries.length === 0 && (
-              <div className="py-1 pl-10 text-[11px] text-[var(--color-text-muted)] italic">
-                {searchQuery ? 'No matches' : 'Empty'}
-              </div>
-            )}
+        }}
+      >
+        {loadingDirs.has(rootPath) && (
+          <div className="py-1 pl-4 text-[11px] text-[var(--color-text-muted)] italic">
+            Loading...
+          </div>
+        )}
+        {errorDirs.has(rootPath) && (
+          <div className="py-1 pl-4 text-[11px] text-red-400 italic">
+            {errorDirs.get(rootPath)}
+          </div>
+        )}
+        {newEntryState && newEntryState.parentPath === rootPath && (
+          <InlineNameEditor
+            initialValue=""
+            depth={0}
+            icon={newEntryState.isDirectory ? <FolderIcon open={false} /> : <FileIcon />}
+            onConfirm={(name) => handleNewEntryConfirm(rootPath, name, newEntryState.isDirectory)}
+            onCancel={handleNewEntryCancel}
+          />
+        )}
+        {filteredRootEntries?.map((entry) => (
+          <TreeItem key={entry.path} entry={entry} depth={0} {...childProps} />
+        ))}
+        {filteredRootEntries && filteredRootEntries.length === 0 && !newEntryState && !loadingDirs.has(rootPath) && (
+          <div className="py-1 pl-4 text-[11px] text-[var(--color-text-muted)] italic">
+            {searchQuery ? 'No matches' : 'Empty'}
           </div>
         )}
       </div>

@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react'
+import { useState, useCallback, useMemo, useRef } from 'react'
 import { useProjectsStore } from '@/stores/projects'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
 import { useSettingsStore } from '@/stores/settings'
@@ -537,6 +537,7 @@ export default function Sidebar(): React.JSX.Element {
   const fetchProjects = useProjectsStore((s) => s.fetchProjects)
   const createSection = useProjectsStore((s) => s.createSection)
 
+  const reorderProjects = useProjectsStore((s) => s.reorderProjects)
   const focusGroupsEnabled = useFocusGroupsStore((s) => s.focusGroupsEnabled)
   const activeFocusGroupId = useFocusGroupsStore((s) => s.activeFocusGroupId)
 
@@ -548,6 +549,83 @@ export default function Sidebar(): React.JSX.Element {
     if (!focusGroupsEnabled || activeFocusGroupId === null) return unpinned
     return unpinned.filter((p) => p.focusGroupId === activeFocusGroupId)
   }, [projects, focusGroupsEnabled, activeFocusGroupId])
+
+  // ── Drag-to-reorder state ──────────────────────────────────────────
+  const [dragId, setDragId] = useState<string | null>(null)
+  const [dragZone, setDragZone] = useState<'pinned' | 'unpinned' | null>(null)
+  const [dropIndex, setDropIndex] = useState<number | null>(null)
+  const pinnedRef = useRef<HTMLDivElement>(null)
+  const unpinnedRef = useRef<HTMLDivElement>(null)
+  const dropIndexRef = useRef<number | null>(null)
+
+  const handleProjectMouseDown = useCallback((
+    e: React.MouseEvent,
+    projectId: string,
+    zone: 'pinned' | 'unpinned'
+  ) => {
+    if (e.button !== 0) return
+    if ((e.target as HTMLElement).closest('button')) return
+
+    const startX = e.clientX
+    const startY = e.clientY
+    let started = false
+
+    const handleMouseMove = (ev: MouseEvent): void => {
+      if (!started && (Math.abs(ev.clientX - startX) > 3 || Math.abs(ev.clientY - startY) > 5)) {
+        started = true
+        setDragId(projectId)
+        setDragZone(zone)
+        document.body.style.cursor = 'grabbing'
+        document.body.style.userSelect = 'none'
+      }
+
+      if (!started) return
+
+      // Determine drop index based on mouse Y
+      const containerEl = (zone === 'pinned' ? pinnedRef : unpinnedRef).current
+      if (!containerEl) return
+
+      const items = containerEl.querySelectorAll('[data-project-id]')
+      let idx = 0
+      for (let i = 0; i < items.length; i++) {
+        const rect = items[i].getBoundingClientRect()
+        if (ev.clientY > rect.top + rect.height / 2) {
+          idx = i + 1
+        }
+      }
+      dropIndexRef.current = idx
+      setDropIndex(idx)
+    }
+
+    const handleMouseUp = (): void => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+
+      if (started) {
+        const list = zone === 'pinned'
+          ? [...useProjectsStore.getState().projects.filter((p) => p.pinned)]
+          : [...useProjectsStore.getState().projects.filter((p) => !p.pinned)]
+        const di = dropIndexRef.current
+        const fromIdx = list.findIndex((p) => p.id === projectId)
+        if (fromIdx >= 0 && di !== null && fromIdx !== di && fromIdx !== di - 1) {
+          const item = list.splice(fromIdx, 1)[0]
+          const insertAt = di > fromIdx ? di - 1 : di
+          list.splice(insertAt, 0, item)
+          reorderProjects(list.map((p) => p.id))
+        }
+      }
+
+      setDragId(null)
+      setDragZone(null)
+      setDropIndex(null)
+      dropIndexRef.current = null
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+  }, [reorderProjects])
 
   // Worktree dialog state
   const [worktreeDialog, setWorktreeDialog] = useState<{
@@ -678,8 +756,55 @@ export default function Sidebar(): React.JSX.Element {
               Pinned
             </span>
           </div>
-          {pinnedProjects.map((project) => (
-            <div key={project.id}>
+          <div ref={pinnedRef}>
+            {pinnedProjects.map((project, idx) => (
+              <div
+                key={project.id}
+                data-project-id={project.id}
+                style={{ opacity: dragId === project.id ? 0.4 : 1 }}
+                onMouseDown={(e) => handleProjectMouseDown(e, project.id, 'pinned')}
+              >
+                {dragZone === 'pinned' && dropIndex === idx && (
+                  <div className="h-[2px] bg-[var(--color-accent)] mx-3" />
+                )}
+                {project.worktreeMode === 0 ? (
+                  <SingleProjectItem
+                    project={project}
+                    isActive={project.id === activeProjectId}
+                    onContextMenu={handleContextMenu}
+                  />
+                ) : (
+                  <ProjectItem
+                    project={project}
+                    isActive={project.id === activeProjectId}
+                    onContextMenu={handleContextMenu}
+                  />
+                )}
+              </div>
+            ))}
+            {dragZone === 'pinned' && dropIndex === pinnedProjects.length && (
+              <div className="h-[2px] bg-[var(--color-accent)] mx-3" />
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Focus Group Selector (replaces branding area) */}
+      <FocusGroupSelector />
+
+      {/* Workspace list */}
+      <div className="flex-1 overflow-y-auto overflow-x-hidden py-1">
+        <div ref={unpinnedRef}>
+          {filteredProjects.map((project, idx) => (
+            <div
+              key={project.id}
+              data-project-id={project.id}
+              style={{ opacity: dragId === project.id ? 0.4 : 1 }}
+              onMouseDown={(e) => handleProjectMouseDown(e, project.id, 'unpinned')}
+            >
+              {dragZone === 'unpinned' && dropIndex === idx && (
+                <div className="h-[2px] bg-[var(--color-accent)] mx-3" />
+              )}
               {project.worktreeMode === 0 ? (
                 <SingleProjectItem
                   project={project}
@@ -693,36 +818,15 @@ export default function Sidebar(): React.JSX.Element {
                   onContextMenu={handleContextMenu}
                 />
               )}
+              {idx < filteredProjects.length - 1 && !(dragZone === 'unpinned' && dropIndex === idx + 1) && (
+                <div className="border-b border-[var(--color-border)]" />
+              )}
             </div>
           ))}
+          {dragZone === 'unpinned' && dropIndex === filteredProjects.length && (
+            <div className="h-[2px] bg-[var(--color-accent)] mx-3" />
+          )}
         </div>
-      )}
-
-      {/* Focus Group Selector (replaces branding area) */}
-      <FocusGroupSelector />
-
-      {/* Workspace list */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden py-1">
-        {filteredProjects.map((project, idx) => (
-          <div key={project.id}>
-            {project.worktreeMode === 0 ? (
-              <SingleProjectItem
-                project={project}
-                isActive={project.id === activeProjectId}
-                onContextMenu={handleContextMenu}
-              />
-            ) : (
-              <ProjectItem
-                project={project}
-                isActive={project.id === activeProjectId}
-                onContextMenu={handleContextMenu}
-              />
-            )}
-            {idx < filteredProjects.length - 1 && (
-              <div className="border-b border-[var(--color-border)]" />
-            )}
-          </div>
-        ))}
 
         {filteredProjects.length === 0 && (
           <div className="px-3 py-6 text-center">

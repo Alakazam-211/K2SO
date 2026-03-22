@@ -15,7 +15,7 @@ name = "k2so"
 path = "src/main.rs"
 
 [dependencies]
-tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+tauri = { version = "2", features = ["protocol-asset", "macos-private-api", "tray-icon"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
@@ -37,6 +37,9 @@ libc = "0.2"
 llama-cpp-2 = { version = "0.1", features = ["metal", "sampler"] }
 encoding_rs = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+tauri-plugin-drag = "2.1.0"
+notify = { version = "7", features = ["macos_fsevent"] }
+notify-debouncer-mini = "0.5"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

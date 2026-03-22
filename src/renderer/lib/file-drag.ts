@@ -1,0 +1,148 @@
+/**
+ * Global in-window file drag state.
+ *
+ * The native Tauri `startDrag` plugin hands control to the OS, which means
+ * `tauri://drag-drop` events don't fire for drops back into the same window.
+ * This module provides a simple global state so FileTree can initiate a drag
+ * and TerminalView (or any other target) can detect the drop via mouseup.
+ *
+ * Flow:
+ *   1. FileTree mousedown → mousemove 5px → `beginDrag(paths)`
+ *   2. Global mousemove tracks position, shows ghost cursor
+ *   3. mouseup → `endDrag()` checks what's under the cursor
+ *   4. If mouse leaves the window → `startDrag` is called for Finder drops
+ */
+
+import { invoke } from '@tauri-apps/api/core'
+import { startDrag } from '@crabnebula/tauri-plugin-drag'
+
+// ── State ────────────────────────────────────────────────────────────
+
+let dragPaths: string[] = []
+let active = false
+let ghost: HTMLDivElement | null = null
+
+// ── Shell-escape helper ──────────────────────────────────────────────
+
+function shellEscape(p: string): string {
+  if (/[^a-zA-Z0-9_\-./]/.test(p)) {
+    return "'" + p.replace(/'/g, "'\\''") + "'"
+  }
+  return p
+}
+
+// ── Ghost element ────────────────────────────────────────────────────
+
+function createGhost(paths: string[]): HTMLDivElement {
+  const el = document.createElement('div')
+  el.style.cssText = `
+    position: fixed;
+    pointer-events: none;
+    z-index: 999999;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-family: 'MesloLGM Nerd Font', Menlo, monospace;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-accent);
+    color: var(--color-text-primary);
+    border-radius: 4px;
+    opacity: 0.9;
+    white-space: nowrap;
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  `
+  const name = paths[0].split('/').pop() || paths[0]
+  el.textContent = paths.length === 1 ? name : `${name} +${paths.length - 1}`
+  document.body.appendChild(el)
+  return el
+}
+
+function moveGhost(x: number, y: number): void {
+  if (ghost) {
+    ghost.style.left = `${x + 12}px`
+    ghost.style.top = `${y + 12}px`
+  }
+}
+
+function removeGhost(): void {
+  if (ghost) {
+    ghost.remove()
+    ghost = null
+  }
+}
+
+// ── Public API ───────────────────────────────────────────────────────
+
+export function isFileDragActive(): boolean {
+  return active
+}
+
+export function getFileDragPaths(): string[] {
+  return dragPaths
+}
+
+/**
+ * Start tracking a file drag from the FileTree.
+ * Call this from FileTree's mousedown handler after the 5px threshold.
+ */
+export function beginFileDrag(paths: string[], startX: number, startY: number): void {
+  dragPaths = paths
+  active = true
+  ghost = createGhost(paths)
+  moveGhost(startX, startY)
+
+  const handleMouseMove = (ev: MouseEvent): void => {
+    moveGhost(ev.clientX, ev.clientY)
+  }
+
+  const handleMouseUp = (ev: MouseEvent): void => {
+    cleanup()
+
+    if (!active) return
+    active = false
+
+    // Hit-test: is the drop over a terminal container?
+    const el = document.elementFromPoint(ev.clientX, ev.clientY)
+    if (el) {
+      const termContainer = (el as HTMLElement).closest('[data-terminal-id]') as HTMLElement | null
+      if (termContainer && termContainer.dataset.terminalId) {
+        // Paste shell-escaped paths into the terminal
+        const escaped = dragPaths.map(shellEscape).join(' ')
+        invoke('terminal_write', {
+          id: termContainer.dataset.terminalId,
+          data: escaped
+        }).catch(() => {})
+        dragPaths = []
+        return
+      }
+    }
+
+    // Drop wasn't on a terminal — cancel
+    dragPaths = []
+  }
+
+  const handleMouseLeave = (): void => {
+    // Mouse left the window — hand off to OS native drag for Finder
+    cleanup()
+    active = false
+
+    if (dragPaths.length > 0) {
+      startDrag({ item: dragPaths, icon: 'png' }).catch((err) => {
+        console.error('[file-drag] Native drag failed:', err)
+      })
+    }
+    dragPaths = []
+  }
+
+  function cleanup(): void {
+    removeGhost()
+    document.removeEventListener('mousemove', handleMouseMove)
+    document.removeEventListener('mouseup', handleMouseUp)
+    document.documentElement.removeEventListener('mouseleave', handleMouseLeave)
+  }
+
+  document.addEventListener('mousemove', handleMouseMove)
+  document.addEventListener('mouseup', handleMouseUp)
+  document.documentElement.addEventListener('mouseleave', handleMouseLeave)
+}

@@ -12,6 +12,7 @@ import GitInitDialog from './components/GitInitDialog/GitInitDialog'
 import WorktreeBar from './components/FocusWindow/WorktreeBar'
 import CommandPalette from './components/CommandPalette/CommandPalette'
 import ContextMenu from './components/ContextMenu/ContextMenu'
+import ConfirmDialog from './components/ConfirmDialog/ConfirmDialog'
 import Toast from './components/Toast/Toast'
 import AssistantBar from './components/WorkspaceAssistant/AssistantBar'
 import { useProjectsStore } from './stores/projects'
@@ -21,6 +22,8 @@ import { useCommandPaletteStore } from './stores/command-palette'
 import { useTerminalSettingsStore } from './stores/terminal-settings'
 import { useAssistantStore } from './stores/assistant'
 import { useTabsStore } from './stores/tabs'
+import { useActiveAgentsStore, startAgentPolling, stopAgentPolling } from './stores/active-agents'
+import AgentCloseDialog from './components/AgentCloseDialog/AgentCloseDialog'
 
 /** Parse focus mode project ID from URL hash (#focus=<projectId>) */
 function parseFocusProjectId(): string | null {
@@ -169,41 +172,64 @@ export default function App(): React.JSX.Element {
     }
   }, [focusProjectId, projects, focusInitialized, setActiveProject])
 
-  // Before app close: detect CLI tool session IDs and save workspace layout
+  const [showQuitDialog, setShowQuitDialog] = useState(false)
+  const [quitAgents, setQuitAgents] = useState<ReturnType<typeof useActiveAgentsStore.getState>['getActiveAgentsList']>([])
+
+  // Start agent polling
+  useEffect(() => {
+    startAgentPolling()
+    return () => stopAgentPolling()
+  }, [])
+
+  // Save layout helper
+  const saveCurrentLayout = (): void => {
+    const tabsStore = useTabsStore.getState()
+    const projectsStore = useProjectsStore.getState()
+    if (projectsStore.activeProjectId && projectsStore.activeWorkspaceId) {
+      tabsStore.saveLayoutForWorkspace(
+        projectsStore.activeProjectId,
+        projectsStore.activeWorkspaceId
+      )
+    }
+  }
+
+  // Force quit (bypasses agent check)
+  const forceQuit = async (): Promise<void> => {
+    setShowQuitDialog(false)
+    const tabsStore = useTabsStore.getState()
+    await tabsStore.detectAndSaveSessionIds()
+    saveCurrentLayout()
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    getCurrentWindow().destroy()
+  }
+
+  // Before app close: check for active agents, save layout
   useEffect(() => {
     const handleBeforeUnload = (): void => {
-      const tabsStore = useTabsStore.getState()
-      const projectsStore = useProjectsStore.getState()
-
-      // Synchronously detect and save — we can't await in beforeunload,
-      // but we trigger the async detection. The session IDs are also
-      // periodically detected by the polling mechanism.
-      if (projectsStore.activeProjectId && projectsStore.activeWorkspaceId) {
-        tabsStore.saveLayoutForWorkspace(
-          projectsStore.activeProjectId,
-          projectsStore.activeWorkspaceId
-        )
-      }
+      saveCurrentLayout()
     }
 
     window.addEventListener('beforeunload', handleBeforeUnload)
 
-    // Also listen for Tauri's close event for more reliable detection
     let unlisten: (() => void) | undefined
     import('@tauri-apps/api/event').then(({ listen }) => {
-      listen('tauri://close-requested', async () => {
-        const tabsStore = useTabsStore.getState()
-        const projectsStore = useProjectsStore.getState()
+      listen('tauri://close-requested', async (event) => {
+        // Check for active agents
+        await useActiveAgentsStore.getState().pollOnce()
+        const agents = useActiveAgentsStore.getState().getActiveAgentsList()
 
-        // Detect session IDs before save (async is OK here since Tauri waits)
-        await tabsStore.detectAndSaveSessionIds()
-
-        if (projectsStore.activeProjectId && projectsStore.activeWorkspaceId) {
-          tabsStore.saveLayoutForWorkspace(
-            projectsStore.activeProjectId,
-            projectsStore.activeWorkspaceId
-          )
+        if (agents.length > 0) {
+          // Prevent close and show dialog
+          (event as any).preventDefault?.()
+          setQuitAgents(agents)
+          setShowQuitDialog(true)
+          return
         }
+
+        // No agents — proceed with close
+        const tabsStore = useTabsStore.getState()
+        await tabsStore.detectAndSaveSessionIds()
+        saveCurrentLayout()
       }).then((fn) => { unlisten = fn }).catch(() => {})
     })
 
@@ -237,6 +263,7 @@ export default function App(): React.JSX.Element {
         <GitInitDialog />
         <CommandPalette />
         <ContextMenu />
+        <ConfirmDialog />
         <Toast />
         <AssistantBar />
       </>
@@ -266,6 +293,7 @@ export default function App(): React.JSX.Element {
         <GitInitDialog />
         <CommandPalette />
         <ContextMenu />
+        <ConfirmDialog />
         <Toast />
         <AssistantBar />
       </>
@@ -297,7 +325,16 @@ export default function App(): React.JSX.Element {
       <GitInitDialog />
       <CommandPalette />
       <ContextMenu />
+      <ConfirmDialog />
       <AssistantBar />
+      {showQuitDialog && (
+        <AgentCloseDialog
+          agents={quitAgents}
+          mode="app"
+          onConfirm={forceQuit}
+          onCancel={() => setShowQuitDialog(false)}
+        />
+      )}
     </>
   )
 }

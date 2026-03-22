@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import { PDFViewer } from './PDFViewer'
 import { DocxViewer } from './DocxViewer'
+import { CodeViewer, HighlightedCodeBlock, detectLanguage } from './CodeHighlighter'
 import { useTabsStore } from '@/stores/tabs'
 import { FILE_POLL_INTERVAL } from '@shared/constants'
 
@@ -449,9 +450,14 @@ export function FileViewerPane({ filePath, paneId, tabId, onClose }: FileViewerP
         {category === 'image' && viewMode === 'rendered' ? (
           <div className="flex items-center justify-center p-4 min-h-full bg-[#0a0a0a]">
             <img
-              src={`file://${filePath}`}
+              src={convertFileSrc(filePath)}
               alt={fileName}
               style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+              onError={(e) => {
+                // Fallback: show error message if asset protocol fails
+                (e.target as HTMLImageElement).style.display = 'none'
+                setError('Failed to load image')
+              }}
             />
           </div>
         ) : category === 'image' && viewMode === 'raw' ? (
@@ -460,14 +466,36 @@ export function FileViewerPane({ filePath, paneId, tabId, onClose }: FileViewerP
           </div>
         ) : category === 'markdown' && viewMode === 'rendered' ? (
           <div className="markdown-content p-4">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                code({ className, children, ...props }) {
+                  // Fenced code blocks get className="language-xxx"
+                  const match = /language-(\w+)/.exec(className || '')
+                  const codeStr = String(children).replace(/\n$/, '')
+                  if (match) {
+                    return <HighlightedCodeBlock code={codeStr} language={match[1]} />
+                  }
+                  // Inline code
+                  return <code className={className} {...props}>{children}</code>
+                }
+              }}
+            >
+              {content}
+            </ReactMarkdown>
           </div>
-        ) : (
+        ) : editedContent !== null || !detectLanguage(filePath) ? (
           <textarea
             className="w-full h-full p-4 text-xs text-[var(--color-text-secondary)] whitespace-pre font-mono leading-5 bg-transparent border-none outline-none resize-none"
             value={editedContent ?? content}
             onChange={(e) => setEditedContent(e.target.value)}
             spellCheck={false}
+          />
+        ) : (
+          <CodeViewer
+            code={content}
+            language={detectLanguage(filePath)}
+            className="h-full"
           />
         )}
       </div>

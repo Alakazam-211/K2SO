@@ -7,9 +7,11 @@ mod menu;
 mod project_config;
 mod state;
 mod terminal;
+mod watcher;
 mod window;
 
 use state::AppState;
+use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -32,6 +34,7 @@ pub fn run() {
         db: Mutex::new(conn),
         terminal_manager: Mutex::new(terminal::TerminalManager::new()),
         llm_manager: Mutex::new(llm::LlmManager::new()),
+        watchers: Mutex::new(HashMap::new()),
     };
 
     tauri::Builder::default()
@@ -40,6 +43,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_drag::init())
         .manage(app_state)
         .menu(|handle| menu::create_menu(handle))
         .on_menu_event(menu::handle_menu_event)
@@ -62,8 +66,17 @@ pub fn run() {
                 win.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { .. } = event {
                         window::save_window_state(&app_handle);
+                        // Unload LLM model before exit to release Metal/GPU resources.
+                        // If this isn't done, ggml_metal static destructors call abort()
+                        // during process teardown, causing a SIGABRT crash report.
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            if let Some(state) = app_handle.try_state::<AppState>() {
+                                if let Ok(mut manager) = state.llm_manager.lock() {
+                                    manager.unload();
+                                }
+                            }
+                        }));
                         // Kill all PTY processes to prevent zombies.
-                        // Wrap in catch_unwind so a panic here doesn't prevent shutdown.
                         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             if let Some(state) = app_handle.try_state::<AppState>() {
                                 if let Ok(mut manager) = state.terminal_manager.lock() {
@@ -181,6 +194,15 @@ pub fn run() {
             commands::filesystem::fs_read_file,
             commands::filesystem::fs_read_binary_file,
             commands::filesystem::fs_write_file,
+            commands::filesystem::fs_move_files,
+            commands::filesystem::fs_copy_files,
+            commands::filesystem::fs_delete,
+            commands::filesystem::fs_rename,
+            commands::filesystem::fs_create_entry,
+            commands::filesystem::fs_duplicate,
+            // Filesystem watcher
+            watcher::fs_watch_dir,
+            watcher::fs_unwatch_dir,
             // Settings
             commands::settings::settings_get,
             commands::settings::settings_update,
@@ -196,6 +218,7 @@ pub fn run() {
             commands::terminal::terminal_kill,
             commands::terminal::terminal_active_count_for_path,
             commands::terminal::terminal_kill_foreground,
+            commands::terminal::terminal_get_foreground_command,
             commands::terminal::terminal_exists,
             commands::terminal::terminal_get_buffer,
             commands::terminal::terminal_log,

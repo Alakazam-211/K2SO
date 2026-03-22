@@ -2,6 +2,31 @@ import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 
+/** Maximum number of commands to keep in history. */
+const MAX_HISTORY = 50
+/** Maximum number of interaction log entries to keep. */
+const MAX_LOG = 30
+
+/** A single LLM inference pass (matches backend DebugPass). */
+export interface DebugPass {
+  prompt: string
+  rawOutput: string
+}
+
+/** A full interaction log entry — one per user command. */
+export interface InteractionLogEntry {
+  /** When this command was sent. */
+  timestamp: number
+  /** The user's original message. */
+  message: string
+  /** The result summary shown to the user (or error). */
+  result: string
+  /** The parsed tool calls / message from the LLM. */
+  parsed: unknown
+  /** Raw LLM output from each inference pass. */
+  debugPasses: DebugPass[]
+}
+
 interface AssistantState {
   isOpen: boolean
   isLoading: boolean
@@ -9,6 +34,12 @@ interface AssistantState {
   downloadProgress: number
   modelLoaded: boolean
   lastResult: string | null
+  /** Command history, most recent last. */
+  history: string[]
+  /** Full interaction log for debugging, most recent last. */
+  interactionLog: InteractionLogEntry[]
+  /** Whether the debug log panel is visible. */
+  showDebugLog: boolean
 
   open: () => void
   close: () => void
@@ -17,6 +48,14 @@ interface AssistantState {
   setDownloading: (downloading: boolean, progress?: number) => void
   setModelLoaded: (loaded: boolean) => void
   setLastResult: (result: string | null) => void
+  /** Add a command to history (deduplicates consecutive repeats). */
+  addToHistory: (command: string) => void
+  /** Log a full interaction for debugging. */
+  logInteraction: (entry: InteractionLogEntry) => void
+  /** Toggle the debug log panel. */
+  toggleDebugLog: () => void
+  /** Clear the interaction log. */
+  clearLog: () => void
 }
 
 export const useAssistantStore = create<AssistantState>((set) => ({
@@ -26,6 +65,9 @@ export const useAssistantStore = create<AssistantState>((set) => ({
   downloadProgress: 0,
   modelLoaded: false,
   lastResult: null,
+  history: [],
+  interactionLog: [],
+  showDebugLog: false,
 
   open: () => set({ isOpen: true }),
   close: () => set({ isOpen: false, lastResult: null }),
@@ -37,7 +79,30 @@ export const useAssistantStore = create<AssistantState>((set) => ({
       downloadProgress: progress ?? (downloading ? 0 : 100)
     }),
   setModelLoaded: (loaded) => set({ modelLoaded: loaded }),
-  setLastResult: (result) => set({ lastResult: result })
+  setLastResult: (result) => set({ lastResult: result }),
+  addToHistory: (command) =>
+    set((s) => {
+      // Don't add consecutive duplicates
+      if (s.history.length > 0 && s.history[s.history.length - 1] === command) {
+        return s
+      }
+      const updated = [...s.history, command]
+      // Trim to max size
+      if (updated.length > MAX_HISTORY) {
+        updated.splice(0, updated.length - MAX_HISTORY)
+      }
+      return { history: updated }
+    }),
+  logInteraction: (entry) =>
+    set((s) => {
+      const updated = [...s.interactionLog, entry]
+      if (updated.length > MAX_LOG) {
+        updated.splice(0, updated.length - MAX_LOG)
+      }
+      return { interactionLog: updated }
+    }),
+  toggleDebugLog: () => set((s) => ({ showDebugLog: !s.showDebugLog })),
+  clearLog: () => set({ interactionLog: [] }),
 }))
 
 // Poll backend status until model is loaded (it loads async on startup)

@@ -100,6 +100,22 @@ pub fn terminal_kill_foreground(
         .kill_foreground(&id)
 }
 
+/// Get the name of the foreground process in a terminal.
+/// Returns None if only the shell is running.
+/// Used to detect active AI agents before closing tabs/app.
+#[cfg(unix)]
+#[tauri::command]
+pub fn terminal_get_foreground_command(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Option<String>, String> {
+    state
+        .terminal_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?
+        .get_foreground_command(&id)
+}
+
 /// Log a message from the frontend to Rust stderr (for debugging).
 #[tauri::command]
 pub fn terminal_log(message: String) -> Result<(), String> {

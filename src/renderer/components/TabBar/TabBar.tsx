@@ -1,6 +1,8 @@
-import { useCallback } from 'react'
+import { useCallback, useState } from 'react'
 import { useTabsStore } from '@/stores/tabs'
+import { useActiveAgentsStore } from '@/stores/active-agents'
 import { startTabDrag } from '@/components/Terminal/TerminalArea'
+import AgentCloseDialog from '@/components/AgentCloseDialog/AgentCloseDialog'
 
 interface TabBarProps {
   cwd: string
@@ -21,10 +23,17 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
     addTabToGroup(groupIndex, cwd)
   }, [addTabToGroup, groupIndex, cwd])
 
+  const [pendingClose, setPendingClose] = useState<{ tabId: string; agents: ReturnType<typeof useActiveAgentsStore.getState>['getAgentsInTab'] } | null>(null)
+
   const handleCloseTab = useCallback(
     (e: React.MouseEvent, tabId: string) => {
       e.stopPropagation()
-      removeTabFromGroup(groupIndex, tabId)
+      const agents = useActiveAgentsStore.getState().getAgentsInTab(tabId)
+      if (agents.length > 0) {
+        setPendingClose({ tabId, agents })
+      } else {
+        removeTabFromGroup(groupIndex, tabId)
+      }
     },
     [removeTabFromGroup, groupIndex]
   )
@@ -67,6 +76,7 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
         {tabs.map((tab) => {
           const isActive = tab.id === activeTabId
           const isDirty = tab.isDirty ?? false
+          const hasAgent = useActiveAgentsStore.getState().getAgentsInTab(tab.id).length > 0
           return (
             <div
               key={tab.id}
@@ -78,7 +88,10 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
               onClick={() => setActiveTabInGroup(groupIndex, tab.id)}
               onMouseDown={(e) => handleTabMouseDown(e, tab.id, tab.title)}
             >
-              {isDirty && (
+              {hasAgent && (
+                <span className="agent-active-dot flex-shrink-0 mr-1.5" style={{ width: 6, height: 6, backgroundColor: '#22c55e' }} />
+              )}
+              {isDirty && !hasAgent && (
                 <span className="w-1.5 h-1.5 bg-[var(--color-accent)] flex-shrink-0 mr-1.5" />
               )}
               <span className={`truncate flex-1 ${isDirty ? 'italic' : ''}`}>
@@ -170,6 +183,18 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
           <line x1="1" y1="6" x2="11" y2="6" />
         </svg>
       </button>
+      {/* Agent close confirmation dialog */}
+      {pendingClose && (
+        <AgentCloseDialog
+          agents={pendingClose.agents}
+          mode="tab"
+          onConfirm={() => {
+            removeTabFromGroup(groupIndex, pendingClose.tabId)
+            setPendingClose(null)
+          }}
+          onCancel={() => setPendingClose(null)}
+        />
+      )}
     </div>
   )
 }

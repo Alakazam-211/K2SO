@@ -43,6 +43,7 @@
     "fs:allow-mkdir",
     "fs:allow-remove",
     "fs:allow-rename",
-    "deep-link:default"
+    "deep-link:default",
+    "drag:default"
   ]
 }

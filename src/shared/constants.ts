@@ -33,3 +33,16 @@ export const RESUMABLE_CLI_TOOLS: Record<string, { resumeFlag: string; provider:
   'claude': { resumeFlag: '--resume', provider: 'claude' },
   'cursor-agent': { resumeFlag: '--resume', provider: 'cursor' },
 }
+
+// ── Known agent commands ────────────────────────────────────────────
+// CLI tools considered "active agents" for close-warning purposes.
+// When one of these is the foreground process in a terminal, the user
+// is warned before closing the tab or quitting the app.
+export const KNOWN_AGENT_COMMANDS = new Set([
+  // Cloud CLI agents
+  'claude', 'cursor-agent', 'codex', 'gemini', 'copilot',
+  'aider', 'opencode', 'codepuppy', 'gpt', 'goose',
+  // Local/on-device LLM tools
+  'ollama', 'llamafile', 'llama-cli', 'interpreter',
+  'tenere', 'llm-tui-rs',
+])

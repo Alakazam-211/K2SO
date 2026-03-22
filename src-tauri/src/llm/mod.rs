@@ -1,4 +1,5 @@
 pub mod download;
+pub mod file_index;
 pub mod tools;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -70,6 +71,15 @@ impl LlmManager {
         self.model_path.clone()
     }
 
+    /// Explicitly unloads the model and backend to release Metal/GPU resources.
+    /// Must be called before process exit to avoid SIGABRT from ggml_metal
+    /// static destructors racing against Metal device teardown.
+    pub fn unload(&mut self) {
+        self.model = None;
+        self.model_path = None;
+        self.backend = None;
+    }
+
     /// Returns whether a download is in progress.
     pub fn is_downloading(&self) -> bool {
         self.downloading.load(Ordering::Relaxed)
@@ -103,9 +113,9 @@ impl LlmManager {
             .apply_chat_template(&chat_template, &messages, true)
             .map_err(|e| format!("Failed to apply chat template: {e}"))?;
 
-        // Create context with small context window (2048 tokens)
+        // Create context — 4096 tokens to accommodate file index context
         let ctx_params = LlamaContextParams::default()
-            .with_n_ctx(std::num::NonZeroU32::new(2048))
+            .with_n_ctx(std::num::NonZeroU32::new(4096))
             .with_n_threads(4)
             .with_n_threads_batch(4);
 
@@ -118,12 +128,12 @@ impl LlmManager {
             .str_to_token(&prompt, AddBos::Always)
             .map_err(|e| format!("Failed to tokenize prompt: {e}"))?;
 
-        if tokens.len() > 1800 {
+        if tokens.len() > 3500 {
             return Err("Prompt too long for context window".to_string());
         }
 
         // Feed prompt tokens into the context via batch
-        let mut batch = LlamaBatch::new(2048, 1);
+        let mut batch = LlamaBatch::new(4096, 1);
         let last_idx = tokens.len() - 1;
         for (i, &token) in tokens.iter().enumerate() {
             batch

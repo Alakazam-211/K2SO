@@ -1,5 +1,5 @@
 import React from 'react'
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useSettingsStore, getEffectiveKeybinding } from '@/stores/settings'
 import type { SettingsSection, TerminalSettings } from '@/stores/settings'
 import { useProjectsStore } from '@/stores/projects'
@@ -8,6 +8,7 @@ import { usePresetsStore } from '@/stores/presets'
 import { invoke } from '@tauri-apps/api/core'
 import { useAssistantStore } from '@/stores/assistant'
 import IconCropDialog from './IconCropDialog'
+import ProjectAvatar from '@/components/Sidebar/ProjectAvatar'
 import {
   HOTKEYS,
   RESERVED_KEYS,
@@ -912,7 +913,7 @@ function ProjectsSection(): React.JSX.Element {
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId) ?? null
   const editors = ['Cursor', 'VS Code', 'Zed', 'Other']
-  const ungroupedProjects = projects.filter((p) => !p.focusGroupId)
+  const ungroupedProjects = projects.filter((p) => !p.focusGroupId && !p.pinned)
 
   const toggleGroupCollapse = useCallback((groupId: string) => {
     setCollapsedGroups((prev) => {
@@ -936,6 +937,119 @@ function ProjectsSection(): React.JSX.Element {
     setDragProjectId(null)
     setDragOverGroupId(null)
   }, [dragProjectId, assignProjectToGroup, fetchProjects])
+
+  // ── Reorder state ──────────────────────────────────────────────────
+  const [reorderDragId, setReorderDragId] = useState<string | null>(null)
+  const [reorderDropIndex, setReorderDropIndex] = useState<number | null>(null)
+  const [reorderZone, setReorderZone] = useState<string | null>(null)
+  const reorderDropRef = useRef<number | null>(null)
+  const reorderZoneRef = useRef<string | null>(null)
+  const dragOverGroupRef = useRef<string | null>(null)
+
+  const pinnedProjects = useMemo(() => projects.filter((p) => p.pinned), [projects])
+  const reorderProjects = useProjectsStore((s) => s.reorderProjects)
+
+  const handleReorderMouseDown = useCallback((
+    e: React.MouseEvent,
+    projectId: string,
+    zone: string,
+    containerSelector: string
+  ) => {
+    if (e.button !== 0) return
+    const startX = e.clientX
+    const startY = e.clientY
+    let started = false
+
+    const handleMouseMove = (ev: MouseEvent): void => {
+      if (!started && (Math.abs(ev.clientX - startX) > 3 || Math.abs(ev.clientY - startY) > 5)) {
+        started = true
+        setReorderDragId(projectId)
+        setReorderZone(zone)
+        reorderZoneRef.current = zone
+        document.body.style.cursor = 'grabbing'
+        document.body.style.userSelect = 'none'
+      }
+      if (!started) return
+
+      // Check if hovering over a focus group header
+      const el = document.elementFromPoint(ev.clientX, ev.clientY)
+      const groupHeader = el?.closest('[data-focus-group-id]') as HTMLElement | null
+      if (groupHeader) {
+        const gid = groupHeader.dataset.focusGroupId!
+        dragOverGroupRef.current = gid
+        setDragOverGroupId(gid)
+        setReorderDropIndex(null)
+        reorderDropRef.current = null
+        return
+      } else {
+        dragOverGroupRef.current = null
+        setDragOverGroupId(null)
+      }
+
+      // Check within-zone reorder
+      const container = document.querySelector(containerSelector)
+      if (!container) return
+      const items = container.querySelectorAll('[data-settings-project-id]')
+      let idx = 0
+      for (let i = 0; i < items.length; i++) {
+        const rect = items[i].getBoundingClientRect()
+        if (ev.clientY > rect.top + rect.height / 2) idx = i + 1
+      }
+      reorderDropRef.current = idx
+      setReorderDropIndex(idx)
+    }
+
+    const handleMouseUp = async (): Promise<void> => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+
+      if (started) {
+        // Check if dropped on a focus group header → move to that group
+        const hoveredGroupId = dragOverGroupRef.current
+        if (hoveredGroupId && hoveredGroupId !== '__ungrouped__') {
+          await assignProjectToGroup(projectId, hoveredGroupId)
+          await fetchProjects()
+        } else if (hoveredGroupId === '__ungrouped__') {
+          await assignProjectToGroup(projectId, null)
+          await fetchProjects()
+        } else {
+          // Within-zone reorder
+          const currentProjects = useProjectsStore.getState().projects
+          let list: typeof projects = []
+          const z = reorderZoneRef.current
+          if (z === 'pinned') {
+            list = [...currentProjects.filter((p) => p.pinned)]
+          } else if (z === 'ungrouped' || z === 'flat') {
+            list = [...currentProjects.filter((p) => !p.pinned && !p.focusGroupId)]
+          } else if (z?.startsWith('group:')) {
+            const gid = z.slice(6)
+            list = [...currentProjects.filter((p) => p.focusGroupId === gid)]
+          }
+
+          const di = reorderDropRef.current
+          const fromIdx = list.findIndex((p) => p.id === projectId)
+          if (fromIdx >= 0 && di !== null && fromIdx !== di && fromIdx !== di - 1) {
+            const item = list.splice(fromIdx, 1)[0]
+            const insertAt = di > fromIdx ? di - 1 : di
+            list.splice(insertAt, 0, item)
+            reorderProjects(list.map((p) => p.id))
+          }
+        }
+      }
+
+      setReorderDragId(null)
+      setReorderZone(null)
+      setReorderDropIndex(null)
+      setDragOverGroupId(null)
+      reorderDropRef.current = null
+      reorderZoneRef.current = null
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+  }, [reorderProjects, assignProjectToGroup, fetchProjects])
 
   const [disableWorktreeProject, setDisableWorktreeProject] = useState<typeof projects[number] | null>(null)
 
@@ -1001,57 +1115,53 @@ function ProjectsSection(): React.JSX.Element {
   }, [gitInitForWorktree, gitInitBranch, fetchProjects])
 
   // Workspace row component (reused in groups and ungrouped)
-  const ProjectRow = useCallback(({ project: p }: { project: typeof projects[number] }) => {
+  const ProjectRow = useCallback(({ project: p, zone, containerSelector }: {
+    project: typeof projects[number]
+    zone: string
+    containerSelector: string
+  }) => {
     const isSelected = selectedProjectId === p.id
-    const isDragged = dragProjectId === p.id
+    const isDragged = reorderDragId === p.id
     return (
       <div
-        draggable={focusGroupsEnabled}
-        onDragStart={(e) => {
-          setDragProjectId(p.id)
-          e.dataTransfer.effectAllowed = 'move'
-          e.dataTransfer.setData('text/plain', p.id)
-          // Use the current target as drag image
-          if (e.currentTarget instanceof HTMLElement) {
-            e.dataTransfer.setDragImage(e.currentTarget, 10, 10)
-          }
-        }}
-        onDragEnd={() => { setDragProjectId(null); setDragOverGroupId(null) }}
+        data-settings-project-id={p.id}
         onClick={() => setSelectedProjectId(p.id)}
-        className={`flex items-center gap-2 px-2 py-1.5 transition-colors no-drag cursor-pointer group ${
+        onMouseDown={(e) => handleReorderMouseDown(e, p.id, zone, containerSelector)}
+        className={`flex items-center gap-2 px-2 py-1.5 transition-colors no-drag cursor-pointer group select-none ${
           isSelected
             ? 'bg-[var(--color-accent)]/15 text-[var(--color-text-primary)]'
             : 'text-[var(--color-text-secondary)] hover:bg-white/[0.04] hover:text-[var(--color-text-primary)]'
-        } ${isDragged ? 'opacity-30' : ''} ${focusGroupsEnabled ? 'cursor-grab active:cursor-grabbing' : ''}`}
+        } ${isDragged ? 'opacity-30' : ''} cursor-grab active:cursor-grabbing`}
       >
-        {/* Drag handle dots — only visible when focus groups enabled */}
-        {focusGroupsEnabled && (
-          <svg
-            width="6" height="10" viewBox="0 0 6 10"
-            fill="currentColor"
-            className="flex-shrink-0 opacity-0 group-hover:opacity-40 transition-opacity"
-          >
-            <circle cx="1.5" cy="1.5" r="1" />
-            <circle cx="4.5" cy="1.5" r="1" />
-            <circle cx="1.5" cy="5" r="1" />
-            <circle cx="4.5" cy="5" r="1" />
-            <circle cx="1.5" cy="8.5" r="1" />
-            <circle cx="4.5" cy="8.5" r="1" />
-          </svg>
-        )}
-        <div
-          className="w-5 h-5 flex items-center justify-center flex-shrink-0 text-[10px] font-bold text-white"
-          style={{ backgroundColor: p.color }}
-        >
-          {p.name.charAt(0).toUpperCase()}
-        </div>
+        <ProjectAvatar
+          projectPath={p.path}
+          projectName={p.name}
+          projectColor={p.color}
+          projectId={p.id}
+          iconUrl={p.iconUrl}
+          size={20}
+        />
         <span className="text-xs truncate flex-1">{p.name}</span>
-        <span className="text-[10px] text-[var(--color-text-muted)] flex-shrink-0 tabular-nums">
-          {p.worktreeMode ? `${p.workspaces.length}` : 'local'}
-        </span>
+        <button
+          onClick={async (e) => {
+            e.stopPropagation()
+            await invoke('projects_update', { id: p.id, pinned: p.pinned ? 0 : 1 })
+            await fetchProjects()
+          }}
+          className={`flex-shrink-0 p-0.5 transition-colors ${
+            p.pinned
+              ? 'text-[var(--color-accent)]'
+              : 'text-transparent group-hover:text-[var(--color-text-muted)] hover:!text-[var(--color-accent)]'
+          }`}
+          title={p.pinned ? 'Unpin' : 'Pin to top'}
+        >
+          <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1-.707.707l-.71-.71-3.18 3.18a3.5 3.5 0 0 1-.4.3L11 11.106V14.5a.5.5 0 0 1-.854.354L7.5 12.207 4.854 14.854a.5.5 0 0 1-.708-.708L6.793 11.5 4.146 8.854A.5.5 0 0 1 4.5 8h3.394a3.5 3.5 0 0 0 .3-.4l3.18-3.18-.71-.71a.5.5 0 0 1 .354-.854z" />
+          </svg>
+        </button>
       </div>
     )
-  }, [selectedProjectId, dragProjectId, focusGroupsEnabled])
+  }, [selectedProjectId, reorderDragId, handleReorderMouseDown, fetchProjects])
 
   return (
     <div className="flex h-full -m-6">
@@ -1076,33 +1186,56 @@ function ProjectsSection(): React.JSX.Element {
           </button>
         </div>
 
-        {/* Workspace list — organized by group folders when enabled */}
+        {/* Workspace list — pinned at top, then groups or flat */}
         <div className="flex-1 overflow-y-auto px-1 py-1">
+          {/* ── Pinned workspaces (always visible) ── */}
+          {pinnedProjects.length > 0 && (
+            <div className="mb-1 pb-1 border-b border-[var(--color-border)]">
+              <div className="px-2 pt-1 pb-1">
+                <span className="text-[10px] font-semibold text-[var(--color-accent)] uppercase tracking-wider">
+                  Pinned
+                </span>
+              </div>
+              <div data-reorder-zone="pinned">
+                {pinnedProjects.map((p, idx) => (
+                  <div key={p.id}>
+                    {reorderZone === 'pinned' && reorderDropIndex === idx && (
+                      <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
+                    )}
+                    <ProjectRow project={p} zone="pinned" containerSelector="[data-reorder-zone='pinned']" />
+                  </div>
+                ))}
+                {reorderZone === 'pinned' && reorderDropIndex === pinnedProjects.length && (
+                  <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
+                )}
+              </div>
+            </div>
+          )}
+
           {focusGroupsEnabled ? (
             <>
               {/* Focus group folders */}
               {focusGroups.map((group) => {
-                const groupProjects = projects.filter((p) => p.focusGroupId === group.id)
+                const groupProjects = projects.filter((p) => p.focusGroupId === group.id && !p.pinned)
                 const isCollapsed = collapsedGroups.has(group.id)
                 const isDragOver = dragOverGroupId === group.id
+                const zoneId = `group:${group.id}`
 
                 return (
                   <div key={group.id} className="mb-0.5">
                     {/* Group folder header */}
                     <div
-                      className={`flex items-center gap-1.5 px-2 py-1 cursor-pointer no-drag transition-colors ${
-                        isDragOver ? 'bg-[var(--color-accent)]/10' : 'hover:bg-white/[0.03]'
+                      data-focus-group-id={group.id}
+                      className={`flex items-center gap-1.5 px-2 py-1 cursor-pointer no-drag select-none transition-all duration-150 ${
+                        isDragOver
+                          ? 'bg-[var(--color-accent)]/15 ring-1 ring-inset ring-[var(--color-accent)] scale-[1.02]'
+                          : 'hover:bg-white/[0.03]'
                       }`}
                       onClick={() => toggleGroupCollapse(group.id)}
-                      onDragOver={(e) => { e.preventDefault(); setDragOverGroupId(group.id) }}
-                      onDragLeave={() => setDragOverGroupId(null)}
-                      onDrop={(e) => { e.preventDefault(); handleDrop(group.id) }}
                     >
-                      {/* Color bar */}
                       {group.color && (
-                        <span className="w-1 h-3 flex-shrink-0" style={{ backgroundColor: group.color }} />
+                        <span className="w-1 h-3 flex-shrink-0" style={{ backgroundColor: isDragOver ? 'var(--color-accent)' : group.color }} />
                       )}
-                      {/* Chevron */}
                       <svg
                         className={`w-2.5 h-2.5 text-[var(--color-text-muted)] transition-transform flex-shrink-0 ${
                           isCollapsed ? '' : 'rotate-90'
@@ -1114,17 +1247,30 @@ function ProjectsSection(): React.JSX.Element {
                       <span className="text-[11px] font-medium text-[var(--color-text-secondary)] flex-1 truncate">
                         {group.name}
                       </span>
-                      <span className="text-[10px] text-[var(--color-text-muted)] tabular-nums flex-shrink-0">
-                        {groupProjects.length}
-                      </span>
+                      {isDragOver ? (
+                        <span className="text-[9px] text-[var(--color-accent)] flex-shrink-0 font-medium">
+                          Drop here
+                        </span>
+                      ) : (
+                        <span className="text-[10px] text-[var(--color-text-muted)] tabular-nums flex-shrink-0">
+                          {groupProjects.length}
+                        </span>
+                      )}
                     </div>
 
-                    {/* Group workspaces */}
                     {!isCollapsed && (
-                      <div className="ml-3">
-                        {groupProjects.map((p) => (
-                          <ProjectRow key={p.id} project={p} />
+                      <div className="ml-3" data-reorder-zone={zoneId}>
+                        {groupProjects.map((p, idx) => (
+                          <div key={p.id}>
+                            {reorderZone === zoneId && reorderDropIndex === idx && (
+                              <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
+                            )}
+                            <ProjectRow project={p} zone={zoneId} containerSelector={`[data-reorder-zone='${zoneId}']`} />
+                          </div>
                         ))}
+                        {reorderZone === zoneId && reorderDropIndex === groupProjects.length && (
+                          <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
+                        )}
                         {groupProjects.length === 0 && (
                           <div
                             className={`px-2 py-2 text-center text-[10px] text-[var(--color-text-muted)] italic transition-colors ${
@@ -1144,19 +1290,27 @@ function ProjectsSection(): React.JSX.Element {
               {ungroupedProjects.length > 0 && (
                 <div className="mt-1">
                   <div
-                    className={`flex items-center gap-1.5 px-2 py-1 text-[11px] font-medium text-[var(--color-text-muted)] transition-colors ${
-                      dragOverGroupId === '__ungrouped__' ? 'bg-[var(--color-accent)]/10' : ''
+                    data-focus-group-id="__ungrouped__"
+                    className={`flex items-center gap-1.5 px-2 py-1 text-[11px] font-medium select-none transition-all duration-150 ${
+                      dragOverGroupId === '__ungrouped__'
+                        ? 'text-[var(--color-accent)] bg-[var(--color-accent)]/15 ring-1 ring-inset ring-[var(--color-accent)] scale-[1.02]'
+                        : 'text-[var(--color-text-muted)]'
                     }`}
-                    onDragOver={(e) => { e.preventDefault(); setDragOverGroupId('__ungrouped__') }}
-                    onDragLeave={() => setDragOverGroupId(null)}
-                    onDrop={(e) => { e.preventDefault(); handleDrop(null) }}
                   >
                     Ungrouped
                   </div>
-                  <div className="ml-1">
-                    {ungroupedProjects.map((p) => (
-                      <ProjectRow key={p.id} project={p} />
+                  <div className="ml-1" data-reorder-zone="ungrouped">
+                    {ungroupedProjects.map((p, idx) => (
+                      <div key={p.id}>
+                        {reorderZone === 'ungrouped' && reorderDropIndex === idx && (
+                          <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
+                        )}
+                        <ProjectRow project={p} zone="ungrouped" containerSelector="[data-reorder-zone='ungrouped']" />
+                      </div>
                     ))}
+                    {reorderZone === 'ungrouped' && reorderDropIndex === ungroupedProjects.length && (
+                      <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
+                    )}
                   </div>
                 </div>
               )}
@@ -1183,9 +1337,16 @@ function ProjectsSection(): React.JSX.Element {
                   Workspaces
                 </span>
               </div>
-              {projects.map((p) => (
-                <ProjectRow key={p.id} project={p} />
-              ))}
+              <div data-reorder-zone="flat">
+                {projects.filter((p) => !p.pinned).map((p, idx) => (
+                  <div key={p.id}>
+                    {reorderZone === 'flat' && reorderDropIndex === idx && (
+                      <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
+                    )}
+                    <ProjectRow project={p} zone="flat" containerSelector="[data-reorder-zone='flat']" />
+                  </div>
+                ))}
+              </div>
               {projects.length === 0 && (
                 <div className="px-2 py-6 text-center">
                   <span className="text-xs text-[var(--color-text-muted)]">No workspaces</span>

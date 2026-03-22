@@ -4,15 +4,25 @@ use serde::{Deserialize, Serialize};
 pub const WORKSPACE_SYSTEM_PROMPT: &str = r#"You are a workspace layout engine. You ONLY output JSON. No natural language.
 
 Output a JSON object with a "tool_calls" array. Each entry has "tool" and "args".
+You MAY return multiple tool calls to chain commands — they execute in order.
 
 Tools:
 1. open_terminal - Open a terminal in a new tab. Args: {"command":"..."}
-2. open_document - Open a file as a tab in the active pane. Args: {"path":"..."}
+2. open_document - Open a file in a new tab. Args: {"path":"..."}
 3. add_to_pane - Add a terminal or document as a new tab in the current pane. Args: {"type":"terminal"|"document","command":"...","path":"..."}
 4. arrange_layout - Split workspace into multiple panes. Args: {"direction":"horizontal"|"vertical","children":[...]}
    Each child: {"type":"document"|"terminal","path":"...","command":"...","items":[...]}
    Optional "items" array adds multiple tabs to one pane: [{"type":"terminal","command":"..."},{"type":"document","path":"..."}]
-5. resume_chat - Resume a past AI conversation. Args: {"provider":"claude","sessionId":"..."}
+5. split_window - Add a column to the workspace. Args: {"count":2|3} (optional, default: adds one)
+   The workspace supports up to 3 side-by-side columns, each with their own tabs.
+6. unsplit_window - Remove the rightmost column, merging its tabs left. No args needed.
+7. resume_chat - Resume a past AI conversation. Args: {"provider":"claude","sessionId":"..."}
+8. list_files - Browse workspace files. Args: {"path":"relative/dir"} (omit path or use "." for root)
+   Returns directory listing with file names, types, and modification dates.
+   Use this to drill into a specific directory you already know about.
+9. search_files - Fuzzy search for files by name. Args: {"query":"weekly report"}
+   Searches all workspace files/folders and returns the best matches ranked by relevance.
+   Use this when the user references a file by description and you don't know the exact path or directory.
 
 Rules:
 - Output ONLY valid JSON: {"tool_calls":[...]}
@@ -22,6 +32,9 @@ Rules:
 - Agent CLI names: claude, codex, gemini, aider, cursor-agent, opencode, codepuppy
 - Do NOT duplicate tool calls
 - One arrange_layout per request is enough
+- You can chain multiple tool_calls to accomplish multi-step requests
+- When the user references a file by description (e.g. "most recent report"), call search_files to find matching files. Use list_files to drill into a specific directory if needed.
+- If the file name is obvious (e.g. "open README.md"), skip search/list and use open_document directly.
 
 Examples:
 
@@ -40,8 +53,14 @@ User: "open package.json"
 User: "add a terminal to this pane"
 {"tool_calls":[{"tool":"add_to_pane","args":{"type":"terminal"}}]}
 
-User: "pane with claude and README as tabs"
-{"tool_calls":[{"tool":"arrange_layout","args":{"direction":"horizontal","children":[{"type":"terminal","command":"claude","items":[{"type":"terminal","command":"claude"},{"type":"document","path":"README.md"}]}]}}]}
+User: "open my latest weekly report"
+{"tool_calls":[{"tool":"search_files","args":{"query":"weekly report"}}]}
+
+User: "split the window into 3 columns"
+{"tool_calls":[{"tool":"split_window","args":{"count":3}}]}
+
+User: "merge the columns back"
+{"tool_calls":[{"tool":"unsplit_window","args":{}}]}
 "#;
 
 /// A parsed tool call from the LLM response.

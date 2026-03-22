@@ -98,26 +98,43 @@ export function TerminalView({
   const ptyIdRef = useRef<string | null>(null)
   const isExitedRef = useRef(false)
 
-  // Stable fit function
+  // Stable fit function — debounced to prevent flooding the PTY with
+  // SIGWINCH signals during drag-resize, which causes TUI apps (Claude Code,
+  // Gemini CLI, etc.) to partially redraw and leave box-drawing artifacts.
+  const fitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastColsRef = useRef(0)
+  const lastRowsRef = useRef(0)
+
   const doFit = useCallback(() => {
-    const fitAddon = fitAddonRef.current
-    const xterm = xtermRef.current
-    if (!fitAddon || !xterm || !containerRef.current) return
+    if (fitTimerRef.current) clearTimeout(fitTimerRef.current)
+    fitTimerRef.current = setTimeout(() => {
+      const fitAddon = fitAddonRef.current
+      const xterm = xtermRef.current
+      if (!fitAddon || !xterm || !containerRef.current) return
 
-    try {
-      fitAddon.fit()
+      try {
+        fitAddon.fit()
 
-      const ptyId = ptyIdRef.current
-      if (ptyId && xterm.cols > 0 && xterm.rows > 0) {
-        invoke('terminal_resize', {
-          id: ptyId,
-          cols: xterm.cols,
-          rows: xterm.rows
-        })
+        // Only send resize to PTY if dimensions actually changed
+        const ptyId = ptyIdRef.current
+        if (
+          ptyId &&
+          xterm.cols > 0 &&
+          xterm.rows > 0 &&
+          (xterm.cols !== lastColsRef.current || xterm.rows !== lastRowsRef.current)
+        ) {
+          lastColsRef.current = xterm.cols
+          lastRowsRef.current = xterm.rows
+          invoke('terminal_resize', {
+            id: ptyId,
+            cols: xterm.cols,
+            rows: xterm.rows
+          })
+        }
+      } catch {
+        // Ignore fit errors during teardown
       }
-    } catch {
-      // Ignore fit errors during teardown
-    }
+    }, 80)
   }, [])
 
   useEffect(() => {
@@ -226,6 +243,35 @@ export function TerminalView({
       doFit()
     })
     resizeObserver.observe(container)
+
+    // ── Drop files into terminal → paste path ─────────────────────────
+    // Handles native drags from Finder and from FileTree (via Tauri drag plugin).
+    // Paths are shell-escaped so spaces/special chars work correctly.
+    let dropUnlisten: UnlistenFn | undefined
+    listen<{ paths: string[]; position: { x: number; y: number } }>(
+      'tauri://drag-drop',
+      (event) => {
+        const { paths, position } = event.payload
+        if (!paths || paths.length === 0) return
+        if (!ptyIdRef.current || isExitedRef.current) return
+
+        // Only handle if the drop landed on THIS terminal's container
+        const el = document.elementFromPoint(position.x, position.y)
+        if (!el || !container.contains(el)) return
+
+        // Shell-escape each path and join with spaces
+        const escaped = paths.map((p) => {
+          // Wrap in single quotes; escape any existing single quotes
+          if (/[^a-zA-Z0-9_\-./]/.test(p)) {
+            return "'" + p.replace(/'/g, "'\\''") + "'"
+          }
+          return p
+        })
+        const text = escaped.join(' ')
+
+        invoke('terminal_write', { id: ptyIdRef.current, data: text }).catch(() => {})
+      }
+    ).then((fn) => { dropUnlisten = fn })
 
     // ── Spawn or reattach the pty ──────────────────────────────────────
     let dataUnlisten: UnlistenFn | undefined
@@ -337,6 +383,8 @@ export function TerminalView({
     // When this component remounts (tab re-activated), it reattaches.
     return () => {
       resizeObserver.disconnect()
+      if (fitTimerRef.current) clearTimeout(fitTimerRef.current)
+      dropUnlisten?.()
       dataUnlisten?.()
       exitUnlisten?.()
 
@@ -468,6 +516,7 @@ export function TerminalView({
   return (
     <div
       ref={containerRef}
+      data-terminal-id={ptyIdRef.current || terminalId}
       className="h-full w-full bg-[#0a0a0a] no-drag"
       style={{ padding: '4px 0 0 4px' }}
     />

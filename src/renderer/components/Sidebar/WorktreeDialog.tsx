@@ -1,6 +1,19 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useProjectsStore } from '@/stores/projects'
+
+/** Sanitize a string into a valid git branch name */
+function sanitizeBranchName(input: string): string {
+  return input
+    .trim()
+    .replace(/\s+/g, '-')        // spaces → hyphens
+    .replace(/\.{2,}/g, '-')     // consecutive dots → hyphen
+    .replace(/[\x00-\x1f\x7f~^:?*[\]\\]/g, '') // control chars + git-invalid chars
+    .replace(/\/\//g, '/')       // collapse double slashes
+    .replace(/^[.\-/]+/, '')     // no leading dot, hyphen, or slash
+    .replace(/[.\-/]+$/, '')     // no trailing dot, hyphen, or slash
+    .replace(/\.lock$/i, '')     // can't end with .lock
+}
 
 interface WorktreeDialogProps {
   projectId: string
@@ -62,8 +75,11 @@ export default function WorktreeDialog({
     return () => window.removeEventListener('keydown', handler)
   }, [open, onClose])
 
+  const sanitizedName = useMemo(() => sanitizeBranchName(name), [name])
+  const namesDiffer = name.trim().length > 0 && sanitizedName !== name.trim()
+
   const handleCreate = useCallback(async () => {
-    const branchName = mode === 'new' ? name.trim() : selectedBranch
+    const branchName = mode === 'new' ? sanitizedName : selectedBranch
     if (!branchName) return
 
     setCreating(true)
@@ -89,12 +105,12 @@ export default function WorktreeDialog({
     } finally {
       setCreating(false)
     }
-  }, [name, selectedBranch, mode, projectPath, projectId, fetchProjects, setActiveWorkspace, onClose])
+  }, [sanitizedName, selectedBranch, mode, projectPath, projectId, fetchProjects, setActiveWorkspace, onClose])
 
   if (!open) return null
 
   const canCreate = mode === 'new'
-    ? name.trim().length > 0 && !creating
+    ? sanitizedName.length > 0 && !creating
     : selectedBranch.length > 0 && !creating
 
   return (
@@ -168,7 +184,13 @@ export default function WorktreeDialog({
                   if (e.key === 'Enter' && canCreate) handleCreate()
                 }}
               />
-              <p className="text-[11px] text-[var(--color-text-muted)] mt-2">
+              {namesDiffer && (
+                <p className="text-[11px] text-[var(--color-text-secondary)] mt-1.5 font-mono">
+                  <span className="text-[var(--color-text-muted)]">Branch: </span>
+                  <span className="text-[var(--color-accent)]">{sanitizedName}</span>
+                </p>
+              )}
+              <p className="text-[11px] text-[var(--color-text-muted)] mt-1.5">
                 Creates a new branch and workspace from the current branch.
               </p>
             </>
