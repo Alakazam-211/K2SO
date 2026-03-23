@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
 import { useSettingsStore } from '@/stores/settings'
+import AgentIcon from '@/components/AgentIcon/AgentIcon'
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -71,40 +72,15 @@ function getRightmostLeaf(tree: unknown): string | null {
 
 // ── Icons ────────────────────────────────────────────────────────────
 
-function ClaudeIcon(): React.JSX.Element {
-  return (
-    <svg
-      className="w-3.5 h-3.5 flex-shrink-0 text-[var(--color-text-muted)]"
-      viewBox="0 0 16 16"
-      fill="none"
-    >
-      <path
-        d="M8 2l1.5 3.5L13 7l-3.5 1.5L8 12l-1.5-3.5L3 7l3.5-1.5z"
-        fill="currentColor"
-      />
-    </svg>
-  )
-}
-
-function CursorIcon(): React.JSX.Element {
-  return (
-    <svg
-      className="w-3.5 h-3.5 flex-shrink-0 text-[var(--color-text-muted)]"
-      viewBox="0 0 16 16"
-      fill="none"
-    >
-      <path
-        d="M3 2l10 6-10 6V2z"
-        fill="currentColor"
-        opacity="0.8"
-      />
-    </svg>
-  )
+/** Map chat history provider names to AgentIcon agent names */
+const PROVIDER_AGENT_NAME: Record<string, string> = {
+  claude: 'Claude',
+  cursor: 'Cursor Agent',
 }
 
 function ProviderIcon({ provider }: { provider: string }): React.JSX.Element {
-  if (provider === 'cursor') return <CursorIcon />
-  return <ClaudeIcon />
+  const agentName = PROVIDER_AGENT_NAME[provider] ?? provider
+  return <AgentIcon agent={agentName} size={14} />
 }
 
 interface ChatStoragePaths {
@@ -158,6 +134,10 @@ export default function ChatHistory(): React.JSX.Element {
   const [searchVisible, setSearchVisible] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(-1)
+  const [customNames, setCustomNames] = useState<Record<string, string>>({})
+  const [renamingSession, setRenamingSession] = useState<ChatSession | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const renameInputRef = useRef<HTMLInputElement>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const selectedRowRef = useRef<HTMLButtonElement>(null)
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -192,10 +172,21 @@ export default function ChatHistory(): React.JSX.Element {
     }
   }, [projectPath])
 
+  // Fetch custom names
+  const fetchCustomNames = useCallback(async () => {
+    try {
+      const names = await invoke<Record<string, string>>('chat_history_get_custom_names')
+      setCustomNames(names)
+    } catch {
+      // ignore
+    }
+  }, [])
+
   // Initial fetch
   useEffect(() => {
     fetchSessions(true)
-  }, [fetchSessions])
+    fetchCustomNames()
+  }, [fetchSessions, fetchCustomNames])
 
   // Poll every 5 seconds to catch new sessions quickly
   // (cheap operation — reads small files)
@@ -291,6 +282,39 @@ export default function ChatHistory(): React.JSX.Element {
     })
   }, [projectPath, searchQuery])
 
+  const handleRenameStart = useCallback((session: ChatSession, e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const key = `${session.provider}:${session.sessionId}`
+    setRenamingSession(session)
+    setRenameValue(customNames[key] ?? session.title)
+    setTimeout(() => renameInputRef.current?.focus(), 0)
+  }, [customNames])
+
+  const handleRenameSubmit = useCallback(async () => {
+    if (!renamingSession || !renameValue.trim()) {
+      setRenamingSession(null)
+      return
+    }
+    try {
+      await invoke('chat_history_rename_session', {
+        provider: renamingSession.provider,
+        sessionId: renamingSession.sessionId,
+        customName: renameValue.trim(),
+      })
+      // Update local custom names
+      const key = `${renamingSession.provider}:${renamingSession.sessionId}`
+      setCustomNames((prev) => ({ ...prev, [key]: renameValue.trim() }))
+      // Update any open tab with this session's title
+      const tabsStore = useTabsStore.getState()
+      const oldTitle = customNames[key] ?? renamingSession.title
+      tabsStore.renameTabByTitle(oldTitle, renameValue.trim())
+    } catch (err) {
+      console.error('[chat-history] Failed to rename:', err)
+    }
+    setRenamingSession(null)
+  }, [renamingSession, renameValue, customNames])
+
   const handleSessionClick = useCallback(
     (session: ChatSession) => {
       if (!projectPath) return
@@ -299,17 +323,19 @@ export default function ChatHistory(): React.JSX.Element {
       if (!config) return
 
       const tabsStore = useTabsStore.getState()
+      const key = `${session.provider}:${session.sessionId}`
+      const displayTitle = customNames[key] ?? session.title
 
       // If split into columns, open in the rightmost group
       const targetGroup = tabsStore.splitCount > 1 ? tabsStore.splitCount - 1 : 0
 
       tabsStore.addTabToGroup(targetGroup, projectPath, {
-        title: session.title,
+        title: displayTitle,
         command: config.command,
         args: ['--resume', session.sessionId]
       })
     },
-    [projectPath]
+    [projectPath, customNames]
   )
 
   const handleSearchKeyDown = useCallback(
@@ -457,17 +483,38 @@ export default function ChatHistory(): React.JSX.Element {
                               : 'hover:bg-white/[0.04] active:bg-white/[0.06]'
                           }`}
                           onClick={() => handleSessionClick(session)}
+                          onContextMenu={(e) => handleRenameStart(session, e)}
                         >
                           <ProviderIcon provider={session.provider} />
 
                           <div className="flex-1 min-w-0 flex flex-col justify-center">
-                            <span className="text-[11px] text-[var(--color-text-secondary)] font-mono truncate leading-tight">
-                              {session.title}
-                            </span>
-                            {session.messageCount > 0 && (
-                              <span className="text-[10px] text-[var(--color-text-muted)] font-mono leading-tight">
-                                {session.messageCount} message{session.messageCount !== 1 ? 's' : ''}
-                              </span>
+                            {renamingSession?.sessionId === session.sessionId && renamingSession?.provider === session.provider ? (
+                              <input
+                                ref={renameInputRef}
+                                type="text"
+                                value={renameValue}
+                                onChange={(e) => setRenameValue(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') { e.preventDefault(); handleRenameSubmit() }
+                                  if (e.key === 'Escape') { e.preventDefault(); setRenamingSession(null) }
+                                  e.stopPropagation()
+                                }}
+                                onBlur={handleRenameSubmit}
+                                onClick={(e) => e.stopPropagation()}
+                                className="text-[11px] font-mono bg-white/[0.06] border border-[var(--color-accent)] text-[var(--color-text-primary)] px-1 py-0 outline-none w-full"
+                                maxLength={100}
+                              />
+                            ) : (
+                              <>
+                                <span className="text-[11px] text-[var(--color-text-secondary)] font-mono truncate leading-tight">
+                                  {customNames[`${session.provider}:${session.sessionId}`] ?? session.title}
+                                </span>
+                                {session.messageCount > 0 && (
+                                  <span className="text-[10px] text-[var(--color-text-muted)] font-mono leading-tight">
+                                    {session.messageCount} message{session.messageCount !== 1 ? 's' : ''}
+                                  </span>
+                                )}
+                              </>
                             )}
                           </div>
 

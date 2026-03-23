@@ -316,6 +316,13 @@ pub fn run() {
             commands::chat_history::chat_history_list_for_project,
             commands::chat_history::chat_history_detect_active_session,
             commands::chat_history::chat_history_get_storage_paths,
+            commands::chat_history::chat_history_get_custom_names,
+            commands::chat_history::chat_history_rename_session,
+            // Timer
+            commands::timer::timer_entries_list,
+            commands::timer::timer_entry_create,
+            commands::timer::timer_entry_delete,
+            commands::timer::timer_entries_export,
             // Updater
             commands::updater::check_for_update,
             commands::updater::get_current_version,

@@ -27,6 +27,44 @@ fn default_agent() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TimerSettings {
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    #[serde(default = "default_true")]
+    pub countdown_enabled: bool,
+    #[serde(default = "default_countdown_theme")]
+    pub countdown_theme: String,
+    #[serde(default)]
+    pub skip_memo: bool,
+    #[serde(default)]
+    pub timezone: String,
+    #[serde(default)]
+    pub custom_themes: Vec<serde_json::Value>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_countdown_theme() -> String {
+    "rocket".to_string()
+}
+
+impl Default for TimerSettings {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            countdown_enabled: true,
+            countdown_theme: "rocket".to_string(),
+            skip_memo: false,
+            timezone: String::new(),
+            custom_themes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub terminal: TerminalSettings,
     pub keybindings: HashMap<String, String>,
@@ -39,6 +77,8 @@ pub struct AppSettings {
     pub workspace_layouts: HashMap<String, serde_json::Value>,
     #[serde(default = "default_agent")]
     pub default_agent: String,
+    #[serde(default)]
+    pub timer: TimerSettings,
 }
 
 impl Default for AppSettings {
@@ -59,6 +99,7 @@ impl Default for AppSettings {
             right_panel_open: false,
             workspace_layouts: HashMap::new(),
             default_agent: "claude".to_string(),
+            timer: TimerSettings::default(),
         }
     }
 }

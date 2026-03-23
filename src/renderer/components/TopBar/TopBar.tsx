@@ -3,6 +3,7 @@ import { TOPBAR_HEIGHT } from '../../../shared/constants'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useSettingsStore } from '@/stores/settings'
+import TimerButton from '@/components/Timer/TimerButton'
 
 interface TopBarProps {
   projectName?: string
@@ -173,6 +174,9 @@ export default function TopBar({
             </svg>
           </button>
         )}
+
+        {/* Timer */}
+        <TimerButton />
 
         {/* Left panel toggle (opens panel to the left of terminal) */}
         <button

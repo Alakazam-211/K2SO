@@ -82,8 +82,8 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
               key={tab.id}
               className={`group flex h-full min-w-0 max-w-[200px] cursor-pointer items-center border-r border-[var(--color-border)] px-3 text-xs transition-colors select-none ${
                 isActive
-                  ? 'bg-[var(--color-bg)] text-[var(--color-text-primary)]'
-                  : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)]'
+                  ? 'bg-white/[0.08] text-[var(--color-text-primary)]'
+                  : 'text-[var(--color-text-secondary)] hover:bg-white/[0.04]'
               }`}
               onClick={() => setActiveTabInGroup(groupIndex, tab.id)}
               onMouseDown={(e) => handleTabMouseDown(e, tab.id, tab.title)}

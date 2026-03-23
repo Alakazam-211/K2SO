@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::collections::HashMap;
+use tauri::Emitter;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -167,7 +168,46 @@ fn cursor_project_hash(project_path: &str) -> String {
         .replace('/', "-")
 }
 
-fn parse_cursor_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSession>, String> {
+/// Read Cursor chat metadata from store.db to extract the chat name and timestamp.
+/// Cursor stores metadata as hex-encoded JSON in the `meta` table, key "0".
+fn read_cursor_chat_meta(store_db: &std::path::Path) -> Option<(String, i64)> {
+    // Open the SQLite database and try to read the meta table
+    let conn = rusqlite::Connection::open_with_flags(
+        store_db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ).ok()?;
+
+    let hex_value: String = conn.query_row(
+        "SELECT value FROM meta WHERE key = '0'",
+        [],
+        |row| row.get(0),
+    ).ok()?;
+
+    // Decode hex string to bytes
+    let chars: Vec<char> = hex_value.chars().collect();
+    if chars.len() % 2 != 0 { return None; }
+    let mut bytes = Vec::with_capacity(chars.len() / 2);
+    for chunk in chars.chunks(2) {
+        let s: String = chunk.iter().collect();
+        bytes.push(u8::from_str_radix(&s, 16).ok()?);
+    }
+
+    let json_str = String::from_utf8(bytes).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+
+    let name = parsed.get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Untitled")
+        .to_string();
+
+    let created_at = parsed.get("createdAt")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    Some((name, created_at))
+}
+
+fn parse_cursor_sessions(_project_filter: Option<&str>) -> Result<Vec<ChatSession>, String> {
     let cursor_chats_dir = match dirs::home_dir() {
         Some(h) => h.join(".cursor").join("chats"),
         None => return Ok(vec![]),
@@ -179,34 +219,16 @@ fn parse_cursor_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSession
 
     let mut results = Vec::new();
 
-    // If project filter is provided, match the root project hash and any
-    // worktree hashes (which share the same prefix).
-    let hash_dirs: Vec<PathBuf> = if let Some(filter) = project_filter {
-        let root = resolve_root_project_path(filter);
-        let root_hash = cursor_project_hash(root);
-        // Collect the root hash dir + any dirs whose name starts with
-        // the root hash (worktree hashes look like "root-hash-.worktrees-branch")
-        match fs::read_dir(&cursor_chats_dir) {
-            Ok(entries) => entries
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    let name = e.file_name().to_string_lossy().to_string();
-                    e.path().is_dir() && (name == root_hash || name.starts_with(&format!("{}-.worktrees-", root_hash)))
-                })
-                .map(|e| e.path())
-                .collect(),
-            Err(_) => vec![],
-        }
-    } else {
-        // List all project hash directories
-        match fs::read_dir(&cursor_chats_dir) {
-            Ok(entries) => entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().is_dir())
-                .map(|e| e.path())
-                .collect(),
-            Err(_) => vec![],
-        }
+    // Cursor uses opaque hex hashes for project directories that can't be
+    // reversed to project paths. Scan all hash directories and show all
+    // Cursor chat sessions regardless of project filter.
+    let hash_dirs: Vec<PathBuf> = match fs::read_dir(&cursor_chats_dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.path())
+            .collect(),
+        Err(_) => vec![],
     };
 
     for hash_dir in hash_dirs {
@@ -231,21 +253,36 @@ fn parse_cursor_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSession
                 None => continue,
             };
 
-            // Get modification time of store.db as timestamp
             let store_db = chat_path.join("store.db");
-            let timestamp = match fs::metadata(&store_db) {
-                Ok(meta) => meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0),
-                Err(_) => continue,
-            };
+            if !store_db.exists() {
+                continue;
+            }
 
-            // Use a short title derived from the chat ID
-            let short_id = if chat_id.len() > 8 { &chat_id[..8] } else { &chat_id };
-            let title = format!("Cursor session {}", short_id);
+            // Try to read chat name and timestamp from store.db metadata
+            let (title, timestamp) = match read_cursor_chat_meta(&store_db) {
+                Some((name, created_at)) => {
+                    // Use file modification time for "last active", but prefer
+                    // createdAt from metadata for ordering
+                    let file_ts = fs::metadata(&store_db)
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(created_at);
+                    (name, file_ts)
+                }
+                None => {
+                    // Fallback: use file modification time and short ID as title
+                    let file_ts = fs::metadata(&store_db)
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    let short_id = if chat_id.len() > 8 { &chat_id[..8] } else { &chat_id };
+                    (format!("Cursor session {}", short_id), file_ts)
+                }
+            };
 
             results.push(ChatSession {
                 session_id: chat_id,
@@ -253,7 +290,154 @@ fn parse_cursor_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSession
                 title,
                 timestamp,
                 provider: "cursor".to_string(),
-                message_count: 0, // We don't count messages for Cursor
+                message_count: 0,
+            });
+        }
+    }
+
+    Ok(results)
+}
+
+// ── Cursor IDE workspace storage parsing ────────────────────────────────
+
+/// Parse Cursor IDE conversations from the workspace storage layer.
+/// Cursor IDE stores conversations in:
+///   ~/Library/Application Support/Cursor/User/workspaceStorage/{hash}/state.vscdb
+/// Each workspace has a workspace.json mapping the hash to a project folder URI.
+fn parse_cursor_ide_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSession>, String> {
+    let workspace_dir = match dirs::home_dir() {
+        Some(h) => h.join("Library/Application Support/Cursor/User/workspaceStorage"),
+        None => return Ok(vec![]),
+    };
+
+    if !workspace_dir.exists() {
+        return Ok(vec![]);
+    }
+
+    let mut results = Vec::new();
+
+    let entries = match fs::read_dir(&workspace_dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(vec![]),
+    };
+
+    for entry in entries.flatten() {
+        let ws_path = entry.path();
+        if !ws_path.is_dir() {
+            continue;
+        }
+
+        // Read workspace.json to get the project folder URI
+        let ws_json_path = ws_path.join("workspace.json");
+        let ws_json = match fs::read_to_string(&ws_json_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let ws_data: serde_json::Value = match serde_json::from_str(&ws_json) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let folder_uri = match ws_data.get("folder").and_then(|v| v.as_str()) {
+            Some(f) => f.to_string(),
+            None => continue,
+        };
+
+        // Decode URI to path: "file:///Users/z3thon/DevProjects/Alakazam%20Labs/C3PO" → "/Users/.../C3PO"
+        let folder_path = folder_uri
+            .strip_prefix("file://")
+            .unwrap_or(&folder_uri)
+            .to_string();
+        // Basic percent-decoding for common chars
+        let folder_path = folder_path
+            .replace("%20", " ")
+            .replace("%28", "(")
+            .replace("%29", ")")
+            .replace("%5B", "[")
+            .replace("%5D", "]");
+
+        // Apply project filter
+        if let Some(filter) = project_filter {
+            let root = resolve_root_project_path(filter);
+            if !matches_project_family(&folder_path, root) {
+                continue;
+            }
+        }
+
+        // Try to read state.vscdb for composer data
+        let state_db_path = ws_path.join("state.vscdb");
+        if !state_db_path.exists() {
+            continue;
+        }
+
+        let conn = match rusqlite::Connection::open_with_flags(
+            &state_db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Read the conversation index from composer.composerData
+        let composer_json: String = match conn.query_row(
+            "SELECT value FROM ItemTable WHERE key = 'composer.composerData'",
+            [],
+            |row| row.get(0),
+        ) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let composer_data: serde_json::Value = match serde_json::from_str(&composer_json) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let composers = match composer_data.get("allComposers").and_then(|v| v.as_array()) {
+            Some(arr) => arr,
+            None => continue,
+        };
+
+        // Extract the project name from the folder path for display
+        let project_display = folder_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&folder_path)
+            .to_string();
+
+        for composer in composers {
+            let composer_id = match composer.get("composerId").and_then(|v| v.as_str()) {
+                Some(id) => id.to_string(),
+                None => continue,
+            };
+
+            let name = composer
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Untitled")
+                .to_string();
+
+            let title = if name.len() > 80 {
+                let truncated: String = name.chars().take(77).collect();
+                format!("{}...", truncated)
+            } else {
+                name
+            };
+
+            // Use lastUpdatedAt or createdAt for timestamp
+            let timestamp = composer
+                .get("lastUpdatedAt")
+                .and_then(|v| v.as_i64())
+                .or_else(|| composer.get("createdAt").and_then(|v| v.as_i64()))
+                .unwrap_or(0);
+
+            results.push(ChatSession {
+                session_id: composer_id,
+                project: project_display.clone(),
+                title,
+                timestamp,
+                provider: "cursor".to_string(),
+                message_count: 0,
             });
         }
     }
@@ -372,8 +556,10 @@ fn detect_cursor_session(project_path: &str) -> Option<String> {
 #[tauri::command]
 pub fn chat_history_list(project_path: Option<String>) -> Result<Vec<ChatSession>, String> {
     let mut all = parse_claude_sessions(project_path.as_deref())?;
-    let cursor = parse_cursor_sessions(project_path.as_deref())?;
-    all.extend(cursor);
+    let cursor_cli = parse_cursor_sessions(project_path.as_deref())?;
+    let cursor_ide = parse_cursor_ide_sessions(project_path.as_deref())?;
+    all.extend(cursor_cli);
+    all.extend(cursor_ide);
     all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     all.truncate(100);
     Ok(all)
@@ -382,8 +568,10 @@ pub fn chat_history_list(project_path: Option<String>) -> Result<Vec<ChatSession
 #[tauri::command]
 pub fn chat_history_list_for_project(project_path: String) -> Result<Vec<ChatSession>, String> {
     let mut all = parse_claude_sessions(Some(&project_path))?;
-    let cursor = parse_cursor_sessions(Some(&project_path))?;
-    all.extend(cursor);
+    let cursor_cli = parse_cursor_sessions(Some(&project_path))?;
+    let cursor_ide = parse_cursor_ide_sessions(Some(&project_path))?;
+    all.extend(cursor_cli);
+    all.extend(cursor_ide);
     all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     all.truncate(100);
     Ok(all)
@@ -455,6 +643,54 @@ pub fn chat_history_get_storage_paths(project_path: String) -> Result<ChatStorag
         claude_sessions_dirs,
         cursor_chats_dirs,
     })
+}
+
+/// Get all custom session names from the database.
+/// Returns a map of "provider:sessionId" → custom_name.
+#[tauri::command]
+pub fn chat_history_get_custom_names(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<HashMap<String, String>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT provider, session_id, custom_name FROM chat_session_names")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            let provider: String = row.get(0)?;
+            let session_id: String = row.get(1)?;
+            let custom_name: String = row.get(2)?;
+            Ok((format!("{}:{}", provider, session_id), custom_name))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut map = HashMap::new();
+    for row in rows {
+        if let Ok((key, name)) = row {
+            map.insert(key, name);
+        }
+    }
+    Ok(map)
+}
+
+/// Rename a chat session. Stores the custom name in our database.
+#[tauri::command]
+pub fn chat_history_rename_session(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
+    provider: String,
+    session_id: String,
+    custom_name: String,
+) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO chat_session_names (provider, session_id, custom_name, updated_at) \
+         VALUES (?1, ?2, ?3, unixepoch())",
+        rusqlite::params![provider, session_id, custom_name],
+    )
+    .map_err(|e| e.to_string())?;
+    let _ = app.emit("sync:chat-history", ());
+    Ok(())
 }
 
 #[tauri::command]

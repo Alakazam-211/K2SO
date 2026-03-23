@@ -3,6 +3,7 @@ import { useProjectsStore } from '@/stores/projects'
 import { usePanelsStore } from '@/stores/panels'
 import ProjectAvatar from '@/components/Sidebar/ProjectAvatar'
 import { showContextMenu } from '@/lib/context-menu'
+import { useGitInfo } from '@/hooks/useGit'
 
 interface FocusWorkspaceHeaderProps {
   side: 'left' | 'right'
@@ -40,6 +41,10 @@ export default function FocusWorkspaceHeader({ side }: FocusWorkspaceHeaderProps
     }
   }, [activeProjectId, setActiveWorkspace])
 
+  const { data: gitInfo } = useGitInfo(
+    projects.find((p) => p.id === activeProjectId)?.path
+  )
+
   // All hooks above — safe to return null now
   const project = projects.find((p) => p.id === activeProjectId)
   if (!project) return null
@@ -54,41 +59,45 @@ export default function FocusWorkspaceHeader({ side }: FocusWorkspaceHeaderProps
     >
       {/* Project header — click anywhere to toggle worktree drawer */}
       <div
-        className={`flex items-center gap-2 px-3 py-2 ${hasWorktrees ? 'cursor-pointer hover:bg-white/[0.03]' : ''}`}
+        className={`flex items-stretch gap-2.5 px-3 py-2 ${hasWorktrees ? 'cursor-pointer hover:bg-white/[0.03]' : ''}`}
         onClick={hasWorktrees ? () => setWorktreeExpanded(!worktreeExpanded) : undefined}
       >
-        <ProjectAvatar
-          projectPath={project.path}
-          projectName={project.name}
-          projectColor={project.color}
-          projectId={project.id}
-          iconUrl={project.iconUrl}
-          size={22}
-        />
-        <div className="flex-1 min-w-0">
-          <div className="text-[11px] font-medium text-[var(--color-text-primary)] truncate">
+        <div className="flex items-center flex-shrink-0">
+          <ProjectAvatar
+            projectPath={project.path}
+            projectName={project.name}
+            projectColor={project.color}
+            projectId={project.id}
+            iconUrl={project.iconUrl}
+            size={32}
+          />
+        </div>
+        <div className="flex flex-col justify-center min-w-0 flex-1">
+          <div className="text-sm font-medium text-[var(--color-text-primary)] truncate">
             {project.name}
           </div>
-          {activeWorkspace && (
-            <div className="text-[10px] text-[var(--color-text-muted)] font-mono truncate">
-              {activeWorkspace.branch || activeWorkspace.name}
+          {gitInfo?.isRepo && gitInfo.currentBranch && (
+            <div className="text-[10px] text-[var(--color-text-muted)] font-mono truncate" title={gitInfo.currentBranch}>
+              {gitInfo.currentBranch}
             </div>
           )}
         </div>
 
         {/* Chevron indicator */}
         {hasWorktrees && (
-          <svg
-            className={`w-3 h-3 text-[var(--color-text-muted)] transition-transform ${worktreeExpanded ? 'rotate-90' : ''}`}
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={2}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <polyline points="9 18 15 12 9 6" />
-          </svg>
+          <div className="flex items-center flex-shrink-0">
+            <svg
+              className={`w-3 h-3 text-[var(--color-text-muted)] transition-transform ${worktreeExpanded ? 'rotate-90' : ''}`}
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+          </div>
         )}
       </div>
 

@@ -395,10 +395,13 @@ function ProjectItem({
   const ungroupedWorkspaces = project.workspaces.filter((ws) => !ws.sectionId)
   const sections = project.sections || []
 
+  // Get git info for the project root to show branch/ahead-behind
+  const { data: gitInfo } = useGitInfo(project.path)
+
   return (
     <div className="no-drag">
       <button
-        className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors group ${
+        className={`w-full flex items-stretch gap-2.5 px-3 py-2 text-left text-sm transition-colors group ${
           isActive
             ? 'bg-white/[0.08] text-[var(--color-text-primary)]'
             : 'text-[var(--color-text-secondary)] hover:bg-white/[0.04] hover:text-[var(--color-text-primary)]'
@@ -406,46 +409,58 @@ function ProjectItem({
         onClick={handleClick}
         onContextMenu={(e) => onContextMenu(e, project.id)}
       >
-        <ProjectAvatar
-          projectPath={project.path}
-          projectName={project.name}
-          projectColor={project.color}
-          projectId={project.id}
-          iconUrl={project.iconUrl}
-          size={20}
-          showActivity
-        />
-        <span className="truncate">{project.name}</span>
-        {/* Worktree count badge — left-justified after name */}
-        <span className="text-[10px] text-[var(--color-text-muted)] tabular-nums flex-shrink-0 px-1.5 py-0.5 bg-white/[0.06] font-mono">
-          {project.workspaces.length}
-        </span>
-        <span className="flex-1" />
-        {/* New worktree button — always visible */}
-        <span
-          onClick={(e) => {
-            e.stopPropagation()
-            setShowWorktreeDialog(true)
-            if (!isExpanded) setIsExpanded(true)
-          }}
-          className="flex-shrink-0 w-5 h-5 flex items-center justify-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-white/[0.1] transition-colors cursor-pointer"
-          title="New workspace"
-        >
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-            <path d="M5 1v8M1 5h8" />
+        <div className="flex items-center flex-shrink-0">
+          <ProjectAvatar
+            projectPath={project.path}
+            projectName={project.name}
+            projectColor={project.color}
+            projectId={project.id}
+            iconUrl={project.iconUrl}
+            size={32}
+          />
+        </div>
+        <div className="flex flex-col justify-center min-w-0 flex-1">
+          <div className="flex items-center gap-2 w-full">
+            <span className="truncate flex-1">{project.name}</span>
+            <AheadBehind path={project.path} />
+            <AggregatedDiffStats paths={workspacePaths} />
+          </div>
+          {gitInfo?.isRepo && gitInfo.currentBranch && (
+            <span
+              className="text-[10px] font-mono text-[var(--color-text-muted)] truncate"
+              title={gitInfo.currentBranch}
+            >
+              {gitInfo.currentBranch}
+            </span>
+          )}
+        </div>
+        {/* New worktree + expand/collapse controls */}
+        <div className="flex flex-col items-center justify-center gap-0.5 flex-shrink-0">
+          <span
+            onClick={(e) => {
+              e.stopPropagation()
+              setShowWorktreeDialog(true)
+              if (!isExpanded) setIsExpanded(true)
+            }}
+            className="w-5 h-5 flex items-center justify-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-white/[0.1] transition-colors cursor-pointer"
+            title="New workspace"
+          >
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+              <path d="M5 1v8M1 5h8" />
+            </svg>
+          </span>
+          <svg
+            className={`w-3 h-3 text-[var(--color-text-muted)] transition-transform ${
+              isExpanded ? 'rotate-90' : ''
+            }`}
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
           </svg>
-        </span>
-        <svg
-          className={`w-3 h-3 text-[var(--color-text-muted)] transition-transform flex-shrink-0 ${
-            isExpanded ? 'rotate-90' : ''
-          }`}
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-          strokeWidth={2}
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-        </svg>
+        </div>
       </button>
 
       {isExpanded && (

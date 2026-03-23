@@ -460,6 +460,22 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
     useFileSelectionStore.getState().clearSelection()
   }
 
+  // ── Env files section ──────────────────────────────────────────────
+  const [envFiles, setEnvFiles] = useState<FileEntry[]>([])
+  const [envCollapsed, setEnvCollapsed] = useState(false)
+
+  const loadEnvFiles = useCallback(async () => {
+    try {
+      const entries = await invoke<FileEntry[]>('fs_read_dir', {
+        path: rootPath,
+        showHidden: true,
+      })
+      setEnvFiles(entries.filter((e) => !e.isDirectory && e.name.startsWith('.env')))
+    } catch {
+      setEnvFiles([])
+    }
+  }, [rootPath])
+
   // Load directory contents
   const loadDir = useCallback(
     async (dirPath: string, force = false) => {
@@ -500,6 +516,9 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
     }
   }, [loadDir])
 
+  // Load env files on mount / root change
+  useEffect(() => { loadEnvFiles() }, [loadEnvFiles])
+
   // ── FS Watcher ──────────────────────────────────────────────────────
   useEffect(() => {
     // Start watching the root path
@@ -521,13 +540,18 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
         }
         return prev
       })
+      // Refresh env files section when a .env* file changes in root
+      const changedName = changedPath.split('/').pop() || ''
+      if (dir === rootPath && changedName.startsWith('.env')) {
+        loadEnvFiles()
+      }
     }).then((fn) => { unlisten = fn })
 
     return () => {
       unlisten?.()
       invoke('fs_unwatch_dir', { path: rootPath }).catch(() => {})
     }
-  }, [rootPath, loadDir])
+  }, [rootPath, loadDir, loadEnvFiles])
 
   // ── Drop-in from Finder (Tauri events) ─────────────────────────────
   useEffect(() => {
@@ -1033,8 +1057,50 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
 
   return (
     <div ref={treeRef} className="flex flex-col h-full" tabIndex={-1}>
+      {/* Env files section */}
+      {envFiles.length > 0 && (
+        <div className="px-3 pt-2 pb-1 border-b border-[var(--color-border)]">
+          <button
+            className="w-full flex items-center gap-1.5 mb-1.5 text-left text-[10px] uppercase tracking-wider font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] transition-colors"
+            onClick={() => setEnvCollapsed((prev) => !prev)}
+          >
+            <svg
+              className={`w-2.5 h-2.5 flex-shrink-0 transition-transform ${envCollapsed ? '' : 'rotate-90'}`}
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2.5}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+            </svg>
+            <span className="flex-1">Environment</span>
+          </button>
+          {!envCollapsed && (
+            <div className="flex flex-wrap gap-1.5 pb-1.5">
+              {envFiles.map((entry) => (
+                <button
+                  key={entry.path}
+                  className="inline-flex items-center gap-1.5 px-2 py-1 text-[11px] bg-white/[0.04] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-white/[0.08] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors"
+                  onClick={() => {
+                    useFileSelectionStore.getState().select(entry.path)
+                    useTabsStore.getState().openFileInNewTab(entry.path)
+                  }}
+                  title={entry.name}
+                >
+                  <svg className="w-3 h-3 text-yellow-500/80 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                    <path d="M7 11V7a5 5 0 0110 0v4" />
+                  </svg>
+                  <span className="truncate">{entry.name}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Search input */}
-      <div className="px-3 pb-2">
+      <div className="px-3 pt-2 pb-2">
         <div className="relative">
           <svg
             className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-[var(--color-text-muted)]"

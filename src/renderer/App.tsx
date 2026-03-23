@@ -26,8 +26,11 @@ import { useTabsStore } from './stores/tabs'
 import { useActiveAgentsStore, startAgentPolling, stopAgentPolling } from './stores/active-agents'
 import AgentCloseDialog from './components/AgentCloseDialog/AgentCloseDialog'
 import FocusWorkspaceHeader from './components/FocusWindow/FocusWorkspaceHeader'
+import { useGitInfo } from './hooks/useGit'
 import { useUpdateChecker } from './hooks/useUpdateChecker'
 import { useWindowSync } from './hooks/useWindowSync'
+import CountdownOverlay from './components/Timer/CountdownOverlay'
+import MemoDialog from './components/Timer/MemoDialog'
 
 /** Parse focus mode project ID from URL hash (#focus=<projectId>) */
 function parseFocusProjectId(): string | null {
@@ -121,11 +124,13 @@ function FocusModeContent({ activeProject, cwd }: { activeProject: any; cwd: str
   const focusHeaderSide = usePanelsStore((s) => s.focusWorkspaceHeaderSide)
   const leftHeader = focusHeaderSide === 'left' ? <FocusWorkspaceHeader side="left" /> : undefined
   const rightHeader = focusHeaderSide === 'right' ? <FocusWorkspaceHeader side="right" /> : undefined
+  const { data: gitInfo } = useGitInfo(activeProject?.path)
 
   return (
     <FocusErrorBoundary>
       <FocusLayout
         projectName={activeProject?.name}
+        branchName={gitInfo?.isRepo ? gitInfo.currentBranch : undefined}
         leftPanel={<LeftPanelContent rootPath={activeProject?.path} header={leftHeader} />}
         rightPanel={<RightPanelContent rootPath={activeProject?.path} header={rightHeader} />}
       >
@@ -146,6 +151,8 @@ function FocusModeContent({ activeProject, cwd }: { activeProject: any; cwd: str
       <MergeDialog />
       <Toast />
       <AssistantBar />
+      <CountdownOverlay />
+      <MemoDialog />
     </FocusErrorBoundary>
   )
 }
@@ -339,6 +346,8 @@ export default function App(): React.JSX.Element {
       <MergeDialog />
         <Toast />
         <AssistantBar />
+        <CountdownOverlay />
+        <MemoDialog />
       </>
     )
   }
@@ -379,6 +388,8 @@ export default function App(): React.JSX.Element {
       <MergeDialog />
       <Toast />
       <AssistantBar />
+      <CountdownOverlay />
+      <MemoDialog />
       {showQuitDialog && (
         <AgentCloseDialog
           agents={quitAgents}

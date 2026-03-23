@@ -65,7 +65,7 @@ export default function AgentIcon({ agent, size = 14, className = '' }: AgentIco
       return (
         <svg width={s} height={s} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }}>
           <rect x="3" y="3" width="18" height="18" rx="3" stroke="#22D3EE" strokeWidth="1.5" fill="none"/>
-          <path d="M8 7L8 17L12 14L15 18" stroke="#22D3EE" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          <path d="M8 6L8 17L11.5 14L14.5 18.5L16 17.5L13 13.5L17 12.5L8 6Z" fill="#22D3EE"/>
         </svg>
       )
 

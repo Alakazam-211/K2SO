@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { getDefaultKeybindings } from '@shared/hotkeys'
 
-export type SettingsSection = 'general' | 'terminal' | 'editors-agents' | 'keybindings' | 'projects' | 'ai-assistant'
+export type SettingsSection = 'general' | 'terminal' | 'editors-agents' | 'keybindings' | 'projects' | 'ai-assistant' | 'timer'
 
 export interface TerminalSettings {
   fontFamily: string

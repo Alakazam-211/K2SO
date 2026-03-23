@@ -529,6 +529,89 @@ impl AgentPreset {
     }
 }
 
+// ── Time Entries ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimeEntry {
+    pub id: String,
+    pub project_id: Option<String>,
+    pub start_time: i64,
+    pub end_time: i64,
+    pub duration_seconds: i64,
+    pub memo: Option<String>,
+    pub created_at: i64,
+}
+
+impl TimeEntry {
+    pub fn list(
+        conn: &Connection,
+        start: Option<i64>,
+        end: Option<i64>,
+        project_id: Option<&str>,
+    ) -> Result<Vec<TimeEntry>> {
+        let mut sql = String::from(
+            "SELECT id, project_id, start_time, end_time, duration_seconds, memo, created_at \
+             FROM time_entries WHERE 1=1",
+        );
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut idx = 1;
+
+        if let Some(s) = start {
+            sql.push_str(&format!(" AND start_time >= ?{}", idx));
+            param_values.push(Box::new(s));
+            idx += 1;
+        }
+        if let Some(e) = end {
+            sql.push_str(&format!(" AND start_time <= ?{}", idx));
+            param_values.push(Box::new(e));
+            idx += 1;
+        }
+        if let Some(pid) = project_id {
+            sql.push_str(&format!(" AND project_id = ?{}", idx));
+            param_values.push(Box::new(pid.to_string()));
+        }
+        sql.push_str(" ORDER BY start_time DESC");
+
+        let mut stmt = conn.prepare(&sql)?;
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(params_ref.as_slice(), |row| {
+            Ok(TimeEntry {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                start_time: row.get(2)?,
+                end_time: row.get(3)?,
+                duration_seconds: row.get(4)?,
+                memo: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn create(
+        conn: &Connection,
+        id: &str,
+        project_id: Option<&str>,
+        start_time: i64,
+        end_time: i64,
+        duration_seconds: i64,
+        memo: Option<&str>,
+    ) -> Result<()> {
+        conn.execute(
+            "INSERT INTO time_entries (id, project_id, start_time, end_time, duration_seconds, memo) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, project_id, start_time, end_time, duration_seconds, memo],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete(conn: &Connection, id: &str) -> Result<()> {
+        conn.execute("DELETE FROM time_entries WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+}
+
 // ── Terminal Tabs (stub) ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

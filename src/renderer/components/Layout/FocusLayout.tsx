@@ -2,10 +2,12 @@ import { type ReactNode } from 'react'
 import { TOPBAR_HEIGHT } from '../../../shared/constants'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { usePanelsStore } from '../../stores/panels'
+import TimerButton from '@/components/Timer/TimerButton'
 
 interface FocusLayoutProps {
   children: ReactNode
   projectName?: string
+  branchName?: string
   leftPanel?: ReactNode
   rightPanel?: ReactNode
 }
@@ -13,6 +15,7 @@ interface FocusLayoutProps {
 export default function FocusLayout({
   children,
   projectName,
+  branchName,
   leftPanel,
   rightPanel
 }: FocusLayoutProps): React.JSX.Element {
@@ -39,17 +42,32 @@ export default function FocusLayout({
         {/* Left: traffic lights spacer */}
         <div style={{ width: 70 }} />
 
-        {/* Center: workspace name */}
+        {/* Center: workspace name + branch */}
         <div className="flex items-center gap-1.5 text-xs">
           {projectName ? (
-            <span className="text-[var(--color-text-primary)] font-medium">{projectName}</span>
+            <>
+              <span className="text-[var(--color-text-primary)] font-medium">{projectName}</span>
+              {branchName && (
+                <>
+                  <span className="text-[var(--color-text-muted)]">/</span>
+                  <svg className="w-3 h-3 text-[var(--color-text-muted)]" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="6" y1="3" x2="6" y2="15" />
+                    <circle cx="14" cy="6" r="2" />
+                    <circle cx="6" cy="15" r="0" />
+                    <path d="M14 8a7 7 0 0 1-7 7" />
+                  </svg>
+                  <span className="text-[var(--color-text-muted)] font-mono">{branchName}</span>
+                </>
+              )}
+            </>
           ) : (
             <span className="text-[var(--color-text-muted)]">Focus Window</span>
           )}
         </div>
 
-        {/* Right: left/right panel toggles */}
+        {/* Right: timer + left/right panel toggles */}
         <div className="flex items-center gap-1">
+          <TimerButton />
           <button
             onClick={toggleLeftPanel}
             className="flex h-6 w-6 items-center justify-center text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)] transition-colors"

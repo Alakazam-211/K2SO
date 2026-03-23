@@ -8,6 +8,7 @@ import { useFocusGroupsStore } from '@/stores/focus-groups'
 import { usePanelsStore } from '@/stores/panels'
 import { useSidebarStore } from '@/stores/sidebar'
 import { useTabsStore } from '@/stores/tabs'
+import { useTimerStore } from '@/stores/timer'
 
 /**
  * Listens for cross-window sync events emitted by the Rust backend.
@@ -54,6 +55,19 @@ export function useWindowSync(): void {
       unlisteners.push(
         await listen<any>('sync:tabs', (event) => {
           useTabsStore.getState().applyRemoteTabChange(event.payload)
+        })
+      )
+
+      unlisteners.push(
+        await listen<any>('sync:timer', (event) => {
+          useTimerStore.getState().syncFromEvent(event.payload)
+        })
+      )
+
+      unlisteners.push(
+        await listen('sync:timer-entries', () => {
+          // Re-fetch entries if the timer settings section is open
+          useTimerStore.getState().fetchEntries()
         })
       )
 

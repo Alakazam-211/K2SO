@@ -151,6 +151,7 @@ interface TabsState {
   unpinPane: (tabId: string, paneGroupId: string) => void
   openFileInNewTab: (filePath: string) => void
   setTabTitle: (tabId: string, title: string) => void
+  renameTabByTitle: (oldTitle: string, newTitle: string) => void
   setTabDirty: (tabId: string, dirty: boolean) => void
   /** @deprecated Use openFileInPane instead */
   openMarkdownPane: (tabId: string, filePath: string, splitDirection?: 'row' | 'column') => void
@@ -734,6 +735,20 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       return { tabs: result.tabs, extraGroups: result.extraGroups }
     })
     broadcastTabChange({ windowId: WINDOW_ID, action: 'title', groupIndex: 0, tabId, title })
+  },
+
+  renameTabByTitle: (oldTitle: string, newTitle: string) => {
+    set((state) => {
+      const updateTab = (tab: any) =>
+        tab.title === oldTitle ? { ...tab, title: newTitle } : tab
+      return {
+        tabs: state.tabs.map(updateTab),
+        extraGroups: state.extraGroups.map((group: any) => ({
+          ...group,
+          tabs: group.tabs.map(updateTab),
+        })),
+      }
+    })
   },
 
   setTabDirty: (tabId: string, dirty: boolean) => {
