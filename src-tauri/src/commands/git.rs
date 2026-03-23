@@ -100,3 +100,120 @@ pub fn git_reopen_worktree(
 pub fn git_changes(path: String) -> Result<Vec<git::ChangedFile>, String> {
     Ok(git::get_changed_files(&path))
 }
+
+// ── Diff Commands ────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn git_diff_file(path: String, file_path: String) -> Result<Vec<git::DiffHunk>, String> {
+    git::diff_file(&path, &file_path)
+}
+
+#[tauri::command]
+pub fn git_diff_summary(path: String) -> Result<Vec<git::FileDiffSummary>, String> {
+    git::diff_summary(&path)
+}
+
+#[tauri::command]
+pub fn git_diff_between_branches(
+    path: String,
+    base_branch: String,
+    head_branch: String,
+) -> Result<Vec<git::FileDiffSummary>, String> {
+    git::diff_between_branches(&path, &base_branch, &head_branch)
+}
+
+#[tauri::command]
+pub fn git_file_content_at_ref(
+    path: String,
+    file_path: String,
+    git_ref: String,
+) -> Result<String, String> {
+    git::file_content_at_ref(&path, &file_path, &git_ref)
+}
+
+// ── Staging Commands ─────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn git_stage_file(path: String, file_path: String) -> Result<(), String> {
+    git::stage_file(&path, &file_path)
+}
+
+#[tauri::command]
+pub fn git_unstage_file(path: String, file_path: String) -> Result<(), String> {
+    git::unstage_file(&path, &file_path)
+}
+
+#[tauri::command]
+pub fn git_stage_all(path: String) -> Result<(), String> {
+    git::stage_all(&path)
+}
+
+// ── Commit Command ───────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn git_commit(path: String, message: String) -> Result<git::CommitResult, String> {
+    git::commit(&path, &message)
+}
+
+// ── Merge Commands ───────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn git_merge_branch(path: String, branch: String) -> Result<git::MergeResult, String> {
+    git::merge_branch(&path, &branch)
+}
+
+#[tauri::command]
+pub fn git_merge_status(path: String) -> Result<git::MergeStatus, String> {
+    git::merge_status(&path)
+}
+
+#[tauri::command]
+pub fn git_abort_merge(path: String) -> Result<(), String> {
+    git::abort_merge(&path)
+}
+
+#[tauri::command]
+pub fn git_resolve_conflict(
+    path: String,
+    file_path: String,
+    resolution: String,
+) -> Result<(), String> {
+    git::resolve_conflict(&path, &file_path, &resolution)
+}
+
+#[tauri::command]
+pub fn git_delete_branch(path: String, branch: String) -> Result<(), String> {
+    git::delete_branch(&path, &branch)
+}
+
+/// Prune stale worktree references and clean up DB records for missing worktrees.
+#[tauri::command]
+pub fn git_prune_worktrees(
+    state: State<'_, AppState>,
+    project_path: String,
+    project_id: String,
+) -> Result<(), String> {
+    // Run git worktree prune to clean stale refs
+    let _ = std::process::Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(&project_path)
+        .output();
+
+    // Check DB workspaces against actual worktree paths
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let workspaces = Workspace::list(&conn, &project_id).unwrap_or_default();
+
+    for ws in &workspaces {
+        if ws.type_ == "worktree" {
+            if let Some(ref wt_path) = ws.worktree_path {
+                if !std::path::Path::new(wt_path).exists() {
+                    // Worktree dir is gone — remove DB record
+                    eprintln!("[git] Pruning stale workspace '{}' (path missing: {})", ws.name, wt_path);
+                    let _ = Workspace::delete(&conn, &ws.id);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}

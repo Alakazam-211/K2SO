@@ -1,7 +1,19 @@
 use serde::{Deserialize, Serialize};
 
-/// The system prompt that instructs the LLM about available workspace tools.
-pub const WORKSPACE_SYSTEM_PROMPT: &str = r#"You are a workspace layout engine. You ONLY output JSON. No natural language.
+/// Build the system prompt, optionally including git tools when the project is a git repo.
+pub fn build_system_prompt(is_git_repo: bool) -> String {
+    let mut prompt = BASE_SYSTEM_PROMPT.to_string();
+    if is_git_repo {
+        prompt.push_str(GIT_TOOLS_SECTION);
+    }
+    prompt.push_str(EXAMPLES_SECTION);
+    if is_git_repo {
+        prompt.push_str(GIT_EXAMPLES_SECTION);
+    }
+    prompt
+}
+
+const BASE_SYSTEM_PROMPT: &str = r#"You are a workspace layout engine. You ONLY output JSON. No natural language.
 
 Output a JSON object with a "tool_calls" array. Each entry has "tool" and "args".
 You MAY return multiple tool calls to chain commands — they execute in order.
@@ -41,7 +53,26 @@ Rules:
 - If the file name is obvious (e.g. "open README.md"), skip search/list and use open_document directly.
 - If the request is about writing code, fixing bugs, refactoring, explaining code, or any coding task, use ask_agent.
 - Only use ask_agent for coding/complex tasks. Layout commands (open, split, arrange) should use the other tools.
+"#;
 
+const GIT_TOOLS_SECTION: &str = r#"
+Git Tools (available because this is a git repository):
+11. stage_all - Stage all changed files. No args.
+12. stage_file - Stage a specific file. Args: {"file":"src/auth.ts"}
+13. unstage_file - Unstage a specific file. Args: {"file":"src/auth.ts"}
+14. commit - Commit staged changes. Args: {"message":"fix login bug"}
+15. show_diff - Open diff view for a file. Args: {"file":"src/auth.ts"} (optional - omit to show all changes)
+16. show_changes - Open the Changes panel. No args.
+17. merge_branch - Open merge dialog for a branch. Args: {"branch":"feature-auth"}
+18. create_worktree - Create a new worktree branch. Args: {"branch":"feature-x"}
+
+Git rules:
+- For simple git operations (stage, commit, show diff): use the direct git tools above.
+- For complex git workflows (merge with conflict resolution, rebase, reviewing and merging, multi-step git): use ask_agent to delegate to the CLI agent. The CLI agent can run git commands and reason about conflicts.
+- When unsure, prefer ask_agent — the CLI agent is smarter.
+"#;
+
+const EXAMPLES_SECTION: &str = r#"
 Examples:
 
 User: "open claude"
@@ -76,6 +107,38 @@ User: "fix the bug in the login form"
 
 User: "explain how the auth middleware works"
 {"tool_calls":[{"tool":"ask_agent","args":{"query":"explain how the auth middleware works"}}]}
+"#;
+
+const GIT_EXAMPLES_SECTION: &str = r#"
+User: "stage everything"
+{"tool_calls":[{"tool":"stage_all","args":{}}]}
+
+User: "commit fix typo"
+{"tool_calls":[{"tool":"commit","args":{"message":"fix typo"}}]}
+
+User: "stage everything and commit new feature"
+{"tool_calls":[{"tool":"stage_all","args":{}},{"tool":"commit","args":{"message":"new feature"}}]}
+
+User: "show what changed"
+{"tool_calls":[{"tool":"show_changes","args":{}}]}
+
+User: "show diff for auth.ts"
+{"tool_calls":[{"tool":"show_diff","args":{"file":"src/auth.ts"}}]}
+
+User: "merge feature-auth"
+{"tool_calls":[{"tool":"merge_branch","args":{"branch":"feature-auth"}}]}
+
+User: "new branch bugfix-login"
+{"tool_calls":[{"tool":"create_worktree","args":{"branch":"bugfix-login"}}]}
+
+User: "merge my worktree and handle conflicts"
+{"tool_calls":[{"tool":"ask_agent","args":{"query":"Merge the current worktree branch into main. Resolve any merge conflicts."}}]}
+
+User: "review changes and merge if good"
+{"tool_calls":[{"tool":"ask_agent","args":{"query":"Review all changes in the current branch, then merge into main if they look correct."}}]}
+
+User: "rebase on main"
+{"tool_calls":[{"tool":"ask_agent","args":{"query":"Rebase the current branch onto main, resolving any conflicts."}}]}
 "#;
 
 /// A parsed tool call from the LLM response.

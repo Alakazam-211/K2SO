@@ -153,6 +153,7 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
         ) : activeItem.type === 'file-viewer' && fileData ? (
           <FileViewerPane
             filePath={fileData.filePath}
+            mode={fileData.mode}
             paneId={activeItem.id}
             tabId={tabId}
             onClose={() => handleClose(activeItem.id)}

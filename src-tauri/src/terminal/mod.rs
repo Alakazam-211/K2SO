@@ -195,7 +195,7 @@ impl TerminalManager {
             .map_err(|e| format!("Failed to get PTY writer: {}", e))?;
 
         // Get a reader for the master side
-        let mut reader = pair
+        let reader = pair
             .master
             .try_clone_reader()
             .map_err(|e| format!("Failed to get PTY reader: {}", e))?;
@@ -222,37 +222,30 @@ impl TerminalManager {
         let app_for_thread = app_handle.clone();
         let buffer_for_thread = Arc::clone(&buffer);
 
-        thread::spawn(move || {
-            // Wrap entire reader thread in catch_unwind so a panic doesn't
-            // silently kill the thread, leaving the UI thinking the terminal
-            // is still alive. On panic, we emit an exit event with code -1.
-            let data_event_clone = data_event.clone();
-            let exit_event_clone = exit_event.clone();
-            let app_clone = app_for_thread.clone();
+        let master_pty_for_thread = Arc::clone(&master_pty);
 
-            let result = panic::catch_unwind(panic::AssertUnwindSafe(move || {
-                // Use a 16KB read buffer — larger reads mean fewer IPC events
-                // for fast output, while immediate emission avoids latency for
-                // interactive apps (claude, cursor) that use full-screen ANSI.
+        thread::spawn(move || {
+            // Run the reader loop with one retry on panic. If the first attempt
+            // panics, we try to obtain a fresh reader from the PTY master and
+            // restart. If that also fails, emit an exit event so the UI knows.
+            let run_reader = |mut reader: Box<dyn Read + Send>,
+                              data_event: &str,
+                              exit_event: &str,
+                              app: &AppHandle,
+                              buffer: &Arc<Mutex<ScrollbackBuffer>>,
+                              child: &Arc<Mutex<Box<dyn Child + Send + Sync>>>| {
                 let mut buf = [0u8; 16384];
                 let mut first_emit = true;
-                // Leftover bytes from an incomplete UTF-8 sequence at the end
-                // of the previous read. Max 3 bytes (a 4-byte char split at worst).
                 let mut utf8_leftover: Vec<u8> = Vec::with_capacity(4);
 
                 loop {
                     match reader.read(&mut buf) {
-                        Ok(0) => {
-                            break;
-                        }
+                        Ok(0) => break,
                         Ok(n) => {
-                            // Buffer the raw output for replay on reattach
-                            if let Ok(mut scrollback) = buffer_for_thread.lock() {
+                            if let Ok(mut scrollback) = buffer.lock() {
                                 scrollback.push(&buf[..n]);
                             }
 
-                            // Prepend any leftover bytes from the previous read
-                            // into a combined buffer for UTF-8 boundary analysis.
                             let combined: Vec<u8>;
                             let chunk: &[u8] = if utf8_leftover.is_empty() {
                                 &buf[..n]
@@ -261,43 +254,30 @@ impl TerminalManager {
                                 &combined
                             };
 
-                            // Find how many bytes at the end form an incomplete
-                            // UTF-8 sequence. We check the last 1–3 bytes for a
-                            // leading byte that expects more continuation bytes
-                            // than are present.
                             let valid_up_to = match std::str::from_utf8(chunk) {
                                 Ok(_) => chunk.len(),
                                 Err(e) => {
                                     let valid = e.valid_up_to();
-                                    // If there's an error_len, it's truly invalid
-                                    // bytes (not just incomplete). Skip them to
-                                    // avoid infinite accumulation.
                                     if e.error_len().is_some() {
-                                        // Invalid byte(s) — include them (lossy)
                                         valid + e.error_len().unwrap()
                                     } else {
-                                        // Incomplete sequence at end — save for next read
                                         valid
                                     }
                                 }
                             };
 
-                            // Emit the valid portion
                             if valid_up_to > 0 {
                                 let data = String::from_utf8_lossy(&chunk[..valid_up_to]).to_string();
                                 if first_emit {
                                     eprintln!("[terminal] First data emit to event '{}' ({} bytes)", data_event, n);
                                     first_emit = false;
                                 }
-                                let _ = app_for_thread.emit(&data_event, &data);
+                                let _ = app.emit(data_event, &data);
                             }
 
-                            // Save any trailing incomplete bytes for next iteration
                             utf8_leftover = chunk[valid_up_to..].to_vec();
                         }
-                        Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                            continue;
-                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                         Err(e) => {
                             eprintln!("[terminal] Reader error: {}", e);
                             break;
@@ -306,24 +286,58 @@ impl TerminalManager {
                 }
 
                 // Child exited — get exit status
-                let exit_code = match child_for_thread.lock() {
-                    Ok(mut c) => c
-                        .wait()
-                        .ok()
-                        .map(|s| s.exit_code() as i32)
-                        .unwrap_or(-1),
+                let exit_code = match child.lock() {
+                    Ok(mut c) => c.wait().ok().map(|s| s.exit_code() as i32).unwrap_or(-1),
                     Err(e) => {
                         eprintln!("[terminal] Poisoned child mutex: {}", e);
                         -1
                     }
                 };
 
-                let _ = app_for_thread.emit(&exit_event, serde_json::json!({ "exitCode": exit_code }));
+                let _ = app.emit(exit_event, serde_json::json!({ "exitCode": exit_code }));
+            };
+
+            // First attempt
+            let first_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                run_reader(
+                    reader,
+                    &data_event,
+                    &exit_event,
+                    &app_for_thread,
+                    &buffer_for_thread,
+                    &child_for_thread,
+                );
             }));
 
-            if result.is_err() {
-                eprintln!("[terminal] PANIC in reader thread for '{}' — emitting exit event", data_event_clone);
-                let _ = app_clone.emit(&exit_event_clone, serde_json::json!({ "exitCode": -1, "signal": -1 }));
+            if first_result.is_err() {
+                eprintln!("[terminal] PANIC in reader thread for '{}' — attempting restart", data_event);
+
+                // Try to get a fresh reader from the PTY master
+                let retry_reader = master_pty_for_thread
+                    .lock()
+                    .ok()
+                    .and_then(|pty| pty.try_clone_reader().ok());
+
+                if let Some(new_reader) = retry_reader {
+                    let retry_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                        run_reader(
+                            new_reader,
+                            &data_event,
+                            &exit_event,
+                            &app_for_thread,
+                            &buffer_for_thread,
+                            &child_for_thread,
+                        );
+                    }));
+
+                    if retry_result.is_err() {
+                        eprintln!("[terminal] PANIC in reader retry for '{}' — giving up", data_event);
+                        let _ = app_for_thread.emit(&exit_event, serde_json::json!({ "exitCode": -1, "signal": -1 }));
+                    }
+                } else {
+                    eprintln!("[terminal] Could not obtain new reader for '{}' — emitting exit", data_event);
+                    let _ = app_for_thread.emit(&exit_event, serde_json::json!({ "exitCode": -1, "signal": -1 }));
+                }
             }
         });
 
@@ -366,16 +380,24 @@ impl TerminalManager {
     }
 
     /// Kill a terminal and clean up.
-    /// Sends SIGHUP first for graceful shutdown, then SIGKILL after a grace period.
+    /// Sends SIGHUP to the process group first for graceful shutdown,
+    /// then SIGKILL after a grace period.
     pub fn kill(&mut self, id: &str) -> Result<(), String> {
         if let Some(instance) = self.terminals.remove(id) {
             if let Ok(mut child) = instance.child.lock() {
-                // Try graceful shutdown with SIGHUP first
                 #[cfg(unix)]
                 {
                     if let Some(pid) = child.process_id() {
+                        // Send SIGHUP to the entire process group (kills child processes too)
                         unsafe {
-                            libc::kill(pid as i32, libc::SIGHUP);
+                            // Try process group kill first (catches forked children)
+                            let pgid = libc::getpgid(pid as i32);
+                            if pgid > 0 {
+                                libc::killpg(pgid, libc::SIGHUP);
+                            } else {
+                                // Fallback to direct PID kill
+                                libc::kill(pid as i32, libc::SIGHUP);
+                            }
                         }
                     }
                     // Wait briefly for graceful exit

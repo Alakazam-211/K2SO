@@ -1,5 +1,7 @@
-import { useMemo } from 'react'
+import { useState, useMemo, useCallback } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { useProjectsStore } from '@/stores/projects'
+import { useTabsStore } from '@/stores/tabs'
 import { useGitInfo, useGitChanges } from '@/hooks/useGit'
 
 // ── Status helpers ───────────────────────────────────────────────────────────
@@ -13,39 +15,90 @@ const STATUS_CONFIG = {
 
 type FileStatus = keyof typeof STATUS_CONFIG
 
+interface ChangeFile {
+  path: string
+  status: string
+  staged: boolean
+}
+
 // ── Component ────────────────────────────────────────────────────────────────
 
 export default function ChangesPanel(): React.JSX.Element {
+  const [commitMsg, setCommitMsg] = useState('')
+  const [committing, setCommitting] = useState(false)
+
   const projects = useProjectsStore((s) => s.projects)
   const activeProjectId = useProjectsStore((s) => s.activeProjectId)
   const activeWorkspaceId = useProjectsStore((s) => s.activeWorkspaceId)
 
-  // Determine the active worktree's path
   const activeProject = projects.find((p) => p.id === activeProjectId)
   const activeWorkspace = activeProject?.workspaces.find((w) => w.id === activeWorkspaceId)
-
   const workspacePath = activeWorkspace?.worktreePath ?? activeProject?.path
 
   const { data: gitInfo } = useGitInfo(workspacePath)
-  const { data: changes } = useGitChanges(workspacePath)
+  const { data: changes, refetch } = useGitChanges(workspacePath)
 
-  // Group files by status
-  const grouped = useMemo(() => {
-    const groups: Record<FileStatus, { path: string; status: FileStatus }[]> = {
-      modified: [],
-      added: [],
-      deleted: [],
-      untracked: []
-    }
-
+  // Split files into staged and unstaged groups
+  const { staged, unstaged } = useMemo(() => {
+    const s: ChangeFile[] = []
+    const u: ChangeFile[] = []
     for (const file of changes) {
-      groups[file.status].push(file)
+      if (file.staged) s.push(file)
+      else u.push(file)
     }
-
-    return groups
+    return { staged: s, unstaged: u }
   }, [changes])
 
-  const totalCount = changes.length
+  // ── Actions ──────────────────────────────────────────────────────────────
+
+  const handleStage = useCallback(async (filePath: string) => {
+    if (!workspacePath) return
+    await invoke('git_stage_file', { path: workspacePath, filePath }).catch(console.error)
+    refetch()
+  }, [workspacePath, refetch])
+
+  const handleUnstage = useCallback(async (filePath: string) => {
+    if (!workspacePath) return
+    await invoke('git_unstage_file', { path: workspacePath, filePath }).catch(console.error)
+    refetch()
+  }, [workspacePath, refetch])
+
+  const handleStageAll = useCallback(async () => {
+    if (!workspacePath) return
+    await invoke('git_stage_all', { path: workspacePath }).catch(console.error)
+    refetch()
+  }, [workspacePath, refetch])
+
+  const handleUnstageAll = useCallback(async () => {
+    if (!workspacePath) return
+    for (const file of staged) {
+      await invoke('git_unstage_file', { path: workspacePath, filePath: file.path }).catch(console.error)
+    }
+    refetch()
+  }, [workspacePath, staged, refetch])
+
+  const handleCommit = useCallback(async () => {
+    if (!workspacePath || !commitMsg.trim() || staged.length === 0) return
+    setCommitting(true)
+    try {
+      await invoke('git_commit', { path: workspacePath, message: commitMsg.trim() })
+      setCommitMsg('')
+      refetch()
+    } catch (e) {
+      console.error('[changes] Commit failed:', e)
+    } finally {
+      setCommitting(false)
+    }
+  }, [workspacePath, commitMsg, staged.length, refetch])
+
+  const handleOpenDiff = useCallback((filePath: string) => {
+    const activeTab = useTabsStore.getState().getActiveTab()
+    if (activeTab) {
+      useTabsStore.getState().openDiffInPane(activeTab.id, filePath)
+    }
+  }, [])
+
+  // ── Render helpers ───────────────────────────────────────────────────────
 
   if (!activeProject) {
     return (
@@ -62,6 +115,8 @@ export default function ChangesPanel(): React.JSX.Element {
       </div>
     )
   }
+
+  const totalCount = changes.length
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
@@ -94,53 +149,144 @@ export default function ChangesPanel(): React.JSX.Element {
         </div>
       </div>
 
-      {/* Changes header */}
-      <div className="px-3 py-1.5 border-b border-[var(--color-border)]">
-        <span className="text-xs font-medium text-[var(--color-text-secondary)]">
-          Changes ({totalCount})
-        </span>
-      </div>
-
-      {/* File list */}
+      {/* File lists */}
       <div className="flex-1 overflow-y-auto">
         {totalCount === 0 ? (
           <div className="px-3 py-6 text-center">
             <p className="text-xs text-[var(--color-text-muted)]">Working tree clean</p>
           </div>
         ) : (
-          <div className="py-1">
-            {(Object.entries(grouped) as [FileStatus, typeof changes][]).map(
-              ([status, files]) =>
-                files.length > 0 && (
-                  <div key={status} className="mb-1">
-                    <div className="px-3 py-1">
-                      <span
-                        className={`text-[10px] font-semibold uppercase tracking-wider ${STATUS_CONFIG[status].color}`}
-                      >
-                        {STATUS_CONFIG[status].label} ({files.length})
-                      </span>
-                    </div>
-                    {files.map((file) => (
-                      <div
-                        key={file.path}
-                        className="flex items-center gap-2 px-3 py-0.5 hover:bg-white/[0.04] group"
-                      >
-                        <span
-                          className={`w-4 h-4 flex items-center justify-center text-[10px] font-bold${STATUS_CONFIG[file.status].color} ${STATUS_CONFIG[file.status].bg} flex-shrink-0`}
-                        >
-                          {STATUS_CONFIG[file.status].icon}
-                        </span>
-                        <span className="text-xs text-[var(--color-text-secondary)] truncate">
-                          {file.path}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )
+          <>
+            {/* Staged Changes */}
+            {staged.length > 0 && (
+              <FileSection
+                title="Staged Changes"
+                count={staged.length}
+                files={staged}
+                action="unstage"
+                onToggle={handleUnstage}
+                onBulkAction={handleUnstageAll}
+                bulkLabel="Unstage All"
+                onClickFile={handleOpenDiff}
+              />
             )}
-          </div>
+
+            {/* Unstaged Changes */}
+            <FileSection
+              title="Changes"
+              count={unstaged.length}
+              files={unstaged}
+              action="stage"
+              onToggle={handleStage}
+              onBulkAction={handleStageAll}
+              bulkLabel="Stage All"
+              onClickFile={handleOpenDiff}
+            />
+          </>
         )}
       </div>
+
+      {/* Commit input — shown when there are staged files */}
+      {staged.length > 0 && (
+        <div className="border-t border-[var(--color-border)] p-2">
+          <textarea
+            className="w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] px-2 py-1.5 resize-none outline-none focus:border-[var(--color-accent)] placeholder:text-[var(--color-text-muted)]"
+            placeholder="Commit message..."
+            rows={3}
+            value={commitMsg}
+            onChange={(e) => setCommitMsg(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault()
+                handleCommit()
+              }
+            }}
+          />
+          <button
+            className="w-full mt-1 px-3 py-1.5 text-xs font-medium bg-[var(--color-accent)] text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+            disabled={!commitMsg.trim() || committing}
+            onClick={handleCommit}
+          >
+            {committing ? 'Committing...' : `Commit (${staged.length} file${staged.length !== 1 ? 's' : ''})`}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── File Section ─────────────────────────────────────────────────────────────
+
+interface FileSectionProps {
+  title: string
+  count: number
+  files: ChangeFile[]
+  action: 'stage' | 'unstage'
+  onToggle: (filePath: string) => void
+  onBulkAction: () => void
+  bulkLabel: string
+  onClickFile: (filePath: string) => void
+}
+
+function FileSection({
+  title, count, files, action, onToggle, onBulkAction, bulkLabel, onClickFile
+}: FileSectionProps): React.JSX.Element {
+  return (
+    <div className="mb-1">
+      {/* Section header */}
+      <div className="flex items-center justify-between px-3 py-1.5 border-b border-[var(--color-border)]">
+        <span className="text-xs font-medium text-[var(--color-text-secondary)]">
+          {title} ({count})
+        </span>
+        {count > 0 && (
+          <button
+            className="text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
+            onClick={onBulkAction}
+          >
+            {bulkLabel}
+          </button>
+        )}
+      </div>
+
+      {/* File entries */}
+      {files.map((file) => {
+        const status = (file.status as FileStatus) in STATUS_CONFIG
+          ? (file.status as FileStatus)
+          : 'modified'
+        const config = STATUS_CONFIG[status]
+
+        return (
+          <div
+            key={file.path}
+            className="flex items-center gap-1.5 px-2 py-0.5 hover:bg-white/[0.04] group cursor-pointer"
+            onClick={() => onClickFile(file.path)}
+          >
+            {/* Stage/Unstage button */}
+            <button
+              className="w-4 h-4 flex items-center justify-center text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] opacity-0 group-hover:opacity-100 shrink-0"
+              onClick={(e) => {
+                e.stopPropagation()
+                onToggle(file.path)
+              }}
+              title={action === 'stage' ? 'Stage file' : 'Unstage file'}
+            >
+              {action === 'stage' ? '+' : '-'}
+            </button>
+
+            {/* Status badge */}
+            <span
+              className={`w-4 h-4 flex items-center justify-center text-[10px] font-bold ${config.color} ${config.bg} flex-shrink-0`}
+            >
+              {config.icon}
+            </span>
+
+            {/* File path */}
+            <span className="text-xs text-[var(--color-text-secondary)] truncate flex-1">
+              {file.path}
+            </span>
+          </div>
+        )
+      })}
     </div>
   )
 }

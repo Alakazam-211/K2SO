@@ -1,6 +1,8 @@
 import { useState, useCallback } from 'react'
 import { useProjectsStore, type ProjectWithWorkspaces } from '@/stores/projects'
 import { useGitInfo } from '@/hooks/useGit'
+import { useMergeDialogStore } from '@/components/MergeDialog/MergeDialog'
+import { useContextMenuStore } from '@/stores/context-menu'
 import WorktreeDialog from '@/components/Sidebar/WorktreeDialog'
 
 // ── Git status badge (changed files count) ────────────────────────────────
@@ -83,6 +85,25 @@ export default function WorktreeBar({ project }: WorktreeBarProps): React.JSX.El
   const ungroupedWorkspaces = project.workspaces.filter((ws) => !ws.sectionId)
   const hasSections = sections.length > 0
 
+  const showMergeDialog = useMergeDialogStore((s) => s.show)
+  const showContextMenu = useContextMenuStore((s) => s.show)
+
+  const handleWorktreeContextMenu = useCallback(
+    async (e: React.MouseEvent, workspace: typeof project.workspaces[number]) => {
+      e.preventDefault()
+      if (workspace.type !== 'worktree' || !workspace.branch) return
+
+      const selected = await showContextMenu(e.clientX, e.clientY, [
+        { id: 'merge', label: `Merge "${workspace.branch}" into current branch` },
+      ])
+
+      if (selected === 'merge') {
+        showMergeDialog(workspace.branch!, project.path, project.id, workspace.id)
+      }
+    },
+    [project, showContextMenu, showMergeDialog]
+  )
+
   const renderWorkspaceTab = (workspace: typeof project.workspaces[number]) => {
     const isActive = workspace.id === activeWorkspaceId
     const workspacePath = workspace.worktreePath ?? project.path
@@ -90,12 +111,13 @@ export default function WorktreeBar({ project }: WorktreeBarProps): React.JSX.El
     return (
       <button
         key={workspace.id}
-        className={`flex items-center gap-1.5 h-full px-3 text-xs font-mono whitespace-nowrap transition-colors border-r border-[var(--color-border)] ${
+        className={`group flex items-center gap-1.5 h-full px-3 text-xs font-mono whitespace-nowrap transition-colors border-r border-[var(--color-border)] ${
           isActive
             ? 'bg-[var(--color-accent)]/10 text-[var(--color-accent)] border-b-2 border-b-[var(--color-accent)]'
             : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] hover:bg-white/[0.03]'
         }`}
         onClick={() => handleWorkspaceClick(workspace.id)}
+        onContextMenu={(e) => handleWorktreeContextMenu(e, workspace)}
       >
         <BranchIcon />
         <span>{workspace.name}</span>
@@ -103,6 +125,21 @@ export default function WorktreeBar({ project }: WorktreeBarProps): React.JSX.El
           <span className="text-[10px] opacity-50">{workspace.branch}</span>
         )}
         <GitBadge path={workspacePath} />
+        {/* Merge button — visible on hover for non-main worktrees */}
+        {workspace.type === 'worktree' && workspace.branch && (
+          <span
+            className="opacity-0 group-hover:opacity-100 ml-0.5 hover:text-[var(--color-accent)] cursor-pointer"
+            title={`Merge "${workspace.branch}" into current branch`}
+            onClick={(e) => {
+              e.stopPropagation()
+              showMergeDialog(workspace.branch!, project.path, project.id, workspace.id)
+            }}
+          >
+            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
+            </svg>
+          </span>
+        )}
       </button>
     )
   }

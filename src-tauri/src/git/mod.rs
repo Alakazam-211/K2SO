@@ -1,4 +1,4 @@
-use git2::{Repository, StatusOptions, BranchType};
+use git2::{DiffOptions, Repository, StatusOptions, BranchType};
 use serde::Serialize;
 use std::path::Path;
 use std::process::Command;
@@ -34,9 +34,11 @@ pub struct WorktreeInfo {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChangedFile {
     pub path: String,
     pub status: String,
+    pub staged: bool,
 }
 
 // ── Git Info ──────────────────────────────────────────────────────────────
@@ -458,6 +460,15 @@ pub fn get_changed_files(path: &str) -> Vec<ChangedFile> {
         let file_path = entry.path().unwrap_or("").to_string();
         let s = entry.status();
 
+        // Determine if the change is staged (in index) vs unstaged (working tree)
+        let is_staged = s.intersects(
+            git2::Status::INDEX_NEW
+                | git2::Status::INDEX_MODIFIED
+                | git2::Status::INDEX_DELETED
+                | git2::Status::INDEX_RENAMED
+                | git2::Status::INDEX_TYPECHANGE,
+        );
+
         let status = if s.contains(git2::Status::WT_NEW) {
             "untracked"
         } else if s.contains(git2::Status::INDEX_NEW) {
@@ -471,8 +482,594 @@ pub fn get_changed_files(path: &str) -> Vec<ChangedFile> {
         files.push(ChangedFile {
             path: file_path,
             status: status.to_string(),
+            staged: is_staged,
         });
     }
 
     files
+}
+
+// ── Diff Types ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffHunk {
+    pub old_start: u32,
+    pub old_count: u32,
+    pub new_start: u32,
+    pub new_count: u32,
+    pub lines: Vec<DiffLine>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiffLine {
+    pub kind: String, // "add", "remove", "context"
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDiffSummary {
+    pub path: String,
+    pub status: String,
+    pub additions: u32,
+    pub deletions: u32,
+    pub old_path: Option<String>,
+}
+
+// ── Diff Functions ───────────────────────────────────────────────────────
+
+/// Get unified diff hunks for a single file (working tree vs HEAD).
+pub fn diff_file(repo_path: &str, file_path: &str) -> Result<Vec<DiffHunk>, String> {
+    let repo = Repository::discover(repo_path).map_err(|e| format!("Not a git repository: {e}"))?;
+
+    let mut opts = DiffOptions::new();
+    opts.pathspec(file_path);
+    opts.context_lines(3);
+
+    let head_tree = repo
+        .head()
+        .ok()
+        .and_then(|h| h.peel_to_tree().ok());
+
+    let diff = repo
+        .diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut opts))
+        .map_err(|e| format!("Failed to compute diff: {e}"))?;
+
+    collect_hunks(&diff)
+}
+
+/// Get a summary of all changed files (working tree vs HEAD).
+pub fn diff_summary(repo_path: &str) -> Result<Vec<FileDiffSummary>, String> {
+    let repo = Repository::discover(repo_path).map_err(|e| format!("Not a git repository: {e}"))?;
+
+    let mut opts = DiffOptions::new();
+    opts.context_lines(0);
+
+    let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+
+    let diff = repo
+        .diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut opts))
+        .map_err(|e| format!("Failed to compute diff: {e}"))?;
+
+    collect_summary(&diff)
+}
+
+/// Get a diff summary between two branches (for merge preview).
+pub fn diff_between_branches(
+    repo_path: &str,
+    base_branch: &str,
+    head_branch: &str,
+) -> Result<Vec<FileDiffSummary>, String> {
+    let repo = Repository::discover(repo_path).map_err(|e| format!("Not a git repository: {e}"))?;
+
+    let base_tree = resolve_branch_tree(&repo, base_branch)?;
+    let head_tree = resolve_branch_tree(&repo, head_branch)?;
+
+    let mut opts = DiffOptions::new();
+    opts.context_lines(0);
+
+    let diff = repo
+        .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), Some(&mut opts))
+        .map_err(|e| format!("Failed to compute branch diff: {e}"))?;
+
+    collect_summary(&diff)
+}
+
+/// Get the content of a file at a specific git reference (branch, commit, HEAD, etc.).
+pub fn file_content_at_ref(repo_path: &str, file_path: &str, git_ref: &str) -> Result<String, String> {
+    let repo = Repository::discover(repo_path).map_err(|e| format!("Not a git repository: {e}"))?;
+
+    let obj = repo
+        .revparse_single(git_ref)
+        .map_err(|e| format!("Cannot resolve ref '{git_ref}': {e}"))?;
+
+    let commit = obj
+        .peel_to_commit()
+        .map_err(|e| format!("Not a commit: {e}"))?;
+
+    let tree = commit.tree().map_err(|e| format!("Failed to get tree: {e}"))?;
+
+    let entry = tree
+        .get_path(Path::new(file_path))
+        .map_err(|_| format!("File '{file_path}' not found at '{git_ref}'"))?;
+
+    let blob = repo
+        .find_blob(entry.id())
+        .map_err(|e| format!("Failed to read blob: {e}"))?;
+
+    let content = std::str::from_utf8(blob.content())
+        .map_err(|_| "File is binary".to_string())?;
+
+    Ok(content.to_string())
+}
+
+/// Helper: resolve a branch name to its tree.
+fn resolve_branch_tree<'a>(repo: &'a Repository, branch: &str) -> Result<git2::Tree<'a>, String> {
+    let reference = repo
+        .find_branch(branch, BranchType::Local)
+        .map_err(|e| format!("Branch '{branch}' not found: {e}"))?;
+
+    let commit = reference
+        .get()
+        .peel_to_commit()
+        .map_err(|e| format!("Failed to get commit for branch '{branch}': {e}"))?;
+
+    commit.tree().map_err(|e| format!("Failed to get tree: {e}"))
+}
+
+/// Helper: collect DiffHunks from a git2::Diff.
+fn collect_hunks(diff: &git2::Diff) -> Result<Vec<DiffHunk>, String> {
+    let mut hunks: Vec<DiffHunk> = Vec::new();
+
+    diff.print(git2::DiffFormat::Patch, |_delta, hunk, line| {
+        if let Some(h) = hunk {
+            // Check if we need a new hunk
+            let need_new = hunks.last().map_or(true, |last: &DiffHunk| {
+                last.old_start != h.old_start() || last.new_start != h.new_start()
+            });
+
+            if need_new {
+                hunks.push(DiffHunk {
+                    old_start: h.old_start(),
+                    old_count: h.old_lines(),
+                    new_start: h.new_start(),
+                    new_count: h.new_lines(),
+                    lines: Vec::new(),
+                });
+            }
+        }
+
+        if let Some(current_hunk) = hunks.last_mut() {
+            let kind = match line.origin() {
+                '+' => "add",
+                '-' => "remove",
+                ' ' => "context",
+                _ => return true,
+            };
+
+            let content = String::from_utf8_lossy(line.content()).to_string();
+            current_hunk.lines.push(DiffLine {
+                kind: kind.to_string(),
+                content,
+            });
+        }
+
+        true
+    })
+    .map_err(|e| format!("Failed to print diff: {e}"))?;
+
+    Ok(hunks)
+}
+
+/// Helper: collect FileDiffSummary from a git2::Diff.
+fn collect_summary(diff: &git2::Diff) -> Result<Vec<FileDiffSummary>, String> {
+    let stats = diff.stats().map_err(|e| format!("Failed to get diff stats: {e}"))?;
+    let _ = stats; // stats gives totals, we need per-file
+
+    let mut summaries: Vec<FileDiffSummary> = Vec::new();
+
+    for i in 0..diff.deltas().len() {
+        let Some(delta) = diff.get_delta(i) else { continue };
+        let new_file = delta.new_file();
+        let old_file = delta.old_file();
+
+        let path = new_file
+            .path()
+            .or_else(|| old_file.path())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let status = match delta.status() {
+            git2::Delta::Added => "added",
+            git2::Delta::Deleted => "deleted",
+            git2::Delta::Modified => "modified",
+            git2::Delta::Renamed => "renamed",
+            git2::Delta::Copied => "copied",
+            git2::Delta::Conflicted => "conflicted",
+            _ => "modified",
+        };
+
+        let old_path = if delta.status() == git2::Delta::Renamed {
+            old_file.path().map(|p| p.to_string_lossy().to_string())
+        } else {
+            None
+        };
+
+        // Count additions/deletions for this file
+        let mut additions = 0u32;
+        let mut deletions = 0u32;
+        if let Ok(patch) = git2::Patch::from_diff(diff, i) {
+            if let Some(patch) = patch {
+                let (_, adds, dels) = patch.line_stats().unwrap_or((0, 0, 0));
+                additions = adds as u32;
+                deletions = dels as u32;
+            }
+        }
+
+        summaries.push(FileDiffSummary {
+            path,
+            status: status.to_string(),
+            additions,
+            deletions,
+            old_path,
+        });
+    }
+
+    Ok(summaries)
+}
+
+// ── Index lock retry helper ──────────────────────────────────────────────
+
+/// Maximum retries for index operations when the index is locked by another process.
+const INDEX_LOCK_RETRIES: u32 = 5;
+const INDEX_LOCK_DELAY_MS: u64 = 50;
+
+/// Check if a git2 error is an index lock contention error.
+fn is_index_locked(err: &git2::Error) -> bool {
+    let msg = err.message();
+    msg.contains("index.lock") || msg.contains("is locked") || err.code() == git2::ErrorCode::Locked
+}
+
+/// Retry getting the repository index with lock contention handling.
+fn get_index_with_retry(repo: &Repository) -> Result<git2::Index, String> {
+    for attempt in 0..INDEX_LOCK_RETRIES {
+        match repo.index() {
+            Ok(idx) => return Ok(idx),
+            Err(e) if is_index_locked(&e) && attempt < INDEX_LOCK_RETRIES - 1 => {
+                std::thread::sleep(std::time::Duration::from_millis(INDEX_LOCK_DELAY_MS));
+            }
+            Err(e) => return Err(format!("Failed to get index: {e}")),
+        }
+    }
+    Err("Index locked after retries".to_string())
+}
+
+/// Retry writing the index with lock contention handling.
+fn write_index_with_retry(index: &mut git2::Index) -> Result<(), String> {
+    for attempt in 0..INDEX_LOCK_RETRIES {
+        match index.write() {
+            Ok(()) => return Ok(()),
+            Err(e) if is_index_locked(&e) && attempt < INDEX_LOCK_RETRIES - 1 => {
+                std::thread::sleep(std::time::Duration::from_millis(INDEX_LOCK_DELAY_MS));
+            }
+            Err(e) => return Err(format!("Failed to write index: {e}")),
+        }
+    }
+    Err("Index locked after retries".to_string())
+}
+
+// ── Staging Functions ────────────────────────────────────────────────────
+
+/// Stage a file (git add).
+pub fn stage_file(repo_path: &str, file_path: &str) -> Result<(), String> {
+    let repo = Repository::discover(repo_path).map_err(|e| format!("Not a git repository: {e}"))?;
+    let mut index = get_index_with_retry(&repo)?;
+
+    let full_path = Path::new(repo_path).join(file_path);
+    if full_path.exists() {
+        index.add_path(Path::new(file_path)).map_err(|e| format!("Failed to stage file: {e}"))?;
+    } else {
+        index.remove_path(Path::new(file_path)).map_err(|e| format!("Failed to stage deletion: {e}"))?;
+    }
+
+    write_index_with_retry(&mut index)
+}
+
+/// Unstage a file (git reset HEAD -- file).
+pub fn unstage_file(repo_path: &str, file_path: &str) -> Result<(), String> {
+    let repo = Repository::discover(repo_path).map_err(|e| format!("Not a git repository: {e}"))?;
+
+    let head = repo.head().map_err(|e| format!("Failed to get HEAD: {e}"))?;
+    let head_commit = head.peel_to_commit().map_err(|e| format!("Failed to get HEAD commit: {e}"))?;
+    let head_tree = head_commit.tree().map_err(|e| format!("Failed to get HEAD tree: {e}"))?;
+
+    let mut index = get_index_with_retry(&repo)?;
+
+    // Check if the file exists in HEAD
+    match head_tree.get_path(Path::new(file_path)) {
+        Ok(entry) => {
+            // File exists in HEAD — restore index entry to HEAD version
+            let blob = repo.find_blob(entry.id()).map_err(|e| format!("Failed to find blob: {e}"))?;
+            let index_entry = git2::IndexEntry {
+                ctime: git2::IndexTime::new(0, 0),
+                mtime: git2::IndexTime::new(0, 0),
+                dev: 0,
+                ino: 0,
+                mode: entry.filemode() as u32,
+                uid: 0,
+                gid: 0,
+                file_size: blob.size() as u32,
+                id: entry.id(),
+                flags: 0,
+                flags_extended: 0,
+                path: file_path.as_bytes().to_vec(),
+            };
+            index.add(&index_entry).map_err(|e| format!("Failed to unstage: {e}"))?;
+        }
+        Err(_) => {
+            // File doesn't exist in HEAD — remove from index
+            index.remove_path(Path::new(file_path)).map_err(|e| format!("Failed to unstage: {e}"))?;
+        }
+    }
+
+    write_index_with_retry(&mut index)
+}
+
+/// Stage all changes (git add -A).
+pub fn stage_all(repo_path: &str) -> Result<(), String> {
+    let repo = Repository::discover(repo_path).map_err(|e| format!("Not a git repository: {e}"))?;
+    let mut index = get_index_with_retry(&repo)?;
+
+    index
+        .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+        .map_err(|e| format!("Failed to stage all: {e}"))?;
+
+    // Also remove deleted files from index
+    index
+        .update_all(["*"].iter(), None)
+        .map_err(|e| format!("Failed to update index: {e}"))?;
+
+    write_index_with_retry(&mut index)
+}
+
+// ── Commit Function ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitResult {
+    pub oid: String,
+    pub message: String,
+}
+
+/// Create a commit from the current index.
+pub fn commit(repo_path: &str, message: &str) -> Result<CommitResult, String> {
+    let repo = Repository::discover(repo_path).map_err(|e| format!("Not a git repository: {e}"))?;
+
+    let sig = repo.signature().map_err(|e| format!("Failed to get signature (set git user.name and user.email): {e}"))?;
+
+    let mut index = get_index_with_retry(&repo)?;
+    let tree_oid = index.write_tree().map_err(|e| format!("Failed to write tree: {e}"))?;
+    let tree = repo.find_tree(tree_oid).map_err(|e| format!("Failed to find tree: {e}"))?;
+
+    let head = repo.head().map_err(|e| format!("Failed to get HEAD: {e}"))?;
+    let parent = head.peel_to_commit().map_err(|e| format!("Failed to get parent commit: {e}"))?;
+
+    let oid = repo
+        .commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
+        .map_err(|e| format!("Failed to create commit: {e}"))?;
+
+    Ok(CommitResult {
+        oid: oid.to_string(),
+        message: message.to_string(),
+    })
+}
+
+// ── Merge Functions ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeResult {
+    pub success: bool,
+    pub conflicts: Vec<String>,
+    pub merged_files: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeStatus {
+    pub in_progress: bool,
+    pub conflicts: Vec<String>,
+}
+
+/// Merge a branch into the current HEAD (used for merging worktree branches into main).
+pub fn merge_branch(repo_path: &str, branch_name: &str) -> Result<MergeResult, String> {
+    let repo = Repository::discover(repo_path).map_err(|e| format!("Not a git repository: {e}"))?;
+
+    // Validate repository state — reject if another merge/rebase is already in progress
+    match repo.state() {
+        git2::RepositoryState::Clean => {}
+        git2::RepositoryState::Merge => {
+            return Err("A merge is already in progress. Resolve conflicts or abort the current merge first.".to_string());
+        }
+        git2::RepositoryState::Rebase
+        | git2::RepositoryState::RebaseInteractive
+        | git2::RepositoryState::RebaseMerge => {
+            return Err("A rebase is in progress. Complete or abort the rebase first.".to_string());
+        }
+        git2::RepositoryState::CherryPick => {
+            return Err("A cherry-pick is in progress. Complete or abort it first.".to_string());
+        }
+        other => {
+            return Err(format!("Repository is in an unsupported state: {:?}", other));
+        }
+    }
+
+    let branch = repo
+        .find_branch(branch_name, BranchType::Local)
+        .map_err(|e| format!("Branch '{branch_name}' not found: {e}"))?;
+
+    let annotated = repo
+        .reference_to_annotated_commit(branch.get())
+        .map_err(|e| format!("Failed to get annotated commit: {e}"))?;
+
+    let (analysis, _) = repo
+        .merge_analysis(&[&annotated])
+        .map_err(|e| format!("Merge analysis failed: {e}"))?;
+
+    if analysis.is_up_to_date() {
+        return Ok(MergeResult {
+            success: true,
+            conflicts: Vec::new(),
+            merged_files: 0,
+        });
+    }
+
+    if analysis.is_fast_forward() {
+        // Fast-forward: just move HEAD
+        let target_oid = annotated.id();
+        let mut reference = repo.head().map_err(|e| format!("Failed to get HEAD: {e}"))?;
+        reference
+            .set_target(target_oid, &format!("Fast-forward merge {branch_name}"))
+            .map_err(|e| format!("Failed to fast-forward: {e}"))?;
+
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .map_err(|e| format!("Failed to checkout after fast-forward: {e}"))?;
+
+        return Ok(MergeResult {
+            success: true,
+            conflicts: Vec::new(),
+            merged_files: 0,
+        });
+    }
+
+    // Normal merge
+    repo.merge(&[&annotated], None, None)
+        .map_err(|e| format!("Merge failed: {e}"))?;
+
+    // Check for conflicts
+    let index = repo.index().map_err(|e| format!("Failed to get index: {e}"))?;
+    let conflicts: Vec<String> = index
+        .conflicts()
+        .map_err(|e| format!("Failed to check conflicts: {e}"))?
+        .filter_map(|c| c.ok())
+        .filter_map(|c| {
+            c.our
+                .as_ref()
+                .or(c.their.as_ref())
+                .and_then(|entry| String::from_utf8(entry.path.clone()).ok())
+        })
+        .collect();
+
+    if conflicts.is_empty() {
+        // Auto-merge succeeded — create merge commit
+        let sig = repo.signature().map_err(|e| format!("Failed to get signature: {e}"))?;
+        let mut index = repo.index().map_err(|e| format!("Failed to get index: {e}"))?;
+        let tree_oid = index.write_tree().map_err(|e| format!("Failed to write tree: {e}"))?;
+        let tree = repo.find_tree(tree_oid).map_err(|e| format!("Failed to find tree: {e}"))?;
+
+        let head_commit = repo.head()
+            .map_err(|e| format!("Failed to get HEAD: {e}"))?
+            .peel_to_commit()
+            .map_err(|e| format!("Failed to get HEAD commit: {e}"))?;
+        let branch_commit = repo.find_commit(annotated.id())
+            .map_err(|e| format!("Failed to find branch commit: {e}"))?;
+
+        let msg = format!("Merge branch '{branch_name}'");
+        repo.commit(Some("HEAD"), &sig, &sig, &msg, &tree, &[&head_commit, &branch_commit])
+            .map_err(|e| format!("Failed to create merge commit: {e}"))?;
+
+        repo.cleanup_state().map_err(|e| format!("Failed to cleanup merge state: {e}"))?;
+
+        let summary = diff_summary(repo_path).unwrap_or_default();
+        Ok(MergeResult {
+            success: true,
+            conflicts: Vec::new(),
+            merged_files: summary.len() as u32,
+        })
+    } else {
+        Ok(MergeResult {
+            success: false,
+            conflicts,
+            merged_files: 0,
+        })
+    }
+}
+
+/// Check if a merge is currently in progress.
+pub fn merge_status(repo_path: &str) -> Result<MergeStatus, String> {
+    let repo = Repository::discover(repo_path).map_err(|e| format!("Not a git repository: {e}"))?;
+
+    let in_progress = repo.state() == git2::RepositoryState::Merge;
+
+    let conflicts = if in_progress {
+        let index = repo.index().map_err(|e| format!("Failed to get index: {e}"))?;
+        let conflict_paths: Vec<String> = index
+            .conflicts()
+            .map_err(|e| format!("Failed to check conflicts: {e}"))?
+            .filter_map(|c| c.ok())
+            .filter_map(|c| {
+                c.our
+                    .as_ref()
+                    .or(c.their.as_ref())
+                    .and_then(|entry| String::from_utf8(entry.path.clone()).ok())
+            })
+            .collect();
+        conflict_paths
+    } else {
+        Vec::new()
+    };
+
+    Ok(MergeStatus {
+        in_progress,
+        conflicts,
+    })
+}
+
+/// Abort an in-progress merge.
+pub fn abort_merge(repo_path: &str) -> Result<(), String> {
+    let repo = Repository::discover(repo_path).map_err(|e| format!("Not a git repository: {e}"))?;
+
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+        .map_err(|e| format!("Failed to reset working tree: {e}"))?;
+
+    repo.cleanup_state().map_err(|e| format!("Failed to cleanup merge state: {e}"))
+}
+
+/// Resolve a conflict by choosing "ours" or "theirs".
+pub fn resolve_conflict(repo_path: &str, file_path: &str, resolution: &str) -> Result<(), String> {
+    let repo = Repository::discover(repo_path).map_err(|e| format!("Not a git repository: {e}"))?;
+    let workdir = repo.workdir().ok_or("No working directory")?;
+
+    match resolution {
+        "ours" => {
+            // Checkout our version
+            let mut cb = git2::build::CheckoutBuilder::new();
+            cb.path(file_path).force().use_ours(true);
+            repo.checkout_index(None, Some(&mut cb))
+                .map_err(|e| format!("Failed to checkout 'ours': {e}"))?;
+        }
+        "theirs" => {
+            // Checkout their version
+            let mut cb = git2::build::CheckoutBuilder::new();
+            cb.path(file_path).force().use_theirs(true);
+            repo.checkout_index(None, Some(&mut cb))
+                .map_err(|e| format!("Failed to checkout 'theirs': {e}"))?;
+        }
+        _ => return Err(format!("Invalid resolution: {resolution} (use 'ours' or 'theirs')")),
+    }
+
+    // Stage the resolved file
+    stage_file(workdir.to_string_lossy().as_ref(), file_path)
+}
+
+/// Delete a local branch.
+pub fn delete_branch(repo_path: &str, branch_name: &str) -> Result<(), String> {
+    let repo = Repository::discover(repo_path).map_err(|e| format!("Not a git repository: {e}"))?;
+
+    let mut branch = repo
+        .find_branch(branch_name, BranchType::Local)
+        .map_err(|e| format!("Branch '{branch_name}' not found: {e}"))?;
+
+    branch.delete().map_err(|e| format!("Failed to delete branch '{branch_name}': {e}"))
 }

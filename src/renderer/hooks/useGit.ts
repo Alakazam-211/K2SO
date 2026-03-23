@@ -16,6 +16,7 @@ interface GitInfo {
 interface ChangedFile {
   path: string
   status: 'modified' | 'added' | 'deleted' | 'untracked'
+  staged: boolean
 }
 
 interface UseGitInfoResult {

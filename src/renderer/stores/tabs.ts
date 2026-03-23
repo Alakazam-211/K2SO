@@ -38,6 +38,8 @@ export interface TerminalItemData {
 
 export interface FileViewerItemData {
   filePath: string
+  /** When 'diff', shows unified diff view instead of editor */
+  mode?: 'edit' | 'diff'
 }
 
 export interface Item {
@@ -144,6 +146,7 @@ interface TabsState {
   removePaneFromTab: (tabId: string, paneGroupId: string) => void
   getActiveTab: () => Tab | undefined
   openFileInPane: (tabId: string, filePath: string) => void
+  openDiffInPane: (tabId: string, filePath: string) => void
   pinPane: (tabId: string, paneGroupId: string) => void
   unpinPane: (tabId: string, paneGroupId: string) => void
   openFileInNewTab: (filePath: string) => void
@@ -597,6 +600,58 @@ export const useTabsStore = create<TabsState>((set, get) => ({
             id: crypto.randomUUID(),
             type: 'file-viewer',
             data: { filePath },
+            pinned: false,
+          }
+          const newItems = [...pg.items, newItem]
+          newPaneGroups.set(activePgId, {
+            ...pg,
+            items: newItems,
+            activeItemIndex: newItems.length - 1,
+          })
+        }
+
+        return { ...tab, paneGroups: newPaneGroups }
+      })
+
+      return { tabs }
+    })
+  },
+
+  openDiffInPane: (tabId: string, filePath: string) => {
+    set((state) => {
+      const tabs = state.tabs.map((tab) => {
+        if (tab.id !== tabId) return tab
+
+        const activePgId = getFirstLeaf(tab.mosaicTree)
+        if (!activePgId) return tab
+
+        const pg = tab.paneGroups.get(activePgId)
+        if (!pg) return tab
+
+        // Look for an existing unpinned file-viewer item to reuse
+        const unpinnedIdx = pg.items.findIndex(
+          (item) => item.type === 'file-viewer' && !item.pinned
+        )
+
+        const newPaneGroups = new Map(tab.paneGroups)
+        const diffData: FileViewerItemData = { filePath, mode: 'diff' }
+
+        if (unpinnedIdx !== -1) {
+          const newItems = [...pg.items]
+          newItems[unpinnedIdx] = {
+            ...newItems[unpinnedIdx],
+            data: diffData,
+          }
+          newPaneGroups.set(activePgId, {
+            ...pg,
+            items: newItems,
+            activeItemIndex: unpinnedIdx,
+          })
+        } else {
+          const newItem: Item = {
+            id: crypto.randomUUID(),
+            type: 'file-viewer',
+            data: diffData,
             pinned: false,
           }
           const newItems = [...pg.items, newItem]

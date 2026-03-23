@@ -56,19 +56,34 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             for statement in sql.split("--> statement-breakpoint") {
                 let trimmed = statement.trim();
                 if !trimmed.is_empty() {
-                    // Use IF NOT EXISTS for CREATE TABLE, ignore errors for ALTER TABLE
-                    // (handles migrating from Electron's Drizzle-managed DB)
-                    match conn.execute_batch(trimmed) {
-                        Ok(_) => {},
-                        Err(e) => {
-                            let msg = e.to_string();
-                            // Ignore "already exists" and "duplicate column" errors
-                            if msg.contains("already exists") || msg.contains("duplicate column") {
-                                eprintln!("[db] Migration {}: skipping ({})", name, msg);
-                            } else {
+                    // Retry with backoff for database lock contention
+                    let mut last_err = None;
+                    for attempt in 0..5u32 {
+                        match conn.execute_batch(trimmed) {
+                            Ok(_) => { last_err = None; break; },
+                            Err(e) => {
+                                let msg = e.to_string();
+                                // Ignore "already exists" and "duplicate column" errors
+                                if msg.contains("already exists") || msg.contains("duplicate column") {
+                                    eprintln!("[db] Migration {}: skipping ({})", name, msg);
+                                    last_err = None;
+                                    break;
+                                }
+                                // Retry on lock contention
+                                if (msg.contains("database is locked") || msg.contains("schema is locked"))
+                                    && attempt < 4
+                                {
+                                    eprintln!("[db] Migration {}: locked, retrying ({}/5)", name, attempt + 1);
+                                    std::thread::sleep(std::time::Duration::from_millis(50 * (attempt as u64 + 1)));
+                                    last_err = Some(e);
+                                    continue;
+                                }
                                 return Err(e);
                             }
                         }
+                    }
+                    if let Some(e) = last_err {
+                        return Err(e);
                     }
                 }
             }

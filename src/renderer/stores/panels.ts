@@ -39,6 +39,9 @@ interface PanelsState {
   // Move workspace header between sides (focus window)
   moveFocusWorkspaceHeader: (side: 'left' | 'right') => void
 
+  /** Activate a specific tab on whichever side has it, opening the panel if needed. */
+  activateTab: (tab: PanelTab) => void
+
   initFromSettings: () => Promise<void>
 }
 
@@ -122,6 +125,26 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
 
   moveFocusWorkspaceHeader: (side) => {
     set({ focusWorkspaceHeaderSide: side })
+  },
+
+  activateTab: (tab: PanelTab) => {
+    const state = get()
+    // Check left panel first
+    if (state.leftPanelTabs.includes(tab)) {
+      set({ leftPanelOpen: true, leftPanelActiveTab: tab })
+      return
+    }
+    // Then right panel
+    if (state.rightPanelTabs.includes(tab)) {
+      set({ rightPanelOpen: true, rightPanelActiveTab: tab })
+      return
+    }
+    // Tab not on either side — add to right panel
+    set({
+      rightPanelOpen: true,
+      rightPanelTabs: [...state.rightPanelTabs, tab],
+      rightPanelActiveTab: tab,
+    })
   },
 
   initFromSettings: async () => {

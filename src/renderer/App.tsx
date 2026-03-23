@@ -13,6 +13,7 @@ import WorktreeBar from './components/FocusWindow/WorktreeBar'
 import CommandPalette from './components/CommandPalette/CommandPalette'
 import ContextMenu from './components/ContextMenu/ContextMenu'
 import ConfirmDialog from './components/ConfirmDialog/ConfirmDialog'
+import MergeDialog from './components/MergeDialog/MergeDialog'
 import Toast from './components/Toast/Toast'
 import AssistantBar from './components/WorkspaceAssistant/AssistantBar'
 import { useProjectsStore } from './stores/projects'
@@ -142,6 +143,7 @@ function FocusModeContent({ activeProject, cwd }: { activeProject: any; cwd: str
       <CommandPalette />
       <ContextMenu />
       <ConfirmDialog />
+      <MergeDialog />
       <Toast />
       <AssistantBar />
     </FocusErrorBoundary>
@@ -334,6 +336,7 @@ export default function App(): React.JSX.Element {
         <CommandPalette />
         <ContextMenu />
         <ConfirmDialog />
+      <MergeDialog />
         <Toast />
         <AssistantBar />
       </>
@@ -373,6 +376,7 @@ export default function App(): React.JSX.Element {
       <CommandPalette />
       <ContextMenu />
       <ConfirmDialog />
+      <MergeDialog />
       <Toast />
       <AssistantBar />
       {showQuitDialog && (

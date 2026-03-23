@@ -6,6 +6,7 @@ import { PDFViewer } from './PDFViewer'
 import { DocxViewer } from './DocxViewer'
 import { HighlightedCodeBlock } from './CodeHighlighter'
 import { CodeEditor } from './CodeEditor'
+import { DiffViewer } from '@/components/DiffViewer/DiffViewer'
 import { useTabsStore } from '@/stores/tabs'
 import { FILE_POLL_INTERVAL } from '@shared/constants'
 
@@ -13,6 +14,7 @@ import { FILE_POLL_INTERVAL } from '@shared/constants'
 
 interface FileViewerPaneProps {
   filePath: string
+  mode?: 'edit' | 'diff'
   paneId: string
   tabId: string
   onClose?: () => void
@@ -53,7 +55,16 @@ function getShortPath(filePath: string): string {
 
 // ── Component ────────────────────────────────────────────────────────────
 
-export function FileViewerPane({ filePath, paneId, tabId, onClose }: FileViewerPaneProps): React.JSX.Element {
+export function FileViewerPane({ filePath, mode, paneId, tabId, onClose }: FileViewerPaneProps): React.JSX.Element {
+  // Diff mode — render DiffViewer instead of editor
+  if (mode === 'diff') {
+    return <DiffViewer filePath={filePath} className="h-full" />
+  }
+
+  return <FileViewerPaneInner filePath={filePath} paneId={paneId} tabId={tabId} onClose={onClose} />
+}
+
+function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileViewerPaneProps, 'mode'>): React.JSX.Element {
   const [content, setContent] = useState<string>('')
   const [editedContent, setEditedContent] = useState<string | null>(null) // null = not edited
   const [loading, setLoading] = useState(true)

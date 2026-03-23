@@ -4,6 +4,9 @@ import { useAssistantStore, type DebugPass, type InteractionLogEntry } from '../
 import { useSettingsStore } from '../../stores/settings'
 import { useTabsStore } from '../../stores/tabs'
 import { useProjectsStore } from '../../stores/projects'
+import { usePanelsStore } from '../../stores/panels'
+import { useMergeDialogStore } from '../MergeDialog/MergeDialog'
+import { useToastStore } from '../../stores/toast'
 
 interface ToolCall {
   tool: string
@@ -28,6 +31,15 @@ const VALID_TOOLS = new Set([
   'resume_chat',       // Resume a past AI conversation
   'switch_workspace',  // Switch to a named workspace
   'ask_agent',         // Delegate a coding task to the default AI agent
+  // Git tools
+  'stage_all',         // Stage all changes
+  'stage_file',        // Stage a specific file
+  'unstage_file',      // Unstage a specific file
+  'commit',            // Commit staged changes
+  'show_diff',         // Open diff view for a file
+  'show_changes',      // Open Changes panel
+  'merge_branch',      // Open merge dialog for a branch
+  'create_worktree',   // Create a new worktree branch
 ])
 
 interface ChildDescriptor {
@@ -140,6 +152,43 @@ function validateAndSanitize(toolCalls: ToolCall[], cwd: string): ToolCall[] {
       case 'ask_agent': {
         if (!args.query || typeof args.query !== 'string') continue
         sanitized.push({ tool: call.tool, args: { query: args.query } })
+        break
+      }
+
+      // Git tools
+      case 'stage_all':
+      case 'show_changes': {
+        sanitized.push({ tool: call.tool, args: {} })
+        break
+      }
+
+      case 'stage_file':
+      case 'unstage_file': {
+        if (!args.file || typeof args.file !== 'string') continue
+        sanitized.push({ tool: call.tool, args: { file: args.file } })
+        break
+      }
+
+      case 'commit': {
+        if (!args.message || typeof args.message !== 'string') continue
+        sanitized.push({ tool: call.tool, args: { message: args.message } })
+        break
+      }
+
+      case 'show_diff': {
+        sanitized.push({ tool: call.tool, args: { file: args.file } })
+        break
+      }
+
+      case 'merge_branch': {
+        if (!args.branch || typeof args.branch !== 'string') continue
+        sanitized.push({ tool: call.tool, args: { branch: args.branch } })
+        break
+      }
+
+      case 'create_worktree': {
+        if (!args.branch || typeof args.branch !== 'string') continue
+        sanitized.push({ tool: call.tool, args: { branch: args.branch } })
         break
       }
     }
@@ -283,6 +332,89 @@ function executeToolCalls(toolCalls: ToolCall[]): string {
             args: [query]
           })
           results.push(`Sent to ${agent}`)
+          break
+        }
+
+        // ── Git tools ──────────────────────────────────────────────
+
+        case 'stage_all': {
+          invoke('git_stage_all', { path: cwd }).catch(console.error)
+          results.push('Staged all changes')
+          break
+        }
+
+        case 'stage_file': {
+          const file = call.args.file as string
+          invoke('git_stage_file', { path: cwd, filePath: file }).catch(console.error)
+          results.push(`Staged ${file}`)
+          break
+        }
+
+        case 'unstage_file': {
+          const file = call.args.file as string
+          invoke('git_unstage_file', { path: cwd, filePath: file }).catch(console.error)
+          results.push(`Unstaged ${file}`)
+          break
+        }
+
+        case 'commit': {
+          const message = call.args.message as string
+          invoke('git_commit', { path: cwd, message })
+            .then(() => useToastStore.getState().addToast(`Committed: ${message}`, 'success'))
+            .catch((e) => useToastStore.getState().addToast(`Commit failed: ${e}`, 'error'))
+          results.push(`Committed: ${message}`)
+          break
+        }
+
+        case 'show_diff': {
+          const file = call.args.file as string | undefined
+          if (file) {
+            const activeTab = tabsStore.getActiveTab()
+            if (activeTab) {
+              tabsStore.openDiffInPane(activeTab.id, file)
+            }
+            results.push(`Diff: ${file}`)
+          } else {
+            // No specific file — activate changes panel
+            usePanelsStore.getState().activateTab('changes')
+            results.push('Changes panel')
+          }
+          break
+        }
+
+        case 'show_changes': {
+          usePanelsStore.getState().activateTab('changes')
+          results.push('Changes panel')
+          break
+        }
+
+        case 'merge_branch': {
+          const branch = call.args.branch as string
+          const project = projectsStore.projects.find(p => p.id === projectsStore.activeProjectId)
+          if (project) {
+            const workspace = project.workspaces.find(w => w.branch === branch)
+            useMergeDialogStore.getState().show(branch, project.path, project.id, workspace?.id ?? null)
+          }
+          results.push(`Merge: ${branch}`)
+          break
+        }
+
+        case 'create_worktree': {
+          const branch = call.args.branch as string
+          const project = projectsStore.projects.find(p => p.id === projectsStore.activeProjectId)
+          if (project) {
+            invoke('git_create_worktree', {
+              projectPath: project.path,
+              branch,
+              projectId: project.id,
+            })
+              .then(() => {
+                useProjectsStore.getState().fetchProjects()
+                useToastStore.getState().addToast(`Created worktree: ${branch}`, 'success')
+              })
+              .catch((e) => useToastStore.getState().addToast(`Failed: ${e}`, 'error'))
+          }
+          results.push(`Worktree: ${branch}`)
           break
         }
       }
@@ -513,9 +645,19 @@ export default function AssistantBar(): React.JSX.Element | null {
       )
       const workspacePath = activeProject?.path ?? undefined
 
+      // Check if this is a git repo to enable git tools in the LLM prompt
+      let isGitRepo = false
+      try {
+        if (workspacePath) {
+          const info = await invoke<{ isRepo: boolean }>('git_info', { path: workspacePath })
+          isGitRepo = info.isRepo
+        }
+      } catch { /* not a git repo */ }
+
       const response = await invoke<ChatResponse>('assistant_chat', {
         message: trimmed,
         workspacePath,
+        isGitRepo,
       })
 
       // If the user pressed Escape while we were waiting, discard the result

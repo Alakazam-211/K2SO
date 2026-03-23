@@ -95,19 +95,20 @@ pub fn assistant_chat(
     state: State<'_, AppState>,
     message: String,
     workspace_path: Option<String>,
+    is_git_repo: Option<bool>,
 ) -> Result<ChatResponse, String> {
     let manager = state
         .llm_manager
         .lock()
         .map_err(|e| format!("Failed to lock LLM manager: {e}"))?;
 
-    let system_prompt = tools::WORKSPACE_SYSTEM_PROMPT;
+    let system_prompt = tools::build_system_prompt(is_git_repo.unwrap_or(false));
     let mut debug_passes: Vec<DebugPass> = Vec::new();
 
     eprintln!("[assistant] User message: {message}");
 
     // First pass
-    let raw = manager.generate(system_prompt, &message)?;
+    let raw = manager.generate(&system_prompt, &message)?;
     eprintln!("[assistant] Raw LLM response (pass 1): {raw}");
     debug_passes.push(DebugPass {
         prompt: message.clone(),
@@ -137,7 +138,7 @@ pub fn assistant_chat(
                     );
                     eprintln!("[assistant] Follow-up prompt (pass 2): {follow_up}");
 
-                    let raw2 = manager.generate(system_prompt, &follow_up)?;
+                    let raw2 = manager.generate(&system_prompt, &follow_up)?;
                     eprintln!("[assistant] Raw LLM response (pass 2): {raw2}");
                     debug_passes.push(DebugPass {
                         prompt: follow_up,

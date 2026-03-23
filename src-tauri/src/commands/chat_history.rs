@@ -25,6 +25,26 @@ struct SessionAccumulator {
     count: usize,
 }
 
+// ── Worktree path resolution ────────────────────────────────────────────
+
+/// Given a project path (which may be a worktree), resolve the root project path.
+/// e.g. "/repo/.worktrees/feature" → "/repo"
+/// e.g. "/repo" → "/repo"
+fn resolve_root_project_path(path: &str) -> &str {
+    if let Some(idx) = path.find("/.worktrees/") {
+        &path[..idx]
+    } else {
+        path
+    }
+}
+
+/// Check if a session's project path belongs to the given root project
+/// (either the root itself or any worktree under it).
+fn matches_project_family(session_project: &str, root: &str) -> bool {
+    session_project == root
+        || session_project.starts_with(&format!("{}/.worktrees/", root))
+}
+
 // ── Claude history parsing ───────────────────────────────────────────────
 
 fn claude_history_path() -> Option<PathBuf> {
@@ -72,9 +92,12 @@ fn parse_claude_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSession
             .unwrap_or("")
             .to_string();
 
-        // Apply project filter early to avoid unnecessary work
+        // Apply project filter early to avoid unnecessary work.
+        // Match the root project AND all its worktrees so history
+        // "collapses back" when a worktree is merged/deleted.
         if let Some(filter) = project_filter {
-            if project != filter {
+            let root = resolve_root_project_path(filter);
+            if !matches_project_family(&project, root) {
                 continue;
             }
         }
@@ -156,11 +179,24 @@ fn parse_cursor_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSession
 
     let mut results = Vec::new();
 
-    // If project filter is provided, only check the matching hash directory
+    // If project filter is provided, match the root project hash and any
+    // worktree hashes (which share the same prefix).
     let hash_dirs: Vec<PathBuf> = if let Some(filter) = project_filter {
-        let hash = cursor_project_hash(filter);
-        let dir = cursor_chats_dir.join(&hash);
-        if dir.exists() { vec![dir] } else { vec![] }
+        let root = resolve_root_project_path(filter);
+        let root_hash = cursor_project_hash(root);
+        // Collect the root hash dir + any dirs whose name starts with
+        // the root hash (worktree hashes look like "root-hash-.worktrees-branch")
+        match fs::read_dir(&cursor_chats_dir) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    e.path().is_dir() && (name == root_hash || name.starts_with(&format!("{}-.worktrees-", root_hash)))
+                })
+                .map(|e| e.path())
+                .collect(),
+            Err(_) => vec![],
+        }
     } else {
         // List all project hash directories
         match fs::read_dir(&cursor_chats_dir) {
@@ -244,7 +280,8 @@ fn detect_claude_session(project_path: &str) -> Option<String> {
     let mut buf = String::new();
     file.read_to_string(&mut buf).ok()?;
 
-    // Find the most recent sessionId matching this project
+    // Find the most recent sessionId matching this project (or any of its worktrees)
+    let root = resolve_root_project_path(project_path);
     let mut best_session: Option<(i64, String)> = None;
 
     for line in buf.lines() {
@@ -254,7 +291,7 @@ fn detect_claude_session(project_path: &str) -> Option<String> {
         };
 
         let project = parsed.get("project").and_then(|v| v.as_str()).unwrap_or("");
-        if project != project_path {
+        if !matches_project_family(project, root) {
             continue;
         }
 
@@ -281,33 +318,47 @@ fn detect_claude_session(project_path: &str) -> Option<String> {
 
 fn detect_cursor_session(project_path: &str) -> Option<String> {
     let cursor_chats_dir = dirs::home_dir()?.join(".cursor").join("chats");
-    let hash = cursor_project_hash(project_path);
-    let hash_dir = cursor_chats_dir.join(&hash);
+    let root = resolve_root_project_path(project_path);
+    let root_hash = cursor_project_hash(root);
 
-    if !hash_dir.exists() {
-        return None;
-    }
+    // Collect matching hash dirs (root + worktrees)
+    let hash_dirs: Vec<PathBuf> = match fs::read_dir(&cursor_chats_dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                e.path().is_dir() && (name == root_hash || name.starts_with(&format!("{}-.worktrees-", root_hash)))
+            })
+            .map(|e| e.path())
+            .collect(),
+        Err(_) => return None,
+    };
 
-    // Find the most recently modified chat directory
+    // Find the most recently modified chat directory across all matching hash dirs
     let mut best: Option<(std::time::SystemTime, String)> = None;
 
-    let entries = fs::read_dir(&hash_dir).ok()?;
-    for entry in entries.flatten() {
-        if !entry.path().is_dir() {
-            continue;
-        }
-        let store_db = entry.path().join("store.db");
-        if let Ok(meta) = fs::metadata(&store_db) {
-            if let Ok(modified) = meta.modified() {
-                let chat_id = entry.file_name().to_string_lossy().to_string();
-                match &best {
-                    Some((best_time, _)) if modified > *best_time => {
-                        best = Some((modified, chat_id));
+    for hash_dir in hash_dirs {
+        let entries = match fs::read_dir(&hash_dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let store_db = entry.path().join("store.db");
+            if let Ok(meta) = fs::metadata(&store_db) {
+                if let Ok(modified) = meta.modified() {
+                    let chat_id = entry.file_name().to_string_lossy().to_string();
+                    match &best {
+                        Some((best_time, _)) if modified > *best_time => {
+                            best = Some((modified, chat_id));
+                        }
+                        None => {
+                            best = Some((modified, chat_id));
+                        }
+                        _ => {}
                     }
-                    None => {
-                        best = Some((modified, chat_id));
-                    }
-                    _ => {}
                 }
             }
         }
@@ -336,6 +387,74 @@ pub fn chat_history_list_for_project(project_path: String) -> Result<Vec<ChatSes
     all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     all.truncate(100);
     Ok(all)
+}
+
+// ── Storage path discovery ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatStoragePaths {
+    pub claude_history_file: Option<String>,
+    pub claude_sessions_dirs: Vec<String>,
+    pub cursor_chats_dirs: Vec<String>,
+}
+
+/// Convert a project path to Claude's project hash format.
+/// Same as Cursor: strip leading `/`, replace `/` with `-`.
+fn claude_project_hash(project_path: &str) -> String {
+    project_path
+        .trim_start_matches('/')
+        .replace('/', "-")
+}
+
+#[tauri::command]
+pub fn chat_history_get_storage_paths(project_path: String) -> Result<ChatStoragePaths, String> {
+    let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
+    let root = resolve_root_project_path(&project_path);
+    let root_hash = claude_project_hash(root);
+
+    let claude_history_file = {
+        let p = home.join(".claude").join("history.jsonl");
+        if p.exists() { Some(p.to_string_lossy().to_string()) } else { None }
+    };
+
+    // Collect Claude sessions dirs: root + any worktree dirs matching the prefix
+    let claude_sessions_dirs = {
+        let projects_dir = home.join(".claude").join("projects");
+        match fs::read_dir(&projects_dir) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    e.path().is_dir() && (name == root_hash || name.starts_with(&format!("{}-.worktrees-", root_hash)))
+                })
+                .map(|e| e.path().to_string_lossy().to_string())
+                .collect(),
+            Err(_) => vec![],
+        }
+    };
+
+    // Collect Cursor chats dirs: root + any worktree dirs matching the prefix
+    let cursor_chats_dirs = {
+        let chats_dir = home.join(".cursor").join("chats");
+        match fs::read_dir(&chats_dir) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    e.path().is_dir() && (name == root_hash || name.starts_with(&format!("{}-.worktrees-", root_hash)))
+                })
+                .map(|e| e.path().to_string_lossy().to_string())
+                .collect(),
+            Err(_) => vec![],
+        }
+    };
+
+    Ok(ChatStoragePaths {
+        claude_history_file,
+        claude_sessions_dirs,
+        cursor_chats_dirs,
+    })
 }
 
 #[tauri::command]

@@ -6,6 +6,50 @@ use std::process::Command;
 
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 
+// ── Platform-specific exclusive rename ─────────────────────────────────
+
+/// Rename a file/directory without overwriting the destination.
+/// On macOS, uses `renamex_np` with `RENAME_EXCL` for atomic exclusivity.
+/// On other platforms, falls back to an existence check + rename (not atomic
+/// but catches the common case).
+fn rename_exclusive(src: &Path, dst: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::CString;
+        let src_c = CString::new(src.to_string_lossy().as_bytes())
+            .map_err(|_| "Invalid source path".to_string())?;
+        let dst_c = CString::new(dst.to_string_lossy().as_bytes())
+            .map_err(|_| "Invalid destination path".to_string())?;
+
+        // RENAME_EXCL = 0x00000004 — fail if destination exists
+        let ret = unsafe { libc::renamex_np(src_c.as_ptr(), dst_c.as_ptr(), 0x00000004) };
+        if ret == 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EEXIST) {
+            return Err(format!("Already exists: {}", dst.display()));
+        }
+        // If renamex_np not supported (e.g., FUSE), fall through to regular rename
+        if err.raw_os_error() == Some(libc::ENOTSUP) {
+            if dst.exists() {
+                return Err(format!("Already exists: {}", dst.display()));
+            }
+            fs::rename(src, dst).map_err(|e| format!("Rename failed: {e}"))?;
+            return Ok(());
+        }
+        return Err(format!("Rename failed: {err}"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        if dst.exists() {
+            return Err(format!("Already exists: {}", dst.display()));
+        }
+        fs::rename(src, dst).map_err(|e| format!("Rename failed: {e}"))
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DirEntry {
@@ -377,17 +421,19 @@ pub fn fs_rename(old_path: String, new_name: String) -> Result<String, String> {
         .map(|n| n.to_string_lossy().to_lowercase() == new_name.to_lowercase())
         .unwrap_or(false);
 
-    if !is_case_rename && new_path.exists() {
-        return Err(format!("Already exists: {}", new_path.display()));
+    if is_case_rename {
+        // Case rename: must use regular rename (atomic exclusive would reject same inode)
+        fs::rename(old, &new_path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                "Permission denied".to_string()
+            } else {
+                format!("Rename failed: {e}")
+            }
+        })?;
+    } else {
+        // Use atomic exclusive rename to prevent overwriting
+        rename_exclusive(old, &new_path)?;
     }
-
-    fs::rename(old, &new_path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::PermissionDenied {
-            "Permission denied".to_string()
-        } else {
-            format!("Rename failed: {e}")
-        }
-    })?;
 
     Ok(new_path.to_string_lossy().to_string())
 }

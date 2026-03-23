@@ -279,6 +279,24 @@ pub fn run() {
             commands::git::git_remove_worktree,
             commands::git::git_reopen_worktree,
             commands::git::git_changes,
+            // Git Diff
+            commands::git::git_diff_file,
+            commands::git::git_diff_summary,
+            commands::git::git_diff_between_branches,
+            commands::git::git_file_content_at_ref,
+            // Git Staging
+            commands::git::git_stage_file,
+            commands::git::git_unstage_file,
+            commands::git::git_stage_all,
+            // Git Commit
+            commands::git::git_commit,
+            // Git Merge
+            commands::git::git_merge_branch,
+            commands::git::git_merge_status,
+            commands::git::git_abort_merge,
+            commands::git::git_resolve_conflict,
+            commands::git::git_delete_branch,
+            commands::git::git_prune_worktrees,
             // Workspace Ops
             commands::workspace_ops::workspace_split_pane,
             commands::workspace_ops::workspace_close_pane,
@@ -297,6 +315,7 @@ pub fn run() {
             commands::chat_history::chat_history_list,
             commands::chat_history::chat_history_list_for_project,
             commands::chat_history::chat_history_detect_active_session,
+            commands::chat_history::chat_history_get_storage_paths,
             // Updater
             commands::updater::check_for_update,
             commands::updater::get_current_version,

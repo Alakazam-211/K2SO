@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
+import { useSettingsStore } from '@/stores/settings'
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -106,6 +107,29 @@ function ProviderIcon({ provider }: { provider: string }): React.JSX.Element {
   return <ClaudeIcon />
 }
 
+interface ChatStoragePaths {
+  claudeHistoryFile: string | null
+  claudeSessionsDirs: string[]
+  cursorChatsDirs: string[]
+}
+
+function SearchIcon(): React.JSX.Element {
+  return (
+    <svg
+      className="w-3 h-3"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="11" cy="11" r="8" />
+      <path d="M21 21l-4.35-4.35" />
+    </svg>
+  )
+}
+
 function RefreshIcon(): React.JSX.Element {
   return (
     <svg
@@ -131,6 +155,11 @@ export default function ChatHistory(): React.JSX.Element {
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [searchVisible, setSearchVisible] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [selectedIndex, setSelectedIndex] = useState(-1)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const selectedRowRef = useRef<HTMLButtonElement>(null)
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const projects = useProjectsStore((s) => s.projects)
@@ -185,8 +214,14 @@ export default function ChatHistory(): React.JSX.Element {
   const grouped = useMemo(() => {
     const groups = new Map<DateGroup, ChatSession[]>()
 
+    // Filter by search query if present
+    const q = searchQuery.toLowerCase().trim()
+    const filtered = q
+      ? sessions.filter((s) => s.title.toLowerCase().includes(q))
+      : sessions
+
     // Sort newest first
-    const sorted = [...sessions].sort((a, b) => b.timestamp - a.timestamp)
+    const sorted = [...filtered].sort((a, b) => b.timestamp - a.timestamp)
 
     for (const session of sorted) {
       const group = classifyDate(session.timestamp)
@@ -199,7 +234,62 @@ export default function ChatHistory(): React.JSX.Element {
     }
 
     return groups
-  }, [sessions])
+  }, [sessions, searchQuery])
+
+  // Flat ordered list of visible sessions for keyboard navigation
+  const flatSessions = useMemo(() => {
+    const result: ChatSession[] = []
+    for (const group of GROUP_ORDER) {
+      const items = grouped.get(group)
+      if (items) result.push(...items)
+    }
+    return result
+  }, [grouped])
+
+  // Reset selection when search query changes
+  useEffect(() => {
+    setSelectedIndex(-1)
+  }, [searchQuery])
+
+  // Scroll selected row into view
+  useEffect(() => {
+    selectedRowRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [selectedIndex])
+
+  const handleAgenticSearch = useCallback(async () => {
+    if (!projectPath || !searchQuery.trim()) return
+
+    const paths = await invoke<ChatStoragePaths>('chat_history_get_storage_paths', { projectPath })
+    const agent = useSettingsStore.getState().defaultAgent || 'claude'
+
+    // Build the search prompt with available paths
+    const locationLines: string[] = []
+    if (paths.claudeHistoryFile) locationLines.push(`- Claude session index: ${paths.claudeHistoryFile}`)
+    for (const dir of paths.claudeSessionsDirs) locationLines.push(`- Claude sessions: ${dir}`)
+    for (const dir of paths.cursorChatsDirs) locationLines.push(`- Cursor chats: ${dir}`)
+
+    const prompt = [
+      `Search through my conversation history for: "${searchQuery.trim()}"`,
+      '',
+      locationLines.length > 0
+        ? `History locations:\n${locationLines.join('\n')}`
+        : 'No conversation history files were found for this project.',
+      '',
+      'Read the relevant files and show which conversations match, with titles, dates, and relevant excerpts.',
+    ].join('\n')
+
+    const tabsStore = useTabsStore.getState()
+    const targetGroup = tabsStore.splitCount > 1 ? tabsStore.splitCount - 1 : 0
+
+    // Claude uses -p for print mode; other agents get the prompt as a positional arg
+    const args = agent === 'claude' ? ['-p', prompt] : [prompt]
+
+    tabsStore.addTabToGroup(targetGroup, projectPath, {
+      title: `Search: ${searchQuery.trim().slice(0, 30)}`,
+      command: agent,
+      args,
+    })
+  }, [projectPath, searchQuery])
 
   const handleSessionClick = useCallback(
     (session: ChatSession) => {
@@ -222,6 +312,29 @@ export default function ChatHistory(): React.JSX.Element {
     [projectPath]
   )
 
+  const handleSearchKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setSearchQuery('')
+        setSearchVisible(false)
+        setSelectedIndex(-1)
+      } else if (e.key === 'Enter' && e.metaKey) {
+        e.preventDefault()
+        handleAgenticSearch()
+      } else if (e.key === 'Enter' && !e.metaKey && selectedIndex >= 0 && selectedIndex < flatSessions.length) {
+        e.preventDefault()
+        handleSessionClick(flatSessions[selectedIndex])
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSelectedIndex((i) => Math.min(i + 1, flatSessions.length - 1))
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSelectedIndex((i) => Math.max(i - 1, -1))
+      }
+    },
+    [handleAgenticSearch, handleSessionClick, flatSessions, selectedIndex]
+  )
+
   if (!activeProject) {
     return (
       <div className="h-full flex items-center justify-center p-4">
@@ -237,14 +350,59 @@ export default function ChatHistory(): React.JSX.Element {
         <span className="text-xs font-medium text-[var(--color-text-secondary)] font-mono">
           Chat History
         </span>
-        <button
-          className="no-drag p-1 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
-          onClick={() => fetchSessions(true)}
-          title="Refresh"
-        >
-          <RefreshIcon />
-        </button>
+        <div className="flex items-center gap-0.5">
+          <button
+            className={`no-drag p-1 transition-colors ${
+              searchVisible
+                ? 'text-[var(--color-text-primary)]'
+                : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]'
+            }`}
+            onClick={() => {
+              setSearchVisible((v) => !v)
+              if (!searchVisible) {
+                setTimeout(() => searchInputRef.current?.focus(), 0)
+              } else {
+                setSearchQuery('')
+              }
+            }}
+            title="Search"
+          >
+            <SearchIcon />
+          </button>
+          <button
+            className="no-drag p-1 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
+            onClick={() => fetchSessions(true)}
+            title="Refresh"
+          >
+            <RefreshIcon />
+          </button>
+        </div>
       </div>
+
+      {/* Search bar */}
+      {searchVisible && (
+        <div className="px-3 py-2 border-b border-[var(--color-border)] flex flex-col gap-1.5 flex-shrink-0">
+          <input
+            ref={searchInputRef}
+            type="text"
+            className="no-drag w-full bg-white/[0.06] border border-[var(--color-border)] rounded px-2 py-1 text-[11px] font-mono text-[var(--color-text-secondary)] placeholder:text-[var(--color-text-muted)] outline-none focus:border-white/20"
+            placeholder="Search chats..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={handleSearchKeyDown}
+          />
+          {searchQuery.trim() && (
+            <button
+              className="no-drag flex items-center justify-between w-full px-2 py-1 rounded text-[11px] font-mono text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] hover:bg-white/[0.06] transition-colors"
+              onClick={handleAgenticSearch}
+              title="Search agentically with your default agent (⌘↵)"
+            >
+              <span>Search Agentically</span>
+              <span className="text-[10px] opacity-60">⌘↵</span>
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
@@ -262,49 +420,67 @@ export default function ChatHistory(): React.JSX.Element {
               No conversations yet
             </p>
           </div>
+        ) : searchQuery.trim() && grouped.size === 0 ? (
+          <div className="px-3 py-6 text-center">
+            <p className="text-[11px] text-[var(--color-text-muted)] font-mono">
+              No matching conversations
+            </p>
+          </div>
         ) : (
           <div className="py-1">
-            {GROUP_ORDER.map((group) => {
-              const items = grouped.get(group)
-              if (!items || items.length === 0) return null
+            {(() => {
+              let flatIndex = 0
+              return GROUP_ORDER.map((group) => {
+                const items = grouped.get(group)
+                if (!items || items.length === 0) return null
 
-              return (
-                <div key={group} className="mb-1">
-                  {/* Group header */}
-                  <div className="px-3 py-1.5 border-b border-white/[0.04]">
-                    <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)] font-mono">
-                      {group}
-                    </span>
-                  </div>
-
-                  {/* Session rows */}
-                  {items.map((session) => (
-                    <button
-                      key={`${session.provider}-${session.sessionId}`}
-                      className="no-drag w-full flex items-center gap-2 px-3 h-8 hover:bg-white/[0.04] active:bg-white/[0.06] transition-colors text-left group"
-                      onClick={() => handleSessionClick(session)}
-                    >
-                      <ProviderIcon provider={session.provider} />
-
-                      <div className="flex-1 min-w-0 flex flex-col justify-center">
-                        <span className="text-[11px] text-[var(--color-text-secondary)] font-mono truncate leading-tight">
-                          {session.title}
-                        </span>
-                        {session.messageCount > 0 && (
-                          <span className="text-[10px] text-[var(--color-text-muted)] font-mono leading-tight">
-                            {session.messageCount} message{session.messageCount !== 1 ? 's' : ''}
-                          </span>
-                        )}
-                      </div>
-
-                      <span className="text-[10px] text-[var(--color-text-muted)] font-mono flex-shrink-0 tabular-nums">
-                        {formatTime(session.timestamp)}
+                return (
+                  <div key={group} className="mb-1">
+                    {/* Group header */}
+                    <div className="px-3 py-1.5 border-b border-white/[0.04]">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)] font-mono">
+                        {group}
                       </span>
-                    </button>
-                  ))}
-                </div>
-              )
-            })}
+                    </div>
+
+                    {/* Session rows */}
+                    {items.map((session) => {
+                      const idx = flatIndex++
+                      const isSelected = searchVisible && idx === selectedIndex
+                      return (
+                        <button
+                          key={`${session.provider}-${session.sessionId}`}
+                          ref={isSelected ? selectedRowRef : undefined}
+                          className={`no-drag w-full flex items-center gap-2 px-3 h-8 transition-colors text-left group ${
+                            isSelected
+                              ? 'bg-white/[0.08] text-[var(--color-text-primary)]'
+                              : 'hover:bg-white/[0.04] active:bg-white/[0.06]'
+                          }`}
+                          onClick={() => handleSessionClick(session)}
+                        >
+                          <ProviderIcon provider={session.provider} />
+
+                          <div className="flex-1 min-w-0 flex flex-col justify-center">
+                            <span className="text-[11px] text-[var(--color-text-secondary)] font-mono truncate leading-tight">
+                              {session.title}
+                            </span>
+                            {session.messageCount > 0 && (
+                              <span className="text-[10px] text-[var(--color-text-muted)] font-mono leading-tight">
+                                {session.messageCount} message{session.messageCount !== 1 ? 's' : ''}
+                              </span>
+                            )}
+                          </div>
+
+                          <span className="text-[10px] text-[var(--color-text-muted)] font-mono flex-shrink-0 tabular-nums">
+                            {formatTime(session.timestamp)}
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                )
+              })
+            })()}
           </div>
         )}
       </div>

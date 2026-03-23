@@ -152,14 +152,23 @@ impl LlmManager {
             LlamaSampler::dist(42),
         ]);
 
-        // Generate tokens
+        // Generate tokens with a 30-second timeout to prevent hangs
         let mut output = String::new();
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut n_cur = tokens.len() as i32;
         let max_tokens = 512; // Workspace commands are short
         let mut n_generated = 0;
+        let generation_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
 
         while n_generated < max_tokens {
+            if std::time::Instant::now() > generation_deadline {
+                eprintln!("[llm] Generation timed out after 30s ({n_generated} tokens generated)");
+                if output.is_empty() {
+                    return Err("LLM generation timed out".to_string());
+                }
+                // Return what we have so far — partial output is better than nothing
+                break;
+            }
             let token = sampler.sample(&ctx, batch.n_tokens() - 1);
             sampler.accept(token);
 
