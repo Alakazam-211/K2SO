@@ -20,9 +20,9 @@ type DateGroup = 'Pinned' | 'Today' | 'Yesterday' | 'This Week' | 'This Month' |
 
 // ── CLI tool config ─────────────────────────────────────────────────
 
-const PROVIDER_CONFIG: Record<string, { command: string; label: string }> = {
-  claude: { command: 'claude', label: 'Claude' },
-  cursor: { command: 'cursor-agent', label: 'Cursor' },
+const PROVIDER_CONFIG: Record<string, { command: string; label: string; resumeFlag: string }> = {
+  claude: { command: 'claude', label: 'Claude', resumeFlag: '--resume' },
+  cursor: { command: 'cursor-agent', label: 'Cursor', resumeFlag: '--resume' },
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -319,12 +319,30 @@ export default function ChatHistory(): React.JSX.Element {
     // Show a simple context menu with pin + rename
     const menuDiv = document.createElement('div')
     menuDiv.style.cssText = `position:fixed;left:${e.clientX}px;top:${e.clientY}px;z-index:9999;background:#1e1e1e;border:1px solid #333;padding:2px 0;min-width:140px;font-size:11px;font-family:var(--font-mono,monospace);`
+    const config = PROVIDER_CONFIG[session.provider]
+    const resumeCmd = config
+      ? `${config.command} ${config.resumeFlag} ${session.sessionId}`
+      : `# unknown provider: ${session.provider}`
+
     const items = [
       { label: isPinned ? 'Unpin' : 'Pin', action: () => handleTogglePin(session) },
       { label: 'Rename', action: () => {
         setRenamingSession(session)
         setRenameValue(customNames[key] ?? session.title)
         setTimeout(() => renameInputRef.current?.focus(), 0)
+      }},
+      { label: 'Copy resume command', action: async () => {
+        try {
+          await navigator.clipboard.writeText(resumeCmd)
+        } catch {
+          // Fallback
+          const ta = document.createElement('textarea')
+          ta.value = resumeCmd
+          document.body.appendChild(ta)
+          ta.select()
+          document.execCommand('copy')
+          document.body.removeChild(ta)
+        }
       }},
     ]
     for (const item of items) {

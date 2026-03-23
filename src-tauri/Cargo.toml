@@ -1,6 +1,6 @@
 [package]
 name = "k2so"
-version = "0.12.3"
+version = "0.13.0"
 edition = "2021"
 description = "Developer workspace with terminals, git worktrees, and agent presets"
 license = "MIT"
@@ -42,8 +42,46 @@ notify = { version = "7", features = ["macos_fsevent"] }
 notify-debouncer-mini = "0.5"
 trash = "5"
 
+# Alacritty terminal backend (behind feature flag)
+alacritty_terminal = { version = "0.26.0-rc1", optional = true }
+parking_lot = { version = "0.12", optional = true }
+polling = { version = "3", optional = true }
+rustix = { version = "1", features = ["termios", "process"], optional = true }
+mio = { version = "1", features = ["os-poll", "os-ext"], optional = true }
+signal-hook = { version = "0.3", optional = true }
+signal-hook-mio = { version = "0.2", features = ["support-v1_0"], optional = true }
+fontdue = { version = "0.9", optional = true }
+qoi = { version = "0.4", optional = true }
+
+[features]
+default = []
+alacritty-backend = [
+    "alacritty_terminal",
+    "parking_lot",
+    "polling",
+    "rustix",
+    "mio",
+    "signal-hook",
+    "signal-hook-mio",
+    "fontdue",
+    "qoi",
+]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+# Optimize hot-path crates even in dev builds — bitmap rendering
+# and QOI encoding are 10-30x slower without optimizations.
+[profile.dev.package.qoi]
+opt-level = 3
+
+[profile.dev.package.fontdue]
+opt-level = 3
+
+# Note: Can't set opt-level for k2so itself due to linker issues with Tauri.
+# The hot-path crates (fontdue, qoi) are optimized which covers most of the cost.
+[profile.dev]
+opt-level = 1
 
 [profile.release]
 strip = true

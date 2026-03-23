@@ -1,5 +1,5 @@
 import { useCallback } from 'react'
-import { TerminalView } from '@/components/Terminal/TerminalView'
+import { AlacrittyTerminalView } from '@/components/Terminal/AlacrittyTerminalView'
 import { FileViewerPane } from '@/components/FileViewerPane/FileViewerPane'
 import { useTabsStore } from '@/stores/tabs'
 import type { TerminalItemData, FileViewerItemData } from '@/stores/tabs'
@@ -107,6 +107,7 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
 
   const terminalData = activeItem.type === 'terminal' && activeItem.data as TerminalItemData
   const fileData = activeItem.type === 'file-viewer' && activeItem.data as FileViewerItemData
+  // xterm.js removed — alacritty is the only backend
 
   // Only show per-pane tab bar when there are splits
   // (so the close-pane button is accessible).
@@ -127,29 +128,25 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
 
       <div className="flex-1 min-h-0">
         {activeItem.type === 'terminal' && terminalData ? (
-          <TerminalView
-            terminalId={terminalData.terminalId}
-            cwd={terminalData.cwd}
-            command={terminalData.command}
-            args={terminalData.args}
-            onExit={(exitCode) => {
-              if (exitCode === 127) {
-                // Command not found — remove the entire tab.
-                // TerminalView shows a toast with install instructions.
-                const store = useTabsStore.getState()
-                const groupIdx = store.tabs.some((t) => t.id === tabId)
-                  ? 0
-                  : store.extraGroups.findIndex((g) => g.tabs.some((t) => t.id === tabId)) + 1
-                if (groupIdx >= 0) {
-                  removeTabFromGroup(groupIdx, tabId)
+            <AlacrittyTerminalView
+              terminalId={terminalData.terminalId}
+              cwd={terminalData.cwd}
+              command={terminalData.command}
+              args={terminalData.args}
+              onExit={(exitCode) => {
+                if (exitCode === 127) {
+                  const store = useTabsStore.getState()
+                  const groupIdx = store.tabs.some((t) => t.id === tabId)
+                    ? 0
+                    : store.extraGroups.findIndex((g) => g.tabs.some((t) => t.id === tabId)) + 1
+                  if (groupIdx >= 0) {
+                    removeTabFromGroup(groupIdx, tabId)
+                  }
+                } else if (exitCode === 0) {
+                  handleClose(activeItem.id)
                 }
-              } else if (exitCode === 0) {
-                // Clean exit — close the pane item
-                handleClose(activeItem.id)
-              }
-              // Other non-zero exits: keep terminal visible for error output
-            }}
-          />
+              }}
+            />
         ) : activeItem.type === 'file-viewer' && fileData ? (
           <FileViewerPane
             filePath={fileData.filePath}

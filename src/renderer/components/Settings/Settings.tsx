@@ -132,7 +132,7 @@ export default function Settings(): React.JSX.Element {
       </div>
 
       {/* Content area */}
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className={`flex-1 p-6 ${activeSection === 'projects' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
         {activeSection === 'general' && <GeneralSection />}
         {activeSection === 'terminal' && <TerminalSection />}
         {activeSection === 'editors-agents' && <EditorsAgentsSection />}
@@ -1903,9 +1903,9 @@ function ProjectsSection(): React.JSX.Element {
   }, [selectedProjectId, reorderDragId, handleReorderMouseDown, fetchProjects])
 
   return (
-    <div className="flex h-full -m-6">
+    <div className="flex h-[calc(100%+3rem)] -m-6">
       {/* ── Left panel: focus group toggle + organized workspace list ── */}
-      <div className="w-60 flex-shrink-0 border-r border-[var(--color-border)] flex flex-col overflow-hidden">
+      <div className="w-60 flex-shrink-0 border-r border-[var(--color-border)] flex flex-col">
         {/* Focus groups toggle at top */}
         <div className="px-3 pt-3 pb-2 border-b border-[var(--color-border)] flex items-center justify-between">
           <span className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">

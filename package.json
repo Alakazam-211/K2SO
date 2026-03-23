@@ -1,12 +1,12 @@
 {
   "name": "k2so",
-  "version": "0.12.3",
+  "version": "0.13.0",
   "description": "Developer workspace with terminal panes, git worktrees, and agent presets",
   "author": "Alakazam Labs",
   "license": "MIT",
   "scripts": {
-    "dev": "tauri dev",
-    "build": "tauri build",
+    "dev": "tauri dev --features alacritty-backend",
+    "build": "tauri build --features alacritty-backend",
     "vite:dev": "vite --config vite.config.ts",
     "vite:build": "vite build --config vite.config.ts",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
