@@ -165,7 +165,6 @@ function SingleProjectItem({
         <div className="flex flex-col justify-center min-w-0 flex-1">
           <div className="flex items-center gap-2 w-full">
             <span className="truncate flex-1">{project.name}</span>
-            <AheadBehind path={project.path} />
             <DiffStats path={project.path} />
           </div>
           {gitInfo?.isRepo && gitInfo.currentBranch && (
@@ -421,9 +420,10 @@ function ProjectItem({
         </div>
         <div className="flex flex-col justify-center min-w-0 flex-1">
           <div className="flex items-center gap-2 w-full">
-            <span className="truncate flex-1">{project.name}</span>
-            <AheadBehind path={project.path} />
-            <AggregatedDiffStats paths={workspacePaths} />
+            <span className="truncate">{project.name}</span>
+            <span className="text-[10px] text-[var(--color-text-muted)] tabular-nums flex-shrink-0 px-1.5 py-0.5 bg-white/[0.06] font-mono">
+              {project.workspaces.length}
+            </span>
           </div>
           {gitInfo?.isRepo && gitInfo.currentBranch && (
             <span

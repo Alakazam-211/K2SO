@@ -16,7 +16,7 @@ interface ChatSession {
   messageCount: number
 }
 
-type DateGroup = 'Today' | 'Yesterday' | 'This Week' | 'This Month' | 'Older'
+type DateGroup = 'Pinned' | 'Today' | 'Yesterday' | 'This Week' | 'This Month' | 'Older'
 
 // ── CLI tool config ─────────────────────────────────────────────────
 
@@ -55,7 +55,7 @@ function formatTime(timestamp: number): string {
   return date.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
 
-const GROUP_ORDER: DateGroup[] = ['Today', 'Yesterday', 'This Week', 'This Month', 'Older']
+const GROUP_ORDER: DateGroup[] = ['Pinned', 'Today', 'Yesterday', 'This Week', 'This Month', 'Older']
 
 /** Get the right-most leaf node ID in a mosaic tree */
 function getRightmostLeaf(tree: unknown): string | null {
@@ -135,6 +135,7 @@ export default function ChatHistory(): React.JSX.Element {
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(-1)
   const [customNames, setCustomNames] = useState<Record<string, string>>({})
+  const [pinnedKeys, setPinnedKeys] = useState<Set<string>>(new Set())
   const [renamingSession, setRenamingSession] = useState<ChatSession | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const renameInputRef = useRef<HTMLInputElement>(null)
@@ -172,11 +173,17 @@ export default function ChatHistory(): React.JSX.Element {
     }
   }, [projectPath])
 
-  // Fetch custom names
+  // Fetch custom names and pinned state
   const fetchCustomNames = useCallback(async () => {
     try {
       const names = await invoke<Record<string, string>>('chat_history_get_custom_names')
       setCustomNames(names)
+    } catch {
+      // ignore
+    }
+    try {
+      const pinned = await invoke<string[]>('chat_history_get_pinned')
+      setPinnedKeys(new Set(pinned))
     } catch {
       // ignore
     }
@@ -215,7 +222,8 @@ export default function ChatHistory(): React.JSX.Element {
     const sorted = [...filtered].sort((a, b) => b.timestamp - a.timestamp)
 
     for (const session of sorted) {
-      const group = classifyDate(session.timestamp)
+      const key = `${session.provider}:${session.sessionId}`
+      const group = pinnedKeys.has(key) ? 'Pinned' as DateGroup : classifyDate(session.timestamp)
       const existing = groups.get(group)
       if (existing) {
         existing.push(session)
@@ -225,7 +233,7 @@ export default function ChatHistory(): React.JSX.Element {
     }
 
     return groups
-  }, [sessions, searchQuery])
+  }, [sessions, searchQuery, pinnedKeys])
 
   // Flat ordered list of visible sessions for keyboard navigation
   const flatSessions = useMemo(() => {
@@ -282,14 +290,65 @@ export default function ChatHistory(): React.JSX.Element {
     })
   }, [projectPath, searchQuery])
 
-  const handleRenameStart = useCallback((session: ChatSession, e: React.MouseEvent) => {
+  const handleTogglePin = useCallback(async (session: ChatSession) => {
+    const key = `${session.provider}:${session.sessionId}`
+    const isPinned = pinnedKeys.has(key)
+    try {
+      await invoke('chat_history_toggle_pin', {
+        provider: session.provider,
+        sessionId: session.sessionId,
+        pinned: !isPinned,
+      })
+      setPinnedKeys((prev) => {
+        const next = new Set(prev)
+        if (isPinned) next.delete(key)
+        else next.add(key)
+        return next
+      })
+    } catch (err) {
+      console.error('[chat-history] Failed to toggle pin:', err)
+    }
+  }, [pinnedKeys])
+
+  const handleContextMenu = useCallback((session: ChatSession, e: React.MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
     const key = `${session.provider}:${session.sessionId}`
-    setRenamingSession(session)
-    setRenameValue(customNames[key] ?? session.title)
-    setTimeout(() => renameInputRef.current?.focus(), 0)
-  }, [customNames])
+    const isPinned = pinnedKeys.has(key)
+
+    // Show a simple context menu with pin + rename
+    const menuDiv = document.createElement('div')
+    menuDiv.style.cssText = `position:fixed;left:${e.clientX}px;top:${e.clientY}px;z-index:9999;background:#1e1e1e;border:1px solid #333;padding:2px 0;min-width:140px;font-size:11px;font-family:var(--font-mono,monospace);`
+    const items = [
+      { label: isPinned ? 'Unpin' : 'Pin', action: () => handleTogglePin(session) },
+      { label: 'Rename', action: () => {
+        setRenamingSession(session)
+        setRenameValue(customNames[key] ?? session.title)
+        setTimeout(() => renameInputRef.current?.focus(), 0)
+      }},
+    ]
+    for (const item of items) {
+      const btn = document.createElement('button')
+      btn.textContent = item.label
+      btn.style.cssText = 'display:block;width:100%;text-align:left;padding:4px 12px;background:none;border:none;color:#ccc;cursor:pointer;font:inherit;'
+      btn.onmouseenter = () => { btn.style.background = '#333' }
+      btn.onmouseleave = () => { btn.style.background = 'none' }
+      btn.onclick = () => { item.action(); document.body.removeChild(menuDiv) }
+      menuDiv.appendChild(btn)
+    }
+    document.body.appendChild(menuDiv)
+    const dismiss = (ev: MouseEvent) => {
+      if (!menuDiv.contains(ev.target as Node)) {
+        document.body.removeChild(menuDiv)
+        document.removeEventListener('mousedown', dismiss)
+      }
+    }
+    setTimeout(() => document.addEventListener('mousedown', dismiss), 0)
+  }, [pinnedKeys, customNames, handleTogglePin])
+
+  const handleRenameStart = useCallback((_session: ChatSession, _e: React.MouseEvent) => {
+    // Now handled via context menu above
+  }, [])
 
   const handleRenameSubmit = useCallback(async () => {
     if (!renamingSession || !renameValue.trim()) {
@@ -482,8 +541,11 @@ export default function ChatHistory(): React.JSX.Element {
                               ? 'bg-white/[0.08] text-[var(--color-text-primary)]'
                               : 'hover:bg-white/[0.04] active:bg-white/[0.06]'
                           }`}
-                          onClick={() => handleSessionClick(session)}
-                          onContextMenu={(e) => handleRenameStart(session, e)}
+                          onClick={() => {
+                            if (renamingSession?.sessionId === session.sessionId && renamingSession?.provider === session.provider) return
+                            handleSessionClick(session)
+                          }}
+                          onContextMenu={(e) => handleContextMenu(session, e)}
                         >
                           <ProviderIcon provider={session.provider} />
 
@@ -495,12 +557,15 @@ export default function ChatHistory(): React.JSX.Element {
                                 value={renameValue}
                                 onChange={(e) => setRenameValue(e.target.value)}
                                 onKeyDown={(e) => {
+                                  e.stopPropagation()
                                   if (e.key === 'Enter') { e.preventDefault(); handleRenameSubmit() }
                                   if (e.key === 'Escape') { e.preventDefault(); setRenamingSession(null) }
-                                  e.stopPropagation()
                                 }}
+                                onKeyUp={(e) => e.stopPropagation()}
+                                onKeyPress={(e) => e.stopPropagation()}
                                 onBlur={handleRenameSubmit}
                                 onClick={(e) => e.stopPropagation()}
+                                onMouseDown={(e) => e.stopPropagation()}
                                 className="text-[11px] font-mono bg-white/[0.06] border border-[var(--color-accent)] text-[var(--color-text-primary)] px-1 py-0 outline-none w-full"
                                 maxLength={100}
                               />

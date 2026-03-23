@@ -352,15 +352,31 @@ export function TerminalView({
             // Buffer might not be available — that's OK
           }
 
-          // Fit + resize so the PTY knows the current dimensions
+          // Fit + force resize so the shell recalculates line width.
+          // We resize to cols-1 then back to real cols to guarantee a
+          // SIGWINCH even if dimensions haven't changed — this fixes
+          // stale line-editing redraw after tab switch.
           requestAnimationFrame(() => {
             try {
               fitAddon.fit()
               if (ptyIdRef.current && xterm.cols > 0 && xterm.rows > 0) {
+                const realCols = xterm.cols
+                const realRows = xterm.rows
+                // Nudge: shrink by 1 col then restore — forces SIGWINCH
                 invoke('terminal_resize', {
                   id: ptyIdRef.current,
-                  cols: xterm.cols,
-                  rows: xterm.rows,
+                  cols: Math.max(1, realCols - 1),
+                  rows: realRows,
+                }).then(() => {
+                  setTimeout(() => {
+                    invoke('terminal_resize', {
+                      id: ptyIdRef.current!,
+                      cols: realCols,
+                      rows: realRows,
+                    })
+                    lastColsRef.current = realCols
+                    lastRowsRef.current = realRows
+                  }, 20)
                 })
               }
             } catch {
@@ -389,6 +405,26 @@ export function TerminalView({
             cols: initialCols,
             rows: initialRows
           })
+
+          // After shell boots, force a resize to ensure it knows the
+          // exact terminal dimensions — proposeDimensions can be stale
+          // if the container wasn't fully laid out at creation time.
+          setTimeout(() => {
+            try {
+              fitAddon.fit()
+              if (ptyIdRef.current && xterm.cols > 0 && xterm.rows > 0) {
+                invoke('terminal_resize', {
+                  id: ptyIdRef.current,
+                  cols: xterm.cols,
+                  rows: xterm.rows,
+                })
+                lastColsRef.current = xterm.cols
+                lastRowsRef.current = xterm.rows
+              }
+            } catch {
+              // Ignore
+            }
+          }, 100)
         }
       } catch (err) {
         xterm.writeln(

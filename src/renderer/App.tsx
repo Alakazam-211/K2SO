@@ -29,8 +29,11 @@ import FocusWorkspaceHeader from './components/FocusWindow/FocusWorkspaceHeader'
 import { useGitInfo } from './hooks/useGit'
 import { useUpdateChecker } from './hooks/useUpdateChecker'
 import { useWindowSync } from './hooks/useWindowSync'
+import { useTimerStore } from './stores/timer'
 import CountdownOverlay from './components/Timer/CountdownOverlay'
 import MemoDialog from './components/Timer/MemoDialog'
+import ExtendTimerDialog from './components/Timer/ExtendTimerDialog'
+import { useCursorMigrationCheck } from './hooks/useCursorMigrationCheck'
 
 /** Parse focus mode project ID from URL hash (#focus=<projectId>) */
 function parseFocusProjectId(): string | null {
@@ -153,6 +156,7 @@ function FocusModeContent({ activeProject, cwd }: { activeProject: any; cwd: str
       <AssistantBar />
       <CountdownOverlay />
       <MemoDialog />
+      <ExtendTimerDialog />
     </FocusErrorBoundary>
   )
 }
@@ -260,6 +264,9 @@ export default function App(): React.JSX.Element {
   // Sync state across all windows (main, focus, new)
   useWindowSync()
 
+  // Check for unmigrated Cursor IDE conversations
+  useCursorMigrationCheck()
+
   // Save layout helper
   const saveCurrentLayout = (): void => {
     const tabsStore = useTabsStore.getState()
@@ -275,6 +282,11 @@ export default function App(): React.JSX.Element {
   // Force quit (bypasses agent check)
   const forceQuit = async (): Promise<void> => {
     setShowQuitDialog(false)
+    // Auto-stop timer silently
+    const timerState = useTimerStore.getState()
+    if (timerState.status !== 'idle') {
+      await timerState.stopTimerSilently()
+    }
     const tabsStore = useTabsStore.getState()
     await tabsStore.detectAndSaveSessionIds()
     saveCurrentLayout()
@@ -285,6 +297,11 @@ export default function App(): React.JSX.Element {
   // Before app close: check for active agents, save layout
   useEffect(() => {
     const handleBeforeUnload = (): void => {
+      // Auto-stop timer silently on close (no memo prompt)
+      const timerState = useTimerStore.getState()
+      if (timerState.status !== 'idle') {
+        timerState.stopTimerSilently()
+      }
       saveCurrentLayout()
     }
 
@@ -293,6 +310,12 @@ export default function App(): React.JSX.Element {
     let unlisten: (() => void) | undefined
     import('@tauri-apps/api/event').then(({ listen }) => {
       listen('tauri://close-requested', async (event) => {
+        // Auto-stop timer silently before closing
+        const timerState = useTimerStore.getState()
+        if (timerState.status !== 'idle') {
+          await timerState.stopTimerSilently()
+        }
+
         // Check for active agents
         await useActiveAgentsStore.getState().pollOnce()
         const agents = useActiveAgentsStore.getState().getActiveAgentsList()
@@ -348,6 +371,7 @@ export default function App(): React.JSX.Element {
         <AssistantBar />
         <CountdownOverlay />
         <MemoDialog />
+      <ExtendTimerDialog />
       </>
     )
   }
@@ -390,6 +414,7 @@ export default function App(): React.JSX.Element {
       <AssistantBar />
       <CountdownOverlay />
       <MemoDialog />
+      <ExtendTimerDialog />
       {showQuitDialog && (
         <AgentCloseDialog
           agents={quitAgents}

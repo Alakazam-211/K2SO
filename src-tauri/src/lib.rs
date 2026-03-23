@@ -318,6 +318,10 @@ pub fn run() {
             commands::chat_history::chat_history_get_storage_paths,
             commands::chat_history::chat_history_get_custom_names,
             commands::chat_history::chat_history_rename_session,
+            commands::chat_history::chat_history_get_pinned,
+            commands::chat_history::chat_history_toggle_pin,
+            commands::chat_history::chat_history_discover_ide_sessions,
+            commands::chat_history::chat_history_migrate_ide_sessions,
             // Timer
             commands::timer::timer_entries_list,
             commands::timer::timer_entry_create,

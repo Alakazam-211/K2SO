@@ -68,6 +68,10 @@ export default function FocusLayout({
         {/* Right: timer + left/right panel toggles */}
         <div className="flex items-center gap-1">
           <TimerButton />
+
+          {/* Separator between timer and panel toggles */}
+          <div className="w-px h-4 bg-[var(--color-border)] mx-1" />
+
           <button
             onClick={toggleLeftPanel}
             className="flex h-6 w-6 items-center justify-center text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)] transition-colors"

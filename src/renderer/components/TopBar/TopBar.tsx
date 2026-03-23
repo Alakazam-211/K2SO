@@ -178,6 +178,9 @@ export default function TopBar({
         {/* Timer */}
         <TimerButton />
 
+        {/* Separator between timer and panel toggles */}
+        <div className="w-px h-4 bg-[var(--color-border)] mx-1" />
+
         {/* Left panel toggle (opens panel to the left of terminal) */}
         <button
           onClick={onToggleLeftPanel}

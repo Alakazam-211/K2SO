@@ -18,6 +18,7 @@ import {
 } from '@shared/hotkeys'
 import type { HotkeyDefinition } from '@shared/hotkeys'
 import DisableWorktreesDialog from './DisableWorktreesDialog'
+import AgentIcon from '@/components/AgentIcon/AgentIcon'
 import { checkForUpdate } from '@/hooks/useUpdateChecker'
 import type { UpdateInfo } from '@/hooks/useUpdateChecker'
 import {
@@ -122,9 +123,10 @@ export default function Settings(): React.JSX.Element {
         <div className="px-4 py-3 border-t border-[var(--color-border)]">
           <button
             onClick={closeSettings}
-            className="text-xs text-[var(--color-text-primary)] hover:text-[var(--color-text-primary)] no-drag cursor-pointer"
+            className="flex items-center gap-2 text-xs text-[var(--color-text-primary)] hover:text-[var(--color-text-primary)] no-drag cursor-pointer"
           >
             &larr; Back
+            <span className="text-[10px] text-[var(--color-text-muted)]">Esc</span>
           </button>
         </div>
       </div>
@@ -305,19 +307,15 @@ function TerminalSection(): React.JSX.Element {
 
         {/* Cursor Style */}
         <SettingRow label="Cursor Style">
-          <select
+          <SettingDropdown
             value={terminal.cursorStyle}
-            onChange={(e) =>
-              updateTerminalSettings({
-                cursorStyle: e.target.value as TerminalSettings['cursorStyle']
-              })
-            }
-            className="w-40 px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag cursor-pointer"
-          >
-            <option value="bar">Bar</option>
-            <option value="block">Block</option>
-            <option value="underline">Underline</option>
-          </select>
+            options={[
+              { value: 'bar', label: 'Bar' },
+              { value: 'block', label: 'Block' },
+              { value: 'underline', label: 'Underline' },
+            ]}
+            onChange={(v) => updateTerminalSettings({ cursorStyle: v as TerminalSettings['cursorStyle'] })}
+          />
         </SettingRow>
 
         {/* Scrollback */}
@@ -394,17 +392,11 @@ function DefaultAgentPicker({ presets }: { presets: { id: string; label: string;
       <p className="text-[10px] text-[var(--color-text-muted)] mb-3">
         The agent launched when you send coding tasks from the assistant (Cmd+L).
       </p>
-      <select
+      <SettingDropdown
         value={defaultAgent}
-        onChange={(e) => setDefaultAgent(e.target.value)}
-        className="px-2 py-1.5 text-xs bg-[var(--color-bg)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag cursor-pointer font-mono"
-      >
-        {agentOptions.map((opt) => (
-          <option key={opt.command} value={opt.command}>
-            {opt.label} ({opt.command})
-          </option>
-        ))}
-      </select>
+        options={agentOptions.map((opt) => ({ value: opt.command, label: `${opt.label} (${opt.command})` }))}
+        onChange={setDefaultAgent}
+      />
     </div>
   )
 }
@@ -1271,6 +1263,9 @@ function TimerSection(): React.JSX.Element {
       if (!parsed.animationPreset) {
         parsed.animationPreset = 'fade'
       }
+      if (!parsed.flowTitles || !Array.isArray(parsed.flowTitles)) {
+        parsed.flowTitles = []
+      }
 
       const updated = [...customThemes, parsed]
       await updateTimerSetting('customThemes', updated)
@@ -1278,6 +1273,32 @@ function TimerSection(): React.JSX.Element {
       console.error('[timer] Failed to upload theme:', err)
     }
   }, [customThemes, updateTimerSetting])
+
+  const handleDownloadReference = useCallback(() => {
+    const reference: CountdownThemeConfig = {
+      name: 'My Custom Theme',
+      backgroundColor: '#0a0a2e',
+      textColor: '#00ff88',
+      fontFamily: 'monospace',
+      countdownTexts: ['Ready...', 'Set...', 'Go!'],
+      finalText: 'FLOW TIME!',
+      animationPreset: 'fade',
+      flowTitles: [
+        "You're on fire!",
+        "Keep that momentum going!",
+        "Built different.",
+        "The keyboard is smoking.",
+        "Locked in.",
+      ],
+    }
+    const blob = new Blob([JSON.stringify(reference, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'k2so-theme-reference.json'
+    a.click()
+    URL.revokeObjectURL(url)
+  }, [])
 
   const handleDeleteTheme = useCallback(async (name: string) => {
     const updated = customThemes.filter((t) => t.name !== name)
@@ -1303,7 +1324,8 @@ function TimerSection(): React.JSX.Element {
   const detectedTz = Intl.DateTimeFormat().resolvedOptions().timeZone
 
   return (
-    <div className="max-w-xl">
+    <div>
+      <div className="max-w-xl">
       <h2 className="text-lg font-semibold text-[var(--color-text-primary)] mb-1">Timer</h2>
       <p className="text-xs text-[var(--color-text-muted)] mb-6">
         Track work sessions. Click the clock icon in the top bar to start.
@@ -1317,13 +1339,13 @@ function TimerSection(): React.JSX.Element {
         </div>
         <button
           onClick={() => updateTimerSetting('visible', !visible)}
-          className={`w-8 h-4 rounded-full transition-colors relative cursor-pointer ${
+          className={`w-8 h-4 flex items-center transition-colors no-drag cursor-pointer ${
             visible ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
           }`}
         >
-          <div
-            className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${
-              visible ? 'translate-x-4' : 'translate-x-0.5'
+          <span
+            className={`w-3 h-3 bg-white block transition-transform ${
+              visible ? 'translate-x-4.5' : 'translate-x-0.5'
             }`}
           />
         </button>
@@ -1337,13 +1359,13 @@ function TimerSection(): React.JSX.Element {
         </div>
         <button
           onClick={() => updateTimerSetting('countdownEnabled', !countdownEnabled)}
-          className={`w-8 h-4 rounded-full transition-colors relative cursor-pointer ${
+          className={`w-8 h-4 flex items-center transition-colors no-drag cursor-pointer ${
             countdownEnabled ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
           }`}
         >
-          <div
-            className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${
-              countdownEnabled ? 'translate-x-4' : 'translate-x-0.5'
+          <span
+            className={`w-3 h-3 bg-white block transition-transform ${
+              countdownEnabled ? 'translate-x-4.5' : 'translate-x-0.5'
             }`}
           />
         </button>
@@ -1355,18 +1377,14 @@ function TimerSection(): React.JSX.Element {
           <div>
             <div className="text-xs text-[var(--color-text-primary)]">Countdown theme</div>
           </div>
-          <select
+          <SettingDropdown
             value={countdownTheme}
-            onChange={(e) => updateTimerSetting('countdownTheme', e.target.value)}
-            className="text-xs bg-[var(--color-bg)] border border-[var(--color-border)] text-[var(--color-text-primary)] px-2 py-1 outline-none cursor-pointer"
-          >
-            {BUILT_IN_THEMES.map((t) => (
-              <option key={t.value} value={t.value}>{t.label}</option>
-            ))}
-            {customThemes.map((t) => (
-              <option key={t.name} value={t.name}>{t.name}</option>
-            ))}
-          </select>
+            options={[
+              ...BUILT_IN_THEMES.map((t) => ({ value: t.value, label: t.label })),
+              ...customThemes.map((t) => ({ value: t.name, label: t.name })),
+            ]}
+            onChange={(v) => updateTimerSetting('countdownTheme', v)}
+          />
         </div>
       )}
 
@@ -1382,12 +1400,20 @@ function TimerSection(): React.JSX.Element {
           />
           <div className="flex items-center justify-between mb-2">
             <div className="text-xs text-[var(--color-text-primary)]">Custom themes</div>
-            <button
-              onClick={handleUploadTheme}
-              className="text-[10px] text-[var(--color-accent)] hover:underline cursor-pointer"
-            >
-              Upload .json
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleDownloadReference}
+                className="text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] cursor-pointer"
+              >
+                Download reference
+              </button>
+              <button
+                onClick={handleUploadTheme}
+                className="text-[10px] text-[var(--color-accent)] hover:underline cursor-pointer"
+              >
+                Upload .json
+              </button>
+            </div>
           </div>
           {customThemes.length === 0 ? (
             <div className="text-[10px] text-[var(--color-text-muted)]">No custom themes uploaded</div>
@@ -1423,13 +1449,13 @@ function TimerSection(): React.JSX.Element {
         </div>
         <button
           onClick={() => updateTimerSetting('skipMemo', !skipMemo)}
-          className={`w-8 h-4 rounded-full transition-colors relative cursor-pointer ${
+          className={`w-8 h-4 flex items-center transition-colors no-drag cursor-pointer ${
             skipMemo ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
           }`}
         >
-          <div
-            className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${
-              skipMemo ? 'translate-x-4' : 'translate-x-0.5'
+          <span
+            className={`w-3 h-3 bg-white block transition-transform ${
+              skipMemo ? 'translate-x-4.5' : 'translate-x-0.5'
             }`}
           />
         </button>
@@ -1443,18 +1469,17 @@ function TimerSection(): React.JSX.Element {
             Times displayed in this timezone (detected: {detectedTz})
           </div>
         </div>
-        <select
+        <SettingDropdown
           value={timezone}
-          onChange={(e) => updateTimerSetting('timezone', e.target.value)}
-          className="text-xs bg-[var(--color-bg)] border border-[var(--color-border)] text-[var(--color-text-primary)] px-2 py-1 outline-none cursor-pointer max-w-[200px]"
-        >
-          {COMMON_TIMEZONES.map((tz) => (
-            <option key={tz} value={tz}>
-              {tz === '' ? `Auto (${detectedTz})` : tz}
-            </option>
-          ))}
-        </select>
+          options={COMMON_TIMEZONES.map((tz) => ({
+            value: tz,
+            label: tz === '' ? `Auto (${detectedTz})` : tz,
+          }))}
+          onChange={(v) => updateTimerSetting('timezone', v)}
+        />
       </div>
+
+      </div>{/* end max-w-xl */}
 
       {/* Timer History */}
       <div className="mt-6">
@@ -1498,16 +1523,14 @@ function TimerSection(): React.JSX.Element {
           </div>
           <div>
             <label className="text-[10px] text-[var(--color-text-muted)] block mb-0.5">Project</label>
-            <select
+            <SettingDropdown
               value={filterProject}
-              onChange={(e) => setFilterProject(e.target.value)}
-              className="text-xs bg-[var(--color-bg)] border border-[var(--color-border)] text-[var(--color-text-primary)] px-2 py-1 outline-none cursor-pointer"
-            >
-              <option value="">All projects</option>
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>{p.name}</option>
-              ))}
-            </select>
+              options={[
+                { value: '', label: 'All projects' },
+                ...projects.map((p) => ({ value: p.id, label: p.name })),
+              ]}
+              onChange={setFilterProject}
+            />
           </div>
           {(filterStart || filterEnd || filterProject) && (
             <button
@@ -1525,51 +1548,68 @@ function TimerSection(): React.JSX.Element {
             No time entries yet. Click the timer button to start tracking.
           </div>
         ) : (
-          <div className="space-y-4 max-h-[400px] overflow-y-auto">
-            {groupedEntries.map(([monthKey, monthEntries]) => {
-              const [year, month] = monthKey.split('-')
-              const monthLabel = new Date(Number(year), Number(month) - 1).toLocaleString('en-US', { month: 'long', year: 'numeric' })
-              return (
-                <div key={monthKey}>
-                  <div className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider mb-1 sticky top-0 bg-[var(--color-bg)] py-1">
-                    {monthLabel}
-                  </div>
-                  <div className="space-y-0.5">
-                    {monthEntries.map((entry) => {
-                      const project = projects.find((p) => p.id === entry.projectId)
-                      return (
-                        <div
-                          key={entry.id}
-                          className="flex items-center gap-3 py-1.5 px-2 hover:bg-[var(--color-bg-elevated)] group text-xs"
-                        >
-                          <span className="text-[var(--color-text-muted)] w-[130px] flex-shrink-0 font-mono text-[10px]">
-                            {formatTimestamp(entry.startTime, timezone, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                          </span>
-                          <span className="text-[var(--color-accent)] font-mono w-[60px] flex-shrink-0 text-[10px]">
-                            {formatDuration(entry.durationSeconds)}
-                          </span>
-                          {project && (
-                            <span className="text-[var(--color-text-muted)] text-[10px] w-[80px] flex-shrink-0 truncate">
-                              {project.name}
-                            </span>
-                          )}
-                          <span className="text-[var(--color-text-secondary)] flex-1 truncate text-[10px]">
-                            {entry.memo || '—'}
-                          </span>
-                          <button
-                            onClick={() => deleteEntry(entry.id)}
-                            className="text-red-400/0 group-hover:text-red-400/60 hover:!text-red-400 transition-colors cursor-pointer text-[10px]"
-                            title="Delete entry"
+          <div className="max-h-[600px] overflow-y-auto">
+            {/* Column headers */}
+            <div className="grid gap-x-3 px-2 py-1.5 border-b border-[var(--color-border)] sticky top-0 bg-[var(--color-bg)] z-10 text-[11px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider"
+              style={{ gridTemplateColumns: '190px 190px 80px 100px 1fr 20px' }}
+            >
+              <span>Start</span>
+              <span>End</span>
+              <span>Duration</span>
+              <span>Project</span>
+              <span>Memo</span>
+              <span />
+            </div>
+
+            <div className="space-y-3">
+              {groupedEntries.map(([monthKey, monthEntries]) => {
+                const [year, month] = monthKey.split('-')
+                const monthLabel = new Date(Number(year), Number(month) - 1).toLocaleString('en-US', { month: 'long', year: 'numeric' })
+                return (
+                  <div key={monthKey}>
+                    <div className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider mb-1 sticky top-[28px] bg-[var(--color-bg)] py-1 px-2 z-[5]">
+                      {monthLabel}
+                    </div>
+                    <div>
+                      {monthEntries.map((entry) => {
+                        const project = projects.find((p) => p.id === entry.projectId)
+                        const timeOpts: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }
+                        return (
+                          <div
+                            key={entry.id}
+                            className="grid items-center gap-x-3 py-1.5 px-2 hover:bg-[var(--color-bg-elevated)] group text-xs font-mono"
+                            style={{ gridTemplateColumns: '190px 190px 80px 100px 1fr 20px' }}
                           >
-                            ×
-                          </button>
-                        </div>
-                      )
-                    })}
+                            <span className="text-[var(--color-text-muted)] truncate">
+                              {formatTimestamp(entry.startTime, timezone, timeOpts)}
+                            </span>
+                            <span className="text-[var(--color-text-muted)] truncate">
+                              {formatTimestamp(entry.endTime, timezone, timeOpts)}
+                            </span>
+                            <span className="text-[var(--color-accent)]">
+                              {formatDuration(entry.durationSeconds)}
+                            </span>
+                            <span className="text-[var(--color-text-muted)] truncate font-sans">
+                              {project?.name || '—'}
+                            </span>
+                            <span className="text-[var(--color-text-secondary)] truncate font-sans">
+                              {entry.memo || '—'}
+                            </span>
+                            <button
+                              onClick={() => deleteEntry(entry.id)}
+                              className="text-red-400/0 group-hover:text-red-400/60 hover:!text-red-400 transition-colors cursor-pointer text-center"
+                              title="Delete entry"
+                            >
+                              ×
+                            </button>
+                          </div>
+                        )
+                      })}
+                    </div>
                   </div>
-                </div>
-              )
-            })}
+                )
+              })}
+            </div>
           </div>
         )}
       </div>
@@ -2495,15 +2535,11 @@ function ProjectDetail({
         {/* Default editor */}
         <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
           <span className="text-xs text-[var(--color-text-secondary)]">Default Editor</span>
-          <select
+          <SettingDropdown
             value={projectSettings[project.id]?.defaultEditor ?? 'Cursor'}
-            onChange={(e) => updateProjectSetting(project.id, e.target.value)}
-            className="px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag cursor-pointer"
-          >
-            {editors.map((ed) => (
-              <option key={ed} value={ed}>{ed}</option>
-            ))}
-          </select>
+            options={editors.map((ed) => ({ value: ed, label: ed }))}
+            onChange={(v) => updateProjectSetting(project.id, v)}
+          />
         </div>
 
         {/* Color */}
@@ -2530,19 +2566,17 @@ function ProjectDetail({
         {focusGroupsEnabled && (
           <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
             <span className="text-xs text-[var(--color-text-secondary)]">Focus Group</span>
-            <select
+            <SettingDropdown
               value={project.focusGroupId ?? ''}
-              onChange={async (e) => {
-                await assignProjectToGroup(project.id, e.target.value || null)
+              options={[
+                { value: '', label: 'No Group' },
+                ...focusGroups.map((g) => ({ value: g.id, label: g.name })),
+              ]}
+              onChange={async (v) => {
+                await assignProjectToGroup(project.id, v || null)
                 await fetchProjects()
               }}
-              className="px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag cursor-pointer"
-            >
-              <option value="">No Group</option>
-              {focusGroups.map((g) => (
-                <option key={g.id} value={g.id}>{g.name}</option>
-              ))}
-            </select>
+            />
           </div>
         )}
       </div>
@@ -2580,6 +2614,9 @@ function ProjectDetail({
         <WorktreeFoldersOnDisk project={project} fetchProjects={fetchProjects} />
       )}
 
+      {/* ── Cursor Chat Migration ── */}
+      <CursorMigrationPanel projectPath={project.path} />
+
       {/* ── Danger zone ── */}
       <div className="pt-4 border-t border-[var(--color-border)]">
         <button
@@ -2594,7 +2631,250 @@ function ProjectDetail({
   )
 }
 
+// ── Cursor IDE Chat Migration Panel ─────────────────────────────────
+
+interface CursorIdeSession {
+  composerId: string
+  name: string
+  createdAt: number
+  lastUpdatedAt: number
+  mode: string
+  alreadyMigrated: boolean
+  migratable: boolean
+}
+
+function CursorMigrationPanel({ projectPath }: { projectPath: string }): React.JSX.Element | null {
+  const [sessions, setSessions] = useState<CursorIdeSession[]>([])
+  const [loading, setLoading] = useState(true)
+  const [migrating, setMigrating] = useState(false)
+  const [migratingIds, setMigratingIds] = useState<Set<string>>(new Set())
+  const [justMigratedIds, setJustMigratedIds] = useState<Set<string>>(new Set())
+  const [error, setError] = useState<string | null>(null)
+
+  const fetchIdeSessions = useCallback(async () => {
+    try {
+      const result = await invoke<CursorIdeSession[]>('chat_history_discover_ide_sessions', { projectPath })
+      setSessions(result)
+    } catch {
+      setSessions([])
+    } finally {
+      setLoading(false)
+    }
+  }, [projectPath])
+
+  useEffect(() => {
+    fetchIdeSessions()
+  }, [fetchIdeSessions])
+
+  const unmigratedSessions = sessions.filter((s) => !s.alreadyMigrated && !justMigratedIds.has(s.composerId) && s.migratable)
+  const migratedSessions = sessions.filter((s) => s.alreadyMigrated || justMigratedIds.has(s.composerId))
+  const nonMigratableSessions = sessions.filter((s) => !s.migratable && !s.alreadyMigrated)
+
+  const handleMigrateAll = useCallback(async () => {
+    if (unmigratedSessions.length === 0) return
+    setMigrating(true)
+    setError(null)
+
+    let succeeded = 0
+    let failed = 0
+
+    // Migrate one at a time so the UI updates per-session
+    for (const session of unmigratedSessions) {
+      setMigratingIds(new Set([session.composerId]))
+      try {
+        const count = await invoke<number>('chat_history_migrate_ide_sessions', {
+          projectPath,
+          composerIds: [session.composerId],
+        })
+        if (count > 0) {
+          succeeded++
+          setJustMigratedIds((prev) => new Set([...prev, session.composerId]))
+        } else {
+          failed++
+        }
+      } catch {
+        failed++
+      }
+    }
+
+    if (failed > 0) {
+      setError(`${succeeded} migrated, ${failed} failed (missing conversation data)`)
+    }
+    setMigrating(false)
+    setMigratingIds(new Set())
+    await fetchIdeSessions()
+  }, [unmigratedSessions, projectPath, fetchIdeSessions])
+
+  if (loading) return null
+  if (sessions.length === 0) return null
+
+  return (
+    <div className="space-y-2">
+      <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
+        Cursor IDE Conversations ({sessions.length})
+      </h3>
+
+      <p className="text-[10px] text-[var(--color-text-muted)]">
+        Migrate conversations from the Cursor IDE to CLI format so they can be resumed in K2SO terminals.
+      </p>
+
+      {/* Session list */}
+      <div className="border border-[var(--color-border)] max-h-[250px] overflow-y-auto">
+        {sessions.map((session, i) => {
+          const isMigrated = session.alreadyMigrated || justMigratedIds.has(session.composerId)
+          const isCurrentlyMigrating = migratingIds.has(session.composerId)
+          const date = new Date(session.lastUpdatedAt || session.createdAt)
+          const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+
+          return (
+            <div
+              key={session.composerId}
+              className={`flex items-center gap-2 px-3 py-1.5 text-xs ${
+                i < sessions.length - 1 ? 'border-b border-[var(--color-border)]' : ''
+              }`}
+            >
+              <AgentIcon agent="Cursor Agent" size={12} />
+              <span className={`flex-1 truncate ${isMigrated ? 'text-[var(--color-text-muted)]' : 'text-[var(--color-text-primary)]'}`}>
+                {session.name || 'Untitled'}
+              </span>
+              <span className="text-[10px] text-[var(--color-text-muted)] flex-shrink-0">
+                {dateStr}
+              </span>
+              {isCurrentlyMigrating ? (
+                <span className="text-[10px] text-[var(--color-accent)] flex-shrink-0 animate-pulse">
+                  migrating...
+                </span>
+              ) : isMigrated ? (
+                <span className="text-[10px] text-green-400 flex-shrink-0">
+                  migrated
+                </span>
+              ) : !session.migratable ? (
+                <span className="text-[10px] text-[var(--color-text-muted)] flex-shrink-0 opacity-50">
+                  chat only
+                </span>
+              ) : (
+                <span className="text-[10px] text-[var(--color-text-muted)] flex-shrink-0">
+                  pending
+                </span>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      {/* Error */}
+      {error && (
+        <p className="text-[10px] text-red-400">{error}</p>
+      )}
+
+      {/* Status + button */}
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] text-[var(--color-text-muted)]">
+          {migratedSessions.length > 0 && (
+            <span className="text-green-400">{migratedSessions.length} migrated</span>
+          )}
+          {migratedSessions.length > 0 && unmigratedSessions.length > 0 && ' · '}
+          {unmigratedSessions.length > 0 && (
+            <span>{unmigratedSessions.length} pending</span>
+          )}
+          {nonMigratableSessions.length > 0 && (
+            <span> · {nonMigratableSessions.length} chat-only</span>
+          )}
+          {migratedSessions.length > 0 && unmigratedSessions.length === 0 && nonMigratableSessions.length === 0 && (
+            <span> — all conversations available in Chat History</span>
+          )}
+        </span>
+
+        {unmigratedSessions.length > 0 && (
+          <button
+            onClick={handleMigrateAll}
+            disabled={migrating}
+            className="px-3 py-1.5 text-xs font-medium bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity cursor-pointer disabled:opacity-50 no-drag"
+          >
+            {migrating
+              ? `Migrating ${migratingIds.size}...`
+              : `Migrate ${unmigratedSessions.length}`}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ── Shared components ────────────────────────────────────────────────
+// ── Reusable Dropdown (matches FocusGroupDropdown style) ─────────────
+
+function SettingDropdown({
+  value,
+  options,
+  onChange,
+  className,
+}: {
+  value: string
+  options: { value: string; label: string }[]
+  onChange: (value: string) => void | Promise<void>
+  className?: string
+}): React.JSX.Element {
+  const [isOpen, setIsOpen] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  const selected = options.find((o) => o.value === value) ?? options[0]
+
+  useEffect(() => {
+    if (!isOpen) return
+    const handler = (e: MouseEvent): void => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setIsOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [isOpen])
+
+  return (
+    <div ref={containerRef} className={`relative no-drag ${className ?? ''}`}>
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className="flex items-center gap-2 px-2 py-1 text-xs bg-[var(--color-bg)] border border-[var(--color-border)] hover:border-[var(--color-text-muted)] text-[var(--color-text-primary)] transition-colors cursor-pointer"
+      >
+        <span className="truncate">{selected?.label ?? ''}</span>
+        <svg
+          className={`w-3 h-3 text-[var(--color-text-muted)] flex-shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`}
+          fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {isOpen && (
+        <div className="absolute top-full right-0 z-50 mt-0.5 min-w-full bg-[var(--color-bg-surface)] border border-[var(--color-border)] shadow-xl max-h-60 overflow-y-auto">
+          {options.map((option) => {
+            const isActive = option.value === value
+            return (
+              <button
+                key={option.value}
+                onClick={() => { onChange(option.value); setIsOpen(false) }}
+                className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors cursor-pointer ${
+                  isActive
+                    ? 'text-[var(--color-accent)] bg-[var(--color-accent)]/10'
+                    : 'text-[var(--color-text-secondary)] hover:bg-white/[0.04] hover:text-[var(--color-text-primary)]'
+                }`}
+              >
+                <span className="truncate flex-1">{option.label}</span>
+                {isActive && (
+                  <svg className="w-3 h-3 flex-shrink-0 text-[var(--color-accent)]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                  </svg>
+                )}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function SettingRow({
   label,
   children

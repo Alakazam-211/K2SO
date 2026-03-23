@@ -22,6 +22,7 @@ export interface CountdownThemeConfig {
   countdownTexts: string[]   // e.g. ["T-minus 3", "T-minus 2", "T-minus 1"]
   finalText: string          // e.g. "LIFTOFF!"
   animationPreset: 'fade' | 'zoom' | 'slide'
+  flowTitles?: string[]      // shown when timer expires, e.g. ["You're on fire!", "Locked in."]
 }
 
 export type TimerStatus = 'idle' | 'running' | 'paused'
@@ -32,6 +33,7 @@ interface TimerState {
   startTime: number | null       // unix ms when timer started
   pausedElapsed: number          // accumulated ms before current resume
   resumeTime: number | null      // unix ms when last resumed
+  targetDurationMs: number | null // countdown target in ms (null = count up)
 
   // Settings (from backend)
   visible: boolean
@@ -44,6 +46,7 @@ interface TimerState {
   // UI state
   showCountdown: boolean
   showMemoDialog: boolean
+  showExtendDialog: boolean
   stoppedElapsed: number | null  // ms elapsed at stop (for memo dialog display)
 
   // History
@@ -52,14 +55,19 @@ interface TimerState {
   // Actions
   initFromSettings: () => Promise<void>
   beginCountdownOrStart: () => void
+  startWithDuration: (durationMs: number) => void
   startTimer: () => void
   pauseTimer: () => void
   resumeTimer: () => void
   stopTimer: () => void
+  stopTimerSilently: () => Promise<void>
   dismissCountdown: () => void
   cancelCountdown: () => void
   saveEntry: (memo?: string) => Promise<void>
   dismissMemoDialog: () => void
+  showExtend: () => void
+  extendTimer: (additionalMs: number) => void
+  dismissExtendDialog: () => void
 
   // History actions
   fetchEntries: (start?: number, end?: number, projectId?: string) => Promise<void>
@@ -78,6 +86,7 @@ export interface TimerSyncPayload {
   startTime: number | null
   pausedElapsed: number
   resumeTime: number | null
+  targetDurationMs: number | null
 }
 
 function generateId(): string {
@@ -90,6 +99,7 @@ function broadcastTimerState(state: TimerState): void {
     startTime: state.startTime,
     pausedElapsed: state.pausedElapsed,
     resumeTime: state.resumeTime,
+    targetDurationMs: state.targetDurationMs,
   }
   invoke('broadcast_sync', {
     channel: 'sync:timer',
@@ -105,6 +115,15 @@ export function getElapsedMs(state: { status: TimerStatus; pausedElapsed: number
     return state.pausedElapsed + (Date.now() - state.resumeTime)
   }
   return state.pausedElapsed
+}
+
+/**
+ * Get remaining milliseconds for a countdown timer. Returns 0 if elapsed exceeds target.
+ */
+export function getRemainingMs(state: { status: TimerStatus; pausedElapsed: number; resumeTime: number | null; targetDurationMs: number | null }): number {
+  if (state.targetDurationMs == null) return 0
+  const elapsed = getElapsedMs(state)
+  return Math.max(0, state.targetDurationMs - elapsed)
 }
 
 /**
@@ -160,6 +179,7 @@ export const useTimerStore = create<TimerState>((set, get) => ({
   startTime: null,
   pausedElapsed: 0,
   resumeTime: null,
+  targetDurationMs: null,
 
   // Settings defaults
   visible: true,
@@ -172,6 +192,7 @@ export const useTimerStore = create<TimerState>((set, get) => ({
   // UI
   showCountdown: false,
   showMemoDialog: false,
+  showExtendDialog: false,
   stoppedElapsed: null,
 
   // History
@@ -201,6 +222,25 @@ export const useTimerStore = create<TimerState>((set, get) => ({
       set({ showCountdown: true })
     } else {
       get().startTimer()
+    }
+  },
+
+  startWithDuration: (durationMs: number) => {
+    const state = get()
+    if (state.status !== 'idle') return
+    set({ targetDurationMs: durationMs })
+    if (state.countdownEnabled) {
+      set({ showCountdown: true })
+    } else {
+      const now = Date.now()
+      set({
+        status: 'running',
+        startTime: now,
+        pausedElapsed: 0,
+        resumeTime: now,
+        showCountdown: false,
+      })
+      broadcastTimerState(get())
     }
   },
 
@@ -257,6 +297,41 @@ export const useTimerStore = create<TimerState>((set, get) => ({
     broadcastTimerState(get())
   },
 
+  stopTimerSilently: async () => {
+    const state = get()
+    if (state.status === 'idle') return
+    const elapsed = getElapsedMs(state)
+    // Save entry immediately without memo dialog
+    const startMs = state.startTime ?? Date.now()
+    const durationSeconds = Math.round(elapsed / 1000)
+    const startTimeSec = Math.floor(startMs / 1000)
+    const endTimeSec = startTimeSec + durationSeconds
+    const projectId = useProjectsStore.getState().activeProjectId ?? undefined
+
+    try {
+      await invoke('timer_entry_create', {
+        id: generateId(),
+        projectId: projectId ?? null,
+        startTime: startTimeSec,
+        endTime: endTimeSec,
+        durationSeconds,
+        memo: null,
+      })
+    } catch (err) {
+      console.error('[timer] Failed to save entry on close:', err)
+    }
+
+    set({
+      status: 'idle',
+      startTime: null,
+      pausedElapsed: 0,
+      resumeTime: null,
+      targetDurationMs: null,
+      showMemoDialog: false,
+      stoppedElapsed: null,
+    })
+  },
+
   dismissCountdown: () => {
     set({ showCountdown: false })
   },
@@ -294,6 +369,7 @@ export const useTimerStore = create<TimerState>((set, get) => ({
       startTime: null,
       pausedElapsed: 0,
       resumeTime: null,
+      targetDurationMs: null,
       showMemoDialog: false,
       stoppedElapsed: null,
     })
@@ -303,6 +379,38 @@ export const useTimerStore = create<TimerState>((set, get) => ({
   dismissMemoDialog: () => {
     // Save without memo
     get().saveEntry()
+  },
+
+  showExtend: () => {
+    const state = get()
+    if (state.status !== 'running') return
+    // Pause the timer while showing the extend dialog
+    const elapsed = getElapsedMs(state)
+    set({
+      status: 'paused',
+      pausedElapsed: elapsed,
+      resumeTime: null,
+      showExtendDialog: true,
+    })
+  },
+
+  extendTimer: (additionalMs: number) => {
+    const state = get()
+    // Add more time to the target and resume
+    const newTarget = (state.targetDurationMs ?? 0) + additionalMs
+    set({
+      status: 'running',
+      targetDurationMs: newTarget,
+      resumeTime: Date.now(),
+      showExtendDialog: false,
+    })
+    broadcastTimerState(get())
+  },
+
+  dismissExtendDialog: () => {
+    // User chose to stop — proceed to normal stop flow
+    set({ showExtendDialog: false })
+    get().stopTimer()
   },
 
   fetchEntries: async (start?: number, end?: number, projectId?: string) => {
@@ -361,9 +469,11 @@ export const useTimerStore = create<TimerState>((set, get) => ({
       startTime: payload.startTime,
       pausedElapsed: payload.pausedElapsed,
       resumeTime: payload.resumeTime,
-      // Close countdown/memo if synced from another window
+      targetDurationMs: payload.targetDurationMs,
+      // Close dialogs if synced from another window
       showCountdown: false,
       showMemoDialog: false,
+      showExtendDialog: false,
     })
   },
 }))

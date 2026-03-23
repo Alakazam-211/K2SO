@@ -72,7 +72,7 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
     <div
       className="flex h-9 items-center border-b border-[var(--color-border)] bg-[var(--color-bg-surface)] no-drag"
     >
-      <div className="flex h-full flex-1 items-center overflow-x-auto">
+      <div className="flex h-full flex-1 items-center overflow-x-auto tabbar-scroll">
         {tabs.map((tab) => {
           const isActive = tab.id === activeTabId
           const isDirty = tab.isDirty ?? false
@@ -80,7 +80,7 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
           return (
             <div
               key={tab.id}
-              className={`group flex h-full min-w-0 max-w-[200px] cursor-pointer items-center border-r border-[var(--color-border)] px-3 text-xs transition-colors select-none ${
+              className={`group flex h-full min-w-[100px] max-w-[200px] flex-shrink-0 cursor-pointer items-center border-r border-[var(--color-border)] px-3 text-xs transition-colors select-none ${
                 isActive
                   ? 'bg-white/[0.08] text-[var(--color-text-primary)]'
                   : 'text-[var(--color-text-secondary)] hover:bg-white/[0.04]'
