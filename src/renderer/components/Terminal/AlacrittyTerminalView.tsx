@@ -5,6 +5,8 @@ import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import { useSettingsStore } from '@/stores/settings'
 import { keyEventToSequence, naturalTextEditingSequence } from '@/lib/key-mapping'
 import { isFileDragActive, markDropConsumed } from '@/lib/file-drag'
+import { detectLinks, type DetectedLink } from './terminalLinkDetector'
+import { useTabsStore } from '@/stores/tabs'
 
 // ── Types matching Rust GridUpdate / CompactLine / StyleSpan ──────────
 
@@ -52,6 +54,7 @@ const DEFAULT_BG = 0x0a0a0a
 
 interface AlacrittyTerminalViewProps {
   terminalId: string
+  tabId?: string
   cwd: string
   command?: string
   args?: string[]
@@ -135,6 +138,7 @@ function renderLineSpans(line: CompactLine): React.JSX.Element[] {
 
 export function AlacrittyTerminalView({
   terminalId,
+  tabId,
   cwd,
   command,
   args,
@@ -152,11 +156,16 @@ export function AlacrittyTerminalView({
   const pendingFrameRef = useRef<GridUpdate | null>(null)
 
   const fontSize = useTerminalSettingsStore((s) => s.fontSize)
+  const linkClickMode = useTerminalSettingsStore((s) => s.linkClickMode)
   const settings = useSettingsStore((s) => s.settings)
   const naturalTextEditing = settings?.terminal?.naturalTextEditing !== false
 
   const [created, setCreated] = useState(false)
   const [cursorBlinkVisible, setCursorBlinkVisible] = useState(true)
+
+  // ── Link detection state ──────────────────────────────────────────
+  const cmdHeldRef = useRef(false)
+  const [hoveredLink, setHoveredLink] = useState<{ row: number; link: DetectedLink } | null>(null)
 
   // Grid state
   const linesRef = useRef<Map<number, CompactLine>>(new Map())
@@ -493,6 +502,107 @@ export function AlacrittyTerminalView({
     }
   }, [])
 
+  // ── Link detection: Cmd key tracking ────────────────────────────────
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent): void => {
+      if (e.key === 'Meta') cmdHeldRef.current = true
+    }
+    const handleKeyUp = (e: KeyboardEvent): void => {
+      if (e.key === 'Meta') {
+        cmdHeldRef.current = false
+        if (linkClickMode === 'cmd-click') setHoveredLink(null)
+      }
+    }
+    const handleBlur = (): void => {
+      cmdHeldRef.current = false
+      setHoveredLink(null)
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    document.addEventListener('keyup', handleKeyUp)
+    window.addEventListener('blur', handleBlur)
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown)
+      document.removeEventListener('keyup', handleKeyUp)
+      window.removeEventListener('blur', handleBlur)
+    }
+  }, [linkClickMode])
+
+  // ── Link detection: mouse hover ────────────────────────────────────
+
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    // In cmd-click mode, only detect when Cmd is held
+    if (linkClickMode === 'cmd-click' && !cmdHeldRef.current) {
+      if (hoveredLink) setHoveredLink(null)
+      return
+    }
+
+    const viewport = viewportRef.current
+    if (!viewport) return
+    const rect = viewport.getBoundingClientRect()
+    const { width: cw, height: ch } = cellMetricsRef.current
+    if (cw === 0 || ch === 0) return
+
+    const row = Math.floor((e.clientY - rect.top) / ch)
+    const col = Math.floor((e.clientX - rect.left) / cw)
+    const line = linesRef.current.get(row)
+    if (!line || !line.text) {
+      if (hoveredLink) setHoveredLink(null)
+      return
+    }
+
+    const links = detectLinks(line.text, cwd)
+    const hit = links.find((l) => col >= l.start && col < l.end)
+    if (hit) {
+      if (!hoveredLink || hoveredLink.row !== row || hoveredLink.link.start !== hit.start) {
+        setHoveredLink({ row, link: hit })
+      }
+    } else if (hoveredLink) {
+      setHoveredLink(null)
+    }
+  }, [linkClickMode, hoveredLink, cwd])
+
+  const handleMouseLeaveViewport = useCallback(() => {
+    if (hoveredLink) setHoveredLink(null)
+  }, [hoveredLink])
+
+  // ── Link detection: click handler ──────────────────────────────────
+
+  const handleLinkClick = useCallback((e: React.MouseEvent) => {
+    // In cmd-click mode, require Cmd. In click mode, just need hoveredLink.
+    if (linkClickMode === 'cmd-click' && !e.metaKey) return
+    if (!hoveredLink) return
+
+    const viewport = viewportRef.current
+    if (!viewport) return
+    const rect = viewport.getBoundingClientRect()
+    const { width: cw, height: ch } = cellMetricsRef.current
+    if (cw === 0 || ch === 0) return
+
+    const row = Math.floor((e.clientY - rect.top) / ch)
+    const col = Math.floor((e.clientX - rect.left) / cw)
+    const line = linesRef.current.get(row)
+    if (!line || !line.text) return
+
+    const links = detectLinks(line.text, cwd)
+    const clicked = links.find((l) => col >= l.start && col < l.end)
+    if (!clicked) return
+
+    e.preventDefault()
+    e.stopPropagation()
+
+    if (clicked.type === 'url') {
+      invoke('plugin:shell|open', { path: clicked.target }).catch(() => {})
+    } else if (clicked.type === 'file' && clicked.filePath) {
+      const tabsStore = useTabsStore.getState()
+      if (tabId) {
+        tabsStore.openFileInPane(tabId, clicked.filePath)
+      } else {
+        tabsStore.openFileInNewTab(clicked.filePath)
+      }
+    }
+  }, [linkClickMode, hoveredLink, cwd, tabId])
+
   // ── Cursor blink ───────────────────────────────────────────────────
 
   useEffect(() => {
@@ -553,10 +663,13 @@ export function AlacrittyTerminalView({
       onDragOver={handleDragOver}
       onDrop={handleDrop}
       data-terminal-id={terminalId}
-      style={{ cursor: isDragging ? 'default' : 'text', position: 'relative' }}
+      style={{ cursor: isDragging ? 'default' : hoveredLink ? 'pointer' : 'text', position: 'relative' }}
     >
       <div
         ref={viewportRef}
+        onMouseMove={handleMouseMove}
+        onMouseLeave={handleMouseLeaveViewport}
+        onClick={handleLinkClick}
         style={{
           fontFamily: "'MesloLGM Nerd Font', 'MesloLGM Nerd Font Mono', Menlo, Monaco, 'Courier New', monospace",
           fontSize: `${fontSize}px`,
@@ -570,6 +683,23 @@ export function AlacrittyTerminalView({
       >
         {rowElements}
       </div>
+
+      {/* Link underline overlay */}
+      {hoveredLink && cellW > 0 && cellH > 0 && (
+        <div
+          style={{
+            position: 'absolute',
+            left: hoveredLink.link.start * cellW,
+            top: hoveredLink.row * cellH + cellH - 1,
+            width: (hoveredLink.link.end - hoveredLink.link.start) * cellW,
+            height: 1,
+            background: hoveredLink.link.type === 'url' ? '#6cb6ff' : '#8bdb81',
+            pointerEvents: 'none',
+            zIndex: 10,
+            opacity: 0.8,
+          }}
+        />
+      )}
 
       {/* Cursor overlay — block style, matches iTerm2/Alacritty default */}
       {showCursor && cellW > 0 && cellH > 0 && (

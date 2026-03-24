@@ -5,15 +5,20 @@ import {
   TERMINAL_FONT_SIZE_DEFAULT
 } from '../../shared/constants'
 
+export type LinkClickMode = 'click' | 'cmd-click'
+
 interface TerminalSettingsState {
   fontSize: number
+  linkClickMode: LinkClickMode
   incrementFontSize: () => void
   decrementFontSize: () => void
   resetFontSize: () => void
+  setLinkClickMode: (mode: LinkClickMode) => void
 }
 
 export const useTerminalSettingsStore = create<TerminalSettingsState>((set) => ({
   fontSize: TERMINAL_FONT_SIZE_DEFAULT,
+  linkClickMode: 'click' as LinkClickMode,
 
   incrementFontSize: () => {
     set((state) => ({
@@ -29,6 +34,10 @@ export const useTerminalSettingsStore = create<TerminalSettingsState>((set) => (
 
   resetFontSize: () => {
     set({ fontSize: TERMINAL_FONT_SIZE_DEFAULT })
+  },
+
+  setLinkClickMode: (mode: LinkClickMode) => {
+    set({ linkClickMode: mode })
   }
 }))
 

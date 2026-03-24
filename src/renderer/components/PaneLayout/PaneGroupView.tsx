@@ -130,6 +130,7 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
         {activeItem.type === 'terminal' && terminalData ? (
             <AlacrittyTerminalView
               terminalId={terminalData.terminalId}
+              tabId={tabId}
               cwd={terminalData.cwd}
               command={terminalData.command}
               args={terminalData.args}

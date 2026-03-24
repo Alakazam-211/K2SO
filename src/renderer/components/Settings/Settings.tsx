@@ -5,6 +5,8 @@ import type { SettingsSection, TerminalSettings } from '@/stores/settings'
 import { useProjectsStore } from '@/stores/projects'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
 import { usePresetsStore } from '@/stores/presets'
+import { useTerminalSettingsStore } from '@/stores/terminal-settings'
+import type { LinkClickMode } from '@/stores/terminal-settings'
 import { invoke } from '@tauri-apps/api/core'
 import { useAssistantStore } from '@/stores/assistant'
 import IconCropDialog from './IconCropDialog'
@@ -263,6 +265,8 @@ function GeneralSection(): React.JSX.Element {
 function TerminalSection(): React.JSX.Element {
   const terminal = useSettingsStore((s) => s.terminal)
   const updateTerminalSettings = useSettingsStore((s) => s.updateTerminalSettings)
+  const linkClickMode = useTerminalSettingsStore((s) => s.linkClickMode)
+  const setLinkClickMode = useTerminalSettingsStore((s) => s.setLinkClickMode)
 
   return (
     <div className="max-w-xl">
@@ -352,6 +356,22 @@ function TerminalSection(): React.JSX.Element {
               }`}
             />
           </button>
+        </SettingRow>
+
+        {/* Link Click Mode */}
+        <SettingRow label={
+          <span title="How to activate clickable links (URLs and file paths) in terminal output">
+            Link Click Mode
+          </span>
+        }>
+          <SettingDropdown
+            value={linkClickMode}
+            options={[
+              { value: 'click', label: 'Click' },
+              { value: 'cmd-click', label: '⌘ + Click' },
+            ]}
+            onChange={(v) => setLinkClickMode(v as LinkClickMode)}
+          />
         </SettingRow>
       </div>
     </div>
