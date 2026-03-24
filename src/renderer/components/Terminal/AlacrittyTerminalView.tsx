@@ -167,6 +167,9 @@ export function AlacrittyTerminalView({
   // ── Link detection state ──────────────────────────────────────────
   const cmdHeldRef = useRef(false)
   const [hoveredLink, setHoveredLink] = useState<{ row: number; link: DetectedLink } | null>(null)
+  const mouseDownLinkRef = useRef<DetectedLink | null>(null)
+  const lastDetectPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
+  const lastDetectTimeRef = useRef(0)
 
   // Grid state
   const linesRef = useRef<Map<number, CompactLine>>(new Map())
@@ -539,6 +542,15 @@ export function AlacrittyTerminalView({
       return
     }
 
+    // Throttle: skip if mouse moved < 4px and < 80ms since last detection
+    const now = Date.now()
+    const dx = e.clientX - lastDetectPosRef.current.x
+    const dy = e.clientY - lastDetectPosRef.current.y
+    const dist = dx * dx + dy * dy
+    if (dist < 16 && now - lastDetectTimeRef.current < 80) return
+    lastDetectPosRef.current = { x: e.clientX, y: e.clientY }
+    lastDetectTimeRef.current = now
+
     const viewport = viewportRef.current
     if (!viewport) return
     const rect = viewport.getBoundingClientRect()
@@ -568,12 +580,24 @@ export function AlacrittyTerminalView({
     if (hoveredLink) setHoveredLink(null)
   }, [hoveredLink])
 
+  // ── Link detection: mouse-down/up validation ────────────────────────
+
+  const handleLinkMouseDown = useCallback((e: React.MouseEvent) => {
+    // Store the link at mouse-down so we can validate on click
+    mouseDownLinkRef.current = hoveredLink?.link ?? null
+  }, [hoveredLink])
+
   // ── Link detection: click handler ──────────────────────────────────
 
   const handleLinkClick = useCallback((e: React.MouseEvent) => {
     // In cmd-click mode, require Cmd. In click mode, just need hoveredLink.
     if (linkClickMode === 'cmd-click' && !e.metaKey) return
     if (!hoveredLink) return
+
+    // Validate: mouse-down must have been on the same link (prevents drag-to-link false clicks)
+    const downLink = mouseDownLinkRef.current
+    mouseDownLinkRef.current = null
+    if (!downLink || downLink.start !== hoveredLink.link.start || downLink.target !== hoveredLink.link.target) return
 
     const viewport = viewportRef.current
     if (!viewport) return
@@ -670,6 +694,7 @@ export function AlacrittyTerminalView({
       <div
         ref={viewportRef}
         onMouseMove={handleMouseMove}
+        onMouseDown={handleLinkMouseDown}
         onMouseLeave={handleMouseLeaveViewport}
         onClick={handleLinkClick}
         style={{

@@ -1,29 +1,10 @@
-// Terminal backend abstraction layer.
-//
-// By default, uses the legacy xterm.js + portable-pty backend.
-// With the `alacritty-backend` feature, uses alacritty_terminal for
-// Rust-native terminal emulation with grid-based IPC.
+// Terminal backend — Alacritty-based terminal emulation with grid-based IPC.
 
-mod legacy;
-
-#[cfg(feature = "alacritty-backend")]
 mod alacritty_backend;
-
-#[cfg(feature = "alacritty-backend")]
 pub mod grid_types;
-
-#[cfg(feature = "alacritty-backend")]
 mod font_renderer;
-
-#[cfg(feature = "alacritty-backend")]
 mod bitmap_renderer;
 
-// ── Re-export the active backend as `TerminalManager` ──────────────────────
-
-#[cfg(not(feature = "alacritty-backend"))]
-pub use legacy::TerminalManager;
-
-#[cfg(feature = "alacritty-backend")]
 pub use alacritty_backend::TerminalManager;
 
 // ── Shared utilities ───────────────────────────────────────────────────────
@@ -37,16 +18,7 @@ pub fn ignore_sigpipe() {
     }
 }
 
-/// Returns which backend is active: "legacy" or "alacritty".
-pub fn backend_name() -> &'static str {
-    #[cfg(feature = "alacritty-backend")]
-    { "alacritty" }
-    #[cfg(not(feature = "alacritty-backend"))]
-    { "legacy" }
-}
-
 /// Expand tilde in a path and ensure the directory exists.
-/// Falls back to home directory if the path doesn't exist.
 pub fn resolve_cwd(cwd: &str) -> String {
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
     let resolved = if cwd == "~" {
@@ -60,10 +32,7 @@ pub fn resolve_cwd(cwd: &str) -> String {
     if std::path::Path::new(&resolved).exists() {
         resolved
     } else {
-        eprintln!(
-            "[terminal] WARNING: CWD '{}' does not exist, falling back to home directory",
-            resolved
-        );
+        eprintln!("[terminal] WARNING: CWD '{}' does not exist, falling back to home", resolved);
         home.to_string_lossy().to_string()
     }
 }

@@ -17,16 +17,17 @@ export interface DetectedLink {
 
 // ── Regex patterns ───────────────────────────────────────────────────
 
-// URLs: http:// or https:// followed by non-whitespace, non-bracket chars
-const URL_RE = /https?:\/\/[^\s<>'")\]]+/g
+// URLs: multiple schemes followed by non-whitespace, non-bracket chars
+const URL_RE = /(?:https?|ftp|ssh|file|gemini|gopher|ipfs|ipns):\/\/[^\s<>'")\]{}]+|mailto:[^\s<>'")\]{}]+/g
 
 // File paths: require at least one `/` and a file extension
 // Matches: src/foo.tsx, ./foo/bar.ts, /absolute/path.rs, ../relative.js
+// Also matches git diff prefixes: a/src/foo.ts, b/src/foo.ts
 // Optional :line or :line:col suffix
-const FILE_PATH_RE = /(?:\.{0,2}\/)?(?:[\w@._-]+\/)+[\w@._-]+\.\w+(?::\d+(?::\d+)?)?/g
+const FILE_PATH_RE = /(?:[ab]\/|\.{0,2}\/)?(?:[\w@._-]+\/)+[\w@._-]+\.\w+(?::\d+(?::\d+)?)?/g
 
-// Trailing punctuation that shouldn't be part of a URL
-const TRAILING_PUNCT_RE = /[.,;:!?)]+$/
+// Bracket pairs for balanced cleanup
+const BRACKET_PAIRS: Record<string, string> = { ')': '(', ']': '[', '}': '{', '>': '<' }
 
 // ── LRU Cache ────────────────────────────────────────────────────────
 
@@ -36,7 +37,6 @@ const cache = new Map<string, DetectedLink[]>()
 function cacheGet(key: string): DetectedLink[] | undefined {
   const val = cache.get(key)
   if (val !== undefined) {
-    // Move to end (most recently used)
     cache.delete(key)
     cache.set(key, val)
   }
@@ -45,28 +45,36 @@ function cacheGet(key: string): DetectedLink[] | undefined {
 
 function cacheSet(key: string, value: DetectedLink[]): void {
   if (cache.size >= MAX_CACHE_SIZE) {
-    // Evict oldest entry
     const firstKey = cache.keys().next().value
     if (firstKey !== undefined) cache.delete(firstKey)
   }
   cache.set(key, value)
 }
 
-// ── Detection ────────────────────────────────────────────────────────
+// ── Detection helpers ────────────────────────────────────────────────
 
 function cleanTrailingPunct(url: string): string {
-  // Remove trailing punctuation that's likely not part of the URL
-  // But be careful with balanced parens: https://en.wikipedia.org/wiki/Foo_(bar)
+  // Iteratively strip trailing punctuation/brackets that are unbalanced
   let cleaned = url
-  const match = cleaned.match(TRAILING_PUNCT_RE)
-  if (match) {
-    const trail = match[0]
-    // Keep trailing ) if there's a matching ( in the URL
-    if (trail.includes(')') && cleaned.includes('(')) {
-      // Only strip trailing chars after the last balanced )
-      cleaned = cleaned.replace(/[.,;:!]+$/, '')
-    } else {
-      cleaned = cleaned.slice(0, -trail.length)
+  let changed = true
+  while (changed) {
+    changed = false
+    const last = cleaned[cleaned.length - 1]
+    // Strip trailing punctuation
+    if (last && '.,;:!?\'"'.includes(last)) {
+      cleaned = cleaned.slice(0, -1)
+      changed = true
+      continue
+    }
+    // Strip unbalanced closing brackets
+    const opener = last ? BRACKET_PAIRS[last] : undefined
+    if (opener) {
+      const opens = (cleaned.match(new RegExp('\\' + opener, 'g')) || []).length
+      const closes = (cleaned.match(new RegExp('\\' + last, 'g')) || []).length
+      if (closes > opens) {
+        cleaned = cleaned.slice(0, -1)
+        changed = true
+      }
     }
   }
   return cleaned
@@ -85,6 +93,16 @@ function parseFileSuffix(target: string): { path: string; line?: number; col?: n
   return { path: target }
 }
 
+function stripGitDiffPrefix(path: string): string {
+  // Strip a/ or b/ prefixes from git diff output
+  if (path.startsWith('a/') || path.startsWith('b/')) {
+    return path.slice(2)
+  }
+  return path
+}
+
+// ── Main detection ───────────────────────────────────────────────────
+
 export function detectLinks(text: string, cwd: string): DetectedLink[] {
   if (!text || text.trim().length === 0) return []
 
@@ -95,21 +113,18 @@ export function detectLinks(text: string, cwd: string): DetectedLink[] {
   const links: DetectedLink[] = []
   const chars = [...text]
 
-  // We need to map byte/string offsets to char indices for multi-byte support
-  // Build a mapping: string index → char index
+  // Build mapping: string index → char index (for multi-byte support)
   const strToChar = new Map<number, number>()
   let strIdx = 0
   for (let ci = 0; ci < chars.length; ci++) {
     strToChar.set(strIdx, ci)
     strIdx += chars[ci].length
   }
-  strToChar.set(strIdx, chars.length) // sentinel
+  strToChar.set(strIdx, chars.length)
 
   function strPosToCharIdx(pos: number): number {
-    // Find the closest char index for a string position
     const exact = strToChar.get(pos)
     if (exact !== undefined) return exact
-    // Fallback: find the nearest lower entry
     let best = 0
     for (const [sp, ci] of strToChar) {
       if (sp <= pos) best = ci
@@ -124,7 +139,7 @@ export function detectLinks(text: string, cwd: string): DetectedLink[] {
   while ((match = URL_RE.exec(text)) !== null) {
     const raw = match[0]
     const cleaned = cleanTrailingPunct(raw)
-    if (cleaned.length < 10) continue // too short to be a real URL
+    if (cleaned.length < 10) continue
 
     const start = strPosToCharIdx(match.index)
     const end = start + [...cleaned].length
@@ -150,8 +165,9 @@ export function detectLinks(text: string, cwd: string): DetectedLink[] {
 
     const { path, line, col } = parseFileSuffix(raw)
 
-    // Resolve relative paths against cwd
-    const absolutePath = path.startsWith('/') ? path : `${cwd}/${path}`
+    // Strip git diff prefixes and resolve relative paths
+    const stripped = stripGitDiffPrefix(path)
+    const absolutePath = stripped.startsWith('/') ? stripped : `${cwd}/${stripped}`
 
     links.push({
       start,
@@ -164,7 +180,6 @@ export function detectLinks(text: string, cwd: string): DetectedLink[] {
     })
   }
 
-  // Sort by start position
   links.sort((a, b) => a.start - b.start)
 
   cacheSet(cacheKey, links)

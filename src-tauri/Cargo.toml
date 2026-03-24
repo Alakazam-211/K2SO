@@ -42,30 +42,19 @@ notify = { version = "7", features = ["macos_fsevent"] }
 notify-debouncer-mini = "0.5"
 trash = "5"
 
-# Alacritty terminal backend (behind feature flag)
-alacritty_terminal = { version = "0.26.0-rc1", optional = true }
-parking_lot = { version = "0.12", optional = true }
-polling = { version = "3", optional = true }
-rustix = { version = "1", features = ["termios", "process"], optional = true }
-mio = { version = "1", features = ["os-poll", "os-ext"], optional = true }
-signal-hook = { version = "0.3", optional = true }
-signal-hook-mio = { version = "0.2", features = ["support-v1_0"], optional = true }
-fontdue = { version = "0.9", optional = true }
-qoi = { version = "0.4", optional = true }
+# Alacritty terminal backend
+alacritty_terminal = "0.26.0-rc1"
+parking_lot = "0.12"
+polling = "3"
+rustix = { version = "1", features = ["termios", "process"] }
+mio = { version = "1", features = ["os-poll", "os-ext"] }
+signal-hook = "0.3"
+signal-hook-mio = { version = "0.2", features = ["support-v1_0"] }
+fontdue = "0.9"
+qoi = "0.4"
 
 [features]
 default = []
-alacritty-backend = [
-    "alacritty_terminal",
-    "parking_lot",
-    "polling",
-    "rustix",
-    "mio",
-    "signal-hook",
-    "signal-hook-mio",
-    "fontdue",
-    "qoi",
-]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
