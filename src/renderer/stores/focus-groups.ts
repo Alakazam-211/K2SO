@@ -21,6 +21,7 @@ interface FocusGroupsState {
   deleteFocusGroup: (id: string) => Promise<void>
   renameFocusGroup: (id: string, name: string) => Promise<void>
   updateFocusGroupColor: (id: string, color: string | null) => Promise<void>
+  reorderFocusGroups: (ids: string[]) => Promise<void>
   assignProjectToGroup: (projectId: string, focusGroupId: string | null) => Promise<void>
   setFocusGroupsEnabled: (enabled: boolean) => Promise<void>
   initFromSettings: () => Promise<void>
@@ -82,6 +83,17 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
       await get().fetchFocusGroups()
     } catch (err) {
       console.error('[focus-groups] updateFocusGroupColor failed:', err)
+    }
+  },
+
+  reorderFocusGroups: async (ids: string[]) => {
+    try {
+      for (let i = 0; i < ids.length; i++) {
+        await invoke('focus_groups_update', { id: ids[i], tabOrder: i })
+      }
+      await get().fetchFocusGroups()
+    } catch (err) {
+      console.error('[focus-groups] reorderFocusGroups failed:', err)
     }
   },
 

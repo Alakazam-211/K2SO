@@ -20,6 +20,7 @@ import {
 } from '@shared/hotkeys'
 import type { HotkeyDefinition } from '@shared/hotkeys'
 import DisableWorktreesDialog from './DisableWorktreesDialog'
+import { showContextMenu } from '@/lib/context-menu'
 import AgentIcon from '@/components/AgentIcon/AgentIcon'
 import { checkForUpdate } from '@/hooks/useUpdateChecker'
 import type { UpdateInfo } from '@/hooks/useUpdateChecker'
@@ -1730,6 +1731,106 @@ function ProjectsSection(): React.JSX.Element {
   const [dragProjectId, setDragProjectId] = useState<string | null>(null)
   const [dragOverGroupId, setDragOverGroupId] = useState<string | null>(null)
 
+  // ── Focus group reorder state ──
+  const [groupDragId, setGroupDragId] = useState<string | null>(null)
+  const [groupDropIndex, setGroupDropIndex] = useState<number | null>(null)
+  const groupDragIdRef = useRef<string | null>(null)
+  const groupDropRef = useRef<number | null>(null)
+  const reorderFocusGroups = useFocusGroupsStore((s) => s.reorderFocusGroups)
+  const [renamingGroupId, setRenamingGroupId] = useState<string | null>(null)
+  const [renamingGroupName, setRenamingGroupName] = useState('')
+  const renameGroupInputRef = useRef<HTMLInputElement>(null)
+
+  const handleGroupContextMenu = useCallback(async (e: React.MouseEvent, groupId: string) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const group = focusGroups.find((g) => g.id === groupId)
+    if (!group) return
+
+    const clickedId = await showContextMenu([
+      { id: 'rename', label: 'Rename' },
+      { id: 'delete', label: 'Delete' },
+    ])
+
+    if (clickedId === 'rename') {
+      setRenamingGroupId(groupId)
+      setRenamingGroupName(group.name)
+      requestAnimationFrame(() => renameGroupInputRef.current?.focus())
+    } else if (clickedId === 'delete') {
+      await deleteFocusGroup(groupId)
+      await fetchProjects()
+    }
+  }, [focusGroups, deleteFocusGroup, fetchProjects])
+
+  const handleGroupRenameConfirm = useCallback(async () => {
+    if (renamingGroupId && renamingGroupName.trim()) {
+      await renameFocusGroup(renamingGroupId, renamingGroupName.trim())
+    }
+    setRenamingGroupId(null)
+    setRenamingGroupName('')
+  }, [renamingGroupId, renamingGroupName, renameFocusGroup])
+
+  const handleGroupReorderMouseDown = useCallback((e: React.MouseEvent, groupId: string) => {
+    if (e.button !== 0) return
+    // Don't start drag from interactive elements
+    if ((e.target as HTMLElement).closest('button, input')) return
+    const startY = e.clientY
+    let started = false
+
+    const handleMouseMove = (ev: MouseEvent): void => {
+      if (!started && Math.abs(ev.clientY - startY) > 5) {
+        started = true
+        groupDragIdRef.current = groupId
+        setGroupDragId(groupId)
+        document.body.style.cursor = 'grabbing'
+        document.body.style.userSelect = 'none'
+      }
+      if (!started) return
+
+      const container = document.querySelector('[data-focus-group-reorder-container]')
+      if (!container) return
+      const items = container.querySelectorAll('[data-focus-group-reorder-id]')
+      let dropIdx = 0
+      for (let i = 0; i < items.length; i++) {
+        const rect = items[i].getBoundingClientRect()
+        if (ev.clientY > rect.top + rect.height / 2) dropIdx = i + 1
+      }
+      groupDropRef.current = dropIdx
+      setGroupDropIndex(dropIdx)
+    }
+
+    const handleMouseUp = async (): Promise<void> => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+
+      if (started) {
+        const dragId = groupDragIdRef.current
+        const dropIdx = groupDropRef.current
+        if (dragId && dropIdx !== null) {
+          const currentGroups = useFocusGroupsStore.getState().focusGroups
+          const fromIdx = currentGroups.findIndex((g) => g.id === dragId)
+          if (fromIdx >= 0 && fromIdx !== dropIdx && fromIdx !== dropIdx - 1) {
+            const list = [...currentGroups]
+            const [moved] = list.splice(fromIdx, 1)
+            const insertAt = dropIdx > fromIdx ? dropIdx - 1 : dropIdx
+            list.splice(insertAt, 0, moved)
+            await reorderFocusGroups(list.map((g) => g.id))
+          }
+        }
+      }
+
+      setGroupDragId(null)
+      setGroupDropIndex(null)
+      groupDragIdRef.current = null
+      groupDropRef.current = null
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+  }, [reorderFocusGroups])
+
   const selectedProject = projects.find((p) => p.id === selectedProjectId) ?? null
   const editors = ['Cursor', 'VS Code', 'Zed', 'Other']
   const ungroupedProjects = projects.filter((p) => !p.focusGroupId && !p.pinned)
@@ -2005,6 +2106,32 @@ function ProjectsSection(): React.JSX.Element {
           </button>
         </div>
 
+        {/* Alphabetize buttons */}
+        <div className="px-3 py-1.5 flex gap-1.5 border-b border-[var(--color-border)]">
+          <button
+            onClick={async () => {
+              if (focusGroupsEnabled) {
+                const sorted = [...focusGroups].sort((a, b) => a.name.localeCompare(b.name))
+                await reorderFocusGroups(sorted.map((g) => g.id))
+              }
+            }}
+            className="flex-1 px-1.5 py-1 text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] bg-white/[0.03] hover:bg-white/[0.06] transition-colors no-drag cursor-pointer"
+            title="Sort focus groups A-Z"
+          >
+            A→Z Groups
+          </button>
+          <button
+            onClick={async () => {
+              const sorted = [...projects].sort((a, b) => a.name.localeCompare(b.name))
+              await reorderProjects(sorted.map((p) => p.id))
+            }}
+            className="flex-1 px-1.5 py-1 text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] bg-white/[0.03] hover:bg-white/[0.06] transition-colors no-drag cursor-pointer"
+            title="Sort workspaces A-Z within groups"
+          >
+            A→Z Workspaces
+          </button>
+        </div>
+
         {/* Workspace list — pinned at top, then groups or flat */}
         <div className="flex-1 overflow-y-auto px-1 py-1">
           {/* ── Pinned workspaces (always visible) ── */}
@@ -2034,14 +2161,19 @@ function ProjectsSection(): React.JSX.Element {
           {focusGroupsEnabled ? (
             <>
               {/* Focus group folders */}
-              {focusGroups.map((group) => {
+              <div data-focus-group-reorder-container>
+              {focusGroups.map((group, groupIdx) => {
                 const groupProjects = projects.filter((p) => p.focusGroupId === group.id && !p.pinned)
                 const isCollapsed = collapsedGroups.has(group.id)
                 const isDragOver = dragOverGroupId === group.id
                 const zoneId = `group:${group.id}`
+                const isGroupDragged = groupDragId === group.id
+                const showGroupDropBefore = groupDropIndex === groupIdx
+                const showGroupDropAfter = groupDropIndex === focusGroups.length && groupIdx === focusGroups.length - 1
 
                 return (
-                  <div key={group.id} className="mb-0.5">
+                  <div key={group.id} className={`mb-0.5 ${isGroupDragged ? 'opacity-30' : ''}`} data-focus-group-reorder-id={group.id}>
+                    {showGroupDropBefore && <div className="h-[2px] bg-[var(--color-accent)] mx-2 mb-0.5" />}
                     {/* Group folder header */}
                     <div
                       data-focus-group-id={group.id}
@@ -2050,7 +2182,9 @@ function ProjectsSection(): React.JSX.Element {
                           ? 'bg-[var(--color-accent)]/15 ring-1 ring-inset ring-[var(--color-accent)] scale-[1.02]'
                           : 'hover:bg-white/[0.03]'
                       }`}
-                      onClick={() => toggleGroupCollapse(group.id)}
+                      onClick={() => { if (renamingGroupId !== group.id) toggleGroupCollapse(group.id) }}
+                      onMouseDown={(e) => handleGroupReorderMouseDown(e, group.id)}
+                      onContextMenu={(e) => handleGroupContextMenu(e, group.id)}
                     >
                       {group.color && (
                         <span className="w-1 h-3 flex-shrink-0" style={{ backgroundColor: isDragOver ? 'var(--color-accent)' : group.color }} />
@@ -2063,9 +2197,25 @@ function ProjectsSection(): React.JSX.Element {
                       >
                         <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                       </svg>
-                      <span className="text-[11px] font-medium text-[var(--color-text-secondary)] flex-1 truncate">
-                        {group.name}
-                      </span>
+                      {renamingGroupId === group.id ? (
+                        <input
+                          ref={renameGroupInputRef}
+                          type="text"
+                          value={renamingGroupName}
+                          onChange={(e) => setRenamingGroupName(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleGroupRenameConfirm()
+                            else if (e.key === 'Escape') { setRenamingGroupId(null); setRenamingGroupName('') }
+                          }}
+                          onBlur={handleGroupRenameConfirm}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-[11px] font-medium text-[var(--color-text-primary)] flex-1 bg-transparent border-b border-[var(--color-accent)] outline-none px-0 py-0"
+                        />
+                      ) : (
+                        <span className="text-[11px] font-medium text-[var(--color-text-secondary)] flex-1 truncate">
+                          {group.name}
+                        </span>
+                      )}
                       {isDragOver ? (
                         <span className="text-[9px] text-[var(--color-accent)] flex-shrink-0 font-medium">
                           Drop here
@@ -2101,9 +2251,11 @@ function ProjectsSection(): React.JSX.Element {
                         )}
                       </div>
                     )}
+                    {showGroupDropAfter && <div className="h-[2px] bg-[var(--color-accent)] mx-2 mt-0.5" />}
                   </div>
                 )
               })}
+              </div>
 
               {/* Ungrouped workspaces */}
               {ungroupedProjects.length > 0 && (
