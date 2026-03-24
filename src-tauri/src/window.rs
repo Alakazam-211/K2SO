@@ -129,5 +129,5 @@ pub fn migrate_json_window_state(app: &tauri::AppHandle) {
 
     // Remove old JSON file
     let _ = std::fs::remove_file(&json_path);
-    eprintln!("[window] Migrated window state from JSON to SQLite");
+    log_debug!("[window] Migrated window state from JSON to SQLite");
 }

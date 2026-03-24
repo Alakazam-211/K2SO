@@ -105,11 +105,11 @@ pub fn assistant_chat(
     let system_prompt = tools::build_system_prompt(is_git_repo.unwrap_or(false));
     let mut debug_passes: Vec<DebugPass> = Vec::new();
 
-    eprintln!("[assistant] User message: {message}");
+    log_debug!("[assistant] User message: {message}");
 
     // First pass
     let raw = manager.generate(&system_prompt, &message)?;
-    eprintln!("[assistant] Raw LLM response (pass 1): {raw}");
+    log_debug!("[assistant] Raw LLM response (pass 1): {raw}");
     debug_passes.push(DebugPass {
         prompt: message.clone(),
         raw_output: raw.clone(),
@@ -136,10 +136,10 @@ pub fn assistant_chat(
                     let follow_up = format!(
                         "File listing results:\n{listing_text}\n\nOriginal request: {message}\n\nNow output the tool_calls to fulfill the request using the file paths above."
                     );
-                    eprintln!("[assistant] Follow-up prompt (pass 2): {follow_up}");
+                    log_debug!("[assistant] Follow-up prompt (pass 2): {follow_up}");
 
                     let raw2 = manager.generate(&system_prompt, &follow_up)?;
-                    eprintln!("[assistant] Raw LLM response (pass 2): {raw2}");
+                    log_debug!("[assistant] Raw LLM response (pass 2): {raw2}");
                     debug_passes.push(DebugPass {
                         prompt: follow_up,
                         raw_output: raw2.clone(),
@@ -229,7 +229,7 @@ pub fn assistant_load_model(
             .ok_or_else(|| "Invalid file path".to_string())?;
         let dest = models_dir.join(filename);
 
-        eprintln!("[llm] Copying model to {:?}", dest);
+        log_debug!("[llm] Copying model to {:?}", dest);
         std::fs::copy(&src, &dest)
             .map_err(|e| format!("Failed to copy model: {e}"))?;
 
@@ -290,7 +290,7 @@ pub fn assistant_download_default_model(
                         .store(false, std::sync::atomic::Ordering::Relaxed);
                 }
                 Err(e) => {
-                    eprintln!("Failed to lock LLM manager to clear downloading flag: {e}");
+                    log_debug!("Failed to lock LLM manager to clear downloading flag: {e}");
                 }
             }
 
@@ -301,14 +301,14 @@ pub fn assistant_download_default_model(
                         let _ = mgr.load_model(&dest_str);
                     }
                     Err(e) => {
-                        eprintln!("Failed to lock LLM manager to load model: {e}");
+                        log_debug!("Failed to lock LLM manager to load model: {e}");
                     }
                 }
             }
         }
 
         if let Err(e) = result {
-            eprintln!("Model download failed: {e}");
+            log_debug!("Model download failed: {e}");
         }
     });
 

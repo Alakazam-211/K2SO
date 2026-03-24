@@ -69,7 +69,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
                                 let msg = e.to_string();
                                 // Ignore "already exists" and "duplicate column" errors
                                 if msg.contains("already exists") || msg.contains("duplicate column") {
-                                    eprintln!("[db] Migration {}: skipping ({})", name, msg);
+                                    log_debug!("[db] Migration {}: skipping ({})", name, msg);
                                     last_err = None;
                                     break;
                                 }
@@ -77,7 +77,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
                                 if (msg.contains("database is locked") || msg.contains("schema is locked"))
                                     && attempt < 4
                                 {
-                                    eprintln!("[db] Migration {}: locked, retrying ({}/5)", name, attempt + 1);
+                                    log_debug!("[db] Migration {}: locked, retrying ({}/5)", name, attempt + 1);
                                     std::thread::sleep(std::time::Duration::from_millis(50 * (attempt as u64 + 1)));
                                     last_err = Some(e);
                                     continue;
@@ -105,16 +105,16 @@ fn run_migrations(conn: &Connection) -> Result<()> {
 /// are added on upgrade without duplicating existing ones.
 fn seed_agent_presets(conn: &Connection) -> Result<()> {
     let presets: &[(&str, &str, &str, &str, i64)] = &[
-        // Cloud CLI agents
-        ("b0a1c2d3-e4f5-6789-abcd-ef0123456001", "Claude", "claude --dangerously-skip-permissions", "\u{1F916}", 0),
-        ("b0a1c2d3-e4f5-6789-abcd-ef0123456002", "Codex", "codex -c model_reasoning_effort=\"high\" --dangerously-bypass-approvals-and-sandbox", "\u{1F98E}", 1),
-        ("b0a1c2d3-e4f5-6789-abcd-ef0123456003", "Gemini", "gemini --yolo", "\u{1F48E}", 2),
-        ("b0a1c2d3-e4f5-6789-abcd-ef0123456004", "Copilot", "copilot --allow-all", "\u{1F6F8}", 3),
-        ("b0a1c2d3-e4f5-6789-abcd-ef0123456005", "Aider", "aider", "\u{1F6E0}", 4),
-        ("b0a1c2d3-e4f5-6789-abcd-ef0123456006", "Cursor Agent", "cursor-agent", "\u{26A1}", 5),
-        ("b0a1c2d3-e4f5-6789-abcd-ef0123456007", "OpenCode", "opencode", "\u{1F4DF}", 6),
-        ("b0a1c2d3-e4f5-6789-abcd-ef0123456008", "Code Puppy", "codepuppy", "\u{1F436}", 7),
-        // Local/on-device LLM tools
+        // Cloud CLI agents (no emoji — use custom AgentIcon SVGs)
+        ("b0a1c2d3-e4f5-6789-abcd-ef0123456001", "Claude", "claude --dangerously-skip-permissions", "", 0),
+        ("b0a1c2d3-e4f5-6789-abcd-ef0123456002", "Codex", "codex -c model_reasoning_effort=\"high\" --dangerously-bypass-approvals-and-sandbox", "", 1),
+        ("b0a1c2d3-e4f5-6789-abcd-ef0123456003", "Gemini", "gemini --yolo", "", 2),
+        ("b0a1c2d3-e4f5-6789-abcd-ef0123456004", "Copilot", "copilot --allow-all", "", 3),
+        ("b0a1c2d3-e4f5-6789-abcd-ef0123456005", "Aider", "aider", "", 4),
+        ("b0a1c2d3-e4f5-6789-abcd-ef0123456006", "Cursor Agent", "cursor-agent", "", 5),
+        ("b0a1c2d3-e4f5-6789-abcd-ef0123456007", "OpenCode", "opencode", "", 6),
+        ("b0a1c2d3-e4f5-6789-abcd-ef0123456008", "Code Puppy", "codepuppy", "", 7),
+        // Local/on-device LLM tools (keep emoji — no custom icon)
         ("b0a1c2d3-e4f5-6789-abcd-ef0123456009", "Ollama", "ollama run llama3.2", "\u{1F999}", 8),
         ("b0a1c2d3-e4f5-6789-abcd-ef0123456010", "Interpreter", "interpreter", "\u{1F310}", 9),
         ("b0a1c2d3-e4f5-6789-abcd-ef0123456011", "Goose", "goose", "\u{1FABF}", 10),

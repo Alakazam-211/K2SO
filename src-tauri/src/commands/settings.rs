@@ -111,7 +111,7 @@ impl Default for AppSettings {
 fn settings_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| {
-            eprintln!("[settings] WARNING: Could not determine home directory, using current dir");
+            log_debug!("[settings] WARNING: Could not determine home directory, using current dir");
             PathBuf::from(".")
         })
         .join(".k2so")

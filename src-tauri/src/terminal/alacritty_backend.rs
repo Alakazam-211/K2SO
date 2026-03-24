@@ -256,7 +256,7 @@ impl TerminalManager {
         app_handle: AppHandle,
     ) -> Result<(), String> {
         if self.terminals.contains_key(&id) {
-            eprintln!("[terminal/alacritty] Terminal {} already exists, skipping creation", id);
+            log_debug!("[terminal/alacritty] Terminal {} already exists, skipping creation", id);
             return Ok(());
         }
 
@@ -407,7 +407,7 @@ impl TerminalManager {
         };
 
         self.terminals.insert(id.clone(), instance);
-        eprintln!("[terminal/alacritty] Terminal {} created ({}x{}, pid={})", id, c, r, child_pid);
+        log_debug!("[terminal/alacritty] Terminal {} created ({}x{}, pid={})", id, c, r, child_pid);
 
         Ok(())
     }
@@ -906,7 +906,7 @@ fn row_to_compact_line(
     // Debug: log rows with background-colored spans (like CLI cursors)
     let has_bg_spans = spans.iter().any(|s| s.bg.is_some());
     if has_bg_spans {
-        eprintln!(
+        log_debug!(
             "[compact] row={} text={:?} (len={}) spans={:?} rightmost_styled={:?}",
             row_idx,
             &trimmed,
@@ -1272,7 +1272,7 @@ fn bitmap_emission_loop(
 
             // Log display offset to debug scroll
             if display_offset > 0 || bstate.force_full_render {
-                eprintln!("[emit] display_offset={} force_full={} rows={}", display_offset, bstate.force_full_render, rows);
+                log_debug!("[emit] display_offset={} force_full={} rows={}", display_offset, bstate.force_full_render, rows);
             }
 
             // Ensure bitmap is correctly sized
@@ -1370,7 +1370,7 @@ fn bitmap_emission_loop(
                 // Lightweight perf logging (Rust-side only, no JS overhead)
                 let total_ms = render_start.elapsed().as_millis();
                 if total_ms > 5 || damaged_count > 10 {
-                    eprintln!(
+                    log_debug!(
                         "[perf] id={} rows={}/{} render={}us qoi={}us size={}KB total={}ms",
                         id, damaged_count, rows,
                         render_elapsed.as_micros(),

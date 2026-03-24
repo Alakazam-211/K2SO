@@ -32,7 +32,7 @@ pub fn resolve_cwd(cwd: &str) -> String {
     if std::path::Path::new(&resolved).exists() {
         resolved
     } else {
-        eprintln!("[terminal] WARNING: CWD '{}' does not exist, falling back to home", resolved);
+        log_debug!("[terminal] WARNING: CWD '{}' does not exist, falling back to home", resolved);
         home.to_string_lossy().to_string()
     }
 }

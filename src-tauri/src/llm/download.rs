@@ -44,7 +44,7 @@ pub fn cleanup_stale_downloads() {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
-                    eprintln!("[llm] Removing stale partial download: {}", path.display());
+                    log_debug!("[llm] Removing stale partial download: {}", path.display());
                     let _ = fs::remove_file(&path);
                 }
             }

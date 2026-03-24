@@ -18,59 +18,92 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
   const setActiveTabInGroup = useTabsStore((s) => s.setActiveTabInGroup)
   const splitTerminalArea = useTabsStore((s) => s.splitTerminalArea)
   const unsplitTerminalArea = useTabsStore((s) => s.unsplitTerminalArea)
+  const reorderTabs = useTabsStore((s) => s.reorderTabs)
   const agentMap = useActiveAgentsStore((s) => s.agents)
 
   const handleAddTab = useCallback(() => {
     addTabToGroup(groupIndex, cwd)
   }, [addTabToGroup, groupIndex, cwd])
 
-  const reorderTabs = useTabsStore((s) => s.reorderTabs)
-
   const [pendingClose, setPendingClose] = useState<{ tabId: string; agents: ReturnType<typeof useActiveAgentsStore.getState>['getAgentsInTab'] } | null>(null)
 
-  // ── Within-group tab reordering via drag ──
-  const dragIndexRef = useRef<number | null>(null)
-  const [dropIndicator, setDropIndicator] = useState<number | null>(null)
+  // ── Tab reorder state ──
+  const [reorderDragIndex, setReorderDragIndex] = useState<number | null>(null)
+  const [reorderDropIndex, setReorderDropIndex] = useState<number | null>(null)
+  const reorderDropRef = useRef<number | null>(null)
+  const reorderFromRef = useRef<number | null>(null)
+  const tabBarRef = useRef<HTMLDivElement>(null)
 
-  const handleDragStart = useCallback((e: React.DragEvent, index: number) => {
-    dragIndexRef.current = index
-    e.dataTransfer.effectAllowed = 'move'
-    e.dataTransfer.setData('text/plain', String(index))
-    // Make the drag image slightly transparent
-    if (e.currentTarget instanceof HTMLElement) {
-      e.currentTarget.style.opacity = '0.5'
+  const handleTabMouseDown = useCallback((e: React.MouseEvent, index: number, tabId: string, tabTitle: string) => {
+    if (e.button !== 0) return
+    if ((e.target as HTMLElement).closest('button')) return
+
+    const startX = e.clientX
+    const startY = e.clientY
+    let started = false
+    let mode: 'reorder' | 'cross-group' | null = null
+
+    const handleMouseMove = (ev: MouseEvent): void => {
+      const dx = ev.clientX - startX
+      const dy = ev.clientY - startY
+
+      if (!started && (Math.abs(dx) > 3 || Math.abs(dy) > 5)) {
+        started = true
+
+        // If multiple columns and dragging vertically, do cross-group
+        if (splitCount > 1 && Math.abs(dy) > Math.abs(dx) * 1.5) {
+          mode = 'cross-group'
+          startTabDrag({ groupIndex, tabId, tabTitle, mouseX: ev.clientX, mouseY: ev.clientY })
+          document.removeEventListener('mousemove', handleMouseMove)
+          document.removeEventListener('mouseup', handleMouseUp)
+          return
+        }
+
+        mode = 'reorder'
+        reorderFromRef.current = index
+        setReorderDragIndex(index)
+        document.body.style.cursor = 'grabbing'
+        document.body.style.userSelect = 'none'
+      }
+
+      if (!started || mode !== 'reorder') return
+
+      // Find which tab slot the cursor is over
+      if (!tabBarRef.current) return
+      const items = tabBarRef.current.querySelectorAll<HTMLElement>('[data-tab-reorder-index]')
+      let dropIdx = 0
+      for (let i = 0; i < items.length; i++) {
+        const rect = items[i].getBoundingClientRect()
+        if (ev.clientX > rect.left + rect.width / 2) dropIdx = i + 1
+      }
+      reorderDropRef.current = dropIdx
+      setReorderDropIndex(dropIdx)
     }
-  }, [])
 
-  const handleDragEnd = useCallback((e: React.DragEvent) => {
-    dragIndexRef.current = null
-    setDropIndicator(null)
-    if (e.currentTarget instanceof HTMLElement) {
-      e.currentTarget.style.opacity = ''
+    const handleMouseUp = (): void => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+
+      if (started && mode === 'reorder') {
+        const fromIdx = reorderFromRef.current
+        const dropIdx = reorderDropRef.current
+        if (fromIdx !== null && dropIdx !== null && fromIdx !== dropIdx && fromIdx !== dropIdx - 1) {
+          const insertAt = dropIdx > fromIdx ? dropIdx - 1 : dropIdx
+          reorderTabs(fromIdx, insertAt, groupIndex)
+        }
+      }
+
+      setReorderDragIndex(null)
+      setReorderDropIndex(null)
+      reorderDropRef.current = null
+      reorderFromRef.current = null
     }
-  }, [])
 
-  const handleDragOver = useCallback((e: React.DragEvent, index: number) => {
-    e.preventDefault()
-    e.dataTransfer.dropEffect = 'move'
-    if (dragIndexRef.current !== null && dragIndexRef.current !== index) {
-      setDropIndicator(index)
-    }
-  }, [])
-
-  const handleDrop = useCallback((e: React.DragEvent, toIndex: number) => {
-    e.preventDefault()
-    const fromIndex = dragIndexRef.current
-    if (fromIndex !== null && fromIndex !== toIndex) {
-      reorderTabs(fromIndex, toIndex, groupIndex)
-    }
-    dragIndexRef.current = null
-    setDropIndicator(null)
-  }, [reorderTabs, groupIndex])
-
-  const handleDragLeave = useCallback(() => {
-    setDropIndicator(null)
-  }, [])
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+  }, [groupIndex, splitCount, reorderTabs])
 
   const handleCloseTab = useCallback(
     (e: React.MouseEvent, tabId: string) => {
@@ -85,68 +118,35 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
     [removeTabFromGroup, groupIndex]
   )
 
-  const handleTabMouseDown = useCallback((e: React.MouseEvent, tabId: string, tabTitle: string) => {
-    // Only start drag on left click, not on close button
-    if (e.button !== 0) return
-    if ((e.target as HTMLElement).closest('button')) return
-
-    // Only enable cross-group drag when there are multiple groups
-    const store = useTabsStore.getState()
-    if (store.splitCount <= 1) return
-
-    const startX = e.clientX
-    const startY = e.clientY
-    let started = false
-
-    const handleMouseMove = (ev: MouseEvent): void => {
-      // Require a small drag distance before starting
-      if (!started && (Math.abs(ev.clientX - startX) > 5 || Math.abs(ev.clientY - startY) > 5)) {
-        started = true
-        startTabDrag({ groupIndex, tabId, tabTitle, mouseX: ev.clientX, mouseY: ev.clientY })
-      }
-    }
-
-    const handleMouseUp = (): void => {
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-    }
-
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-  }, [groupIndex])
-
   return (
     <div
       className="flex h-9 items-center border-b border-[var(--color-border)] bg-[var(--color-bg-surface)] no-drag"
     >
-      <div className="flex h-full flex-1 items-center overflow-x-auto tabbar-scroll">
+      <div ref={tabBarRef} className="flex h-full flex-1 items-center overflow-x-auto tabbar-scroll">
         {tabs.map((tab, index) => {
           const isActive = tab.id === activeTabId
           const isDirty = tab.isDirty ?? false
           const agentsInTab = Array.from(agentMap.values()).filter(a => a.tabId === tab.id)
           const hasAgent = agentsInTab.length > 0
           const hasActiveAgent = agentsInTab.some(a => a.status === 'active')
-          const showDropLeft = dropIndicator === index && dragIndexRef.current !== null && dragIndexRef.current > index
-          const showDropRight = dropIndicator === index && dragIndexRef.current !== null && dragIndexRef.current < index
+          const isDragged = reorderDragIndex === index
+          const showDropBefore = reorderDropIndex === index
+          const showDropAfter = reorderDropIndex === tabs.length && index === tabs.length - 1
+
           return (
             <div
               key={tab.id}
-              draggable
-              onDragStart={(e) => handleDragStart(e, index)}
-              onDragEnd={handleDragEnd}
-              onDragOver={(e) => handleDragOver(e, index)}
-              onDrop={(e) => handleDrop(e, index)}
-              onDragLeave={handleDragLeave}
-              className={`group relative flex h-full min-w-[100px] max-w-[200px] flex-shrink-0 cursor-pointer items-center border-r border-[var(--color-border)] px-3 text-xs transition-colors select-none ${
+              data-tab-reorder-index={index}
+              className={`group relative flex h-full min-w-[100px] max-w-[200px] flex-shrink-0 items-center border-r border-[var(--color-border)] px-3 text-xs transition-colors select-none ${
                 isActive
                   ? 'bg-white/[0.08] text-[var(--color-text-primary)]'
                   : 'text-[var(--color-text-secondary)] hover:bg-white/[0.04]'
-              }`}
+              } ${isDragged ? 'opacity-30' : ''}`}
               onClick={() => setActiveTabInGroup(groupIndex, tab.id)}
-              onMouseDown={(e) => handleTabMouseDown(e, tab.id, tab.title)}
+              onMouseDown={(e) => handleTabMouseDown(e, index, tab.id, tab.title)}
             >
-              {showDropLeft && <div className="absolute left-0 top-1 bottom-1 w-[2px] bg-[var(--color-accent)] z-10" />}
-              {showDropRight && <div className="absolute right-0 top-1 bottom-1 w-[2px] bg-[var(--color-accent)] z-10" />}
+              {showDropBefore && <div className="absolute left-0 top-1 bottom-1 w-[2px] bg-[var(--color-accent)] z-10" />}
+              {showDropAfter && <div className="absolute right-0 top-1 bottom-1 w-[2px] bg-[var(--color-accent)] z-10" />}
               {hasAgent && (
                 <span
                   className={`flex-shrink-0 mr-1.5 rounded-full ${hasActiveAgent ? 'agent-active-dot' : ''}`}

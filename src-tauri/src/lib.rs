@@ -1,3 +1,13 @@
+/// Safe eprintln that silently ignores write failures.
+/// When launched from Finder (no tty), stderr writes can fail and the default
+/// `eprintln!` panics, which cascades into abort(). This macro catches that.
+macro_rules! log_debug {
+    ($($arg:tt)*) => {{
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 mod commands;
 mod db;
 mod editors;
@@ -24,8 +34,8 @@ pub fn run() {
     let conn = match db::init_database() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[k2so] FATAL: Failed to initialize database: {}", e);
-            eprintln!("[k2so] The app will now exit. Check disk permissions and space at ~/.k2so/");
+            log_debug!("[k2so] FATAL: Failed to initialize database: {}", e);
+            log_debug!("[k2so] The app will now exit. Check disk permissions and space at ~/.k2so/");
             std::process::exit(1);
         }
     };
@@ -85,7 +95,7 @@ pub fn run() {
                                     if let Ok(mut manager) = state.llm_manager.try_lock() {
                                         manager.unload();
                                     } else {
-                                        eprintln!("[shutdown] LLM lock busy (model loading?) — skipping unload");
+                                        log_debug!("[shutdown] LLM lock busy (model loading?) — skipping unload");
                                     }
                                 }
                             }));
@@ -122,13 +132,13 @@ pub fn run() {
                         while completed < 2 {
                             let remaining = timeout.saturating_sub(start.elapsed());
                             if remaining.is_zero() {
-                                eprintln!("[shutdown] Cleanup timed out after 2s — exiting anyway");
+                                log_debug!("[shutdown] Cleanup timed out after 2s — exiting anyway");
                                 break;
                             }
                             match done_rx.recv_timeout(remaining) {
                                 Ok(_) => completed += 1,
                                 Err(_) => {
-                                    eprintln!("[shutdown] Cleanup timed out after 2s — exiting anyway");
+                                    log_debug!("[shutdown] Cleanup timed out after 2s — exiting anyway");
                                     break;
                                 }
                             }
@@ -145,7 +155,7 @@ pub fn run() {
                 std::thread::spawn(move || {
                     match llm::download::default_model_exists() {
                         Ok(false) => {
-                            eprintln!("[llm] Default model not found, starting download...");
+                            log_debug!("[llm] Default model not found, starting download...");
                             if let Some(state) = app_handle_for_download.try_state::<AppState>() {
                                 if let Ok(manager) = state.llm_manager.lock() {
                                     manager.downloading.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -153,7 +163,7 @@ pub fn run() {
                             }
                             let dest = match llm::download::default_model_path() {
                                 Ok(p) => p,
-                                Err(e) => { eprintln!("[llm] Error getting model path: {e}"); return; }
+                                Err(e) => { log_debug!("[llm] Error getting model path: {e}"); return; }
                             };
                             let dest_str = dest.to_string_lossy().to_string();
                             let result = llm::download::download_model(
@@ -166,27 +176,27 @@ pub fn run() {
                                     manager.downloading.store(false, std::sync::atomic::Ordering::Relaxed);
                                     if result.is_ok() {
                                         let _ = manager.load_model(&dest_str);
-                                        eprintln!("[llm] Model downloaded and loaded successfully");
+                                        log_debug!("[llm] Model downloaded and loaded successfully");
                                     }
                                 }
                             }
                             if let Err(e) = result {
-                                eprintln!("[llm] Auto-download failed: {e}");
+                                log_debug!("[llm] Auto-download failed: {e}");
                             }
                         }
                         Ok(true) => {
                             // Model exists, try to load it
-                            eprintln!("[llm] Default model found, loading...");
+                            log_debug!("[llm] Default model found, loading...");
                             if let Some(state) = app_handle_for_download.try_state::<AppState>() {
                                 if let Ok(mut manager) = state.llm_manager.lock() {
                                     if let Ok(path) = llm::download::default_model_path() {
                                         let _ = manager.load_model(&path.to_string_lossy());
-                                        eprintln!("[llm] Model loaded successfully");
+                                        log_debug!("[llm] Model loaded successfully");
                                     }
                                 }
                             }
                         }
-                        Err(e) => eprintln!("[llm] Error checking model: {e}"),
+                        Err(e) => log_debug!("[llm] Error checking model: {e}"),
                     }
                 });
             }
@@ -410,7 +420,7 @@ fn migrate_workspace_layouts_to_db(app: &tauri::AppHandle) {
     }
 
     if migrated > 0 {
-        eprintln!("[k2so] Migrated {} workspace layout(s) from settings.json to SQLite", migrated);
+        log_debug!("[k2so] Migrated {} workspace layout(s) from settings.json to SQLite", migrated);
 
         // Remove workspaceLayouts from settings.json
         if let Some(obj) = parsed.as_object_mut() {

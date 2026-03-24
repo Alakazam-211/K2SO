@@ -162,7 +162,7 @@ impl LlmManager {
 
         while n_generated < max_tokens {
             if std::time::Instant::now() > generation_deadline {
-                eprintln!("[llm] Generation timed out after 30s ({n_generated} tokens generated)");
+                log_debug!("[llm] Generation timed out after 30s ({n_generated} tokens generated)");
                 if output.is_empty() {
                     return Err("LLM generation timed out".to_string());
                 }

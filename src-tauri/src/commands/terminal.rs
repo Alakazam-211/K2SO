@@ -15,7 +15,7 @@ pub fn terminal_create(
 ) -> Result<serde_json::Value, String> {
     let id = id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
-    eprintln!("[terminal] Creating terminal id={} cwd={} command={:?} size={}x{}", id, cwd, command, cols.unwrap_or(80), rows.unwrap_or(24));
+    log_debug!("[terminal] Creating terminal id={} cwd={} command={:?} size={}x{}", id, cwd, command, cols.unwrap_or(80), rows.unwrap_or(24));
 
     let mut manager = state
         .terminal_manager
@@ -24,11 +24,11 @@ pub fn terminal_create(
 
     match manager.create(id.clone(), cwd, command, args, cols, rows, app) {
         Ok(()) => {
-            eprintln!("[terminal] Terminal {} created successfully", id);
+            log_debug!("[terminal] Terminal {} created successfully", id);
             Ok(serde_json::json!({ "id": id }))
         }
         Err(e) => {
-            eprintln!("[terminal] Terminal creation failed: {}", e);
+            log_debug!("[terminal] Terminal creation failed: {}", e);
             Err(e)
         }
     }
@@ -116,7 +116,7 @@ pub fn terminal_get_foreground_command(
 
 #[tauri::command]
 pub fn terminal_log(message: String) -> Result<(), String> {
-    eprintln!("{}", message);
+    log_debug!("{}", message);
     Ok(())
 }
 

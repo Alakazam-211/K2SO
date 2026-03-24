@@ -93,7 +93,7 @@ pub fn get_all_editors() -> Vec<EditorInfo> {
     let mut cache = match EDITOR_CACHE.lock() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Failed to lock editor cache: {e}");
+            log_debug!("Failed to lock editor cache: {e}");
             return vec![];
         }
     };
@@ -115,7 +115,7 @@ pub fn clear_editor_cache() -> Vec<EditorInfo> {
         match EDITOR_CACHE.lock() {
             Ok(mut cache) => { *cache = None; }
             Err(e) => {
-                eprintln!("Failed to lock editor cache for clearing: {e}");
+                log_debug!("Failed to lock editor cache for clearing: {e}");
             }
         }
     }

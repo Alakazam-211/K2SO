@@ -462,6 +462,8 @@ function EditorsAgentsSection(): React.JSX.Element {
   })
   const [dragIdx, setDragIdx] = useState<number | null>(null)
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
+  const presetDragFromRef = useRef<number | null>(null)
+  const presetDropRef = useRef<number | null>(null)
   const formLabelRef = useRef<HTMLInputElement>(null)
 
   const loadEditors = useCallback(async () => {
@@ -542,7 +544,7 @@ function EditorsAgentsSection(): React.JSX.Element {
           id: presetForm.editingId,
           label: presetForm.label.trim(),
           command: presetForm.command.trim(),
-          icon: presetForm.icon.trim() || undefined
+          icon: presetForm.icon.trim() || ''
         })
       } else {
         await invoke('presets_create', {
@@ -573,33 +575,62 @@ function EditorsAgentsSection(): React.JSX.Element {
     fetchPresets()
   }, [fetchPresets])
 
-  const handleDragStart = useCallback((idx: number) => {
-    setDragIdx(idx)
-  }, [])
+  const handlePresetReorderMouseDown = useCallback((e: React.MouseEvent, idx: number) => {
+    if (e.button !== 0) return
+    const startY = e.clientY
+    let started = false
 
-  const handleDragOver = useCallback((e: React.DragEvent, idx: number) => {
-    e.preventDefault()
-    setDragOverIdx(idx)
-  }, [])
+    const handleMouseMove = (ev: MouseEvent): void => {
+      if (!started && Math.abs(ev.clientY - startY) > 5) {
+        started = true
+        presetDragFromRef.current = idx
+        setDragIdx(idx)
+        document.body.style.cursor = 'grabbing'
+        document.body.style.userSelect = 'none'
+      }
+      if (!started) return
 
-  const handleDrop = useCallback(async (targetIdx: number) => {
-    if (dragIdx === null || dragIdx === targetIdx) {
-      setDragIdx(null)
-      setDragOverIdx(null)
-      return
+      const container = document.querySelector('[data-preset-reorder-container]')
+      if (!container) return
+      const items = container.querySelectorAll('[data-preset-reorder-index]')
+      let dropIdx = 0
+      for (let i = 0; i < items.length; i++) {
+        const rect = items[i].getBoundingClientRect()
+        if (ev.clientY > rect.top + rect.height / 2) dropIdx = i + 1
+      }
+      presetDropRef.current = dropIdx
+      setDragOverIdx(dropIdx)
     }
 
-    const sorted = [...presets]
-    const [moved] = sorted.splice(dragIdx, 1)
-    sorted.splice(targetIdx, 0, moved)
+    const handleMouseUp = async (): Promise<void> => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
 
-    const ids = sorted.map((p) => p.id)
-    await invoke('presets_reorder', { ids })
-    fetchPresets()
+      if (started) {
+        const fromIdx = presetDragFromRef.current
+        const dropIdx = presetDropRef.current
+        if (fromIdx !== null && dropIdx !== null && fromIdx !== dropIdx && fromIdx !== dropIdx - 1) {
+          const currentPresets = usePresetsStore.getState().presets
+          const sorted = [...currentPresets]
+          const [moved] = sorted.splice(fromIdx, 1)
+          const insertAt = dropIdx > fromIdx ? dropIdx - 1 : dropIdx
+          sorted.splice(insertAt, 0, moved)
+          await invoke('presets_reorder', { ids: sorted.map((p) => p.id) })
+          fetchPresets()
+        }
+      }
 
-    setDragIdx(null)
-    setDragOverIdx(null)
-  }, [dragIdx, presets, fetchPresets])
+      setDragIdx(null)
+      setDragOverIdx(null)
+      presetDragFromRef.current = null
+      presetDropRef.current = null
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+  }, [fetchPresets])
 
   const editorApps = editors.filter((e) => e.type === 'editor')
   const terminalApps = editors.filter((e) => e.type === 'terminal')
@@ -691,21 +722,18 @@ function EditorsAgentsSection(): React.JSX.Element {
           </div>
         </div>
 
-        <div className="border border-[var(--color-border)]">
+        <div className="border border-[var(--color-border)]" data-preset-reorder-container>
           {presets.map((preset, i) => (
             <div
               key={preset.id}
-              draggable
-              onDragStart={() => handleDragStart(i)}
-              onDragOver={(e) => handleDragOver(e, i)}
-              onDrop={() => handleDrop(i)}
-              onDragEnd={() => { setDragIdx(null); setDragOverIdx(null) }}
-              className={`flex items-center gap-2 px-3 py-1.5 group transition-colors ${
+              data-preset-reorder-index={i}
+              onMouseDown={(e) => handlePresetReorderMouseDown(e, i)}
+              className={`relative flex items-center gap-2 px-3 py-1.5 group transition-colors select-none ${
                 i < presets.length - 1 ? 'border-b border-[var(--color-border)]' : ''
-              } ${dragIdx === i ? 'opacity-30' : ''} ${
-                dragOverIdx === i ? 'bg-[var(--color-accent)]/10' : ''
-              } cursor-grab active:cursor-grabbing`}
+              } ${dragIdx === i ? 'opacity-30' : ''} cursor-grab active:cursor-grabbing`}
             >
+              {dragOverIdx === i && <div className="absolute left-0 right-0 top-0 h-[2px] bg-[var(--color-accent)] z-10" />}
+              {dragOverIdx === presets.length && i === presets.length - 1 && <div className="absolute left-0 right-0 bottom-0 h-[2px] bg-[var(--color-accent)] z-10" />}
               {/* Drag handle */}
               <svg
                 width="6" height="10" viewBox="0 0 6 10"
@@ -720,9 +748,13 @@ function EditorsAgentsSection(): React.JSX.Element {
                 <circle cx="4.5" cy="8.5" r="1" />
               </svg>
 
-              {/* Icon */}
-              <span className="text-sm leading-none w-5 text-center flex-shrink-0">
-                {preset.icon || '-'}
+              {/* Icon — emoji override, otherwise custom drawn icon */}
+              <span className="w-5 flex items-center justify-center flex-shrink-0">
+                {preset.icon ? (
+                  <span className="text-sm leading-none">{preset.icon}</span>
+                ) : (
+                  <AgentIcon agent={preset.label} size={16} />
+                )}
               </span>
 
               {/* Label */}

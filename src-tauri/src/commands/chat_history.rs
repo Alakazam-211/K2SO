@@ -1091,7 +1091,7 @@ pub fn chat_history_migrate_ide_sessions(
         let data = match composer_data_map.get(composer_id) {
             Some(d) => d,
             None => {
-                eprintln!("[migrate] No composerData found for {}", composer_id);
+                log_debug!("[migrate] No composerData found for {}", composer_id);
                 continue;
             }
         };
@@ -1100,7 +1100,7 @@ pub fn chat_history_migrate_ide_sessions(
         let conversation_state = match data.get("conversationState").and_then(|v| v.as_str()) {
             Some(cs) if !cs.is_empty() => cs.to_string(),
             _ => {
-                eprintln!("[migrate] No conversationState for {}", composer_id);
+                log_debug!("[migrate] No conversationState for {}", composer_id);
                 continue;
             }
         };
@@ -1118,7 +1118,7 @@ pub fn chat_history_migrate_ide_sessions(
             match base64_decode(&padded) {
                 Some(d) if !d.is_empty() => d,
                 _ => {
-                    eprintln!("[migrate] Failed to base64-decode conversationState for {}", composer_id);
+                    log_debug!("[migrate] Failed to base64-decode conversationState for {}", composer_id);
                     continue;
                 }
             }
@@ -1126,7 +1126,7 @@ pub fn chat_history_migrate_ide_sessions(
             // Try hex decode
             let chars: Vec<char> = conversation_state.chars().collect();
             if chars.len() % 2 != 0 || chars.len() < 4 {
-                eprintln!("[migrate] Invalid conversationState format for {}", composer_id);
+                log_debug!("[migrate] Invalid conversationState format for {}", composer_id);
                 continue;
             }
             let mut bytes = Vec::with_capacity(chars.len() / 2);
@@ -1139,7 +1139,7 @@ pub fn chat_history_migrate_ide_sessions(
                 }
             }
             if !valid || bytes.is_empty() {
-                eprintln!("[migrate] Failed to hex-decode conversationState for {}", composer_id);
+                log_debug!("[migrate] Failed to hex-decode conversationState for {}", composer_id);
                 continue;
             }
             bytes
@@ -1155,7 +1155,7 @@ pub fn chat_history_migrate_ide_sessions(
         // Create the store.db
         let session_dir = cursor_chats_dir.join(&project_md5).join(composer_id);
         if let Err(e) = fs::create_dir_all(&session_dir) {
-            eprintln!("[migrate] Failed to create dir for {}: {}", composer_id, e);
+            log_debug!("[migrate] Failed to create dir for {}: {}", composer_id, e);
             continue;
         }
 
@@ -1163,7 +1163,7 @@ pub fn chat_history_migrate_ide_sessions(
         let store_conn = match rusqlite::Connection::open(&store_db_path) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("[migrate] Failed to create store.db for {}: {}", composer_id, e);
+                log_debug!("[migrate] Failed to create store.db for {}: {}", composer_id, e);
                 continue;
             }
         };
@@ -1237,7 +1237,7 @@ pub fn chat_history_migrate_ide_sessions(
             rusqlite::params![meta_hex],
         );
 
-        eprintln!("[migrate] Migrated {} ({}) with {} blobs", composer_id, name, blobs_copied);
+        log_debug!("[migrate] Migrated {} ({}) with {} blobs", composer_id, name, blobs_copied);
         migrated_count += 1;
     }
 

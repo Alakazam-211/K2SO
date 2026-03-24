@@ -71,6 +71,69 @@ export function PresetsBar({ cwd }: PresetsBarProps): React.JSX.Element | null {
 
   const [hoveredId, setHoveredId] = useState<string | null>(null)
 
+  // ── Reorder state ──
+  const [reorderDragIdx, setReorderDragIdx] = useState<number | null>(null)
+  const [reorderDropIdx, setReorderDropIdx] = useState<number | null>(null)
+  const reorderFromRef = useRef<number | null>(null)
+  const reorderDropRef = useRef<number | null>(null)
+  const presetsBarRef = useRef<HTMLDivElement>(null)
+
+  const handleReorderMouseDown = useCallback((e: React.MouseEvent, idx: number) => {
+    if (e.button !== 0) return
+    const startX = e.clientX
+    let started = false
+
+    const handleMouseMove = (ev: MouseEvent): void => {
+      if (!started && Math.abs(ev.clientX - startX) > 5) {
+        started = true
+        reorderFromRef.current = idx
+        setReorderDragIdx(idx)
+        document.body.style.cursor = 'grabbing'
+        document.body.style.userSelect = 'none'
+      }
+      if (!started) return
+
+      if (!presetsBarRef.current) return
+      const items = presetsBarRef.current.querySelectorAll<HTMLElement>('[data-preset-bar-index]')
+      let dropIdx = 0
+      for (let i = 0; i < items.length; i++) {
+        const rect = items[i].getBoundingClientRect()
+        if (ev.clientX > rect.left + rect.width / 2) dropIdx = i + 1
+      }
+      reorderDropRef.current = dropIdx
+      setReorderDropIdx(dropIdx)
+    }
+
+    const handleMouseUp = async (): Promise<void> => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+
+      if (started) {
+        const fromIdx = reorderFromRef.current
+        const dropI = reorderDropRef.current
+        if (fromIdx !== null && dropI !== null && fromIdx !== dropI && fromIdx !== dropI - 1) {
+          const currentPresets = usePresetsStore.getState().presets
+          const sorted = [...currentPresets]
+          const [moved] = sorted.splice(fromIdx, 1)
+          const insertAt = dropI > fromIdx ? dropI - 1 : dropI
+          sorted.splice(insertAt, 0, moved)
+          await invoke('presets_reorder', { ids: sorted.map((p) => p.id) })
+          fetchPresets()
+        }
+      }
+
+      setReorderDragIdx(null)
+      setReorderDropIdx(null)
+      reorderFromRef.current = null
+      reorderDropRef.current = null
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+  }, [fetchPresets])
+
   const formLabelRef = useRef<HTMLInputElement>(null)
 
   // Fetch presets on mount
@@ -156,7 +219,7 @@ export function PresetsBar({ cwd }: PresetsBarProps): React.JSX.Element | null {
           id: form.editingId,
           label: form.label.trim(),
           command: form.command.trim(),
-          icon: form.icon.trim() || undefined
+          icon: form.icon.trim() || ''
         })
       } else {
         await invoke('presets_create', {
@@ -189,6 +252,7 @@ export function PresetsBar({ cwd }: PresetsBarProps): React.JSX.Element | null {
 
   return (
     <div
+      ref={presetsBarRef}
       style={{
         position: 'relative',
         display: 'flex',
@@ -204,17 +268,22 @@ export function PresetsBar({ cwd }: PresetsBarProps): React.JSX.Element | null {
       }}
     >
       {/* Preset buttons */}
-      {enabledPresets.map((preset) => {
+      {enabledPresets.map((preset, idx) => {
         const isRunning = runningIds.has(preset.id)
         const isHovered = hoveredId === preset.id
+        const isDragged = reorderDragIdx === idx
+        const showDropBefore = reorderDropIdx === idx
+        const showDropAfter = reorderDropIdx === enabledPresets.length && idx === enabledPresets.length - 1
 
         return (
           <button
             key={preset.id}
-            onClick={() => handleClick(preset.id)}
+            data-preset-bar-index={idx}
+            onClick={() => { if (reorderDragIdx === null) handleClick(preset.id) }}
             onContextMenu={(e) => handleContextMenu(e, preset.id)}
             onMouseEnter={() => setHoveredId(preset.id)}
             onMouseLeave={() => setHoveredId(null)}
+            onMouseDown={(e) => handleReorderMouseDown(e, idx)}
             title={preset.command}
             style={{
               position: 'relative',
@@ -232,6 +301,7 @@ export function PresetsBar({ cwd }: PresetsBarProps): React.JSX.Element | null {
               letterSpacing: '0.02em',
               whiteSpace: 'nowrap',
               transition: 'background-color 120ms ease, color 120ms ease',
+              opacity: isDragged ? 0.3 : 1,
               backgroundColor: isRunning
                 ? (isHovered ? '#1a2a1a' : '#111a11')
                 : (isHovered ? '#1a1a1a' : 'transparent'),
@@ -241,7 +311,17 @@ export function PresetsBar({ cwd }: PresetsBarProps): React.JSX.Element | null {
               borderLeft: isRunning ? '2px solid #4ade80' : '2px solid transparent',
             }}
           >
-            <AgentIcon agent={preset.label} size={14} />
+            {showDropBefore && (
+              <div style={{ position: 'absolute', left: 0, top: 2, bottom: 2, width: 2, backgroundColor: 'var(--color-accent, #3b82f6)', zIndex: 10 }} />
+            )}
+            {showDropAfter && (
+              <div style={{ position: 'absolute', right: 0, top: 2, bottom: 2, width: 2, backgroundColor: 'var(--color-accent, #3b82f6)', zIndex: 10 }} />
+            )}
+            {preset.icon ? (
+              <span style={{ fontSize: 14, lineHeight: 1, flexShrink: 0 }}>{preset.icon}</span>
+            ) : (
+              <AgentIcon agent={preset.label} size={14} />
+            )}
             <span style={{ lineHeight: 1 }}>{preset.label}</span>
             {isRunning && (
               <span

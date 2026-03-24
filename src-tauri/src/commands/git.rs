@@ -208,7 +208,7 @@ pub fn git_prune_worktrees(
             if let Some(ref wt_path) = ws.worktree_path {
                 if !std::path::Path::new(wt_path).exists() {
                     // Worktree dir is gone — remove DB record
-                    eprintln!("[git] Pruning stale workspace '{}' (path missing: {})", ws.name, wt_path);
+                    log_debug!("[git] Pruning stale workspace '{}' (path missing: {})", ws.name, wt_path);
                     let _ = Workspace::delete(&conn, &ws.id);
                 }
             }
