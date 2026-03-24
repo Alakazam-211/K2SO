@@ -22,6 +22,20 @@ let dragPaths: string[] = []
 let active = false
 let ghost: HTMLDivElement | null = null
 
+// Track whether a tauri://drag-drop was already handled (e.g. by the terminal)
+// so that FileTree doesn't also process it as a file move.
+let dropConsumed = false
+
+export function markDropConsumed(): void {
+  dropConsumed = true
+  // Reset after a tick so the FileTree listener (which fires in the same event loop) sees it
+  setTimeout(() => { dropConsumed = false }, 0)
+}
+
+export function wasDropConsumed(): boolean {
+  return dropConsumed
+}
+
 // ── Shell-escape helper ──────────────────────────────────────────────
 
 function shellEscape(p: string): string {

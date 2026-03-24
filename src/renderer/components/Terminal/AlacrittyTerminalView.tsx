@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import { useSettingsStore } from '@/stores/settings'
 import { keyEventToSequence, naturalTextEditingSequence } from '@/lib/key-mapping'
+import { isFileDragActive, markDropConsumed } from '@/lib/file-drag'
 
 // ── Types matching Rust GridUpdate / CompactLine / StyleSpan ──────────
 
@@ -58,7 +59,8 @@ interface AlacrittyTerminalViewProps {
 }
 
 function shellEscape(path: string): string {
-  return "'" + path.replace(/'/g, "'\\''") + "'"
+  // Escape special shell characters with backslashes (like iTerm2/Terminal.app)
+  return path.replace(/[ '"\\()&|;<>$`!#*?[\]{}~]/g, '\\$&')
 }
 
 function colorToCSS(c: number): string {
@@ -319,11 +321,23 @@ export function AlacrittyTerminalView({
         onExit?.(event.payload.exitCode)
       })
 
-      unlistenDrop = await listen<{ paths: string[] }>('tauri://drag-drop', (event) => {
-        if (!ptyIdRef.current || !event.payload.paths?.length) return
-        const escaped = event.payload.paths.map(shellEscape).join(' ')
-        invoke('terminal_write', { id: ptyIdRef.current, data: escaped + ' ' })
-      })
+      unlistenDrop = await listen<{ paths: string[]; position: { x: number; y: number } }>(
+        'tauri://drag-drop',
+        (event) => {
+          const { paths, position } = event.payload
+          if (!paths || paths.length === 0 || !ptyIdRef.current) return
+
+          // Check if drop landed on a file tree element — if so, let FileTree handle it
+          if (position) {
+            const el = document.elementFromPoint(position.x, position.y)
+            if (el && (el as HTMLElement).closest?.('[data-path]')) return
+          }
+
+          // Accept the drop — paste escaped paths into terminal
+          const escaped = paths.map(shellEscape).join(' ')
+          invoke('terminal_write', { id: ptyIdRef.current, data: escaped + ' ' })
+        }
+      )
     }
 
     setup().catch((err) => console.error('[AlacrittyTerminalView] Setup failed:', err))
@@ -431,6 +445,54 @@ export function AlacrittyTerminalView({
     }
   }, [])
 
+  // ── Drag state tracking (for cursor style) ─────────────────────────
+
+  const [isDragging, setIsDragging] = useState(false)
+  useEffect(() => {
+    const checkDrag = (): void => { setIsDragging(isFileDragActive()) }
+    // Poll drag state on mousemove (lightweight — only sets state on change)
+    const handler = (): void => { checkDrag() }
+    document.addEventListener('mousemove', handler)
+    document.addEventListener('mouseup', handler)
+    return () => {
+      document.removeEventListener('mousemove', handler)
+      document.removeEventListener('mouseup', handler)
+    }
+  }, [])
+
+  // ── Drag and drop ───────────────────────────────────────────────────
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+  }, [])
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (!ptyIdRef.current) return
+
+    // Handle files dropped from Finder
+    const files = e.dataTransfer.files
+    if (files.length > 0) {
+      const paths: string[] = []
+      for (let i = 0; i < files.length; i++) {
+        // Electron/Tauri expose the full path via .path property
+        const filePath = (files[i] as any).path
+        if (filePath) paths.push(shellEscape(filePath))
+      }
+      if (paths.length > 0) {
+        invoke('terminal_write', { id: ptyIdRef.current, data: paths.join(' ') + ' ' })
+      }
+    }
+
+    // Handle text drops
+    const text = e.dataTransfer.getData('text/plain')
+    if (text && files.length === 0) {
+      invoke('terminal_write', { id: ptyIdRef.current, data: text })
+    }
+  }, [])
+
   // ── Cursor blink ───────────────────────────────────────────────────
 
   useEffect(() => {
@@ -488,7 +550,10 @@ export function AlacrittyTerminalView({
       onWheel={handleWheel}
       onFocus={handleFocus}
       onBlur={handleBlur}
-      style={{ cursor: 'text', position: 'relative' }}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+      data-terminal-id={terminalId}
+      style={{ cursor: isDragging ? 'default' : 'text', position: 'relative' }}
     >
       <div
         ref={viewportRef}

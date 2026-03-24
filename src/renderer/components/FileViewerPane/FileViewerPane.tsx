@@ -398,11 +398,8 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
           onClick={handleTogglePin}
           title={pinned ? 'Unpin (preview mode)' : 'Pin (keep open)'}
         >
-          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill={pinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 2l0 5" />
-            <path d="M6 7h12l-1.5 8H7.5L6 7z" />
-            <path d="M9 15l-2 7" />
-            <path d="M15 15l2 7" />
+          <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1-.707.707l-.71-.71-3.18 3.18a3.5 3.5 0 0 1-.4.3L11 11.106V14.5a.5.5 0 0 1-.854.354L7.5 12.207 4.854 14.854a.5.5 0 0 1-.708-.708L6.793 11.5 4.146 8.854A.5.5 0 0 1 4.5 8h3.394a3.5 3.5 0 0 0 .3-.4l3.18-3.18-.71-.71a.5.5 0 0 1 .354-.854z" />
           </svg>
         </button>
 

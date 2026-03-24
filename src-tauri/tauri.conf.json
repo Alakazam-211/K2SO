@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicolo-ribaudo/tauri-v2-schema/main/schemas/desktop-schema.json",
   "productName": "K2SO",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "identifier": "com.alakazamlabs.k2so",
   "build": {
     "frontendDist": "../out/renderer",

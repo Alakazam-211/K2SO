@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { beginFileDrag } from '@/lib/file-drag'
+import { beginFileDrag, wasDropConsumed } from '@/lib/file-drag'
 import { showContextMenu } from '@/lib/context-menu'
 import { useFileTreeStore } from '@/stores/filetree'
 import { useTabsStore } from '@/stores/tabs'
@@ -422,7 +422,12 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
   const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set())
   const [errorDirs, setErrorDirs] = useState<Map<string, string>>(new Map())
   const [dropTarget, setDropTarget] = useState<string | null>(null)
-  const [isDragOver, setIsDragOver] = useState(false)
+  const [isDragOver, setIsDragOverState] = useState(false)
+  const isDragOverRef = useRef(false)
+  const setIsDragOver = useCallback((v: boolean) => {
+    isDragOverRef.current = v
+    setIsDragOverState(v)
+  }, [])
   const [renamingPath, setRenamingPath] = useState<string | null>(null)
   const [newEntryState, setNewEntryState] = useState<{ parentPath: string; isDirectory: boolean } | null>(null)
 
@@ -564,6 +569,19 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
       const { paths, position } = event.payload
       if (!paths || paths.length === 0) return
 
+      // Check if the drop position is inside a terminal — if so, skip entirely
+      const dropEl = document.elementFromPoint(position.x, position.y)
+      if (dropEl && (dropEl as HTMLElement).closest?.('[data-terminal-id]')) return
+
+      // Only handle drops that land inside the file tree panel
+      if (!treeRef.current) return
+      const treeRect = treeRef.current.getBoundingClientRect()
+      const inTree = (
+        position.x >= treeRect.left && position.x <= treeRect.right &&
+        position.y >= treeRect.top && position.y <= treeRect.bottom
+      )
+      if (!inTree) return
+
       let targetFolder = rootPath
       const el = document.elementFromPoint(position.x, position.y)
       if (el) {
@@ -601,11 +619,28 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
     }).then((fn) => unlisteners.push(fn))
 
     listen('tauri://drag-enter', () => {
-      setIsDragOver(true)
+      // Don't set isDragOver here — let drag-over handle it based on position,
+      // so drops on the terminal don't get treated as file tree drops.
     }).then((fn) => unlisteners.push(fn))
 
     listen<{ position: { x: number; y: number } }>('tauri://drag-over', (event) => {
       const { position } = event.payload
+      // Only show drop targets when hovering over the file tree panel
+      if (!treeRef.current) {
+        setIsDragOver(false)
+        setDropTarget(null)
+        return
+      }
+      const rect = treeRef.current.getBoundingClientRect()
+      if (
+        position.x < rect.left || position.x > rect.right ||
+        position.y < rect.top || position.y > rect.bottom
+      ) {
+        setIsDragOver(false)
+        setDropTarget(null)
+        return
+      }
+      setIsDragOver(true)
       const el = document.elementFromPoint(position.x, position.y)
       if (el) {
         const btn = (el as HTMLElement).closest('[data-path]') as HTMLElement | null

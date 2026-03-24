@@ -289,12 +289,14 @@ export const useTimerStore = create<TimerState>((set, get) => ({
       resumeTime: null,
       stoppedElapsed: elapsed,
     })
+    // Broadcast BEFORE showing memo dialog — broadcast_sync emits to all
+    // windows including this one, and syncFromEvent resets showMemoDialog
+    broadcastTimerState(get())
     if (state.skipMemo) {
       get().saveEntry()
     } else {
       set({ showMemoDialog: true })
     }
-    broadcastTimerState(get())
   },
 
   stopTimerSilently: async () => {

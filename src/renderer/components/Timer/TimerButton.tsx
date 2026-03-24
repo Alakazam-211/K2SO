@@ -23,6 +23,7 @@ export default function TimerButton(): React.JSX.Element | null {
   const stopTimer = useTimerStore((s) => s.stopTimer)
   const startWithDuration = useTimerStore((s) => s.startWithDuration)
   const showExtend = useTimerStore((s) => s.showExtend)
+  const showMemoDialog = useTimerStore((s) => s.showMemoDialog)
 
   // Re-render every second when running
   const [, setTick] = useState(0)
@@ -42,6 +43,10 @@ export default function TimerButton(): React.JSX.Element | null {
   })
 
   if (!visible) return null
+
+  // Timer is stopped and waiting for memo — hide controls
+  // (the MemoDialog handles the rest of the flow)
+  if (showMemoDialog) return null
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const noDrag = { WebkitAppRegion: 'no-drag' } as any
