@@ -23,16 +23,13 @@ export default function FocusGroupDropdown({
   const inputRef = useRef<HTMLInputElement>(null)
   const [highlightIndex, setHighlightIndex] = useState(0)
 
-  const allOptions: FocusGroupOption[] = [
-    { id: null, name: 'All Workspaces' },
-    ...options
-  ]
+  const allOptions: FocusGroupOption[] = options
 
   const filtered = search
     ? allOptions.filter((o) => o.name.toLowerCase().includes(search.toLowerCase()))
     : allOptions
 
-  const selected = allOptions.find((o) => o.id === value) ?? allOptions[0]
+  const selected = allOptions.find((o) => o.id === value) ?? allOptions[0] ?? { id: null, name: 'Focus Groups' }
 
   // Close on outside click
   useEffect(() => {

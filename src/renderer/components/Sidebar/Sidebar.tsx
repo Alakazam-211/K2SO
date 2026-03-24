@@ -1,8 +1,9 @@
-import { useState, useCallback, useMemo, useRef } from 'react'
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import { useProjectsStore } from '@/stores/projects'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
 import { useSettingsStore } from '@/stores/settings'
 import { useAssistantStore } from '@/stores/assistant'
+import { useToastStore } from '@/stores/toast'
 import { useCommandPaletteStore } from '@/stores/command-palette'
 import { invoke } from '@tauri-apps/api/core'
 import { showContextMenu } from '@/lib/context-menu'
@@ -580,6 +581,29 @@ export default function Sidebar(): React.JSX.Element {
     return unpinned.filter((p) => p.focusGroupId === activeFocusGroupId)
   }, [projects, focusGroupsEnabled, activeFocusGroupId])
 
+  // ── Nudge to enable focus groups at 10+ workspaces (every 3 hours) ──
+  useEffect(() => {
+    if (focusGroupsEnabled || projects.length < 10) return
+
+    const NUDGE_KEY = 'k2so:focus-group-nudge-last'
+    const THREE_HOURS = 3 * 60 * 60 * 1000
+    const lastNudge = parseInt(localStorage.getItem(NUDGE_KEY) || '0', 10)
+    const now = Date.now()
+
+    if (now - lastNudge < THREE_HOURS) return
+
+    localStorage.setItem(NUDGE_KEY, String(now))
+    useToastStore.getState().addToast(
+      `You have ${projects.length} workspaces. Enable Focus Groups to keep things organized.`,
+      'info',
+      8000,
+      {
+        label: 'Settings',
+        onClick: () => useSettingsStore.getState().openSettings('projects'),
+      }
+    )
+  }, [projects.length, focusGroupsEnabled])
+
   // ── Drag-to-reorder state ──────────────────────────────────────────
   const [dragId, setDragId] = useState<string | null>(null)
   const [dragZone, setDragZone] = useState<'pinned' | 'unpinned' | null>(null)
@@ -879,11 +903,31 @@ export default function Sidebar(): React.JSX.Element {
         )}
       </div>
 
+      {/* Workspace limit warning */}
+      {!focusGroupsEnabled && projects.length >= 15 && (
+        <div className="px-3 py-2 border-t border-[var(--color-border)]">
+          <p className="text-[10px] text-red-400 font-medium leading-snug">
+            Too many workspaces without Focus Groups. Enable Focus Groups to organize your workspaces before adding more.{' '}
+            <button
+              className="underline text-red-400 hover:text-red-300 cursor-pointer"
+              onClick={() => useSettingsStore.getState().openSettings('projects')}
+            >
+              Open Settings
+            </button>
+          </p>
+        </div>
+      )}
+
       {/* Add Workspace + Assistant buttons */}
       <div className="p-3 border-t border-[var(--color-border)] flex gap-2">
         <button
-          className="no-drag flex-1 flex items-center justify-center gap-2 px-3 py-2 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] bg-white/[0.04] hover:bg-white/[0.08] transition-colors"
-          onClick={handleAddProject}
+          className={`no-drag flex-1 flex items-center justify-center gap-2 px-3 py-2 text-xs bg-white/[0.04] transition-colors ${
+            !focusGroupsEnabled && projects.length >= 15
+              ? 'text-[var(--color-text-muted)] opacity-50 cursor-not-allowed'
+              : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-white/[0.08]'
+          }`}
+          onClick={!focusGroupsEnabled && projects.length >= 15 ? undefined : handleAddProject}
+          disabled={!focusGroupsEnabled && projects.length >= 15}
         >
           <svg
             className="w-3.5 h-3.5"

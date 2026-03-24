@@ -9,20 +9,41 @@ use tauri::{AppHandle, Emitter};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalSettings {
+    #[serde(default = "default_font_family")]
     pub font_family: String,
+    #[serde(default = "default_font_size")]
     pub font_size: u32,
+    #[serde(default = "default_cursor_style")]
     pub cursor_style: String,
+    #[serde(default = "default_scrollback")]
     pub scrollback: u32,
-    #[serde(default = "default_natural_text_editing")]
+    #[serde(default = "default_true")]
     pub natural_text_editing: bool,
 }
 
-fn default_natural_text_editing() -> bool {
-    true
+impl Default for TerminalSettings {
+    fn default() -> Self {
+        default_terminal()
+    }
 }
+
+fn default_font_family() -> String { "MesloLGM Nerd Font".to_string() }
+fn default_font_size() -> u32 { 13 }
+fn default_cursor_style() -> String { "bar".to_string() }
+fn default_scrollback() -> u32 { 5000 }
 
 fn default_agent() -> String {
     "claude".to_string()
+}
+
+fn default_terminal() -> TerminalSettings {
+    TerminalSettings {
+        font_family: "MesloLGM Nerd Font".to_string(),
+        font_size: 13,
+        cursor_style: "bar".to_string(),
+        scrollback: 5000,
+        natural_text_editing: true,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,12 +87,21 @@ impl Default for TimerSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
+    #[serde(default = "default_terminal")]
     pub terminal: TerminalSettings,
+    #[serde(default)]
     pub keybindings: HashMap<String, String>,
+    #[serde(default, alias = "projects")]
     pub project_settings: HashMap<String, serde_json::Value>,
+    #[serde(default)]
     pub focus_groups_enabled: bool,
+    #[serde(default)]
+    pub active_focus_group_id: Option<String>,
+    #[serde(default)]
     pub sidebar_collapsed: bool,
+    #[serde(default)]
     pub left_panel_open: bool,
+    #[serde(default)]
     pub right_panel_open: bool,
     /// Deprecated: workspace layouts now stored in SQLite workspace_sessions table.
     /// Kept for deserialization compat with old settings.json files; skipped on write.
@@ -86,16 +116,11 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            terminal: TerminalSettings {
-                font_family: "MesloLGM Nerd Font".to_string(),
-                font_size: 13,
-                cursor_style: "bar".to_string(),
-                scrollback: 5000,
-                natural_text_editing: true,
-            },
+            terminal: default_terminal(),
             keybindings: HashMap::new(),
             project_settings: HashMap::new(),
             focus_groups_enabled: false,
+            active_focus_group_id: None,
             sidebar_collapsed: false,
             left_panel_open: false,
             right_panel_open: false,
@@ -151,7 +176,15 @@ fn read_settings() -> AppSettings {
     match fs::read_to_string(&file) {
         Ok(raw) => {
             match serde_json::from_str::<serde_json::Value>(&raw) {
-                Ok(parsed) => {
+                Ok(mut parsed) => {
+                    // Migrate legacy "projects" key to "projectSettings"
+                    if let Some(obj) = parsed.as_object_mut() {
+                        if obj.contains_key("projects") && !obj.contains_key("projectSettings") {
+                            if let Some(v) = obj.remove("projects") {
+                                obj.insert("projectSettings".to_string(), v);
+                            }
+                        }
+                    }
                     // Deep merge with defaults so new keys are always present
                     let mut defaults = serde_json::to_value(AppSettings::default()).unwrap();
                     deep_merge(&mut defaults, &parsed);
