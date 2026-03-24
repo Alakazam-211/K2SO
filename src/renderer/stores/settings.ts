@@ -37,6 +37,9 @@ interface SettingsState {
   // Loading state
   loaded: boolean
 
+  // When true, GeneralSection should auto-trigger an update check on mount
+  pendingUpdateCheck: boolean
+
   // Actions
   openSettings: (section?: SettingsSection, projectId?: string) => void
   closeSettings: () => void
@@ -70,6 +73,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   defaultAgent: 'claude',
   initialProjectId: null,
   loaded: false,
+  pendingUpdateCheck: false,
 
   openSettings: (section?: SettingsSection, projectId?: string) => {
     set({

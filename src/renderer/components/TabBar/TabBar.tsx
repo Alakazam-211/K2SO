@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useState, useRef } from 'react'
 import { useTabsStore } from '@/stores/tabs'
 import { useActiveAgentsStore } from '@/stores/active-agents'
 import { startTabDrag } from '@/components/Terminal/TerminalArea'
@@ -24,7 +24,53 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
     addTabToGroup(groupIndex, cwd)
   }, [addTabToGroup, groupIndex, cwd])
 
+  const reorderTabs = useTabsStore((s) => s.reorderTabs)
+
   const [pendingClose, setPendingClose] = useState<{ tabId: string; agents: ReturnType<typeof useActiveAgentsStore.getState>['getAgentsInTab'] } | null>(null)
+
+  // ── Within-group tab reordering via drag ──
+  const dragIndexRef = useRef<number | null>(null)
+  const [dropIndicator, setDropIndicator] = useState<number | null>(null)
+
+  const handleDragStart = useCallback((e: React.DragEvent, index: number) => {
+    dragIndexRef.current = index
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', String(index))
+    // Make the drag image slightly transparent
+    if (e.currentTarget instanceof HTMLElement) {
+      e.currentTarget.style.opacity = '0.5'
+    }
+  }, [])
+
+  const handleDragEnd = useCallback((e: React.DragEvent) => {
+    dragIndexRef.current = null
+    setDropIndicator(null)
+    if (e.currentTarget instanceof HTMLElement) {
+      e.currentTarget.style.opacity = ''
+    }
+  }, [])
+
+  const handleDragOver = useCallback((e: React.DragEvent, index: number) => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+    if (dragIndexRef.current !== null && dragIndexRef.current !== index) {
+      setDropIndicator(index)
+    }
+  }, [])
+
+  const handleDrop = useCallback((e: React.DragEvent, toIndex: number) => {
+    e.preventDefault()
+    const fromIndex = dragIndexRef.current
+    if (fromIndex !== null && fromIndex !== toIndex) {
+      reorderTabs(fromIndex, toIndex, groupIndex)
+    }
+    dragIndexRef.current = null
+    setDropIndicator(null)
+  }, [reorderTabs, groupIndex])
+
+  const handleDragLeave = useCallback(() => {
+    setDropIndicator(null)
+  }, [])
 
   const handleCloseTab = useCallback(
     (e: React.MouseEvent, tabId: string) => {
@@ -74,16 +120,24 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
       className="flex h-9 items-center border-b border-[var(--color-border)] bg-[var(--color-bg-surface)] no-drag"
     >
       <div className="flex h-full flex-1 items-center overflow-x-auto tabbar-scroll">
-        {tabs.map((tab) => {
+        {tabs.map((tab, index) => {
           const isActive = tab.id === activeTabId
           const isDirty = tab.isDirty ?? false
           const agentsInTab = Array.from(agentMap.values()).filter(a => a.tabId === tab.id)
           const hasAgent = agentsInTab.length > 0
           const hasActiveAgent = agentsInTab.some(a => a.status === 'active')
+          const showDropLeft = dropIndicator === index && dragIndexRef.current !== null && dragIndexRef.current > index
+          const showDropRight = dropIndicator === index && dragIndexRef.current !== null && dragIndexRef.current < index
           return (
             <div
               key={tab.id}
-              className={`group flex h-full min-w-[100px] max-w-[200px] flex-shrink-0 cursor-pointer items-center border-r border-[var(--color-border)] px-3 text-xs transition-colors select-none ${
+              draggable
+              onDragStart={(e) => handleDragStart(e, index)}
+              onDragEnd={handleDragEnd}
+              onDragOver={(e) => handleDragOver(e, index)}
+              onDrop={(e) => handleDrop(e, index)}
+              onDragLeave={handleDragLeave}
+              className={`group relative flex h-full min-w-[100px] max-w-[200px] flex-shrink-0 cursor-pointer items-center border-r border-[var(--color-border)] px-3 text-xs transition-colors select-none ${
                 isActive
                   ? 'bg-white/[0.08] text-[var(--color-text-primary)]'
                   : 'text-[var(--color-text-secondary)] hover:bg-white/[0.04]'
@@ -91,6 +145,8 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
               onClick={() => setActiveTabInGroup(groupIndex, tab.id)}
               onMouseDown={(e) => handleTabMouseDown(e, tab.id, tab.title)}
             >
+              {showDropLeft && <div className="absolute left-0 top-1 bottom-1 w-[2px] bg-[var(--color-accent)] z-10" />}
+              {showDropRight && <div className="absolute right-0 top-1 bottom-1 w-[2px] bg-[var(--color-accent)] z-10" />}
               {hasAgent && (
                 <span
                   className={`flex-shrink-0 mr-1.5 rounded-full ${hasActiveAgent ? 'agent-active-dot' : ''}`}

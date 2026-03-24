@@ -66,6 +66,9 @@ export const HOTKEYS: HotkeyDefinition[] = [
   // ── App ──────────────────────────────────────────────────────────────
   { id: 'openSettings', label: 'Open Settings', defaultKey: 'Meta+,', category: 'App' },
   { id: 'newWindow', label: 'New Window', defaultKey: 'Meta+Shift+N', category: 'App' },
+  { id: 'newDocument', label: 'New Document', defaultKey: 'Meta+N', category: 'App' },
+  { id: 'openWorkspace', label: 'Open Workspace', defaultKey: 'Meta+O', category: 'App' },
+  { id: 'focusWindow', label: 'Open in Focus Window', defaultKey: 'Meta+Shift+F', category: 'App' },
   { id: 'toggleAssistant', label: 'Toggle Assistant', defaultKey: 'Meta+L', category: 'App' }
 ]
 

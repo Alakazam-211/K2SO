@@ -154,7 +154,7 @@ interface TabsState {
     direction: MosaicDirection
   ) => void
   updateMosaicTree: (tabId: string, tree: MosaicNode<string> | null) => void
-  reorderTabs: (fromIndex: number, toIndex: number) => void
+  reorderTabs: (fromIndex: number, toIndex: number, groupIndex?: number) => void
   addPaneToTab: (tabId: string, paneId: string, pane: PaneData) => void
   removePaneFromTab: (tabId: string, paneGroupId: string) => void
   getActiveTab: () => Tab | undefined
@@ -164,6 +164,7 @@ interface TabsState {
   pinPane: (tabId: string, paneGroupId: string) => void
   unpinPane: (tabId: string, paneGroupId: string) => void
   openFileInNewTab: (filePath: string) => void
+  openUntitledDocument: (cwd: string) => void
   setTabTitle: (tabId: string, title: string) => void
   renameTabByTitle: (oldTitle: string, newTitle: string) => void
   setTabDirty: (tabId: string, dirty: boolean) => void
@@ -590,12 +591,22 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     })
   },
 
-  reorderTabs: (fromIndex, toIndex) => {
+  reorderTabs: (fromIndex, toIndex, groupIndex = 0) => {
     set((state) => {
-      const tabs = [...state.tabs]
-      const [moved] = tabs.splice(fromIndex, 1)
-      tabs.splice(toIndex, 0, moved)
-      return { tabs }
+      if (groupIndex === 0) {
+        const tabs = [...state.tabs]
+        const [moved] = tabs.splice(fromIndex, 1)
+        tabs.splice(toIndex, 0, moved)
+        return { tabs }
+      }
+      const extraGroups = state.extraGroups.map((g: { tabs: Tab[], activeTabId: string | null }, i: number) => {
+        if (i !== groupIndex - 1) return g
+        const tabs = [...g.tabs]
+        const [moved] = tabs.splice(fromIndex, 1)
+        tabs.splice(toIndex, 0, moved)
+        return { ...g, tabs }
+      })
+      return { extraGroups }
     })
   },
 
@@ -838,6 +849,42 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       title: fileName,
       mosaicTree: paneGroupId,
       paneGroups: new Map([[paneGroupId, pg]])
+    }
+
+    set((state) => ({
+      tabs: [...state.tabs, tab],
+      activeTabId: tabId
+    }))
+  },
+
+  openUntitledDocument: (cwd: string) => {
+    // Count existing untitled docs to generate a unique name
+    const state = get()
+    const allTabs = [
+      ...state.tabs,
+      ...state.extraGroups.flatMap((g: { tabs: Tab[] }) => g.tabs)
+    ]
+    const untitledPattern = /^Untitled(?:-(\d+))?$/
+    let maxNum = 0
+    for (const t of allTabs) {
+      const m = untitledPattern.exec(t.title)
+      if (m) maxNum = Math.max(maxNum, m[1] ? parseInt(m[1], 10) : 1)
+    }
+    const num = maxNum + 1
+    const title = num === 1 ? 'Untitled' : `Untitled-${num}`
+
+    const paneGroupId = crypto.randomUUID()
+    const tabId = crypto.randomUUID()
+    const filePath = `${cwd}/${title}`
+
+    const pg = makeFileViewerPaneGroup(paneGroupId, filePath, true)
+
+    const tab: Tab = {
+      id: tabId,
+      title,
+      mosaicTree: paneGroupId,
+      paneGroups: new Map([[paneGroupId, pg]]),
+      isDirty: true, // Mark as dirty since it's unsaved
     }
 
     set((state) => ({

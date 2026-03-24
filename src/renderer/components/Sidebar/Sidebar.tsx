@@ -2,6 +2,8 @@ import { useState, useCallback, useMemo, useRef } from 'react'
 import { useProjectsStore } from '@/stores/projects'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
 import { useSettingsStore } from '@/stores/settings'
+import { useAssistantStore } from '@/stores/assistant'
+import { useCommandPaletteStore } from '@/stores/command-palette'
 import { invoke } from '@tauri-apps/api/core'
 import { showContextMenu } from '@/lib/context-menu'
 import { useGitInfo, useGitChanges } from '@/hooks/useGit'
@@ -532,12 +534,24 @@ function FocusGroupSelector(): React.JSX.Element {
   }
 
   return (
-    <div className="px-3 pt-3 pb-2 no-drag">
-      <FocusGroupDropdown
-        options={focusGroups.map((g) => ({ id: g.id, name: g.name, color: g.color }))}
-        value={activeFocusGroupId}
-        onChange={setActiveFocusGroup}
-      />
+    <div className="px-3 pt-3 pb-2 no-drag flex items-center gap-1.5">
+      <div className="flex-1 min-w-0">
+        <FocusGroupDropdown
+          options={focusGroups.map((g) => ({ id: g.id, name: g.name, color: g.color }))}
+          value={activeFocusGroupId}
+          onChange={setActiveFocusGroup}
+        />
+      </div>
+      <button
+        className="flex-shrink-0 flex items-center gap-1 px-1.5 py-1 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-white/[0.06] transition-colors cursor-pointer"
+        onClick={() => useCommandPaletteStore.getState().toggle()}
+        title="Command Palette (⌘K)"
+      >
+        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="11" cy="11" r="8" />
+          <line x1="21" y1="21" x2="16.65" y2="16.65" />
+        </svg>
+      </button>
     </div>
   )
 }
@@ -865,10 +879,10 @@ export default function Sidebar(): React.JSX.Element {
         )}
       </div>
 
-      {/* Add Workspace button */}
-      <div className="p-3 border-t border-[var(--color-border)]">
+      {/* Add Workspace + Assistant buttons */}
+      <div className="p-3 border-t border-[var(--color-border)] flex gap-2">
         <button
-          className="no-drag w-full flex items-center justify-center gap-2 px-3 py-2 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] bg-white/[0.04] hover:bg-white/[0.08] transition-colors"
+          className="no-drag flex-1 flex items-center justify-center gap-2 px-3 py-2 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] bg-white/[0.04] hover:bg-white/[0.08] transition-colors"
           onClick={handleAddProject}
         >
           <svg
@@ -881,6 +895,16 @@ export default function Sidebar(): React.JSX.Element {
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
           </svg>
           Add Workspace
+        </button>
+        <button
+          className="no-drag flex items-center gap-1.5 px-2.5 py-2 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] bg-white/[0.04] hover:bg-white/[0.08] transition-colors"
+          onClick={() => useAssistantStore.getState().toggle()}
+          title="Toggle Assistant (⌘L)"
+        >
+          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="4 17 10 11 4 5" />
+            <line x1="12" y1="19" x2="20" y2="19" />
+          </svg>
         </button>
       </div>
 

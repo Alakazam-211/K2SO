@@ -119,9 +119,9 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
     try {
       const result = await invoke<{ content: string }>('fs_read_file', { path: filePath })
       setContent(result.content)
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to read file'
-      setError(message)
+    } catch {
+      // File doesn't exist yet (e.g., untitled document) — start with empty content
+      setContent('')
     } finally {
       setLoading(false)
     }

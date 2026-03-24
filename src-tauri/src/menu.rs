@@ -24,6 +24,21 @@ pub fn create_menu(handle: &AppHandle) -> Result<Menu<tauri::Wry>, tauri::Error>
         ],
     )?;
 
+    // File submenu
+    let file_menu = Submenu::with_items(
+        handle,
+        "File",
+        true,
+        &[
+            &MenuItem::with_id(handle, "new-document", "New Document", true, Some("CmdOrCtrl+N"))?,
+            &MenuItem::with_id(handle, "new-tab", "New Tab", true, Some("CmdOrCtrl+T"))?,
+            &PredefinedMenuItem::separator(handle)?,
+            &MenuItem::with_id(handle, "open-workspace", "Open Workspace...", true, Some("CmdOrCtrl+O"))?,
+            &PredefinedMenuItem::separator(handle)?,
+            &MenuItem::with_id(handle, "close-tab", "Close Tab", true, Some("CmdOrCtrl+W"))?,
+        ],
+    )?;
+
     // Edit submenu
     let edit_menu = Submenu::with_items(
         handle,
@@ -46,7 +61,10 @@ pub fn create_menu(handle: &AppHandle) -> Result<Menu<tauri::Wry>, tauri::Error>
         "View",
         true,
         &[
-            &MenuItem::with_id(handle, "new-window", "New Window", true, Some("CmdOrCtrl+Shift+N"))?,
+            &MenuItem::with_id(handle, "command-palette", "Command Palette", true, Some("CmdOrCtrl+K"))?,
+            &MenuItem::with_id(handle, "toggle-sidebar", "Toggle Sidebar", true, Some("CmdOrCtrl+B"))?,
+            &MenuItem::with_id(handle, "toggle-assistant", "Toggle Assistant", true, Some("CmdOrCtrl+L"))?,
+            &MenuItem::with_id(handle, "focus-window", "Open in Focus Window", true, Some("CmdOrCtrl+Shift+F"))?,
             &PredefinedMenuItem::separator(handle)?,
             &MenuItem::with_id(handle, "app-zoom-in", "Zoom In", true, Some("CmdOrCtrl+Equal"))?,
             &MenuItem::with_id(handle, "app-zoom-out", "Zoom Out", true, Some("CmdOrCtrl+-"))?,
@@ -65,6 +83,8 @@ pub fn create_menu(handle: &AppHandle) -> Result<Menu<tauri::Wry>, tauri::Error>
         "Window",
         true,
         &[
+            &MenuItem::with_id(handle, "new-window", "New Window", true, Some("CmdOrCtrl+Shift+N"))?,
+            &PredefinedMenuItem::separator(handle)?,
             &PredefinedMenuItem::minimize(handle, None)?,
             &PredefinedMenuItem::maximize(handle, None)?,
             &PredefinedMenuItem::separator(handle)?,
@@ -73,6 +93,7 @@ pub fn create_menu(handle: &AppHandle) -> Result<Menu<tauri::Wry>, tauri::Error>
     )?;
 
     menu.append(&app_menu)?;
+    menu.append(&file_menu)?;
     menu.append(&edit_menu)?;
     menu.append(&view_menu)?;
     menu.append(&window_menu)?;
@@ -102,6 +123,30 @@ pub fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
         }
         "terminal-zoom-out" => {
             emit_to_focused(app, "terminal:zoom-out");
+        }
+        "new-document" => {
+            emit_to_focused(app, "menu:new-document");
+        }
+        "new-tab" => {
+            emit_to_focused(app, "menu:new-tab");
+        }
+        "open-workspace" => {
+            emit_to_focused(app, "menu:open-workspace");
+        }
+        "close-tab" => {
+            emit_to_focused(app, "menu:close-tab");
+        }
+        "command-palette" => {
+            emit_to_focused(app, "menu:command-palette");
+        }
+        "toggle-sidebar" => {
+            emit_to_focused(app, "menu:toggle-sidebar");
+        }
+        "toggle-assistant" => {
+            emit_to_focused(app, "menu:toggle-assistant");
+        }
+        "focus-window" => {
+            emit_to_focused(app, "menu:focus-window");
         }
         "new-window" => {
             use tauri::WebviewWindowBuilder;

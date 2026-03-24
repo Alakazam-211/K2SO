@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { useTabsStore } from '@/stores/tabs'
 import { usePresetsStore } from '@/stores/presets'
 import { useProjectsStore } from '@/stores/projects'
@@ -91,6 +92,36 @@ export function useTerminalShortcuts(cwd: string): void {
           const curIdx = state.tabs.findIndex((t) => t.id === state.activeTabId)
           if (curIdx < state.tabs.length - 1) {
             state.setActiveTab(state.tabs[curIdx + 1].id)
+          }
+          break
+        }
+
+        case 'n': {
+          if (e.shiftKey || e.altKey) return
+          e.preventDefault()
+          state.openUntitledDocument(cwd)
+          break
+        }
+
+        case 'o': {
+          if (e.shiftKey || e.altKey) return
+          e.preventDefault()
+          invoke<string | null>('projects_pick_folder').then((folderPath) => {
+            if (folderPath) {
+              useProjectsStore.getState().addProject(folderPath)
+            }
+          })
+          break
+        }
+
+        case 'f': {
+          // Cmd+Shift+F: Open current workspace in focus window
+          if (!e.shiftKey || e.altKey) return
+          e.preventDefault()
+          const projectsState = useProjectsStore.getState()
+          const activeProjectId = projectsState.activeProjectId
+          if (activeProjectId) {
+            invoke('projects_open_focus_window', { projectId: activeProjectId }).catch(() => {})
           }
           break
         }

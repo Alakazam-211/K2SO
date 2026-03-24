@@ -23,6 +23,7 @@ import { useCommandPaletteStore } from './stores/command-palette'
 import { useTerminalSettingsStore } from './stores/terminal-settings'
 import { useAssistantStore } from './stores/assistant'
 import { useTabsStore } from './stores/tabs'
+import { useSidebarStore } from './stores/sidebar'
 import { useActiveAgentsStore, startAgentPolling, stopAgentPolling } from './stores/active-agents'
 import AgentCloseDialog from './components/AgentCloseDialog/AgentCloseDialog'
 import FocusWorkspaceHeader from './components/FocusWindow/FocusWorkspaceHeader'
@@ -225,18 +226,58 @@ export default function App(): React.JSX.Element {
     return () => window.removeEventListener('keydown', handler)
   }, [openSettings, toggleCommandPalette, toggleAssistant])
 
-  // Listen for menu:open-settings from Tauri backend
+  // Listen for menu events from Tauri backend
   useEffect(() => {
-    let unlisten: (() => void) | undefined
+    const unlisteners: Array<() => void> = []
     import('@tauri-apps/api/event').then(({ listen }) => {
-      listen('menu:open-settings', () => openSettings()).then((fn) => {
-        unlisten = fn
-      })
+      listen('menu:open-settings', () => openSettings()).then((fn) => unlisteners.push(fn))
+      listen('menu:new-document', () => {
+        const ps = useProjectsStore.getState()
+        const proj = ps.projects.find((p) => p.id === ps.activeProjectId)
+        const ws = proj?.workspaces.find((w) => w.id === ps.activeWorkspaceId)
+        const cwd = ws?.worktreePath ?? proj?.path ?? '~'
+        useTabsStore.getState().openUntitledDocument(cwd)
+      }).then((fn) => unlisteners.push(fn))
+      listen('menu:new-tab', () => {
+        const ps = useProjectsStore.getState()
+        const proj = ps.projects.find((p) => p.id === ps.activeProjectId)
+        const ws = proj?.workspaces.find((w) => w.id === ps.activeWorkspaceId)
+        const cwd = ws?.worktreePath ?? proj?.path ?? '~'
+        useTabsStore.getState().addTab(cwd)
+      }).then((fn) => unlisteners.push(fn))
+      listen('menu:open-workspace', () => {
+        import('@tauri-apps/api/core').then(({ invoke }) => {
+          invoke<string | null>('projects_pick_folder').then((path) => {
+            if (path) useProjectsStore.getState().addProject(path)
+          })
+        })
+      }).then((fn) => unlisteners.push(fn))
+      listen('menu:close-tab', () => {
+        const { activeTabId, removeTab } = useTabsStore.getState()
+        if (activeTabId) removeTab(activeTabId)
+      }).then((fn) => unlisteners.push(fn))
+      listen('menu:command-palette', () => {
+        toggleCommandPalette()
+      }).then((fn) => unlisteners.push(fn))
+      listen('menu:toggle-sidebar', () => {
+        useSidebarStore.getState().toggle()
+      }).then((fn) => unlisteners.push(fn))
+      listen('menu:toggle-assistant', () => {
+        toggleAssistant()
+      }).then((fn) => unlisteners.push(fn))
+      listen('menu:focus-window', () => {
+        const projectId = useProjectsStore.getState().activeProjectId
+        if (projectId) {
+          import('@tauri-apps/api/core').then(({ invoke }) => {
+            invoke('projects_open_focus_window', { projectId }).catch(() => {})
+          })
+        }
+      }).then((fn) => unlisteners.push(fn))
     })
     return () => {
-      unlisten?.()
+      unlisteners.forEach((fn) => fn())
     }
-  }, [openSettings])
+  }, [openSettings, toggleAssistant, toggleCommandPalette])
 
   // In focus mode, set the active project to the focused project on mount
   useEffect(() => {

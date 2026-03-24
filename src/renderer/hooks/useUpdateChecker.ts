@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useToastStore } from '@/stores/toast'
+import { useSettingsStore } from '@/stores/settings'
 import { UPDATE_CHECK_INTERVAL } from '@shared/constants'
 
 interface UpdateInfo {
@@ -26,7 +27,9 @@ async function checkForUpdate(showToastIfNone = false): Promise<UpdateInfo | nul
         {
           label: 'Download',
           onClick: () => {
-            window.open(info.download_url, '_blank')
+            // Open settings to general page and auto-trigger update check
+            useSettingsStore.getState().openSettings('general')
+            useSettingsStore.setState({ pendingUpdateCheck: true })
           },
         }
       )

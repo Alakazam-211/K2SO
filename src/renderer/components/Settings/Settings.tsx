@@ -178,6 +178,14 @@ function GeneralSection(): React.JSX.Element {
     }
   }, [])
 
+  // Auto-check for updates when navigated here from the update toast
+  useEffect(() => {
+    if (useSettingsStore.getState().pendingUpdateCheck) {
+      useSettingsStore.setState({ pendingUpdateCheck: false })
+      handleCheckUpdate()
+    }
+  }, [handleCheckUpdate])
+
   return (
     <div className="max-w-xl">
       <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-4">General</h2>
@@ -211,14 +219,12 @@ function GeneralSection(): React.JSX.Element {
                 You&apos;re on v{updateInfo.current_version}
               </p>
             </div>
-            <a
-              href={updateInfo.download_url}
-              target="_blank"
-              rel="noopener noreferrer"
+            <button
               className="px-3 py-1 text-xs font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
+              onClick={() => invoke('plugin:shell|open', { path: updateInfo!.download_url }).catch(() => {})}
             >
               Download
-            </a>
+            </button>
           </div>
         )}
 
@@ -2135,6 +2141,25 @@ function ProjectsSection(): React.JSX.Element {
               )}
             </div>
           )}
+        </div>
+
+        {/* + New Workspace button */}
+        <div className="px-2 py-2 border-t border-[var(--color-border)]">
+          <button
+            className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] bg-white/[0.04] hover:bg-white/[0.08] transition-colors no-drag cursor-pointer"
+            onClick={async () => {
+              const folderPath = await invoke<string | null>('projects_pick_folder')
+              if (folderPath) {
+                await useProjectsStore.getState().addProject(folderPath)
+                await fetchProjects()
+              }
+            }}
+          >
+            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+            </svg>
+            New Workspace
+          </button>
         </div>
       </div>
 
