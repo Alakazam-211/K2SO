@@ -23,10 +23,7 @@ export default function FocusGroupDropdown({
   const inputRef = useRef<HTMLInputElement>(null)
   const [highlightIndex, setHighlightIndex] = useState(0)
 
-  const allOptions: FocusGroupOption[] = [
-    { id: null, name: 'All Workspaces' },
-    ...options
-  ]
+  const allOptions: FocusGroupOption[] = options
 
   const filtered = search
     ? allOptions.filter((o) => o.name.toLowerCase().includes(search.toLowerCase()))
