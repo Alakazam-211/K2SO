@@ -17,14 +17,23 @@ export interface DetectedLink {
 
 // ── Regex patterns ───────────────────────────────────────────────────
 
-// URLs: multiple schemes followed by non-whitespace, non-bracket chars
+// URLs with explicit scheme: https://..., ftp://..., mailto:...
 const URL_RE = /(?:https?|ftp|ssh|file|gemini|gopher|ipfs|ipns):\/\/[^\s<>'")\]{}]+|mailto:[^\s<>'")\]{}]+/g
+
+// Bare domain URLs without scheme: docs.anthropic.com/path, github.com/org/repo
+// Requires a recognized TLD to avoid false positives on things like "foo.bar"
+const BARE_DOMAIN_RE = /\b[a-zA-Z0-9][\w-]*(?:\.[a-zA-Z0-9][\w-]*)*\.(?:com|org|net|io|dev|ai|app|co|me|info|edu|gov|so|gl|ly|to|gg|rs|py|js|ts|sh|run|cc|fm|tv|xyz|tech|cloud|page|site|de|fr|uk|eu|ca|au|jp|nl|se|no|fi|ch|at|be|ie|es|it|br|in|ru)\b(?:\/[^\s<>'")\]{}]*)?/g
 
 // File paths: require at least one `/` and a file extension
 // Matches: src/foo.tsx, ./foo/bar.ts, /absolute/path.rs, ../relative.js
 // Also matches git diff prefixes: a/src/foo.ts, b/src/foo.ts
 // Optional :line or :line:col suffix
 const FILE_PATH_RE = /(?:[ab]\/|\.{0,2}\/)?(?:[\w@._-]+\/)+[\w@._-]+\.\w+(?::\d+(?::\d+)?)?/g
+
+// Tool output patterns: Action(filename.ext) — Claude Code, editors, build tools
+// Captures the filename inside parens (may contain spaces, paths, etc.)
+// Matches: Update(foo.md), Create(src/bar.tsx), Write(party hats test.md), Edit(file.rs:42)
+const TOOL_ACTION_RE = /(?:Update|Create|Write|Read|Edit|Delete|Rename|Move|Copy)\(([^)]+\.\w+(?::\d+(?::\d+)?)?)\)/g
 
 // Bracket pairs for balanced cleanup
 const BRACKET_PAIRS: Record<string, string> = { ')': '(', ']': '[', '}': '{', '>': '<' }
@@ -82,8 +91,8 @@ function cleanTrailingPunct(url: string): string {
 
 function parseFileSuffix(target: string): { path: string; line?: number; col?: number } {
   const colonMatch = target.match(/:(\d+)(?::(\d+))?$/)
-  if (colonMatch) {
-    const path = target.slice(0, target.indexOf(':' + colonMatch[1]))
+  if (colonMatch && colonMatch.index !== undefined) {
+    const path = target.slice(0, colonMatch.index)
     return {
       path,
       line: parseInt(colonMatch[1], 10),
@@ -152,6 +161,28 @@ export function detectLinks(text: string, cwd: string): DetectedLink[] {
     })
   }
 
+  // Detect bare domain URLs (no scheme)
+  BARE_DOMAIN_RE.lastIndex = 0
+  while ((match = BARE_DOMAIN_RE.exec(text)) !== null) {
+    const raw = match[0]
+    const cleaned = cleanTrailingPunct(raw)
+    if (cleaned.length < 5) continue
+
+    const start = strPosToCharIdx(match.index)
+    const end = start + [...cleaned].length
+
+    // Skip if overlaps with a scheme-based URL already detected
+    const overlaps = links.some((l) => start < l.end && end > l.start)
+    if (overlaps) continue
+
+    links.push({
+      start,
+      end,
+      type: 'url',
+      target: 'https://' + cleaned,  // Prepend https:// for opening in browser
+    })
+  }
+
   // Detect file paths
   FILE_PATH_RE.lastIndex = 0
   while ((match = FILE_PATH_RE.exec(text)) !== null) {
@@ -174,6 +205,35 @@ export function detectLinks(text: string, cwd: string): DetectedLink[] {
       end,
       type: 'file',
       target: raw,
+      filePath: absolutePath,
+      line,
+      col,
+    })
+  }
+
+  // Detect tool output patterns: Action(filename)
+  // These can contain spaces and don't require `/`, so we handle them separately
+  TOOL_ACTION_RE.lastIndex = 0
+  while ((match = TOOL_ACTION_RE.exec(text)) !== null) {
+    const fileRef = match[1]  // captured group inside parens
+    // Calculate position of the file ref (after the opening paren)
+    const parenPos = match.index + match[0].indexOf('(') + 1
+    const start = strPosToCharIdx(parenPos)
+    const end = start + [...fileRef].length
+
+    // Skip if this range overlaps with an already-detected link
+    const overlaps = links.some((l) => start < l.end && end > l.start)
+    if (overlaps) continue
+
+    const { path, line, col } = parseFileSuffix(fileRef)
+    const stripped = stripGitDiffPrefix(path)
+    const absolutePath = stripped.startsWith('/') ? stripped : `${cwd}/${stripped}`
+
+    links.push({
+      start,
+      end,
+      type: 'file',
+      target: fileRef,
       filePath: absolutePath,
       line,
       col,

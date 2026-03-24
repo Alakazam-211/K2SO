@@ -4,7 +4,7 @@
  * The native Tauri `startDrag` plugin hands control to the OS, which means
  * `tauri://drag-drop` events don't fire for drops back into the same window.
  * This module provides a simple global state so FileTree can initiate a drag
- * and TerminalView (or any other target) can detect the drop via mouseup.
+ * and the terminal (or any other target) can detect the drop via mouseup.
  *
  * Flow:
  *   1. FileTree mousedown → mousemove 5px → `beginDrag(paths)`

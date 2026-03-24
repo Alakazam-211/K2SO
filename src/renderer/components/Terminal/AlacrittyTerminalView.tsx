@@ -56,6 +56,7 @@ const DEFAULT_BG = 0x0a0a0a
 interface AlacrittyTerminalViewProps {
   terminalId: string
   tabId?: string
+  paneGroupId?: string
   cwd: string
   command?: string
   args?: string[]
@@ -140,6 +141,7 @@ function renderLineSpans(line: CompactLine): React.JSX.Element[] {
 export function AlacrittyTerminalView({
   terminalId,
   tabId,
+  paneGroupId,
   cwd,
   command,
   args,
@@ -621,13 +623,24 @@ export function AlacrittyTerminalView({
       invoke('plugin:shell|open', { path: clicked.target }).catch(() => {})
     } else if (clicked.type === 'file' && clicked.filePath) {
       const tabsStore = useTabsStore.getState()
-      if (tabId) {
-        tabsStore.openFileInPane(tabId, clicked.filePath)
-      } else {
-        tabsStore.openFileInNewTab(clicked.filePath)
+      const openInSplit = useTerminalSettingsStore.getState().openLinksInSplitPane
+
+      // If split pane setting is on, try to open in the sibling pane
+      if (openInSplit && tabId && paneGroupId) {
+        const tab = tabsStore.tabs.find((t) => t.id === tabId)
+        if (tab && tab.paneGroups.size > 1) {
+          // Find a pane group that isn't the terminal's pane
+          const siblingId = [...tab.paneGroups.keys()].find((id) => id !== paneGroupId)
+          if (siblingId) {
+            tabsStore.openFileInPaneGroup(tabId, siblingId, clicked.filePath)
+            return
+          }
+        }
       }
+
+      tabsStore.openFileInNewTab(clicked.filePath)
     }
-  }, [linkClickMode, hoveredLink, cwd, tabId])
+  }, [linkClickMode, hoveredLink, cwd, tabId, paneGroupId])
 
   // ── Cursor blink ───────────────────────────────────────────────────
 

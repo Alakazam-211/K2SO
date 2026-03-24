@@ -133,23 +133,6 @@ pub fn terminal_exists(
 }
 
 #[tauri::command]
-pub fn terminal_get_backend() -> String {
-    "alacritty".to_string()
-}
-
-#[tauri::command]
-pub fn terminal_get_buffer(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<String, String> {
-    state
-        .terminal_manager
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
-        .get_buffer(&id)
-}
-
-#[tauri::command]
 pub fn terminal_get_grid(
     state: State<'_, AppState>,
     id: String,
@@ -172,18 +155,6 @@ pub fn terminal_scroll(
         .lock()
         .map_err(|e| format!("Lock error: {}", e))?
         .scroll(&id, delta)
-}
-
-#[tauri::command]
-pub fn terminal_get_frame(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<crate::terminal::grid_types::BitmapUpdate, String> {
-    state
-        .terminal_manager
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
-        .get_frame(&id)
 }
 
 #[tauri::command]

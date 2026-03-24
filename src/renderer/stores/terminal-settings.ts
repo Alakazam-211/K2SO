@@ -10,15 +10,18 @@ export type LinkClickMode = 'click' | 'cmd-click'
 interface TerminalSettingsState {
   fontSize: number
   linkClickMode: LinkClickMode
+  openLinksInSplitPane: boolean
   incrementFontSize: () => void
   decrementFontSize: () => void
   resetFontSize: () => void
   setLinkClickMode: (mode: LinkClickMode) => void
+  setOpenLinksInSplitPane: (enabled: boolean) => void
 }
 
 export const useTerminalSettingsStore = create<TerminalSettingsState>((set) => ({
   fontSize: TERMINAL_FONT_SIZE_DEFAULT,
   linkClickMode: 'click' as LinkClickMode,
+  openLinksInSplitPane: true,
 
   incrementFontSize: () => {
     set((state) => ({
@@ -38,6 +41,10 @@ export const useTerminalSettingsStore = create<TerminalSettingsState>((set) => (
 
   setLinkClickMode: (mode: LinkClickMode) => {
     set({ linkClickMode: mode })
+  },
+
+  setOpenLinksInSplitPane: (enabled: boolean) => {
+    set({ openLinksInSplitPane: enabled })
   }
 }))
 

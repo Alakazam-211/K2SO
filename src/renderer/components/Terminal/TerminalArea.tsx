@@ -11,7 +11,7 @@ interface TerminalAreaProps {
 
 // ── Global drag state ────────────────────────────────────────────────────
 // Uses mousedown/mousemove/mouseup instead of HTML5 drag-and-drop
-// because xterm swallows drag events and the overlay timing is unreliable.
+// because terminals swallow drag events and the overlay timing is unreliable.
 
 interface TabDragState {
   groupIndex: number

@@ -267,6 +267,8 @@ function TerminalSection(): React.JSX.Element {
   const updateTerminalSettings = useSettingsStore((s) => s.updateTerminalSettings)
   const linkClickMode = useTerminalSettingsStore((s) => s.linkClickMode)
   const setLinkClickMode = useTerminalSettingsStore((s) => s.setLinkClickMode)
+  const openLinksInSplitPane = useTerminalSettingsStore((s) => s.openLinksInSplitPane)
+  const setOpenLinksInSplitPane = useTerminalSettingsStore((s) => s.setOpenLinksInSplitPane)
 
   return (
     <div className="max-w-xl">
@@ -372,6 +374,26 @@ function TerminalSection(): React.JSX.Element {
             ]}
             onChange={(v) => setLinkClickMode(v as LinkClickMode)}
           />
+        </SettingRow>
+
+        {/* Open Links in Split Pane */}
+        <SettingRow label={
+          <span title="When split panes are active, open file links in the sibling pane instead of a new tab">
+            Open Links in Split Pane
+          </span>
+        }>
+          <button
+            onClick={() => setOpenLinksInSplitPane(!openLinksInSplitPane)}
+            className={`w-7 h-3.5 flex items-center transition-colors no-drag cursor-pointer flex-shrink-0 ${
+              openLinksInSplitPane ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
+            }`}
+          >
+            <span
+              className={`w-2.5 h-2.5 bg-white block transition-transform ${
+                openLinksInSplitPane ? 'translate-x-3.5' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
         </SettingRow>
       </div>
     </div>

@@ -123,7 +123,7 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
 
   const terminalData = activeItem.type === 'terminal' && activeItem.data as TerminalItemData
   const fileData = activeItem.type === 'file-viewer' && activeItem.data as FileViewerItemData
-  // xterm.js removed — alacritty is the only backend
+  // Only show per-pane tab bar when there are splits
 
   // Only show per-pane tab bar when there are splits
   // (so the close-pane button is accessible).
@@ -148,6 +148,7 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
               <AlacrittyTerminalView
                 terminalId={terminalData.terminalId}
                 tabId={tabId}
+                paneGroupId={paneGroupId}
                 cwd={terminalData.cwd}
                 command={terminalData.command}
                 args={terminalData.args}

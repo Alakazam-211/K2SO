@@ -159,6 +159,7 @@ interface TabsState {
   removePaneFromTab: (tabId: string, paneGroupId: string) => void
   getActiveTab: () => Tab | undefined
   openFileInPane: (tabId: string, filePath: string) => void
+  openFileInPaneGroup: (tabId: string, paneGroupId: string, filePath: string) => void
   openDiffInPane: (tabId: string, filePath: string) => void
   pinPane: (tabId: string, paneGroupId: string) => void
   unpinPane: (tabId: string, paneGroupId: string) => void
@@ -505,8 +506,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   },
 
   removeTab: (tabId: string) => {
-    // Kill all PTYs in the removed tab (since TerminalView cleanup
-    // no longer kills PTYs — they survive tab switches for persistence)
+    // Kill all PTYs in the removed tab (PTYs survive tab switches for persistence)
     const tab = get().tabs.find((t) => t.id === tabId)
     if (tab) {
       for (const [, pg] of tab.paneGroups) {
@@ -690,6 +690,42 @@ export const useTabsStore = create<TabsState>((set, get) => ({
             items: newItems,
             activeItemIndex: newItems.length - 1,
           })
+        }
+
+        return { ...tab, paneGroups: newPaneGroups }
+      })
+
+      return { tabs }
+    })
+  },
+
+  openFileInPaneGroup: (tabId: string, paneGroupId: string, filePath: string) => {
+    set((state) => {
+      const tabs = state.tabs.map((tab) => {
+        if (tab.id !== tabId) return tab
+
+        const pg = tab.paneGroups.get(paneGroupId)
+        if (!pg) return tab
+
+        const unpinnedIdx = pg.items.findIndex(
+          (item) => item.type === 'file-viewer' && !item.pinned
+        )
+
+        const newPaneGroups = new Map(tab.paneGroups)
+
+        if (unpinnedIdx !== -1) {
+          const newItems = [...pg.items]
+          newItems[unpinnedIdx] = { ...newItems[unpinnedIdx], data: { filePath } }
+          newPaneGroups.set(paneGroupId, { ...pg, items: newItems, activeItemIndex: unpinnedIdx })
+        } else {
+          const newItem: Item = {
+            id: crypto.randomUUID(),
+            type: 'file-viewer',
+            data: { filePath },
+            pinned: false,
+          }
+          const newItems = [...pg.items, newItem]
+          newPaneGroups.set(paneGroupId, { ...pg, items: newItems, activeItemIndex: newItems.length - 1 })
         }
 
         return { ...tab, paneGroups: newPaneGroups }
