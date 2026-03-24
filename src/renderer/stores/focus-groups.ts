@@ -43,10 +43,6 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
 
   setActiveFocusGroup: (id: string | null) => {
     set({ activeFocusGroupId: id })
-    // Persist to settings so it restores on next launch
-    if (id !== null) {
-      invoke('settings_update', { activeFocusGroupId: id }).catch(() => {})
-    }
   },
 
   createFocusGroup: async (name: string, color?: string) => {
@@ -63,13 +59,7 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
     try {
       const state = get()
       if (state.activeFocusGroupId === id) {
-        // Default to the first remaining group instead of null
-        const remaining = state.focusGroups.filter((g) => g.id !== id)
-        const nextId = remaining.length > 0 ? remaining[0].id : null
-        set({ activeFocusGroupId: nextId })
-        if (nextId) {
-          invoke('settings_update', { activeFocusGroupId: nextId }).catch(() => {})
-        }
+        set({ activeFocusGroupId: null })
       }
       await invoke('focus_groups_delete', { id })
       await get().fetchFocusGroups()
@@ -118,15 +108,7 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
   setFocusGroupsEnabled: async (enabled: boolean) => {
     try {
       set({ focusGroupsEnabled: enabled })
-      if (enabled) {
-        // Default to the first focus group, never "All Workspaces"
-        const groups = get().focusGroups
-        if (groups.length > 0 && !get().activeFocusGroupId) {
-          const firstId = groups[0].id
-          set({ activeFocusGroupId: firstId })
-          invoke('settings_update', { activeFocusGroupId: firstId }).catch(() => {})
-        }
-      } else {
+      if (!enabled) {
         set({ activeFocusGroupId: null })
       }
       await invoke('settings_update', { focusGroupsEnabled: enabled })
@@ -138,20 +120,8 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
   initFromSettings: async () => {
     try {
       const settings = await invoke<any>('settings_get')
-      const enabled = settings.focusGroupsEnabled ?? false
-      set({ focusGroupsEnabled: enabled })
+      set({ focusGroupsEnabled: settings.focusGroupsEnabled ?? false })
       await get().fetchFocusGroups()
-
-      if (enabled) {
-        const groups = get().focusGroups
-        const savedId = settings.activeFocusGroupId as string | undefined
-        // Restore saved group if it still exists, otherwise default to first group
-        if (savedId && groups.some((g) => g.id === savedId)) {
-          set({ activeFocusGroupId: savedId })
-        } else if (groups.length > 0) {
-          set({ activeFocusGroupId: groups[0].id })
-        }
-      }
     } catch (err) {
       console.error('[focus-groups] initFromSettings failed:', err)
     }

@@ -70,8 +70,6 @@ pub struct AppSettings {
     pub keybindings: HashMap<String, String>,
     pub project_settings: HashMap<String, serde_json::Value>,
     pub focus_groups_enabled: bool,
-    #[serde(default)]
-    pub active_focus_group_id: Option<String>,
     pub sidebar_collapsed: bool,
     pub left_panel_open: bool,
     pub right_panel_open: bool,
@@ -98,7 +96,6 @@ impl Default for AppSettings {
             keybindings: HashMap::new(),
             project_settings: HashMap::new(),
             focus_groups_enabled: false,
-            active_focus_group_id: None,
             sidebar_collapsed: false,
             left_panel_open: false,
             right_panel_open: false,
