@@ -96,18 +96,50 @@ export function getFileDragPaths(): string[] {
   return dragPaths
 }
 
+export interface FileDragCallbacks {
+  /** Called during mousemove with the directory path under the cursor (or null). */
+  onDragOver?: (dirPath: string | null) => void
+  /** Called on mouseup if the drop lands on a directory. Return true to consume the drop. */
+  onDrop?: (dirPath: string) => boolean
+  /** Called when the drag ends (cleanup). */
+  onDragEnd?: () => void
+}
+
 /**
  * Start tracking a file drag from the FileTree.
  * Call this from FileTree's mousedown handler after the 5px threshold.
  */
-export function beginFileDrag(paths: string[], startX: number, startY: number): void {
+export function beginFileDrag(paths: string[], startX: number, startY: number, callbacks?: FileDragCallbacks): void {
   dragPaths = paths
   active = true
   ghost = createGhost(paths)
   moveGhost(startX, startY)
 
+  /** Find the nearest directory element under the cursor within the file tree. */
+  function findDirUnderCursor(x: number, y: number): string | null {
+    const el = document.elementFromPoint(x, y)
+    if (!el) return null
+    // Walk up to find a [data-path] element
+    const btn = (el as HTMLElement).closest('[data-path]') as HTMLElement | null
+    if (!btn) return null
+    // If it's a directory, use its path; if it's a file, use its parent directory
+    if (btn.dataset.isDirectory === 'true') return btn.dataset.path || null
+    // For files, find the parent directory from the path
+    const path = btn.dataset.path
+    if (path) {
+      const idx = path.lastIndexOf('/')
+      return idx > 0 ? path.slice(0, idx) : null
+    }
+    return null
+  }
+
   const handleMouseMove = (ev: MouseEvent): void => {
     moveGhost(ev.clientX, ev.clientY)
+    // Notify file tree about the directory under the cursor for highlighting
+    if (callbacks?.onDragOver) {
+      const dirPath = findDirUnderCursor(ev.clientX, ev.clientY)
+      callbacks.onDragOver(dirPath)
+    }
   }
 
   const handleMouseUp = (ev: MouseEvent): void => {
@@ -116,8 +148,9 @@ export function beginFileDrag(paths: string[], startX: number, startY: number): 
     if (!active) return
     active = false
 
-    // Hit-test: is the drop over a terminal container?
     const el = document.elementFromPoint(ev.clientX, ev.clientY)
+
+    // Hit-test: is the drop over a terminal container?
     if (el) {
       const termContainer = (el as HTMLElement).closest('[data-terminal-id]') as HTMLElement | null
       if (termContainer && termContainer.dataset.terminalId) {
@@ -132,7 +165,19 @@ export function beginFileDrag(paths: string[], startX: number, startY: number): 
       }
     }
 
-    // Drop wasn't on a terminal — cancel
+    // Hit-test: is the drop over a directory in the file tree?
+    if (callbacks?.onDrop) {
+      const dirPath = findDirUnderCursor(ev.clientX, ev.clientY)
+      if (dirPath) {
+        const consumed = callbacks.onDrop(dirPath)
+        if (consumed) {
+          dragPaths = []
+          return
+        }
+      }
+    }
+
+    // Drop wasn't on a terminal or directory — cancel
     dragPaths = []
   }
 
@@ -151,6 +196,7 @@ export function beginFileDrag(paths: string[], startX: number, startY: number): 
 
   function cleanup(): void {
     removeGhost()
+    callbacks?.onDragEnd?.()
     document.removeEventListener('mousemove', handleMouseMove)
     document.removeEventListener('mouseup', handleMouseUp)
     document.documentElement.removeEventListener('mouseleave', handleMouseLeave)

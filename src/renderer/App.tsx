@@ -267,15 +267,15 @@ export default function App(): React.JSX.Element {
   // Check for unmigrated Cursor IDE conversations
   useCursorMigrationCheck()
 
-  // Save layout helper
-  const saveCurrentLayout = (): void => {
+  // Save all workspaces (active + background) to DB
+  const saveAllWorkspaces = async (): Promise<void> => {
     const tabsStore = useTabsStore.getState()
     const projectsStore = useProjectsStore.getState()
-    if (projectsStore.activeProjectId && projectsStore.activeWorkspaceId) {
-      tabsStore.saveLayoutForWorkspace(
-        projectsStore.activeProjectId,
-        projectsStore.activeWorkspaceId
-      )
+    const activeKey = projectsStore.activeProjectId && projectsStore.activeWorkspaceId
+      ? `${projectsStore.activeProjectId}:${projectsStore.activeWorkspaceId}`
+      : null
+    if (activeKey) {
+      await tabsStore.serializeAllWorkspaces(activeKey)
     }
   }
 
@@ -289,7 +289,7 @@ export default function App(): React.JSX.Element {
     }
     const tabsStore = useTabsStore.getState()
     await tabsStore.detectAndSaveSessionIds()
-    saveCurrentLayout()
+    await saveAllWorkspaces()
     const { getCurrentWindow } = await import('@tauri-apps/api/window')
     getCurrentWindow().destroy()
   }
@@ -302,7 +302,15 @@ export default function App(): React.JSX.Element {
       if (timerState.status !== 'idle') {
         timerState.stopTimerSilently()
       }
-      saveCurrentLayout()
+      // Best-effort sync save (beforeunload can't await)
+      const tabsStore = useTabsStore.getState()
+      const projectsStore = useProjectsStore.getState()
+      const activeKey = projectsStore.activeProjectId && projectsStore.activeWorkspaceId
+        ? `${projectsStore.activeProjectId}:${projectsStore.activeWorkspaceId}`
+        : null
+      if (activeKey) {
+        tabsStore.saveLayoutForWorkspace(projectsStore.activeProjectId!, projectsStore.activeWorkspaceId!)
+      }
     }
 
     window.addEventListener('beforeunload', handleBeforeUnload)
@@ -310,6 +318,9 @@ export default function App(): React.JSX.Element {
     let unlisten: (() => void) | undefined
     import('@tauri-apps/api/event').then(({ listen }) => {
       listen('tauri://close-requested', async (event) => {
+        // Always prevent default so we can save before closing
+        ;(event as any).preventDefault?.()
+
         // Auto-stop timer silently before closing
         const timerState = useTimerStore.getState()
         if (timerState.status !== 'idle') {
@@ -321,17 +332,17 @@ export default function App(): React.JSX.Element {
         const agents = useActiveAgentsStore.getState().getActiveAgentsList()
 
         if (agents.length > 0) {
-          // Prevent close and show dialog
-          (event as any).preventDefault?.()
           setQuitAgents(agents)
           setShowQuitDialog(true)
           return
         }
 
-        // No agents — proceed with close
+        // No agents — save all workspaces (active + background) with session IDs, then close
         const tabsStore = useTabsStore.getState()
         await tabsStore.detectAndSaveSessionIds()
-        saveCurrentLayout()
+        await saveAllWorkspaces()
+        const { getCurrentWindow } = await import('@tauri-apps/api/window')
+        getCurrentWindow().destroy()
       }).then((fn) => { unlisten = fn }).catch(() => {})
     })
 

@@ -37,6 +37,9 @@ export const RESUMABLE_CLI_TOOLS: Record<string, { resumeFlag: string; provider:
   'cursor-agent': { resumeFlag: '--resume', provider: 'cursor' },
 }
 
+// ── Agent activity ────────────────────────────────────────────────
+export const AGENT_IDLE_THRESHOLD_MS = 5000  // 5 seconds without grid output → idle
+
 // ── Known agent commands ────────────────────────────────────────────
 // CLI tools considered "active agents" for close-warning purposes.
 // When one of these is the foreground process in a terminal, the user

@@ -1,7 +1,8 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { useTabsStore, type TerminalItemData } from './tabs'
-import { KNOWN_AGENT_COMMANDS } from '@shared/constants'
+import { useToastStore } from './toast'
+import { KNOWN_AGENT_COMMANDS, AGENT_IDLE_THRESHOLD_MS } from '@shared/constants'
 
 export interface ActiveAgent {
   terminalId: string
@@ -9,21 +10,25 @@ export interface ActiveAgent {
   tabId: string
   tabTitle: string
   groupIndex: number
+  status: 'active' | 'idle'
 }
 
 interface ActiveAgentsState {
   agents: Map<string, ActiveAgent>
+  outputTimestamps: Map<string, number>
 
   hasActiveAgents: () => boolean
   getActiveAgentsList: () => ActiveAgent[]
   getAgentsInTab: (tabId: string) => ActiveAgent[]
   isTerminalRunningAgent: (terminalId: string) => boolean
+  recordOutput: (terminalId: string) => void
 
   pollOnce: () => Promise<void>
 }
 
 export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
   agents: new Map(),
+  outputTimestamps: new Map(),
 
   hasActiveAgents: () => get().agents.size > 0,
 
@@ -33,6 +38,10 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
     Array.from(get().agents.values()).filter((a) => a.tabId === tabId),
 
   isTerminalRunningAgent: (terminalId: string) => get().agents.has(terminalId),
+
+  recordOutput: (terminalId: string) => {
+    get().outputTimestamps.set(terminalId, Date.now())
+  },
 
   pollOnce: async () => {
     const tabsState = useTabsStore.getState()
@@ -85,17 +94,24 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
     // Poll each terminal for its foreground command
     const newAgents = new Map<string, ActiveAgent>()
 
+    const now = Date.now()
+    const { agents: oldAgents, outputTimestamps } = get()
+
     await Promise.all(
       terminals.map(async (t) => {
         try {
           const command = await invoke<string | null>('terminal_get_foreground_command', { id: t.terminalId })
           if (command && KNOWN_AGENT_COMMANDS.has(command)) {
+            const lastOutput = outputTimestamps.get(t.terminalId) ?? 0
+            const status: 'active' | 'idle' = (now - lastOutput < AGENT_IDLE_THRESHOLD_MS) ? 'active' : 'idle'
+
             newAgents.set(t.terminalId, {
               terminalId: t.terminalId,
               command,
               tabId: t.tabId,
               tabTitle: t.tabTitle,
               groupIndex: t.groupIndex,
+              status,
             })
           }
         } catch {
@@ -103,6 +119,49 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
         }
       })
     )
+
+    // Detect transitions and fire toasts
+    const toast = useToastStore.getState()
+
+    for (const [terminalId, newAgent] of newAgents) {
+      const oldAgent = oldAgents.get(terminalId)
+      if (oldAgent?.status === 'active' && newAgent.status === 'idle') {
+        // Agent was actively working, now idle → waiting for input
+        const { tabId, groupIndex } = newAgent
+        toast.addToast(
+          `${newAgent.command} is waiting for input in "${newAgent.tabTitle}"`,
+          'info',
+          5000,
+          {
+            label: 'Switch to tab',
+            onClick: () => useTabsStore.getState().setActiveTabInGroup(groupIndex, tabId),
+          }
+        )
+      }
+    }
+
+    for (const [terminalId, oldAgent] of oldAgents) {
+      if (!newAgents.has(terminalId) && oldAgent.status === 'active') {
+        // Agent was actively working and has now exited
+        const { tabId, groupIndex } = oldAgent
+        toast.addToast(
+          `${oldAgent.command} finished in "${oldAgent.tabTitle}"`,
+          'success',
+          4000,
+          {
+            label: 'Switch to tab',
+            onClick: () => useTabsStore.getState().setActiveTabInGroup(groupIndex, tabId),
+          }
+        )
+      }
+    }
+
+    // Clean up output timestamps for terminals no longer tracked
+    for (const terminalId of outputTimestamps.keys()) {
+      if (!newAgents.has(terminalId)) {
+        outputTimestamps.delete(terminalId)
+      }
+    }
 
     set({ agents: newAgents })
   },

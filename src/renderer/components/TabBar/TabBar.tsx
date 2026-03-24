@@ -18,6 +18,7 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
   const setActiveTabInGroup = useTabsStore((s) => s.setActiveTabInGroup)
   const splitTerminalArea = useTabsStore((s) => s.splitTerminalArea)
   const unsplitTerminalArea = useTabsStore((s) => s.unsplitTerminalArea)
+  const agentMap = useActiveAgentsStore((s) => s.agents)
 
   const handleAddTab = useCallback(() => {
     addTabToGroup(groupIndex, cwd)
@@ -76,7 +77,9 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
         {tabs.map((tab) => {
           const isActive = tab.id === activeTabId
           const isDirty = tab.isDirty ?? false
-          const hasAgent = useActiveAgentsStore.getState().getAgentsInTab(tab.id).length > 0
+          const agentsInTab = Array.from(agentMap.values()).filter(a => a.tabId === tab.id)
+          const hasAgent = agentsInTab.length > 0
+          const hasActiveAgent = agentsInTab.some(a => a.status === 'active')
           return (
             <div
               key={tab.id}
@@ -89,7 +92,10 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
               onMouseDown={(e) => handleTabMouseDown(e, tab.id, tab.title)}
             >
               {hasAgent && (
-                <span className="agent-active-dot flex-shrink-0 mr-1.5" style={{ width: 6, height: 6, backgroundColor: '#22c55e' }} />
+                <span
+                  className={`flex-shrink-0 mr-1.5 rounded-full ${hasActiveAgent ? 'agent-active-dot' : ''}`}
+                  style={{ width: 6, height: 6, backgroundColor: hasActiveAgent ? '#f97316' : '#22c55e' }}
+                />
               )}
               {isDirty && !hasAgent && (
                 <span className="w-1.5 h-1.5 bg-[var(--color-accent)] flex-shrink-0 mr-1.5" />

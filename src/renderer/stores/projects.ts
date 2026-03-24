@@ -137,17 +137,16 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
         return
       }
 
-      await get().fetchProjects()
-
-      // Set the newly added project as active
-      const state = get()
+      // Stash the workspace we're leaving BEFORE fetchProjects changes active IDs
+      const preState = get()
       const tabsStore = useTabsStore.getState()
-
-      // Save layout for the workspace we're leaving
-      if (state.activeProjectId && state.activeWorkspaceId) {
-        tabsStore.saveLayoutForWorkspace(state.activeProjectId, state.activeWorkspaceId)
+      if (preState.activeProjectId && preState.activeWorkspaceId) {
+        tabsStore.stashWorkspace(`${preState.activeProjectId}:${preState.activeWorkspaceId}`)
       }
 
+      await get().fetchProjects()
+
+      const state = get()
       const newProject = state.projects[state.projects.length - 1]
       if (newProject) {
         const newWorkspaceId = newProject.workspaces[0]?.id ?? null
@@ -156,10 +155,10 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
           activeWorkspaceId: newWorkspaceId
         })
 
-        // New project — clear tabs and create a fresh one
         if (newWorkspaceId) {
           const cwd = newProject.workspaces[0]?.worktreePath ?? newProject.path ?? '~'
-          tabsStore.loadLayoutForWorkspace(newProject.id, newWorkspaceId, cwd)
+          const newKey = `${newProject.id}:${newWorkspaceId}`
+          tabsStore.restoreWorkspace(newKey, cwd)
         } else {
           tabsStore.clearAllTabs()
         }
@@ -174,11 +173,20 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   removeProject: async (id: string) => {
     try {
+      const tabsStore = useTabsStore.getState()
+
+      // Clean up background workspaces for this project
+      for (const key of Object.keys(tabsStore.backgroundWorkspaces)) {
+        if (key.startsWith(`${id}:`)) {
+          tabsStore.clearBackgroundWorkspace(key)
+        }
+      }
+      // Delete saved sessions from DB
+      invoke('workspace_session_delete', { projectId: id, workspaceId: null }).catch(() => {})
+
       await invoke('projects_delete', { id })
 
       const state = get()
-      const tabsStore = useTabsStore.getState()
-
       if (state.activeProjectId === id) {
         tabsStore.clearAllTabs()
         set({ activeProjectId: null, activeWorkspaceId: null })
@@ -198,7 +206,8 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
         if (firstWorkspaceId) {
           const cwd = first.workspaces[0]?.worktreePath ?? first.path ?? '~'
-          tabsStore.loadLayoutForWorkspace(first.id, firstWorkspaceId, cwd)
+          const newKey = `${first.id}:${firstWorkspaceId}`
+          tabsStore.restoreWorkspace(newKey, cwd)
         }
       }
 
@@ -212,13 +221,12 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     const state = get()
     const tabsStore = useTabsStore.getState()
 
-    // Save the current layout before switching
+    // Stash current workspace (PTYs stay alive in background)
     if (state.activeProjectId && state.activeWorkspaceId) {
-      tabsStore.saveLayoutForWorkspace(state.activeProjectId, state.activeWorkspaceId)
+      tabsStore.stashWorkspace(`${state.activeProjectId}:${state.activeWorkspaceId}`)
     }
 
     if (id === null) {
-      tabsStore.clearAllTabs()
       set({ activeProjectId: null, activeWorkspaceId: null })
       return
     }
@@ -231,17 +239,10 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
         activeWorkspaceId: newWorkspaceId
       })
 
-      // Restore layout for the new workspace
       if (newWorkspaceId) {
         const cwd = project.workspaces[0]?.worktreePath ?? project.path ?? '~'
-        try {
-          tabsStore.loadLayoutForWorkspace(id, newWorkspaceId, cwd)
-        } catch (err) {
-          console.error('[projects] Failed to restore layout, clearing tabs:', err)
-          tabsStore.clearAllTabs()
-        }
-      } else {
-        tabsStore.clearAllTabs()
+        const newKey = `${id}:${newWorkspaceId}`
+        tabsStore.restoreWorkspace(newKey, cwd)
       }
     }
   },
@@ -250,9 +251,9 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     const state = get()
     const tabsStore = useTabsStore.getState()
 
-    // Save the current layout before switching
+    // Stash current workspace (PTYs stay alive in background)
     if (state.activeProjectId && state.activeWorkspaceId) {
-      tabsStore.saveLayoutForWorkspace(state.activeProjectId, state.activeWorkspaceId)
+      tabsStore.stashWorkspace(`${state.activeProjectId}:${state.activeWorkspaceId}`)
     }
 
     set({
@@ -260,16 +261,11 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
       activeWorkspaceId: workspaceId
     })
 
-    // Restore layout for the new workspace
     const project = state.projects.find((p) => p.id === projectId)
     const workspace = project?.workspaces.find((w) => w.id === workspaceId)
     const cwd = workspace?.worktreePath ?? project?.path ?? '~'
-    try {
-      tabsStore.loadLayoutForWorkspace(projectId, workspaceId, cwd)
-    } catch (err) {
-      console.error('[projects] Failed to restore layout, clearing tabs:', err)
-      tabsStore.clearAllTabs()
-    }
+    const newKey = `${projectId}:${workspaceId}`
+    tabsStore.restoreWorkspace(newKey, cwd)
   },
 
   reorderProjects: async (ids: string[]) => {

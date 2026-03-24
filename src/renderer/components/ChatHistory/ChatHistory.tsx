@@ -14,6 +14,7 @@ interface ChatSession {
   timestamp: number // unix ms
   provider: string
   messageCount: number
+  originBranch: string | null
 }
 
 type DateGroup = 'Pinned' | 'Today' | 'Yesterday' | 'This Week' | 'This Month' | 'Older'
@@ -403,16 +404,45 @@ export default function ChatHistory(): React.JSX.Element {
       const key = `${session.provider}:${session.sessionId}`
       const displayTitle = customNames[key] ?? session.title
 
+      // Determine if we're resuming across worktree boundaries.
+      // When the current workspace branch differs from the session's origin,
+      // we fork the session (--fork-session) so the original stays clean and
+      // the new worktree gets its own conversation branch.
+      // Claude CLI --resume uses the new cwd for file operations, so the
+      // worktree re-basing happens automatically via the terminal's cwd.
+      //
+      // originBranch is null for sessions created in the main repo (not a worktree).
+      // worktreePath is null for the main workspace. We use worktreePath presence
+      // (not branch name) to determine if we're actually in a worktree, since the
+      // main workspace always has a branch name like "main" even though it's not
+      // a worktree.
+      const isCurrentlyInWorktree = activeWorkspace?.worktreePath != null
+      const sessionFromWorktree = session.originBranch != null
+      const isCrossWorktree =
+        // Both in worktrees but different ones
+        (sessionFromWorktree && isCurrentlyInWorktree && session.originBranch !== activeWorkspace?.branch)
+        // One is a worktree, the other is main repo
+        || (sessionFromWorktree !== isCurrentlyInWorktree)
+
+      const args = ['--resume', session.sessionId]
+      if (isCrossWorktree && config.command === 'claude') {
+        args.push('--fork-session')
+      }
+
+      const title = isCrossWorktree && session.originBranch
+        ? `${displayTitle} (from ${session.originBranch})`
+        : displayTitle
+
       // If split into columns, open in the rightmost group
       const targetGroup = tabsStore.splitCount > 1 ? tabsStore.splitCount - 1 : 0
 
       tabsStore.addTabToGroup(targetGroup, projectPath, {
-        title: displayTitle,
+        title,
         command: config.command,
-        args: ['--resume', session.sessionId]
+        args,
       })
     },
-    [projectPath, customNames]
+    [projectPath, customNames, activeWorkspace]
   )
 
   const handleSearchKeyDown = useCallback(
@@ -592,11 +622,17 @@ export default function ChatHistory(): React.JSX.Element {
                                 <span className="text-[11px] text-[var(--color-text-secondary)] font-mono truncate leading-tight">
                                   {customNames[`${session.provider}:${session.sessionId}`] ?? session.title}
                                 </span>
-                                {session.messageCount > 0 && (
-                                  <span className="text-[10px] text-[var(--color-text-muted)] font-mono leading-tight">
-                                    {session.messageCount} message{session.messageCount !== 1 ? 's' : ''}
-                                  </span>
-                                )}
+                                <span className="text-[10px] text-[var(--color-text-muted)] font-mono leading-tight flex items-center gap-1.5">
+                                  {session.originBranch && (
+                                    <span className="inline-flex items-center gap-0.5 opacity-70" title={`Created in worktree: ${session.originBranch}`}>
+                                      <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25Z" /></svg>
+                                      {session.originBranch}
+                                    </span>
+                                  )}
+                                  {session.messageCount > 0 && (
+                                    <span>{session.messageCount} msg{session.messageCount !== 1 ? 's' : ''}</span>
+                                  )}
+                                </span>
                               </>
                             )}
                           </div>

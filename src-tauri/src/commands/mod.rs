@@ -13,3 +13,4 @@ pub mod assistant;
 pub mod chat_history;
 pub mod timer;
 pub mod updater;
+pub mod workspace_sessions;

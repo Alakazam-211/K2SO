@@ -662,8 +662,10 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
     }
   }, [rootPath, loadDir])
 
-  // ── Drag-out to Finder ─────────────────────────────────────────────
-  // ── Drag-out: in-window (terminal drop) + Finder (OS handoff) ─────
+  // ── Internal drag state (for highlighting folders during drag) ─────
+  const [internalDropTarget, setInternalDropTarget] = useState<string | null>(null)
+
+  // ── Drag-out: in-window (terminal drop) + folder drop + Finder (OS handoff)
   const handleDragOutStart = useCallback((entry: FileEntry, e: React.MouseEvent) => {
     const startX = e.clientX
     const startY = e.clientY
@@ -678,10 +680,61 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
     const handleMouseMove = (ev: MouseEvent): void => {
       if (!started && (Math.abs(ev.clientX - startX) > 5 || Math.abs(ev.clientY - startY) > 5)) {
         started = true
-        // Use custom in-window drag system.
-        // - mouseup over a terminal → paste path
-        // - mouse leaves window → hands off to OS native drag for Finder
-        beginFileDrag(paths, ev.clientX, ev.clientY)
+        beginFileDrag(paths, ev.clientX, ev.clientY, {
+          onDragOver: (dirPath) => {
+            // Don't highlight if hovering over one of the dragged items' own directories
+            if (dirPath && paths.some(p => p === dirPath || dirPath.startsWith(p + '/'))) {
+              setInternalDropTarget(null)
+            } else {
+              setInternalDropTarget(dirPath)
+            }
+          },
+          onDrop: (dirPath) => {
+            // Don't allow dropping into self or a child of a dragged folder
+            if (paths.some(p => p === dirPath || dirPath.startsWith(p + '/'))) return false
+            // Don't allow "moving" if already in the target directory
+            if (paths.every(p => parentDir(p) === dirPath)) return false
+
+            const toast = useToastStore.getState()
+            const undo = useFileUndoStore.getState()
+            const isCopy = optionKeyRef.current
+
+            const doMove = async (): Promise<void> => {
+              try {
+                if (isCopy) {
+                  await invoke('fs_copy_files', { sources: paths, destination: dirPath })
+                  undo.push({
+                    type: 'copy',
+                    createdPaths: paths.map(p => `${dirPath}/${p.split('/').pop()}`)
+                  })
+                  toast.addToast(`Copied ${paths.length} item${paths.length > 1 ? 's' : ''}`, 'success')
+                } else {
+                  await invoke('fs_move_files', { sources: paths, destination: dirPath })
+                  undo.push({
+                    type: 'move',
+                    items: paths.map(p => ({
+                      oldPath: p,
+                      newPath: `${dirPath}/${p.split('/').pop()}`
+                    }))
+                  })
+                  toast.addToast(`Moved ${paths.length} item${paths.length > 1 ? 's' : ''}`, 'success')
+                }
+                // Refresh affected directories
+                const dirsToRefresh = new Set<string>()
+                dirsToRefresh.add(dirPath)
+                for (const p of paths) dirsToRefresh.add(parentDir(p))
+                for (const dir of dirsToRefresh) await loadDir(dir, true)
+              } catch (err) {
+                toast.addToast(`${isCopy ? 'Copy' : 'Move'} failed: ${err}`, 'error')
+              }
+            }
+            doMove()
+            return true
+          },
+          onDragEnd: () => {
+            setInternalDropTarget(null)
+          }
+        })
         document.removeEventListener('mousemove', handleMouseMove)
         document.removeEventListener('mouseup', handleMouseUp)
       }
@@ -694,7 +747,7 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
 
     document.addEventListener('mousemove', handleMouseMove)
     document.addEventListener('mouseup', handleMouseUp)
-  }, [])
+  }, [loadDir])
 
   // Toggle directory expand/collapse
   const handleToggleDir = useCallback(
@@ -1076,13 +1129,16 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
 
   const rootBasename = rootPath.split('/').pop() || rootPath
 
+  // Merge Finder drag-in target with internal drag target
+  const effectiveDropTarget = dropTarget ?? internalDropTarget
+
   const childProps = {
     cache, expandedDirs, loadingDirs, errorDirs, selectedPaths, cutPaths,
     onToggleDir: handleToggleDir,
     onItemClick: handleItemClick,
     onContextMenu: handleContextMenu,
     onDragOutStart: handleDragOutStart,
-    searchQuery, dropTarget, renamingPath,
+    searchQuery, dropTarget: effectiveDropTarget, renamingPath,
     onRenameConfirm: handleRenameConfirm,
     onRenameCancel: handleRenameCancel,
     newEntryState,

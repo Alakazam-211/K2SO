@@ -45,6 +45,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         ("0006_time_entries", include_str!("../../drizzle_sql/0006_time_entries.sql")),
         ("0007_chat_session_names", include_str!("../../drizzle_sql/0007_chat_session_names.sql")),
         ("0008_chat_pinned", include_str!("../../drizzle_sql/0008_chat_pinned.sql")),
+        ("0009_workspace_sessions", include_str!("../../drizzle_sql/0009_workspace_sessions.sql")),
     ];
 
     for (name, sql) in migrations {

@@ -51,6 +51,9 @@ pub fn run() {
             // Migrate old JSON window state to SQLite (one-time migration)
             window::migrate_json_window_state(app.handle());
 
+            // Migrate workspace_layouts from settings.json → SQLite (one-time)
+            migrate_workspace_layouts_to_db(app.handle());
+
             // Apply saved window state on startup
             if let Some(saved) = window::load_window_state(app.handle()) {
                 if let Some(win) = app.get_webview_window("main") {
@@ -339,7 +342,88 @@ pub fn run() {
             commands::updater::check_for_update,
             commands::updater::get_current_version,
             commands::updater::broadcast_sync,
+            // Workspace Sessions
+            commands::workspace_sessions::workspace_session_save,
+            commands::workspace_sessions::workspace_session_load,
+            commands::workspace_sessions::workspace_session_load_all,
+            commands::workspace_sessions::workspace_session_delete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running K2SO");
+}
+
+/// One-time migration: move workspace_layouts from settings.json → workspace_sessions SQLite table.
+fn migrate_workspace_layouts_to_db(app: &tauri::AppHandle) {
+    let settings_path = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".k2so")
+        .join("settings.json");
+
+    if !settings_path.exists() {
+        return;
+    }
+
+    let raw = match std::fs::read_to_string(&settings_path) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    let mut parsed: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let layouts = match parsed.get("workspaceLayouts") {
+        Some(v) if v.is_object() && !v.as_object().unwrap().is_empty() => {
+            v.as_object().unwrap().clone()
+        }
+        _ => return, // Nothing to migrate
+    };
+
+    // Get the DB connection from managed state
+    let state = app.state::<AppState>();
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let mut migrated = 0usize;
+    for (key, layout_val) in &layouts {
+        // key format: "projectId:workspaceId"
+        let parts: Vec<&str> = key.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            continue;
+        }
+        let project_id = parts[0];
+        let workspace_id = parts[1];
+
+        let layout_json = match serde_json::to_string(layout_val) {
+            Ok(j) => j,
+            Err(_) => continue,
+        };
+
+        let id = key.clone();
+        if conn.execute(
+            "INSERT OR IGNORE INTO workspace_sessions (id, project_id, workspace_id, layout_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, unixepoch())",
+            rusqlite::params![id, project_id, workspace_id, layout_json],
+        ).is_ok() {
+            migrated += 1;
+        }
+    }
+
+    if migrated > 0 {
+        eprintln!("[k2so] Migrated {} workspace layout(s) from settings.json to SQLite", migrated);
+
+        // Remove workspaceLayouts from settings.json
+        if let Some(obj) = parsed.as_object_mut() {
+            obj.remove("workspaceLayouts");
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&parsed) {
+            let tmp = settings_path.with_extension("json.tmp");
+            if std::fs::write(&tmp, &json).is_ok() {
+                std::fs::rename(&tmp, &settings_path).ok();
+            }
+        }
+    }
 }

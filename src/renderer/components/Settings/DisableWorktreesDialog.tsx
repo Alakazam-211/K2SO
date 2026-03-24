@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useProjectsStore, type ProjectWithWorkspaces } from '../../stores/projects'
+import { useActiveAgentsStore } from '@/stores/active-agents'
+import AgentCloseDialog from '@/components/AgentCloseDialog/AgentCloseDialog'
 
 interface DisableWorktreesDialogProps {
   project: ProjectWithWorkspaces
@@ -19,6 +21,8 @@ export default function DisableWorktreesDialog({
   const [action, setAction] = useState<Action | null>(null)
   const [hasUnmerged, setHasUnmerged] = useState(false)
   const [showRecycleConfirm, setShowRecycleConfirm] = useState(false)
+  const [showAgentDialog, setShowAgentDialog] = useState(false)
+  const [pendingAgentAction, setPendingAgentAction] = useState<Action | null>(null)
   const fetchProjects = useProjectsStore((s) => s.fetchProjects)
 
   // Get worktree-type workspaces (not the main branch workspace)
@@ -55,13 +59,25 @@ export default function DisableWorktreesDialog({
       setIsPending(false)
       setShowRecycleConfirm(false)
       setHasUnmerged(false)
+      setShowAgentDialog(false)
+      setPendingAgentAction(null)
     }
   }, [open])
 
-  const handleAction = useCallback(async (selectedAction: Action) => {
+  const handleAction = useCallback(async (selectedAction: Action, bypassAgentCheck = false) => {
     if (selectedAction === 'cancel') {
       onClose()
       return
+    }
+
+    // Check for active agents before any destructive action
+    if (!bypassAgentCheck) {
+      const agents = useActiveAgentsStore.getState().getActiveAgentsList()
+      if (agents.length > 0) {
+        setPendingAgentAction(selectedAction)
+        setShowAgentDialog(true)
+        return
+      }
     }
 
     if (selectedAction === 'recycle' && hasUnmerged && !showRecycleConfirm) {
@@ -256,6 +272,23 @@ export default function DisableWorktreesDialog({
           </div>
         )}
       </div>
+
+      {showAgentDialog && pendingAgentAction && (
+        <AgentCloseDialog
+          agents={useActiveAgentsStore.getState().getActiveAgentsList()}
+          mode="tab"
+          onConfirm={() => {
+            setShowAgentDialog(false)
+            const act = pendingAgentAction
+            setPendingAgentAction(null)
+            handleAction(act, true)
+          }}
+          onCancel={() => {
+            setShowAgentDialog(false)
+            setPendingAgentAction(null)
+          }}
+        />
+      )}
     </div>
   )
 }

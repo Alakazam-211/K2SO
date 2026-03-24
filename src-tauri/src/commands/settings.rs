@@ -73,7 +73,9 @@ pub struct AppSettings {
     pub sidebar_collapsed: bool,
     pub left_panel_open: bool,
     pub right_panel_open: bool,
-    #[serde(default)]
+    /// Deprecated: workspace layouts now stored in SQLite workspace_sessions table.
+    /// Kept for deserialization compat with old settings.json files; skipped on write.
+    #[serde(default, skip_serializing)]
     pub workspace_layouts: HashMap<String, serde_json::Value>,
     #[serde(default = "default_agent")]
     pub default_agent: String,

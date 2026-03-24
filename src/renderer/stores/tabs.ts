@@ -113,6 +113,19 @@ export interface SerializedTab {
 export interface SerializedLayout {
   tabs: SerializedTab[]
   activeTabId: string | null
+  extraGroups?: Array<{ tabs: SerializedTab[], activeTabId: string | null }>
+  splitCount?: number
+  activeGroupIndex?: number
+}
+
+// ── Background workspace snapshot (live tabs with running PTYs) ─────────
+
+export interface WorkspaceTabSnapshot {
+  tabs: Tab[]
+  extraGroups: Array<{ tabs: Tab[], activeTabId: string | null }>
+  splitCount: number
+  activeGroupIndex: number
+  activeTabId: string | null
 }
 
 // ── Tab ─────────────────────────────────────────────────────────────────
@@ -183,14 +196,25 @@ interface TabsState {
   getGroupTabs: (groupIndex: number) => { tabs: Tab[], activeTabId: string | null }
 
   // Layout persistence per workspace
+  activeWorkspaceKey: string | null  // "projectId:workspaceId" for auto-save
+  backgroundWorkspaces: Record<string, WorkspaceTabSnapshot>
   workspaceLayouts: Record<string, SerializedLayout>
   serializeCurrentLayout: () => SerializedLayout
   restoreLayout: (layout: SerializedLayout, cwd: string) => void
   saveLayoutForWorkspace: (projectId: string, workspaceId: string) => void
   loadLayoutForWorkspace: (projectId: string, workspaceId: string, cwd: string) => void
+  loadWorkspaceSessionsFromDb: () => Promise<void>
+  /** @deprecated Use loadWorkspaceSessionsFromDb instead */
   loadWorkspaceLayoutsFromSettings: () => Promise<void>
   clearAllTabs: () => void
   detectAndSaveSessionIds: () => Promise<void>
+
+  // Background workspace management
+  stashWorkspace: (key: string) => void
+  restoreWorkspace: (key: string, cwd: string) => void
+  serializeAllWorkspaces: (activeKey: string) => Promise<void>
+  clearBackgroundWorkspace: (key: string) => void
+  persistActiveWorkspace: () => void
 
   // Cross-window sync
   applyRemoteTabChange: (payload: TabSyncPayload) => void
@@ -200,6 +224,63 @@ interface TabsState {
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 let tabCounter = 0
+
+/** Serialize a single Tab to SerializedTab (used by serializeCurrentLayout and serializeAllWorkspaces). */
+function serializeTab(tab: Tab): SerializedTab {
+  const paneGroupsObj: Record<string, SerializedPaneGroup> = {}
+  for (const [pgId, pg] of tab.paneGroups) {
+    const serializedItems: SerializedItem[] = pg.items.map((item) => {
+      if (item.type === 'terminal') {
+        const d = item.data as TerminalItemData
+        return {
+          id: item.id,
+          type: 'terminal' as const,
+          cwd: d.cwd,
+          command: d.command,
+          args: d.args,
+          sessionId: d.sessionId,
+        }
+      } else {
+        const d = item.data as FileViewerItemData
+        return {
+          id: item.id,
+          type: 'file-viewer' as const,
+          filePath: d.filePath,
+          pinned: item.pinned,
+        }
+      }
+    })
+    paneGroupsObj[pgId] = {
+      id: pg.id,
+      items: serializedItems,
+      activeItemIndex: Math.min(pg.activeItemIndex, Math.max(0, pg.items.length - 1)),
+    }
+  }
+  return {
+    id: tab.id,
+    title: tab.title,
+    mosaicTree: tab.mosaicTree,
+    paneGroups: paneGroupsObj,
+  }
+}
+
+/** Serialize a WorkspaceTabSnapshot (background workspace with live tabs). */
+function serializeSnapshot(snapshot: WorkspaceTabSnapshot): SerializedLayout {
+  const serializedExtraGroups = snapshot.extraGroups.map((group) => ({
+    tabs: group.tabs.map(serializeTab),
+    activeTabId: group.activeTabId,
+  }))
+  return {
+    tabs: snapshot.tabs.map(serializeTab),
+    activeTabId: snapshot.activeTabId,
+    extraGroups: serializedExtraGroups.length > 0 ? serializedExtraGroups : undefined,
+    splitCount: snapshot.splitCount > 1 ? snapshot.splitCount : undefined,
+    activeGroupIndex: snapshot.activeGroupIndex > 0 ? snapshot.activeGroupIndex : undefined,
+  }
+}
+
+/** Debounce timer for auto-saving the active workspace. */
+let persistDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
 function removePaneFromTree(
   tree: MosaicNode<string> | null,
@@ -1090,48 +1171,24 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
   // ── Layout persistence per workspace ──────────────────────────────────
 
+  activeWorkspaceKey: null,
+  backgroundWorkspaces: {},
   workspaceLayouts: {},
 
   serializeCurrentLayout: (): SerializedLayout => {
     const state = get()
-    const serializedTabs: SerializedTab[] = state.tabs.map((tab) => {
-      const paneGroupsObj: Record<string, SerializedPaneGroup> = {}
-      for (const [pgId, pg] of tab.paneGroups) {
-        const serializedItems: SerializedItem[] = pg.items.map((item) => {
-          if (item.type === 'terminal') {
-            const d = item.data as TerminalItemData
-            return {
-              id: item.id,
-              type: 'terminal' as const,
-              cwd: d.cwd,
-              command: d.command,
-              args: d.args,
-              sessionId: d.sessionId,
-            }
-          } else {
-            const d = item.data as FileViewerItemData
-            return {
-              id: item.id,
-              type: 'file-viewer' as const,
-              filePath: d.filePath,
-              pinned: item.pinned,
-            }
-          }
-        })
-        paneGroupsObj[pgId] = {
-          id: pg.id,
-          items: serializedItems,
-          activeItemIndex: Math.min(pg.activeItemIndex, Math.max(0, pg.items.length - 1)),
-        }
-      }
-      return {
-        id: tab.id,
-        title: tab.title,
-        mosaicTree: tab.mosaicTree,
-        paneGroups: paneGroupsObj,
-      }
-    })
-    return { tabs: serializedTabs, activeTabId: state.activeTabId }
+    const serializedTabs = state.tabs.map(serializeTab)
+    const serializedExtraGroups = state.extraGroups.map((group) => ({
+      tabs: group.tabs.map(serializeTab),
+      activeTabId: group.activeTabId,
+    }))
+    return {
+      tabs: serializedTabs,
+      activeTabId: state.activeTabId,
+      extraGroups: serializedExtraGroups.length > 0 ? serializedExtraGroups : undefined,
+      splitCount: state.splitCount > 1 ? state.splitCount : undefined,
+      activeGroupIndex: state.activeGroupIndex > 0 ? state.activeGroupIndex : undefined,
+    }
   },
 
   restoreLayout: (layout: SerializedLayout, cwd: string) => {
@@ -1224,13 +1281,88 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       }
     })
 
+    // Restore activeTabId by index position (IDs are remapped)
+    const activeTabIndex = layout.activeTabId
+      ? layout.tabs.findIndex((t) => t.id === layout.activeTabId)
+      : -1
+    const restoredActiveTabId = activeTabIndex >= 0 && activeTabIndex < restoredTabs.length
+      ? restoredTabs[activeTabIndex].id
+      : restoredTabs.length > 0 ? restoredTabs[0].id : null
+
+    // Restore extra groups (split columns)
+    const restoredExtraGroups: Array<{ tabs: Tab[], activeTabId: string | null }> = []
+    if (layout.extraGroups) {
+      for (const group of layout.extraGroups) {
+        const groupTabs = group.tabs.map((serializedTab) => {
+          // Use the same restore logic as group 0
+          const paneGroups = new Map<string, PaneGroup>()
+          const idMap = new Map<string, string>()
+          const serializedPaneGroups = serializedTab.paneGroups
+            ?? convertLegacyPanes((serializedTab as any).panes)
+          if (serializedPaneGroups && typeof serializedPaneGroups === 'object') {
+            for (const [oldPgId, serializedPg] of Object.entries(serializedPaneGroups)) {
+              const newPgId = crypto.randomUUID()
+              idMap.set(oldPgId, newPgId)
+              const rawItems = Array.isArray(serializedPg?.items) ? serializedPg.items : []
+              const items: Item[] = rawItems.map((si) => {
+                if (si.type === 'terminal') {
+                  let command = si.command
+                  let args = si.args
+                  const sessionId = si.sessionId
+                  if (sessionId && command) {
+                    const toolConfig = RESUMABLE_CLI_TOOLS[command]
+                    if (toolConfig) args = [toolConfig.resumeFlag, sessionId]
+                  }
+                  return {
+                    id: crypto.randomUUID(),
+                    type: 'terminal' as const,
+                    data: { terminalId: newPgId, cwd: si.cwd ?? cwd, command, args, sessionId },
+                  }
+                } else {
+                  return {
+                    id: crypto.randomUUID(),
+                    type: 'file-viewer' as const,
+                    data: { filePath: si.filePath ?? '' },
+                    pinned: si.pinned ?? false,
+                  }
+                }
+              })
+              if (items.length === 0) {
+                items.push({ id: crypto.randomUUID(), type: 'terminal', data: { terminalId: newPgId, cwd } })
+              }
+              const clampedIndex = Math.max(0, Math.min(serializedPg?.activeItemIndex ?? 0, items.length - 1))
+              paneGroups.set(newPgId, { id: newPgId, items, activeItemIndex: clampedIndex })
+            }
+          }
+          tabCounter++
+          return {
+            id: crypto.randomUUID(),
+            title: serializedTab.title,
+            mosaicTree: remapMosaicIds(serializedTab.mosaicTree, idMap),
+            paneGroups,
+          }
+        })
+        const groupActiveIndex = group.activeTabId
+          ? group.tabs.findIndex((t) => t.id === group.activeTabId)
+          : -1
+        restoredExtraGroups.push({
+          tabs: groupTabs,
+          activeTabId: groupActiveIndex >= 0 && groupActiveIndex < groupTabs.length
+            ? groupTabs[groupActiveIndex].id
+            : groupTabs.length > 0 ? groupTabs[0].id : null,
+        })
+      }
+    }
+
     set({
       tabs: restoredTabs,
-      activeTabId: restoredTabs.length > 0 ? restoredTabs[0].id : null
+      activeTabId: restoredActiveTabId,
+      extraGroups: restoredExtraGroups,
+      splitCount: layout.splitCount ?? 1,
+      activeGroupIndex: layout.activeGroupIndex ?? 0,
     })
     } catch (err) {
       console.error('[tabs] Failed to restore layout, falling back to fresh tab:', err)
-      // Fall back to a fresh terminal tab instead of crashing
       tabCounter++
       const tabId = crypto.randomUUID()
       const paneGroupId = crypto.randomUUID()
@@ -1241,7 +1373,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         mosaicTree: paneGroupId,
         paneGroups: new Map([[paneGroupId, pg]]),
       }
-      set({ tabs: [tab], activeTabId: tabId })
+      set({ tabs: [tab], activeTabId: tabId, extraGroups: [], splitCount: 1, activeGroupIndex: 0 })
     }
   },
 
@@ -1251,12 +1383,15 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
     const key = `${projectId}:${workspaceId}`
     const layout = state.serializeCurrentLayout()
-    const newLayouts = { ...state.workspaceLayouts, [key]: layout }
-    set({ workspaceLayouts: newLayouts })
+    set({ workspaceLayouts: { ...state.workspaceLayouts, [key]: layout } })
 
-    // Persist to Tauri settings
-    invoke('settings_update', { workspaceLayouts: newLayouts }).catch((err) => {
-      console.error('[tabs] Failed to persist workspace layouts:', err)
+    // Persist to SQLite
+    invoke('workspace_session_save', {
+      projectId,
+      workspaceId,
+      layoutJson: JSON.stringify(layout),
+    }).catch((err) => {
+      console.error('[tabs] Failed to persist workspace layout:', err)
     })
   },
 
@@ -1264,47 +1399,97 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     const key = `${projectId}:${workspaceId}`
     const savedLayout = get().workspaceLayouts[key]
 
+    // Kill any existing PTYs in the active view before restoring
+    get().clearAllTabs()
+
     if (savedLayout && savedLayout.tabs && savedLayout.tabs.length > 0) {
-      // Clear then restore saved layout
-      set({ tabs: [], activeTabId: null })
       get().restoreLayout(savedLayout, cwd)
+      set({ activeWorkspaceKey: key })
     } else {
-      // No saved layout — start empty temporarily.
-      // If synced tabs arrive from another window, those will populate.
-      // If not (first launch / no other windows), create a default tab after a delay.
-      set({ tabs: [], activeTabId: null })
-      setTimeout(() => {
-        if (get().tabs.length === 0) {
-          tabCounter++
-          const tabId = crypto.randomUUID()
-          const paneGroupId = crypto.randomUUID()
-          const pg = makeTerminalPaneGroup(paneGroupId, cwd)
-          const tab: Tab = {
-            id: tabId,
-            title: `Terminal ${tabCounter}`,
-            mosaicTree: paneGroupId,
-            paneGroups: new Map([[paneGroupId, pg]])
+      // Set key early so race-condition guards work
+      set({ activeWorkspaceKey: key })
+
+      // Try loading from DB
+      invoke<string | null>('workspace_session_load', { projectId, workspaceId })
+        .then((json) => {
+          // Guard: bail if user already switched to a different workspace
+          if (get().activeWorkspaceKey !== key) return
+
+          if (json) {
+            try {
+              const layout = JSON.parse(json) as SerializedLayout
+              if (layout.tabs && layout.tabs.length > 0) {
+                set({ workspaceLayouts: { ...get().workspaceLayouts, [key]: layout } })
+                get().restoreLayout(layout, cwd)
+                return
+              }
+            } catch (err) {
+              console.error('[tabs] Failed to parse DB layout:', err)
+            }
           }
-          set({ tabs: [tab], activeTabId: tabId })
-        }
-      }, 1500)
+          // No saved layout — create default tab after delay (for cross-window sync)
+          setTimeout(() => {
+            if (get().activeWorkspaceKey === key && get().tabs.length === 0) {
+              tabCounter++
+              const tabId = crypto.randomUUID()
+              const paneGroupId = crypto.randomUUID()
+              const pg = makeTerminalPaneGroup(paneGroupId, cwd)
+              const tab: Tab = {
+                id: tabId,
+                title: `Terminal ${tabCounter}`,
+                mosaicTree: paneGroupId,
+                paneGroups: new Map([[paneGroupId, pg]])
+              }
+              set({ tabs: [tab], activeTabId: tabId })
+            }
+          }, 1500)
+        })
+        .catch(() => {
+          // DB unavailable — create default tab after delay
+          setTimeout(() => {
+            if (get().activeWorkspaceKey === key && get().tabs.length === 0) {
+              tabCounter++
+              const tabId = crypto.randomUUID()
+              const paneGroupId = crypto.randomUUID()
+              const pg = makeTerminalPaneGroup(paneGroupId, cwd)
+              const tab: Tab = {
+                id: tabId,
+                title: `Terminal ${tabCounter}`,
+                mosaicTree: paneGroupId,
+                paneGroups: new Map([[paneGroupId, pg]])
+              }
+              set({ tabs: [tab], activeTabId: tabId })
+            }
+          }, 1500)
+        })
     }
   },
 
-  loadWorkspaceLayoutsFromSettings: async () => {
+  loadWorkspaceSessionsFromDb: async () => {
     try {
-      const result = await invoke<any>('settings_get')
-      if (result.workspaceLayouts) {
-        set({ workspaceLayouts: result.workspaceLayouts })
+      const sessions = await invoke<Array<{ projectId: string, workspaceId: string, layoutJson: string }>>('workspace_session_load_all')
+      const layouts: Record<string, SerializedLayout> = {}
+      for (const session of sessions) {
+        try {
+          layouts[`${session.projectId}:${session.workspaceId}`] = JSON.parse(session.layoutJson)
+        } catch { /* skip corrupt entries */ }
       }
+      set({ workspaceLayouts: layouts })
     } catch (err) {
-      console.error('[tabs] Failed to load workspace layouts from settings:', err)
+      console.error('[tabs] Failed to load workspace sessions from DB:', err)
     }
+  },
+
+  /** @deprecated Use loadWorkspaceSessionsFromDb instead */
+  loadWorkspaceLayoutsFromSettings: async () => {
+    // Redirect to new DB-backed loader
+    return get().loadWorkspaceSessionsFromDb()
   },
 
   clearAllTabs: () => {
-    // Kill all PTYs before clearing
-    for (const tab of get().tabs) {
+    const state = get()
+    // Kill all PTYs in group 0
+    for (const tab of state.tabs) {
       for (const [, pg] of tab.paneGroups) {
         for (const item of pg.items) {
           if (item.type === 'terminal') {
@@ -1314,47 +1499,214 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         }
       }
     }
-    set({ tabs: [], activeTabId: null })
+    // Kill all PTYs in extra groups
+    for (const group of state.extraGroups) {
+      for (const tab of group.tabs) {
+        for (const [, pg] of tab.paneGroups) {
+          for (const item of pg.items) {
+            if (item.type === 'terminal') {
+              const data = item.data as TerminalItemData
+              invoke('terminal_kill', { id: data.terminalId }).catch(() => {})
+            }
+          }
+        }
+      }
+    }
+    set({ tabs: [], activeTabId: null, extraGroups: [], splitCount: 1, activeGroupIndex: 0 })
   },
 
-  // Detect active CLI tool session IDs for all running terminals.
-  // Called before app close to capture session state for resume.
+  // Detect active CLI tool session IDs for all running terminals
+  // across active tabs, extra groups, and background workspaces.
   detectAndSaveSessionIds: async () => {
     const state = get()
     let updated = false
 
-    for (const tab of state.tabs) {
-      for (const [pgId, pg] of tab.paneGroups) {
-        for (let i = 0; i < pg.items.length; i++) {
-          const item = pg.items[i]
-          if (item.type !== 'terminal') continue
-
-          const d = item.data as TerminalItemData
-          if (!d.command || d.sessionId) continue // already has sessionId or no command
-
-          const toolConfig = RESUMABLE_CLI_TOOLS[d.command]
-          if (!toolConfig) continue
-
-          try {
-            const sessionId = await invoke<string | null>('chat_history_detect_active_session', {
-              provider: toolConfig.provider,
-              projectPath: d.cwd,
-            })
-            if (sessionId) {
-              // Mutate in place then notify store
-              ;(item.data as TerminalItemData).sessionId = sessionId
-              updated = true
+    // Helper to detect sessions in a list of tabs
+    const detectInTabs = async (tabs: Tab[]): Promise<void> => {
+      for (const tab of tabs) {
+        for (const [, pg] of tab.paneGroups) {
+          for (const item of pg.items) {
+            if (item.type !== 'terminal') continue
+            const d = item.data as TerminalItemData
+            if (!d.command || d.sessionId) continue
+            const toolConfig = RESUMABLE_CLI_TOOLS[d.command]
+            if (!toolConfig) continue
+            try {
+              const sessionId = await invoke<string | null>('chat_history_detect_active_session', {
+                provider: toolConfig.provider,
+                projectPath: d.cwd,
+              })
+              if (sessionId) {
+                ;(item.data as TerminalItemData).sessionId = sessionId
+                updated = true
+              }
+            } catch (err) {
+              console.error('[tabs] Failed to detect session for', d.command, err)
             }
-          } catch (err) {
-            console.error('[tabs] Failed to detect session for', d.command, err)
           }
         }
       }
     }
 
-    if (updated) {
-      set({ tabs: [...state.tabs] }) // trigger re-render with updated sessionIds
+    // Active group 0
+    await detectInTabs(state.tabs)
+    // Extra groups
+    for (const group of state.extraGroups) {
+      await detectInTabs(group.tabs)
     }
+    // Background workspaces
+    for (const snapshot of Object.values(state.backgroundWorkspaces)) {
+      await detectInTabs(snapshot.tabs)
+      for (const group of snapshot.extraGroups) {
+        await detectInTabs(group.tabs)
+      }
+    }
+
+    if (updated) {
+      // Trigger re-render with shallow copies so serialization picks up mutations
+      set({
+        tabs: [...state.tabs],
+        extraGroups: [...state.extraGroups],
+        backgroundWorkspaces: { ...state.backgroundWorkspaces },
+      })
+    }
+  },
+
+  // ── Background workspace management ─────────────────────────────────
+
+  stashWorkspace: (key: string) => {
+    const state = get()
+    if (state.tabs.length === 0 && state.extraGroups.length === 0) return
+
+    // Move active tabs into background (PTYs stay alive)
+    set({
+      backgroundWorkspaces: {
+        ...state.backgroundWorkspaces,
+        [key]: {
+          tabs: state.tabs,
+          extraGroups: state.extraGroups,
+          splitCount: state.splitCount,
+          activeGroupIndex: state.activeGroupIndex,
+          activeTabId: state.activeTabId,
+        }
+      },
+      // Clear active view (React unmounts, but PTYs stay alive in backend)
+      tabs: [],
+      activeTabId: null,
+      extraGroups: [],
+      splitCount: 1,
+      activeGroupIndex: 0,
+      activeWorkspaceKey: null,
+    })
+  },
+
+  restoreWorkspace: (key: string, cwd: string) => {
+    const state = get()
+    const live = state.backgroundWorkspaces[key]
+
+    if (live && (live.tabs.length > 0 || live.extraGroups.length > 0)) {
+      // Live tabs with running PTYs — swap them in
+      const { [key]: _, ...remaining } = state.backgroundWorkspaces
+      set({
+        tabs: live.tabs,
+        activeTabId: live.activeTabId,
+        extraGroups: live.extraGroups,
+        splitCount: live.splitCount,
+        activeGroupIndex: live.activeGroupIndex,
+        backgroundWorkspaces: remaining,
+        activeWorkspaceKey: key,
+      })
+      return
+    }
+
+    // No live tabs — fall back to serialized layout (creates new PTYs)
+    const [projectId, workspaceId] = key.split(':')
+    if (projectId && workspaceId) {
+      get().loadLayoutForWorkspace(projectId, workspaceId, cwd)
+    }
+  },
+
+  serializeAllWorkspaces: async (activeKey: string) => {
+    const state = get()
+
+    // Serialize + save current active workspace
+    if (state.tabs.length > 0 || state.extraGroups.length > 0) {
+      const layout = state.serializeCurrentLayout()
+      const [projectId, workspaceId] = activeKey.split(':')
+      if (projectId && workspaceId) {
+        await invoke('workspace_session_save', {
+          projectId,
+          workspaceId,
+          layoutJson: JSON.stringify(layout),
+        }).catch((err) => console.error('[tabs] Failed to save active workspace:', err))
+      }
+    }
+
+    // Serialize + save each background workspace
+    for (const [key, snapshot] of Object.entries(state.backgroundWorkspaces)) {
+      const layout = serializeSnapshot(snapshot)
+      const [projectId, workspaceId] = key.split(':')
+      if (projectId && workspaceId) {
+        await invoke('workspace_session_save', {
+          projectId,
+          workspaceId,
+          layoutJson: JSON.stringify(layout),
+        }).catch((err) => console.error('[tabs] Failed to save background workspace:', key, err))
+      }
+    }
+  },
+
+  clearBackgroundWorkspace: (key: string) => {
+    const state = get()
+    const snapshot = state.backgroundWorkspaces[key]
+    if (!snapshot) return
+
+    // Kill all PTYs in the background workspace
+    for (const tab of snapshot.tabs) {
+      for (const [, pg] of tab.paneGroups) {
+        for (const item of pg.items) {
+          if (item.type === 'terminal') {
+            const data = item.data as TerminalItemData
+            invoke('terminal_kill', { id: data.terminalId }).catch(() => {})
+          }
+        }
+      }
+    }
+    for (const group of snapshot.extraGroups) {
+      for (const tab of group.tabs) {
+        for (const [, pg] of tab.paneGroups) {
+          for (const item of pg.items) {
+            if (item.type === 'terminal') {
+              const data = item.data as TerminalItemData
+              invoke('terminal_kill', { id: data.terminalId }).catch(() => {})
+            }
+          }
+        }
+      }
+    }
+
+    const { [key]: _, ...remaining } = state.backgroundWorkspaces
+    set({ backgroundWorkspaces: remaining })
+  },
+
+  persistActiveWorkspace: () => {
+    // Debounced save of the active workspace to DB
+    if (persistDebounceTimer) clearTimeout(persistDebounceTimer)
+    persistDebounceTimer = setTimeout(() => {
+      const state = get()
+      if (!state.activeWorkspaceKey) return
+      if (state.tabs.length === 0 && state.extraGroups.length === 0) return
+
+      const layout = state.serializeCurrentLayout()
+      const [projectId, workspaceId] = state.activeWorkspaceKey.split(':')
+      if (projectId && workspaceId) {
+        invoke('workspace_session_save', {
+          projectId,
+          workspaceId,
+          layoutJson: JSON.stringify(layout),
+        }).catch((err) => console.error('[tabs] Auto-save failed:', err))
+      }
+    }, 1000)
   },
 
   applyRemoteTabChange: (payload: TabSyncPayload) => {
@@ -1781,5 +2133,24 @@ async function initWorkspaceOpsListeners(): Promise<void> {
 // Initialize listeners on import
 initWorkspaceOpsListeners()
 
-// Load persisted workspace layouts on import
-useTabsStore.getState().loadWorkspaceLayoutsFromSettings()
+// Load persisted workspace sessions from DB on import
+useTabsStore.getState().loadWorkspaceSessionsFromDb()
+
+// Auto-save: subscribe to tab structure changes and persist to DB (debounced).
+// This provides crash resilience — lose at most ~1 second of tab changes.
+useTabsStore.subscribe(
+  (state, prevState) => {
+    // Only trigger on meaningful tab structure changes (not backgroundWorkspaces swaps)
+    if (
+      state.tabs !== prevState.tabs ||
+      state.extraGroups !== prevState.extraGroups ||
+      state.splitCount !== prevState.splitCount ||
+      state.activeTabId !== prevState.activeTabId ||
+      state.activeGroupIndex !== prevState.activeGroupIndex
+    ) {
+      if (state.activeWorkspaceKey && state.tabs.length > 0) {
+        state.persistActiveWorkspace()
+      }
+    }
+  }
+)

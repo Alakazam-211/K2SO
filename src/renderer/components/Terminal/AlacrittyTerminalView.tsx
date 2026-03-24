@@ -7,6 +7,7 @@ import { keyEventToSequence, naturalTextEditingSequence } from '@/lib/key-mappin
 import { isFileDragActive, markDropConsumed } from '@/lib/file-drag'
 import { detectLinks, type DetectedLink } from './terminalLinkDetector'
 import { useTabsStore } from '@/stores/tabs'
+import { useActiveAgentsStore } from '@/stores/active-agents'
 
 // ── Types matching Rust GridUpdate / CompactLine / StyleSpan ──────────
 
@@ -324,6 +325,7 @@ export function AlacrittyTerminalView({
       // Listen for grid updates (DOM text rendering)
       unlistenGrid = await listen<GridUpdate>(`terminal:grid:${terminalId}`, (event) => {
         scheduleRender(event.payload)
+        useActiveAgentsStore.getState().recordOutput(terminalId)
       })
 
       unlistenExit = await listen<{ exitCode: number }>(`terminal:exit:${terminalId}`, (event) => {

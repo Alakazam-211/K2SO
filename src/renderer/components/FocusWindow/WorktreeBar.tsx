@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react'
 import { useProjectsStore, type ProjectWithWorkspaces } from '@/stores/projects'
+import { useActiveAgentsStore } from '@/stores/active-agents'
 import { useGitInfo } from '@/hooks/useGit'
 import { useMergeDialogStore } from '@/components/MergeDialog/MergeDialog'
 import { useContextMenuStore } from '@/stores/context-menu'
@@ -50,6 +51,7 @@ interface WorktreeBarProps {
 export default function WorktreeBar({ project }: WorktreeBarProps): React.JSX.Element {
   const activeWorkspaceId = useProjectsStore((s) => s.activeWorkspaceId)
   const setActiveWorkspace = useProjectsStore((s) => s.setActiveWorkspace)
+  const agentMap = useActiveAgentsStore((s) => s.agents)
 
   const [worktreeDialogOpen, setWorktreeDialogOpen] = useState(false)
 
@@ -66,12 +68,20 @@ export default function WorktreeBar({ project }: WorktreeBarProps): React.JSX.El
   if (!worktreeMode && project.workspaces.length <= 1) {
     const workspace = project.workspaces[0]
     const workspacePath = workspace?.worktreePath ?? project.path
+    const hasActiveAgentSingle = Array.from(agentMap.values()).some(a => a.status === 'active')
+    const hasIdleAgentSingle = agentMap.size > 0 && !hasActiveAgentSingle
 
     return (
       <div
         className="flex items-center h-[32px] min-h-[32px] px-3 bg-[var(--color-bg)] border-b border-[var(--color-border)] select-none no-drag"
       >
         <div className="flex items-center gap-1.5 text-xs text-[var(--color-text-muted)]">
+          {(hasActiveAgentSingle || hasIdleAgentSingle) && (
+            <span
+              className={`flex-shrink-0 rounded-full ${hasActiveAgentSingle ? 'agent-active-dot' : ''}`}
+              style={{ width: 5, height: 5, backgroundColor: hasActiveAgentSingle ? '#f97316' : '#22c55e' }}
+            />
+          )}
           <BranchIcon />
           <span className="font-mono">{workspace?.branch ?? 'main'}</span>
           {workspace && <GitBadge path={workspacePath} />}
@@ -107,6 +117,9 @@ export default function WorktreeBar({ project }: WorktreeBarProps): React.JSX.El
   const renderWorkspaceTab = (workspace: typeof project.workspaces[number]) => {
     const isActive = workspace.id === activeWorkspaceId
     const workspacePath = workspace.worktreePath ?? project.path
+    // Only the active workspace has live terminals — others are suspended
+    const hasActiveAgent = isActive && Array.from(agentMap.values()).some(a => a.status === 'active')
+    const hasIdleAgent = isActive && agentMap.size > 0 && !hasActiveAgent
 
     return (
       <button
@@ -119,6 +132,12 @@ export default function WorktreeBar({ project }: WorktreeBarProps): React.JSX.El
         onClick={() => handleWorkspaceClick(workspace.id)}
         onContextMenu={(e) => handleWorktreeContextMenu(e, workspace)}
       >
+        {(hasActiveAgent || hasIdleAgent) && (
+          <span
+            className={`flex-shrink-0 rounded-full ${hasActiveAgent ? 'agent-active-dot' : ''}`}
+            style={{ width: 5, height: 5, backgroundColor: hasActiveAgent ? '#f97316' : '#22c55e' }}
+          />
+        )}
         <BranchIcon />
         <span>{workspace.name}</span>
         {workspace.branch && workspace.branch !== workspace.name && (

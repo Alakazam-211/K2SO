@@ -14,6 +14,8 @@ pub struct ChatSession {
     pub timestamp: i64,
     pub provider: String,
     pub message_count: usize,
+    /// The worktree branch name if this session was created in a worktree, else None.
+    pub origin_branch: Option<String>,
 }
 
 /// Internal struct to accumulate session data while parsing.
@@ -44,6 +46,13 @@ fn resolve_root_project_path(path: &str) -> &str {
 fn matches_project_family(session_project: &str, root: &str) -> bool {
     session_project == root
         || session_project.starts_with(&format!("{}/.worktrees/", root))
+}
+
+/// Extract the worktree branch name from a project path, if present.
+/// e.g. "/repo/.worktrees/feature-x" → Some("feature-x")
+/// e.g. "/repo" → None
+fn extract_worktree_branch(project: &str) -> Option<String> {
+    project.find("/.worktrees/").map(|idx| project[idx + 12..].to_string())
 }
 
 // ── Claude history parsing ───────────────────────────────────────────────
@@ -147,6 +156,7 @@ fn parse_claude_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSession
             };
 
             ChatSession {
+                origin_branch: extract_worktree_branch(&acc.project),
                 session_id: acc.session_id,
                 project: acc.project,
                 title,
@@ -303,6 +313,7 @@ fn parse_cursor_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSession
                 timestamp,
                 provider: "cursor".to_string(),
                 message_count: 0,
+                origin_branch: None, // Cursor CLI sessions don't embed project path
             };
 
             // Keep the entry with the best title and latest timestamp
@@ -468,6 +479,7 @@ fn parse_cursor_ide_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSes
             results.push(ChatSession {
                 session_id: composer_id,
                 project: project_display.clone(),
+                origin_branch: extract_worktree_branch(&project_display),
                 title,
                 timestamp,
                 provider: "cursor".to_string(),

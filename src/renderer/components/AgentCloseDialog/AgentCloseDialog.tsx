@@ -86,7 +86,7 @@ export default function AgentCloseDialog({
               >
                 {agents.map((agent) => (
                   <div key={agent.terminalId} className="flex items-center gap-2 text-xs">
-                    <span className="agent-active-dot flex-shrink-0" style={{ width: 6, height: 6, backgroundColor: '#22c55e' }} />
+                    <span className="flex-shrink-0 rounded-full" style={{ width: 6, height: 6, backgroundColor: '#22c55e' }} />
                     <span className="text-[var(--color-text-secondary)] font-medium">{agent.command}</span>
                     <span className="text-[var(--color-text-muted)]">in</span>
                     <span className="text-[var(--color-text-secondary)] truncate">{agent.tabTitle}</span>
