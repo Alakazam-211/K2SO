@@ -7,13 +7,32 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter};
 
 static HOOK_PORT: AtomicU16 = AtomicU16::new(0);
+static HOOK_TOKEN: OnceLock<String> = OnceLock::new();
 
 /// Get the port the notification server is listening on.
 pub fn get_port() -> u16 {
     HOOK_PORT.load(Ordering::Relaxed)
+}
+
+/// Get the auth token for hook requests.
+pub fn get_token() -> &'static str {
+    HOOK_TOKEN.get().map(|s| s.as_str()).unwrap_or("")
+}
+
+/// Generate a random hex token.
+fn generate_token() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    // Mix with process ID for uniqueness across instances
+    let mixed = seed ^ (std::process::id() as u128) << 32;
+    format!("{:032x}", mixed)
 }
 
 /// Canonical agent lifecycle event types.
@@ -82,6 +101,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
     let port = listener.local_addr().unwrap().port();
     HOOK_PORT.store(port, Ordering::Relaxed);
 
+    let token = generate_token();
+    let _ = HOOK_TOKEN.set(token.clone());
     log_debug!("[agent-hooks] Notification server listening on port {}", port);
 
     std::thread::spawn(move || {
@@ -115,6 +136,13 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
 
             if path.starts_with("/hook/complete") {
                 let params = parse_query_params(path);
+
+                // Validate auth token
+                let req_token = params.get("token").cloned().unwrap_or_default();
+                if req_token != token {
+                    let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+                    continue;
+                }
                 let pane_id = params.get("paneId").cloned().unwrap_or_default();
                 let tab_id = params.get("tabId").cloned().unwrap_or_default();
                 let raw_event = params.get("eventType").cloned().unwrap_or_default();
@@ -191,6 +219,7 @@ curl -sG "http://127.0.0.1:$K2SO_PORT/hook/complete" \
     --data-urlencode "paneId=$K2SO_PANE_ID" \
     --data-urlencode "tabId=$K2SO_TAB_ID" \
     --data-urlencode "eventType=$EVENT_TYPE" \
+    --data-urlencode "token=$K2SO_HOOK_TOKEN" \
     >/dev/null 2>&1 || true
 
 exit 0

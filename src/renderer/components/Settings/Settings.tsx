@@ -167,7 +167,7 @@ function GeneralSection(): React.JSX.Element {
 
   // Load current version on mount
   useEffect(() => {
-    invoke<string>('get_current_version').then(setCurrentVersion).catch(() => {})
+    invoke<string>('get_current_version').then(setCurrentVersion).catch((e) => console.warn('[settings]', e))
   }, [])
 
   const handleCheckUpdate = useCallback(async () => {
@@ -223,7 +223,7 @@ function GeneralSection(): React.JSX.Element {
             </div>
             <button
               className="px-3 py-1 text-xs font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
-              onClick={() => invoke('plugin:shell|open', { path: updateInfo!.download_url }).catch(() => {})}
+              onClick={() => invoke('plugin:shell|open', { path: updateInfo!.download_url }).catch((e) => console.warn('[settings]', e))}
             >
               Download
             </button>
@@ -2064,7 +2064,7 @@ function ProjectsSection(): React.JSX.Element {
       const project = projects.find((p) => p.id === projectId)
       if (project) {
         try {
-          const gitInfo = await invoke<any>('git_info', { path: project.path })
+          const gitInfo = await invoke<{ isRepo: boolean; currentBranch?: string }>('git_info', { path: project.path })
           if (!gitInfo.isRepo) {
             // Not a git repo — need to initialize first
             setGitInitForWorktree({ projectId: project.id, projectPath: project.path, projectName: project.name })
@@ -3219,11 +3219,11 @@ function AIAssistantSection(): React.JSX.Element {
         setModelPath(status.modelPath)
         if (status.modelPath) setCustomPath(status.modelPath)
       })
-      .catch(() => {})
+      .catch((e) => console.warn('[settings]', e))
 
     invoke<boolean>('assistant_check_model')
       .then((exists) => setModelExists(exists))
-      .catch(() => {})
+      .catch((e) => console.warn('[settings]', e))
   }, [modelLoaded])
 
   const handleDownload = useCallback(async () => {

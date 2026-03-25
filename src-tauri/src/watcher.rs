@@ -25,7 +25,7 @@ fn event_kind_label(kind: &EventKind) -> &'static str {
 #[tauri::command]
 pub fn fs_watch_dir(app: tauri::AppHandle, path: String) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let mut watchers = state.watchers.lock().map_err(|e| e.to_string())?;
+    let mut watchers = state.watchers.lock();
 
     // Already watching this path
     if watchers.contains_key(&path) {
@@ -109,7 +109,7 @@ pub fn fs_watch_dir(app: tauri::AppHandle, path: String) -> Result<(), String> {
 #[tauri::command]
 pub fn fs_unwatch_dir(app: tauri::AppHandle, path: String) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let mut watchers = state.watchers.lock().map_err(|e| e.to_string())?;
+    let mut watchers = state.watchers.lock();
 
     // Removing the watcher drops it, which stops watching and disconnects the channel
     watchers.remove(&path);

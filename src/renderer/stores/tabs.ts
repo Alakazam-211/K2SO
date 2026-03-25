@@ -515,7 +515,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         for (const item of pg.items) {
           if (item.type === 'terminal') {
             const data = item.data as TerminalItemData
-            invoke('terminal_kill', { id: data.terminalId }).catch(() => {})
+            invoke('terminal_kill', { id: data.terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
           }
         }
       }
@@ -636,7 +636,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       for (const item of pg.items) {
         if (item.type === 'terminal') {
           const data = item.data as TerminalItemData
-          invoke('terminal_kill', { id: data.terminalId }).catch(() => {})
+          invoke('terminal_kill', { id: data.terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
         }
       }
     }
@@ -964,7 +964,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     const removedItem = pg?.items.find((item) => item.id === itemId)
     if (removedItem?.type === 'terminal') {
       const data = removedItem.data as TerminalItemData
-      invoke('terminal_kill', { id: data.terminalId }).catch(() => {})
+      invoke('terminal_kill', { id: data.terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
     }
 
     set((state) => {
@@ -1157,7 +1157,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       for (const [, pg] of tab.paneGroups) {
         for (const item of pg.items) {
           if (item.type === 'terminal') {
-            invoke('terminal_kill', { id: (item.data as TerminalItemData).terminalId }).catch(() => {})
+            invoke('terminal_kill', { id: (item.data as TerminalItemData).terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
           }
         }
       }
@@ -1598,7 +1598,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         for (const item of pg.items) {
           if (item.type === 'terminal') {
             const data = item.data as TerminalItemData
-            invoke('terminal_kill', { id: data.terminalId }).catch(() => {})
+            invoke('terminal_kill', { id: data.terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
           }
         }
       }
@@ -1610,7 +1610,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
           for (const item of pg.items) {
             if (item.type === 'terminal') {
               const data = item.data as TerminalItemData
-              invoke('terminal_kill', { id: data.terminalId }).catch(() => {})
+              invoke('terminal_kill', { id: data.terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
             }
           }
         }
@@ -1771,7 +1771,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         for (const item of pg.items) {
           if (item.type === 'terminal') {
             const data = item.data as TerminalItemData
-            invoke('terminal_kill', { id: data.terminalId }).catch(() => {})
+            invoke('terminal_kill', { id: data.terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
           }
         }
       }
@@ -1782,7 +1782,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
           for (const item of pg.items) {
             if (item.type === 'terminal') {
               const data = item.data as TerminalItemData
-              invoke('terminal_kill', { id: data.terminalId }).catch(() => {})
+              invoke('terminal_kill', { id: data.terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
             }
           }
         }

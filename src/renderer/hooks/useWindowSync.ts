@@ -83,7 +83,7 @@ export function useWindowSync(): void {
         invoke('broadcast_sync', {
           channel: 'sync:tabs-request',
           payload: {},
-        }).catch(() => {})
+        }).catch((e) => console.warn('[window-sync]', e))
       }, 500)
     }
 

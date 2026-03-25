@@ -21,7 +21,7 @@ const BUILT_IN_PRESETS: &[(&str, &str, &str, &str, i64)] = &[
 
 #[tauri::command]
 pub fn presets_list(state: State<'_, AppState>) -> Result<Vec<AgentPreset>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     AgentPreset::list(&conn).map_err(|e| e.to_string())
 }
 
@@ -33,7 +33,7 @@ pub fn presets_create(
     command: String,
     icon: Option<String>,
 ) -> Result<AgentPreset, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     let id = uuid::Uuid::new_v4().to_string();
 
     let existing = AgentPreset::list(&conn).unwrap_or_default();
@@ -60,7 +60,7 @@ pub fn presets_update(
     enabled: Option<i64>,
     sort_order: Option<i64>,
 ) -> Result<AgentPreset, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     AgentPreset::update(
         &conn,
         &id,
@@ -78,7 +78,7 @@ pub fn presets_update(
 
 #[tauri::command]
 pub fn presets_delete(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
 
     // Prevent deleting built-in presets
     let preset = AgentPreset::get(&conn, &id).map_err(|e| e.to_string())?;
@@ -93,7 +93,7 @@ pub fn presets_delete(app: AppHandle, state: State<'_, AppState>, id: String) ->
 
 #[tauri::command]
 pub fn presets_reorder(app: AppHandle, state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     for (i, id) in ids.iter().enumerate() {
         AgentPreset::update(&conn, id, None, None, None, None, Some(i as i64))
             .map_err(|e| e.to_string())?;
@@ -104,7 +104,7 @@ pub fn presets_reorder(app: AppHandle, state: State<'_, AppState>, ids: Vec<Stri
 
 #[tauri::command]
 pub fn presets_reset_built_ins(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<AgentPreset>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
 
     // Delete all existing built-in presets and re-insert from catalog
     for (id, label, command, icon, sort_order) in BUILT_IN_PRESETS {

@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { getDefaultKeybindings } from '@shared/hotkeys'
+import type { AppSettingsResponse } from '@shared/types'
 
 export type SettingsSection = 'general' | 'terminal' | 'editors-agents' | 'keybindings' | 'projects' | 'ai-assistant' | 'timer'
 
@@ -64,6 +65,14 @@ const DEFAULT_TERMINAL: TerminalSettings = {
 }
 
 /**
+ * Monotonic write counter. Incremented each time we write settings.
+ * fetchSettings() captures this before its async call and skips applying
+ * the result if another write happened in the meantime (the write's result
+ * is more authoritative than a stale read).
+ */
+let _writeSeq = 0
+
+/**
  * Helper: sends a partial update to the backend, which deep-merges it
  * with the current settings on disk and returns the canonical result.
  * We apply the returned state to the store, ensuring we stay in sync
@@ -73,9 +82,9 @@ async function persistAndApply(
   set: (state: Partial<SettingsState>) => void,
   updates: Record<string, any>
 ): Promise<void> {
-  _selfWriting = true
+  _writeSeq++
   try {
-    const result = await invoke<any>('settings_update', { updates })
+    const result = await invoke<AppSettingsResponse>('settings_update', { updates })
     set({
       terminal: result.terminal,
       keybindings: result.keybindings,
@@ -83,18 +92,10 @@ async function persistAndApply(
       defaultAgent: result.defaultAgent ?? 'claude',
       loaded: true
     })
-  } finally {
-    // Clear after a tick so the sync:settings event (which fires async) is also skipped
-    setTimeout(() => { _selfWriting = false }, 50)
+  } catch (e) {
+    console.warn('[settings] persistAndApply failed:', e)
   }
 }
-
-/**
- * Flag: when true, fetchSettings() is a no-op.
- * Set during our own writes to prevent the sync:settings listener
- * from overwriting optimistic state with a stale round-trip.
- */
-let _selfWriting = false
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   settingsOpen: false,
@@ -210,7 +211,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   resetAllSettings: async () => {
-    const result = await invoke<any>('settings_reset')
+    const result = await invoke<AppSettingsResponse>('settings_reset')
     set({
       terminal: result.terminal,
       keybindings: result.keybindings,
@@ -219,8 +220,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   fetchSettings: async () => {
-    if (_selfWriting) return
-    const result = await invoke<any>('settings_get')
+    const seqBefore = _writeSeq
+    const result = await invoke<AppSettingsResponse>('settings_get')
+    // If a write happened while we were fetching, skip — the write's result is fresher
+    if (_writeSeq !== seqBefore) return
     set({
       terminal: result.terminal,
       keybindings: result.keybindings,

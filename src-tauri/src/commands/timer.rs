@@ -9,7 +9,7 @@ pub fn timer_entries_list(
     end: Option<i64>,
     project_id: Option<String>,
 ) -> Result<Vec<TimeEntry>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     TimeEntry::list(&conn, start, end, project_id.as_deref()).map_err(|e| e.to_string())
 }
 
@@ -24,7 +24,7 @@ pub fn timer_entry_create(
     duration_seconds: i64,
     memo: Option<String>,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     TimeEntry::create(
         &conn,
         &id,
@@ -45,7 +45,7 @@ pub fn timer_entry_delete(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     TimeEntry::delete(&conn, id.as_str()).map_err(|e| e.to_string())?;
     let _ = app.emit("sync:timer-entries", ());
     Ok(())
@@ -59,7 +59,7 @@ pub fn timer_entries_export(
     end: Option<i64>,
     project_id: Option<String>,
 ) -> Result<String, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     let entries =
         TimeEntry::list(&conn, start, end, project_id.as_deref()).map_err(|e| e.to_string())?;
 

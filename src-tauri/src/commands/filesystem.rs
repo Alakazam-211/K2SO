@@ -6,6 +6,29 @@ use std::process::Command;
 
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 
+/// Validate a path for filesystem operations.
+/// Rejects empty paths and ensures the path resolves to a real location
+/// (canonicalize follows symlinks and resolves `..` components).
+fn validate_path(path: &str) -> Result<PathBuf, String> {
+    if path.is_empty() {
+        return Err("Path is empty".to_string());
+    }
+    let p = Path::new(path);
+    // For reads, the path must exist — canonicalize will fail if not
+    // For writes, the parent must exist
+    if p.exists() {
+        p.canonicalize().map_err(|e| format!("Invalid path: {e}"))
+    } else {
+        // Path doesn't exist yet (for create operations) — validate parent
+        let parent = p.parent().ok_or_else(|| "Invalid path: no parent".to_string())?;
+        if parent.exists() {
+            Ok(p.to_path_buf())
+        } else {
+            Err(format!("Parent directory does not exist: {}", parent.display()))
+        }
+    }
+}
+
 // ── Platform-specific exclusive rename ─────────────────────────────────
 
 /// Rename a file/directory without overwriting the destination.
@@ -63,6 +86,7 @@ pub struct DirEntry {
 #[tauri::command]
 pub fn fs_read_dir(path: String, show_hidden: Option<bool>) -> Result<Vec<DirEntry>, String> {
     let show_hidden = show_hidden.unwrap_or(false);
+    let path = validate_path(&path)?.to_string_lossy().to_string();
 
     let entries = fs::read_dir(&path).map_err(|e| e.to_string())?;
 
@@ -147,6 +171,7 @@ pub struct FileContent {
 
 #[tauri::command]
 pub fn fs_read_file(path: String) -> Result<FileContent, String> {
+    let path = validate_path(&path)?.to_string_lossy().to_string();
     let p = Path::new(&path);
 
     // Check file exists
@@ -201,6 +226,7 @@ pub fn fs_read_file(path: String) -> Result<FileContent, String> {
 
 #[tauri::command]
 pub fn fs_read_binary_file(path: String) -> Result<Vec<u8>, String> {
+    let path = validate_path(&path)?.to_string_lossy().to_string();
     let p = Path::new(&path);
 
     if !p.exists() {
@@ -231,6 +257,7 @@ pub fn fs_read_binary_file(path: String) -> Result<Vec<u8>, String> {
 
 #[tauri::command]
 pub fn fs_write_file(path: String, content: String) -> Result<(), String> {
+    let path = validate_path(&path)?.to_string_lossy().to_string();
     fs::write(&path, &content).map_err(|e| {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
             "Permission denied".to_string()
@@ -376,6 +403,7 @@ pub fn fs_delete(paths: Vec<String>, permanent: Option<bool>) -> Result<(), Stri
     let permanent = permanent.unwrap_or(false);
 
     for path_str in &paths {
+        validate_path(path_str)?;
         let p = Path::new(path_str);
         if !p.exists() {
             return Err(format!("Does not exist: {path_str}"));
@@ -441,6 +469,7 @@ pub fn fs_rename(old_path: String, new_name: String) -> Result<String, String> {
 /// Create a new file or directory.
 #[tauri::command]
 pub fn fs_create_entry(path: String, is_directory: bool) -> Result<(), String> {
+    let path = validate_path(&path)?.to_string_lossy().to_string();
     let p = Path::new(&path);
 
     if p.exists() {

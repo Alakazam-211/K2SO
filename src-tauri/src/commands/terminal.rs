@@ -19,8 +19,7 @@ pub fn terminal_create(
 
     let mut manager = state
         .terminal_manager
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
+        .lock();
 
     match manager.create(id.clone(), cwd, command, args, cols, rows, app) {
         Ok(()) => {
@@ -43,7 +42,6 @@ pub fn terminal_write(
     state
         .terminal_manager
         .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
         .write(&id, &data)
 }
 
@@ -57,7 +55,6 @@ pub fn terminal_resize(
     state
         .terminal_manager
         .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
         .resize(&id, cols, rows)
 }
 
@@ -69,7 +66,6 @@ pub fn terminal_kill(
     state
         .terminal_manager
         .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
         .kill(&id)
 }
 
@@ -81,7 +77,6 @@ pub fn terminal_active_count_for_path(
     Ok(state
         .terminal_manager
         .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
         .get_count_for_path(&path))
 }
 
@@ -96,7 +91,6 @@ pub fn terminal_kill_foreground(
     state
         .terminal_manager
         .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
         .kill_foreground(&id)
 }
 
@@ -110,7 +104,6 @@ pub fn terminal_get_foreground_command(
     state
         .terminal_manager
         .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
         .get_foreground_command(&id)
 }
 
@@ -128,7 +121,6 @@ pub fn terminal_exists(
     Ok(state
         .terminal_manager
         .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
         .exists(&id))
 }
 
@@ -140,7 +132,6 @@ pub fn terminal_get_grid(
     state
         .terminal_manager
         .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
         .get_grid(&id)
 }
 
@@ -153,7 +144,6 @@ pub fn terminal_scroll(
     state
         .terminal_manager
         .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
         .scroll(&id, delta)
 }
 
@@ -167,7 +157,6 @@ pub fn terminal_set_font_size(
     let (cw, ch) = state
         .terminal_manager
         .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
         .set_font_size(&id, font_size, dpr)?;
     Ok(serde_json::json!({ "cell_width": cw, "cell_height": ch }))
 }
@@ -180,7 +169,6 @@ pub fn terminal_get_cell_metrics(
     let (cw, ch, cols, rows) = state
         .terminal_manager
         .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
         .get_cell_metrics(&id)?;
     Ok(serde_json::json!({ "cell_width": cw, "cell_height": ch, "cols": cols, "rows": rows }))
 }
@@ -194,7 +182,6 @@ pub fn terminal_set_focus(
     state
         .terminal_manager
         .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
         .set_focus(&id, focused)
 }
 
@@ -210,6 +197,5 @@ pub fn terminal_get_selection_text(
     state
         .terminal_manager
         .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
         .get_selection_text(&id, start_col, start_row, end_col, end_row)
 }

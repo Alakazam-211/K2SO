@@ -40,7 +40,7 @@ export default function TimerButton(): React.JSX.Element | null {
     if (remaining <= 0) {
       showExtend()
     }
-  })
+  }, [status, targetDurationMs, pausedElapsed, resumeTime, showExtend])
 
   if (!visible) return null
 

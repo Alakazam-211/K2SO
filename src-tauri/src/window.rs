@@ -22,12 +22,11 @@ pub fn save_window_state(app: &tauri::AppHandle) {
     if is_maximized {
         // Just update is_maximized flag if row already exists
         if let Some(state) = app.try_state::<AppState>() {
-            if let Ok(db) = state.db.lock() {
-                let _ = db.execute(
-                    "UPDATE window_state SET is_maximized = 1, updated_at = unixepoch() WHERE id = 1",
-                    [],
-                );
-            }
+            let db = state.db.lock();
+            let _ = db.execute(
+                "UPDATE window_state SET is_maximized = 1, updated_at = unixepoch() WHERE id = 1",
+                [],
+            );
         }
         return;
     }
@@ -42,24 +41,23 @@ pub fn save_window_state(app: &tauri::AppHandle) {
     };
 
     if let Some(state) = app.try_state::<AppState>() {
-        if let Ok(db) = state.db.lock() {
-            let _ = db.execute(
-                "INSERT INTO window_state (id, x, y, width, height, is_maximized, updated_at)
-                 VALUES (1, ?1, ?2, ?3, ?4, ?5, unixepoch())
-                 ON CONFLICT(id) DO UPDATE SET
-                   x = excluded.x, y = excluded.y,
-                   width = excluded.width, height = excluded.height,
-                   is_maximized = excluded.is_maximized,
-                   updated_at = unixepoch()",
-                rusqlite::params![position.x, position.y, size.width, size.height, is_maximized as i32],
-            );
-        }
+        let db = state.db.lock();
+        let _ = db.execute(
+            "INSERT INTO window_state (id, x, y, width, height, is_maximized, updated_at)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, unixepoch())
+             ON CONFLICT(id) DO UPDATE SET
+               x = excluded.x, y = excluded.y,
+               width = excluded.width, height = excluded.height,
+               is_maximized = excluded.is_maximized,
+               updated_at = unixepoch()",
+            rusqlite::params![position.x, position.y, size.width, size.height, is_maximized as i32],
+        );
     }
 }
 
 pub fn load_window_state(app: &tauri::AppHandle) -> Option<WindowState> {
     let state = app.try_state::<AppState>()?;
-    let db = state.db.lock().ok()?;
+    let db = state.db.lock();
 
     db.query_row(
         "SELECT x, y, width, height, is_maximized FROM window_state WHERE id = 1",
@@ -107,24 +105,23 @@ pub fn migrate_json_window_state(app: &tauri::AppHandle) {
 
     // Write to SQLite
     if let Some(state) = app.try_state::<AppState>() {
-        if let Ok(db) = state.db.lock() {
-            let _ = db.execute(
-                "INSERT INTO window_state (id, x, y, width, height, is_maximized, updated_at)
-                 VALUES (1, ?1, ?2, ?3, ?4, ?5, unixepoch())
-                 ON CONFLICT(id) DO UPDATE SET
-                   x = excluded.x, y = excluded.y,
-                   width = excluded.width, height = excluded.height,
-                   is_maximized = excluded.is_maximized,
-                   updated_at = unixepoch()",
-                rusqlite::params![
-                    old_state.x,
-                    old_state.y,
-                    old_state.width,
-                    old_state.height,
-                    old_state.is_maximized as i32
-                ],
-            );
-        }
+        let db = state.db.lock();
+        let _ = db.execute(
+            "INSERT INTO window_state (id, x, y, width, height, is_maximized, updated_at)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, unixepoch())
+             ON CONFLICT(id) DO UPDATE SET
+               x = excluded.x, y = excluded.y,
+               width = excluded.width, height = excluded.height,
+               is_maximized = excluded.is_maximized,
+               updated_at = unixepoch()",
+            rusqlite::params![
+                old_state.x,
+                old_state.y,
+                old_state.width,
+                old_state.height,
+                old_state.is_maximized as i32
+            ],
+        );
     }
 
     // Remove old JSON file

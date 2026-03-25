@@ -159,7 +159,7 @@ export function beginFileDrag(paths: string[], startX: number, startY: number, c
         invoke('terminal_write', {
           id: termContainer.dataset.terminalId,
           data: escaped
-        }).catch(() => {})
+        }).catch((e) => console.warn('[file-drag]', e))
         dragPaths = []
         return
       }

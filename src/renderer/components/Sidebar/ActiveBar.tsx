@@ -184,7 +184,7 @@ export default function ActiveBar(): React.JSX.Element | null {
       // Clear from memory, DB, and local state
       _activeBarMemory.delete(project.id)
       await invoke('projects_update', { id: project.id, manuallyActive: 0 })
-      await invoke('projects_touch_interaction_clear', { id: project.id }).catch(() => {})
+      await invoke('projects_touch_interaction_clear', { id: project.id }).catch((e) => console.warn('[active-bar]', e))
       await useProjectsStore.getState().fetchProjects()
     }
   }, [activeProjectId, agentMap, setManuallyActive])

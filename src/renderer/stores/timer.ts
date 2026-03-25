@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { useProjectsStore } from '@/stores/projects'
+import { useToastStore } from '@/stores/toast'
+import type { AppSettingsResponse } from '@shared/types'
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -104,7 +106,7 @@ function broadcastTimerState(state: TimerState): void {
   invoke('broadcast_sync', {
     channel: 'sync:timer',
     payload,
-  }).catch(() => {})
+  }).catch((e) => console.warn('[timer] broadcast failed:', e))
 }
 
 /**
@@ -200,7 +202,7 @@ export const useTimerStore = create<TimerState>((set, get) => ({
 
   initFromSettings: async () => {
     try {
-      const result = await invoke<any>('settings_get')
+      const result = await invoke<AppSettingsResponse>('settings_get')
       const timer = result.timer ?? {}
       set({
         visible: timer.visible ?? true,
@@ -208,7 +210,7 @@ export const useTimerStore = create<TimerState>((set, get) => ({
         countdownTheme: timer.countdownTheme ?? 'rocket',
         skipMemo: timer.skipMemo ?? false,
         timezone: timer.timezone ?? '',
-        customThemes: timer.customThemes ?? [],
+        customThemes: (timer.customThemes ?? []) as unknown as CountdownThemeConfig[],
       })
     } catch (err) {
       console.error('[timer] Failed to load settings:', err)
@@ -282,6 +284,7 @@ export const useTimerStore = create<TimerState>((set, get) => ({
     const state = get()
     if (state.status === 'idle') return
     const elapsed = getElapsedMs(state)
+    const { skipMemo } = state
     // Pause the timer to freeze the elapsed time
     set({
       status: 'paused',
@@ -290,9 +293,10 @@ export const useTimerStore = create<TimerState>((set, get) => ({
       stoppedElapsed: elapsed,
     })
     // Broadcast BEFORE showing memo dialog — broadcast_sync emits to all
-    // windows including this one, and syncFromEvent resets showMemoDialog
+    // windows including this one, and syncFromEvent resets showMemoDialog.
+    // Use captured `skipMemo` (not get()) to avoid race with sync events.
     broadcastTimerState(get())
-    if (state.skipMemo) {
+    if (skipMemo) {
       get().saveEntry()
     } else {
       set({ showMemoDialog: true })
@@ -363,9 +367,10 @@ export const useTimerStore = create<TimerState>((set, get) => ({
       })
     } catch (err) {
       console.error('[timer] Failed to save entry:', err)
+      useToastStore.getState().addToast('Failed to save timer entry', 'error')
     }
 
-    // Reset timer state
+    // Reset timer state (always reset — user shouldn't be stuck with a broken timer)
     set({
       status: 'idle',
       startTime: null,
@@ -457,7 +462,7 @@ export const useTimerStore = create<TimerState>((set, get) => ({
     // Optimistic update locally
     set({ [key]: value } as any)
     try {
-      const currentSettings = await invoke<any>('settings_get')
+      const currentSettings = await invoke<AppSettingsResponse>('settings_get')
       const timer = { ...(currentSettings.timer ?? {}), [key]: value }
       await invoke('settings_update', { updates: { timer } })
     } catch (err) {

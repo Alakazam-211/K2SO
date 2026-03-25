@@ -5,6 +5,7 @@ import {
   SIDEBAR_MAX_WIDTH
 } from '../../shared/constants'
 import { invoke } from '@tauri-apps/api/core'
+import type { AppSettingsResponse } from '@shared/types'
 
 type PanelTab = 'files' | 'changes' | 'history'
 
@@ -149,14 +150,14 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
 
   initFromSettings: async () => {
     try {
-      const settings = await invoke<any>('settings_get')
+      const settings = await invoke<AppSettingsResponse>('settings_get')
       set({
         leftPanelOpen: settings.leftPanelOpen,
         rightPanelOpen: settings.rightPanelOpen,
-        ...(settings.leftPanelActiveTab && { leftPanelActiveTab: settings.leftPanelActiveTab }),
-        ...(settings.rightPanelActiveTab && { rightPanelActiveTab: settings.rightPanelActiveTab }),
-        ...(settings.leftPanelTabs?.length && { leftPanelTabs: settings.leftPanelTabs }),
-        ...(settings.rightPanelTabs?.length && { rightPanelTabs: settings.rightPanelTabs }),
+        ...(settings.leftPanelActiveTab && { leftPanelActiveTab: settings.leftPanelActiveTab as PanelTab }),
+        ...(settings.rightPanelActiveTab && { rightPanelActiveTab: settings.rightPanelActiveTab as PanelTab }),
+        ...(settings.leftPanelTabs?.length && { leftPanelTabs: settings.leftPanelTabs as PanelTab[] }),
+        ...(settings.rightPanelTabs?.length && { rightPanelTabs: settings.rightPanelTabs as PanelTab[] }),
       })
     } catch {
       // ignore — use defaults

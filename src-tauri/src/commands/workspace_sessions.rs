@@ -19,7 +19,7 @@ pub fn workspace_session_save(
     workspace_id: String,
     layout_json: String,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     let id = format!("{}:{}", project_id, workspace_id);
 
     conn.execute(
@@ -41,7 +41,7 @@ pub fn workspace_session_load(
     project_id: String,
     workspace_id: String,
 ) -> Result<Option<String>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
 
     let result = conn.query_row(
         "SELECT layout_json FROM workspace_sessions WHERE project_id = ?1 AND workspace_id = ?2",
@@ -61,7 +61,7 @@ pub fn workspace_session_load(
 pub fn workspace_session_load_all(
     state: State<'_, AppState>,
 ) -> Result<Vec<WorkspaceSession>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
 
     let mut stmt = conn
         .prepare("SELECT project_id, workspace_id, layout_json FROM workspace_sessions")
@@ -89,7 +89,7 @@ pub fn workspace_session_delete(
     project_id: String,
     workspace_id: Option<String>,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
 
     if let Some(ws_id) = workspace_id {
         conn.execute(

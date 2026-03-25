@@ -23,7 +23,7 @@ mod window;
 
 use state::AppState;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use tauri::Manager;
 
 pub fn run() {
@@ -93,7 +93,7 @@ pub fn run() {
                             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 if let Some(state) = handle_for_llm.try_state::<AppState>() {
                                     // Use try_lock to avoid blocking if model is still loading
-                                    if let Ok(mut manager) = state.llm_manager.try_lock() {
+                                    if let Some(mut manager) = state.llm_manager.try_lock() {
                                         manager.unload();
                                     } else {
                                         log_debug!("[shutdown] LLM lock busy (model loading?) — skipping unload");
@@ -105,9 +105,8 @@ pub fn run() {
                         let term_thread = std::thread::spawn(move || {
                             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 if let Some(state) = handle_for_term.try_state::<AppState>() {
-                                    if let Ok(mut manager) = state.terminal_manager.lock() {
-                                        manager.kill_all();
-                                    }
+                                    let mut manager = state.terminal_manager.lock();
+                                    manager.kill_all();
                                 }
                             }));
                         });
@@ -172,9 +171,8 @@ pub fn run() {
                         Ok(false) => {
                             log_debug!("[llm] Default model not found, starting download...");
                             if let Some(state) = app_handle_for_download.try_state::<AppState>() {
-                                if let Ok(manager) = state.llm_manager.lock() {
-                                    manager.downloading.store(true, std::sync::atomic::Ordering::Relaxed);
-                                }
+                                let manager = state.llm_manager.lock();
+                                manager.downloading.store(true, std::sync::atomic::Ordering::Relaxed);
                             }
                             let dest = match llm::download::default_model_path() {
                                 Ok(p) => p,
@@ -187,12 +185,11 @@ pub fn run() {
                                 app_handle_for_download.clone(),
                             );
                             if let Some(state) = app_handle_for_download.try_state::<AppState>() {
-                                if let Ok(mut manager) = state.llm_manager.lock() {
-                                    manager.downloading.store(false, std::sync::atomic::Ordering::Relaxed);
-                                    if result.is_ok() {
-                                        let _ = manager.load_model(&dest_str);
-                                        log_debug!("[llm] Model downloaded and loaded successfully");
-                                    }
+                                let mut manager = state.llm_manager.lock();
+                                manager.downloading.store(false, std::sync::atomic::Ordering::Relaxed);
+                                if result.is_ok() {
+                                    let _ = manager.load_model(&dest_str);
+                                    log_debug!("[llm] Model downloaded and loaded successfully");
                                 }
                             }
                             if let Err(e) = result {
@@ -203,11 +200,10 @@ pub fn run() {
                             // Model exists, try to load it
                             log_debug!("[llm] Default model found, loading...");
                             if let Some(state) = app_handle_for_download.try_state::<AppState>() {
-                                if let Ok(mut manager) = state.llm_manager.lock() {
-                                    if let Ok(path) = llm::download::default_model_path() {
-                                        let _ = manager.load_model(&path.to_string_lossy());
-                                        log_debug!("[llm] Model loaded successfully");
-                                    }
+                                let mut manager = state.llm_manager.lock();
+                                if let Ok(path) = llm::download::default_model_path() {
+                                    let _ = manager.load_model(&path.to_string_lossy());
+                                    log_debug!("[llm] Model loaded successfully");
                                 }
                             }
                         }
@@ -407,10 +403,7 @@ fn migrate_workspace_layouts_to_db(app: &tauri::AppHandle) {
 
     // Get the DB connection from managed state
     let state = app.state::<AppState>();
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
+    let conn = state.db.lock();
 
     let mut migrated = 0usize;
     for (key, layout_val) in &layouts {

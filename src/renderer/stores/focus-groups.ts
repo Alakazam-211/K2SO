@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
+import type { AppSettingsResponse } from '@shared/types'
 import { useToastStore } from './toast'
 import { useProjectsStore } from './projects'
 
@@ -46,7 +47,7 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
     set({ activeFocusGroupId: id })
     // Persist to settings so it restores on next launch
     if (id !== null) {
-      invoke('settings_update', { updates: { activeFocusGroupId: id } }).catch(() => {})
+      invoke('settings_update', { updates: { activeFocusGroupId: id } }).catch((e) => console.warn('[focus-groups] settings_update failed:', e))
 
       // Auto-activate the first workspace in the new focus group
       const projectsState = useProjectsStore.getState()
@@ -80,7 +81,7 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
         const nextId = remaining.length > 0 ? remaining[0].id : null
         set({ activeFocusGroupId: nextId })
         if (nextId) {
-          invoke('settings_update', { updates: { activeFocusGroupId: nextId } }).catch(() => {})
+          invoke('settings_update', { updates: { activeFocusGroupId: nextId } }).catch((e) => console.warn('[focus-groups] settings_update failed:', e))
         }
       }
       await invoke('focus_groups_delete', { id })
@@ -136,7 +137,7 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
         if (groups.length > 0 && !get().activeFocusGroupId) {
           const firstId = groups[0].id
           set({ activeFocusGroupId: firstId })
-          invoke('settings_update', { updates: { activeFocusGroupId: firstId } }).catch(() => {})
+          invoke('settings_update', { updates: { activeFocusGroupId: firstId } }).catch((e) => console.warn('[focus-groups] settings_update failed:', e))
         }
       } else {
         set({ activeFocusGroupId: null })
@@ -149,7 +150,7 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
 
   initFromSettings: async () => {
     try {
-      const settings = await invoke<any>('settings_get')
+      const settings = await invoke<AppSettingsResponse>('settings_get')
       const enabled = settings.focusGroupsEnabled ?? false
       set({ focusGroupsEnabled: enabled })
       await get().fetchFocusGroups()

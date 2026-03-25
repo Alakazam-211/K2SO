@@ -148,7 +148,7 @@ export function useTerminalShortcuts(cwd: string): void {
           const projectsState = useProjectsStore.getState()
           const activeProjectId = projectsState.activeProjectId
           if (activeProjectId) {
-            invoke('projects_open_focus_window', { projectId: activeProjectId }).catch(() => {})
+            invoke('projects_open_focus_window', { projectId: activeProjectId }).catch((e) => console.warn('[shortcuts]', e))
           }
           break
         }

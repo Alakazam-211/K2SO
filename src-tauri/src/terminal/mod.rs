@@ -11,6 +11,11 @@ pub use alacritty_backend::TerminalManager;
 
 /// Ignore SIGPIPE at process startup so writing to a dead PTY returns EPIPE
 /// instead of killing the entire Tauri process.
+///
+/// This is intentionally global: child processes spawned via Command::new()
+/// inherit their own signal mask, so git/external tools are unaffected.
+/// DB writes target local files (no pipe), and reqwest uses MSG_NOSIGNAL.
+/// Zed uses the same approach.
 #[cfg(unix)]
 pub fn ignore_sigpipe() {
     unsafe {

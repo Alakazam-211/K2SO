@@ -5,7 +5,7 @@ use crate::state::AppState;
 
 #[tauri::command]
 pub fn focus_groups_list(state: State<'_, AppState>) -> Result<Vec<FocusGroup>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     FocusGroup::list(&conn).map_err(|e| e.to_string())
 }
 
@@ -16,7 +16,7 @@ pub fn focus_groups_create(
     name: String,
     color: Option<String>,
 ) -> Result<FocusGroup, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     let id = uuid::Uuid::new_v4().to_string();
 
     let existing = FocusGroup::list(&conn).unwrap_or_default();
@@ -39,7 +39,7 @@ pub fn focus_groups_update(
     color: Option<String>,
     tab_order: Option<i64>,
 ) -> Result<FocusGroup, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     FocusGroup::update(&conn, &id, name.as_deref(), color.as_deref(), tab_order)
         .map_err(|e| e.to_string())?;
     let result = FocusGroup::get(&conn, &id).map_err(|e| e.to_string())?;
@@ -49,7 +49,7 @@ pub fn focus_groups_update(
 
 #[tauri::command]
 pub fn focus_groups_delete(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     FocusGroup::delete(&conn, &id).map_err(|e| e.to_string())?;
     let _ = app.emit("sync:focus-groups", ());
     Ok(())
@@ -62,7 +62,7 @@ pub fn focus_groups_assign_project(
     project_id: String,
     focus_group_id: Option<String>,
 ) -> Result<Project, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
 
     // Update the project's focus_group_id
     Project::update(
@@ -103,7 +103,7 @@ pub fn focus_groups_reconcile_project(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<Project, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     let project = Project::get(&conn, &project_id).map_err(|e| e.to_string())?;
 
     let config = project_config::get_project_config(&project.path);

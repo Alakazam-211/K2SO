@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 pub struct AppState {
     pub db: Mutex<rusqlite::Connection>,

@@ -127,7 +127,7 @@ export default function MergeDialog(): React.JSX.Element | null {
       }
 
       // Delete the branch
-      await invoke('git_delete_branch', { path: projectPath, branch }).catch(() => {})
+      await invoke('git_delete_branch', { path: projectPath, branch }).catch((e) => console.warn('[merge-dialog]', e))
 
       await fetchProjects()
     } catch (e) {

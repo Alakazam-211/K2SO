@@ -7,7 +7,7 @@ pub fn sections_list(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<Vec<WorkspaceSection>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     WorkspaceSection::list(&conn, &project_id).map_err(|e| e.to_string())
 }
 
@@ -18,7 +18,7 @@ pub fn sections_create(
     name: String,
     color: Option<String>,
 ) -> Result<WorkspaceSection, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     let id = uuid::Uuid::new_v4().to_string();
 
     let existing = WorkspaceSection::list(&conn, &project_id).unwrap_or_default();
@@ -39,7 +39,7 @@ pub fn sections_update(
     is_collapsed: Option<i64>,
     tab_order: Option<i64>,
 ) -> Result<WorkspaceSection, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     WorkspaceSection::update(
         &conn,
         &id,
@@ -54,13 +54,13 @@ pub fn sections_update(
 
 #[tauri::command]
 pub fn sections_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     WorkspaceSection::delete(&conn, &id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn sections_reorder(state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     for (i, id) in ids.iter().enumerate() {
         WorkspaceSection::update(&conn, id, None, None, None, Some(i as i64))
             .map_err(|e| e.to_string())?;
@@ -74,7 +74,7 @@ pub fn sections_assign_workspace(
     workspace_id: String,
     section_id: Option<String>,
 ) -> Result<Workspace, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     Workspace::update(
         &conn,
         &workspace_id,

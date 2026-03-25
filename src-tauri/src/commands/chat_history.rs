@@ -693,7 +693,7 @@ pub fn chat_history_get_storage_paths(project_path: String) -> Result<ChatStorag
 pub fn chat_history_get_custom_names(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<HashMap<String, String>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     let mut stmt = conn
         .prepare("SELECT provider, session_id, custom_name FROM chat_session_names")
         .map_err(|e| e.to_string())?;
@@ -725,7 +725,7 @@ pub fn chat_history_rename_session(
     session_id: String,
     custom_name: String,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     // Upsert: insert if new, update only custom_name if exists
     conn.execute(
         "INSERT INTO chat_session_names (provider, session_id, custom_name, pinned, updated_at) \
@@ -743,7 +743,7 @@ pub fn chat_history_rename_session(
 pub fn chat_history_get_pinned(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<Vec<String>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     let mut stmt = conn
         .prepare("SELECT provider, session_id FROM chat_session_names WHERE pinned = 1")
         .map_err(|e| e.to_string())?;
@@ -773,7 +773,7 @@ pub fn chat_history_toggle_pin(
     session_id: String,
     pinned: bool,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     let pinned_val: i64 = if pinned { 1 } else { 0 };
     // Upsert: create row if it doesn't exist, otherwise just update pinned
     conn.execute(

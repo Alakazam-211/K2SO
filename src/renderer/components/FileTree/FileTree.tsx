@@ -592,7 +592,7 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
 
     return () => {
       unlisten?.()
-      invoke('fs_unwatch_dir', { path: rootPath }).catch(() => {})
+      invoke('fs_unwatch_dir', { path: rootPath }).catch((e) => console.warn('[file-tree]', e))
     }
   }, [rootPath, loadDir, loadEnvFiles, loadAiConfig])
 

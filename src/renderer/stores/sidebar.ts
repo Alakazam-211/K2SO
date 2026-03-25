@@ -5,6 +5,7 @@ import {
   SIDEBAR_MAX_WIDTH
 } from '../../shared/constants'
 import { invoke } from '@tauri-apps/api/core'
+import type { AppSettingsResponse } from '@shared/types'
 
 interface SidebarState {
   isCollapsed: boolean
@@ -42,7 +43,7 @@ export const useSidebarStore = create<SidebarState>((set, get) => ({
 
   initFromSettings: async () => {
     try {
-      const settings = await invoke<any>('settings_get')
+      const settings = await invoke<AppSettingsResponse>('settings_get')
       set({ isCollapsed: settings.sidebarCollapsed })
     } catch {
       // ignore — use defaults

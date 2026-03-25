@@ -331,9 +331,11 @@ export function startAgentPolling(): void {
   if (pollInterval) return
   // Initial poll
   useActiveAgentsStore.getState().pollOnce()
+  // Add jitter to avoid thundering-herd across multiple windows
+  const interval = 2500 + Math.floor(Math.random() * 500)
   pollInterval = setInterval(() => {
     useActiveAgentsStore.getState().pollOnce()
-  }, 2500)
+  }, interval)
 
   // Listen for hook-based lifecycle events from the Rust notification server
   import('@tauri-apps/api/event').then(({ listen }) => {

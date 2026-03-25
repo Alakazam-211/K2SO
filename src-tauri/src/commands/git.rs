@@ -34,7 +34,7 @@ pub fn git_create_worktree(
     }?;
 
     // Create workspace record in DB
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     let ws_id = uuid::Uuid::new_v4().to_string();
     let existing = Workspace::list(&conn, &project_id).unwrap_or_default();
     let max_order = existing.iter().map(|w| w.tab_order).max().unwrap_or(-1) + 1;
@@ -71,7 +71,7 @@ pub fn git_remove_worktree(
 
     // Clean up workspace DB record if provided
     if let Some(ws_id) = workspace_id {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.lock();
         Workspace::delete(&conn, &ws_id).map_err(|e| e.to_string())?;
     }
 
@@ -200,7 +200,7 @@ pub fn git_prune_worktrees(
         .output();
 
     // Check DB workspaces against actual worktree paths
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     let workspaces = Workspace::list(&conn, &project_id).unwrap_or_default();
 
     for ws in &workspaces {

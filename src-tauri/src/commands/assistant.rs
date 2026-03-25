@@ -97,10 +97,7 @@ pub fn assistant_chat(
     workspace_path: Option<String>,
     is_git_repo: Option<bool>,
 ) -> Result<ChatResponse, String> {
-    let manager = state
-        .llm_manager
-        .lock()
-        .map_err(|e| format!("Failed to lock LLM manager: {e}"))?;
+    let manager = state.llm_manager.lock();
 
     let system_prompt = tools::build_system_prompt(is_git_repo.unwrap_or(false));
     let mut debug_passes: Vec<DebugPass> = Vec::new();
@@ -188,12 +185,12 @@ pub fn assistant_chat(
 #[tauri::command]
 pub fn assistant_status(state: State<'_, AppState>) -> Result<AssistantStatus, String> {
     match state.llm_manager.try_lock() {
-        Ok(manager) => Ok(AssistantStatus {
+        Some(manager) => Ok(AssistantStatus {
             loaded: manager.is_loaded(),
             model_path: manager.get_model_path(),
             downloading: manager.is_downloading(),
         }),
-        Err(_) => {
+        None => {
             // Lock held by model loading thread — report as loading
             Ok(AssistantStatus {
                 loaded: false,
@@ -236,10 +233,7 @@ pub fn assistant_load_model(
         dest.to_string_lossy().to_string()
     };
 
-    let mut manager = state
-        .llm_manager
-        .lock()
-        .map_err(|e| format!("Failed to lock LLM manager: {e}"))?;
+    let mut manager = state.llm_manager.lock();
 
     manager.load_model(&final_path)?;
     Ok(final_path)
@@ -253,10 +247,7 @@ pub fn assistant_download_default_model(
     app: AppHandle,
 ) -> Result<(), String> {
     // Check if already downloading
-    let manager = state
-        .llm_manager
-        .lock()
-        .map_err(|e| format!("Failed to lock LLM manager: {e}"))?;
+    let manager = state.llm_manager.lock();
 
     if manager.is_downloading() {
         return Err("A download is already in progress".to_string());
@@ -284,26 +275,14 @@ pub fn assistant_download_default_model(
 
         // Clear downloading flag
         if let Some(app_state) = state_handle.try_state::<AppState>() {
-            match app_state.llm_manager.lock() {
-                Ok(mgr) => {
-                    mgr.downloading
-                        .store(false, std::sync::atomic::Ordering::Relaxed);
-                }
-                Err(e) => {
-                    log_debug!("Failed to lock LLM manager to clear downloading flag: {e}");
-                }
-            }
+            app_state.llm_manager.lock()
+                .downloading
+                .store(false, std::sync::atomic::Ordering::Relaxed);
 
             // If download succeeded, auto-load the model
             if result.is_ok() {
-                match app_state.llm_manager.lock() {
-                    Ok(mut mgr) => {
-                        let _ = mgr.load_model(&dest_str);
-                    }
-                    Err(e) => {
-                        log_debug!("Failed to lock LLM manager to load model: {e}");
-                    }
-                }
+                let mut mgr = app_state.llm_manager.lock();
+                let _ = mgr.load_model(&dest_str);
             }
         }
 

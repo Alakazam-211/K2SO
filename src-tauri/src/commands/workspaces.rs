@@ -4,7 +4,7 @@ use crate::state::AppState;
 
 #[tauri::command]
 pub fn workspaces_list(state: State<'_, AppState>, project_id: String) -> Result<Vec<Workspace>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     Workspace::list(&conn, &project_id).map_err(|e| e.to_string())
 }
 
@@ -17,7 +17,7 @@ pub fn workspaces_create(
     branch: Option<String>,
     worktree_path: Option<String>,
 ) -> Result<Workspace, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     let id = uuid::Uuid::new_v4().to_string();
     let type_val = type_.unwrap_or_else(|| "branch".to_string());
 
@@ -43,6 +43,6 @@ pub fn workspaces_create(
 
 #[tauri::command]
 pub fn workspaces_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     Workspace::delete(&conn, &id).map_err(|e| e.to_string())
 }

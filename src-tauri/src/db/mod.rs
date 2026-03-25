@@ -47,6 +47,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         ("0008_chat_pinned", include_str!("../../drizzle_sql/0008_chat_pinned.sql")),
         ("0009_workspace_sessions", include_str!("../../drizzle_sql/0009_workspace_sessions.sql")),
         ("0010_active_workspaces", include_str!("../../drizzle_sql/0010_active_workspaces.sql")),
+        ("0011_add_indexes", include_str!("../../drizzle_sql/0011_add_indexes.sql")),
     ];
 
     for (name, sql) in migrations {
@@ -57,48 +58,59 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
 
         if !already_applied {
-            // Split on the drizzle statement-breakpoint marker and execute each statement
-            for statement in sql.split("--> statement-breakpoint") {
-                let trimmed = statement.trim();
-                if !trimmed.is_empty() {
-                    // Retry with backoff for database lock contention
-                    let mut last_err = None;
-                    for attempt in 0..5u32 {
-                        match conn.execute_batch(trimmed) {
-                            Ok(_) => { last_err = None; break; },
-                            Err(e) => {
-                                let msg = e.to_string();
-                                // Ignore "already exists" and "duplicate column" errors
-                                if msg.contains("already exists") || msg.contains("duplicate column") {
-                                    log_debug!("[db] Migration {}: skipping ({})", name, msg);
-                                    last_err = None;
-                                    break;
-                                }
-                                // Retry on lock contention
-                                if (msg.contains("database is locked") || msg.contains("schema is locked"))
-                                    && attempt < 4
-                                {
-                                    log_debug!("[db] Migration {}: locked, retrying ({}/5)", name, attempt + 1);
-                                    std::thread::sleep(std::time::Duration::from_millis(50 * (attempt as u64 + 1)));
-                                    last_err = Some(e);
-                                    continue;
-                                }
-                                return Err(e);
-                            }
+            // Run each migration inside a transaction for atomicity.
+            // Retry the entire transaction on lock contention.
+            let mut last_err = None;
+            for attempt in 0..5u32 {
+                match run_single_migration(conn, name, sql) {
+                    Ok(_) => { last_err = None; break; },
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if (msg.contains("database is locked") || msg.contains("schema is locked"))
+                            && attempt < 4
+                        {
+                            log_debug!("[db] Migration {}: locked, retrying ({}/5)", name, attempt + 1);
+                            std::thread::sleep(std::time::Duration::from_millis(50 * (attempt as u64 + 1)));
+                            last_err = Some(e);
+                            continue;
                         }
-                    }
-                    if let Some(e) = last_err {
                         return Err(e);
                     }
                 }
             }
-            conn.execute(
-                "INSERT INTO _migrations (name) VALUES (?1)",
-                params![name],
-            )?;
+            if let Some(e) = last_err {
+                return Err(e);
+            }
         }
     }
 
+    Ok(())
+}
+
+/// Execute a single migration file's statements inside a transaction.
+/// "already exists" / "duplicate column" errors are silently skipped (idempotent).
+fn run_single_migration(conn: &Connection, name: &str, sql: &str) -> Result<()> {
+    conn.execute_batch("BEGIN;")?;
+    for statement in sql.split("--> statement-breakpoint") {
+        let trimmed = statement.trim();
+        if !trimmed.is_empty() {
+            if let Err(e) = conn.execute_batch(trimmed) {
+                let msg = e.to_string();
+                if msg.contains("already exists") || msg.contains("duplicate column") {
+                    log_debug!("[db] Migration {}: skipping ({})", name, msg);
+                    continue;
+                }
+                // Rollback on real errors
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(e);
+            }
+        }
+    }
+    conn.execute(
+        "INSERT INTO _migrations (name) VALUES (?1)",
+        params![name],
+    )?;
+    conn.execute_batch("COMMIT;")?;
     Ok(())
 }
 

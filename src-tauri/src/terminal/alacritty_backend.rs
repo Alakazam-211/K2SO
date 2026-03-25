@@ -90,6 +90,22 @@ impl Dimensions for TermSize {
     }
 }
 
+// ── Shell escaping ──────────────────────────────────────────────────────
+
+/// Shell-escape a single argument for use in a `-c` shell string.
+/// Wraps in single quotes and escapes any embedded single quotes.
+fn shell_escape_arg(arg: &str) -> String {
+    if arg.is_empty() {
+        return "''".to_string();
+    }
+    // If the arg contains no special chars, return as-is
+    if arg.chars().all(|c| c.is_alphanumeric() || "-_./=:@,%+".contains(c)) {
+        return arg.to_string();
+    }
+    // Wrap in single quotes, escaping any embedded single quotes: ' → '\''
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
 // ── Default terminal colors (VS Code Dark+) ─────────────────────────────
 
 fn default_color_palette() -> [Option<Rgb>; 269] {
@@ -220,7 +236,6 @@ struct AlacrittyTerminalInstance {
     event_loop_sender: EventLoopSender,
     app_handle: AppHandle,
     cwd: String,
-    #[allow(dead_code)]
     pty_raw_fd: i32,
     child_pid: Option<u32>,
     palette: [Option<Rgb>; 269],
@@ -230,6 +245,8 @@ struct AlacrittyTerminalInstance {
     /// Channel to send manual wakeups to the emission loop
     /// (e.g. after scroll_display which doesn't trigger PTY wakeups).
     wakeup_tx: Option<mpsc::Sender<()>>,
+    /// Handle for the grid emission thread, joined on kill.
+    grid_thread_handle: Option<thread::JoinHandle<()>>,
 }
 
 // ── Terminal Manager ─────────────────────────────────────────────────────
@@ -298,11 +315,14 @@ impl TerminalManager {
 
         // Set shell and optional command
         if let Some(ref user_command) = command {
-            let full_args = if let Some(ref user_args) = args {
-                vec!["-ilc".to_string(), format!("{} {}", user_command, user_args.join(" "))]
-            } else {
-                vec!["-ilc".to_string(), user_command.clone()]
-            };
+            let mut shell_cmd = shell_escape_arg(user_command);
+            if let Some(ref user_args) = args {
+                for arg in user_args {
+                    shell_cmd.push(' ');
+                    shell_cmd.push_str(&shell_escape_arg(arg));
+                }
+            }
+            let full_args = vec!["-ilc".to_string(), shell_cmd];
             pty_options.shell = Some(tty::Shell::new(shell, full_args));
         } else {
             pty_options.shell = Some(tty::Shell::new(shell, vec![]));
@@ -320,6 +340,7 @@ impl TerminalManager {
             pty_options.env.insert("K2SO_PORT".to_string(), hook_port.to_string());
             pty_options.env.insert("K2SO_PANE_ID".to_string(), id.clone());
             pty_options.env.insert("K2SO_TAB_ID".to_string(), id.clone());
+            pty_options.env.insert("K2SO_HOOK_TOKEN".to_string(), crate::agent_hooks::get_token().to_string());
         }
 
         // Strip unwanted env vars
@@ -390,7 +411,7 @@ impl TerminalManager {
         let grid_palette = palette;
         let force_full_for_grid = Arc::clone(&force_full_render);
 
-        thread::spawn(move || {
+        let grid_thread_handle = thread::spawn(move || {
             grid_emission_loop(
                 &id_for_grid,
                 &term_for_grid,
@@ -412,6 +433,7 @@ impl TerminalManager {
             bitmap_state,
             force_full_render,
             wakeup_tx: Some(scroll_wakeup_tx),
+            grid_thread_handle: Some(grid_thread_handle),
         };
 
         self.terminals.insert(id.clone(), instance);
@@ -458,25 +480,22 @@ impl TerminalManager {
             cell_height: 16,
         };
 
+        // Send resize to event loop — it handles both PTY resize and term grid resize.
+        // Do NOT also call term.resize() here to avoid racing with the event loop thread.
         let _ = instance
             .event_loop_sender
             .send(Msg::Resize(window_size));
-
-        // Also resize the Term's internal grid
-        let mut term = instance.term.lock_unfair();
-        let size = TermSize {
-            cols: cols as usize,
-            rows: rows as usize,
-        };
-        term.resize(size);
 
         Ok(())
     }
 
     pub fn kill(&mut self, id: &str) -> Result<(), String> {
-        if let Some(instance) = self.terminals.remove(id) {
+        if let Some(mut instance) = self.terminals.remove(id) {
             // Send shutdown to event loop
             let _ = instance.event_loop_sender.send(Msg::Shutdown);
+
+            // Drop the wakeup channel to unblock the grid emission thread
+            instance.wakeup_tx.take();
 
             // Kill child process
             if let Some(pid) = instance.child_pid {
@@ -494,7 +513,27 @@ impl TerminalManager {
                 unsafe {
                     libc::kill(pid as i32, libc::SIGKILL);
                 }
+
+                // Reap the child process to prevent zombies
+                #[cfg(unix)]
+                unsafe {
+                    let mut status: i32 = 0;
+                    // WNOHANG: don't block if not yet exited (SIGKILL should handle it)
+                    libc::waitpid(pid as i32, &mut status, libc::WNOHANG);
+                }
             }
+
+            // Take the grid thread handle before dropping the instance.
+            // Dropping instance releases:
+            //   - instance.wakeup_tx (already taken above)
+            //   - instance.term (Arc refcount -1, but grid thread still holds a clone)
+            //   - instance.event_loop_sender (event loop will shut down)
+            // Once the event loop stops, no more wakeups are sent. The grid thread's
+            // K2SOListener sender (inside Term Arc) is the last wakeup_tx clone.
+            // When the grid thread's Term Arc is the sole owner and it drops,
+            // recv() returns Disconnected. This is async — we don't wait for it.
+            let _grid_handle = instance.grid_thread_handle.take();
+            // instance is dropped here — grid thread will exit asynchronously.
         }
         Ok(())
     }
@@ -1155,11 +1194,17 @@ fn render_full_bitmap(
 
     // QOI encode
     let qoi_start = std::time::Instant::now();
-    let qoi_bytes = qoi::encode_to_vec(
+    let qoi_bytes = match qoi::encode_to_vec(
         &bitmap.pixels,
         bitmap.width,
         bitmap.height,
-    ).unwrap_or_default();
+    ) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            log_debug!("[terminal/bitmap] QOI encode failed: {:?} ({}x{})", e, bitmap.width, bitmap.height);
+            return BitmapUpdate::default();
+        }
+    };
     let qoi_elapsed = qoi_start.elapsed();
 
     // Base64 encode
@@ -1366,11 +1411,17 @@ fn bitmap_emission_loop(
 
                 // QOI encode full buffer
                 let qoi_start = std::time::Instant::now();
-                let qoi_bytes = qoi::encode_to_vec(
+                let qoi_bytes = match qoi::encode_to_vec(
                     &bitmap.pixels,
                     bitmap.width,
                     bitmap.height,
-                ).unwrap_or_default();
+                ) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        log_debug!("[terminal/bitmap] QOI encode failed in emission loop: {:?}", e);
+                        continue;
+                    }
+                };
                 let qoi_elapsed = qoi_start.elapsed();
 
                 let image_b64 = base64::engine::general_purpose::STANDARD.encode(&qoi_bytes);

@@ -90,7 +90,7 @@ pub struct PerfInfo {
 
 /// A bitmap frame sent from Rust → frontend via Tauri event.
 /// Contains a QOI-compressed RGBA image of the terminal, base64-encoded.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug, Default)]
 pub struct BitmapUpdate {
     /// Base64-encoded QOI image bytes.
     pub image_b64: String,

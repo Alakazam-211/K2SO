@@ -134,7 +134,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   addProject: async (path: string) => {
     try {
-      const result = await invoke<any>('projects_add_from_path', { path })
+      const result = await invoke<{ needsGitInit?: true; path: string; name: string } | null>('projects_add_from_path', { path })
       console.log('[projects] addFromPath result:', JSON.stringify(result))
 
       // Check if the folder needs git initialization
@@ -190,7 +190,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
         }
       }
       // Delete saved sessions from DB
-      invoke('workspace_session_delete', { projectId: id, workspaceId: null }).catch(() => {})
+      invoke('workspace_session_delete', { projectId: id, workspaceId: null }).catch((e) => console.warn('[projects] workspace_session_delete failed:', e))
 
       await invoke('projects_delete', { id })
 
@@ -353,8 +353,8 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     // Write to DB — await so subsequent fetchProjects picks up the value
     try {
       await invoke('projects_touch_interaction', { id: projectId })
-    } catch {
-      // ignore
+    } catch (err) {
+      console.warn('[projects] touchInteraction failed:', err)
     }
   },
 

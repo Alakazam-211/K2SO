@@ -8,6 +8,7 @@ import { isFileDragActive, markDropConsumed } from '@/lib/file-drag'
 import { detectLinks, type DetectedLink } from './terminalLinkDetector'
 import { useTabsStore } from '@/stores/tabs'
 import { useActiveAgentsStore } from '@/stores/active-agents'
+import { useToastStore } from '@/stores/toast'
 
 // ── Types matching Rust GridUpdate / CompactLine / StyleSpan ──────────
 
@@ -201,7 +202,7 @@ export function AlacrittyTerminalView({
     const rect = span.getBoundingClientRect()
     document.body.removeChild(span)
     const width = rect.width
-    const height = Math.ceil(fontSize * 1.4)  // line height multiplier
+    const height = Math.ceil(fontSize * 1.2)  // match Rust font_renderer cell_height = px_size * 1.2
     cellMetricsRef.current = { width, height }
     setCellMetrics({ width, height })
     return { width, height }
@@ -242,6 +243,8 @@ export function AlacrittyTerminalView({
   }, [])
 
   // ── rAF-batched rendering ──────────────────────────────────────────
+  // Each GridUpdate is a full visible-grid snapshot, so only the latest
+  // frame matters — intermediate ones are safely overwritten.
 
   const scheduleRender = useCallback((payload: GridUpdate) => {
     pendingFrameRef.current = payload
@@ -276,7 +279,7 @@ export function AlacrittyTerminalView({
     if (cols !== lastColsRef.current || rows !== lastRowsRef.current) {
       lastColsRef.current = cols
       lastRowsRef.current = rows
-      invoke('terminal_resize', { id: ptyIdRef.current, cols, rows }).catch(() => {})
+      invoke('terminal_resize', { id: ptyIdRef.current, cols, rows }).catch((e) => console.warn('[terminal]', e))
     }
   }, [fontSize, created, calculateDimensions, measureCell])
 
@@ -310,7 +313,7 @@ export function AlacrittyTerminalView({
       if (newCols !== lastColsRef.current || newRows !== lastRowsRef.current) {
         lastColsRef.current = newCols
         lastRowsRef.current = newRows
-        await invoke('terminal_resize', { id: terminalId, cols: newCols, rows: newRows }).catch(() => {})
+        await invoke('terminal_resize', { id: terminalId, cols: newCols, rows: newRows }).catch((e) => console.warn('[terminal]', e))
       }
 
       // Reattach: get current grid state
@@ -325,7 +328,7 @@ export function AlacrittyTerminalView({
       ptyIdRef.current = terminalId
       setCreated(true)
 
-      invoke('terminal_set_focus', { id: terminalId, focused: true }).catch(() => {})
+      invoke('terminal_set_focus', { id: terminalId, focused: true }).catch((e) => console.warn('[terminal]', e))
 
       // Listen for grid updates (DOM text rendering)
       unlistenGrid = await listen<GridUpdate>(`terminal:grid:${terminalId}`, (event) => {
@@ -380,7 +383,7 @@ export function AlacrittyTerminalView({
         lastColsRef.current = cols
         lastRowsRef.current = rows
         if (ptyIdRef.current) {
-          invoke('terminal_resize', { id: ptyIdRef.current, cols, rows }).catch(() => {})
+          invoke('terminal_resize', { id: ptyIdRef.current, cols, rows }).catch((e) => console.warn('[terminal]', e))
         }
       }, 80)
     })
@@ -391,10 +394,10 @@ export function AlacrittyTerminalView({
   // ── Focus tracking ─────────────────────────────────────────────────
 
   const handleFocus = useCallback(() => {
-    if (ptyIdRef.current) invoke('terminal_set_focus', { id: ptyIdRef.current, focused: true }).catch(() => {})
+    if (ptyIdRef.current) invoke('terminal_set_focus', { id: ptyIdRef.current, focused: true }).catch((e) => console.warn('[terminal]', e))
   }, [])
   const handleBlur = useCallback(() => {
-    if (ptyIdRef.current) invoke('terminal_set_focus', { id: ptyIdRef.current, focused: false }).catch(() => {})
+    if (ptyIdRef.current) invoke('terminal_set_focus', { id: ptyIdRef.current, focused: false }).catch((e) => console.warn('[terminal]', e))
   }, [])
 
   // ── Keyboard ───────────────────────────────────────────────────────
@@ -424,7 +427,18 @@ export function AlacrittyTerminalView({
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     if (!ptyIdRef.current) return
     const text = e.clipboardData.getData('text')
-    if (text) { e.preventDefault(); invoke('terminal_write', { id: ptyIdRef.current, data: text }) }
+    if (!text) return
+    e.preventDefault()
+    // Guard against extremely large text pastes (10MB limit)
+    const MAX_PASTE_BYTES = 10 * 1024 * 1024
+    if (text.length > MAX_PASTE_BYTES) {
+      useToastStore.getState().addToast(
+        `Paste too large (${(text.length / 1024 / 1024).toFixed(1)}MB, max 10MB)`,
+        'error'
+      )
+      return
+    }
+    invoke('terminal_write', { id: ptyIdRef.current, data: text })
   }, [])
 
   // ── Scroll — throttled + accumulated ─────────────────────────────────
@@ -455,7 +469,7 @@ export function AlacrittyTerminalView({
         const lines = Math.round(accum / lineHeight)
         const delta = -lines
         if (delta !== 0) {
-          invoke('terminal_scroll', { id: ptyIdRef.current, delta }).catch(() => {})
+          invoke('terminal_scroll', { id: ptyIdRef.current, delta }).catch((e) => console.warn('[terminal]', e))
         }
       }, 50)
     }
@@ -620,7 +634,7 @@ export function AlacrittyTerminalView({
     e.stopPropagation()
 
     if (clicked.type === 'url') {
-      invoke('plugin:shell|open', { path: clicked.target }).catch(() => {})
+      invoke('plugin:shell|open', { path: clicked.target }).catch((e) => console.warn('[terminal]', e))
     } else if (clicked.type === 'file' && clicked.filePath) {
       const tabsStore = useTabsStore.getState()
       const openInSplit = useTerminalSettingsStore.getState().openLinksInSplitPane

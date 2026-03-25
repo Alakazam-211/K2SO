@@ -294,7 +294,7 @@ fn next_tab_order(conn: &rusqlite::Connection) -> i64 {
 
 #[tauri::command]
 pub fn projects_list(state: State<'_, AppState>) -> Result<Vec<Project>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     Project::list(&conn).map_err(|e| e.to_string())
 }
 
@@ -306,7 +306,7 @@ pub fn projects_create(
     path: String,
     color: Option<String>,
 ) -> Result<Project, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     let project_id = uuid::Uuid::new_v4().to_string();
     let workspace_id = uuid::Uuid::new_v4().to_string();
     let tab_order = next_tab_order(&conn);
@@ -338,7 +338,7 @@ pub fn projects_update(
     manually_active: Option<i64>,
     icon_url: Option<String>,
 ) -> Result<Project, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
 
     // icon_url: Some("data:...") sets it, Some("") clears it, None leaves unchanged
     let icon_param = icon_url.as_ref().map(|url| {
@@ -370,7 +370,7 @@ pub fn projects_enable_worktrees(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<Project, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
 
     // Get the project
     let project = Project::get(&conn, &project_id).map_err(|e| e.to_string())?;
@@ -426,7 +426,7 @@ pub fn projects_enable_worktrees(
 
 #[tauri::command]
 pub fn projects_delete(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     // Delete workspaces first (cascade)
     conn.execute("DELETE FROM workspaces WHERE project_id = ?1", rusqlite::params![id])
         .map_err(|e| e.to_string())?;
@@ -437,7 +437,7 @@ pub fn projects_delete(app: AppHandle, state: State<'_, AppState>, id: String) -
 
 #[tauri::command]
 pub fn projects_reorder(app: AppHandle, state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     for (i, id) in ids.iter().enumerate() {
         Project::update(&conn, id, None, None, None, Some(i as i64), None, None, None, None, None)
             .map_err(|e| e.to_string())?;
@@ -500,7 +500,7 @@ pub fn projects_add_from_path(
 
     // Validate no overlap with existing projects or worktrees
     // Use path-with-separator to avoid false positives like "K2SO" matching "K2SO-website"
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     let existing_projects = Project::list(&conn).unwrap_or_default();
     let path_with_sep = format!("{}/", path.trim_end_matches('/'));
     for ep in &existing_projects {
@@ -600,7 +600,7 @@ pub fn projects_add_without_git(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.clone());
 
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     let project_id = uuid::Uuid::new_v4().to_string();
     let workspace_id = uuid::Uuid::new_v4().to_string();
     let tab_order = next_tab_order(&conn);
@@ -668,7 +668,7 @@ pub fn projects_init_git_and_open(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.clone());
 
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     let project_id = uuid::Uuid::new_v4().to_string();
     let workspace_id = uuid::Uuid::new_v4().to_string();
     let tab_order = next_tab_order(&conn);
@@ -730,7 +730,7 @@ pub fn projects_get_icon(
 ) -> Result<IconResult, String> {
     // Check DB first if projectId provided
     if let Some(ref pid) = project_id {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.lock();
         if let Ok(project) = Project::get(&conn, pid) {
             if let Some(ref icon_url) = project.icon_url {
                 return Ok(IconResult {
@@ -745,7 +745,7 @@ pub fn projects_get_icon(
     if let Some(data_url) = detect_project_icon(&path) {
         // Cache in DB if projectId provided
         if let Some(ref pid) = project_id {
-            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            let conn = state.db.lock();
             Project::update(
                 &conn, pid, None, None, None, None, None,
                 Some(Some(data_url.as_str())), None, None, None,
@@ -769,7 +769,7 @@ pub fn projects_detect_icon(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<IconResult, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     let project = Project::get(&conn, &project_id).map_err(|e| e.to_string())?;
 
     if let Some(data_url) = detect_project_icon(&project.path) {
@@ -800,7 +800,7 @@ pub async fn projects_upload_icon(
 
     // Verify project exists
     {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.lock();
         Project::get(&conn, &project_id).map_err(|_| "Project not found".to_string())?;
     }
 
@@ -821,7 +821,7 @@ pub async fn projects_upload_icon(
             let data_url = read_icon_as_data_url(Path::new(&file_path))
                 .ok_or("Could not read the selected image")?;
 
-            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            let conn = state.db.lock();
             Project::update(
                 &conn, &project_id, None, None, None, None, None,
                 Some(Some(data_url.as_str())), None, None, None,
@@ -843,7 +843,7 @@ pub fn projects_clear_icon(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     Project::update(
         &conn, &project_id, None, None, None, None, None,
         Some(None), None, None, None,
@@ -858,7 +858,7 @@ pub fn projects_touch_interaction(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     Project::touch_interaction(&conn, &id).map_err(|e| e.to_string())
 }
 
@@ -867,7 +867,7 @@ pub fn projects_touch_interaction_clear(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
     Project::clear_interaction(&conn, &id).map_err(|e| e.to_string())
 }
 
@@ -907,7 +907,7 @@ pub async fn projects_open_focus_window(
 
     // Look up the project name from DB
     let project_name = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.lock();
         let project = crate::db::schema::Project::get(&conn, &project_id)
             .map_err(|e| e.to_string())?;
         project.name

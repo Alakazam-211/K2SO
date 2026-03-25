@@ -44,3 +44,41 @@ export interface WindowApi {
  * without pulling in main-process Node.js code at runtime.
  */
 export type { WindowApi as WindowApiType, TrpcApi as TrpcApiType }
+
+// ── Backend settings types (mirrors Rust AppSettings) ─────────────────
+
+export interface TerminalSettingsBackend {
+  fontFamily: string
+  fontSize: number
+  cursorStyle: 'bar' | 'block' | 'underline'
+  scrollback: number
+  naturalTextEditing: boolean
+}
+
+export interface TimerSettingsBackend {
+  visible: boolean
+  countdownEnabled: boolean
+  countdownTheme: string
+  skipMemo: boolean
+  timezone: string
+  customThemes: Record<string, string>[]
+}
+
+/** Matches Rust `AppSettings` (camelCase via serde rename) */
+export interface AppSettingsResponse {
+  terminal: TerminalSettingsBackend
+  keybindings: Record<string, string>
+  projectSettings: Record<string, Record<string, string>>
+  focusGroupsEnabled: boolean
+  activeFocusGroupId: string | null
+  sidebarCollapsed: boolean
+  leftPanelOpen: boolean
+  rightPanelOpen: boolean
+  leftPanelActiveTab: string
+  rightPanelActiveTab: string
+  leftPanelTabs: string[]
+  rightPanelTabs: string[]
+  defaultAgent: string
+  aiAssistantEnabled: boolean
+  timer: TimerSettingsBackend
+}

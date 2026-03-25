@@ -163,6 +163,7 @@ function FocusModeContent({ activeProject, cwd }: { activeProject: any; cwd: str
 }
 
 export default function App(): React.JSX.Element {
+  const settingsLoaded = useSettingsStore((s) => s.loaded)
   const focusProjectId = useMemo(() => parseFocusProjectId(), [])
   const activeProjectId = useProjectsStore((s) => s.activeProjectId)
   const activeWorkspaceId = useProjectsStore((s) => s.activeWorkspaceId)
@@ -300,7 +301,7 @@ export default function App(): React.JSX.Element {
         const projectId = useProjectsStore.getState().activeProjectId
         if (projectId) {
           import('@tauri-apps/api/core').then(({ invoke }) => {
-            invoke('projects_open_focus_window', { projectId }).catch(() => {})
+            invoke('projects_open_focus_window', { projectId }).catch((e) => console.warn('[app]', e))
           })
         }
       }).then((fn) => unlisteners.push(fn))
@@ -415,7 +416,7 @@ export default function App(): React.JSX.Element {
         await saveAllWorkspaces()
         const { getCurrentWindow } = await import('@tauri-apps/api/window')
         getCurrentWindow().destroy()
-      }).then((fn) => { unlisten = fn }).catch(() => {})
+      }).then((fn) => { unlisten = fn }).catch((e) => console.warn('[app]', e))
     })
 
     return () => {
@@ -428,6 +429,11 @@ export default function App(): React.JSX.Element {
   const activeProject = projects.find((p) => p.id === effectiveProjectId)
   const activeWorkspace = activeProject?.workspaces.find((w) => w.id === activeWorkspaceId)
   const cwd = activeWorkspace?.worktreePath ?? activeProject?.path ?? '~'
+
+  // Wait for stores to initialize before rendering to prevent flicker
+  if (!settingsLoaded) {
+    return <div className="h-screen w-screen bg-[var(--color-bg)]" />
+  }
 
   // Settings overlay — replaces main content
   if (settingsOpen) {
