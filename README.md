@@ -37,13 +37,19 @@ Quick-launch buttons for the agents you already use:
 - **Copilot** -- `copilot --allow-all`
 - **Aider**, **Cursor Agent**, **OpenCode**, **Code Puppy**
 
-Add your own custom agent presets or edit the built-ins.
+Add your own custom agent presets or edit the built-ins. Set a default agent and launch it instantly with Cmd+Shift+T.
+
+### Agent Lifecycle Detection
+K2SO detects when AI agents start, stop, or request permissions via a hook system that integrates with Claude Code, Cursor, and Gemini CLI. Active agents show real-time status indicators (working, awaiting permission, done) in the sidebar.
+
+### Active Workspaces Dock
+A collapsible dock at the bottom of the sidebar shows projects with running agents or recent activity. Switch between active workspaces with Cmd+1-9. Projects appear automatically when agents run and can be pinned or dismissed.
 
 ### Document Review
 View `.md`, `.pdf`, and `.docx` files inline with a dark-themed viewer. Markdown renders with GFM support; PDFs use pdf.js; Word docs convert via mammoth.
 
 ### Terminal-First
-GPU-accelerated terminals via xterm.js + WebGL renderer with Unicode 11 support. Split into up to 3 independent tab group columns, each with their own tab bar. Drag tabs between columns. Resize columns freely. Natural text editing (macOS-style Opt+Arrow word navigation, Cmd+Arrow line navigation) enabled by default.
+GPU-accelerated terminals powered by [Alacritty](https://github.com/alacritty/alacritty)'s terminal emulator library, rendered via a custom DOM-based frontend. Split into up to 3 independent tab group columns, each with their own tab bar. Drag tabs between columns. Resize columns freely. Natural text editing (macOS-style Opt+Arrow word navigation, Cmd+Arrow line navigation) enabled by default.
 
 ### Chat History & Session Resume
 View Claude and Cursor chat history in the sidebar. Click a session to resume it. When the app closes, terminal sessions are saved and resumed on reopen with `--resume` flags. Fresh chat tabs auto-rename to match the conversation title.
@@ -55,16 +61,25 @@ Terminal PTYs survive tab switches via a scrollback buffer architecture. Switch 
 First-class support for git worktrees. Create worktrees from new or existing branches. Automatic workspace record creation. Projects can run in worktree mode or standard mode.
 
 ### Focus Groups & Pinned Workspaces
-Group related projects together with focus groups. Pin specific workspaces above the focus group filter so they're always accessible regardless of which group is active.
+Group related projects together with focus groups. Pin specific workspaces above the focus group filter so they're always accessible regardless of which group is active. Cmd+Shift+1-9 switches between pinned workspaces (swappable with active shortcuts in settings).
 
 ### Layout Persistence
-Workspace layouts (tab groups, open documents, terminal sessions) save and restore automatically when you switch between workspaces.
+Workspace layouts (tab groups, open documents, terminal sessions) save and restore automatically when you switch between workspaces. Panel tab arrangement and sidebar state persist across app restarts.
+
+### Keyboard Shortcuts
+- **Cmd+1-9** -- Switch active workspaces
+- **Cmd+Shift+1-9** -- Switch pinned workspaces
+- **Cmd+Shift+T** -- Launch default AI agent
+- **Cmd+T** -- New terminal tab
+- **Cmd+D** -- Split pane
+- **Cmd+L** -- AI Workspace Assistant
+- **Cmd+K** -- Quick switcher
 
 ### Icon Cropping
 Upload custom workspace icons with a built-in crop dialog -- drag to position, scroll to zoom, apply to save.
 
 ### Built with Tauri + Rust
-~5MB binary. Native PTY management via `portable-pty`. SQLite database via `rusqlite`. Git operations via `git2`. Local LLM inference via `llama-cpp-2`. No Electron, no bloat.
+~5MB binary. Native PTY management via `portable-pty`. Alacritty terminal emulator for rendering. SQLite database via `rusqlite`. Git operations via `git2`. Local LLM inference via `llama-cpp-2`. No Electron, no bloat.
 
 ## Installation
 
@@ -97,7 +112,7 @@ cargo tauri build
 ```
 ┌─────────────────────────────────────────────────────┐
 │                   React 19 Frontend                 │
-│  Zustand stores  │  xterm.js terminals  │  Viewers  │
+│  Zustand stores  │  Alacritty terminals  │  Viewers │
 ├─────────────────────────────────────────────────────┤
 │                  Tauri v2 IPC Bridge                │
 ├─────────────────────────────────────────────────────┤
@@ -108,13 +123,14 @@ cargo tauri build
 
 | Layer | Tech | Purpose |
 |-------|------|---------|
-| Frontend | React 19, TailwindCSS v4, Zustand, xterm.js | UI, state, terminals |
+| Frontend | React 19, TailwindCSS v4, Zustand | UI and state management |
+| Terminals | Alacritty terminal library, custom DOM renderer | GPU-accelerated terminal emulation |
 | IPC | Tauri commands + events | Frontend-backend communication |
 | Backend | Rust, Tauri v2 | Terminal PTY, database, git, LLM |
 | Database | SQLite (rusqlite, WAL mode) | Projects, workspaces, presets, settings |
 | AI | llama-cpp-2 (Metal) | Local LLM for workspace assistant |
+| Agent Hooks | HTTP notification server | Lifecycle detection for Claude/Cursor/Gemini |
 | Git | git2 | Worktree and branch management |
-| Layout | react-mosaic-component | Tiled pane management |
 
 For the full technical architecture, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

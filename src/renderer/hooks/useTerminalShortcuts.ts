@@ -6,9 +6,8 @@ import { useProjectsStore } from '@/stores/projects'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
 import { useActiveAgentsStore } from '@/stores/active-agents'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
+import { getActiveBarItems } from '@/components/Sidebar/ActiveBar'
 import type { TerminalPane } from '@/stores/tabs'
-
-const TWENTY_FOUR_HOURS = 24 * 60 * 60
 
 /**
  * Registers global keyboard shortcuts for terminal tab/pane management.
@@ -201,10 +200,7 @@ function switchToPinnedByIndex(targetIdx: number): void {
 
     for (const ws of workspaces) {
       if (flatIdx === targetIdx) {
-        const focusState = useFocusGroupsStore.getState()
-        if (focusState.focusGroupsEnabled && project.focusGroupId !== focusState.activeFocusGroupId) {
-          focusState.setActiveFocusGroup(project.focusGroupId)
-        }
+        // Pinned workspaces are always visible — don't change focus group
         projectsState.setActiveWorkspace(project.id, ws.id)
         return
       }
@@ -214,19 +210,7 @@ function switchToPinnedByIndex(targetIdx: number): void {
 }
 
 function switchToActiveByIndex(targetIdx: number): void {
-  const projectsState = useProjectsStore.getState()
-  const hasAgents = useActiveAgentsStore.getState().hasActiveAgents()
-  const bgWorkspaces = useTabsStore.getState().backgroundWorkspaces
-  const now = Math.floor(Date.now() / 1000)
-
-  const activeItems = projectsState.projects.filter((p) => {
-    if (p.pinned) return false
-    if (p.manuallyActive) return true
-    if (p.id === projectsState.activeProjectId && hasAgents) return true
-    if (Object.keys(bgWorkspaces).some((k) => k.startsWith(`${p.id}:`))) return true
-    if (p.lastInteractionAt && (now - p.lastInteractionAt) < TWENTY_FOUR_HOURS) return true
-    return false
-  })
+  const activeItems = getActiveBarItems()
 
   if (targetIdx < activeItems.length) {
     const project = activeItems[targetIdx]
@@ -236,7 +220,7 @@ function switchToActiveByIndex(targetIdx: number): void {
       if (focusState.focusGroupsEnabled && project.focusGroupId !== focusState.activeFocusGroupId) {
         focusState.setActiveFocusGroup(project.focusGroupId)
       }
-      projectsState.setActiveWorkspace(project.id, firstWorkspace.id)
+      useProjectsStore.getState().setActiveWorkspace(project.id, firstWorkspace.id)
     }
   }
 }

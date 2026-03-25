@@ -147,6 +147,13 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
         }
       )
     } else if (eventType === 'stop') {
+      // Skip if already in stop/review/idle state (avoid duplicate toast from multiple stop events)
+      const currentStatus = paneStatuses.get(paneId)
+      if (currentStatus === 'review' || currentStatus === 'idle') {
+        set({ paneStatuses: newStatuses })
+        return
+      }
+
       // Check if the pane's tab is currently active
       const tabsState = useTabsStore.getState()
       let isInActiveTab = false
@@ -266,36 +273,42 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
     // Detect transitions and fire toasts
     const toast = useToastStore.getState()
 
+    // Only fire poll-based toasts if the hook system is NOT active for this pane.
+    // When hooks are working, handleLifecycleEvent handles all toasts.
+    const { paneStatuses } = get()
+
     for (const [terminalId, newAgent] of newAgents) {
       const oldAgent = oldAgents.get(terminalId)
       if (oldAgent?.status === 'active' && newAgent.status === 'idle') {
-        // Agent was actively working, now idle → waiting for input
-        const { tabId, groupIndex } = newAgent
-        toast.addToast(
-          `${newAgent.command} is waiting for input in "${newAgent.tabTitle}"`,
-          'info',
-          5000,
-          {
-            label: 'Switch to tab',
-            onClick: () => useTabsStore.getState().setActiveTabInGroup(groupIndex, tabId),
-          }
-        )
+        if (!paneStatuses.has(terminalId)) {
+          const { tabId, groupIndex } = newAgent
+          toast.addToast(
+            `${newAgent.command} is waiting for input in "${newAgent.tabTitle}"`,
+            'info',
+            5000,
+            {
+              label: 'Switch to tab',
+              onClick: () => useTabsStore.getState().setActiveTabInGroup(groupIndex, tabId),
+            }
+          )
+        }
       }
     }
 
     for (const [terminalId, oldAgent] of oldAgents) {
       if (!newAgents.has(terminalId) && oldAgent.status === 'active') {
-        // Agent was actively working and has now exited
-        const { tabId, groupIndex } = oldAgent
-        toast.addToast(
-          `${oldAgent.command} finished in "${oldAgent.tabTitle}"`,
-          'success',
-          4000,
-          {
-            label: 'Switch to tab',
-            onClick: () => useTabsStore.getState().setActiveTabInGroup(groupIndex, tabId),
-          }
-        )
+        if (!paneStatuses.has(terminalId)) {
+          const { tabId, groupIndex } = oldAgent
+          toast.addToast(
+            `${oldAgent.command} finished in "${oldAgent.tabTitle}"`,
+            'success',
+            4000,
+            {
+              label: 'Switch to tab',
+              onClick: () => useTabsStore.getState().setActiveTabInGroup(groupIndex, tabId),
+            }
+          )
+        }
       }
     }
 

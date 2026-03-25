@@ -76,7 +76,8 @@ function DiffStats({ path }: { path: string }): React.JSX.Element | null {
 
 // ── Agent status or diff stats (shows spinner when agent is working) ─────────
 
-function AgentOrDiffStats({ projectId, path }: { projectId: string; path: string }): React.JSX.Element | null {
+/** Shows braille spinner or "done" label — for placement next to shortcut numbers */
+function AgentSpinner({ projectId }: { projectId: string }): React.JSX.Element | null {
   const projectStatus = useActiveAgentsStore((s) => s.getProjectStatus(projectId))
 
   if (projectStatus === 'working' || projectStatus === 'permission') {
@@ -95,6 +96,11 @@ function AgentOrDiffStats({ projectId, path }: { projectId: string; path: string
     )
   }
 
+  return null
+}
+
+/** Shows diff stats (always visible, even when agent is running — spinner is on a separate row) */
+function AgentOrDiffStats({ projectId, path }: { projectId: string; path: string }): React.JSX.Element | null {
   return <DiffStats path={path} />
 }
 
@@ -200,21 +206,23 @@ function SingleProjectItem({
             <span className="truncate flex-1">{project.name}</span>
             <AgentOrDiffStats projectId={project.id} path={project.path} />
           </div>
-          {gitInfo?.isRepo && gitInfo.currentBranch && (
-            <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1">
+            {gitInfo?.isRepo && gitInfo.currentBranch && (
               <span
                 className="text-[10px] font-mono text-[var(--color-text-muted)] truncate flex-1"
                 title={gitInfo.currentBranch}
               >
                 {gitInfo.currentBranch}
               </span>
-              {shortcutIndex !== undefined && shortcutIndex < 9 && (
-                <span className="text-[10px] font-mono text-[var(--color-text-muted)] tabular-nums flex-shrink-0 py-0.5" style={{ paddingLeft: 8, paddingRight: 8 }}>
-                  {shortcutIndex + 1}
-                </span>
-              )}
-            </div>
-          )}
+            )}
+            {!(gitInfo?.isRepo && gitInfo.currentBranch) && <span className="flex-1" />}
+            <AgentSpinner projectId={project.id} />
+            {shortcutIndex !== undefined && shortcutIndex < 9 && (
+              <span className="text-[10px] font-mono text-[var(--color-text-muted)] tabular-nums flex-shrink-0 py-0.5" style={{ paddingLeft: 8, paddingRight: 8 }}>
+                {shortcutIndex + 1}
+              </span>
+            )}
+          </div>
         </div>
       </button>
     </div>
@@ -279,7 +287,7 @@ function WorkspaceButton({
           <span className="truncate flex-1">{workspace.name}</span>
 
           <AgentOrDiffStats projectId={workspace.projectId} path={workspacePath} />
-
+          <AgentSpinner projectId={workspace.projectId} />
           {shortcutIndex !== undefined && shortcutIndex < 9 && (
             <span className="text-[10px] font-mono text-[var(--color-text-muted)] tabular-nums flex-shrink-0 py-0.5" style={{ paddingLeft: 8, paddingRight: 8 }}>
               {shortcutIndex + 1}

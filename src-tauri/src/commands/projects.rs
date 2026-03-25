@@ -499,17 +499,21 @@ pub fn projects_add_from_path(
     }
 
     // Validate no overlap with existing projects or worktrees
+    // Use path-with-separator to avoid false positives like "K2SO" matching "K2SO-website"
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let existing_projects = Project::list(&conn).unwrap_or_default();
+    let path_with_sep = format!("{}/", path.trim_end_matches('/'));
     for ep in &existing_projects {
         if path == ep.path {
             return Err(format!("This folder is already added as workspace '{}'.", ep.name));
         }
-        if path.starts_with(&ep.path) || ep.path.starts_with(&path) {
+        let ep_with_sep = format!("{}/", ep.path.trim_end_matches('/'));
+        if path_with_sep.starts_with(&ep_with_sep) || ep_with_sep.starts_with(&path_with_sep) {
             let workspaces = Workspace::list(&conn, &ep.id).unwrap_or_default();
             for ws in &workspaces {
                 if let Some(ref wt_path) = ws.worktree_path {
-                    if path.starts_with(wt_path) || wt_path.starts_with(&path) {
+                    let wt_with_sep = format!("{}/", wt_path.trim_end_matches('/'));
+                    if path_with_sep.starts_with(&wt_with_sep) || wt_with_sep.starts_with(&path_with_sep) {
                         return Err(format!(
                             "This folder overlaps with a worktree in workspace '{}'. Remove it first or choose a different folder.",
                             ep.name

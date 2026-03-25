@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import type { MosaicNode, MosaicDirection } from 'react-mosaic-component'
 import { RESUMABLE_CLI_TOOLS } from '@shared/constants'
+import { useSettingsStore } from '@/stores/settings'
 
 // ── Cross-window tab sync ────────────────────────────────────────────────
 
@@ -1510,16 +1511,36 @@ export const useTabsStore = create<TabsState>((set, get) => ({
               console.error('[tabs] Failed to parse DB layout:', err)
             }
           }
-          // No saved layout — create default tab after delay (for cross-window sync)
+          // No saved layout — create default tab with default agent after delay (for cross-window sync)
           setTimeout(() => {
             if (get().activeWorkspaceKey === key && get().tabs.length === 0) {
               tabCounter++
               const tabId = crypto.randomUUID()
               const paneGroupId = crypto.randomUUID()
-              const pg = makeTerminalPaneGroup(paneGroupId, cwd)
+
+              // Look up default agent preset
+              let agentOpts: { command?: string; args?: string[]; title?: string } = {}
+              try {
+                const defaultAgent = useSettingsStore.getState().defaultAgent
+                if (defaultAgent) {
+                  const { usePresetsStore } = require('@/stores/presets')
+                  const presets = usePresetsStore.getState().presets
+                  const preset = presets.find((p: any) => {
+                    const cmd = p.command.split(/\s+/)[0]
+                    return cmd === defaultAgent && p.enabled
+                  })
+                  if (preset) {
+                    const parts = preset.command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || []
+                    const cleaned = parts.map((p: string) => p.replace(/^["']|["']$/g, ''))
+                    agentOpts = { command: cleaned[0], args: cleaned.slice(1), title: preset.label }
+                  }
+                }
+              } catch { /* fall back to plain terminal */ }
+
+              const pg = makeTerminalPaneGroup(paneGroupId, cwd, agentOpts.command ? { command: agentOpts.command, args: agentOpts.args } : undefined)
               const tab: Tab = {
                 id: tabId,
-                title: `Terminal ${tabCounter}`,
+                title: agentOpts.title || `Terminal ${tabCounter}`,
                 mosaicTree: paneGroupId,
                 paneGroups: new Map([[paneGroupId, pg]])
               }

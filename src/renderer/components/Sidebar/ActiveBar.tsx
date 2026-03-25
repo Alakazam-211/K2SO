@@ -75,6 +75,58 @@ function useActiveBarItems(): ProjectWithWorkspaces[] {
   }, [projects, activeProjectId, backgroundWorkspaces, hasActiveAgents, paneStatuses, tick])
 }
 
+function ActiveBarItem({
+  project,
+  index,
+  isCurrentProject,
+  onClick,
+  onContextMenu,
+}: {
+  project: ProjectWithWorkspaces
+  index: number
+  isCurrentProject: boolean
+  onClick: () => void
+  onContextMenu: (e: React.MouseEvent) => void
+}): React.JSX.Element {
+  const shortcutNum = index < 9 ? index + 1 : index === 9 ? 0 : null
+  const projectAgentStatus = useActiveAgentsStore((s) => s.getProjectStatus(project.id))
+  const isAgentWorking = projectAgentStatus === 'working' || projectAgentStatus === 'permission'
+
+  return (
+    <button
+      onClick={onClick}
+      onContextMenu={onContextMenu}
+      className={`no-drag w-full flex items-center gap-2 px-2 py-1 text-left transition-colors cursor-pointer select-none ${
+        isCurrentProject
+          ? 'bg-white/[0.08] text-[var(--color-text-primary)]'
+          : 'text-[var(--color-text-secondary)] hover:bg-white/[0.04] hover:text-[var(--color-text-primary)]'
+      }`}
+    >
+      <ProjectAvatar
+        projectPath={project.path}
+        projectName={project.name}
+        projectColor={project.color}
+        projectId={project.id}
+        iconUrl={project.iconUrl}
+        size={18}
+      />
+      <span className="text-[11px] truncate flex-1">{project.name}</span>
+      {isAgentWorking && (
+        <span className={`text-[11px] font-mono flex-shrink-0 ${
+          projectAgentStatus === 'permission' ? 'text-red-400' : 'text-[var(--color-text-muted)]'
+        }`}>
+          <span className="braille-spinner" />
+        </span>
+      )}
+      {shortcutNum !== null && (
+        <span className="text-[10px] font-mono text-[var(--color-text-muted)] flex-shrink-0 tabular-nums">
+          {shortcutNum}
+        </span>
+      )}
+    </button>
+  )
+}
+
 export default function ActiveBar(): React.JSX.Element | null {
   const items = useActiveBarItems()
   const activeProjectId = useProjectsStore((s) => s.activeProjectId)
@@ -173,51 +225,44 @@ export default function ActiveBar(): React.JSX.Element | null {
         }}
       >
         <div className="px-1 pb-1">
-        {items.map((project, index) => {
-          const isCurrentProject = project.id === activeProjectId
-          const shortcutNum = index < 9 ? index + 1 : index === 9 ? 0 : null
-          const projectAgentStatus = useActiveAgentsStore.getState().getProjectStatus(project.id)
-          const isAgentWorking = projectAgentStatus === 'working' || projectAgentStatus === 'permission'
-
-          return (
-            <button
-              key={project.id}
-              onClick={() => handleClick(project)}
-              onContextMenu={(e) => handleContextMenu(e, project)}
-              className={`no-drag w-full flex items-center gap-2 px-2 py-1 text-left transition-colors cursor-pointer select-none ${
-                isCurrentProject
-                  ? 'bg-white/[0.08] text-[var(--color-text-primary)]'
-                  : 'text-[var(--color-text-secondary)] hover:bg-white/[0.04] hover:text-[var(--color-text-primary)]'
-              }`}
-            >
-              <ProjectAvatar
-                projectPath={project.path}
-                projectName={project.name}
-                projectColor={project.color}
-                projectId={project.id}
-                iconUrl={project.iconUrl}
-                size={18}
-              />
-              <span className="text-[11px] truncate flex-1">{project.name}</span>
-              {isAgentWorking && (
-                <span className={`text-[11px] font-mono flex-shrink-0 ${
-                  projectAgentStatus === 'permission' ? 'text-red-400' : 'text-[var(--color-text-muted)]'
-                }`}>
-                  <span className="braille-spinner" />
-                </span>
-              )}
-              {shortcutNum !== null && (
-                <span className="text-[10px] font-mono text-[var(--color-text-muted)] flex-shrink-0 tabular-nums">
-                  {shortcutNum}
-                </span>
-              )}
-            </button>
-          )
-        })}
+        {items.map((project, index) => (
+          <ActiveBarItem
+            key={project.id}
+            project={project}
+            index={index}
+            isCurrentProject={project.id === activeProjectId}
+            onClick={() => handleClick(project)}
+            onContextMenu={(e) => handleContextMenu(e, project)}
+          />
+        ))}
         </div>
       </div>
     </div>
   )
+}
+
+/** Non-hook version for use by keyboard shortcuts — same logic as useActiveBarItems */
+export function getActiveBarItems(): ProjectWithWorkspaces[] {
+  const projects = useProjectsStore.getState().projects
+  const activeProjectId = useProjectsStore.getState().activeProjectId
+  const backgroundWorkspaces = useTabsStore.getState().backgroundWorkspaces
+  const hasActiveAgents = useActiveAgentsStore.getState().hasActiveAgents()
+  const paneStatuses = useActiveAgentsStore.getState().paneStatuses
+  const now = Math.floor(Date.now() / 1000)
+
+  const hasHookActivity = paneStatuses.size > 0 && Array.from(paneStatuses.values()).some(
+    (s) => s === 'working' || s === 'permission' || s === 'review'
+  )
+
+  return projects.filter((p) => {
+    if (p.pinned) return false
+    if (p.manuallyActive) return true
+    if (p.lastInteractionAt && (now - p.lastInteractionAt) < TWENTY_FOUR_HOURS) return true
+    if (p.id === activeProjectId && (hasActiveAgents || hasHookActivity)) return true
+    if (Object.keys(backgroundWorkspaces).some((k) => k.startsWith(`${p.id}:`))) return true
+    if (_activeBarMemory.has(p.id)) return true
+    return false
+  })
 }
 
 /** Export for use by keyboard shortcuts */

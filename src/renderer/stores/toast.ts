@@ -24,7 +24,7 @@ interface ToastState {
 export const useToastStore = create<ToastState>((set, get) => ({
   toasts: [],
 
-  addToast: (message: string, type: ToastType, duration = 3000, action?: ToastAction) => {
+  addToast: (message: string, type: ToastType, duration = 6000, action?: ToastAction) => {
     const id = crypto.randomUUID()
     const toast: Toast = { id, message, type, duration, action }
 
