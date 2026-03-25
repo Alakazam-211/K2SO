@@ -27,23 +27,21 @@ export const HOTKEYS: HotkeyDefinition[] = [
     defaultKey: 'Meta+Shift+D',
     category: 'Terminal'
   },
+  {
+    id: 'launchDefaultAgent',
+    label: 'Launch Default Agent',
+    defaultKey: 'Meta+Shift+T',
+    category: 'App'
+  },
 
   // ── Tabs ─────────────────────────────────────────────────────────────
   { id: 'newTab', label: 'New Tab', defaultKey: 'Meta+T', category: 'Tabs' },
   { id: 'closeTab', label: 'Close Tab', defaultKey: 'Meta+W', category: 'Tabs' },
   { id: 'prevTab', label: 'Previous Tab', defaultKey: 'Meta+Alt+ArrowLeft', category: 'Tabs' },
   { id: 'nextTab', label: 'Next Tab', defaultKey: 'Meta+Alt+ArrowRight', category: 'Tabs' },
-  { id: 'workspace1', label: 'Switch to Workspace 1', defaultKey: 'Meta+1', category: 'Navigation' },
-  { id: 'workspace2', label: 'Switch to Workspace 2', defaultKey: 'Meta+2', category: 'Navigation' },
-  { id: 'workspace3', label: 'Switch to Workspace 3', defaultKey: 'Meta+3', category: 'Navigation' },
-  { id: 'workspace4', label: 'Switch to Workspace 4', defaultKey: 'Meta+4', category: 'Navigation' },
-  { id: 'workspace5', label: 'Switch to Workspace 5', defaultKey: 'Meta+5', category: 'Navigation' },
-  { id: 'workspace6', label: 'Switch to Workspace 6', defaultKey: 'Meta+6', category: 'Navigation' },
-  { id: 'workspace7', label: 'Switch to Workspace 7', defaultKey: 'Meta+7', category: 'Navigation' },
-  { id: 'workspace8', label: 'Switch to Workspace 8', defaultKey: 'Meta+8', category: 'Navigation' },
-  { id: 'workspace9', label: 'Switch to Workspace 9', defaultKey: 'Meta+9', category: 'Navigation' },
-
   // ── Navigation ──────────────────────────────────────────────────────
+  // Note: ⌘1-9 and ⇧⌘1-9 for Active/Pinned workspaces are handled dynamically
+  // based on the shortcut layout setting and are not individually rebindable.
   {
     id: 'toggleSidebar',
     label: 'Toggle Sidebar',

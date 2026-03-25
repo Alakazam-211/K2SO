@@ -4,6 +4,10 @@ import { useGitInitDialogStore } from './git-init-dialog'
 import { useToastStore } from './toast'
 import { useTabsStore } from './tabs'
 
+// Debounce touchInteraction to avoid excessive DB writes (5 min per project)
+const TOUCH_DEBOUNCE_MS = 5 * 60 * 1000
+const _lastTouchMap = new Map<string, number>()
+
 interface Workspace {
   id: string
   projectId: string
@@ -37,6 +41,8 @@ interface Project {
   iconUrl: string | null
   focusGroupId: string | null
   pinned: number
+  manuallyActive: number
+  lastInteractionAt: number | null
   createdAt: number
 }
 
@@ -62,6 +68,8 @@ interface ProjectsState {
   renameSection: (id: string, name: string) => Promise<void>
   updateSection: (id: string, updates: { name?: string; color?: string | null; isCollapsed?: number }) => Promise<void>
   assignWorkspaceToSection: (workspaceId: string, sectionId: string | null) => Promise<void>
+  touchInteraction: (projectId: string) => void
+  setManuallyActive: (projectId: string, active: boolean) => Promise<void>
 }
 
 export const useProjectsStore = create<ProjectsState>((set, get) => ({
@@ -328,6 +336,34 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
       await get().fetchProjects()
     } catch (err) {
       console.error('[projects] assignWorkspaceToSection failed:', err)
+    }
+  },
+
+  touchInteraction: async (projectId: string) => {
+    const now = Date.now()
+    const last = _lastTouchMap.get(projectId) || 0
+    if (now - last < TOUCH_DEBOUNCE_MS) return
+    _lastTouchMap.set(projectId, now)
+    // Optimistic local update
+    set((state) => ({
+      projects: state.projects.map((p) =>
+        p.id === projectId ? { ...p, lastInteractionAt: Math.floor(now / 1000) } : p
+      )
+    }))
+    // Write to DB — await so subsequent fetchProjects picks up the value
+    try {
+      await invoke('projects_touch_interaction', { id: projectId })
+    } catch {
+      // ignore
+    }
+  },
+
+  setManuallyActive: async (projectId: string, active: boolean) => {
+    try {
+      await invoke('projects_update', { id: projectId, manuallyActive: active ? 1 : 0 })
+      await get().fetchProjects()
+    } catch (err) {
+      console.error('[projects] setManuallyActive failed:', err)
     }
   }
 }))

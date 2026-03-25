@@ -88,13 +88,15 @@ pub struct Project {
     pub icon_url: Option<String>,
     pub focus_group_id: Option<String>,
     pub pinned: i64,
+    pub manually_active: i64,
+    pub last_interaction_at: Option<i64>,
     pub created_at: i64,
 }
 
 impl Project {
     pub fn list(conn: &Connection) -> Result<Vec<Project>> {
         let mut stmt = conn.prepare(
-            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, created_at \
+            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at \
              FROM projects ORDER BY tab_order",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -109,7 +111,9 @@ impl Project {
                 icon_url: row.get(7)?,
                 focus_group_id: row.get(8)?,
                 pinned: row.get(9)?,
-                created_at: row.get(10)?,
+                manually_active: row.get(10)?,
+                last_interaction_at: row.get(11)?,
+                created_at: row.get(12)?,
             })
         })?;
         rows.collect()
@@ -117,7 +121,7 @@ impl Project {
 
     pub fn get(conn: &Connection, id: &str) -> Result<Project> {
         conn.query_row(
-            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, created_at \
+            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at \
              FROM projects WHERE id = ?1",
             params![id],
             |row| {
@@ -132,7 +136,9 @@ impl Project {
                     icon_url: row.get(7)?,
                     focus_group_id: row.get(8)?,
                     pinned: row.get(9)?,
-                    created_at: row.get(10)?,
+                    manually_active: row.get(10)?,
+                    last_interaction_at: row.get(11)?,
+                    created_at: row.get(12)?,
                 })
             },
         )
@@ -168,6 +174,7 @@ impl Project {
         icon_url: Option<Option<&str>>,
         focus_group_id: Option<Option<&str>>,
         pinned: Option<i64>,
+        manually_active: Option<i64>,
     ) -> Result<()> {
         if let Some(v) = name {
             conn.execute("UPDATE projects SET name = ?1 WHERE id = ?2", params![v, id])?;
@@ -193,6 +200,9 @@ impl Project {
         if let Some(v) = pinned {
             conn.execute("UPDATE projects SET pinned = ?1 WHERE id = ?2", params![v, id])?;
         }
+        if let Some(v) = manually_active {
+            conn.execute("UPDATE projects SET manually_active = ?1 WHERE id = ?2", params![v, id])?;
+        }
         Ok(())
     }
 
@@ -204,6 +214,22 @@ impl Project {
     pub fn update_last_opened(conn: &Connection, id: &str) -> Result<()> {
         conn.execute(
             "UPDATE projects SET last_opened_at = unixepoch() WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn touch_interaction(conn: &Connection, id: &str) -> Result<()> {
+        conn.execute(
+            "UPDATE projects SET last_interaction_at = unixepoch() WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_interaction(conn: &Connection, id: &str) -> Result<()> {
+        conn.execute(
+            "UPDATE projects SET last_interaction_at = NULL WHERE id = ?1",
             params![id],
         )?;
         Ok(())

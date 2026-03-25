@@ -61,12 +61,12 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
   toggleLeftPanel: () => {
     const next = !get().leftPanelOpen
     set({ leftPanelOpen: next })
-    invoke('settings_update', { leftPanelOpen: next }).catch((e: unknown) => console.error('[panels]', e))
+    invoke('settings_update', { updates: { leftPanelOpen: next } }).catch((e: unknown) => console.error('[panels]', e))
   },
   toggleRightPanel: () => {
     const next = !get().rightPanelOpen
     set({ rightPanelOpen: next })
-    invoke('settings_update', { rightPanelOpen: next }).catch((e: unknown) => console.error('[panels]', e))
+    invoke('settings_update', { updates: { rightPanelOpen: next } }).catch((e: unknown) => console.error('[panels]', e))
   },
 
   setLeftPanelWidth: (width) =>
@@ -76,11 +76,11 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
 
   setLeftPanelActiveTab: (tab) => {
     set({ leftPanelActiveTab: tab })
-    invoke('settings_update', { leftPanelActiveTab: tab }).catch((e: unknown) => console.error('[panels]', e))
+    invoke('settings_update', { updates: { leftPanelActiveTab: tab } }).catch((e: unknown) => console.error('[panels]', e))
   },
   setRightPanelActiveTab: (tab) => {
     set({ rightPanelActiveTab: tab })
-    invoke('settings_update', { rightPanelActiveTab: tab }).catch((e: unknown) => console.error('[panels]', e))
+    invoke('settings_update', { updates: { rightPanelActiveTab: tab } }).catch((e: unknown) => console.error('[panels]', e))
   },
 
   moveTabToLeft: (tab) => {
@@ -94,12 +94,12 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
           : s.rightPanelActiveTab
     }))
     const s = get()
-    invoke('settings_update', {
+    invoke('settings_update', { updates: {
       leftPanelTabs: s.leftPanelTabs,
       rightPanelTabs: s.rightPanelTabs,
       leftPanelActiveTab: s.leftPanelActiveTab,
       rightPanelActiveTab: s.rightPanelActiveTab
-    }).catch((e: unknown) => console.error('[panels]', e))
+    } }).catch((e: unknown) => console.error('[panels]', e))
   },
 
   moveTabToRight: (tab) => {
@@ -115,12 +115,12 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
           : s.leftPanelActiveTab
     }))
     const s = get()
-    invoke('settings_update', {
+    invoke('settings_update', { updates: {
       leftPanelTabs: s.leftPanelTabs,
       rightPanelTabs: s.rightPanelTabs,
       leftPanelActiveTab: s.leftPanelActiveTab,
       rightPanelActiveTab: s.rightPanelActiveTab
-    }).catch((e: unknown) => console.error('[panels]', e))
+    } }).catch((e: unknown) => console.error('[panels]', e))
   },
 
   moveFocusWorkspaceHeader: (side) => {
@@ -152,7 +152,11 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
       const settings = await invoke<any>('settings_get')
       set({
         leftPanelOpen: settings.leftPanelOpen,
-        rightPanelOpen: settings.rightPanelOpen
+        rightPanelOpen: settings.rightPanelOpen,
+        ...(settings.leftPanelActiveTab && { leftPanelActiveTab: settings.leftPanelActiveTab }),
+        ...(settings.rightPanelActiveTab && { rightPanelActiveTab: settings.rightPanelActiveTab }),
+        ...(settings.leftPanelTabs?.length && { leftPanelTabs: settings.leftPanelTabs }),
+        ...(settings.rightPanelTabs?.length && { rightPanelTabs: settings.rightPanelTabs }),
       })
     } catch {
       // ignore — use defaults

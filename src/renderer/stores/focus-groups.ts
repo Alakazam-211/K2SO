@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { useToastStore } from './toast'
+import { useProjectsStore } from './projects'
 
 export interface FocusGroup {
   id: string
@@ -45,7 +46,18 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
     set({ activeFocusGroupId: id })
     // Persist to settings so it restores on next launch
     if (id !== null) {
-      invoke('settings_update', { activeFocusGroupId: id }).catch(() => {})
+      invoke('settings_update', { updates: { activeFocusGroupId: id } }).catch(() => {})
+
+      // Auto-activate the first workspace in the new focus group
+      const projectsState = useProjectsStore.getState()
+      const groupProjects = projectsState.projects.filter((p) => p.focusGroupId === id)
+      if (groupProjects.length > 0) {
+        const first = groupProjects[0]
+        const firstWs = first.workspaces[0]
+        if (firstWs) {
+          projectsState.setActiveWorkspace(first.id, firstWs.id)
+        }
+      }
     }
   },
 
@@ -68,7 +80,7 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
         const nextId = remaining.length > 0 ? remaining[0].id : null
         set({ activeFocusGroupId: nextId })
         if (nextId) {
-          invoke('settings_update', { activeFocusGroupId: nextId }).catch(() => {})
+          invoke('settings_update', { updates: { activeFocusGroupId: nextId } }).catch(() => {})
         }
       }
       await invoke('focus_groups_delete', { id })
@@ -124,12 +136,12 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
         if (groups.length > 0 && !get().activeFocusGroupId) {
           const firstId = groups[0].id
           set({ activeFocusGroupId: firstId })
-          invoke('settings_update', { activeFocusGroupId: firstId }).catch(() => {})
+          invoke('settings_update', { updates: { activeFocusGroupId: firstId } }).catch(() => {})
         }
       } else {
         set({ activeFocusGroupId: null })
       }
-      await invoke('settings_update', { focusGroupsEnabled: enabled })
+      await invoke('settings_update', { updates: { focusGroupsEnabled: enabled } })
     } catch (err) {
       console.error('[focus-groups] setFocusGroupsEnabled failed:', err)
     }

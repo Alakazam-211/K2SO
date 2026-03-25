@@ -459,7 +459,7 @@ export const useTimerStore = create<TimerState>((set, get) => ({
     try {
       const currentSettings = await invoke<any>('settings_get')
       const timer = { ...(currentSettings.timer ?? {}), [key]: value }
-      await invoke('settings_update', { timer })
+      await invoke('settings_update', { updates: { timer } })
     } catch (err) {
       console.error('[timer] Failed to persist setting:', err)
     }

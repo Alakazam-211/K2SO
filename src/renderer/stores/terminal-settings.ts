@@ -6,22 +6,26 @@ import {
 } from '../../shared/constants'
 
 export type LinkClickMode = 'click' | 'cmd-click'
+export type ShortcutModifierLayout = 'cmd-active-cmdshift-pinned' | 'cmd-pinned-cmdshift-active'
 
 interface TerminalSettingsState {
   fontSize: number
   linkClickMode: LinkClickMode
   openLinksInSplitPane: boolean
+  shortcutLayout: ShortcutModifierLayout
   incrementFontSize: () => void
   decrementFontSize: () => void
   resetFontSize: () => void
   setLinkClickMode: (mode: LinkClickMode) => void
   setOpenLinksInSplitPane: (enabled: boolean) => void
+  setShortcutLayout: (layout: ShortcutModifierLayout) => void
 }
 
 export const useTerminalSettingsStore = create<TerminalSettingsState>((set) => ({
   fontSize: TERMINAL_FONT_SIZE_DEFAULT,
   linkClickMode: 'click' as LinkClickMode,
   openLinksInSplitPane: true,
+  shortcutLayout: 'cmd-active-cmdshift-pinned' as ShortcutModifierLayout,
 
   incrementFontSize: () => {
     set((state) => ({
@@ -45,6 +49,10 @@ export const useTerminalSettingsStore = create<TerminalSettingsState>((set) => (
 
   setOpenLinksInSplitPane: (enabled: boolean) => {
     set({ openLinksInSplitPane: enabled })
+  },
+
+  setShortcutLayout: (layout: ShortcutModifierLayout) => {
+    set({ shortcutLayout: layout })
   }
 }))
 

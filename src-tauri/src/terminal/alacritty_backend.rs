@@ -314,6 +314,14 @@ impl TerminalManager {
         pty_options.env.insert("COLORTERM".to_string(), "truecolor".to_string());
         pty_options.env.insert("PROMPT_EOL_MARK".to_string(), String::new());
 
+        // Agent lifecycle hook env vars
+        let hook_port = crate::agent_hooks::get_port();
+        if hook_port > 0 {
+            pty_options.env.insert("K2SO_PORT".to_string(), hook_port.to_string());
+            pty_options.env.insert("K2SO_PANE_ID".to_string(), id.clone());
+            pty_options.env.insert("K2SO_TAB_ID".to_string(), id.clone());
+        }
+
         // Strip unwanted env vars
         for (key, _) in std::env::vars() {
             if key.starts_with("ELECTRON_") || key.starts_with("VITE_") || key.starts_with("__vite") {

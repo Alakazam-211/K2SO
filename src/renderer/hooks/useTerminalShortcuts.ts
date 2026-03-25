@@ -4,7 +4,11 @@ import { useTabsStore } from '@/stores/tabs'
 import { usePresetsStore } from '@/stores/presets'
 import { useProjectsStore } from '@/stores/projects'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
+import { useActiveAgentsStore } from '@/stores/active-agents'
+import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import type { TerminalPane } from '@/stores/tabs'
+
+const TWENTY_FOUR_HOURS = 24 * 60 * 60
 
 /**
  * Registers global keyboard shortcuts for terminal tab/pane management.
@@ -37,6 +41,21 @@ export function useTerminalShortcuts(cwd: string): void {
         }
       }
 
+      // Cmd+Shift+1-9: switch to pinned or active workspace (depends on layout)
+      if (e.metaKey && e.shiftKey && !e.altKey && !e.ctrlKey) {
+        const num = parseInt(e.key, 10)
+        if (!isNaN(num) && num >= 1 && num <= 9) {
+          e.preventDefault()
+          const layout = useTerminalSettingsStore.getState().shortcutLayout
+          if (layout === 'cmd-active-cmdshift-pinned') {
+            switchToPinnedByIndex(num - 1)
+          } else {
+            switchToActiveByIndex(num - 1)
+          }
+          return
+        }
+      }
+
       // Only handle Cmd (Meta) shortcuts
       if (!e.metaKey) return
 
@@ -44,9 +63,19 @@ export function useTerminalShortcuts(cwd: string): void {
 
       switch (e.key) {
         case 't': {
-          if (e.shiftKey || e.altKey) return
+          if (e.altKey) return
           e.preventDefault()
-          state.addTab(cwd)
+          if (e.shiftKey) {
+            // Cmd+Shift+T: Launch default agent in new tab
+            const presetsState = usePresetsStore.getState()
+            const defaultPreset = presetsState.presets.find((p) => p.enabled)
+            if (defaultPreset) {
+              presetsState.launchPreset(defaultPreset.id, cwd, 'tab')
+            }
+          } else {
+            // Cmd+T: New blank tab
+            state.addTab(cwd)
+          }
           break
         }
 
@@ -64,7 +93,6 @@ export function useTerminalShortcuts(cwd: string): void {
           const activeTab = state.tabs.find((t) => t.id === state.activeTabId)
           if (!activeTab) return
 
-          // Find the first pane to split from
           const firstPaneId = getFirstLeaf(activeTab.mosaicTree)
           if (!firstPaneId) return
 
@@ -134,28 +162,16 @@ export function useTerminalShortcuts(cwd: string): void {
         }
 
         default: {
-          // Cmd+1-9 — switch to workspace by index
+          // Cmd+1-9/0 — switch to active or pinned workspace (depends on layout)
           const num = parseInt(e.key, 10)
-          if (num >= 1 && num <= 9 && !e.shiftKey && !e.altKey) {
+          if (!isNaN(num) && !e.shiftKey && !e.altKey) {
             e.preventDefault()
-            const projectsState = useProjectsStore.getState()
-            const focusState = useFocusGroupsStore.getState()
-
-            // Apply the same focus group filter as the sidebar
-            let filteredProjects = projectsState.projects
-            if (focusState.focusGroupsEnabled && focusState.activeFocusGroupId !== null) {
-              filteredProjects = filteredProjects.filter(
-                (p) => p.focusGroupId === focusState.activeFocusGroupId
-              )
-            }
-
-            const targetIdx = num - 1
-            if (targetIdx < filteredProjects.length) {
-              const project = filteredProjects[targetIdx]
-              const firstWorkspace = project.workspaces[0]
-              if (firstWorkspace) {
-                projectsState.setActiveWorkspace(project.id, firstWorkspace.id)
-              }
+            const layout = useTerminalSettingsStore.getState().shortcutLayout
+            const targetIdx = num === 0 ? 9 : num - 1
+            if (layout === 'cmd-active-cmdshift-pinned') {
+              switchToActiveByIndex(targetIdx)
+            } else {
+              switchToPinnedByIndex(targetIdx)
             }
           }
           break
@@ -168,6 +184,61 @@ export function useTerminalShortcuts(cwd: string): void {
       window.removeEventListener('keydown', handler)
     }
   }, [cwd])
+}
+
+// ── Shortcut helpers ─────────────────────────────────────────────────────
+
+function switchToPinnedByIndex(targetIdx: number): void {
+  const projectsState = useProjectsStore.getState()
+  const pinnedProjects = projectsState.projects.filter((p) => p.pinned)
+
+  // Build flat list of all workspaces across pinned projects
+  let flatIdx = 0
+  for (const project of pinnedProjects) {
+    const workspaces = project.worktreeMode === 1 && project.workspaces.length > 0
+      ? project.workspaces
+      : project.workspaces.slice(0, 1)
+
+    for (const ws of workspaces) {
+      if (flatIdx === targetIdx) {
+        const focusState = useFocusGroupsStore.getState()
+        if (focusState.focusGroupsEnabled && project.focusGroupId !== focusState.activeFocusGroupId) {
+          focusState.setActiveFocusGroup(project.focusGroupId)
+        }
+        projectsState.setActiveWorkspace(project.id, ws.id)
+        return
+      }
+      flatIdx++
+    }
+  }
+}
+
+function switchToActiveByIndex(targetIdx: number): void {
+  const projectsState = useProjectsStore.getState()
+  const hasAgents = useActiveAgentsStore.getState().hasActiveAgents()
+  const bgWorkspaces = useTabsStore.getState().backgroundWorkspaces
+  const now = Math.floor(Date.now() / 1000)
+
+  const activeItems = projectsState.projects.filter((p) => {
+    if (p.pinned) return false
+    if (p.manuallyActive) return true
+    if (p.id === projectsState.activeProjectId && hasAgents) return true
+    if (Object.keys(bgWorkspaces).some((k) => k.startsWith(`${p.id}:`))) return true
+    if (p.lastInteractionAt && (now - p.lastInteractionAt) < TWENTY_FOUR_HOURS) return true
+    return false
+  })
+
+  if (targetIdx < activeItems.length) {
+    const project = activeItems[targetIdx]
+    const firstWorkspace = project.workspaces[0]
+    if (firstWorkspace) {
+      const focusState = useFocusGroupsStore.getState()
+      if (focusState.focusGroupsEnabled && project.focusGroupId !== focusState.activeFocusGroupId) {
+        focusState.setActiveFocusGroup(project.focusGroupId)
+      }
+      projectsState.setActiveWorkspace(project.id, firstWorkspace.id)
+    }
+  }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────

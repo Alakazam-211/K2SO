@@ -8,6 +8,7 @@ macro_rules! log_debug {
     }};
 }
 
+mod agent_hooks;
 mod commands;
 mod db;
 mod editors;
@@ -146,6 +147,20 @@ pub fn run() {
                     }
                 });
             }
+            // Start agent lifecycle notification server and register hooks
+            {
+                let hook_port = agent_hooks::start_server(app.handle().clone());
+                match agent_hooks::write_hook_script(hook_port) {
+                    Ok(script_path) => {
+                        agent_hooks::register_all_hooks(&script_path);
+                        log_debug!("[agent-hooks] Hook system ready on port {} with script {}", hook_port, script_path);
+                    }
+                    Err(e) => {
+                        log_debug!("[agent-hooks] Failed to write hook script: {}", e);
+                    }
+                }
+            }
+
             // Clean up any stale .tmp files from interrupted model downloads
             llm::download::cleanup_stale_downloads();
 
@@ -218,7 +233,10 @@ pub fn run() {
             commands::projects::projects_detect_icon,
             commands::projects::projects_upload_icon,
             commands::projects::projects_clear_icon,
+            commands::projects::projects_touch_interaction,
+            commands::projects::projects_touch_interaction_clear,
             commands::projects::projects_open_in_editor,
+            commands::projects::projects_open_in_terminal,
             commands::projects::projects_get_editors,
             commands::projects::projects_get_all_editors,
             commands::projects::projects_refresh_editors,

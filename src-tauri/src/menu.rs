@@ -32,6 +32,9 @@ pub fn create_menu(handle: &AppHandle) -> Result<Menu<tauri::Wry>, tauri::Error>
         &[
             &MenuItem::with_id(handle, "new-document", "New Document", true, Some("CmdOrCtrl+N"))?,
             &MenuItem::with_id(handle, "new-tab", "New Tab", true, Some("CmdOrCtrl+T"))?,
+            &MenuItem::with_id(handle, "launch-agent", "Launch Default Agent", true, Some("CmdOrCtrl+Shift+T"))?,
+            &PredefinedMenuItem::separator(handle)?,
+            &MenuItem::with_id(handle, "split-pane", "Split Pane", true, Some("CmdOrCtrl+D"))?,
             &PredefinedMenuItem::separator(handle)?,
             &MenuItem::with_id(handle, "open-workspace", "Open Workspace...", true, Some("CmdOrCtrl+O"))?,
             &PredefinedMenuItem::separator(handle)?,
@@ -129,6 +132,12 @@ pub fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
         }
         "new-tab" => {
             emit_to_focused(app, "menu:new-tab");
+        }
+        "launch-agent" => {
+            emit_to_focused(app, "menu:launch-agent");
+        }
+        "split-pane" => {
+            emit_to_focused(app, "menu:split-pane");
         }
         "open-workspace" => {
             emit_to_focused(app, "menu:open-workspace");

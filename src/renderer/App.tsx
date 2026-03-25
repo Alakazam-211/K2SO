@@ -245,6 +245,37 @@ export default function App(): React.JSX.Element {
         const cwd = ws?.worktreePath ?? proj?.path ?? '~'
         useTabsStore.getState().addTab(cwd)
       }).then((fn) => unlisteners.push(fn))
+      listen('menu:launch-agent', async () => {
+        const ps = useProjectsStore.getState()
+        const proj = ps.projects.find((p) => p.id === ps.activeProjectId)
+        const ws = proj?.workspaces.find((w) => w.id === ps.activeWorkspaceId)
+        const cwd = ws?.worktreePath ?? proj?.path ?? '~'
+        const { usePresetsStore: presetsStore } = await import('@/stores/presets')
+        const state = presetsStore.getState()
+        const defaultPreset = state.presets.find((p: any) => p.enabled)
+        if (defaultPreset) {
+          state.launchPreset(defaultPreset.id, cwd, 'tab')
+        }
+      }).then((fn) => unlisteners.push(fn))
+      listen('menu:split-pane', () => {
+        const tabsState = useTabsStore.getState()
+        const activeTab = tabsState.tabs.find((t) => t.id === tabsState.activeTabId)
+        if (!activeTab) return
+        const getLeaf = (t: unknown): string | null => {
+          if (!t) return null
+          if (typeof t === 'string') return t
+          if (typeof t === 'object' && t !== null && 'first' in t) return getLeaf((t as any).first)
+          return null
+        }
+        const firstPaneId = getLeaf(activeTab.mosaicTree)
+        if (!firstPaneId) return
+        const ps = useProjectsStore.getState()
+        const proj = ps.projects.find((p) => p.id === ps.activeProjectId)
+        const ws = proj?.workspaces.find((w) => w.id === ps.activeWorkspaceId)
+        const cwd = ws?.worktreePath ?? proj?.path ?? '~'
+        const newPaneId = crypto.randomUUID()
+        tabsState.splitPane(activeTab.id, firstPaneId, newPaneId, { type: 'terminal', terminalId: newPaneId, cwd }, 'column')
+      }).then((fn) => unlisteners.push(fn))
       listen('menu:open-workspace', () => {
         import('@tauri-apps/api/core').then(({ invoke }) => {
           invoke<string | null>('projects_pick_folder').then((path) => {

@@ -22,6 +22,7 @@ import type { HotkeyDefinition } from '@shared/hotkeys'
 import DisableWorktreesDialog from './DisableWorktreesDialog'
 import { showContextMenu } from '@/lib/context-menu'
 import AgentIcon from '@/components/AgentIcon/AgentIcon'
+import { KeyCombo } from '@/components/KeySymbol'
 import { checkForUpdate } from '@/hooks/useUpdateChecker'
 import type { UpdateInfo } from '@/hooks/useUpdateChecker'
 import {
@@ -377,7 +378,7 @@ function TerminalSection(): React.JSX.Element {
             value={linkClickMode}
             options={[
               { value: 'click', label: 'Click' },
-              { value: 'cmd-click', label: '⌘ + Click' },
+              { value: 'cmd-click', label: '\u2318 + Click' },
             ]}
             onChange={(v) => setLinkClickMode(v as LinkClickMode)}
           />
@@ -402,6 +403,7 @@ function TerminalSection(): React.JSX.Element {
             />
           </button>
         </SettingRow>
+
       </div>
     </div>
   )
@@ -425,25 +427,24 @@ interface PresetFormState {
   icon: string
 }
 
-function DefaultAgentPicker({ presets }: { presets: { id: string; label: string; command: string }[] }): React.JSX.Element {
+function DefaultAgentPickerInline({ presets }: { presets: { id: string; label: string; command: string }[] }): React.JSX.Element {
   const defaultAgent = useSettingsStore((s) => s.defaultAgent)
   const setDefaultAgent = useSettingsStore((s) => s.setDefaultAgent)
 
-  // Extract the base command from each preset for matching
   const agentOptions = presets.map((p) => ({
+    value: p.command.split(/\s+/)[0],
     label: p.label,
-    command: p.command.split(/\s+/)[0],
   }))
 
   return (
-    <div>
-      <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-1">Default AI Agent</h2>
-      <p className="text-[10px] text-[var(--color-text-muted)] mb-3">
-        The agent launched when you send coding tasks from the assistant (Cmd+L).
-      </p>
+    <div className="flex items-center justify-between px-3 py-2.5">
+      <div>
+        <div className="text-xs text-[var(--color-text-secondary)]">Default AI Agent</div>
+        <div className="text-[10px] text-[var(--color-text-muted)] mt-0.5">Launched with <KeyCombo combo="⇧⌘" />T or from the assistant</div>
+      </div>
       <SettingDropdown
         value={defaultAgent}
-        options={agentOptions.map((opt) => ({ value: opt.command, label: `${opt.label} (${opt.command})` }))}
+        options={agentOptions}
         onChange={setDefaultAgent}
       />
     </div>
@@ -452,6 +453,9 @@ function DefaultAgentPicker({ presets }: { presets: { id: string; label: string;
 
 function EditorsAgentsSection(): React.JSX.Element {
   const { presets, fetchPresets } = usePresetsStore()
+  const projectSettings = useSettingsStore((s) => s.projectSettings)
+  const updateProjectSetting = useSettingsStore((s) => s.updateProjectSetting)
+  const fetchSettings = useSettingsStore((s) => s.fetchSettings)
   const [editors, setEditors] = useState<EditorDetected[]>([])
   const [editorsLoading, setEditorsLoading] = useState(false)
   const [presetForm, setPresetForm] = useState<PresetFormState>({
@@ -638,8 +642,39 @@ function EditorsAgentsSection(): React.JSX.Element {
 
   return (
     <div className="max-w-2xl space-y-8">
-      {/* ── Default Agent ── */}
-      <DefaultAgentPicker presets={presets} />
+      {/* ── Defaults ── */}
+      <div>
+        <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-3">Defaults</h2>
+        <div className="border border-[var(--color-border)]">
+          <div className="flex items-center justify-between px-3 py-2.5 border-b border-[var(--color-border)]">
+            <div>
+              <div className="text-xs text-[var(--color-text-secondary)]">Default Editor</div>
+              <div className="text-[10px] text-[var(--color-text-muted)] mt-0.5">Opens files and projects with this editor</div>
+            </div>
+            <SettingDropdown
+              value={(projectSettings['__global__'] as any)?.defaultEditor ?? editorApps.find((e) => e.installed)?.label ?? 'Cursor'}
+              options={editorApps.filter((e) => e.installed).map((ed) => ({ value: ed.label, label: ed.label }))}
+              onChange={(v) => updateProjectSetting('__global__', 'defaultEditor', v)}
+            />
+          </div>
+          {/* Default Terminal */}
+          <div className="flex items-center justify-between px-3 py-2.5 border-b border-[var(--color-border)]">
+            <div>
+              <div className="text-xs text-[var(--color-text-secondary)]">Default Terminal</div>
+              <div className="text-[10px] text-[var(--color-text-muted)] mt-0.5">Right-click a tab to open in this terminal</div>
+            </div>
+            <SettingDropdown
+              value={(projectSettings['__global__'] as any)?.defaultTerminal ?? 'Terminal'}
+              options={[
+                { value: 'Terminal', label: 'Terminal' },
+                ...terminalApps.filter((e) => e.installed).map((ed) => ({ value: ed.label, label: ed.label })),
+              ]}
+              onChange={(v) => updateProjectSetting('__global__', 'defaultTerminal', v)}
+            />
+          </div>
+          <DefaultAgentPickerInline presets={presets} />
+        </div>
+      </div>
 
       {/* ── Editors ── */}
       <div>
@@ -735,19 +770,6 @@ function EditorsAgentsSection(): React.JSX.Element {
             >
               {dragOverIdx === i && <div className="absolute left-0 right-0 top-0 h-[2px] bg-[var(--color-accent)] z-10" />}
               {dragOverIdx === presets.length && i === presets.length - 1 && <div className="absolute left-0 right-0 bottom-0 h-[2px] bg-[var(--color-accent)] z-10" />}
-              {/* Drag handle */}
-              <svg
-                width="6" height="10" viewBox="0 0 6 10"
-                fill="currentColor"
-                className="flex-shrink-0 opacity-0 group-hover:opacity-40 transition-opacity text-[var(--color-text-muted)]"
-              >
-                <circle cx="1.5" cy="1.5" r="1" />
-                <circle cx="4.5" cy="1.5" r="1" />
-                <circle cx="1.5" cy="5" r="1" />
-                <circle cx="4.5" cy="5" r="1" />
-                <circle cx="1.5" cy="8.5" r="1" />
-                <circle cx="4.5" cy="8.5" r="1" />
-              </svg>
 
               {/* Icon — emoji override, otherwise custom drawn icon */}
               <span className="w-5 flex items-center justify-center flex-shrink-0">
@@ -1055,6 +1077,8 @@ function KeybindingsSection(): React.JSX.Element {
   const updateKeybinding = useSettingsStore((s) => s.updateKeybinding)
   const resetKeybinding = useSettingsStore((s) => s.resetKeybinding)
   const resetAllKeybindings = useSettingsStore((s) => s.resetAllKeybindings)
+  const shortcutLayout = useTerminalSettingsStore((s) => s.shortcutLayout)
+  const setShortcutLayout = useTerminalSettingsStore((s) => s.setShortcutLayout)
   const [capturing, setCapturing] = useState<string | null>(null)
 
   // Build a map of combo -> ids to detect conflicts
@@ -1093,12 +1117,57 @@ function KeybindingsSection(): React.JSX.Element {
         Click a binding to rebind. Press Escape to cancel. Reserved keys: {RESERVED_KEYS.join(', ')}
       </div>
 
+      {/* Workspace number shortcut layout */}
+      <div className="mb-4 border border-[var(--color-border)] px-3 py-2.5 flex items-center justify-between">
+        <div>
+          <div className="text-xs text-[var(--color-text-primary)]">Workspace Number Shortcuts</div>
+          <div className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
+            {shortcutLayout === 'cmd-active-cmdshift-pinned'
+              ? <><KeyCombo combo="⌘" /> 1-9 switches Active, <KeyCombo combo="⇧⌘" /> 1-9 switches Pinned</>
+              : <><KeyCombo combo="⌘" /> 1-9 switches Pinned, <KeyCombo combo="⇧⌘" /> 1-9 switches Active</>
+            }
+          </div>
+        </div>
+        <button
+          onClick={() => setShortcutLayout(
+            shortcutLayout === 'cmd-active-cmdshift-pinned'
+              ? 'cmd-pinned-cmdshift-active'
+              : 'cmd-active-cmdshift-pinned'
+          )}
+          className="px-3 py-1 text-xs text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] no-drag cursor-pointer font-mono flex-shrink-0"
+        >
+          Swap
+        </button>
+      </div>
+
       <div className="space-y-4">
         {grouped.map(({ category, items }) => (
           <div key={category}>
             <div className="text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wider mb-1 px-1">
               {category}
             </div>
+            {category === 'Navigation' && (
+              <div className="border border-[var(--color-border)] mb-px">
+                <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)]">
+                  <div>
+                    <span className="text-xs text-[var(--color-text-secondary)]">Active Workspaces</span>
+                    <span className="text-[10px] text-[var(--color-text-muted)] ml-2">1-9</span>
+                  </div>
+                  <span className="text-xs font-mono text-[var(--color-text-muted)] bg-white/[0.06] px-2 py-0.5">
+                    <KeyCombo combo={shortcutLayout === 'cmd-active-cmdshift-pinned' ? '⌘ 1-9' : '⇧⌘ 1-9'} />
+                  </span>
+                </div>
+                <div className="flex items-center justify-between px-3 py-2">
+                  <div>
+                    <span className="text-xs text-[var(--color-text-secondary)]">Pinned Workspaces</span>
+                    <span className="text-[10px] text-[var(--color-text-muted)] ml-2">1-9</span>
+                  </div>
+                  <span className="text-xs font-mono text-[var(--color-text-muted)] bg-white/[0.06] px-2 py-0.5">
+                    <KeyCombo combo={shortcutLayout === 'cmd-active-cmdshift-pinned' ? '⇧⌘ 1-9' : '⌘ 1-9'} />
+                  </span>
+                </div>
+              </div>
+            )}
             <div className="border border-[var(--color-border)]">
               {items.map((hotkey, i) => (
                 <KeybindingRow
@@ -1209,7 +1278,7 @@ function KeybindingRow({
                 : 'bg-[var(--color-bg-surface)] border-[var(--color-border)] text-[var(--color-text-primary)]'
             } hover:border-[var(--color-text-muted)]`}
           >
-            {formatKeyCombo(combo)}
+            <KeyCombo combo={formatKeyCombo(combo)} />
           </button>
         )}
 
@@ -2604,8 +2673,8 @@ function ProjectDetail({
   focusGroups: ReturnType<typeof useFocusGroupsStore.getState>['focusGroups']
   focusGroupsEnabled: boolean
   handleToggleWorktree: (projectId: string, currentMode: number) => Promise<void>
-  projectSettings: Record<string, { defaultEditor?: string }>
-  updateProjectSetting: (projectId: string, editor: string) => void
+  projectSettings: Record<string, Record<string, any>>
+  updateProjectSetting: (projectId: string, key: string, value: string) => void
   removeProject: (id: string) => Promise<void>
   assignProjectToGroup: (projectId: string, groupId: string | null) => Promise<void>
   fetchProjects: () => Promise<void>
@@ -2781,16 +2850,6 @@ function ProjectDetail({
               }`}
             />
           </button>
-        </div>
-
-        {/* Default editor */}
-        <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
-          <span className="text-xs text-[var(--color-text-secondary)]">Default Editor</span>
-          <SettingDropdown
-            value={projectSettings[project.id]?.defaultEditor ?? 'Cursor'}
-            options={editors.map((ed) => ({ value: ed, label: ed }))}
-            onChange={(v) => updateProjectSetting(project.id, v)}
-          />
         </div>
 
         {/* Color */}

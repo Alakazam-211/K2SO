@@ -335,6 +335,7 @@ pub fn projects_update(
     tab_order: Option<i64>,
     worktree_mode: Option<i64>,
     pinned: Option<i64>,
+    manually_active: Option<i64>,
     icon_url: Option<String>,
 ) -> Result<Project, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -355,6 +356,7 @@ pub fn projects_update(
         icon_param,
         None,
         pinned,
+        manually_active,
     )
     .map_err(|e| e.to_string())?;
     let result = Project::get(&conn, &id).map_err(|e| e.to_string())?;
@@ -375,7 +377,7 @@ pub fn projects_enable_worktrees(
 
     let result = with_transaction(&conn, || {
         // Set worktree_mode = 1
-        Project::update(&conn, &project_id, None, None, None, None, Some(1), None, None, None)
+        Project::update(&conn, &project_id, None, None, None, None, Some(1), None, None, None, None)
             .map_err(|e| e.to_string())?;
 
         // Get existing workspace records
@@ -437,7 +439,7 @@ pub fn projects_delete(app: AppHandle, state: State<'_, AppState>, id: String) -
 pub fn projects_reorder(app: AppHandle, state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     for (i, id) in ids.iter().enumerate() {
-        Project::update(&conn, id, None, None, None, Some(i as i64), None, None, None, None)
+        Project::update(&conn, id, None, None, None, Some(i as i64), None, None, None, None, None)
             .map_err(|e| e.to_string())?;
     }
     let _ = app.emit("sync:projects", ());
@@ -577,7 +579,7 @@ fn reconcile_focus_group(
         new_id
     };
 
-    Project::update(conn, project_id, None, None, None, None, None, None, Some(Some(group_id.as_str())), None)
+    Project::update(conn, project_id, None, None, None, None, None, None, Some(Some(group_id.as_str())), None, None)
         .map_err(|e| e.to_string())?;
 
     Ok(())
@@ -742,7 +744,7 @@ pub fn projects_get_icon(
             let conn = state.db.lock().map_err(|e| e.to_string())?;
             Project::update(
                 &conn, pid, None, None, None, None, None,
-                Some(Some(data_url.as_str())), None, None,
+                Some(Some(data_url.as_str())), None, None, None,
             )
             .ok();
         }
@@ -769,7 +771,7 @@ pub fn projects_detect_icon(
     if let Some(data_url) = detect_project_icon(&project.path) {
         Project::update(
             &conn, &project_id, None, None, None, None, None,
-            Some(Some(data_url.as_str())), None, None,
+            Some(Some(data_url.as_str())), None, None, None,
         )
         .map_err(|e| e.to_string())?;
         Ok(IconResult {
@@ -818,7 +820,7 @@ pub async fn projects_upload_icon(
             let conn = state.db.lock().map_err(|e| e.to_string())?;
             Project::update(
                 &conn, &project_id, None, None, None, None, None,
-                Some(Some(data_url.as_str())), None, None,
+                Some(Some(data_url.as_str())), None, None, None,
             )
             .map_err(|e| e.to_string())?;
 
@@ -840,11 +842,29 @@ pub fn projects_clear_icon(
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     Project::update(
         &conn, &project_id, None, None, None, None, None,
-        Some(None), None, None,
+        Some(None), None, None, None,
     )
     .map_err(|e| e.to_string())?;
     let _ = app.emit("sync:projects", ());
     Ok(())
+}
+
+#[tauri::command]
+pub fn projects_touch_interaction(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    Project::touch_interaction(&conn, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn projects_touch_interaction_clear(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    Project::clear_interaction(&conn, &id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -855,6 +875,11 @@ pub fn projects_open_in_editor(editor_id: String, path: String) -> Result<(), St
 #[tauri::command]
 pub fn projects_get_editors() -> Result<Vec<EditorInfo>, String> {
     Ok(editors::get_installed_editors())
+}
+
+#[tauri::command]
+pub fn projects_open_in_terminal(terminal_app: String, path: String) -> Result<(), String> {
+    editors::open_in_terminal(&terminal_app, &path)
 }
 
 #[tauri::command]

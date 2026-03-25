@@ -4,6 +4,7 @@ import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
 import { useSettingsStore } from '@/stores/settings'
 import AgentIcon from '@/components/AgentIcon/AgentIcon'
+import { KeyCombo } from '@/components/KeySymbol'
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -531,7 +532,7 @@ export default function ChatHistory(): React.JSX.Element {
               title="Search agentically with your default agent (⌘↵)"
             >
               <span>Search Agentically</span>
-              <span className="text-[10px] opacity-60">⌘↵</span>
+              <KeyCombo combo="⌘↵" className="text-[10px] opacity-60" />
             </button>
           )}
         </div>

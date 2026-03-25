@@ -3,6 +3,7 @@ import { useProjectsStore, type ProjectWithWorkspaces } from '../../stores/proje
 import { useFocusGroupsStore } from '../../stores/focus-groups'
 import { useSidebarStore } from '../../stores/sidebar'
 import { useSettingsStore } from '../../stores/settings'
+import { useActiveAgentsStore } from '../../stores/active-agents'
 import { useGitInfo, useGitChanges } from '../../hooks/useGit'
 import { invoke } from '@tauri-apps/api/core'
 import { showContextMenu } from '../../lib/context-menu'
@@ -24,6 +25,7 @@ function ProjectIcon({
 }): React.JSX.Element {
   const { data: gitInfo } = useGitInfo(project.path)
   const { data: changes } = useGitChanges(project.path)
+  const agentStatus = useActiveAgentsStore((s) => s.getProjectStatus(project.id))
 
   const hasDirtyFiles =
     gitInfo?.isRepo && (gitInfo.changedFiles + gitInfo.untrackedFiles) > 0
@@ -70,7 +72,10 @@ function ProjectIcon({
         iconUrl={project.iconUrl}
         size={20}
       />
-      {hasDirtyFiles && <span className="icon-rail-badge status-dot-dirty" />}
+      {agentStatus === 'working' && <span className="icon-rail-badge agent-dot-working" />}
+      {agentStatus === 'permission' && <span className="icon-rail-badge agent-dot-permission" />}
+      {agentStatus === 'review' && <span className="icon-rail-badge agent-dot-review" />}
+      {agentStatus === 'idle' && hasDirtyFiles && <span className="icon-rail-badge status-dot-dirty" />}
     </button>
   )
 }

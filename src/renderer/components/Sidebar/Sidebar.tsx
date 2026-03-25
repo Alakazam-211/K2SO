@@ -4,6 +4,8 @@ import { useFocusGroupsStore } from '@/stores/focus-groups'
 import { useSettingsStore } from '@/stores/settings'
 import { useAssistantStore } from '@/stores/assistant'
 import { useToastStore } from '@/stores/toast'
+import { useActiveAgentsStore } from '@/stores/active-agents'
+import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import { useCommandPaletteStore } from '@/stores/command-palette'
 import { invoke } from '@tauri-apps/api/core'
 import { showContextMenu } from '@/lib/context-menu'
@@ -14,6 +16,8 @@ import DisableWorktreesDialog from '../Settings/DisableWorktreesDialog'
 import ProjectAvatar from './ProjectAvatar'
 import SectionItem from './SectionItem'
 import FocusGroupDropdown from './FocusGroupDropdown'
+import ActiveBar from './ActiveBar'
+import { KeyCombo } from '@/components/KeySymbol'
 
 // ── Worktree git badge (shows changed files count) ──────────────────────────
 
@@ -70,6 +74,30 @@ function DiffStats({ path }: { path: string }): React.JSX.Element | null {
   )
 }
 
+// ── Agent status or diff stats (shows spinner when agent is working) ─────────
+
+function AgentOrDiffStats({ projectId, path }: { projectId: string; path: string }): React.JSX.Element | null {
+  const projectStatus = useActiveAgentsStore((s) => s.getProjectStatus(projectId))
+
+  if (projectStatus === 'working' || projectStatus === 'permission') {
+    return (
+      <span className={`flex-shrink-0 text-[11px] font-mono ${
+        projectStatus === 'permission' ? 'text-red-400' : 'text-[var(--color-text-muted)]'
+      }`}>
+        <span className="braille-spinner" />
+      </span>
+    )
+  }
+
+  if (projectStatus === 'review') {
+    return (
+      <span className="flex-shrink-0 text-[10px] text-green-400 font-mono">done</span>
+    )
+  }
+
+  return <DiffStats path={path} />
+}
+
 // ── Aggregated diff stats across all worktrees ──────────────────────────────
 
 function AggregatedDiffStats({
@@ -122,11 +150,13 @@ function AheadBehind({ path }: { path: string }): React.JSX.Element | null {
 function SingleProjectItem({
   project,
   isActive,
-  onContextMenu
+  onContextMenu,
+  shortcutIndex
 }: {
   project: ReturnType<typeof useProjectsStore.getState>['projects'][number]
   isActive: boolean
   onContextMenu: (e: React.MouseEvent, projectId: string) => void
+  shortcutIndex?: number
 }): React.JSX.Element {
   const setActiveWorkspace = useProjectsStore((s) => s.setActiveWorkspace)
   const activeWorkspaceId = useProjectsStore((s) => s.activeWorkspaceId)
@@ -168,15 +198,22 @@ function SingleProjectItem({
         <div className="flex flex-col justify-center min-w-0 flex-1">
           <div className="flex items-center gap-2 w-full">
             <span className="truncate flex-1">{project.name}</span>
-            <DiffStats path={project.path} />
+            <AgentOrDiffStats projectId={project.id} path={project.path} />
           </div>
           {gitInfo?.isRepo && gitInfo.currentBranch && (
-            <span
-              className="text-[10px] font-mono text-[var(--color-text-muted)] truncate"
-              title={gitInfo.currentBranch}
-            >
-              {gitInfo.currentBranch}
-            </span>
+            <div className="flex items-center gap-1">
+              <span
+                className="text-[10px] font-mono text-[var(--color-text-muted)] truncate flex-1"
+                title={gitInfo.currentBranch}
+              >
+                {gitInfo.currentBranch}
+              </span>
+              {shortcutIndex !== undefined && shortcutIndex < 9 && (
+                <span className="text-[10px] font-mono text-[var(--color-text-muted)] tabular-nums flex-shrink-0 py-0.5" style={{ paddingLeft: 8, paddingRight: 8 }}>
+                  {shortcutIndex + 1}
+                </span>
+              )}
+            </div>
           )}
         </div>
       </button>
@@ -191,13 +228,15 @@ function WorkspaceButton({
   projectPath,
   isActive,
   onClick,
-  onContextMenu
+  onContextMenu,
+  shortcutIndex
 }: {
   workspace: ReturnType<typeof useProjectsStore.getState>['projects'][number]['workspaces'][number]
   projectPath: string
   isActive: boolean
   onClick: () => void
   onContextMenu: (e: React.MouseEvent) => void
+  shortcutIndex?: number
 }): React.JSX.Element {
   const workspacePath = workspace.worktreePath ?? projectPath
   const isWorktree = workspace.type === 'worktree'
@@ -218,7 +257,7 @@ function WorkspaceButton({
         onContextMenu={onContextMenu}
       >
         <div className="flex items-center gap-2 w-full">
-          <WorkspaceStatusDot path={workspacePath} />
+          {isWorktree && <WorkspaceStatusDot path={workspacePath} />}
 
           {isWorktree ? (
             /* Git branch/worktree icon */
@@ -239,17 +278,14 @@ function WorkspaceButton({
 
           <span className="truncate flex-1">{workspace.name}</span>
 
-          <DiffStats path={workspacePath} />
-        </div>
+          <AgentOrDiffStats projectId={workspace.projectId} path={workspacePath} />
 
-        {branchName && (
-          <span
-            className="text-[10px] font-mono text-[var(--color-text-muted)] truncate pl-5"
-            title={branchName}
-          >
-            {branchName}
-          </span>
-        )}
+          {shortcutIndex !== undefined && shortcutIndex < 9 && (
+            <span className="text-[10px] font-mono text-[var(--color-text-muted)] tabular-nums flex-shrink-0 py-0.5" style={{ paddingLeft: 8, paddingRight: 8 }}>
+              {shortcutIndex + 1}
+            </span>
+          )}
+        </div>
       </button>
     </div>
   )
@@ -260,11 +296,13 @@ function WorkspaceButton({
 function ProjectItem({
   project,
   isActive,
-  onContextMenu
+  onContextMenu,
+  shortcutIndex
 }: {
   project: ReturnType<typeof useProjectsStore.getState>['projects'][number]
   isActive: boolean
   onContextMenu: (e: React.MouseEvent, projectId: string) => void
+  shortcutIndex?: number
 }): React.JSX.Element {
   const [isExpanded, setIsExpanded] = useState(isActive)
   const [showWorktreeDialog, setShowWorktreeDialog] = useState(false)
@@ -469,7 +507,7 @@ function ProjectItem({
       {isExpanded && (
         <div className="mt-0.5 mb-0.5">
           {/* Ungrouped worktrees first */}
-          {ungroupedWorkspaces.map((workspace) => (
+          {ungroupedWorkspaces.map((workspace, wsIdx) => (
             <WorkspaceButton
               key={workspace.id}
               workspace={workspace}
@@ -477,6 +515,7 @@ function ProjectItem({
               isActive={activeWorkspaceId === workspace.id}
               onClick={() => handleWorkspaceClick(workspace.id)}
               onContextMenu={(e) => handleWorkspaceContextMenu(e, workspace.id)}
+              shortcutIndex={shortcutIndex !== undefined ? shortcutIndex + wsIdx : undefined}
             />
           ))}
 
@@ -751,7 +790,8 @@ export default function Sidebar(): React.JSX.Element {
 
       menuItems.push(
         { id: 'separator-pin', label: '', type: 'separator' },
-        { id: 'toggle-pin', label: project.pinned ? 'Unpin' : 'Pin to Top' }
+        { id: 'toggle-pin', label: project.pinned ? 'Unpin' : 'Pin to Top' },
+        { id: 'toggle-active', label: project.manuallyActive ? 'Remove from Active Bar' : 'Add to Active Bar' }
       )
 
       menuItems.push(
@@ -800,6 +840,9 @@ export default function Sidebar(): React.JSX.Element {
       } else if (clickedId === 'toggle-pin') {
         await invoke('projects_update', { id: projectId, pinned: project.pinned ? 0 : 1 })
         await fetchProjects()
+      } else if (clickedId === 'toggle-active') {
+        await invoke('projects_update', { id: projectId, manuallyActive: project.manuallyActive ? 0 : 1 })
+        await fetchProjects()
       } else if (clickedId === 'remove') {
         await removeProject(projectId)
       }
@@ -814,13 +857,26 @@ export default function Sidebar(): React.JSX.Element {
       {/* Pinned workspaces — always visible above focus groups */}
       {pinnedProjects.length > 0 && (
         <div className="border-b border-[var(--color-border)]">
-          <div className="px-4 pt-3 pb-1 no-drag">
+          <div className="px-4 pt-3 pb-1 no-drag flex items-center gap-1.5">
             <span className="text-[10px] font-semibold tracking-wider text-[var(--color-text-muted)] uppercase">
               Pinned
             </span>
+            <span className="text-[9px] font-mono text-[var(--color-text-muted)] opacity-50">
+              <KeyCombo combo={useTerminalSettingsStore.getState().shortcutLayout === 'cmd-active-cmdshift-pinned' ? '⇧⌘ 1-9' : '⌘ 1-9'} />
+            </span>
           </div>
           <div ref={pinnedRef}>
-            {pinnedProjects.map((project, idx) => (
+            {(() => {
+              let flatIdx = 0
+              return pinnedProjects.map((project, idx) => {
+                const myStartIdx = flatIdx
+                // Count workspaces for this project to advance the counter
+                if (project.worktreeMode === 1 && project.workspaces.length > 0) {
+                  flatIdx += project.workspaces.length
+                } else {
+                  flatIdx += 1
+                }
+                return (
               <div
                 key={project.id}
                 data-project-id={project.id}
@@ -835,16 +891,20 @@ export default function Sidebar(): React.JSX.Element {
                     project={project}
                     isActive={project.id === activeProjectId}
                     onContextMenu={handleContextMenu}
+                    shortcutIndex={myStartIdx}
                   />
                 ) : (
                   <ProjectItem
                     project={project}
                     isActive={project.id === activeProjectId}
                     onContextMenu={handleContextMenu}
+                    shortcutIndex={myStartIdx}
                   />
                 )}
               </div>
-            ))}
+                )
+              })
+            })()}
             {dragZone === 'pinned' && dropIndex === pinnedProjects.length && (
               <div className="h-[2px] bg-[var(--color-accent)] mx-3" />
             )}
@@ -902,6 +962,9 @@ export default function Sidebar(): React.JSX.Element {
           </div>
         )}
       </div>
+
+      {/* Active workspaces dock */}
+      <ActiveBar />
 
       {/* Workspace limit warning */}
       {!focusGroupsEnabled && projects.length >= 15 && (

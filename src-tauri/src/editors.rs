@@ -153,3 +153,37 @@ pub fn open_in_editor(editor_id: &str, path: &str) -> Result<(), String> {
 
     Err(format!("No available launch method for: {}", editor.label))
 }
+
+pub fn open_in_terminal(terminal_app: &str, path: &str) -> Result<(), String> {
+    // "Terminal" is the macOS default — use `open` with the path
+    if terminal_app == "Terminal" {
+        Command::new("open")
+            .args(["-a", "Terminal", path])
+            .spawn()
+            .map_err(|e| format!("Failed to open Terminal: {}", e))?;
+        return Ok(());
+    }
+
+    // Look up in our known terminal apps
+    let all = get_all_editors();
+    let terminal = all
+        .iter()
+        .find(|e| e.type_ == "terminal" && e.label == terminal_app);
+
+    if let Some(term) = terminal {
+        if mac_app_exists(&term.mac_app) {
+            Command::new("open")
+                .args(["-a", &term.mac_app, path])
+                .spawn()
+                .map_err(|e| format!("Failed to open {}: {}", term.label, e))?;
+            return Ok(());
+        }
+    }
+
+    // Fallback: try `open -a <name> <path>` directly
+    Command::new("open")
+        .args(["-a", terminal_app, path])
+        .spawn()
+        .map_err(|e| format!("Failed to open {}: {}", terminal_app, e))?;
+    Ok(())
+}

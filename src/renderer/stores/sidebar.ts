@@ -24,7 +24,7 @@ export const useSidebarStore = create<SidebarState>((set, get) => ({
   toggle: () => {
     const next = !get().isCollapsed
     set({ isCollapsed: next })
-    invoke('settings_update', { sidebarCollapsed: next }).catch((e: unknown) => console.error('[sidebar]', e))
+    invoke('settings_update', { updates: { sidebarCollapsed: next } }).catch((e: unknown) => console.error('[sidebar]', e))
   },
 
   setWidth: (width: number) =>
@@ -32,12 +32,12 @@ export const useSidebarStore = create<SidebarState>((set, get) => ({
 
   collapse: () => {
     set({ isCollapsed: true })
-    invoke('settings_update', { sidebarCollapsed: true }).catch((e: unknown) => console.error('[sidebar]', e))
+    invoke('settings_update', { updates: { sidebarCollapsed: true } }).catch((e: unknown) => console.error('[sidebar]', e))
   },
 
   expand: () => {
     set({ isCollapsed: false })
-    invoke('settings_update', { sidebarCollapsed: false }).catch((e: unknown) => console.error('[sidebar]', e))
+    invoke('settings_update', { updates: { sidebarCollapsed: false } }).catch((e: unknown) => console.error('[sidebar]', e))
   },
 
   initFromSettings: async () => {

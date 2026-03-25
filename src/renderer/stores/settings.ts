@@ -23,7 +23,7 @@ interface SettingsState {
   keybindings: Record<string, string>
 
   // Per-project settings
-  projectSettings: Record<string, { defaultEditor?: string }>
+  projectSettings: Record<string, Record<string, any>>
 
   // AI Assistant
   aiAssistantEnabled: boolean
@@ -48,7 +48,7 @@ interface SettingsState {
   updateKeybinding: (id: string, combo: string) => void
   resetKeybinding: (id: string) => void
   resetAllKeybindings: () => void
-  updateProjectSetting: (projectId: string, editor: string) => void
+  updateProjectSetting: (projectId: string, key: string, value: string) => void
   setAiAssistantEnabled: (enabled: boolean) => void
   setDefaultAgent: (agent: string) => void
   resetAllSettings: () => void
@@ -62,6 +62,39 @@ const DEFAULT_TERMINAL: TerminalSettings = {
   scrollback: 5000,
   naturalTextEditing: true
 }
+
+/**
+ * Helper: sends a partial update to the backend, which deep-merges it
+ * with the current settings on disk and returns the canonical result.
+ * We apply the returned state to the store, ensuring we stay in sync
+ * with what was actually persisted — no extra fetchSettings round-trip.
+ */
+async function persistAndApply(
+  set: (state: Partial<SettingsState>) => void,
+  updates: Record<string, any>
+): Promise<void> {
+  _selfWriting = true
+  try {
+    const result = await invoke<any>('settings_update', { updates })
+    set({
+      terminal: result.terminal,
+      keybindings: result.keybindings,
+      projectSettings: result.projectSettings ?? {},
+      defaultAgent: result.defaultAgent ?? 'claude',
+      loaded: true
+    })
+  } finally {
+    // Clear after a tick so the sync:settings event (which fires async) is also skipped
+    setTimeout(() => { _selfWriting = false }, 50)
+  }
+}
+
+/**
+ * Flag: when true, fetchSettings() is a no-op.
+ * Set during our own writes to prevent the sync:settings listener
+ * from overwriting optimistic state with a stale round-trip.
+ */
+let _selfWriting = false
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   settingsOpen: false,
@@ -96,7 +129,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     const newTerminal = { ...prev, ...partial }
     set({ terminal: newTerminal })
     try {
-      await invoke('settings_update', { terminal: newTerminal })
+      await persistAndApply(set, { terminal: newTerminal })
     } catch (err) {
       console.error('[settings] Failed to persist terminal settings:', err)
       set({ terminal: prev })
@@ -108,7 +141,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     const keybindings = { ...prev, [id]: combo }
     set({ keybindings })
     try {
-      await invoke('settings_update', { keybindings })
+      await persistAndApply(set, { keybindings })
     } catch (err) {
       console.error('[settings] Failed to persist keybinding:', err)
       set({ keybindings: prev })
@@ -121,7 +154,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     delete keybindings[id]
     set({ keybindings })
     try {
-      await invoke('settings_update', { keybindings })
+      await persistAndApply(set, { keybindings })
     } catch (err) {
       console.error('[settings] Failed to persist keybinding reset:', err)
       set({ keybindings: prev })
@@ -132,22 +165,22 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     const prev = get().keybindings
     set({ keybindings: {} })
     try {
-      await invoke('settings_update', { keybindings: {} })
+      await persistAndApply(set, { keybindings: {} })
     } catch (err) {
       console.error('[settings] Failed to persist keybindings reset:', err)
       set({ keybindings: prev })
     }
   },
 
-  updateProjectSetting: async (projectId: string, editor: string) => {
+  updateProjectSetting: async (projectId: string, key: string, value: string) => {
     const prev = get().projectSettings
     const projectSettings = {
       ...prev,
-      [projectId]: { ...prev[projectId], defaultEditor: editor }
+      [projectId]: { ...prev[projectId], [key]: value }
     }
     set({ projectSettings })
     try {
-      await invoke('settings_update', { projectSettings })
+      await persistAndApply(set, { projectSettings })
     } catch (err) {
       console.error('[settings] Failed to persist project setting:', err)
       set({ projectSettings: prev })
@@ -158,7 +191,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     const prev = get().aiAssistantEnabled
     set({ aiAssistantEnabled: enabled })
     try {
-      await invoke('settings_update', { aiAssistantEnabled: enabled })
+      await persistAndApply(set, { aiAssistantEnabled: enabled })
     } catch (err) {
       console.error('[settings] Failed to persist AI assistant setting:', err)
       set({ aiAssistantEnabled: prev })
@@ -169,7 +202,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     const prev = get().defaultAgent
     set({ defaultAgent: agent })
     try {
-      await invoke('settings_update', { defaultAgent: agent })
+      await persistAndApply(set, { defaultAgent: agent })
     } catch (err) {
       console.error('[settings] Failed to persist default agent:', err)
       set({ defaultAgent: prev })
@@ -186,6 +219,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   fetchSettings: async () => {
+    if (_selfWriting) return
     const result = await invoke<any>('settings_get')
     set({
       terminal: result.terminal,

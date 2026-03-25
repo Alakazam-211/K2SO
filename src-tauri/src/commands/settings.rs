@@ -36,6 +36,11 @@ fn default_agent() -> String {
     "claude".to_string()
 }
 
+fn default_left_panel_tab() -> String { "files".to_string() }
+fn default_right_panel_tab() -> String { "history".to_string() }
+fn default_left_panel_tabs() -> Vec<String> { vec!["files".to_string()] }
+fn default_right_panel_tabs() -> Vec<String> { vec!["history".to_string(), "changes".to_string()] }
+
 fn default_terminal() -> TerminalSettings {
     TerminalSettings {
         font_family: "MesloLGM Nerd Font".to_string(),
@@ -103,12 +108,22 @@ pub struct AppSettings {
     pub left_panel_open: bool,
     #[serde(default)]
     pub right_panel_open: bool,
+    #[serde(default = "default_left_panel_tab")]
+    pub left_panel_active_tab: String,
+    #[serde(default = "default_right_panel_tab")]
+    pub right_panel_active_tab: String,
+    #[serde(default = "default_left_panel_tabs")]
+    pub left_panel_tabs: Vec<String>,
+    #[serde(default = "default_right_panel_tabs")]
+    pub right_panel_tabs: Vec<String>,
     /// Deprecated: workspace layouts now stored in SQLite workspace_sessions table.
     /// Kept for deserialization compat with old settings.json files; skipped on write.
     #[serde(default, skip_serializing)]
     pub workspace_layouts: HashMap<String, serde_json::Value>,
     #[serde(default = "default_agent")]
     pub default_agent: String,
+    #[serde(default)]
+    pub ai_assistant_enabled: bool,
     #[serde(default)]
     pub timer: TimerSettings,
 }
@@ -124,8 +139,13 @@ impl Default for AppSettings {
             sidebar_collapsed: false,
             left_panel_open: false,
             right_panel_open: false,
+            left_panel_active_tab: default_left_panel_tab(),
+            right_panel_active_tab: default_right_panel_tab(),
+            left_panel_tabs: default_left_panel_tabs(),
+            right_panel_tabs: default_right_panel_tabs(),
             workspace_layouts: HashMap::new(),
             default_agent: "claude".to_string(),
+            ai_assistant_enabled: false,
             timer: TimerSettings::default(),
         }
     }

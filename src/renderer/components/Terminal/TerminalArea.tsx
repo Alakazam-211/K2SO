@@ -4,6 +4,7 @@ import { PaneLayout } from '@/components/PaneLayout/PaneLayout'
 import { PresetsBar } from '@/components/PresetsBar/PresetsBar'
 import { useTabsStore } from '@/stores/tabs'
 import { useTerminalShortcuts } from '@/hooks/useTerminalShortcuts'
+import { KeyCombo } from '@/components/KeySymbol'
 
 interface TerminalAreaProps {
   cwd: string
@@ -173,7 +174,7 @@ function TabGroupColumn({
         })}
         {tabs.length === 0 && (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-[var(--color-text-muted)]">
-            <span>Press <kbd className="px-1.5 py-0.5 bg-white/[0.06] text-[var(--color-text-secondary)] font-mono text-xs">&#8984;T</kbd> for a terminal</span>
+            <span>Press <kbd className="px-1.5 py-0.5 bg-white/[0.06] text-[var(--color-text-secondary)] font-mono text-xs"><KeyCombo combo="⌘" />T</kbd> for a terminal</span>
           </div>
         )}
 

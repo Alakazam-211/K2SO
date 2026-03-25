@@ -1,7 +1,10 @@
 import { useCallback, useState, useRef } from 'react'
-import { useTabsStore } from '@/stores/tabs'
+import { useTabsStore, type TerminalItemData } from '@/stores/tabs'
+import { useSettingsStore } from '@/stores/settings'
 import { useActiveAgentsStore } from '@/stores/active-agents'
+import { invoke } from '@tauri-apps/api/core'
 import { startTabDrag } from '@/components/Terminal/TerminalArea'
+import { showContextMenu } from '@/lib/context-menu'
 import AgentCloseDialog from '@/components/AgentCloseDialog/AgentCloseDialog'
 
 interface TabBarProps {
@@ -118,6 +121,56 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
     [removeTabFromGroup, groupIndex]
   )
 
+  const handleTabContextMenu = useCallback(async (e: React.MouseEvent, tabId: string) => {
+    e.preventDefault()
+    e.stopPropagation()
+
+    // Get the default terminal name from settings
+    const settings = useSettingsStore.getState()
+    const defaultTerminal = (settings.projectSettings['__global__'] as any)?.defaultTerminal ?? 'Terminal'
+
+    const menuItems = [
+      { id: 'open-terminal', label: `Open in ${defaultTerminal}` },
+      { id: 'separator', label: '', type: 'separator' as const },
+      { id: 'close', label: 'Close Tab' },
+    ]
+
+    const clickedId = await showContextMenu(menuItems)
+    if (clickedId === 'close') {
+      const agents = useActiveAgentsStore.getState().getAgentsInTab(tabId)
+      if (agents.length > 0) {
+        setPendingClose({ tabId, agents })
+      } else {
+        removeTabFromGroup(groupIndex, tabId)
+      }
+    } else if (clickedId === 'open-terminal') {
+      // Find the cwd from the tab's first terminal pane
+      const tabsState = useTabsStore.getState()
+      const allTabs = groupIndex === 0 ? tabsState.tabs : tabsState.extraGroups[groupIndex - 1]?.tabs ?? []
+      const tab = allTabs.find((t) => t.id === tabId)
+      if (tab) {
+        for (const [, pg] of tab.paneGroups) {
+          for (const item of pg.items) {
+            if (item.type === 'terminal') {
+              const termCwd = (item.data as TerminalItemData).cwd
+              // Open the cwd in the default terminal app
+              if (defaultTerminal === 'Terminal') {
+                invoke('plugin:shell|open', { path: termCwd }).catch(() => {})
+              } else {
+                // Use the terminal app's CLI to open
+                invoke('projects_open_in_terminal', { terminalApp: defaultTerminal, path: termCwd }).catch(() => {
+                  // Fallback to generic open
+                  invoke('plugin:shell|open', { path: termCwd }).catch(() => {})
+                })
+              }
+              return
+            }
+          }
+        }
+      }
+    }
+  }, [groupIndex, removeTabFromGroup])
+
   return (
     <div
       className="flex h-9 items-center border-b border-[var(--color-border)] bg-[var(--color-bg-surface)] no-drag"
@@ -143,6 +196,7 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
                   : 'text-[var(--color-text-secondary)] hover:bg-white/[0.04]'
               } ${isDragged ? 'opacity-30' : ''}`}
               onClick={() => setActiveTabInGroup(groupIndex, tab.id)}
+              onContextMenu={(e) => handleTabContextMenu(e, tab.id)}
               onMouseDown={(e) => handleTabMouseDown(e, index, tab.id, tab.title)}
             >
               {showDropBefore && <div className="absolute left-0 top-1 bottom-1 w-[2px] bg-[var(--color-accent)] z-10" />}
