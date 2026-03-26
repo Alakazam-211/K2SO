@@ -4,14 +4,21 @@
 //! (Claude Code, Cursor, Gemini). Maps agent events to canonical lifecycle types
 //! and emits Tauri events to the frontend.
 
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
 static HOOK_PORT: AtomicU16 = AtomicU16::new(0);
 static HOOK_TOKEN: OnceLock<String> = OnceLock::new();
+/// Guard against concurrent triage runs for the same project path.
+static TRIAGE_IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn triage_lock() -> &'static Mutex<HashSet<String>> {
+    TRIAGE_IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
+}
 
 /// Get the port the notification server is listening on.
 pub fn get_port() -> u16 {
@@ -23,16 +30,11 @@ pub fn get_token() -> &'static str {
     HOOK_TOKEN.get().map(|s| s.as_str()).unwrap_or("")
 }
 
-/// Generate a random hex token.
+/// Generate a cryptographically secure random hex token.
 fn generate_token() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    // Mix with process ID for uniqueness across instances
-    let mixed = seed ^ (std::process::id() as u128) << 32;
-    format!("{:032x}", mixed)
+    let mut buf = [0u8; 16];
+    getrandom::getrandom(&mut buf).expect("failed to generate random token");
+    buf.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Canonical agent lifecycle event types.
@@ -368,31 +370,53 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                 Err(e) => Err(e),
                             }
                         } else {
-                            // Original heartbeat triage behavior
-                            crate::commands::k2so_agents::k2so_agents_triage_decide(project_path.clone())
-                                .map(|agents| {
-                                    // Emit launch events for each agent
-                                    for agent_name in &agents {
-                                        if agent_name == "__lead__" {
-                                            // Wake the lead agent — generate workspace CLAUDE.md and launch in project root
-                                            let _ = crate::commands::k2so_agents::k2so_agents_generate_workspace_claude_md(project_path.clone());
-                                            let _ = app_handle.emit("cli:agent-launch", serde_json::json!({
-                                                "command": "claude",
-                                                "args": ["-p", "You are the lead agent. Check the workspace inbox: `k2so work inbox` and triage any new items to the appropriate sub-agents using `k2so delegate`."],
-                                                "cwd": &project_path,
-                                                "agentName": "__lead__",
-                                            }));
-                                        } else {
-                                            // Build and emit launch for sub-agent
-                                            if let Ok(launch) = crate::commands::k2so_agents::k2so_agents_build_launch(
-                                                project_path.clone(), agent_name.clone(), None
-                                            ) {
-                                                let _ = app_handle.emit("cli:agent-launch", &launch);
+                            // Concurrency guard: skip if triage already running for this project
+                            let already_running = {
+                                let mut in_flight = triage_lock().lock().unwrap_or_else(|e| e.into_inner());
+                                if in_flight.contains(&project_path) {
+                                    true
+                                } else {
+                                    in_flight.insert(project_path.clone());
+                                    false
+                                }
+                            };
+
+                            if already_running {
+                                Ok(serde_json::json!({"count": 0, "launched": [], "skipped": "triage already in flight"}).to_string())
+                            } else {
+                                let triage_result = crate::commands::k2so_agents::k2so_agents_triage_decide(project_path.clone())
+                                    .map(|agents| {
+                                        // Emit launch events for each agent
+                                        for agent_name in &agents {
+                                            if agent_name == "__lead__" {
+                                                // Wake the lead agent — generate workspace CLAUDE.md and launch in project root
+                                                let _ = crate::commands::k2so_agents::k2so_agents_generate_workspace_claude_md(project_path.clone());
+                                                let _ = app_handle.emit("cli:agent-launch", serde_json::json!({
+                                                    "command": "claude",
+                                                    "args": ["--append-system-prompt", "Check the workspace inbox: `k2so work inbox` and triage any new items to the appropriate sub-agents using `k2so delegate`."],
+                                                    "cwd": &project_path,
+                                                    "agentName": "__lead__",
+                                                }));
+                                            } else {
+                                                // Build and emit launch for sub-agent
+                                                if let Ok(launch) = crate::commands::k2so_agents::k2so_agents_build_launch(
+                                                    project_path.clone(), agent_name.clone(), None
+                                                ) {
+                                                    let _ = app_handle.emit("cli:agent-launch", &launch);
+                                                }
                                             }
                                         }
-                                    }
-                                    serde_json::json!({"count": agents.len(), "launched": agents}).to_string()
-                                })
+                                        serde_json::json!({"count": agents.len(), "launched": agents}).to_string()
+                                    });
+
+                                // Release the triage lock
+                                {
+                                    let mut in_flight = triage_lock().lock().unwrap_or_else(|e| e.into_inner());
+                                    in_flight.remove(&project_path);
+                                }
+
+                                triage_result
+                            }
                         }
                     }
                     "/cli/settings" => {

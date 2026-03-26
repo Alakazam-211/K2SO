@@ -2438,6 +2438,7 @@ dependencies = [
  "dirs 5.0.1",
  "encoding_rs",
  "fontdue",
+ "getrandom 0.2.17",
  "git2",
  "glob",
  "image",

@@ -147,6 +147,12 @@ pub fn run() {
                                 }
                             }
                         }
+
+                        // Remove stale port file so heartbeat script won't curl a dead port
+                        if let Some(home) = dirs::home_dir() {
+                            let port_file = home.join(".k2so/heartbeat.port");
+                            let _ = std::fs::remove_file(&port_file);
+                        }
                     }
                 });
             }
@@ -167,8 +173,12 @@ pub fn run() {
                 let home = dirs::home_dir().unwrap_or_default();
                 let k2so_dir = home.join(".k2so");
                 let _ = std::fs::create_dir_all(&k2so_dir);
+                // Atomic write: tmp file + rename to prevent partial reads
                 let port_file = k2so_dir.join("heartbeat.port");
-                if let Err(e) = std::fs::write(&port_file, hook_port.to_string()) {
+                let port_tmp = k2so_dir.join("heartbeat.port.tmp");
+                if let Err(e) = std::fs::write(&port_tmp, hook_port.to_string())
+                    .and_then(|_| std::fs::rename(&port_tmp, &port_file))
+                {
                     log_debug!("[heartbeat] Failed to write port file: {}", e);
                 }
                 let token_file = k2so_dir.join("heartbeat.token");

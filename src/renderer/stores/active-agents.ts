@@ -20,6 +20,9 @@ export interface ActiveAgent {
   hookStatus: PaneStatus
 }
 
+/** Track in-flight triage calls per project to prevent duplicate launches */
+const _triageInFlight = new Set<string>()
+
 interface ActiveAgentsState {
   agents: Map<string, ActiveAgent>
   outputTimestamps: Map<string, number>
@@ -194,14 +197,20 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
     set({ paneStatuses: newStatuses })
 
     // Re-triage: if an agent session just stopped, check if there's more work
-    // to do for heartbeat-enabled projects
+    // to do for heartbeat-enabled projects (with concurrency guard)
     if (eventType === 'stop') {
       const projectId = get().paneProjectMap.get(paneId)
       if (projectId) {
         const project = useProjectsStore.getState().projects.find(p => p.id === projectId)
         if (project && project.heartbeatEnabled) {
+          // Skip if triage already in flight for this project
+          if (_triageInFlight.has(project.path)) return
+
           // Small delay to let the session clean up, then triage
           setTimeout(() => {
+            if (_triageInFlight.has(project.path)) return
+            _triageInFlight.add(project.path)
+
             invoke('k2so_agents_triage_decide', { projectPath: project.path })
               .then((agents: unknown) => {
                 const agentList = agents as string[]
@@ -219,6 +228,7 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
                 }
               })
               .catch(console.error)
+              .finally(() => { _triageInFlight.delete(project.path) })
           }, 3000)
         }
       }

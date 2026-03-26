@@ -1681,6 +1681,8 @@ pub fn k2so_agents_uninstall_heartbeat() -> Result<(), String> {
 }
 
 /// Update the heartbeat project list (called when heartbeat toggle changes).
+/// Auto-uninstalls the scheduler when no projects have heartbeat enabled,
+/// and auto-installs when at least one does.
 #[tauri::command]
 pub fn k2so_agents_update_heartbeat_projects(
     state: tauri::State<'_, crate::state::AppState>,
@@ -1700,6 +1702,23 @@ pub fn k2so_agents_update_heartbeat_projects(
     let paths_file = k2so_home.join("heartbeat-projects.txt");
     fs::write(&paths_file, heartbeat_paths.join("\n"))
         .map_err(|e| format!("Failed to write heartbeat projects: {}", e))?;
+
+    // Auto-manage scheduler lifecycle: uninstall when empty, install when needed
+    if heartbeat_paths.is_empty() {
+        #[cfg(target_os = "macos")]
+        { let _ = uninstall_heartbeat_launchd(); }
+        #[cfg(target_os = "linux")]
+        { let _ = uninstall_heartbeat_cron(); }
+    } else {
+        // Ensure scheduler is installed (idempotent — unloads before loading)
+        let script_path = k2so_home.join("heartbeat.sh");
+        if script_path.exists() {
+            #[cfg(target_os = "macos")]
+            { let _ = install_heartbeat_launchd(&script_path); }
+            #[cfg(target_os = "linux")]
+            { let _ = install_heartbeat_cron(&script_path); }
+        }
+    }
 
     Ok(())
 }
@@ -1721,15 +1740,32 @@ TOKEN_FILE="{home}/.k2so/heartbeat.token"
 
 ts() {{ date '+%Y-%m-%d %H:%M:%S'; }}
 
+# Pure-bash URL encoding (no python3 dependency)
+urlencode() {{
+    local string="$1" length="${{#1}}" i c
+    local encoded=""
+    for (( i = 0; i < length; i++ )); do
+        c="${{string:i:1}}"
+        case "$c" in
+            [a-zA-Z0-9._~-]) encoded+="$c" ;;
+            *) encoded+=$(printf '%%%02X' "'$c") ;;
+        esac
+    done
+    printf '%s' "$encoded"
+}}
+
 # Read K2SO port
 if [ ! -f "$PORT_FILE" ]; then
     exit 0
 fi
 PORT=$(cat "$PORT_FILE" 2>/dev/null)
-[ -z "$PORT" ] && exit 0
+if [ -z "$PORT" ] || ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
+    exit 0
+fi
 
-# Check if K2SO is alive
-if ! curl -s --connect-timeout 2 "http://127.0.0.1:$PORT/health" | grep -q "ok"; then
+# Check if K2SO is alive (exact match, not substring)
+HEALTH=$(curl -s --connect-timeout 2 "http://127.0.0.1:$PORT/health" 2>/dev/null)
+if [ "$HEALTH" != "ok" ]; then
     exit 0
 fi
 
@@ -1745,23 +1781,30 @@ if [ -f "$TOKEN_FILE" ]; then
 fi
 
 if [ -z "$TOKEN" ]; then
-    echo "$(ts) No auth token available — skipping heartbeat" >> "$LOG_FILE"
+    echo "$(ts) ERROR: No auth token available — skipping heartbeat" >> "$LOG_FILE"
     exit 0
 fi
 
 # Trigger triage for each heartbeat-enabled project
 while IFS= read -r project_path; do
     [ -z "$project_path" ] && continue
-    ENCODED_PATH=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$project_path', safe=''))" 2>/dev/null)
-    RESULT=$(curl -sG "http://127.0.0.1:$PORT/cli/heartbeat?token=$TOKEN&project=$ENCODED_PATH" --connect-timeout 5 --max-time 30 2>/dev/null)
-    COUNT=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null || echo 0)
-    if [ "$COUNT" -gt 0 ]; then
+    ENCODED_PATH=$(urlencode "$project_path")
+    RESULT=$(curl -sG "http://127.0.0.1:$PORT/cli/heartbeat?token=$TOKEN&project=$ENCODED_PATH" --connect-timeout 5 --max-time 30 2>>"$LOG_FILE")
+    if [ $? -ne 0 ]; then
+        echo "$(ts) ERROR: curl failed for $project_path" >> "$LOG_FILE"
+        continue
+    fi
+    # Extract count from JSON without python3 (pattern: "count":N)
+    COUNT=$(echo "$RESULT" | grep -o '"count":[0-9]*' | grep -o '[0-9]*' || echo 0)
+    if [ -n "$COUNT" ] && [ "$COUNT" -gt 0 ] 2>/dev/null; then
         echo "$(ts) Heartbeat: launched $COUNT agents for $project_path" >> "$LOG_FILE"
     fi
 done < "$PROJECTS_FILE"
 
-# Trim log
-tail -200 "$LOG_FILE" > "$LOG_FILE.tmp" 2>/dev/null && mv "$LOG_FILE.tmp" "$LOG_FILE"
+# Trim log (atomic: write to tmp then move)
+if [ -f "$LOG_FILE" ]; then
+    tail -200 "$LOG_FILE" > "$LOG_FILE.tmp" 2>/dev/null && mv -f "$LOG_FILE.tmp" "$LOG_FILE" 2>/dev/null
+fi
 "##, home = home)
 }
 
