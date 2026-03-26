@@ -368,6 +368,12 @@ pub fn run() {
             commands::workspace_sessions::workspace_session_load,
             commands::workspace_sessions::workspace_session_load_all,
             commands::workspace_sessions::workspace_session_delete,
+            // Claude Auth
+            commands::claude_auth::claude_auth_status,
+            commands::claude_auth::claude_auth_refresh,
+            commands::claude_auth::claude_auth_install_scheduler,
+            commands::claude_auth::claude_auth_uninstall_scheduler,
+            commands::claude_auth::claude_auth_scheduler_installed,
         ])
         .run(tauri::generate_context!())
         .expect("error while running K2SO");

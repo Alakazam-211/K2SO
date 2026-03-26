@@ -29,6 +29,9 @@ interface SettingsState {
   // AI Assistant
   aiAssistantEnabled: boolean
 
+  // Claude Auth auto-refresh (background scheduler)
+  claudeAuthAutoRefresh: boolean
+
   // Default agent CLI tool (e.g. 'claude', 'codex', 'gemini')
   defaultAgent: string
 
@@ -51,6 +54,7 @@ interface SettingsState {
   resetAllKeybindings: () => void
   updateProjectSetting: (projectId: string, key: string, value: string) => void
   setAiAssistantEnabled: (enabled: boolean) => void
+  setClaudeAuthAutoRefresh: (enabled: boolean) => void
   setDefaultAgent: (agent: string) => void
   resetAllSettings: () => void
   fetchSettings: () => Promise<void>
@@ -90,6 +94,7 @@ async function persistAndApply(
       keybindings: result.keybindings,
       projectSettings: result.projectSettings ?? {},
       defaultAgent: result.defaultAgent ?? 'claude',
+      claudeAuthAutoRefresh: result.claudeAuthAutoRefresh ?? false,
       loaded: true
     })
   } catch (e) {
@@ -104,6 +109,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   keybindings: {},
   projectSettings: {},
   aiAssistantEnabled: true,
+  claudeAuthAutoRefresh: false,
   defaultAgent: 'claude',
   initialProjectId: null,
   loaded: false,
@@ -199,6 +205,17 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }
   },
 
+  setClaudeAuthAutoRefresh: async (enabled: boolean) => {
+    const prev = get().claudeAuthAutoRefresh
+    set({ claudeAuthAutoRefresh: enabled })
+    try {
+      await persistAndApply(set, { claudeAuthAutoRefresh: enabled })
+    } catch (err) {
+      console.error('[settings] Failed to persist Claude auth auto-refresh setting:', err)
+      set({ claudeAuthAutoRefresh: prev })
+    }
+  },
+
   setDefaultAgent: async (agent: string) => {
     const prev = get().defaultAgent
     set({ defaultAgent: agent })
@@ -229,6 +246,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       keybindings: result.keybindings,
       projectSettings: result.projectSettings ?? {},
       defaultAgent: result.defaultAgent ?? 'claude',
+      claudeAuthAutoRefresh: result.claudeAuthAutoRefresh ?? false,
       loaded: true
     })
   }
