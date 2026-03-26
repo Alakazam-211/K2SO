@@ -17,6 +17,7 @@ pub struct K2soAgentInfo {
     pub inbox_count: usize,
     pub active_count: usize,
     pub done_count: usize,
+    pub pod_leader: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,12 +118,14 @@ pub fn k2so_agents_list(project_path: String) -> Result<Vec<K2soAgentInfo>, Stri
         let name = entry.file_name().to_string_lossy().to_string();
         let agent_md = entry.path().join("agent.md");
 
-        let role = if agent_md.exists() {
+        let (role, is_pod_leader) = if agent_md.exists() {
             let content = fs::read_to_string(&agent_md).unwrap_or_default();
             let fm = parse_frontmatter(&content);
-            fm.get("role").cloned().unwrap_or_default()
+            let role = fm.get("role").cloned().unwrap_or_default();
+            let is_leader = fm.get("pod_leader").map(|v| v == "true").unwrap_or(false);
+            (role, is_leader)
         } else {
-            String::new()
+            (String::new(), false)
         };
 
         let inbox_count = count_md_files(&agent_work_dir(&project_path, &name, "inbox"));
@@ -135,6 +138,7 @@ pub fn k2so_agents_list(project_path: String) -> Result<Vec<K2soAgentInfo>, Stri
             inbox_count,
             active_count,
             done_count,
+            pod_leader: is_pod_leader,
         });
     }
 
@@ -182,6 +186,7 @@ pub fn k2so_agents_create(
         inbox_count: 0,
         active_count: 0,
         done_count: 0,
+        pod_leader: false,
     })
 }
 
@@ -287,33 +292,88 @@ pub fn k2so_agents_work_create(
     })
 }
 
-/// Delegate a work item to another agent's inbox.
+/// Delegate a work item to an agent — the all-in-one command.
+///
+/// This is the primary way the lead agent assigns work. In one step, K2SO:
+/// 1. Moves the work item to the target agent's active/ folder
+/// 2. Creates a worktree (branch: `agent/<name>/<task-slug>`)
+/// 3. Writes a task-specific CLAUDE.md into the worktree root
+/// 4. Updates the work item frontmatter with worktree_path and branch
+/// 5. Emits a `cli:agent-launch` event so the frontend opens a Claude terminal
+///
+/// Returns JSON with { worktreePath, branch, agentName, taskFile } for the frontend.
 #[tauri::command]
 pub fn k2so_agents_delegate(
     project_path: String,
     target_agent: String,
     source_file: String,
-) -> Result<(), String> {
+) -> Result<serde_json::Value, String> {
     let source = PathBuf::from(&source_file);
     if !source.exists() {
         return Err(format!("Source file does not exist: {}", source_file));
     }
 
-    let target_dir = agent_work_dir(&project_path, &target_agent, "inbox");
-    if !target_dir.exists() {
+    let agent_d = agent_dir(&project_path, &target_agent);
+    if !agent_d.exists() {
         return Err(format!("Target agent '{}' does not exist", target_agent));
     }
 
-    let filename = source.file_name().ok_or("Invalid source filename")?;
-    let target = target_dir.join(filename);
-
+    // Read the work item
     let content = fs::read_to_string(&source).map_err(|e| e.to_string())?;
-    let updated = update_assigned_by(&content, "delegated");
+    let item = read_work_item(&source, "inbox")
+        .ok_or_else(|| "Could not parse work item".to_string())?;
 
-    fs::write(&target, &updated).map_err(|e| format!("Failed to write to target: {}", e))?;
+    // 1. Create a worktree for this task
+    let task_slug = item.filename.trim_end_matches(".md");
+    let branch_name = format!("agent/{}/{}", target_agent, task_slug);
+    let worktree = crate::git::create_worktree(&project_path, &branch_name)
+        .map_err(|e| format!("Failed to create worktree: {}", e))?;
+
+    // 2. Move work item to agent's active/ folder with worktree info
+    let active_dir = agent_work_dir(&project_path, &target_agent, "active");
+    fs::create_dir_all(&active_dir).ok();
+    let updated = update_assigned_by(&content, "delegated");
+    let updated = add_worktree_to_frontmatter(&updated, &worktree.path, &worktree.branch);
+    let active_file = active_dir.join(&item.filename);
+    fs::write(&active_file, &updated)
+        .map_err(|e| format!("Failed to write active work item: {}", e))?;
     fs::remove_file(&source).map_err(|e| format!("Failed to remove source: {}", e))?;
 
-    Ok(())
+    // 3. Generate a task-specific CLAUDE.md and write it to the worktree root
+    let claude_md = generate_agent_claude_md_content(&project_path, &target_agent, Some(&item))?;
+    let claude_md_path = PathBuf::from(&worktree.path).join("CLAUDE.md");
+    fs::write(&claude_md_path, &claude_md)
+        .map_err(|e| format!("Failed to write CLAUDE.md to worktree: {}", e))?;
+
+    // 4. Build the launch command for the frontend
+    let initial_prompt = format!(
+        "You are the K2SO agent \"{agent}\". You are working in a dedicated worktree at `{wt_path}` on branch `{branch}`.\n\n\
+        Your current task:\n**{title}** (priority: {priority})\n\n\
+        The full task description is in `.k2so/agents/{agent}/work/active/{filename}`.\n\n\
+        Instructions:\n\
+        1. Read the task file for full details and acceptance criteria\n\
+        2. Implement the changes — all your work happens in this worktree\n\
+        3. Commit your work to branch `{branch}`\n\
+        4. When done, run: `k2so work move --agent {agent} --file {filename} --from active --to done`\n\
+        5. Your work will be reviewed and either approved (merged to main) or sent back with feedback",
+        agent = target_agent,
+        wt_path = worktree.path,
+        branch = worktree.branch,
+        title = item.title,
+        priority = item.priority,
+        filename = item.filename,
+    );
+
+    Ok(serde_json::json!({
+        "command": "claude",
+        "args": ["--append-system-prompt", claude_md, "-p", initial_prompt],
+        "cwd": worktree.path,
+        "claudeMdPath": claude_md_path.to_string_lossy(),
+        "agentName": target_agent,
+        "worktreePath": worktree.path,
+        "branch": worktree.branch,
+        "taskFile": item.filename,
+    }))
 }
 
 /// Move a work item between folders (inbox → active, active → done, etc.)
@@ -465,14 +525,173 @@ pub fn is_agent_locked(project_path: &str, agent_name: &str) -> bool {
 
 // ── CLAUDE.md Generator ─────────────────────────────────────────────────
 
-/// Generate a CLAUDE.md for an agent and write it to the project root.
-/// Returns the generated content and the path it was written to.
+/// Generate a CLAUDE.md for an agent and write it to the agent's directory.
+/// Returns the generated content.
 #[tauri::command]
 pub fn k2so_agents_generate_claude_md(
     project_path: String,
     agent_name: String,
 ) -> Result<String, String> {
-    let dir = agent_dir(&project_path, &agent_name);
+    let md = generate_agent_claude_md_content(&project_path, &agent_name, None)?;
+
+    let claude_md_path = agent_dir(&project_path, &agent_name).join("CLAUDE.md");
+    fs::write(&claude_md_path, &md)
+        .map_err(|e| format!("Failed to write CLAUDE.md: {}", e))?;
+
+    Ok(md)
+}
+
+/// Build the launch command for an agent's Claude session.
+///
+/// This handles three cases:
+/// 1. Agent has active work with a worktree → resume in that worktree
+/// 2. Agent has inbox work → internally delegates (creates worktree, moves to active)
+/// 3. Agent has no work → launches in project root with empty-inbox prompt
+///
+/// Used by the UI "Launch" button and the heartbeat auto-launch.
+#[tauri::command]
+pub fn k2so_agents_build_launch(
+    project_path: String,
+    agent_name: String,
+    agent_cli_command: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let command = agent_cli_command.unwrap_or_else(|| "claude".to_string());
+
+    // Case 1: Check for active work with a worktree path (resume)
+    let active_dir = agent_work_dir(&project_path, &agent_name, "active");
+    if active_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&active_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "md") {
+                    if let Some(item) = read_work_item(&path, "active") {
+                        let content = fs::read_to_string(&path).unwrap_or_default();
+                        let fm = parse_frontmatter(&content);
+                        if let Some(wt_path) = fm.get("worktree_path") {
+                            let branch = fm.get("branch").cloned().unwrap_or_default();
+                            // Resume in the existing worktree
+                            let claude_md = generate_agent_claude_md_content(&project_path, &agent_name, Some(&item))?;
+                            let claude_md_path = PathBuf::from(wt_path).join("CLAUDE.md");
+                            fs::write(&claude_md_path, &claude_md).ok();
+
+                            let prompt = format!(
+                                "You are the K2SO agent \"{agent}\". Resuming work in worktree `{wt_path}` on branch `{branch}`.\n\n\
+                                Your current task: **{title}** (priority: {priority})\n\
+                                Task file: `.k2so/agents/{agent}/work/active/{filename}`\n\n\
+                                Continue where you left off. When done: `k2so work move --agent {agent} --file {filename} --from active --to done`",
+                                agent = agent_name, wt_path = wt_path, branch = branch,
+                                title = item.title, priority = item.priority, filename = item.filename,
+                            );
+
+                            return Ok(serde_json::json!({
+                                "command": command,
+                                "args": ["--append-system-prompt", claude_md, "-p", prompt],
+                                "cwd": wt_path,
+                                "claudeMdPath": claude_md_path.to_string_lossy(),
+                                "agentName": agent_name,
+                                "worktreePath": wt_path,
+                                "branch": branch,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Case 2: Check for inbox work → delegate (creates worktree + moves to active)
+    let inbox_dir = agent_work_dir(&project_path, &agent_name, "inbox");
+    if inbox_dir.exists() {
+        let mut items: Vec<(PathBuf, WorkItem)> = Vec::new();
+        if let Ok(entries) = fs::read_dir(&inbox_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "md") {
+                    if let Some(item) = read_work_item(&path, "inbox") {
+                        items.push((path, item));
+                    }
+                }
+            }
+        }
+        items.sort_by(|a, b| priority_rank(&a.1.priority).cmp(&priority_rank(&b.1.priority)));
+
+        if let Some((top_path, _)) = items.into_iter().next() {
+            // Use the delegate function — it does everything in one step
+            let source_file = top_path.to_string_lossy().to_string();
+            return k2so_agents_delegate(project_path, agent_name, source_file);
+        }
+    }
+
+    // Case 3: No work — launch in project root with general context
+    let claude_md = generate_agent_claude_md_content(&project_path, &agent_name, None)?;
+    let claude_md_path = agent_dir(&project_path, &agent_name).join("CLAUDE.md");
+    fs::write(&claude_md_path, &claude_md).ok();
+
+    let prompt = format!(
+        "You are the K2SO agent \"{}\". Your inbox is empty. Report your status and wait for work to be assigned.",
+        agent_name
+    );
+
+    Ok(serde_json::json!({
+        "command": command,
+        "args": ["--append-system-prompt", claude_md, "-p", prompt],
+        "cwd": project_path,
+        "claudeMdPath": claude_md_path.to_string_lossy(),
+        "agentName": agent_name,
+        "worktreePath": null,
+        "branch": null,
+    }))
+}
+
+/// Add worktree_path and branch to a work item's frontmatter.
+fn add_worktree_to_frontmatter(content: &str, worktree_path: &str, branch: &str) -> String {
+    if content.starts_with("---") {
+        if let Some(end_idx) = content[3..].find("---") {
+            let frontmatter = &content[3..3 + end_idx];
+            let body = &content[3 + end_idx + 3..];
+            return format!(
+                "---\n{}worktree_path: {}\nbranch: {}\n---{}",
+                frontmatter, worktree_path, branch, body
+            );
+        }
+    }
+    content.to_string()
+}
+
+/// Strip worktree_path and branch from a work item's frontmatter (used on rejection/retry).
+fn strip_worktree_from_frontmatter(content: &str) -> String {
+    if content.starts_with("---") {
+        if let Some(end_idx) = content[3..].find("---") {
+            let frontmatter = &content[3..3 + end_idx];
+            let body = &content[3 + end_idx + 3..];
+            let cleaned: String = frontmatter
+                .lines()
+                .filter(|line| !line.starts_with("worktree_path:") && !line.starts_with("branch:"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return format!("---\n{}\n---{}", cleaned.trim(), body);
+        }
+    }
+    content.to_string()
+}
+
+/// Log a warning for an agent (appends to .k2so/agents/<name>/agent.log).
+fn log_agent_warning(project_path: &str, agent_name: &str, message: &str) {
+    let log_path = agent_dir(project_path, agent_name).join("agent.log");
+    let entry = format!("[{}] WARN: {}\n", simple_date(), message);
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+        use std::io::Write;
+        let _ = file.write_all(entry.as_bytes());
+    }
+}
+
+/// Generate the CLAUDE.md content for an agent, optionally focused on a specific task.
+fn generate_agent_claude_md_content(
+    project_path: &str,
+    agent_name: &str,
+    current_task: Option<&WorkItem>,
+) -> Result<String, String> {
+    let dir = agent_dir(project_path, agent_name);
     if !dir.exists() {
         return Err(format!("Agent '{}' does not exist", agent_name));
     }
@@ -483,7 +702,6 @@ pub fn k2so_agents_generate_claude_md(
     let fm = parse_frontmatter(&agent_md);
     let role = fm.get("role").cloned().unwrap_or("AI Agent".to_string());
 
-    // Strip frontmatter to get body
     let agent_body = if agent_md.starts_with("---") {
         if let Some(end) = agent_md[3..].find("---") {
             agent_md[3 + end + 3..].trim().to_string()
@@ -494,41 +712,9 @@ pub fn k2so_agents_generate_claude_md(
         agent_md.clone()
     };
 
-    // Read inbox items
-    let inbox_dir = agent_work_dir(&project_path, &agent_name, "inbox");
-    let mut inbox_items = Vec::new();
-    if inbox_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&inbox_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "md") {
-                    if let Some(item) = read_work_item(&path, "inbox") {
-                        inbox_items.push(item);
-                    }
-                }
-            }
-        }
-    }
-
-    // Read active items
-    let active_dir = agent_work_dir(&project_path, &agent_name, "active");
-    let mut active_items = Vec::new();
-    if active_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&active_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "md") {
-                    if let Some(item) = read_work_item(&path, "active") {
-                        active_items.push(item);
-                    }
-                }
-            }
-        }
-    }
-
     // List other agents for delegation awareness
     let mut other_agents = Vec::new();
-    let agents_root = agents_dir(&project_path);
+    let agents_root = agents_dir(project_path);
     if agents_root.exists() {
         if let Ok(entries) = fs::read_dir(&agents_root) {
             for entry in entries.flatten() {
@@ -550,50 +736,30 @@ pub fn k2so_agents_generate_claude_md(
         }
     }
 
-    // Build the CLAUDE.md
     let mut md = String::new();
-
     md.push_str(&format!("# K2SO Agent: {}\n\n", agent_name));
     md.push_str(&format!("## Identity\n**Role:** {}\n\n", role));
     if !agent_body.is_empty() {
         md.push_str(&format!("{}\n\n", agent_body));
     }
 
-    // Current work
-    md.push_str("## Your Work\n\n");
+    // Current task (if launching with specific work)
+    if let Some(task) = current_task {
+        md.push_str("## Current Task\n\n");
+        md.push_str(&format!("**{}** (priority: {}, type: {})\n\n", task.title, task.priority, task.item_type));
+        md.push_str(&format!("Task file: `.k2so/agents/{}/work/active/{}`\n\n", agent_name, task.filename));
+        md.push_str("Read the full task file for acceptance criteria and details.\n\n");
+    }
+
+    // Work queue info
+    md.push_str("## Work Queue\n\n");
     md.push_str(&format!(
         "Your work items are at: `.k2so/agents/{}/work/`\n",
         agent_name
     ));
     md.push_str("- `inbox/` — assigned to you, pick the highest priority\n");
-    md.push_str("- `active/` — move items here when you start working\n");
+    md.push_str("- `active/` — items you're currently working on\n");
     md.push_str("- `done/` — move items here when complete\n\n");
-
-    if !active_items.is_empty() {
-        md.push_str("### Currently Active\n");
-        for item in &active_items {
-            md.push_str(&format!(
-                "- **{}** (priority: {}, file: `{}`)\n",
-                item.title, item.priority, item.filename
-            ));
-        }
-        md.push_str("\n");
-    }
-
-    if !inbox_items.is_empty() {
-        md.push_str("### Inbox (Pending)\n");
-        for item in &inbox_items {
-            md.push_str(&format!(
-                "- **{}** (priority: {}, file: `{}`)\n",
-                item.title, item.priority, item.filename
-            ));
-        }
-        md.push_str("\n");
-    }
-
-    if active_items.is_empty() && inbox_items.is_empty() {
-        md.push_str("*No work items currently assigned.*\n\n");
-    }
 
     // Other agents
     if !other_agents.is_empty() {
@@ -605,68 +771,21 @@ pub fn k2so_agents_generate_claude_md(
         md.push_str("\n");
     }
 
-    // CLI tools documentation
     md.push_str(CLI_TOOLS_DOCS);
-
-    // Workflow
     md.push_str(WORKFLOW_DOCS);
-
-    // Write to the agent's directory as CLAUDE.md
-    let claude_md_path = dir.join("CLAUDE.md");
-    fs::write(&claude_md_path, &md)
-        .map_err(|e| format!("Failed to write CLAUDE.md: {}", e))?;
 
     Ok(md)
 }
 
-/// Build the launch command and args for starting an agent's Claude session.
-/// Returns { command, args, cwd, claudeMdPath } for the frontend to open a terminal.
-#[tauri::command]
-pub fn k2so_agents_build_launch(
-    project_path: String,
-    agent_name: String,
-    agent_cli_command: Option<String>,
-) -> Result<serde_json::Value, String> {
-    // Generate CLAUDE.md first
-    k2so_agents_generate_claude_md(project_path.clone(), agent_name.clone())?;
-
-    let claude_md_path = agent_dir(&project_path, &agent_name).join("CLAUDE.md");
-
-    // Read the generated CLAUDE.md to use as system prompt
-    let claude_md = fs::read_to_string(&claude_md_path).unwrap_or_default();
-
-    // Build the prompt — the initial instruction for the agent
-    let inbox_dir = agent_work_dir(&project_path, &agent_name, "inbox");
-    let has_inbox = inbox_dir.exists() && fs::read_dir(&inbox_dir)
-        .map(|e| e.count() > 0)
-        .unwrap_or(false);
-
-    let initial_prompt = if has_inbox {
-        format!(
-            "You are the K2SO agent \"{}\". Check your work queue at .k2so/agents/{}/work/inbox/ and start on the highest priority item. Move it to active/ when you begin. When done, move it to done/ and check if there's more work.",
-            agent_name, agent_name
-        )
-    } else {
-        format!(
-            "You are the K2SO agent \"{}\". Your inbox is empty. Report your status and wait for work to be assigned.",
-            agent_name
-        )
-    };
-
-    let command = agent_cli_command.unwrap_or_else(|| "claude".to_string());
-
-    Ok(serde_json::json!({
-        "command": command,
-        "args": [
-            "--append-system-prompt",
-            claude_md,
-            "-p",
-            initial_prompt
-        ],
-        "cwd": project_path,
-        "claudeMdPath": claude_md_path.to_string_lossy(),
-        "agentName": agent_name,
-    }))
+/// Priority rank for sorting (lower = higher priority).
+fn priority_rank(priority: &str) -> u8 {
+    match priority {
+        "critical" => 0,
+        "high" => 1,
+        "normal" => 2,
+        "low" => 3,
+        _ => 2,
+    }
 }
 
 /// Generate a comprehensive CLAUDE.md for the workspace root.
@@ -685,6 +804,20 @@ pub fn k2so_agents_generate_workspace_claude_md(
     let k2so_dir = PathBuf::from(&project_path).join(".k2so");
     let _ = fs::create_dir_all(k2so_dir.join("agents"));
     let _ = fs::create_dir_all(k2so_dir.join("work").join("inbox"));
+    let _ = fs::create_dir_all(k2so_dir.join("prds"));
+
+    // Auto-create pod-leader agent if it doesn't exist (for pod mode)
+    let pod_leader_dir = k2so_dir.join("agents").join("pod-leader");
+    if !pod_leader_dir.exists() {
+        let _ = fs::create_dir_all(pod_leader_dir.join("work").join("inbox"));
+        let _ = fs::create_dir_all(pod_leader_dir.join("work").join("active"));
+        let _ = fs::create_dir_all(pod_leader_dir.join("work").join("done"));
+        let pod_leader_md = format!(
+            "---\nname: pod-leader\nrole: Pod orchestrator — delegates work to agents, reviews completed branches, drives milestones\npod_leader: true\n---\n\nYou are the pod leader for the {} workspace.\n",
+            project_name
+        );
+        let _ = fs::write(pod_leader_dir.join("agent.md"), &pod_leader_md);
+    }
 
     // List existing agents
     let mut agent_list = String::new();
@@ -727,112 +860,251 @@ pub fn k2so_agents_generate_workspace_claude_md(
         }
     }
 
-    let md = format!(
-        r#"# K2SO Lead Agent: {project_name}
+    // Detect mode — read from DB, fall back to filesystem
+    let is_pod_mode = {
+        // Try reading from DB first
+        let db_mode = dirs::home_dir()
+            .and_then(|h| {
+                let db_path = h.join(".k2so").join("k2so.db");
+                rusqlite::Connection::open(&db_path).ok()
+            })
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT agent_mode FROM projects WHERE path = ?1",
+                    rusqlite::params![project_path],
+                    |row| row.get::<_, String>(0),
+                ).ok()
+            });
 
-You are the **lead agent** for the {project_name} workspace, operating inside K2SO.
+        match db_mode.as_deref() {
+            Some("pod") => true,
+            Some("agent") => false,
+            _ => {
+                // Fallback: if agents dir has sub-agents, assume pod
+                let agents_root = agents_dir(&project_path);
+                agents_root.exists() && fs::read_dir(&agents_root)
+                    .map(|e| e.flatten().any(|e| e.file_type().map_or(false, |ft| ft.is_dir())))
+                    .unwrap_or(false)
+            }
+        }
+    };
+
+    let md = if is_pod_mode {
+        // ── Agent 2: Pod Leader CLAUDE.md ──────────────────────────────
+        format!(
+            r#"# K2SO Pod Leader: {project_name}
+
+You are the **pod leader** for the {project_name} workspace, operating inside K2SO.
 
 ## Your Role
 
-You are an orchestrator. You:
-- **Triage** incoming requests from the workspace inbox (`.k2so/work/inbox/`)
-- **Plan** work by creating PRDs, milestones, and technical specifications
-- **Create sub-agents** to handle specialized work (backend, frontend, testing, etc.)
-- **Delegate** tasks to the right sub-agents based on their skills
-- **Coordinate** across the pod of agents in this workspace
-- **You do NOT write code yourself** — you break work down and delegate to sub-agents who execute in worktrees
+You manage a team of AI agents that build this project. You:
+- **Read PRDs and milestones** in `.k2so/prds/` and `.k2so/milestones/` to understand the plan
+- **Delegate work** to sub-agents — K2SO automatically creates a worktree, writes a CLAUDE.md, and launches the agent
+- **Manage your team** — create new agents when you need new skills, assign multiple tasks to the same agent type across parallel worktrees
+- **Review completed work** — when agents finish, review their diffs and either approve (merge to main) or reject with feedback
+- **Drive milestones forward** — after merging one batch, assign the next batch of tasks
+
+**Important:** An agent is a role template, not a person. `backend-eng` can run in 5 worktrees simultaneously — each gets its own branch, its own CLAUDE.md, and its own Claude session. Don't wait for one task to finish before assigning the next.
 
 ## Workspace Inbox
 
-Incoming requests land at `.k2so/work/inbox/`. Check this first on every session.
-
 {inbox_section}
 
-## Your Pod
-
-Sub-agents in this workspace:
+## Your Agents
 
 {agent_section}
 
-To create a new sub-agent:
+## Delegation (one command does everything)
+
 ```bash
-k2so agents create <name> --role "Description of what this agent does"
+# Create a task and assign it
+k2so work create --agent backend-eng --title "Build OAuth endpoints" \
+  --body "Implement /auth/login and /auth/callback. See PRD: .k2so/prds/auth.md" \
+  --priority high --type task
+
+# Delegate — creates worktree, writes CLAUDE.md, launches the agent:
+k2so delegate backend-eng .k2so/agents/backend-eng/work/inbox/build-oauth-endpoints.md
 ```
 
-## How to Plan Work
+You can delegate multiple tasks to the same agent simultaneously:
+```bash
+k2so delegate backend-eng .k2so/agents/backend-eng/work/inbox/task-1.md
+k2so delegate backend-eng .k2so/agents/backend-eng/work/inbox/task-2.md
+k2so delegate backend-eng .k2so/agents/backend-eng/work/inbox/task-3.md
+```
+Each gets its own worktree and runs in parallel.
 
-1. When a request arrives in the workspace inbox, read it carefully
-2. Check existing PRDs and milestones in `.k2so/` for context
-3. Break the request into actionable tasks with clear acceptance criteria
-4. Create work items and assign to the right sub-agents:
-   ```bash
-   k2so work create --agent backend-eng --title "Implement OAuth endpoints" --body "..." --priority high --type technical-spec
-   ```
-5. For large features, create a PRD first:
-   ```bash
-   cat > .k2so/prds/oauth-support.md << 'EOF'
-   ---
-   title: OAuth Support
-   status: planning
-   ---
-   ## Goal
-   ...
-   ## Milestones
-   ...
-   EOF
-   ```
+## Reviewing and Merging
 
-## How to Delegate
+When agents move their work to done/, it appears in the review queue:
+```bash
+k2so reviews                                    # See all pending reviews with diffs
+k2so review approve backend-eng <branch>        # Merge to main + cleanup worktree
+k2so review reject backend-eng --reason "..."   # Discard worktree + send back to inbox
+k2so review feedback backend-eng -m "..."       # Send feedback without rejecting
+```
 
-- Move workspace inbox items to agent inboxes: `k2so delegate <agent> <file>`
-- Create new tasks directly: `k2so work create --agent <name> --title "..."`
-- Check agent status: `k2so agents list` and `k2so agents work <name>`
-- Send work to other workspaces: `k2so work send --workspace /path/to/project --title "..."`
+**Your review responsibility:** You are the first reviewer. Check the diff, verify it meets the task's acceptance criteria, and approve or reject. Only escalate to the user when a milestone is complete or if you're unsure about a design decision.
+
+## Creating New Agents
+
+When you need a skill your team doesn't have:
+```bash
+k2so agents create devops-eng --role "DevOps — CI/CD, Docker, deployment, infrastructure"
+k2so agents create docs-writer --role "Documentation — README, API docs, user guides"
+```
+
+## Planning
+
+Store plans as markdown files:
+- `.k2so/prds/` — Product requirement documents
+- `.k2so/milestones/` — Milestone breakdowns with task lists
+- `.k2so/specs/` — Technical specifications
 
 {cli_section}
 
 {workflow_section}
 "#,
-        project_name = project_name,
-        inbox_section = if inbox_summary.is_empty() {
-            "*Workspace inbox is empty.*".to_string()
-        } else {
-            format!("### Current Inbox\n{}", inbox_summary)
-        },
-        agent_section = if agent_list.is_empty() {
-            "*No sub-agents created yet. Create agents as you identify the skills needed for this project.*".to_string()
-        } else {
-            agent_list
-        },
-        cli_section = CLI_TOOLS_DOCS,
-        workflow_section = WORKFLOW_DOCS,
-    );
+            project_name = project_name,
+            inbox_section = if inbox_summary.is_empty() {
+                "*Workspace inbox is empty. Waiting for tasks from the AI Planner or user.*".to_string()
+            } else {
+                format!("### Current Inbox\n{}", inbox_summary)
+            },
+            agent_section = if agent_list.is_empty() {
+                "*No agents yet. Create agents based on the skills this project needs.*".to_string()
+            } else {
+                agent_list
+            },
+            cli_section = CLI_TOOLS_DOCS,
+            workflow_section = WORKFLOW_DOCS,
+        )
+    } else {
+        // ── Agent 1: AI Planner CLAUDE.md ──────────────────────────────
+        format!(
+            r#"# K2SO AI Planner: {project_name}
+
+You are the **AI Planner** for the {project_name} workspace, operating inside K2SO.
+
+## Your Role
+
+You collaborate with the user to plan and orchestrate software projects. You:
+- **Talk with the user** to understand what they want to build
+- **Create PRDs** (product requirement documents), milestones, and technical specifications
+- **Set up workspaces** for each project — enable worktrees, pod mode, create agent teams
+- **Coordinate across workspaces** — send work to different projects, check on progress
+- **You do NOT write code** — you plan, then hand off execution to pod leaders and their agent teams
+
+## Setting Up a Project Workspace
+
+When the user has a project they want to build or maintain with agents:
+
+```bash
+# 1. Enable the workspace for autonomous work
+k2so worktree on                    # Agents work in isolated git branches
+k2so mode pod                       # Enable multi-agent orchestration
+k2so heartbeat on                   # Agents wake up automatically on schedule
+
+# 2. Create the agent team based on the project's tech stack
+k2so agents create backend-eng --role "Backend engineer — APIs, databases, server logic"
+k2so agents create frontend-eng --role "Frontend engineer — React, UI, styling, UX"
+k2so agents create qa-tester --role "QA — testing, test automation, quality assurance"
+
+# 3. Verify setup
+k2so settings                       # Shows mode, worktrees, heartbeat status
+k2so agents list                    # Shows agents with work counts
+```
+
+## Planning Workflow
+
+1. **Discuss with the user** what they want built — goals, constraints, timeline
+2. **Create a PRD** that captures the full scope:
+   ```
+   mkdir -p .k2so/prds
+   # Write the PRD as a markdown file
+   ```
+3. **Break the PRD into milestones** — each milestone should be shippable
+4. **Break milestones into tasks** with clear acceptance criteria
+5. **Send tasks to the project workspace** for the pod leader to execute:
+   ```bash
+   k2so work send --workspace /path/to/project \
+     --title "Milestone 1: User Authentication" \
+     --body "See PRD at .k2so/prds/auth.md. Tasks: ..."
+   ```
+   The pod leader in that workspace picks it up and delegates to its agents.
+
+## Cross-Workspace Coordination
+
+You can see and manage multiple workspaces:
+```bash
+# Send work to any workspace
+k2so work send --workspace /path/to/frontend-app --title "..." --body "..."
+k2so work send --workspace /path/to/api-server --title "..." --body "..."
+
+# Set up a new workspace from scratch
+K2SO_PROJECT_PATH="/path/to/new-project" k2so mode pod
+K2SO_PROJECT_PATH="/path/to/new-project" k2so worktree on
+K2SO_PROJECT_PATH="/path/to/new-project" k2so agents create backend-eng --role "..."
+```
+
+## Current Context
+
+{inbox_section}
+
+{cli_section}
+"#,
+            project_name = project_name,
+            inbox_section = if inbox_summary.is_empty() {
+                "No items in the workspace inbox.".to_string()
+            } else {
+                format!("### Workspace Inbox\n{}", inbox_summary)
+            },
+            cli_section = CLI_TOOLS_DOCS,
+        )
+    };
 
     let claude_md_path = PathBuf::from(&project_path).join("CLAUDE.md");
     let disabled_path = PathBuf::from(&project_path).join(".k2so").join("CLAUDE.md.disabled");
+    let generated_path = PathBuf::from(&project_path).join(".k2so").join("CLAUDE.md.generated");
+
+    // Detect if the existing CLAUDE.md was generated by K2SO (vs user-written)
+    // by checking for our header pattern. If it was ours, regenerate it.
+    let is_k2so_generated = if claude_md_path.exists() {
+        let existing = fs::read_to_string(&claude_md_path).unwrap_or_default();
+        existing.starts_with("# K2SO ") // Our headers: "# K2SO Pod Leader:" or "# K2SO AI Planner:" or "# K2SO Lead Agent:"
+    } else {
+        false
+    };
 
     if disabled_path.exists() {
-        // Restore previously disabled CLAUDE.md (preserves user edits)
-        fs::rename(&disabled_path, &claude_md_path)
-            .map_err(|e| format!("Failed to restore CLAUDE.md: {}", e))?;
-        // Also save the freshly generated version for reference
-        let generated_path = PathBuf::from(&project_path).join(".k2so").join("CLAUDE.md.generated");
+        // Was disabled — check if the disabled content matches our pattern
+        let disabled_content = fs::read_to_string(&disabled_path).unwrap_or_default();
+        if disabled_content.starts_with("# K2SO ") {
+            // It was our generated content — write fresh for the new mode
+            let _ = fs::remove_file(&disabled_path);
+            fs::write(&claude_md_path, &md)
+                .map_err(|e| format!("Failed to write CLAUDE.md: {}", e))?;
+        } else {
+            // It was user-written — restore it, save ours for reference
+            fs::rename(&disabled_path, &claude_md_path)
+                .map_err(|e| format!("Failed to restore CLAUDE.md: {}", e))?;
+            let _ = fs::write(&generated_path, &md);
+            return fs::read_to_string(&claude_md_path).map_err(|e| e.to_string());
+        }
+    } else if is_k2so_generated {
+        // Existing CLAUDE.md was generated by K2SO — regenerate for current mode
+        fs::write(&claude_md_path, &md)
+            .map_err(|e| format!("Failed to write CLAUDE.md: {}", e))?;
+    } else if claude_md_path.exists() {
+        // Existing user-written CLAUDE.md — don't overwrite, save ours for reference
         let _ = fs::write(&generated_path, &md);
-        // Read back what was restored
         return fs::read_to_string(&claude_md_path).map_err(|e| e.to_string());
+    } else {
+        // No CLAUDE.md exists — write fresh
+        fs::write(&claude_md_path, &md)
+            .map_err(|e| format!("Failed to write CLAUDE.md: {}", e))?;
     }
-
-    if claude_md_path.exists() {
-        // CLAUDE.md already exists — don't overwrite user edits
-        // Save generated version for reference so agents can diff if needed
-        let generated_path = PathBuf::from(&project_path).join(".k2so").join("CLAUDE.md.generated");
-        let _ = fs::write(&generated_path, &md);
-        return fs::read_to_string(&claude_md_path).map_err(|e| e.to_string());
-    }
-
-    // First time — write fresh CLAUDE.md
-    fs::write(&claude_md_path, &md)
-        .map_err(|e| format!("Failed to write CLAUDE.md: {}", e))?;
 
     Ok(md)
 }
@@ -853,63 +1125,54 @@ pub fn k2so_agents_disable_workspace_claude_md(project_path: String) -> Result<(
 
 const CLI_TOOLS_DOCS: &str = r#"## K2SO CLI Tools
 
-You are operating inside K2SO. The `k2so` command is available in your terminal. Use it to interact with K2SO's workspace orchestration.
+You are operating inside K2SO. The `k2so` command is available in your terminal.
+K2SO does the heavy lifting — each command is a single atomic operation.
 
-### Query
+### Assign Work to an Agent (one step)
 ```
-k2so agents list                     # List all agents in this workspace
-k2so agents work <name>              # Show an agent's work items
-k2so agents status <name>            # Show agent status
+k2so delegate <agent> <work-file>
 ```
+This single command does everything:
+- Creates a git worktree (branch: `agent/<name>/<task>`)
+- Writes a CLAUDE.md into the worktree with the agent's identity + task context
+- Moves the work item from inbox → active with worktree metadata
+- Opens a Claude terminal session in the worktree for the agent to start working
 
-### Work Management
+### Create Work Items
 ```
-k2so work create --title "..." --body "..."  # Create a work item
-  --agent <name>                              # Assign to agent (omit for unassigned)
-  --priority high|normal|low                  # Set priority
-  --type prd|milestone|task                   # Set type
-```
-
-### Workspace Inbox
-```
-k2so work inbox                      # Show items in workspace-level inbox
-k2so work send --workspace <path>    # Send work to another workspace's inbox
-  --title "..." --body "..."
+k2so work create --title "..." --body "..." --agent <name> --priority high --type task
+k2so work create --title "..." --body "..."   # Goes to workspace inbox (no agent)
 ```
 
-### Delegation
+### Check Status
 ```
-k2so delegate <agent> <work-file>    # Move work item to another agent's inbox
-```
-
-### Git Operations
-```
-k2so commit                          # AI Commit: launch Claude to review & commit
-k2so commit-merge                    # AI Commit & Merge: commit then merge into main
+k2so agents list                     # All agents with inbox/active/done counts
+k2so agents work <name>              # Agent's work items
+k2so work inbox                      # Workspace-level inbox
+k2so reviews                         # Pending reviews (completed work)
 ```
 
-### Reviews
+### Reviews (one step each)
 ```
-k2so reviews                         # List all pending reviews
-k2so review approve <agent> <branch> # Approve and merge a branch
-k2so review reject <agent>           # Reject work (back to inbox)
-k2so review feedback <agent> -m ".." # Request changes with feedback
+k2so review approve <agent> <branch>   # Merges branch + removes worktree + cleans up
+k2so review reject <agent>             # Removes worktree + moves work back to inbox
+k2so review reject <agent> --reason "..." # Same + creates feedback file
+k2so review feedback <agent> -m "..."  # Send feedback without rejecting
 ```
 
-### Session Management
+### Git
 ```
-k2so agents lock <name>              # Mark agent as busy
-k2so agents unlock <name>            # Mark agent as available
-k2so agents profile <name>           # Read agent's profile
-k2so agents triage                   # Show triage summary
+k2so commit                          # AI-assisted commit review
+k2so commit-merge                    # AI commit then merge into main
+```
+
+### Other
+```
+k2so agents create <name> --role "..."   # Create a new agent
+k2so agents profile <name>              # Read agent's identity
 k2so work move --agent <name> --file <f> --from inbox --to active
-```
-
-### Workspace Mode
-```
-k2so mode                            # Show current mode (off/agent/pod)
-k2so mode <off|agent|pod>            # Set workspace agent mode
-k2so heartbeat                       # Manually trigger heartbeat triage
+k2so work send --workspace <path> --title "..." --body "..."
+k2so heartbeat                          # Trigger triage manually
 ```
 
 "#;
@@ -917,39 +1180,40 @@ k2so heartbeat                       # Manually trigger heartbeat triage
 const WORKFLOW_DOCS: &str = r#"## Workflow
 
 ### If you are the Lead Agent (orchestrator):
-1. Check the workspace inbox: `ls .k2so/work/inbox/` or `k2so work inbox`
-2. Read each request and assess what needs to happen
-3. Check existing PRDs/milestones in `.k2so/` for context
-4. Decide which sub-agent should handle each request:
-   - `k2so agents list` to see available agents and their roles
-   - `k2so delegate <agent> <file>` to assign work to a sub-agent
-   - Or break the request into sub-tasks and create work items: `k2so work create --agent <name> --title "..."`
-5. If a request is blocked or needs user input, leave it in the workspace inbox and add a note
-6. You do NOT implement code yourself — you orchestrate and plan
+1. Check for work: `k2so work inbox`
+2. Read each request and decide which agent should handle it
+3. Assign work with a single command — K2SO handles everything else:
+   ```
+   k2so delegate backend-eng .k2so/work/inbox/add-oauth-support.md
+   ```
+   This creates a worktree, writes a CLAUDE.md, and launches the agent automatically.
+4. To break a large request into sub-tasks first:
+   ```
+   k2so work create --agent backend-eng --title "Build API endpoints" --body "..." --priority high
+   k2so work create --agent frontend-eng --title "Build login UI" --body "..." --priority high
+   ```
+   Then delegate each: `k2so delegate backend-eng .k2so/agents/backend-eng/work/inbox/build-api-endpoints.md`
+5. If a request is blocked or needs user input, leave it in the workspace inbox
+6. You orchestrate — you do NOT implement code yourself
 
 ### If you are a Sub-Agent (executor):
-1. Check your inbox: `ls .k2so/agents/<your-name>/work/inbox/`
-2. Pick the highest priority item
-3. Move it to `active/`: `mv .k2so/agents/<name>/work/inbox/<file> .k2so/agents/<name>/work/active/`
-4. Create a worktree if needed for isolated work
-5. Implement the changes described in the work item
-6. Commit your changes
-7. Move the item to `done/`: `mv .k2so/agents/<name>/work/active/<file> .k2so/agents/<name>/work/done/`
-8. If sub-tasks need other skills, delegate to appropriate agents using `k2so delegate`
-9. Use `k2so commit` when ready to finalize your changes
+You are launched into a dedicated worktree with your task already set up.
+1. Read your task file (path is in your launch prompt)
+2. Implement the changes — all work happens in your worktree
+3. Commit to your branch as you go
+4. When done: `k2so work move --agent <your-name> --file <task>.md --from active --to done`
+5. Your work appears in the review queue — the user will approve, reject, or request changes
 
-## Cross-Workspace Coordination
-- Send work to another workspace: `k2so work send --workspace /path/to/project --title "..." --body "..."`
-- This drops a work item in that workspace's inbox for its lead agent to triage
+### Review lifecycle (handled by user or lead agent):
+- **Approve**: `k2so review approve <agent> <branch>` — merges to main, cleans up worktree
+- **Reject**: `k2so review reject <agent> --reason "..."` — cleans up worktree, puts task back in inbox with feedback, agent retries with a fresh worktree on next launch
+- **Feedback**: `k2so review feedback <agent> -m "..."` — sends feedback without rejecting
 
 ## Important Rules
-
-- Always read your work item fully before starting
-- Move items between folders to track your progress
-- Create clear commit messages that reference the work item
-- If blocked, document the blocker in the work item and move it back to inbox
-- You can create new work items for other agents using `k2so work create --agent <name>`
-- Never grab a work item that another agent has in their active/ folder
+- Each agent works in its own worktree — never edit main directly
+- K2SO creates worktrees, branches, and CLAUDE.md files for you automatically
+- Commit often with clear messages referencing your task
+- If blocked, move your task back to inbox and document the blocker
 "#;
 
 // ── Review Queue ────────────────────────────────────────────────────────
@@ -1047,17 +1311,37 @@ pub fn k2so_agents_review_queue(project_path: String) -> Result<Vec<ReviewItem>,
     Ok(reviews)
 }
 
-/// Approve an agent's work — merge the branch into main.
+/// Approve an agent's work — merge branch, clean up worktree, archive done items.
+///
+/// This is the all-in-one approve command. In one step, K2SO:
+/// 1. Merges the agent's branch into main
+/// 2. Removes the worktree directory
+/// 3. Deletes the branch (it's now merged)
+/// 4. Archives done items (deletes them — the work is in git history now)
+/// 5. Unlocks the agent
 #[tauri::command]
 pub fn k2so_agents_review_approve(
     project_path: String,
     branch: String,
     agent_name: String,
 ) -> Result<String, String> {
-    // Merge the branch
+    // 1. Merge the branch into main
     let result = crate::git::merge_branch(&project_path, &branch)?;
 
-    // Clear done items for this agent
+    if !result.success {
+        return Err(format!("Merge conflicts: {}", result.conflicts.join(", ")));
+    }
+
+    // 2. Remove the worktree (find it by branch name)
+    let worktrees = crate::git::list_worktrees(&project_path);
+    if let Some(wt) = worktrees.iter().find(|wt| wt.branch == branch) {
+        let _ = crate::git::remove_worktree(&project_path, &wt.path, true);
+    }
+
+    // 3. Delete the branch (now merged)
+    let _ = crate::git::delete_branch(&project_path, &branch);
+
+    // 4. Archive done items for this agent
     let done_dir = agent_work_dir(&project_path, &agent_name, "done");
     if done_dir.exists() {
         if let Ok(entries) = fs::read_dir(&done_dir) {
@@ -1070,14 +1354,20 @@ pub fn k2so_agents_review_approve(
         }
     }
 
-    if result.success {
-        Ok(format!("Merged {} files", result.merged_files))
-    } else {
-        Err(format!("Merge conflicts: {}", result.conflicts.join(", ")))
-    }
+    // 5. Unlock the agent so it can pick up new work
+    let _ = k2so_agents_unlock(project_path, agent_name);
+
+    Ok(format!("Approved and merged: {} files", result.merged_files))
 }
 
-/// Reject an agent's work — move done items back to inbox with rejection feedback.
+/// Reject an agent's work — clean up worktree, move done items back to inbox.
+///
+/// This is the all-in-one reject command. In one step, K2SO:
+/// 1. Removes the worktree directory (discards the code)
+/// 2. Deletes the branch
+/// 3. Moves done items back to inbox (so the agent retries on next launch)
+/// 4. Creates a high-priority feedback file explaining what went wrong
+/// 5. Unlocks the agent
 #[tauri::command]
 pub fn k2so_agents_review_reject(
     project_path: String,
@@ -1091,29 +1381,47 @@ pub fn k2so_agents_review_reject(
         return Ok(());
     }
 
-    // Move all done items back to inbox
+    // 1. Find and remove the worktree + branch for this agent
+    let worktrees = crate::git::list_worktrees(&project_path);
+    for wt in worktrees.iter().filter(|wt| wt.branch.starts_with(&format!("agent/{}/", agent_name))) {
+        let _ = crate::git::remove_worktree(&project_path, &wt.path, true);
+        let _ = crate::git::delete_branch(&project_path, &wt.branch);
+    }
+
+    // 2. Move all done items back to inbox (strip worktree info from frontmatter)
+    fs::create_dir_all(&inbox_dir).ok();
     if let Ok(entries) = fs::read_dir(&done_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().map_or(false, |ext| ext == "md") {
                 let filename = path.file_name().unwrap();
                 let target = inbox_dir.join(filename);
-                let _ = fs::rename(&path, &target);
+                // Strip old worktree info so a fresh worktree gets created on retry
+                if let Ok(content) = fs::read_to_string(&path) {
+                    let cleaned = strip_worktree_from_frontmatter(&content);
+                    let _ = fs::write(&target, &cleaned);
+                } else {
+                    let _ = fs::rename(&path, &target);
+                }
+                let _ = fs::remove_file(&path);
             }
         }
     }
 
-    // Create a feedback file in inbox if reason provided
+    // 3. Create a feedback file in inbox if reason provided
     if let Some(reason) = reason {
         let now = simple_date();
         let content = format!(
-            "---\ntitle: Review Feedback — Work Rejected\npriority: high\nassigned_by: reviewer\ncreated: {}\ntype: feedback\n---\n\n## Rejection Reason\n\n{}\n\n## Action Required\n\nReview the feedback above and address the issues before resubmitting.\n",
+            "---\ntitle: Review Feedback — Work Rejected\npriority: high\nassigned_by: reviewer\ncreated: {}\ntype: feedback\n---\n\n## Rejection Reason\n\n{}\n\n## Action Required\n\nReview the feedback above and address the issues in your next attempt.\nA fresh worktree will be created when you are relaunched.\n",
             now, reason
         );
         let filename = format!("review-feedback-{}.md", now);
         let path = inbox_dir.join(&filename);
         fs::write(&path, &content).map_err(|e| e.to_string())?;
     }
+
+    // 4. Unlock the agent
+    let _ = k2so_agents_unlock(project_path, agent_name);
 
     Ok(())
 }
@@ -1215,12 +1523,13 @@ pub fn k2so_agents_triage_summary(project_path: String) -> Result<String, String
 }
 
 /// Determine what should be launched based on triage.
-/// Returns a structured result: whether the lead agent should wake (workspace inbox has items),
-/// and which sub-agents have actionable inbox items.
+///
+/// Agents are templates — the same agent (e.g., "backend-eng") can run in multiple
+/// worktrees simultaneously. Each inbox item gets its own worktree when delegated.
 ///
 /// Triage order:
-/// 1. Workspace inbox has items → wake lead agent (returned as "__lead__")
-/// 2. Sub-agent inboxes have items + no active work + no lock → wake those sub-agents
+/// 1. Workspace inbox has items → wake lead agent ("__lead__")
+/// 2. Sub-agent inboxes have items → wake those agents (one launch per inbox item)
 #[tauri::command]
 pub fn k2so_agents_triage_decide(project_path: String) -> Result<Vec<String>, String> {
     let mut launchable = Vec::new();
@@ -1232,11 +1541,13 @@ pub fn k2so_agents_triage_decide(project_path: String) -> Result<Vec<String>, St
         .unwrap_or(false);
 
     if has_workspace_inbox {
-        // Wake the lead agent to triage workspace inbox
         launchable.push("__lead__".to_string());
     }
 
     // Step 2: Check sub-agent inboxes
+    // An agent is a template/role — it can have multiple items in its inbox and
+    // each one gets its own worktree. We launch once per agent that has inbox items.
+    // The delegate/build_launch function handles picking the top-priority item.
     let dir = agents_dir(&project_path);
     if dir.exists() {
         if let Ok(entries) = fs::read_dir(&dir) {
@@ -1246,23 +1557,12 @@ pub fn k2so_agents_triage_decide(project_path: String) -> Result<Vec<String>, St
                 }
                 let name = entry.file_name().to_string_lossy().to_string();
 
-                // Skip if locked (active Claude session)
-                if is_agent_locked(&project_path, &name) {
-                    continue;
-                }
-
                 let inbox = agent_work_dir(&project_path, &name, "inbox");
-                let active = agent_work_dir(&project_path, &name, "active");
-
                 let has_inbox = inbox.exists() && fs::read_dir(&inbox)
                     .map(|e| e.flatten().any(|e| e.path().extension().map_or(false, |ext| ext == "md")))
                     .unwrap_or(false);
 
-                let has_active = active.exists() && fs::read_dir(&active)
-                    .map(|e| e.flatten().any(|e| e.path().extension().map_or(false, |ext| ext == "md")))
-                    .unwrap_or(false);
-
-                if has_inbox && !has_active {
+                if has_inbox {
                     launchable.push(name);
                 }
             }
@@ -1380,7 +1680,7 @@ fn generate_heartbeat_script() -> String {
 PORT_FILE="{home}/.k2so/heartbeat.port"
 PROJECTS_FILE="{home}/.k2so/heartbeat-projects.txt"
 LOG_FILE="{home}/.k2so/heartbeat.log"
-TOKEN_FILE="{home}/.k2so/hooks/notify.sh"
+TOKEN_FILE="{home}/.k2so/heartbeat.token"
 
 ts() {{ date '+%Y-%m-%d %H:%M:%S'; }}
 
@@ -1401,13 +1701,10 @@ if [ ! -f "$PROJECTS_FILE" ]; then
     exit 0
 fi
 
-# We need the token. Extract from hook script if available.
+# Read auth token
 TOKEN=""
 if [ -f "$TOKEN_FILE" ]; then
-    # The hook script doesn't embed the token — it reads K2SO_HOOK_TOKEN from env.
-    # For the heartbeat, we need to get it differently.
-    # Fallback: read from any K2SO terminal process environment
-    TOKEN=$(ps -Eww -ax 2>/dev/null | grep K2SO_HOOK_TOKEN | grep -oE 'K2SO_HOOK_TOKEN=[^ ]+' | head -1 | cut -d= -f2)
+    TOKEN=$(cat "$TOKEN_FILE" 2>/dev/null)
 fi
 
 if [ -z "$TOKEN" ]; then

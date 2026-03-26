@@ -9,7 +9,6 @@ import { useToastStore } from '@/stores/toast'
 import { useActiveAgentsStore } from '@/stores/active-agents'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import { useCommandPaletteStore } from '@/stores/command-palette'
-import { useReviewQueueStore } from '@/stores/review-queue'
 import { invoke } from '@tauri-apps/api/core'
 import { showContextMenu } from '@/lib/context-menu'
 import { useGitInfo, useGitChanges } from '@/hooks/useGit'
@@ -496,6 +495,9 @@ function ProjectItem({
             ? 'bg-white/[0.08] text-[var(--color-text-primary)]'
             : 'text-[var(--color-text-secondary)] hover:bg-white/[0.04] hover:text-[var(--color-text-primary)]'
         }`}
+        style={{
+          borderLeft: isActive ? `2px solid ${project.color}` : '2px solid transparent'
+        }}
         onClick={handleClick}
         onContextMenu={(e) => onContextMenu(e, project.id)}
       >
@@ -661,8 +663,19 @@ export default function Sidebar(): React.JSX.Element {
   const focusGroupsEnabled = useFocusGroupsStore((s) => s.focusGroupsEnabled)
   const activeFocusGroupId = useFocusGroupsStore((s) => s.activeFocusGroupId)
 
+  const agenticEnabled = useSettingsStore((s) => s.agenticSystemsEnabled)
+
+  // Agent-mode workspaces float to top (not pods — pods stay in their normal position)
+  const agentProjects = useMemo(() =>
+    agenticEnabled ? projects.filter((p) => p.agentMode === 'agent') : [],
+    [projects, agenticEnabled])
+
+  const agentIds = useMemo(() => new Set(agentProjects.map((p) => p.id)), [agentProjects])
+
   const pinnedProjects = useMemo(() =>
-    projects.filter((p) => p.pinned), [projects])
+    projects.filter((p) => p.pinned && !agentIds.has(p.id)), [projects, agentIds])
+
+  const regularPinned = pinnedProjects
 
   const filteredProjects = useMemo(() => {
     const unpinned = projects.filter((p) => !p.pinned)
@@ -904,12 +917,12 @@ export default function Sidebar(): React.JSX.Element {
     <div className="relative flex flex-col h-full">
       <ResizeHandle />
 
-      {/* Pinned workspaces — always visible above focus groups */}
-      {pinnedProjects.length > 0 && (
+      {/* Agents & Pinned workspaces — always visible above focus groups */}
+      {(agentProjects.length > 0 || pinnedProjects.length > 0) && (
         <div className="border-b border-[var(--color-border)]">
           <div className="px-4 pt-3 pb-1 no-drag flex items-center gap-1.5">
             <span className="text-[10px] font-semibold tracking-wider text-[var(--color-text-muted)] uppercase">
-              Pinned
+              {agentProjects.length > 0 && pinnedProjects.length > 0 ? 'Agents & Pinned' : agentProjects.length > 0 ? 'Agents' : 'Pinned'}
             </span>
             <span className="text-[9px] font-mono text-[var(--color-text-muted)] opacity-50">
               <KeyCombo combo={useTerminalSettingsStore.getState().shortcutLayout === 'cmd-active-cmdshift-pinned' ? '⇧⌘ 1-9' : '⌘ 1-9'} />
@@ -918,14 +931,18 @@ export default function Sidebar(): React.JSX.Element {
           <div ref={pinnedRef}>
             {(() => {
               let flatIdx = 0
-              return pinnedProjects.map((project, idx) => {
+              // Render agents first, then regular pinned — shared numbering
+              const orderedPinned = [...agentProjects, ...regularPinned]
+              return orderedPinned.map((project, idx) => {
                 const myStartIdx = flatIdx
-                // Count workspaces for this project to advance the counter
                 if (project.worktreeMode === 1 && project.workspaces.length > 0) {
                   flatIdx += project.workspaces.length
                 } else {
                   flatIdx += 1
                 }
+                const isAgent = agenticEnabled && project.agentMode && project.agentMode !== 'off'
+                // Show a subtle divider between agents and pinned sections
+                const isFirstPinned = isAgent ? false : idx === agentProjects.length && agentProjects.length > 0
                 return (
               <div
                 key={project.id}
@@ -933,24 +950,29 @@ export default function Sidebar(): React.JSX.Element {
                 style={{ opacity: dragId === project.id ? 0.4 : 1 }}
                 onMouseDown={(e) => handleProjectMouseDown(e, project.id, 'pinned')}
               >
+                {isFirstPinned && (
+                  <div className="mx-3 my-1 border-t border-[var(--color-border)]" />
+                )}
                 {dragZone === 'pinned' && dropIndex === idx && (
                   <div className="h-[2px] bg-[var(--color-accent)] mx-3" />
                 )}
-                {project.worktreeMode === 0 ? (
-                  <SingleProjectItem
-                    project={project}
-                    isActive={project.id === activeProjectId}
-                    onContextMenu={handleContextMenu}
-                    shortcutIndex={myStartIdx}
-                  />
-                ) : (
-                  <ProjectItem
-                    project={project}
-                    isActive={project.id === activeProjectId}
-                    onContextMenu={handleContextMenu}
-                    shortcutIndex={myStartIdx}
-                  />
-                )}
+                <div className={isAgent ? 'border-l-2 border-[var(--color-accent)]' : ''}>
+                  {project.worktreeMode === 0 ? (
+                    <SingleProjectItem
+                      project={project}
+                      isActive={project.id === activeProjectId}
+                      onContextMenu={handleContextMenu}
+                      shortcutIndex={myStartIdx}
+                    />
+                  ) : (
+                    <ProjectItem
+                      project={project}
+                      isActive={project.id === activeProjectId}
+                      onContextMenu={handleContextMenu}
+                      shortcutIndex={myStartIdx}
+                    />
+                  )}
+                </div>
               </div>
                 )
               })
@@ -1053,7 +1075,6 @@ export default function Sidebar(): React.JSX.Element {
           </svg>
           Add Workspace
         </button>
-        <ReviewQueueButton />
         <button
           className="no-drag flex items-center gap-1.5 px-2.5 py-2 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] bg-white/[0.04] hover:bg-white/[0.08] transition-colors"
           onClick={() => useAssistantStore.getState().toggle()}
@@ -1088,23 +1109,3 @@ export default function Sidebar(): React.JSX.Element {
   )
 }
 
-function ReviewQueueButton(): React.JSX.Element {
-  const pendingCount = useReviewQueueStore((s) => s.pendingCount)
-  return (
-    <button
-      className="no-drag relative flex items-center gap-1.5 px-2.5 py-2 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] bg-white/[0.04] hover:bg-white/[0.08] transition-colors"
-      onClick={() => useReviewQueueStore.getState().toggle()}
-      title="Review Queue (⌘P)"
-    >
-      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-        <path d="M9 11l3 3L22 4" />
-        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
-      </svg>
-      {pendingCount > 0 && (
-        <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] flex items-center justify-center text-[8px] font-bold text-white bg-[var(--color-accent)] rounded-full px-0.5">
-          {pendingCount > 99 ? '99+' : pendingCount}
-        </span>
-      )}
-    </button>
-  )
-}

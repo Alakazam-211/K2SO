@@ -13,10 +13,15 @@ interface FileViewerItemData {
   filePath: string
 }
 
+interface AgentItemData {
+  agentName: string
+  projectPath: string
+}
+
 interface Item {
   id: string
-  type: 'terminal' | 'file-viewer'
-  data: TerminalItemData | FileViewerItemData
+  type: 'terminal' | 'file-viewer' | 'agent'
+  data: TerminalItemData | FileViewerItemData | AgentItemData
   pinned?: boolean
 }
 
@@ -26,7 +31,6 @@ function getTabLabel(item: Item): string {
   if (item.type === 'terminal') {
     const data = item.data as TerminalItemData
     if (data.command) {
-      // Show the command name (last segment of path)
       const name = data.command.split('/').pop() || data.command
       return name
     }
@@ -35,6 +39,10 @@ function getTabLabel(item: Item): string {
   if (item.type === 'file-viewer') {
     const data = item.data as FileViewerItemData
     return data.filePath.split('/').pop() || data.filePath
+  }
+  if (item.type === 'agent') {
+    const data = item.data as AgentItemData
+    return `Agent: ${data.agentName}`
   }
   return 'Unknown'
 }

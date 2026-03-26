@@ -3,6 +3,7 @@ import { TOPBAR_HEIGHT } from '../../../shared/constants'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useSettingsStore } from '@/stores/settings'
+import { useReviewQueueStore } from '@/stores/review-queue'
 import TimerButton from '@/components/Timer/TimerButton'
 
 interface TopBarProps {
@@ -129,6 +130,8 @@ export default function TopBar({
             <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
           </svg>
         </button>
+        {/* Review Queue */}
+        <ReviewQueueTopBarButton />
       </div>
 
       {/* Center: workspace + worktree name */}
@@ -252,5 +255,32 @@ export default function TopBar({
         </button>
       </div>
     </div>
+  )
+}
+
+function ReviewQueueTopBarButton(): React.JSX.Element | null {
+  const agenticEnabled = useSettingsStore((s) => s.agenticSystemsEnabled)
+  const pendingCount = useReviewQueueStore((s) => s.pendingCount)
+  if (!agenticEnabled) return null
+  return (
+    <button
+      onClick={() => useReviewQueueStore.getState().toggle()}
+      className="relative flex h-6 w-6 items-center justify-center text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)] transition-colors"
+      style={{
+        // @ts-expect-error -- Electron-specific CSS property
+        WebkitAppRegion: 'no-drag'
+      }}
+      title="Review Queue"
+    >
+      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M9 11l3 3L22 4" />
+        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+      </svg>
+      {pendingCount > 0 && (
+        <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] flex items-center justify-center text-[8px] font-bold text-white bg-[var(--color-accent)] rounded-full px-0.5">
+          {pendingCount > 99 ? '99+' : pendingCount}
+        </span>
+      )}
+    </button>
   )
 }

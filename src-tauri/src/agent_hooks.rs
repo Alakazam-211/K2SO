@@ -211,8 +211,14 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                     "/cli/agents/delegate" => {
                         let target = params.get("target").cloned().unwrap_or_default();
                         let file = params.get("file").cloned().unwrap_or_default();
-                        crate::commands::k2so_agents::k2so_agents_delegate(project_path, target, file)
-                            .map(|_| r#"{"success":true}"#.to_string())
+                        match crate::commands::k2so_agents::k2so_agents_delegate(project_path, target, file) {
+                            Ok(launch_info) => {
+                                // Emit launch event so the frontend opens a terminal
+                                let _ = app_handle.emit("cli:agent-launch", launch_info.clone());
+                                Ok(serde_json::to_string(&launch_info).unwrap_or_default())
+                            }
+                            Err(e) => Err(e),
+                        }
                     }
                     "/cli/agents/work/move" => {
                         let agent = params.get("agent").cloned().unwrap_or_default();
@@ -228,43 +234,6 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                         let agent = params.get("agent").cloned().unwrap_or_default();
                         crate::commands::k2so_agents::k2so_agents_get_profile(project_path, agent)
                             .map(|content| serde_json::json!({"content": content}).to_string())
-                    }
-                    "/cli/heartbeat" => {
-                        // Heartbeat triage: check workspace inbox + sub-agent inboxes
-                        match crate::commands::k2so_agents::k2so_agents_triage_decide(project_path.clone()) {
-                            Ok(agents_to_launch) => {
-                                let mut launched = Vec::new();
-                                for agent_name in &agents_to_launch {
-                                    if agent_name == "__lead__" {
-                                        // Wake lead agent — launch with workspace-level context
-                                        // The lead agent's CLAUDE.md includes triage instructions
-                                        let lead_name = std::path::Path::new(&project_path)
-                                            .file_name()
-                                            .map(|n| n.to_string_lossy().to_lowercase().replace(' ', "-"))
-                                            .unwrap_or_else(|| "lead".to_string());
-                                        if let Ok(launch_info) = crate::commands::k2so_agents::k2so_agents_build_launch(
-                                            project_path.clone(), lead_name.clone(), None,
-                                        ) {
-                                            let _ = app_handle.emit("cli:agent-launch", &launch_info);
-                                            launched.push(format!("lead:{}", lead_name));
-                                        }
-                                    } else {
-                                        // Wake sub-agent
-                                        if let Ok(launch_info) = crate::commands::k2so_agents::k2so_agents_build_launch(
-                                            project_path.clone(), agent_name.clone(), None,
-                                        ) {
-                                            let _ = app_handle.emit("cli:agent-launch", &launch_info);
-                                            launched.push(agent_name.clone());
-                                        }
-                                    }
-                                }
-                                Ok(serde_json::json!({
-                                    "launched": launched,
-                                    "count": launched.len(),
-                                }).to_string())
-                            }
-                            Err(e) => Err(e),
-                        }
                     }
                     "/cli/work/inbox" => {
                         crate::commands::k2so_agents::k2so_agents_workspace_inbox_list(project_path)
@@ -341,30 +310,96 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             .map(|_| r#"{"success":true}"#.to_string())
                     }
                     "/cli/mode" => {
-                        // Get or set workspace agent mode
+                        // Get or set workspace agent mode — persists directly to DB
                         let new_mode = params.get("set").cloned();
                         if let Some(mode) = new_mode {
-                            // This would need DB access — emit event for frontend to handle
-                            let _ = app_handle.emit("cli:set-agent-mode", serde_json::json!({
-                                "projectPath": project_path,
-                                "mode": mode,
-                            }));
-                            Ok(serde_json::json!({"success": true, "mode": mode}).to_string())
+                            match cli_update_project_setting(&project_path, "agent_mode", &mode) {
+                                Ok(_) => {
+                                    // Also scaffold/disable CLAUDE.md based on mode
+                                    if mode == "off" {
+                                        let _ = crate::commands::k2so_agents::k2so_agents_disable_workspace_claude_md(project_path.clone());
+                                    } else {
+                                        let _ = crate::commands::k2so_agents::k2so_agents_generate_workspace_claude_md(project_path.clone());
+                                    }
+                                    // Notify frontend to refresh
+                                    let _ = app_handle.emit("sync:projects", ());
+                                    Ok(serde_json::json!({"success": true, "mode": mode}).to_string())
+                                }
+                                Err(e) => Err(e),
+                            }
                         } else {
-                            // Just return current mode — read from .k2so/ presence
-                            let k2so_dir = std::path::PathBuf::from(&project_path).join(".k2so");
-                            let agents_dir = k2so_dir.join("agents");
-                            let has_agents = agents_dir.exists() && std::fs::read_dir(&agents_dir)
-                                .map(|e| e.count() > 0).unwrap_or(false);
-                            let claude_md = std::path::PathBuf::from(&project_path).join("CLAUDE.md");
-                            let mode = if !claude_md.exists() {
-                                "off"
-                            } else if has_agents {
-                                "pod"
-                            } else {
-                                "agent"
-                            };
-                            Ok(serde_json::json!({"mode": mode}).to_string())
+                            // Read current mode from DB
+                            match cli_get_project_settings(&project_path) {
+                                Ok(settings) => Ok(serde_json::to_string(&settings).unwrap_or_default()),
+                                Err(_) => {
+                                    // Fallback: detect from filesystem
+                                    let k2so_dir = std::path::PathBuf::from(&project_path).join(".k2so");
+                                    let agents_dir = k2so_dir.join("agents");
+                                    let has_agents = agents_dir.exists() && std::fs::read_dir(&agents_dir)
+                                        .map(|e| e.count() > 0).unwrap_or(false);
+                                    let claude_md = std::path::PathBuf::from(&project_path).join("CLAUDE.md");
+                                    let mode = if !claude_md.exists() { "off" } else if has_agents { "pod" } else { "agent" };
+                                    Ok(serde_json::json!({"mode": mode}).to_string())
+                                }
+                            }
+                        }
+                    }
+                    "/cli/worktree" => {
+                        // Enable/disable worktree mode for this project
+                        let enable = params.get("enable").cloned().unwrap_or_default();
+                        let value = if enable == "1" || enable == "true" || enable == "on" { "1" } else { "0" };
+                        match cli_update_project_setting(&project_path, "worktree_mode", value) {
+                            Ok(_) => {
+                                let _ = app_handle.emit("sync:projects", ());
+                                Ok(serde_json::json!({"success": true, "worktreeMode": value == "1"}).to_string())
+                            }
+                            Err(e) => Err(e),
+                        }
+                    }
+                    "/cli/heartbeat" => {
+                        // If "enable" param present → toggle heartbeat; otherwise → triage
+                        if let Some(enable) = params.get("enable").cloned() {
+                            let value = if enable == "1" || enable == "true" || enable == "on" { "1" } else { "0" };
+                            match cli_update_project_setting(&project_path, "heartbeat_enabled", value) {
+                                Ok(_) => {
+                                    let _ = app_handle.emit("sync:projects", ());
+                                    Ok(serde_json::json!({"success": true, "heartbeatEnabled": value == "1"}).to_string())
+                                }
+                                Err(e) => Err(e),
+                            }
+                        } else {
+                            // Original heartbeat triage behavior
+                            crate::commands::k2so_agents::k2so_agents_triage_decide(project_path.clone())
+                                .map(|agents| {
+                                    // Emit launch events for each agent
+                                    for agent_name in &agents {
+                                        if agent_name == "__lead__" {
+                                            // Wake the lead agent — generate workspace CLAUDE.md and launch in project root
+                                            let _ = crate::commands::k2so_agents::k2so_agents_generate_workspace_claude_md(project_path.clone());
+                                            let _ = app_handle.emit("cli:agent-launch", serde_json::json!({
+                                                "command": "claude",
+                                                "args": ["-p", "You are the lead agent. Check the workspace inbox: `k2so work inbox` and triage any new items to the appropriate sub-agents using `k2so delegate`."],
+                                                "cwd": &project_path,
+                                                "agentName": "__lead__",
+                                            }));
+                                        } else {
+                                            // Build and emit launch for sub-agent
+                                            if let Ok(launch) = crate::commands::k2so_agents::k2so_agents_build_launch(
+                                                project_path.clone(), agent_name.clone(), None
+                                            ) {
+                                                let _ = app_handle.emit("cli:agent-launch", &launch);
+                                            }
+                                        }
+                                    }
+                                    serde_json::json!({"count": agents.len(), "launched": agents}).to_string()
+                                })
+                        }
+                    }
+                    "/cli/settings" => {
+                        // Get all settings for this project
+                        match cli_get_project_settings(&project_path) {
+                            Ok(settings) => Ok(serde_json::to_string(&settings).unwrap_or_default()),
+                            Err(e) => Err(e),
                         }
                     }
                     "/cli/commit" | "/cli/commit-merge" => {
@@ -411,6 +446,70 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
     });
 
     port
+}
+
+// ── CLI DB Helpers ──────────────────────────────────────────────────────
+// These open a direct SQLite connection so CLI endpoints can read/write
+// project settings without needing the Tauri AppState.
+
+/// Update a single project setting in the DB by matching on project path.
+fn cli_update_project_setting(project_path: &str, field: &str, value: &str) -> Result<(), String> {
+    let db_path = dirs::home_dir()
+        .ok_or("No home dir")?
+        .join(".k2so")
+        .join("k2so.db");
+    let conn = rusqlite::Connection::open(&db_path)
+        .map_err(|e| format!("Failed to open DB: {}", e))?;
+
+    // Validate field name to prevent SQL injection
+    let allowed = ["agent_mode", "worktree_mode", "heartbeat_enabled", "agent_enabled", "pinned"];
+    if !allowed.contains(&field) {
+        return Err(format!("Unknown setting: {}", field));
+    }
+
+    let sql = format!("UPDATE projects SET {} = ?1 WHERE path = ?2", field);
+    let rows = conn.execute(&sql, rusqlite::params![value, project_path])
+        .map_err(|e| format!("DB update failed: {}", e))?;
+
+    if rows == 0 {
+        return Err(format!("Project not found in DB: {}", project_path));
+    }
+
+    // Keep agent_enabled in sync when agent_mode changes
+    if field == "agent_mode" {
+        let enabled = if value == "off" { "0" } else { "1" };
+        let _ = conn.execute(
+            "UPDATE projects SET agent_enabled = ?1 WHERE path = ?2",
+            rusqlite::params![enabled, project_path],
+        );
+    }
+
+    Ok(())
+}
+
+/// Read current project settings from the DB.
+fn cli_get_project_settings(project_path: &str) -> Result<serde_json::Value, String> {
+    let db_path = dirs::home_dir()
+        .ok_or("No home dir")?
+        .join(".k2so")
+        .join("k2so.db");
+    let conn = rusqlite::Connection::open(&db_path)
+        .map_err(|e| format!("Failed to open DB: {}", e))?;
+
+    conn.query_row(
+        "SELECT agent_mode, worktree_mode, heartbeat_enabled, agent_enabled, pinned, name FROM projects WHERE path = ?1",
+        rusqlite::params![project_path],
+        |row| {
+            Ok(serde_json::json!({
+                "mode": row.get::<_, String>(0).unwrap_or_else(|_| "off".to_string()),
+                "worktreeMode": row.get::<_, i64>(1).unwrap_or(0) == 1,
+                "heartbeatEnabled": row.get::<_, i64>(2).unwrap_or(0) == 1,
+                "agentEnabled": row.get::<_, i64>(3).unwrap_or(0) == 1,
+                "pinned": row.get::<_, i64>(4).unwrap_or(0) == 1,
+                "name": row.get::<_, String>(5).unwrap_or_default(),
+            }))
+        },
+    ).map_err(|e| format!("Project not found: {}", e))
 }
 
 /// Generate the notify hook bash script content.

@@ -105,8 +105,9 @@ export default function ReviewPanel(): React.JSX.Element {
   const [acting, setActing] = useState(false)
   const [chats, setChats] = useState<ChatSession[]>([])
   const [criteria, setCriteria] = useState<Map<string, ChecklistItem[]>>(new Map())
-  const [previewRunning, setPreviewRunning] = useState<Set<string>>(new Set())
+  const [previewRunning, setPreviewRunning] = useState<Map<string, string | null>>(new Map()) // agentName → URL or null (pending)
 
+  const agenticEnabled = useSettingsStore((s) => s.agenticSystemsEnabled)
   const projects = useProjectsStore((s) => s.projects)
   const activeProjectId = useProjectsStore((s) => s.activeProjectId)
   const activeWorkspaceId = useProjectsStore((s) => s.activeWorkspaceId)
@@ -198,14 +199,32 @@ export default function ReviewPanel(): React.JSX.Element {
   const handleStartPreview = useCallback(async (review: ReviewItem) => {
     const path = review.worktreePath ?? workspacePath
     if (!path) return
+
+    // Find the most recent Claude chat session for this review
+    const reviewSessions = getChatsForReview(review)
+    const claudeSession = reviewSessions.find((s) => s.provider === 'claude')
+
     const tabsStore = useTabsStore.getState()
-    tabsStore.addTab(path, {
-      title: `Preview: ${review.branch || review.agentName}`,
-      command: 'npm',
-      args: ['run', 'dev'],
-    })
-    setPreviewRunning((prev) => new Set([...prev, review.agentName]))
-  }, [workspacePath])
+    const prompt = 'Launch the dev server for this project on localhost using an available port. If the default port is taken, pick another open one. Once it is running, tell me the full URL.'
+
+    if (claudeSession) {
+      // Resume the original session with the preview prompt
+      tabsStore.addTab(path, {
+        title: `Preview: ${review.branch || review.agentName}`,
+        command: 'claude',
+        args: ['--resume', claudeSession.sessionId, '-p', prompt],
+      })
+    } else {
+      // No existing session — start a fresh agent with the prompt
+      tabsStore.addTab(path, {
+        title: `Preview: ${review.branch || review.agentName}`,
+        command: 'claude',
+        args: ['-p', prompt],
+      })
+    }
+
+    setPreviewRunning((prev) => new Map([...prev, [review.agentName, null]]))
+  }, [workspacePath, getChatsForReview])
 
   const handleApprove = useCallback(async (review: ReviewItem) => {
     if (!activeProject || !review.branch) return
@@ -289,6 +308,14 @@ export default function ReviewPanel(): React.JSX.Element {
 
   // ── Render ──────────────────────────────────────────────────────────
 
+  if (!agenticEnabled) {
+    return (
+      <div className="h-full flex items-center justify-center p-4">
+        <p className="text-[10px] text-[var(--color-text-muted)]">Agentic Systems is off</p>
+      </div>
+    )
+  }
+
   if (!activeProject) {
     return (
       <div className="h-full flex items-center justify-center p-4">
@@ -332,6 +359,7 @@ export default function ReviewPanel(): React.JSX.Element {
         const reviewChats = getChatsForReview(review)
         const reviewCriteria = criteria.get(review.agentName) ?? []
         const isPreviewUp = previewRunning.has(review.agentName)
+        const previewUrl = previewRunning.get(review.agentName) ?? null
 
         return (
           <div key={review.agentName} className="border-b border-[var(--color-border)] p-3 space-y-2">
@@ -408,14 +436,14 @@ export default function ReviewPanel(): React.JSX.Element {
               {!isPreviewUp ? (
                 <button
                   onClick={() => handleStartPreview(review)}
-                  className="px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer"
+                  className="px-2 py-0.5 text-[10px] text-white bg-[var(--color-accent)] hover:opacity-90 transition-colors no-drag cursor-pointer"
                 >
                   Start Preview
                 </button>
               ) : (
                 <span className="text-[10px] text-green-400 flex items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                  Preview running
+                  Preview launching...
                 </span>
               )}
             </div>

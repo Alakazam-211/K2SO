@@ -102,7 +102,16 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
         })
       )
 
-      set({ projects: projectsWithWorkspaces })
+      // Preserve object identity for unchanged projects to avoid unnecessary re-renders
+      const prev = get().projects
+      const merged = projectsWithWorkspaces.map((next) => {
+        const existing = prev.find((p) => p.id === next.id)
+        if (existing && JSON.stringify(existing) === JSON.stringify(next)) {
+          return existing // same reference — React skips re-render
+        }
+        return next
+      })
+      set({ projects: merged })
 
       // If active project was deleted (e.g. in another window), clear selection
       const state = get()

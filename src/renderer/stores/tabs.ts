@@ -43,10 +43,15 @@ export interface FileViewerItemData {
   mode?: 'edit' | 'diff'
 }
 
+export interface AgentItemData {
+  agentName: string
+  projectPath: string
+}
+
 export interface Item {
   id: string
-  type: 'terminal' | 'file-viewer'
-  data: TerminalItemData | FileViewerItemData
+  type: 'terminal' | 'file-viewer' | 'agent'
+  data: TerminalItemData | FileViewerItemData | AgentItemData
   pinned?: boolean
 }
 
@@ -80,7 +85,7 @@ export interface MarkdownPaneData {
   filePath: string
 }
 
-export type PaneData = TerminalPaneData | FileViewerPaneData
+export type PaneData = TerminalPaneData | FileViewerPaneData | { type: 'agent'; agentName: string; projectPath: string }
 
 // Keep backward-compat alias
 export type TerminalPane = TerminalPaneData
@@ -89,13 +94,15 @@ export type TerminalPane = TerminalPaneData
 
 export interface SerializedItem {
   id: string
-  type: 'terminal' | 'file-viewer'
+  type: 'terminal' | 'file-viewer' | 'agent'
   cwd?: string
   command?: string
   args?: string[]
   sessionId?: string  // CLI tool session ID for resume on restart
   filePath?: string
   pinned?: boolean
+  agentName?: string
+  projectPath?: string
 }
 
 export interface SerializedPaneGroup {
@@ -160,6 +167,7 @@ interface TabsState {
   removePaneFromTab: (tabId: string, paneGroupId: string) => void
   getActiveTab: () => Tab | undefined
   openFileInPane: (tabId: string, filePath: string) => void
+  openAgentPane: (agentName: string, projectPath: string) => void
   openFileInPaneGroup: (tabId: string, paneGroupId: string, filePath: string) => void
   openDiffInPane: (tabId: string, filePath: string) => void
   pinPane: (tabId: string, paneGroupId: string) => void
@@ -242,6 +250,14 @@ function serializeTab(tab: Tab): SerializedTab {
           command: d.command,
           args: d.args,
           sessionId: d.sessionId,
+        }
+      } else if (item.type === 'agent') {
+        const d = item.data as AgentItemData
+        return {
+          id: item.id,
+          type: 'agent' as const,
+          agentName: d.agentName,
+          projectPath: d.projectPath,
         }
       } else {
         const d = item.data as FileViewerItemData
@@ -416,6 +432,12 @@ function paneDataToItem(pane: PaneData): Item {
         args: pane.args,
       },
     }
+  } else if (pane.type === 'agent') {
+    return {
+      id: crypto.randomUUID(),
+      type: 'agent',
+      data: { agentName: pane.agentName, projectPath: pane.projectPath },
+    }
   } else {
     return {
       id: crypto.randomUUID(),
@@ -440,6 +462,13 @@ export function paneGroupToActivePaneData(pg: PaneGroup): PaneData {
       cwd: d.cwd,
       command: d.command,
       args: d.args,
+    }
+  } else if (item.type === 'agent') {
+    const d = item.data as AgentItemData
+    return {
+      type: 'agent',
+      agentName: d.agentName,
+      projectPath: d.projectPath,
     }
   } else {
     const d = item.data as FileViewerItemData
@@ -709,6 +738,53 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
       return { tabs }
     })
+  },
+
+  openAgentPane: (agentName: string, projectPath: string) => {
+    const state = get()
+    const tab = state.tabs.find((t) => t.id === state.activeTabId)
+    if (!tab) return
+
+    const activePgId = getFirstLeaf(tab.mosaicTree)
+    if (!activePgId) return
+
+    const pg = tab.paneGroups.get(activePgId)
+    if (!pg) return
+
+    // Check if this agent is already open
+    const existingIdx = pg.items.findIndex(
+      (item) => item.type === 'agent' && (item.data as AgentItemData).agentName === agentName
+    )
+    if (existingIdx !== -1) {
+      set((s) => ({
+        tabs: s.tabs.map((t) =>
+          t.id !== tab.id ? t : {
+            ...t,
+            paneGroups: new Map(t.paneGroups).set(activePgId, { ...pg, activeItemIndex: existingIdx }),
+          }
+        ),
+      }))
+      return
+    }
+
+    const newItem: Item = {
+      id: crypto.randomUUID(),
+      type: 'agent',
+      data: { agentName, projectPath },
+    }
+    const newItems = [...pg.items, newItem]
+    set((s) => ({
+      tabs: s.tabs.map((t) =>
+        t.id !== tab.id ? t : {
+          ...t,
+          paneGroups: new Map(t.paneGroups).set(activePgId, {
+            ...pg,
+            items: newItems,
+            activeItemIndex: newItems.length - 1,
+          }),
+        }
+      ),
+    }))
   },
 
   openFileInPaneGroup: (tabId: string, paneGroupId: string, filePath: string) => {
@@ -1325,6 +1401,12 @@ export const useTabsStore = create<TabsState>((set, get) => ({
                 sessionId,
               },
             }
+          } else if (si.type === 'agent') {
+            return {
+              id: crypto.randomUUID(),
+              type: 'agent' as const,
+              data: { agentName: si.agentName ?? '', projectPath: si.projectPath ?? cwd },
+            }
           } else {
             return {
               id: crypto.randomUUID(),
@@ -1401,6 +1483,12 @@ export const useTabsStore = create<TabsState>((set, get) => ({
                     id: crypto.randomUUID(),
                     type: 'terminal' as const,
                     data: { terminalId: newPgId, cwd: si.cwd ?? cwd, command, args, sessionId },
+                  }
+                } else if (si.type === 'agent') {
+                  return {
+                    id: crypto.randomUUID(),
+                    type: 'agent' as const,
+                    data: { agentName: si.agentName ?? '', projectPath: si.projectPath ?? cwd },
                   }
                 } else {
                   return {

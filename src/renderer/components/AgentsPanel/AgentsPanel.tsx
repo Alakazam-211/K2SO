@@ -11,10 +11,12 @@ interface K2soAgentInfo {
   inboxCount: number
   activeCount: number
   doneCount: number
+  podLeader: boolean
 }
 
 export default function AgentsPanel(): React.JSX.Element {
   const [agents, setAgents] = useState<K2soAgentInfo[]>([])
+  const [wsInboxCount, setWsInboxCount] = useState(0)
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
   const [newName, setNewName] = useState('')
@@ -45,11 +47,22 @@ export default function AgentsPanel(): React.JSX.Element {
     }
   }, [activeProject])
 
+  const fetchWsInbox = useCallback(async () => {
+    if (!activeProject) return
+    try {
+      const items = await invoke<unknown[]>('k2so_agents_workspace_inbox_list', { projectPath: activeProject.path })
+      setWsInboxCount(items.length)
+    } catch {
+      setWsInboxCount(0)
+    }
+  }, [activeProject])
+
   useEffect(() => {
     fetchAgents()
-    const interval = setInterval(fetchAgents, 10_000)
+    fetchWsInbox()
+    const interval = setInterval(() => { fetchAgents(); fetchWsInbox() }, 10_000)
     return () => clearInterval(interval)
-  }, [fetchAgents])
+  }, [fetchAgents, fetchWsInbox])
 
   useEffect(() => {
     if (showCreate) {
@@ -124,6 +137,21 @@ export default function AgentsPanel(): React.JSX.Element {
     return '#6b7280'                              // gray — idle
   }
 
+  const agenticEnabled = useSettingsStore((s) => s.agenticSystemsEnabled)
+
+  if (!agenticEnabled) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center p-4 gap-2">
+        <p className="text-[10px] text-[var(--color-text-muted)] text-center">
+          Agentic Systems is off
+        </p>
+        <p className="text-[9px] text-[var(--color-text-muted)] text-center">
+          Enable it in Settings &gt; General
+        </p>
+      </div>
+    )
+  }
+
   if (!activeProject) {
     return (
       <div className="h-full flex items-center justify-center p-4">
@@ -183,14 +211,113 @@ export default function AgentsPanel(): React.JSX.Element {
     )
   }
 
-  // Pod mode — show full agent list
+  // Pod mode — show pod leader + pod leader + pod members
+
+  const podLeader = agents.find((a) => a.podLeader)
+  const podMembers = agents.filter((a) => !a.podLeader)
+  const totalDelegated = podMembers.reduce((sum, a) => sum + a.inboxCount + a.activeCount, 0)
+  const totalDone = podMembers.reduce((sum, a) => sum + a.doneCount, 0)
+
+  const openAgentPane = (name: string) => {
+    if (!activeProject) return
+    useTabsStore.getState().openAgentPane(name, activeProject.path)
+  }
+
+  const AgentRow = ({ agent, showDelete = true }: { agent: K2soAgentInfo; showDelete?: boolean }) => (
+    <div
+      className="px-3 py-2 border-b border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] transition-colors group cursor-pointer"
+      onClick={() => openAgentPane(agent.name)}
+    >
+      <div className="flex items-center gap-2">
+        <span
+          className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+          style={{ backgroundColor: statusColor(agent) }}
+          title={
+            agent.activeCount > 0 ? 'Working' :
+            agent.doneCount > 0 ? 'Has completed work' :
+            agent.inboxCount > 0 ? 'Has pending work' : 'Idle'
+          }
+        />
+        <div className="flex-1 min-w-0">
+          <div className="text-xs text-[var(--color-text-primary)] truncate">
+            {agent.name}
+            {agent.podLeader && (
+              <span className="ml-1.5 text-[9px] text-[var(--color-accent)] font-medium">LEADER</span>
+            )}
+          </div>
+          <div className="text-[10px] text-[var(--color-text-muted)] truncate">{agent.role}</div>
+        </div>
+        <div className="flex items-center gap-1 text-[9px] text-[var(--color-text-muted)] flex-shrink-0">
+          {agent.inboxCount > 0 && <span title="Inbox">{agent.inboxCount}i</span>}
+          {agent.activeCount > 0 && <span className="text-yellow-400" title="Active">{agent.activeCount}a</span>}
+          {agent.doneCount > 0 && <span className="text-green-400" title="Done">{agent.doneCount}d</span>}
+        </div>
+        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+          <button
+            onClick={(e) => { e.stopPropagation(); handleLaunch(agent.name) }}
+            className="px-1.5 py-0.5 text-[9px] text-[var(--color-accent)] hover:text-[var(--color-accent)]/80 hover:bg-[var(--color-accent)]/10 no-drag cursor-pointer"
+            title="Launch agent session"
+          >
+            ▶
+          </button>
+          {showDelete && (
+            <button
+              onClick={(e) => { e.stopPropagation(); handleDelete(agent.name) }}
+              className="px-1 py-0.5 text-[9px] text-red-400/50 hover:text-red-400 hover:bg-red-500/10 no-drag cursor-pointer"
+              title="Delete agent"
+            >
+              ×
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
-      {/* Header */}
+      {/* Pod Leader section */}
+      {podLeader && (
+        <div className="border-b border-[var(--color-border)]">
+          <div className="px-3 py-1.5">
+            <span className="text-[9px] font-medium text-[var(--color-accent)] uppercase tracking-wider">Pod Leader</span>
+          </div>
+          <div className="px-3 py-2 border-b border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] transition-colors group">
+            <div className="flex items-center gap-2">
+              <span
+                className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                style={{ backgroundColor: statusColor(podLeader) }}
+              />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-[var(--color-text-primary)] truncate">{podLeader.name}</span>
+                  <span className="text-[9px] font-medium text-[var(--color-accent)]">LEADER</span>
+                </div>
+                <div className="text-[10px] text-[var(--color-text-muted)] truncate">{podLeader.role}</div>
+              </div>
+              <div className="flex items-center gap-1 text-[9px] text-[var(--color-text-muted)] flex-shrink-0">
+                {wsInboxCount > 0 && <span className="text-[var(--color-accent)]" title="Undelegated">{wsInboxCount}u</span>}
+                {totalDelegated > 0 && <span className="text-yellow-400" title="Delegated">{totalDelegated}d</span>}
+                {totalDone > 0 && <span className="text-green-400" title="Done">{totalDone}✓</span>}
+              </div>
+              <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+                <button
+                  onClick={() => handleLaunch(podLeader.name)}
+                  className="px-1.5 py-0.5 text-[9px] text-[var(--color-accent)] hover:text-[var(--color-accent)]/80 hover:bg-[var(--color-accent)]/10 no-drag cursor-pointer"
+                  title="Launch pod leader session"
+                >
+                  ▶
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Pod Members header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)]">
         <span className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider">
-          Agents {agents.length > 0 && `(${agents.length})`}
+          Agents {podMembers.length > 0 && `(${podMembers.length})`}
         </span>
         <button
           onClick={() => setShowCreate(!showCreate)}
@@ -237,68 +364,14 @@ export default function AgentsPanel(): React.JSX.Element {
           <div className="p-3">
             <p className="text-[10px] text-[var(--color-text-muted)]">Loading...</p>
           </div>
-        ) : agents.length === 0 ? (
+        ) : podMembers.length === 0 ? (
           <div className="p-3">
             <p className="text-[10px] text-[var(--color-text-muted)]">
               No agents yet. Click + to create one.
             </p>
           </div>
         ) : (
-          agents.map((agent) => (
-            <div
-              key={agent.name}
-              className="px-3 py-2 border-b border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] transition-colors group"
-            >
-              {/* Agent row */}
-              <div className="flex items-center gap-2">
-                {/* Status dot */}
-                <span
-                  className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-                  style={{ backgroundColor: statusColor(agent) }}
-                  title={
-                    agent.activeCount > 0 ? 'Working' :
-                    agent.doneCount > 0 ? 'Has completed work' :
-                    agent.inboxCount > 0 ? 'Has pending work' : 'Idle'
-                  }
-                />
-
-                {/* Name + role */}
-                <div className="flex-1 min-w-0">
-                  <div className="text-xs text-[var(--color-text-primary)] truncate">
-                    {agent.name}
-                  </div>
-                  <div className="text-[10px] text-[var(--color-text-muted)] truncate">
-                    {agent.role}
-                  </div>
-                </div>
-
-                {/* Work counts */}
-                <div className="flex items-center gap-1 text-[9px] text-[var(--color-text-muted)] flex-shrink-0">
-                  {agent.inboxCount > 0 && <span title="Inbox">{agent.inboxCount}i</span>}
-                  {agent.activeCount > 0 && <span className="text-yellow-400" title="Active">{agent.activeCount}a</span>}
-                  {agent.doneCount > 0 && <span className="text-green-400" title="Done">{agent.doneCount}d</span>}
-                </div>
-
-                {/* Actions (visible on hover) */}
-                <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
-                  <button
-                    onClick={() => handleLaunch(agent.name)}
-                    className="px-1.5 py-0.5 text-[9px] text-[var(--color-accent)] hover:text-[var(--color-accent)]/80 hover:bg-[var(--color-accent)]/10 no-drag cursor-pointer"
-                    title="Launch agent session"
-                  >
-                    ▶
-                  </button>
-                  <button
-                    onClick={() => handleDelete(agent.name)}
-                    className="px-1 py-0.5 text-[9px] text-red-400/50 hover:text-red-400 hover:bg-red-500/10 no-drag cursor-pointer"
-                    title="Delete agent"
-                  >
-                    ×
-                  </button>
-                </div>
-              </div>
-            </div>
-          ))
+          podMembers.map((agent) => <AgentRow key={agent.name} agent={agent} />)
         )}
       </div>
 
@@ -308,16 +381,27 @@ export default function AgentsPanel(): React.JSX.Element {
   )
 }
 
+interface WorkItem {
+  filename: string
+  title: string
+  priority: string
+  assignedBy: string
+  created: string
+  itemType: string
+  folder: string
+}
+
 function WorkspaceInboxSummary({ projectPath }: { projectPath: string }): React.JSX.Element | null {
-  const [count, setCount] = useState(0)
+  const [items, setItems] = useState<WorkItem[]>([])
+  const [expanded, setExpanded] = useState(true)
 
   useEffect(() => {
     const check = async () => {
       try {
-        const items = await invoke<unknown[]>('k2so_agents_workspace_inbox_list', { projectPath })
-        setCount(items.length)
+        const result = await invoke<WorkItem[]>('k2so_agents_workspace_inbox_list', { projectPath })
+        setItems(result)
       } catch {
-        setCount(0)
+        setItems([])
       }
     }
     check()
@@ -325,13 +409,49 @@ function WorkspaceInboxSummary({ projectPath }: { projectPath: string }): React.
     return () => clearInterval(interval)
   }, [projectPath])
 
-  if (count === 0) return null
+  if (items.length === 0) return null
+
+  const openWorkItem = (item: WorkItem) => {
+    const filePath = `${projectPath}/.k2so/work/inbox/${item.filename}`
+    const tab = useTabsStore.getState().getActiveTab()
+    if (tab) {
+      useTabsStore.getState().openFileInPane(tab.id, filePath)
+    }
+  }
+
+  const priorityColor = (p: string) => {
+    if (p === 'critical') return 'text-red-400'
+    if (p === 'high') return 'text-orange-400'
+    return 'text-[var(--color-text-muted)]'
+  }
 
   return (
-    <div className="px-3 py-1.5 border-t border-[var(--color-border)] bg-[var(--color-bg-elevated)]">
-      <span className="text-[10px] text-[var(--color-accent)]">
-        {count} item{count !== 1 ? 's' : ''} in workspace inbox
-      </span>
+    <div className="border-t border-[var(--color-border)] flex-shrink-0">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full px-3 py-1.5 flex items-center justify-between bg-[var(--color-bg-elevated)] hover:bg-[var(--color-bg-hover)] transition-colors no-drag cursor-pointer"
+      >
+        <span className="text-[9px] font-medium text-[var(--color-accent)] uppercase tracking-wider">
+          Workspace Inbox ({items.length})
+        </span>
+        <span className="text-[9px] text-[var(--color-text-muted)]">{expanded ? '▾' : '▸'}</span>
+      </button>
+      {expanded && (
+        <div className="max-h-[200px] overflow-y-auto">
+          {items.map((item) => (
+            <div
+              key={item.filename}
+              onClick={() => openWorkItem(item)}
+              className="px-3 py-1.5 border-t border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] cursor-pointer transition-colors"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-[var(--color-text-primary)] truncate flex-1 mr-2">{item.title}</span>
+                <span className={`text-[9px] flex-shrink-0 ${priorityColor(item.priority)}`}>{item.priority}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

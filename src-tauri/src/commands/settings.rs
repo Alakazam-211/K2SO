@@ -127,6 +127,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub timer: TimerSettings,
     #[serde(default)]
+    pub agentic_systems_enabled: bool,
+    #[serde(default)]
     pub claude_auth_auto_refresh: bool,
 }
 
@@ -149,6 +151,7 @@ impl Default for AppSettings {
             default_agent: "claude".to_string(),
             ai_assistant_enabled: false,
             timer: TimerSettings::default(),
+            agentic_systems_enabled: false,
             claude_auth_auto_refresh: false,
         }
     }

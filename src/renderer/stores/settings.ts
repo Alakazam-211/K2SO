@@ -29,6 +29,9 @@ interface SettingsState {
   // AI Assistant
   aiAssistantEnabled: boolean
 
+  // Master switch for the entire agent system (agents, pods, heartbeat, reviews)
+  agenticSystemsEnabled: boolean
+
   // Claude Auth auto-refresh (background scheduler)
   claudeAuthAutoRefresh: boolean
 
@@ -94,6 +97,7 @@ async function persistAndApply(
       keybindings: result.keybindings,
       projectSettings: result.projectSettings ?? {},
       defaultAgent: result.defaultAgent ?? 'claude',
+      agenticSystemsEnabled: result.agenticSystemsEnabled ?? false,
       claudeAuthAutoRefresh: result.claudeAuthAutoRefresh ?? false,
       loaded: true
     })
@@ -109,6 +113,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   keybindings: {},
   projectSettings: {},
   aiAssistantEnabled: true,
+  agenticSystemsEnabled: false,
   claudeAuthAutoRefresh: false,
   defaultAgent: 'claude',
   initialProjectId: null,
@@ -246,6 +251,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       keybindings: result.keybindings,
       projectSettings: result.projectSettings ?? {},
       defaultAgent: result.defaultAgent ?? 'claude',
+      agenticSystemsEnabled: result.agenticSystemsEnabled ?? false,
       claudeAuthAutoRefresh: result.claudeAuthAutoRefresh ?? false,
       loaded: true
     })

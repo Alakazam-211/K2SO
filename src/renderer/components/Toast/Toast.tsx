@@ -15,7 +15,8 @@ function ToastItem({ toast }: { toast: ToastData }): React.JSX.Element {
   useEffect(() => {
     const el = progressRef.current
     if (!el) return
-    // Animate the progress bar from full width to zero
+    // Animate the progress bar from zero width to full (right-aligned, fills leftward)
+    el.style.width = '100%'
     el.style.transition = `width ${toast.duration}ms linear`
     requestAnimationFrame(() => {
       el.style.width = '0%'
@@ -25,7 +26,7 @@ function ToastItem({ toast }: { toast: ToastData }): React.JSX.Element {
   return (
     <div
       className="flex items-start gap-2 bg-[var(--color-bg-elevated)] text-[var(--color-text-primary)] text-xs shadow-lg min-w-[240px] max-w-[360px] overflow-hidden"
-      style={{ borderLeft: `3px solid ${BORDER_COLORS[toast.type]}` }}
+      style={{ borderRight: `3px solid ${BORDER_COLORS[toast.type]}` }}
     >
       <div className="flex-1 flex flex-col">
         <div className="px-3 py-2.5 flex flex-col gap-1.5">
@@ -60,11 +61,13 @@ function ToastItem({ toast }: { toast: ToastData }): React.JSX.Element {
             </button>
           )}
         </div>
-        <div
-          ref={progressRef}
-          className="h-[2px] w-full"
-          style={{ backgroundColor: BORDER_COLORS[toast.type], opacity: 0.4 }}
-        />
+        <div className="flex justify-end">
+          <div
+            ref={progressRef}
+            className="h-[2px]"
+            style={{ backgroundColor: BORDER_COLORS[toast.type], opacity: 0.4 }}
+          />
+        </div>
       </div>
     </div>
   )
@@ -76,7 +79,7 @@ export default function Toast(): React.JSX.Element | null {
   if (toasts.length === 0) return null
 
   return (
-    <div className="fixed bottom-4 left-4 z-[9999] flex flex-col gap-2 pointer-events-auto">
+    <div className="fixed bottom-4 right-4 z-[9999] flex flex-col items-end gap-2 pointer-events-auto">
       {toasts.map((toast) => (
         <ToastItem key={toast.id} toast={toast} />
       ))}

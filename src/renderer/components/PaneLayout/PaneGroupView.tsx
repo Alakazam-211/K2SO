@@ -1,8 +1,9 @@
 import { useCallback, useState } from 'react'
 import { AlacrittyTerminalView } from '@/components/Terminal/AlacrittyTerminalView'
 import { FileViewerPane } from '@/components/FileViewerPane/FileViewerPane'
+import { AgentPane } from '@/components/AgentPane/AgentPane'
 import { useTabsStore } from '@/stores/tabs'
-import type { TerminalItemData, FileViewerItemData } from '@/stores/tabs'
+import type { TerminalItemData, FileViewerItemData, AgentItemData } from '@/stores/tabs'
 import { useActiveAgentsStore, type ActiveAgent } from '@/stores/active-agents'
 import AgentCloseDialog from '@/components/AgentCloseDialog/AgentCloseDialog'
 import { PaneTabBar } from './PaneTabBar'
@@ -172,6 +173,12 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
               mode={fileData.mode}
               paneId={activeItem.id}
               tabId={tabId}
+              onClose={() => handleClose(activeItem.id)}
+            />
+          ) : activeItem.type === 'agent' ? (
+            <AgentPane
+              agentName={(activeItem.data as AgentItemData).agentName}
+              projectPath={(activeItem.data as AgentItemData).projectPath}
               onClose={() => handleClose(activeItem.id)}
             />
           ) : null}

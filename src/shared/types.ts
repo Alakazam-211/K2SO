@@ -81,5 +81,6 @@ export interface AppSettingsResponse {
   defaultAgent: string
   aiAssistantEnabled: boolean
   timer: TimerSettingsBackend
+  agenticSystemsEnabled: boolean
   claudeAuthAutoRefresh: boolean
 }

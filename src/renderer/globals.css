@@ -693,3 +693,21 @@ a,
   border-bottom: 1px dashed var(--color-border);
   background: var(--color-bg);
 }
+
+/* ── Heartbeat animation ─────────────────────────────────────────────── */
+/* Mimics a real heartbeat: quick double-pump then pause (lub-dub...rest) */
+
+@keyframes heartpulse {
+  0%   { transform: scale(1); }
+  14%  { transform: scale(1.4); }
+  20%  { transform: scale(1); }
+  28%  { transform: scale(1.25); }
+  34%  { transform: scale(1); }
+  100% { transform: scale(1); }
+}
+
+@keyframes heartwave {
+  0%   { transform: scale(0.5); opacity: 0.5; }
+  50%  { transform: scale(1.8); opacity: 0; }
+  100% { transform: scale(1.8); opacity: 0; }
+}

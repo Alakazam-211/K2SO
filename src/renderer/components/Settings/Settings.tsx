@@ -9,6 +9,8 @@ import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import type { LinkClickMode } from '@/stores/terminal-settings'
 import { invoke } from '@tauri-apps/api/core'
 import { useAssistantStore } from '@/stores/assistant'
+import { useTabsStore } from '@/stores/tabs'
+import { usePanelsStore } from '@/stores/panels'
 import IconCropDialog from './IconCropDialog'
 import ProjectAvatar from '@/components/Sidebar/ProjectAvatar'
 import {
@@ -78,12 +80,12 @@ class SectionErrorBoundary extends React.Component<
 // ── Section nav items ────────────────────────────────────────────────
 const SECTIONS: { id: SettingsSection; label: string }[] = [
   { id: 'general', label: 'General' },
+  { id: 'projects', label: 'Workspaces' },
   { id: 'terminal', label: 'Terminal' },
   { id: 'editors-agents', label: 'Editors & Agents' },
   { id: 'ai-assistant', label: 'AI Assistant' },
   { id: 'keybindings', label: 'Keybindings' },
   { id: 'timer', label: 'Timer' },
-  { id: 'projects', label: 'Workspaces' }
 ]
 
 // ── Main Settings component ──────────────────────────────────────────
@@ -232,6 +234,9 @@ function GeneralSection(): React.JSX.Element {
             </button>
           </div>
         )}
+
+        {/* Agentic Systems master switch */}
+        <AgenticSystemsToggle />
 
         {/* Claude Auth Auto-Refresh */}
         <ClaudeAuthRefreshRow />
@@ -1941,7 +1946,13 @@ function ProjectsSection(): React.JSX.Element {
   const reorderZoneRef = useRef<string | null>(null)
   const dragOverGroupRef = useRef<string | null>(null)
 
-  const pinnedProjects = useMemo(() => projects.filter((p) => p.pinned), [projects])
+  const settingsAgenticEnabled = useSettingsStore((s) => s.agenticSystemsEnabled)
+  const agentPinnedProjects = useMemo(() =>
+    settingsAgenticEnabled ? projects.filter((p) => p.agentMode === 'agent') : [],
+    [projects, settingsAgenticEnabled])
+  const agentIds = useMemo(() => new Set(agentPinnedProjects.map((p) => p.id)), [agentPinnedProjects])
+  const pinnedProjects = useMemo(() => projects.filter((p) => p.pinned && !agentIds.has(p.id)), [projects, agentIds])
+  const regularPinnedProjects = pinnedProjects
   const reorderProjects = useProjectsStore((s) => s.reorderProjects)
 
   const handleReorderMouseDown = useCallback((
@@ -2209,16 +2220,34 @@ function ProjectsSection(): React.JSX.Element {
 
         {/* Workspace list — pinned at top, then groups or flat */}
         <div className="flex-1 overflow-y-auto px-1 py-1">
-          {/* ── Pinned workspaces (always visible) ── */}
-          {pinnedProjects.length > 0 && (
+          {/* ── Agent workspaces ── */}
+          {agentPinnedProjects.length > 0 && (
             <div className="mb-1 pb-1 border-b border-[var(--color-border)]">
               <div className="px-2 pt-1 pb-1">
                 <span className="text-[10px] font-semibold text-[var(--color-accent)] uppercase tracking-wider">
+                  Agents
+                </span>
+              </div>
+              <div data-reorder-zone="agents">
+                {agentPinnedProjects.map((p) => (
+                  <div key={p.id} className="border-l-2 border-[var(--color-accent)]">
+                    <ProjectRow project={p} zone="pinned" containerSelector="[data-reorder-zone='agents']" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ── Pinned workspaces ── */}
+          {regularPinnedProjects.length > 0 && (
+            <div className="mb-1 pb-1 border-b border-[var(--color-border)]">
+              <div className="px-2 pt-1 pb-1">
+                <span className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
                   Pinned
                 </span>
               </div>
               <div data-reorder-zone="pinned">
-                {pinnedProjects.map((p, idx) => (
+                {regularPinnedProjects.map((p, idx) => (
                   <div key={p.id}>
                     {reorderZone === 'pinned' && reorderDropIndex === idx && (
                       <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
@@ -2226,7 +2255,7 @@ function ProjectsSection(): React.JSX.Element {
                     <ProjectRow project={p} zone="pinned" containerSelector="[data-reorder-zone='pinned']" />
                   </div>
                 ))}
-                {reorderZone === 'pinned' && reorderDropIndex === pinnedProjects.length && (
+                {reorderZone === 'pinned' && reorderDropIndex === regularPinnedProjects.length && (
                   <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
                 )}
               </div>
@@ -2689,6 +2718,7 @@ function ProjectDetail({
   const [cropImage, setCropImage] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+
   const handleDetectIcon = async (): Promise<void> => {
     setIconLoading(true)
     try {
@@ -2887,8 +2917,8 @@ function ProjectDetail({
           </button>
         </div>
 
-        {/* Worktrees table */}
-        {project.worktreeMode === 1 && project.workspaces.length > 0 && (
+        {/* Worktrees table — uses stableWorktreeMode to prevent layout jiggle */}
+        <div className={project.worktreeMode === 1 && project.workspaces.length > 0 ? '' : 'hidden'}>
           <div className="border border-[var(--color-border)]">
             {project.workspaces.map((ws, i) => (
               <div
@@ -2908,16 +2938,16 @@ function ProjectDetail({
               </div>
             ))}
           </div>
-        )}
+        </div>
 
-        {/* Worktree Folders on Disk */}
-        {project.worktreeMode === 1 && (
+        {/* Worktree Folders on Disk — uses stableWorktreeMode to prevent layout jiggle */}
+        <div className={project.worktreeMode === 1 ? '' : 'hidden'}>
           <WorktreeFoldersOnDisk project={project} fetchProjects={fetchProjects} />
-        )}
+        </div>
       </SettingsGroup>
 
       {/* ── Group 3: Agent Settings — Mode tabs, Heartbeat, Agents list ── */}
-      <SettingsGroup title="Agent Settings">
+      {useSettingsStore.getState().agenticSystemsEnabled && <SettingsGroup title="Agent Settings">
         <div className="space-y-2">
           {/* Mode selector */}
           <div className="flex gap-1">
@@ -2965,31 +2995,46 @@ function ProjectDetail({
 
           <p className="text-[10px] text-[var(--color-text-muted)]">
             {(project.agentMode || 'off') === 'off' && 'No agent features enabled for this workspace.'}
-            {(project.agentMode || 'off') === 'agent' && 'This workspace embodies a single AI agent. Open a Claude terminal and it knows how to operate K2SO.'}
-            {(project.agentMode || 'off') === 'pod' && 'A team of sub-agents accepts and works on tasks. The workspace acts as lead orchestrator.'}
+            {(project.agentMode || 'off') === 'agent' && 'AI Planner — collaborates with you to plan work, set up workspaces, and coordinate across projects.'}
+            {(project.agentMode || 'off') === 'pod' && 'Pod mode — a pod leader delegates work to agent templates that execute in parallel worktrees.'}
           </p>
 
           {/* Heartbeat — only when a mode is active */}
           {(project.agentMode || 'off') !== 'off' && (
             <div className="flex items-center justify-between py-2 border-t border-[var(--color-border)]">
-              <div>
-                <span className="text-[10px] text-[var(--color-text-secondary)]">Heartbeat</span>
-                <p className="text-[9px] text-[var(--color-text-muted)]">
-                  {project.heartbeatEnabled ? 'Wakes up automatically to work' : 'Only works when manually launched'}
-                </p>
+              <div className="flex items-center gap-2">
+                {/* Heartbeat indicator with pulse waves */}
+                <div className="relative flex items-center justify-center w-5 h-5 flex-shrink-0 overflow-hidden">
+                  <span className={`absolute w-5 h-5 rounded-full transition-opacity ${project.heartbeatEnabled ? 'bg-red-500/30 animate-[heartwave_1.2s_ease-out_infinite] opacity-100' : 'opacity-0'}`} />
+                  <span className={`absolute w-5 h-5 rounded-full transition-opacity ${project.heartbeatEnabled ? 'bg-red-500/20 animate-[heartwave_1.2s_ease-out_0.3s_infinite] opacity-100' : 'opacity-0'}`} />
+                  <span className={`relative w-2 h-2 rounded-full transition-colors ${
+                    project.heartbeatEnabled ? 'bg-red-500 animate-[heartpulse_1.2s_ease-in-out_infinite]' : 'bg-red-500/25'
+                  }`} />
+                </div>
+                <div>
+                  <span className="text-[10px] text-[var(--color-text-secondary)]">Heartbeat</span>
+                  <p className="text-[9px] text-[var(--color-text-muted)]">
+                    {project.heartbeatEnabled ? 'Wakes up automatically to work' : 'Only works when manually launched'}
+                  </p>
+                </div>
               </div>
               <button
                 onClick={async () => {
                   const newVal = project.heartbeatEnabled ? 0 : 1
+                  // Update store in-place to avoid full re-render jiggle
+                  const store = useProjectsStore.getState()
+                  const updatedProjects = store.projects.map((p) =>
+                    p.id === project.id ? { ...p, heartbeatEnabled: newVal } : p
+                  )
+                  useProjectsStore.setState({ projects: updatedProjects })
                   await invoke('projects_update', { id: project.id, heartbeatEnabled: newVal })
                   await invoke('k2so_agents_update_heartbeat_projects').catch(console.error)
                   if (newVal === 1) {
                     await invoke('k2so_agents_install_heartbeat').catch(console.error)
                   }
-                  await fetchProjects()
                 }}
                 className={`w-8 h-4 flex items-center transition-colors no-drag cursor-pointer ${
-                  project.heartbeatEnabled ? 'bg-green-600' : 'bg-[var(--color-border)]'
+                  project.heartbeatEnabled ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
                 }`}
               >
                 <span
@@ -3008,7 +3053,7 @@ function ProjectDetail({
             </div>
           )}
         </div>
-      </SettingsGroup>
+      </SettingsGroup>}
 
       {/* ── Group 4: Chat Migrations ── */}
       <SettingsGroup title="Chat Migrations">
@@ -3037,10 +3082,62 @@ interface K2soAgentInfo {
   inboxCount: number
   activeCount: number
   doneCount: number
+  podLeader: boolean
+}
+
+function AgentKebabMenu({ onSettings, onDelete }: { onSettings: () => void; onDelete?: () => void }): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const handleClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [open])
+
+  return (
+    <div className="relative" ref={menuRef}>
+      <button
+        onClick={() => setOpen(!open)}
+        className="px-1 py-0.5 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors no-drag cursor-pointer"
+        title="More options"
+      >
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+          <circle cx="8" cy="3" r="1.5" />
+          <circle cx="8" cy="8" r="1.5" />
+          <circle cx="8" cy="13" r="1.5" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full mt-1 z-50 bg-[var(--color-bg-elevated)] border border-[var(--color-border)] shadow-lg min-w-[140px]">
+          <button
+            onClick={() => { setOpen(false); onSettings() }}
+            className="w-full text-left px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] transition-colors no-drag cursor-pointer"
+          >
+            Settings
+          </button>
+          {onDelete && (
+            <button
+              onClick={() => { setOpen(false); onDelete() }}
+              className="w-full text-left px-3 py-1.5 text-[11px] text-red-400 hover:bg-red-500/10 hover:text-red-300 transition-colors no-drag cursor-pointer"
+            >
+              Delete Agent
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function ProjectAgentsPanel({ projectPath }: { projectPath: string }): React.JSX.Element {
   const [agents, setAgents] = useState<K2soAgentInfo[]>([])
+  const [wsInboxCount, setWsInboxCount] = useState(0)
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
   const [newName, setNewName] = useState('')
@@ -3059,9 +3156,19 @@ function ProjectAgentsPanel({ projectPath }: { projectPath: string }): React.JSX
     }
   }, [projectPath])
 
+  const fetchWsInbox = useCallback(async () => {
+    try {
+      const items = await invoke<unknown[]>('k2so_agents_workspace_inbox_list', { projectPath })
+      setWsInboxCount(items.length)
+    } catch {
+      setWsInboxCount(0)
+    }
+  }, [projectPath])
+
   useEffect(() => {
     fetchAgents()
-  }, [fetchAgents])
+    fetchWsInbox()
+  }, [fetchAgents, fetchWsInbox])
 
   useEffect(() => {
     if (showCreate) {
@@ -3128,106 +3235,155 @@ function ProjectAgentsPanel({ projectPath }: { projectPath: string }): React.JSX
     }
   }, [projectPath])
 
+  const podLeader = agents.find((a) => a.podLeader)
+  const podMembers = agents.filter((a) => !a.podLeader)
+  const totalDelegated = podMembers.reduce((sum, a) => sum + a.inboxCount + a.activeCount, 0)
+  const totalDone = podMembers.reduce((sum, a) => sum + a.doneCount, 0)
+
+  const openAgentSettings = (agentName: string) => {
+    useTabsStore.getState().openAgentPane(agentName, projectPath)
+    useSettingsStore.getState().closeSettings()
+  }
+
+  const AgentListItem = ({ agent }: { agent: K2soAgentInfo }) => (
+    <div className="px-3 py-2 border-b border-[var(--color-border)] last:border-b-0">
+      <div className="flex items-center justify-between">
+        <div className="flex-1 min-w-0 mr-3">
+          <div className="flex items-center">
+            <span className="text-xs font-medium text-[var(--color-text-primary)] flex-shrink-0">{agent.name}</span>
+            <div className="flex items-center justify-end gap-1.5 text-[10px] text-[var(--color-text-muted)] flex-1 ml-2">
+              {agent.inboxCount > 0 && <span title="Inbox items">{agent.inboxCount} inbox</span>}
+              {agent.activeCount > 0 && <span className="text-yellow-400" title="Active">{agent.activeCount} active</span>}
+              {agent.doneCount > 0 && <span className="text-green-400" title="Done">{agent.doneCount} done</span>}
+            </div>
+          </div>
+          <p className="text-[10px] text-[var(--color-text-muted)] truncate mt-0.5">{agent.role}</p>
+        </div>
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <button
+            onClick={() => handleLaunch(agent.name)}
+            className="px-2 py-0.5 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
+            title="Launch agent session"
+          >
+            Launch
+          </button>
+          <AgentKebabMenu
+            onSettings={() => openAgentSettings(agent.name)}
+            onDelete={() => handleDelete(agent.name)}
+          />
+        </div>
+      </div>
+    </div>
+  )
+
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
-          Agents {agents.length > 0 && `(${agents.length})`}
-        </h3>
-        <button
-          onClick={() => setShowCreate(!showCreate)}
-          className="px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer"
-        >
-          {showCreate ? 'Cancel' : '+ New Agent'}
-        </button>
-      </div>
-
-      {/* Create form */}
-      {showCreate && (
-        <div className="border border-[var(--color-border)] p-3 space-y-2">
-          <input
-            ref={nameInputRef}
-            type="text"
-            placeholder="Agent name (e.g. backend-eng)"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            className="w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] px-2 py-1.5 outline-none focus:border-[var(--color-accent)] placeholder:text-[var(--color-text-muted)]"
-            onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
-          />
-          <input
-            type="text"
-            placeholder="Role (e.g. Backend engineering and API development)"
-            value={newRole}
-            onChange={(e) => setNewRole(e.target.value)}
-            className="w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] px-2 py-1.5 outline-none focus:border-[var(--color-accent)] placeholder:text-[var(--color-text-muted)]"
-            onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
-          />
-          <button
-            onClick={handleCreate}
-            disabled={creating || !newName.trim() || !newRole.trim()}
-            className="px-3 py-1 text-xs font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer disabled:opacity-50"
-          >
-            {creating ? 'Creating...' : 'Create Agent'}
-          </button>
-        </div>
-      )}
-
-      {/* Agent list */}
-      {loading ? (
-        <p className="text-[10px] text-[var(--color-text-muted)]">Loading agents...</p>
-      ) : agents.length === 0 && !showCreate ? (
-        <p className="text-[10px] text-[var(--color-text-muted)]">
-          No agents configured. Create one to enable autonomous work.
-        </p>
-      ) : (
-        <div className="border border-[var(--color-border)]">
-          {agents.map((agent, i) => (
-            <div
-              key={agent.name}
-              className={`px-3 py-2 ${
-                i < agents.length - 1 ? 'border-b border-[var(--color-border)]' : ''
-              }`}
-            >
+      {/* Pod Leader section */}
+      {podLeader && (
+        <div>
+          <h3 className="text-[10px] font-semibold text-[var(--color-accent)] uppercase tracking-wider mb-1">
+            Pod Leader
+          </h3>
+          <div className="border border-[var(--color-accent)]/30">
+            <div className="px-3 py-2">
               <div className="flex items-center justify-between">
                 <div className="flex-1 min-w-0 mr-3">
-                  <span className="text-xs font-medium text-[var(--color-text-primary)]">{agent.name}</span>
-                  <p className="text-[10px] text-[var(--color-text-muted)] truncate mt-0.5">{agent.role}</p>
-                </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  {/* Work counts */}
-                  <div className="flex items-center gap-1.5 text-[10px] text-[var(--color-text-muted)]">
-                    {agent.inboxCount > 0 && (
-                      <span title="Inbox items">{agent.inboxCount} inbox</span>
-                    )}
-                    {agent.activeCount > 0 && (
-                      <span className="text-yellow-400" title="Active items">{agent.activeCount} active</span>
-                    )}
-                    {agent.doneCount > 0 && (
-                      <span className="text-green-400" title="Completed items">{agent.doneCount} done</span>
-                    )}
+                  <div className="flex items-center">
+                    <span className="text-xs font-medium text-[var(--color-text-primary)] flex-shrink-0">{podLeader.name}</span>
+                    <span className="text-[9px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 px-1.5 py-0.5 ml-1.5 flex-shrink-0">
+                      LEADER
+                    </span>
+                    <div className="flex items-center justify-end gap-1.5 text-[10px] flex-1 ml-2">
+                      {wsInboxCount > 0 && (
+                        <span className="text-[var(--color-accent)]" title="Undelegated work in workspace inbox">{wsInboxCount} undelegated</span>
+                      )}
+                      {totalDelegated > 0 && (
+                        <span className="text-yellow-400" title="Work assigned to agents">{totalDelegated} delegated</span>
+                      )}
+                      {totalDone > 0 && (
+                        <span className="text-green-400" title="Completed, awaiting review">{totalDone} done</span>
+                      )}
+                    </div>
                   </div>
-                  {/* Launch button */}
+                  <p className="text-[10px] text-[var(--color-text-muted)] truncate mt-0.5">{podLeader.role}</p>
+                </div>
+                <div className="flex items-center gap-1 flex-shrink-0">
                   <button
-                    onClick={() => handleLaunch(agent.name)}
-                    className="px-2 py-0.5 text-[10px] font-medium bg-purple-600 text-white hover:bg-purple-500 transition-colors no-drag cursor-pointer"
-                    title="Launch agent session"
+                    onClick={() => handleLaunch(podLeader.name)}
+                    className="px-2 py-0.5 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
+                    title="Launch pod leader session"
                   >
                     Launch
                   </button>
-                  {/* Delete button */}
-                  <button
-                    onClick={() => handleDelete(agent.name)}
-                    className="px-1.5 py-0.5 text-[10px] text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-colors no-drag cursor-pointer"
-                    title="Delete agent"
-                  >
-                    &times;
-                  </button>
+                  <AgentKebabMenu
+                    onSettings={() => openAgentSettings(podLeader.name)}
+                  />
                 </div>
               </div>
             </div>
-          ))}
+          </div>
         </div>
       )}
+
+      {/* Pod Members section */}
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
+            Agents {podMembers.length > 0 && `(${podMembers.length})`}
+          </h3>
+          <button
+            onClick={() => setShowCreate(!showCreate)}
+            className="px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer"
+          >
+            {showCreate ? 'Cancel' : '+ New Agent'}
+          </button>
+        </div>
+
+        {/* Create form */}
+        {showCreate && (
+          <div className="border border-[var(--color-border)] p-3 space-y-2 mb-2">
+            <input
+              ref={nameInputRef}
+              type="text"
+              placeholder="Agent name (e.g. backend-eng)"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              className="w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] px-2 py-1.5 outline-none focus:border-[var(--color-accent)] placeholder:text-[var(--color-text-muted)]"
+              onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
+            />
+            <input
+              type="text"
+              placeholder="Role (e.g. Backend engineering and API development)"
+              value={newRole}
+              onChange={(e) => setNewRole(e.target.value)}
+              className="w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] px-2 py-1.5 outline-none focus:border-[var(--color-accent)] placeholder:text-[var(--color-text-muted)]"
+              onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
+            />
+            <button
+              onClick={handleCreate}
+              disabled={creating || !newName.trim() || !newRole.trim()}
+              className="px-3 py-1 text-xs font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer disabled:opacity-50"
+            >
+              {creating ? 'Creating...' : 'Create Agent'}
+            </button>
+          </div>
+        )}
+
+        {/* Agent list */}
+        {loading ? (
+          <p className="text-[10px] text-[var(--color-text-muted)]">Loading agents...</p>
+        ) : podMembers.length === 0 && !showCreate ? (
+          <p className="text-[10px] text-[var(--color-text-muted)]">
+            No agents configured. Create one to enable autonomous work.
+          </p>
+        ) : (
+          <div className="border border-[var(--color-border)]">
+            {podMembers.map((agent) => (
+              <AgentListItem key={agent.name} agent={agent} />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -3477,6 +3633,52 @@ function SettingDropdown({
 }
 
 // ── Claude Auth Refresh Toggle ──────────────────────────────────────
+
+function AgenticSystemsToggle(): React.JSX.Element {
+  const enabled = useSettingsStore((s) => s.agenticSystemsEnabled)
+
+  const toggle = async () => {
+    const newVal = !enabled
+    useSettingsStore.setState({ agenticSystemsEnabled: newVal })
+    await invoke('settings_update', { updates: { agenticSystemsEnabled: newVal } }).catch(console.error)
+  }
+
+  return (
+    <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
+      <div className="flex-1 min-w-0 mr-3">
+        <span className="text-xs text-[var(--color-text-secondary)]">Agentic Systems</span>
+        <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
+          {enabled
+            ? 'AI agents, pods, heartbeat, and review queue are active'
+            : 'Enable to unlock AI agent orchestration across workspaces'}
+        </p>
+      </div>
+      <button
+        onClick={toggle}
+        className="no-drag cursor-pointer flex-shrink-0 relative"
+        style={{
+          width: 36,
+          height: 20,
+          backgroundColor: enabled ? 'var(--color-accent)' : '#333',
+          border: 'none',
+          transition: 'background-color 150ms',
+        }}
+      >
+        <span
+          style={{
+            position: 'absolute',
+            top: 2,
+            left: enabled ? 18 : 2,
+            width: 16,
+            height: 16,
+            backgroundColor: '#fff',
+            transition: 'left 150ms',
+          }}
+        />
+      </button>
+    </div>
+  )
+}
 
 function ClaudeAuthRefreshRow(): React.JSX.Element {
   const claudeAuthAutoRefresh = useSettingsStore((s) => s.claudeAuthAutoRefresh)

@@ -159,11 +159,27 @@ pub fn run() {
                     }
                 }
 
-                // Write port to ~/.k2so/heartbeat.port for external heartbeat scripts
+                // Write port and token to ~/.k2so/ for external heartbeat scripts and CLI
                 let home = dirs::home_dir().unwrap_or_default();
-                let port_file = home.join(".k2so").join("heartbeat.port");
+                let k2so_dir = home.join(".k2so");
+                let _ = std::fs::create_dir_all(&k2so_dir);
+                let port_file = k2so_dir.join("heartbeat.port");
                 if let Err(e) = std::fs::write(&port_file, hook_port.to_string()) {
                     log_debug!("[heartbeat] Failed to write port file: {}", e);
+                }
+                let token_file = k2so_dir.join("heartbeat.token");
+                let token_str = crate::agent_hooks::get_token();
+                if !token_str.is_empty() {
+                    // Set file permissions to owner-only (0600) for security
+                    if let Err(e) = std::fs::write(&token_file, token_str) {
+                        log_debug!("[heartbeat] Failed to write token file: {}", e);
+                    } else {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let _ = std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600));
+                        }
+                    }
                 }
             }
 
