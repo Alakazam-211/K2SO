@@ -39,7 +39,7 @@ fn default_agent() -> String {
 fn default_left_panel_tab() -> String { "files".to_string() }
 fn default_right_panel_tab() -> String { "history".to_string() }
 fn default_left_panel_tabs() -> Vec<String> { vec!["files".to_string()] }
-fn default_right_panel_tabs() -> Vec<String> { vec!["history".to_string(), "changes".to_string()] }
+fn default_right_panel_tabs() -> Vec<String> { vec!["history".to_string(), "changes".to_string(), "reviews".to_string()] }
 
 fn default_terminal() -> TerminalSettings {
     TerminalSettings {

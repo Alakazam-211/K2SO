@@ -5,6 +5,7 @@ import Sidebar from './components/Sidebar/Sidebar'
 import FileTree from './components/FileTree/FileTree'
 import ChangesPanel from './components/ChangesPanel/ChangesPanel'
 import ChatHistory from './components/ChatHistory/ChatHistory'
+import ReviewPanel from './components/ReviewPanel/ReviewPanel'
 import TabbedPanel from './components/TabbedPanel/TabbedPanel'
 import { TerminalArea } from './components/Terminal/TerminalArea'
 import Settings from './components/Settings/Settings'
@@ -67,6 +68,7 @@ function LeftPanelContent({ rootPath, header }: { rootPath?: string; header?: Re
       {activeTab === 'files' && rootPath && <FileTree rootPath={rootPath} />}
       {activeTab === 'changes' && <ChangesPanel />}
       {activeTab === 'history' && <ChatHistory />}
+      {activeTab === 'reviews' && <ReviewPanel />}
     </TabbedPanel>
   )
 }
@@ -93,6 +95,7 @@ function RightPanelContent({ rootPath, header }: { rootPath?: string; header?: R
       {activeTab === 'files' && rootPath && <FileTree rootPath={rootPath} />}
       {activeTab === 'changes' && <ChangesPanel />}
       {activeTab === 'history' && <ChatHistory />}
+      {activeTab === 'reviews' && <ReviewPanel />}
     </TabbedPanel>
   )
 }

@@ -3,6 +3,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { useTabsStore, type TerminalItemData } from './tabs'
 import { useToastStore } from './toast'
 import { useProjectsStore } from './projects'
+import { usePresetsStore, parseCommand } from './presets'
+import { useSettingsStore } from './settings'
 import { KNOWN_AGENT_COMMANDS, AGENT_IDLE_THRESHOLD_MS } from '@shared/constants'
 
 export type PaneStatus = 'idle' | 'working' | 'permission' | 'review'
@@ -190,6 +192,37 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
     }
 
     set({ paneStatuses: newStatuses })
+
+    // Re-triage: if an agent session just stopped, check if there's more work
+    // to do for heartbeat-enabled projects
+    if (eventType === 'stop') {
+      const projectId = get().paneProjectMap.get(paneId)
+      if (projectId) {
+        const project = useProjectsStore.getState().projects.find(p => p.id === projectId)
+        if (project && project.heartbeatEnabled) {
+          // Small delay to let the session clean up, then triage
+          setTimeout(() => {
+            invoke('k2so_agents_triage_decide', { projectPath: project.path })
+              .then((agents: unknown) => {
+                const agentList = agents as string[]
+                for (const agentName of agentList) {
+                  invoke('k2so_agents_build_launch', { projectPath: project.path, agentName })
+                    .then((launchInfo: unknown) => {
+                      const info = launchInfo as { command: string; args: string[]; cwd: string; agentName: string }
+                      useTabsStore.getState().addTab(info.cwd, {
+                        title: `Agent: ${info.agentName}`,
+                        command: info.command,
+                        args: info.args,
+                      })
+                    })
+                    .catch(console.error)
+                }
+              })
+              .catch(console.error)
+          }, 3000)
+        }
+      }
+    }
   },
 
   pollOnce: async () => {
@@ -344,6 +377,43 @@ export function startAgentPolling(): void {
       useActiveAgentsStore.getState().handleLifecycleEvent(paneId, tabId, eventType)
     }).then((fn) => {
       hookUnlisten = fn
+    })
+
+    // Listen for CLI-triggered agent launch requests
+    listen<{ command: string; args: string[]; cwd: string; agentName: string }>('cli:agent-launch', (event) => {
+      const { command, args, cwd, agentName } = event.payload
+      const tabsStore = useTabsStore.getState()
+      const activeGroup = tabsStore.activeGroupIndex
+      tabsStore.addTabToGroup(activeGroup, cwd, {
+        title: `Agent: ${agentName}`,
+        command,
+        args
+      })
+    })
+
+    // Listen for CLI-triggered AI Commit requests
+    listen<{ projectPath: string; includeMerge: boolean; message: string }>('cli:ai-commit', (event) => {
+      const { projectPath, includeMerge, message } = event.payload
+      const defaultAgent = useSettingsStore.getState().defaultAgent
+      const presets = usePresetsStore.getState().presets
+      const preset = presets.find((p) => p.id === defaultAgent)
+      if (!preset) return
+
+      const { command, args } = parseCommand(preset.command)
+
+      // Build prompt for the AI agent
+      let prompt = message || 'Review the changes in this repository and create a well-structured commit with an appropriate commit message.'
+      if (includeMerge) {
+        prompt += '\n\nAfter committing, merge this branch back into main and resolve any conflicts.'
+      }
+
+      const tabsStore = useTabsStore.getState()
+      const activeGroup = tabsStore.activeGroupIndex
+      tabsStore.addTabToGroup(activeGroup, projectPath, {
+        title: includeMerge ? 'AI Commit & Merge' : 'AI Commit',
+        command,
+        args: [...args, prompt]
+      })
     })
   })
 }

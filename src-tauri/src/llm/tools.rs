@@ -65,10 +65,13 @@ Git Tools (available because this is a git repository):
 16. show_changes - Open the Changes panel. No args.
 17. merge_branch - Open merge dialog for a branch. Args: {"branch":"feature-auth"}
 18. create_worktree - Create a new worktree branch. Args: {"branch":"feature-x"}
+19. ai_commit - Launch a fresh AI session to review all changes and create a well-structured commit. Args: {"message":"optional guidance"} (optional)
+20. ai_commit_merge - Same as ai_commit, but also merges the branch back into main after committing. Args: {"message":"optional guidance"} (optional)
 
 Git rules:
 - For simple git operations (stage, commit, show diff): use the direct git tools above.
-- For complex git workflows (merge with conflict resolution, rebase, reviewing and merging, multi-step git): use ask_agent to delegate to the CLI agent. The CLI agent can run git commands and reason about conflicts.
+- For AI-powered commits (review changes and write commit message): use ai_commit. For commit + merge: use ai_commit_merge.
+- For complex git workflows (merge with conflict resolution, rebase, multi-step git): use ask_agent to delegate to the CLI agent.
 - When unsure, prefer ask_agent — the CLI agent is smarter.
 "#;
 
@@ -139,6 +142,21 @@ User: "review changes and merge if good"
 
 User: "rebase on main"
 {"tool_calls":[{"tool":"ask_agent","args":{"query":"Rebase the current branch onto main, resolving any conflicts."}}]}
+
+User: "ai commit"
+{"tool_calls":[{"tool":"ai_commit","args":{}}]}
+
+User: "commit these changes"
+{"tool_calls":[{"tool":"ai_commit","args":{}}]}
+
+User: "commit and merge"
+{"tool_calls":[{"tool":"ai_commit_merge","args":{}}]}
+
+User: "commit everything and merge into main"
+{"tool_calls":[{"tool":"ai_commit_merge","args":{}}]}
+
+User: "commit with a focus on the auth changes"
+{"tool_calls":[{"tool":"ai_commit","args":{"message":"Focus on the authentication changes when writing the commit message."}}]}
 "#;
 
 /// A parsed tool call from the LLM response.

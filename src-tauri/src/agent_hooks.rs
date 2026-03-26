@@ -165,6 +165,144 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                     body
                 );
                 let _ = stream.write_all(response.as_bytes());
+            } else if path.starts_with("/cli/") {
+                // K2SO CLI bridge endpoints
+                let params = parse_query_params(path);
+
+                // Validate auth token
+                let req_token = params.get("token").cloned().unwrap_or_default();
+                if req_token != token {
+                    let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+                    continue;
+                }
+
+                let route = path.split('?').next().unwrap_or("");
+                let project_path = params.get("project").cloned().unwrap_or_default();
+
+                let result: Result<String, String> = match route {
+                    "/cli/agents/list" => {
+                        crate::commands::k2so_agents::k2so_agents_list(project_path)
+                            .map(|agents| serde_json::to_string(&agents).unwrap_or_default())
+                    }
+                    "/cli/agents/work" => {
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        let folder = params.get("folder").cloned();
+                        crate::commands::k2so_agents::k2so_agents_work_list(project_path, agent, folder)
+                            .map(|items| serde_json::to_string(&items).unwrap_or_default())
+                    }
+                    "/cli/agents/create" => {
+                        let name = params.get("name").cloned().unwrap_or_default();
+                        let role = params.get("role").cloned().unwrap_or_default();
+                        let prompt = params.get("prompt").cloned();
+                        crate::commands::k2so_agents::k2so_agents_create(project_path, name, role, prompt)
+                            .map(|info| serde_json::to_string(&info).unwrap_or_default())
+                    }
+                    "/cli/agents/work/create" => {
+                        let agent = params.get("agent").cloned();
+                        let title = params.get("title").cloned().unwrap_or_default();
+                        let body = params.get("body").cloned().unwrap_or_default();
+                        let priority = params.get("priority").cloned();
+                        let item_type = params.get("type").cloned();
+                        crate::commands::k2so_agents::k2so_agents_work_create(
+                            project_path, agent, title, body, priority, item_type,
+                        )
+                        .map(|item| serde_json::to_string(&item).unwrap_or_default())
+                    }
+                    "/cli/agents/delegate" => {
+                        let target = params.get("target").cloned().unwrap_or_default();
+                        let file = params.get("file").cloned().unwrap_or_default();
+                        crate::commands::k2so_agents::k2so_agents_delegate(project_path, target, file)
+                            .map(|_| r#"{"success":true}"#.to_string())
+                    }
+                    "/cli/agents/work/move" => {
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        let filename = params.get("filename").cloned().unwrap_or_default();
+                        let from = params.get("from").cloned().unwrap_or_default();
+                        let to = params.get("to").cloned().unwrap_or_default();
+                        crate::commands::k2so_agents::k2so_agents_work_move(
+                            project_path, agent, filename, from, to,
+                        )
+                        .map(|_| r#"{"success":true}"#.to_string())
+                    }
+                    "/cli/agents/profile" => {
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        crate::commands::k2so_agents::k2so_agents_get_profile(project_path, agent)
+                            .map(|content| serde_json::json!({"content": content}).to_string())
+                    }
+                    "/cli/heartbeat" => {
+                        // Heartbeat triage: find agents with actionable work and launch them
+                        match crate::commands::k2so_agents::k2so_agents_triage_decide(project_path.clone()) {
+                            Ok(agents_to_launch) => {
+                                for agent_name in &agents_to_launch {
+                                    if let Ok(launch_info) = crate::commands::k2so_agents::k2so_agents_build_launch(
+                                        project_path.clone(), agent_name.clone(), None,
+                                    ) {
+                                        let _ = app_handle.emit("cli:agent-launch", &launch_info);
+                                    }
+                                }
+                                Ok(serde_json::json!({
+                                    "launched": agents_to_launch,
+                                    "count": agents_to_launch.len(),
+                                }).to_string())
+                            }
+                            Err(e) => Err(e),
+                        }
+                    }
+                    "/cli/agents/triage" => {
+                        crate::commands::k2so_agents::k2so_agents_triage_summary(project_path)
+                    }
+                    "/cli/agents/generate-claude-md" => {
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        crate::commands::k2so_agents::k2so_agents_generate_claude_md(
+                            project_path, agent,
+                        )
+                        .map(|content| serde_json::json!({"success": true, "length": content.len()}).to_string())
+                    }
+                    "/cli/agents/launch" => {
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        let cli_command = params.get("command").cloned();
+                        match crate::commands::k2so_agents::k2so_agents_build_launch(
+                            project_path, agent, cli_command,
+                        ) {
+                            Ok(launch_info) => {
+                                let _ = app_handle.emit("cli:agent-launch", &launch_info);
+                                Ok(serde_json::json!({
+                                    "success": true,
+                                    "note": "Agent session will be launched by K2SO"
+                                }).to_string())
+                            }
+                            Err(e) => Err(e),
+                        }
+                    }
+                    "/cli/commit" | "/cli/commit-merge" => {
+                        let include_merge = route == "/cli/commit-merge";
+                        let message = params.get("message").cloned().unwrap_or_default();
+                        let event_payload = serde_json::json!({
+                            "projectPath": project_path,
+                            "includeMerge": include_merge,
+                            "message": message,
+                        });
+                        let _ = app_handle.emit("cli:ai-commit", &event_payload);
+                        Ok(serde_json::json!({
+                            "success": true,
+                            "action": if include_merge { "commit-merge" } else { "commit" },
+                            "note": "AI commit terminal session will be launched by K2SO"
+                        }).to_string())
+                    }
+                    _ => Err("Unknown CLI endpoint".to_string()),
+                };
+
+                let (status_code, body) = match result {
+                    Ok(json) => ("200 OK", json),
+                    Err(e) => ("400 Bad Request", serde_json::json!({"error": e}).to_string()),
+                };
+                let response = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                    status_code,
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
             } else if path == "/health" {
                 let body = r#"{"status":"ok"}"#;
                 let response = format!(

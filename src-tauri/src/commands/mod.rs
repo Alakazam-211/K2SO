@@ -15,3 +15,4 @@ pub mod timer;
 pub mod updater;
 pub mod workspace_sessions;
 pub mod claude_auth;
+pub mod k2so_agents;

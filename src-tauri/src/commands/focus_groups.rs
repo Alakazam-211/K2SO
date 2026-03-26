@@ -69,7 +69,7 @@ pub fn focus_groups_assign_project(
         &conn,
         &project_id,
         None, None, None, None, None, None,
-        Some(focus_group_id.as_deref()), None, None,
+        Some(focus_group_id.as_deref()), None, None, None, None,
     )
     .map_err(|e| e.to_string())?;
 
@@ -115,7 +115,7 @@ pub fn focus_groups_reconcile_project(
             if project.focus_group_id.is_some() {
                 Project::update(
                     &conn, &project_id, None, None, None, None, None, None,
-                    Some(None), None, None,
+                    Some(None), None, None, None, None,
                 )
                 .map_err(|e| e.to_string())?;
             }
@@ -140,7 +140,7 @@ pub fn focus_groups_reconcile_project(
             if project.focus_group_id.as_deref() != Some(&group_id) {
                 Project::update(
                     &conn, &project_id, None, None, None, None, None, None,
-                    Some(Some(group_id.as_str())), None, None,
+                    Some(Some(group_id.as_str())), None, None, None, None,
                 )
                 .map_err(|e| e.to_string())?;
             }

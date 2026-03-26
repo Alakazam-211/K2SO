@@ -91,12 +91,14 @@ pub struct Project {
     pub manually_active: i64,
     pub last_interaction_at: Option<i64>,
     pub created_at: i64,
+    pub agent_enabled: i64,
+    pub heartbeat_enabled: i64,
 }
 
 impl Project {
     pub fn list(conn: &Connection) -> Result<Vec<Project>> {
         let mut stmt = conn.prepare(
-            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at \
+            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at, agent_enabled, heartbeat_enabled \
              FROM projects ORDER BY tab_order",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -114,6 +116,8 @@ impl Project {
                 manually_active: row.get(10)?,
                 last_interaction_at: row.get(11)?,
                 created_at: row.get(12)?,
+                agent_enabled: row.get(13)?,
+                heartbeat_enabled: row.get(14)?,
             })
         })?;
         rows.collect()
@@ -121,7 +125,7 @@ impl Project {
 
     pub fn get(conn: &Connection, id: &str) -> Result<Project> {
         conn.query_row(
-            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at \
+            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at, agent_enabled, heartbeat_enabled \
              FROM projects WHERE id = ?1",
             params![id],
             |row| {
@@ -139,6 +143,8 @@ impl Project {
                     manually_active: row.get(10)?,
                     last_interaction_at: row.get(11)?,
                     created_at: row.get(12)?,
+                    agent_enabled: row.get(13)?,
+                    heartbeat_enabled: row.get(14)?,
                 })
             },
         )
@@ -175,6 +181,8 @@ impl Project {
         focus_group_id: Option<Option<&str>>,
         pinned: Option<i64>,
         manually_active: Option<i64>,
+        agent_enabled: Option<i64>,
+        heartbeat_enabled: Option<i64>,
     ) -> Result<()> {
         if let Some(v) = name {
             conn.execute("UPDATE projects SET name = ?1 WHERE id = ?2", params![v, id])?;
@@ -202,6 +210,12 @@ impl Project {
         }
         if let Some(v) = manually_active {
             conn.execute("UPDATE projects SET manually_active = ?1 WHERE id = ?2", params![v, id])?;
+        }
+        if let Some(v) = agent_enabled {
+            conn.execute("UPDATE projects SET agent_enabled = ?1 WHERE id = ?2", params![v, id])?;
+        }
+        if let Some(v) = heartbeat_enabled {
+            conn.execute("UPDATE projects SET heartbeat_enabled = ?1 WHERE id = ?2", params![v, id])?;
         }
         Ok(())
     }

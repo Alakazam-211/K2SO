@@ -158,6 +158,13 @@ pub fn run() {
                         log_debug!("[agent-hooks] Failed to write hook script: {}", e);
                     }
                 }
+
+                // Write port to ~/.k2so/heartbeat.port for external heartbeat scripts
+                let home = dirs::home_dir().unwrap_or_default();
+                let port_file = home.join(".k2so").join("heartbeat.port");
+                if let Err(e) = std::fs::write(&port_file, hook_port.to_string()) {
+                    log_debug!("[heartbeat] Failed to write port file: {}", e);
+                }
             }
 
             // Clean up any stale .tmp files from interrupted model downloads
@@ -374,6 +381,27 @@ pub fn run() {
             commands::claude_auth::claude_auth_install_scheduler,
             commands::claude_auth::claude_auth_uninstall_scheduler,
             commands::claude_auth::claude_auth_scheduler_installed,
+            // K2SO Agents
+            commands::k2so_agents::k2so_agents_list,
+            commands::k2so_agents::k2so_agents_create,
+            commands::k2so_agents::k2so_agents_delete,
+            commands::k2so_agents::k2so_agents_work_list,
+            commands::k2so_agents::k2so_agents_work_create,
+            commands::k2so_agents::k2so_agents_delegate,
+            commands::k2so_agents::k2so_agents_work_move,
+            commands::k2so_agents::k2so_agents_get_profile,
+            commands::k2so_agents::k2so_agents_update_profile,
+            commands::k2so_agents::k2so_agents_generate_claude_md,
+            commands::k2so_agents::k2so_agents_build_launch,
+            commands::k2so_agents::k2so_agents_review_queue,
+            commands::k2so_agents::k2so_agents_review_approve,
+            commands::k2so_agents::k2so_agents_review_reject,
+            commands::k2so_agents::k2so_agents_review_request_changes,
+            commands::k2so_agents::k2so_agents_triage_summary,
+            commands::k2so_agents::k2so_agents_triage_decide,
+            commands::k2so_agents::k2so_agents_install_heartbeat,
+            commands::k2so_agents::k2so_agents_uninstall_heartbeat,
+            commands::k2so_agents::k2so_agents_update_heartbeat_projects,
         ])
         .run(tauri::generate_context!())
         .expect("error while running K2SO");

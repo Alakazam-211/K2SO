@@ -7,6 +7,7 @@ import { useProjectsStore } from '../../stores/projects'
 import { usePanelsStore } from '../../stores/panels'
 import { useMergeDialogStore } from '../MergeDialog/MergeDialog'
 import { useToastStore } from '../../stores/toast'
+import { usePresetsStore, parseCommand } from '../../stores/presets'
 
 interface ToolCall {
   tool: string
@@ -40,6 +41,8 @@ const VALID_TOOLS = new Set([
   'show_changes',      // Open Changes panel
   'merge_branch',      // Open merge dialog for a branch
   'create_worktree',   // Create a new worktree branch
+  'ai_commit',         // AI-powered commit: launches fresh Claude to review and commit
+  'ai_commit_merge',   // AI-powered commit & merge: commit then merge branch into main
 ])
 
 interface ChildDescriptor {
@@ -157,8 +160,10 @@ function validateAndSanitize(toolCalls: ToolCall[], cwd: string): ToolCall[] {
 
       // Git tools
       case 'stage_all':
-      case 'show_changes': {
-        sanitized.push({ tool: call.tool, args: {} })
+      case 'show_changes':
+      case 'ai_commit':
+      case 'ai_commit_merge': {
+        sanitized.push({ tool: call.tool, args: call.args ?? {} })
         break
       }
 
@@ -415,6 +420,28 @@ function executeToolCalls(toolCalls: ToolCall[]): string {
               .catch((e) => useToastStore.getState().addToast(`Failed: ${e}`, 'error'))
           }
           results.push(`Worktree: ${branch}`)
+          break
+        }
+
+        case 'ai_commit':
+        case 'ai_commit_merge': {
+          const includeMerge = call.tool === 'ai_commit_merge'
+          const defaultAgentId = useSettingsStore.getState().defaultAgent
+          const presets = usePresetsStore.getState().presets
+          const preset = presets.find((p) => p.id === defaultAgentId)
+          if (preset) {
+            const { command, args } = parseCommand(preset.command)
+            let prompt = (call.args.message as string) || 'Review the changes in this repository and create a well-structured commit with an appropriate commit message.'
+            if (includeMerge) {
+              prompt += '\n\nAfter committing, merge this branch back into main and resolve any conflicts.'
+            }
+            tabsStore.addTab(cwd, {
+              title: includeMerge ? 'AI Commit & Merge' : 'AI Commit',
+              command,
+              args: [...args, prompt]
+            })
+          }
+          results.push(includeMerge ? 'AI Commit & Merge' : 'AI Commit')
           break
         }
       }

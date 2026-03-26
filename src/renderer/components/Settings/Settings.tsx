@@ -2858,6 +2858,89 @@ function ProjectDetail({
           </button>
         </div>
 
+        {/* Agent toggle */}
+        <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
+          <div>
+            <span className="text-xs text-[var(--color-text-secondary)]">Agent Mode</span>
+            <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
+              {project.agentEnabled ? 'Claude sessions in this workspace know how to operate K2SO' : 'Enable to make this workspace an AI agent'}
+            </p>
+          </div>
+          <button
+            onClick={async () => {
+              const newVal = project.agentEnabled ? 0 : 1
+              await invoke('projects_update', { id: project.id, agentEnabled: newVal })
+              if (newVal === 1) {
+                // Scaffold .k2so directory and generate CLAUDE.md
+                await invoke('k2so_agents_generate_claude_md', {
+                  projectPath: project.path,
+                  agentName: project.name.toLowerCase().replace(/\s+/g, '-'),
+                }).catch(() => {
+                  // Agent may not exist yet — create default agent structure
+                  invoke('k2so_agents_create', {
+                    projectPath: project.path,
+                    name: project.name.toLowerCase().replace(/\s+/g, '-'),
+                    role: `Lead agent for ${project.name}`,
+                  }).then(() =>
+                    invoke('k2so_agents_generate_claude_md', {
+                      projectPath: project.path,
+                      agentName: project.name.toLowerCase().replace(/\s+/g, '-'),
+                    })
+                  ).catch(console.error)
+                })
+              }
+              // If disabling agent, also disable heartbeat
+              if (newVal === 0 && project.heartbeatEnabled) {
+                await invoke('projects_update', { id: project.id, heartbeatEnabled: 0 })
+              }
+              await fetchProjects()
+            }}
+            className={`w-8 h-4 flex items-center transition-colors no-drag cursor-pointer ${
+              project.agentEnabled ? 'bg-purple-600' : 'bg-[var(--color-border)]'
+            }`}
+          >
+            <span
+              className={`w-3 h-3 bg-white block transition-transform ${
+                project.agentEnabled ? 'translate-x-4.5' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
+        </div>
+
+        {/* Heartbeat toggle — only available when Agent is enabled */}
+        <div className={`flex items-center justify-between py-2 border-b border-[var(--color-border)] ${!project.agentEnabled ? 'opacity-40' : ''}`}>
+          <div>
+            <span className="text-xs text-[var(--color-text-secondary)]">Heartbeat</span>
+            <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
+              {project.heartbeatEnabled ? 'Agent wakes up automatically to work' : 'Agent only works when manually launched'}
+            </p>
+          </div>
+          <button
+            disabled={!project.agentEnabled}
+            onClick={async () => {
+              const newVal = project.heartbeatEnabled ? 0 : 1
+              await invoke('projects_update', { id: project.id, heartbeatEnabled: newVal })
+              // Update the heartbeat project list and install/uninstall scheduler
+              await invoke('k2so_agents_update_heartbeat_projects').catch(console.error)
+              if (newVal === 1) {
+                await invoke('k2so_agents_install_heartbeat').catch(console.error)
+              }
+              await fetchProjects()
+            }}
+            className={`w-8 h-4 flex items-center transition-colors no-drag ${
+              project.agentEnabled ? 'cursor-pointer' : 'cursor-not-allowed'
+            } ${
+              project.heartbeatEnabled ? 'bg-green-600' : 'bg-[var(--color-border)]'
+            }`}
+          >
+            <span
+              className={`w-3 h-3 bg-white block transition-transform ${
+                project.heartbeatEnabled ? 'translate-x-4.5' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
+        </div>
+
         {/* Color */}
         <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
           <span className="text-xs text-[var(--color-text-secondary)]">Workspace Color</span>
@@ -2930,6 +3013,9 @@ function ProjectDetail({
         <WorktreeFoldersOnDisk project={project} fetchProjects={fetchProjects} />
       )}
 
+      {/* ── K2SO Agents ── */}
+      <ProjectAgentsPanel projectPath={project.path} />
+
       {/* ── Cursor Chat Migration ── */}
       <CursorMigrationPanel projectPath={project.path} />
 
@@ -2944,6 +3030,209 @@ function ProjectDetail({
       </div>
     </div>
     </>
+  )
+}
+
+// ── K2SO Agents Panel ───────────────────────────────────────────────
+
+interface K2soAgentInfo {
+  name: string
+  role: string
+  inboxCount: number
+  activeCount: number
+  doneCount: number
+}
+
+function ProjectAgentsPanel({ projectPath }: { projectPath: string }): React.JSX.Element {
+  const [agents, setAgents] = useState<K2soAgentInfo[]>([])
+  const [loading, setLoading] = useState(true)
+  const [showCreate, setShowCreate] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [newRole, setNewRole] = useState('')
+  const [creating, setCreating] = useState(false)
+  const nameInputRef = useRef<HTMLInputElement>(null)
+
+  const fetchAgents = useCallback(async () => {
+    try {
+      const result = await invoke<K2soAgentInfo[]>('k2so_agents_list', { projectPath })
+      setAgents(result)
+    } catch {
+      setAgents([])
+    } finally {
+      setLoading(false)
+    }
+  }, [projectPath])
+
+  useEffect(() => {
+    fetchAgents()
+  }, [fetchAgents])
+
+  useEffect(() => {
+    if (showCreate) {
+      requestAnimationFrame(() => nameInputRef.current?.focus())
+    }
+  }, [showCreate])
+
+  const handleCreate = useCallback(async () => {
+    if (!newName.trim() || !newRole.trim()) return
+    setCreating(true)
+    try {
+      await invoke('k2so_agents_create', {
+        projectPath,
+        name: newName.trim().toLowerCase().replace(/\s+/g, '-'),
+        role: newRole.trim(),
+      })
+      setNewName('')
+      setNewRole('')
+      setShowCreate(false)
+      await fetchAgents()
+    } catch (e) {
+      console.error('[agents] Create failed:', e)
+    } finally {
+      setCreating(false)
+    }
+  }, [projectPath, newName, newRole, fetchAgents])
+
+  const handleDelete = useCallback(async (name: string) => {
+    const confirmed = await useConfirmDialogStore.getState().confirm({
+      title: `Delete Agent "${name}"?`,
+      message: 'This will delete the agent and all its work items. This cannot be undone.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    })
+    if (!confirmed) return
+    try {
+      await invoke('k2so_agents_delete', { projectPath, name })
+      await fetchAgents()
+    } catch (e) {
+      console.error('[agents] Delete failed:', e)
+    }
+  }, [projectPath, fetchAgents])
+
+  const handleLaunch = useCallback(async (name: string) => {
+    try {
+      const launchInfo = await invoke<{
+        command: string
+        args: string[]
+        cwd: string
+        agentName: string
+      }>('k2so_agents_build_launch', { projectPath, agentName: name })
+
+      const tabsStore = useTabsStore.getState()
+      tabsStore.addTab(launchInfo.cwd, {
+        title: `Agent: ${launchInfo.agentName}`,
+        command: launchInfo.command,
+        args: launchInfo.args,
+      })
+
+      // Close settings so the user can see the launched agent
+      useSettingsStore.getState().closeSettings()
+    } catch (e) {
+      console.error('[agents] Launch failed:', e)
+    }
+  }, [projectPath])
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
+          Agents {agents.length > 0 && `(${agents.length})`}
+        </h3>
+        <button
+          onClick={() => setShowCreate(!showCreate)}
+          className="px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer"
+        >
+          {showCreate ? 'Cancel' : '+ New Agent'}
+        </button>
+      </div>
+
+      {/* Create form */}
+      {showCreate && (
+        <div className="border border-[var(--color-border)] p-3 space-y-2">
+          <input
+            ref={nameInputRef}
+            type="text"
+            placeholder="Agent name (e.g. backend-eng)"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            className="w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] px-2 py-1.5 outline-none focus:border-[var(--color-accent)] placeholder:text-[var(--color-text-muted)]"
+            onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
+          />
+          <input
+            type="text"
+            placeholder="Role (e.g. Backend engineering and API development)"
+            value={newRole}
+            onChange={(e) => setNewRole(e.target.value)}
+            className="w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] px-2 py-1.5 outline-none focus:border-[var(--color-accent)] placeholder:text-[var(--color-text-muted)]"
+            onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
+          />
+          <button
+            onClick={handleCreate}
+            disabled={creating || !newName.trim() || !newRole.trim()}
+            className="px-3 py-1 text-xs font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer disabled:opacity-50"
+          >
+            {creating ? 'Creating...' : 'Create Agent'}
+          </button>
+        </div>
+      )}
+
+      {/* Agent list */}
+      {loading ? (
+        <p className="text-[10px] text-[var(--color-text-muted)]">Loading agents...</p>
+      ) : agents.length === 0 && !showCreate ? (
+        <p className="text-[10px] text-[var(--color-text-muted)]">
+          No agents configured. Create one to enable autonomous work.
+        </p>
+      ) : (
+        <div className="border border-[var(--color-border)]">
+          {agents.map((agent, i) => (
+            <div
+              key={agent.name}
+              className={`px-3 py-2 ${
+                i < agents.length - 1 ? 'border-b border-[var(--color-border)]' : ''
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex-1 min-w-0 mr-3">
+                  <span className="text-xs font-medium text-[var(--color-text-primary)]">{agent.name}</span>
+                  <p className="text-[10px] text-[var(--color-text-muted)] truncate mt-0.5">{agent.role}</p>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  {/* Work counts */}
+                  <div className="flex items-center gap-1.5 text-[10px] text-[var(--color-text-muted)]">
+                    {agent.inboxCount > 0 && (
+                      <span title="Inbox items">{agent.inboxCount} inbox</span>
+                    )}
+                    {agent.activeCount > 0 && (
+                      <span className="text-yellow-400" title="Active items">{agent.activeCount} active</span>
+                    )}
+                    {agent.doneCount > 0 && (
+                      <span className="text-green-400" title="Completed items">{agent.doneCount} done</span>
+                    )}
+                  </div>
+                  {/* Launch button */}
+                  <button
+                    onClick={() => handleLaunch(agent.name)}
+                    className="px-2 py-0.5 text-[10px] font-medium bg-purple-600 text-white hover:bg-purple-500 transition-colors no-drag cursor-pointer"
+                    title="Launch agent session"
+                  >
+                    Launch
+                  </button>
+                  {/* Delete button */}
+                  <button
+                    onClick={() => handleDelete(agent.name)}
+                    className="px-1.5 py-0.5 text-[10px] text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-colors no-drag cursor-pointer"
+                    title="Delete agent"
+                  >
+                    &times;
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 

@@ -343,6 +343,25 @@ impl TerminalManager {
             pty_options.env.insert("K2SO_HOOK_TOKEN".to_string(), crate::agent_hooks::get_token().to_string());
         }
 
+        // K2SO CLI: add cli/ directory to PATH so agents can call `k2so` commands
+        if let Ok(exe_path) = std::env::current_exe() {
+            // The CLI script lives at <app-bundle>/cli/ or <repo>/cli/
+            // Try: next to the binary's grandparent (repo root or app bundle)
+            if let Some(app_dir) = exe_path.parent().and_then(|p| p.parent()) {
+                let cli_dir = app_dir.join("cli");
+                if cli_dir.exists() {
+                    let existing_path = std::env::var("PATH").unwrap_or_default();
+                    pty_options.env.insert(
+                        "PATH".to_string(),
+                        format!("{}:{}", cli_dir.to_string_lossy(), existing_path),
+                    );
+                }
+            }
+        }
+
+        // Set project path so the CLI knows which workspace it's operating in
+        pty_options.env.insert("K2SO_PROJECT_PATH".to_string(), safe_cwd.clone());
+
         // Strip unwanted env vars
         for (key, _) in std::env::vars() {
             if key.starts_with("ELECTRON_") || key.starts_with("VITE_") || key.starts_with("__vite") {

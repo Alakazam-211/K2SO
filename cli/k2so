@@ -1,0 +1,284 @@
+#!/bin/bash
+# K2SO CLI — Agent interface to K2SO workspace orchestration
+# This script communicates with K2SO's running instance via HTTP.
+# Agents and users call this from terminal sessions within K2SO.
+
+set -euo pipefail
+
+# Connection details (set by K2SO when creating terminal sessions)
+PORT="${K2SO_PORT:-}"
+TOKEN="${K2SO_HOOK_TOKEN:-}"
+PROJECT="${K2SO_PROJECT_PATH:-$(pwd)}"
+
+if [ -z "$PORT" ] || [ -z "$TOKEN" ]; then
+    echo "Error: Not running inside a K2SO terminal session." >&2
+    echo "K2SO_PORT and K2SO_HOOK_TOKEN must be set." >&2
+    exit 1
+fi
+
+BASE_URL="http://127.0.0.1:${PORT}"
+
+# HTTP helper
+cli_request() {
+    local endpoint="$1"
+    shift
+    local params="token=${TOKEN}&project=$(urlencode "$PROJECT")"
+    for param in "$@"; do
+        params="${params}&${param}"
+    done
+    curl -sG "${BASE_URL}${endpoint}" \
+        --connect-timeout 3 --max-time 10 \
+        -d "$params" 2>/dev/null
+}
+
+urlencode() {
+    python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1" 2>/dev/null || echo "$1"
+}
+
+# Format JSON output for terminal
+format_agents() {
+    python3 -c "
+import json, sys
+data = json.loads(sys.stdin.read())
+if not data:
+    print('No agents found.')
+    sys.exit(0)
+for a in data:
+    inbox = a.get('inboxCount', 0)
+    active = a.get('activeCount', 0)
+    done = a.get('doneCount', 0)
+    role = a.get('role', '')
+    name = a.get('name', '')
+    status = f'inbox:{inbox} active:{active} done:{done}'
+    print(f'  {name:<20} {role:<30} [{status}]')
+" 2>/dev/null || cat
+}
+
+format_work() {
+    python3 -c "
+import json, sys
+data = json.loads(sys.stdin.read())
+if not data:
+    print('No work items found.')
+    sys.exit(0)
+for item in data:
+    folder = item.get('folder', '?')
+    priority = item.get('priority', 'normal')
+    title = item.get('title', item.get('filename', ''))
+    prio_mark = {'high': '!', 'critical': '!!', 'normal': ' ', 'low': '.'}
+    mark = prio_mark.get(priority, ' ')
+    print(f'  [{folder:<6}] {mark} {title}')
+" 2>/dev/null || cat
+}
+
+# ── Commands ─────────────────────────────────────────────────────────
+
+cmd_agents_list() {
+    cli_request "/cli/agents/list" | format_agents
+}
+
+cmd_agents_work() {
+    local agent="${1:-}"
+    if [ -z "$agent" ]; then
+        echo "Usage: k2so agents work <agent-name> [--folder inbox|active|done]" >&2
+        exit 1
+    fi
+    shift
+    local folder=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --folder) folder="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    local params="agent=$(urlencode "$agent")"
+    [ -n "$folder" ] && params="${params}&folder=$(urlencode "$folder")"
+    cli_request "/cli/agents/work" "$params" | format_work
+}
+
+cmd_agents_status() {
+    local agent="${1:-}"
+    if [ -z "$agent" ]; then
+        echo "Usage: k2so agents status <agent-name>" >&2
+        exit 1
+    fi
+    cli_request "/cli/agents/work" "agent=$(urlencode "$agent")"
+}
+
+cmd_agents_create() {
+    local name="" role="" prompt=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --name) name="$2"; shift 2 ;;
+            --role) role="$2"; shift 2 ;;
+            --prompt) prompt="$2"; shift 2 ;;
+            *) [ -z "$name" ] && name="$1"; shift ;;
+        esac
+    done
+    if [ -z "$name" ]; then
+        echo "Usage: k2so agents create <name> --role \"...\" [--prompt \"...\"]" >&2
+        exit 1
+    fi
+    local params="name=$(urlencode "$name")&role=$(urlencode "$role")"
+    [ -n "$prompt" ] && params="${params}&prompt=$(urlencode "$prompt")"
+    cli_request "/cli/agents/create" "$params"
+}
+
+cmd_work_create() {
+    local agent="" title="" body="" priority="" item_type=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --agent) agent="$2"; shift 2 ;;
+            --title) title="$2"; shift 2 ;;
+            --body) body="$2"; shift 2 ;;
+            --priority) priority="$2"; shift 2 ;;
+            --type) item_type="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    if [ -z "$title" ]; then
+        echo "Usage: k2so work create --title \"...\" --body \"...\" [--agent <name>] [--priority high|normal|low]" >&2
+        exit 1
+    fi
+    local params="title=$(urlencode "$title")&body=$(urlencode "$body")"
+    [ -n "$agent" ] && params="${params}&agent=$(urlencode "$agent")"
+    [ -n "$priority" ] && params="${params}&priority=$(urlencode "$priority")"
+    [ -n "$item_type" ] && params="${params}&type=$(urlencode "$item_type")"
+    cli_request "/cli/agents/work/create" "$params"
+}
+
+cmd_agents_launch() {
+    local agent="${1:-}"
+    if [ -z "$agent" ]; then
+        echo "Usage: k2so agents launch <agent-name> [--command claude]" >&2
+        exit 1
+    fi
+    shift
+    local cmd=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --command) cmd="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    local params="agent=$(urlencode "$agent")"
+    [ -n "$cmd" ] && params="${params}&command=$(urlencode "$cmd")"
+    echo "Launching agent: $agent"
+    cli_request "/cli/agents/launch" "$params"
+}
+
+cmd_agents_generate_md() {
+    local agent="${1:-}"
+    if [ -z "$agent" ]; then
+        echo "Usage: k2so agents generate-md <agent-name>" >&2
+        exit 1
+    fi
+    cli_request "/cli/agents/generate-claude-md" "agent=$(urlencode "$agent")"
+}
+
+cmd_delegate() {
+    local target="${1:-}" file="${2:-}"
+    if [ -z "$target" ] || [ -z "$file" ]; then
+        echo "Usage: k2so delegate <target-agent> <work-file-path>" >&2
+        exit 1
+    fi
+    cli_request "/cli/agents/delegate" "target=$(urlencode "$target")&file=$(urlencode "$file")"
+}
+
+cmd_commit() {
+    local message=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -m|--message) message="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    local params=""
+    [ -n "$message" ] && params="message=$(urlencode "$message")"
+    echo "Requesting AI Commit..."
+    cli_request "/cli/commit" "$params"
+}
+
+cmd_commit_merge() {
+    local message=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -m|--message) message="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    local params=""
+    [ -n "$message" ] && params="message=$(urlencode "$message")"
+    echo "Requesting AI Commit & Merge..."
+    cli_request "/cli/commit-merge" "$params"
+}
+
+cmd_help() {
+    cat <<'EOF'
+K2SO CLI — Agent interface to K2SO workspace orchestration
+
+COMMANDS:
+  agents list                     List all agents in this workspace
+  agents work <name>              Show agent's work items
+  agents status <name>            Show agent status and work summary
+  agents create <name> --role "." Create a new agent
+  agents launch <name>            Launch agent's Claude session in K2SO
+  agents generate-md <name>       Generate agent's CLAUDE.md context file
+
+  work create --title "." --body "."  Create a work item
+    [--agent <name>]              Assign to agent (omit for unassigned)
+    [--priority high|normal|low]  Set priority
+    [--type prd|milestone|task]   Set work item type
+
+  delegate <agent> <file>         Move work item to agent's inbox
+
+  commit [-m "message"]           AI Commit — launch Claude to review & commit changes
+  commit-merge [-m "message"]     AI Commit & Merge — commit then merge branch into main
+
+  help                            Show this help message
+
+ENVIRONMENT:
+  K2SO_PORT          Port of K2SO's HTTP server (set automatically)
+  K2SO_HOOK_TOKEN    Auth token (set automatically)
+  K2SO_PROJECT_PATH  Project root (defaults to $PWD)
+EOF
+}
+
+# ── Router ───────────────────────────────────────────────────────────
+
+case "${1:-help}" in
+    agents)
+        case "${2:-list}" in
+            list)   cmd_agents_list ;;
+            work)   shift 2; cmd_agents_work "$@" ;;
+            status) shift 2; cmd_agents_status "$@" ;;
+            create) shift 2; cmd_agents_create "$@" ;;
+            launch) shift 2; cmd_agents_launch "$@" ;;
+            generate-md) shift 2; cmd_agents_generate_md "$@" ;;
+            *)      echo "Unknown agents subcommand: $2" >&2; cmd_help; exit 1 ;;
+        esac
+        ;;
+    work)
+        case "${2:-}" in
+            create) shift 2; cmd_work_create "$@" ;;
+            *)      echo "Unknown work subcommand: ${2:-}" >&2; cmd_help; exit 1 ;;
+        esac
+        ;;
+    delegate)
+        shift; cmd_delegate "$@"
+        ;;
+    commit)
+        shift; cmd_commit "$@"
+        ;;
+    commit-merge)
+        shift; cmd_commit_merge "$@"
+        ;;
+    help|--help|-h)
+        cmd_help
+        ;;
+    *)
+        echo "Unknown command: $1" >&2
+        cmd_help
+        exit 1
+        ;;
+esac

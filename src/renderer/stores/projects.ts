@@ -44,6 +44,8 @@ interface Project {
   manuallyActive: number
   lastInteractionAt: number | null
   createdAt: number
+  agentEnabled: number
+  heartbeatEnabled: number
 }
 
 export interface ProjectWithWorkspaces extends Project {
