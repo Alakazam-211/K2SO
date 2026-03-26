@@ -132,25 +132,58 @@ export default function AgentsPanel(): React.JSX.Element {
     )
   }
 
-  if (!activeProject.agentEnabled) {
+  const agentMode = activeProject.agentMode || 'off'
+
+  if (agentMode === 'off') {
     return (
       <div className="h-full flex flex-col items-center justify-center p-4 gap-2">
         <p className="text-[10px] text-[var(--color-text-muted)] text-center">
-          Agent mode is off for this workspace
+          No agent mode enabled for this workspace
         </p>
-        <button
-          onClick={async () => {
-            await invoke('projects_update', { id: activeProject.id, agentEnabled: 1 })
-            await invoke('k2so_agents_generate_workspace_claude_md', { projectPath: activeProject.path }).catch(console.error)
-            useProjectsStore.getState().fetchProjects()
-          }}
-          className="px-3 py-1 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
-        >
-          Enable Agent Mode
-        </button>
+        <p className="text-[9px] text-[var(--color-text-muted)] text-center">
+          Enable Agent or Pod mode in workspace settings
+        </p>
       </div>
     )
   }
+
+  if (agentMode === 'agent') {
+    return (
+      <div className="h-full flex flex-col p-4 gap-3">
+        <div>
+          <span className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider">Agent Mode</span>
+          <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">
+            This workspace operates as a single AI agent. Open a Claude terminal to start working.
+          </p>
+        </div>
+        <button
+          onClick={async () => {
+            try {
+              const launchInfo = await invoke<{
+                command: string; args: string[]; cwd: string; agentName: string
+              }>('k2so_agents_build_launch', {
+                projectPath: activeProject.path,
+                agentName: activeProject.name.toLowerCase().replace(/\s+/g, '-'),
+              })
+              useTabsStore.getState().addTab(launchInfo.cwd, {
+                title: `Agent: ${activeProject.name}`,
+                command: launchInfo.command,
+                args: launchInfo.args,
+              })
+            } catch (e) {
+              console.error('[agents] Launch failed:', e)
+            }
+          }}
+          className="px-3 py-1.5 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
+        >
+          Launch Agent
+        </button>
+        <WorkspaceInboxSummary projectPath={activeProject.path} />
+      </div>
+    )
+  }
+
+  // Pod mode — show full agent list
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
@@ -191,7 +224,7 @@ export default function AgentsPanel(): React.JSX.Element {
           <button
             onClick={handleCreate}
             disabled={creating || !newName.trim() || !newRole.trim()}
-            className="w-full px-2 py-1 text-[10px] font-medium bg-purple-600 text-white hover:bg-purple-500 transition-colors no-drag cursor-pointer disabled:opacity-50"
+            className="w-full px-2 py-1 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer disabled:opacity-50"
           >
             {creating ? 'Creating...' : 'Create'}
           </button>
@@ -250,7 +283,7 @@ export default function AgentsPanel(): React.JSX.Element {
                 <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
                   <button
                     onClick={() => handleLaunch(agent.name)}
-                    className="px-1.5 py-0.5 text-[9px] text-purple-400 hover:text-purple-300 hover:bg-purple-500/10 no-drag cursor-pointer"
+                    className="px-1.5 py-0.5 text-[9px] text-[var(--color-accent)] hover:text-[var(--color-accent)]/80 hover:bg-[var(--color-accent)]/10 no-drag cursor-pointer"
                     title="Launch agent session"
                   >
                     ▶

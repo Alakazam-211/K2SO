@@ -240,6 +240,121 @@ cmd_commit_merge() {
     cli_request "/cli/commit-merge" "$params"
 }
 
+cmd_agents_lock() {
+    local agent="${1:-}"
+    [ -z "$agent" ] && { echo "Usage: k2so agents lock <name>" >&2; exit 1; }
+    cli_request "/cli/agents/lock" "agent=$(urlencode "$agent")"
+}
+
+cmd_agents_unlock() {
+    local agent="${1:-}"
+    [ -z "$agent" ] && { echo "Usage: k2so agents unlock <name>" >&2; exit 1; }
+    cli_request "/cli/agents/unlock" "agent=$(urlencode "$agent")"
+}
+
+cmd_agents_triage() {
+    cli_request "/cli/agents/triage"
+}
+
+cmd_agents_profile() {
+    local agent="${1:-}"
+    [ -z "$agent" ] && { echo "Usage: k2so agents profile <name>" >&2; exit 1; }
+    cli_request "/cli/agents/profile" "agent=$(urlencode "$agent")"
+}
+
+cmd_work_move() {
+    local agent="" filename="" from="" to=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --agent) agent="$2"; shift 2 ;;
+            --file) filename="$2"; shift 2 ;;
+            --from) from="$2"; shift 2 ;;
+            --to) to="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    if [ -z "$agent" ] || [ -z "$filename" ] || [ -z "$from" ] || [ -z "$to" ]; then
+        echo "Usage: k2so work move --agent <name> --file <filename> --from inbox --to active" >&2
+        exit 1
+    fi
+    cli_request "/cli/agents/work/move" "agent=$(urlencode "$agent")&filename=$(urlencode "$filename")&from=$(urlencode "$from")&to=$(urlencode "$to")"
+}
+
+cmd_heartbeat() {
+    echo "Triggering heartbeat triage..."
+    cli_request "/cli/heartbeat"
+}
+
+cmd_reviews() {
+    cli_request "/cli/reviews" | python3 -c "
+import json, sys
+data = json.loads(sys.stdin.read())
+if not data:
+    print('No pending reviews.')
+    sys.exit(0)
+for r in data:
+    agent = r.get('agentName', '?')
+    branch = r.get('branch', '')
+    items = len(r.get('workItems', []))
+    files = len(r.get('diffSummary', []))
+    print(f'  {agent:<20} {branch:<30} {items} items, {files} files changed')
+" 2>/dev/null || cat
+}
+
+cmd_review_approve() {
+    local agent="${1:-}" branch="${2:-}"
+    if [ -z "$agent" ] || [ -z "$branch" ]; then
+        echo "Usage: k2so review approve <agent> <branch>" >&2
+        exit 1
+    fi
+    cli_request "/cli/review/approve" "agent=$(urlencode "$agent")&branch=$(urlencode "$branch")"
+}
+
+cmd_review_reject() {
+    local agent="${1:-}" reason=""
+    shift 2>/dev/null
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --reason) reason="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    if [ -z "$agent" ]; then
+        echo "Usage: k2so review reject <agent> [--reason \"...\"]" >&2
+        exit 1
+    fi
+    local params="agent=$(urlencode "$agent")"
+    [ -n "$reason" ] && params="${params}&reason=$(urlencode "$reason")"
+    cli_request "/cli/review/reject" "$params"
+}
+
+cmd_review_feedback() {
+    local agent="${1:-}" feedback=""
+    shift 2>/dev/null
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --message|-m) feedback="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    if [ -z "$agent" ] || [ -z "$feedback" ]; then
+        echo "Usage: k2so review feedback <agent> --message \"...\"" >&2
+        exit 1
+    fi
+    cli_request "/cli/review/feedback" "agent=$(urlencode "$agent")&feedback=$(urlencode "$feedback")"
+}
+
+cmd_mode() {
+    local new_mode="${1:-}"
+    if [ -z "$new_mode" ]; then
+        # Get current mode
+        cli_request "/cli/mode"
+    else
+        # Set mode
+        cli_request "/cli/mode" "set=$(urlencode "$new_mode")"
+    fi
+}
+
 cmd_help() {
     cat <<'EOF'
 K2SO CLI — Agent interface to K2SO workspace orchestration
@@ -251,20 +366,35 @@ COMMANDS:
   agents create <name> --role "." Create a new agent
   agents launch <name>            Launch agent's Claude session in K2SO
   agents generate-md <name>       Generate agent's CLAUDE.md context file
+  agents profile <name>           Read an agent's profile (agent.md)
+  agents lock <name>              Mark agent as busy (active session)
+  agents unlock <name>            Mark agent as available
+  agents triage                   Show triage summary (what needs work)
 
   work create --title "." --body "."  Create a work item
-    [--agent <name>]              Assign to agent (omit for unassigned)
+    [--agent <name>]              Assign to agent (omit for workspace inbox)
     [--priority high|normal|low]  Set priority
     [--type prd|milestone|task]   Set work item type
-
-  work inbox                       Show workspace-level inbox
+  work inbox                      Show workspace-level inbox
   work send --workspace <path>    Send work to another workspace's inbox
     --title "..." --body "..."
+  work move --agent <name> --file <f> --from inbox --to active
 
   delegate <agent> <file>         Move work item to agent's inbox
 
-  commit [-m "message"]           AI Commit — launch Claude to review & commit changes
-  commit-merge [-m "message"]     AI Commit & Merge — commit then merge branch into main
+  reviews                         List all pending reviews
+  review approve <agent> <branch> Approve and merge agent's branch
+  review reject <agent>           Reject work (moves back to inbox)
+    [--reason "..."]
+  review feedback <agent>         Request changes on agent's work
+    --message "..."
+
+  commit [-m "message"]           AI Commit — launch Claude to review & commit
+  commit-merge [-m "message"]     AI Commit & Merge — commit then merge into main
+
+  mode                            Show current workspace agent mode
+  mode <off|agent|pod>            Set workspace agent mode
+  heartbeat                       Manually trigger heartbeat triage
 
   help                            Show this help message
 
@@ -286,6 +416,10 @@ case "${1:-help}" in
             create) shift 2; cmd_agents_create "$@" ;;
             launch) shift 2; cmd_agents_launch "$@" ;;
             generate-md) shift 2; cmd_agents_generate_md "$@" ;;
+            profile) shift 2; cmd_agents_profile "$@" ;;
+            lock) shift 2; cmd_agents_lock "$@" ;;
+            unlock) shift 2; cmd_agents_unlock "$@" ;;
+            triage) shift 2; cmd_agents_triage "$@" ;;
             *)      echo "Unknown agents subcommand: $2" >&2; cmd_help; exit 1 ;;
         esac
         ;;
@@ -294,6 +428,7 @@ case "${1:-help}" in
             create) shift 2; cmd_work_create "$@" ;;
             inbox)  shift 2; cmd_work_inbox "$@" ;;
             send)   shift 2; cmd_work_send "$@" ;;
+            move)   shift 2; cmd_work_move "$@" ;;
             *)      echo "Unknown work subcommand: ${2:-}" >&2; cmd_help; exit 1 ;;
         esac
         ;;
@@ -305,6 +440,23 @@ case "${1:-help}" in
         ;;
     commit-merge)
         shift; cmd_commit_merge "$@"
+        ;;
+    reviews)
+        shift; cmd_reviews "$@"
+        ;;
+    review)
+        case "${2:-}" in
+            approve)  shift 2; cmd_review_approve "$@" ;;
+            reject)   shift 2; cmd_review_reject "$@" ;;
+            feedback) shift 2; cmd_review_feedback "$@" ;;
+            *)        echo "Unknown review subcommand: ${2:-}" >&2; cmd_help; exit 1 ;;
+        esac
+        ;;
+    mode)
+        shift; cmd_mode "$@"
+        ;;
+    heartbeat)
+        shift; cmd_heartbeat "$@"
         ;;
     help|--help|-h)
         cmd_help

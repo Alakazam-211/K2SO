@@ -2858,81 +2858,6 @@ function ProjectDetail({
           </button>
         </div>
 
-        {/* Agent toggle */}
-        <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
-          <div>
-            <span className="text-xs text-[var(--color-text-secondary)]">Agent Mode</span>
-            <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
-              {project.agentEnabled ? 'Claude sessions in this workspace know how to operate K2SO' : 'Enable to make this workspace an AI agent'}
-            </p>
-          </div>
-          <button
-            onClick={async () => {
-              const newVal = project.agentEnabled ? 0 : 1
-              await invoke('projects_update', { id: project.id, agentEnabled: newVal })
-              if (newVal === 1) {
-                // Scaffold .k2so/ and generate CLAUDE.md at workspace root
-                await invoke('k2so_agents_generate_workspace_claude_md', {
-                  projectPath: project.path,
-                }).catch(console.error)
-              } else {
-                // Disable — move CLAUDE.md to .k2so/CLAUDE.md.disabled
-                await invoke('k2so_agents_disable_workspace_claude_md', {
-                  projectPath: project.path,
-                }).catch(console.error)
-              }
-              // If disabling agent, also disable heartbeat
-              if (newVal === 0 && project.heartbeatEnabled) {
-                await invoke('projects_update', { id: project.id, heartbeatEnabled: 0 })
-              }
-              await fetchProjects()
-            }}
-            className={`w-8 h-4 flex items-center transition-colors no-drag cursor-pointer ${
-              project.agentEnabled ? 'bg-purple-600' : 'bg-[var(--color-border)]'
-            }`}
-          >
-            <span
-              className={`w-3 h-3 bg-white block transition-transform ${
-                project.agentEnabled ? 'translate-x-4.5' : 'translate-x-0.5'
-              }`}
-            />
-          </button>
-        </div>
-
-        {/* Heartbeat toggle — only available when Agent is enabled */}
-        <div className={`flex items-center justify-between py-2 border-b border-[var(--color-border)] ${!project.agentEnabled ? 'opacity-40' : ''}`}>
-          <div>
-            <span className="text-xs text-[var(--color-text-secondary)]">Heartbeat</span>
-            <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
-              {project.heartbeatEnabled ? 'Agent wakes up automatically to work' : 'Agent only works when manually launched'}
-            </p>
-          </div>
-          <button
-            disabled={!project.agentEnabled}
-            onClick={async () => {
-              const newVal = project.heartbeatEnabled ? 0 : 1
-              await invoke('projects_update', { id: project.id, heartbeatEnabled: newVal })
-              // Update the heartbeat project list and install/uninstall scheduler
-              await invoke('k2so_agents_update_heartbeat_projects').catch(console.error)
-              if (newVal === 1) {
-                await invoke('k2so_agents_install_heartbeat').catch(console.error)
-              }
-              await fetchProjects()
-            }}
-            className={`w-8 h-4 flex items-center transition-colors no-drag ${
-              project.agentEnabled ? 'cursor-pointer' : 'cursor-not-allowed'
-            } ${
-              project.heartbeatEnabled ? 'bg-green-600' : 'bg-[var(--color-border)]'
-            }`}
-          >
-            <span
-              className={`w-3 h-3 bg-white block transition-transform ${
-                project.heartbeatEnabled ? 'translate-x-4.5' : 'translate-x-0.5'
-              }`}
-            />
-          </button>
-        </div>
-
         {/* Color */}
         <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
           <span className="text-xs text-[var(--color-text-secondary)]">Workspace Color</span>
@@ -2970,6 +2895,92 @@ function ProjectDetail({
             />
           </div>
         )}
+
+        {/* Agent Settings */}
+        <div className="space-y-2 py-2 border-b border-[var(--color-border)]">
+          <span className="text-xs text-[var(--color-text-secondary)]">Agent Settings</span>
+
+          {/* Mode selector */}
+          <div className="flex gap-1">
+            {(['off', 'agent', 'pod'] as const).map((mode) => {
+              const isActive = (project.agentMode || 'off') === mode
+              const labels = { off: 'Off', agent: 'Agent', pod: 'Pod' }
+              return (
+                <button
+                  key={mode}
+                  onClick={async () => {
+                    const currentMode = project.agentMode || 'off'
+                    if (currentMode === mode) return
+
+                    if (currentMode !== 'off') {
+                      await invoke('k2so_agents_disable_workspace_claude_md', {
+                        projectPath: project.path,
+                      }).catch(console.error)
+                    }
+
+                    await invoke('projects_update', { id: project.id, agentMode: mode })
+
+                    if (mode === 'agent' || mode === 'pod') {
+                      await invoke('k2so_agents_generate_workspace_claude_md', {
+                        projectPath: project.path,
+                      }).catch(console.error)
+                    }
+
+                    if (mode === 'off' && project.heartbeatEnabled) {
+                      await invoke('projects_update', { id: project.id, heartbeatEnabled: 0 })
+                    }
+
+                    await fetchProjects()
+                  }}
+                  className={`flex-1 px-2 py-1.5 text-[10px] font-medium transition-colors no-drag cursor-pointer ${
+                    isActive
+                      ? 'bg-[var(--color-accent)] text-white'
+                      : 'bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] border border-[var(--color-border)]'
+                  }`}
+                >
+                  {labels[mode]}
+                </button>
+              )
+            })}
+          </div>
+
+          <p className="text-[10px] text-[var(--color-text-muted)]">
+            {(project.agentMode || 'off') === 'off' && 'No agent features enabled for this workspace.'}
+            {(project.agentMode || 'off') === 'agent' && 'This workspace embodies a single AI agent. Open a Claude terminal and it knows how to operate K2SO.'}
+            {(project.agentMode || 'off') === 'pod' && 'A team of sub-agents accepts and works on tasks. The workspace acts as lead orchestrator.'}
+          </p>
+
+          {(project.agentMode || 'off') !== 'off' && (
+            <div className="flex items-center justify-between pt-1">
+              <div>
+                <span className="text-[10px] text-[var(--color-text-secondary)]">Heartbeat</span>
+                <p className="text-[9px] text-[var(--color-text-muted)]">
+                  {project.heartbeatEnabled ? 'Wakes up automatically to work' : 'Only works when manually launched'}
+                </p>
+              </div>
+              <button
+                onClick={async () => {
+                  const newVal = project.heartbeatEnabled ? 0 : 1
+                  await invoke('projects_update', { id: project.id, heartbeatEnabled: newVal })
+                  await invoke('k2so_agents_update_heartbeat_projects').catch(console.error)
+                  if (newVal === 1) {
+                    await invoke('k2so_agents_install_heartbeat').catch(console.error)
+                  }
+                  await fetchProjects()
+                }}
+                className={`w-8 h-4 flex items-center transition-colors no-drag cursor-pointer ${
+                  project.heartbeatEnabled ? 'bg-green-600' : 'bg-[var(--color-border)]'
+                }`}
+              >
+                <span
+                  className={`w-3 h-3 bg-white block transition-transform ${
+                    project.heartbeatEnabled ? 'translate-x-4.5' : 'translate-x-0.5'
+                  }`}
+                />
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* ── Worktrees ── */}
@@ -3005,8 +3016,10 @@ function ProjectDetail({
         <WorktreeFoldersOnDisk project={project} fetchProjects={fetchProjects} />
       )}
 
-      {/* ── K2SO Agents ── */}
-      <ProjectAgentsPanel projectPath={project.path} />
+      {/* ── K2SO Agents — only in Pod mode ── */}
+      {(project.agentMode || 'off') === 'pod' && (
+        <ProjectAgentsPanel projectPath={project.path} />
+      )}
 
       {/* ── Cursor Chat Migration ── */}
       <CursorMigrationPanel projectPath={project.path} />

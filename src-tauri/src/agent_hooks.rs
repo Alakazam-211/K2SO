@@ -318,6 +318,55 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             Err(e) => Err(e),
                         }
                     }
+                    "/cli/reviews" => {
+                        crate::commands::k2so_agents::k2so_agents_review_queue(project_path)
+                            .map(|items| serde_json::to_string(&items).unwrap_or_default())
+                    }
+                    "/cli/review/approve" => {
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        let branch = params.get("branch").cloned().unwrap_or_default();
+                        crate::commands::k2so_agents::k2so_agents_review_approve(project_path, branch, agent)
+                            .map(|msg| serde_json::json!({"success": true, "message": msg}).to_string())
+                    }
+                    "/cli/review/reject" => {
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        let reason = params.get("reason").cloned();
+                        crate::commands::k2so_agents::k2so_agents_review_reject(project_path, agent, reason)
+                            .map(|_| r#"{"success":true}"#.to_string())
+                    }
+                    "/cli/review/feedback" => {
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        let feedback = params.get("feedback").cloned().unwrap_or_default();
+                        crate::commands::k2so_agents::k2so_agents_review_request_changes(project_path, agent, feedback)
+                            .map(|_| r#"{"success":true}"#.to_string())
+                    }
+                    "/cli/mode" => {
+                        // Get or set workspace agent mode
+                        let new_mode = params.get("set").cloned();
+                        if let Some(mode) = new_mode {
+                            // This would need DB access — emit event for frontend to handle
+                            let _ = app_handle.emit("cli:set-agent-mode", serde_json::json!({
+                                "projectPath": project_path,
+                                "mode": mode,
+                            }));
+                            Ok(serde_json::json!({"success": true, "mode": mode}).to_string())
+                        } else {
+                            // Just return current mode — read from .k2so/ presence
+                            let k2so_dir = std::path::PathBuf::from(&project_path).join(".k2so");
+                            let agents_dir = k2so_dir.join("agents");
+                            let has_agents = agents_dir.exists() && std::fs::read_dir(&agents_dir)
+                                .map(|e| e.count() > 0).unwrap_or(false);
+                            let claude_md = std::path::PathBuf::from(&project_path).join("CLAUDE.md");
+                            let mode = if !claude_md.exists() {
+                                "off"
+                            } else if has_agents {
+                                "pod"
+                            } else {
+                                "agent"
+                            };
+                            Ok(serde_json::json!({"mode": mode}).to_string())
+                        }
+                    }
                     "/cli/commit" | "/cli/commit-merge" => {
                         let include_merge = route == "/cli/commit-merge";
                         let message = params.get("message").cloned().unwrap_or_default();

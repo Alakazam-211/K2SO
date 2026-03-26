@@ -888,6 +888,30 @@ k2so commit                          # AI Commit: launch Claude to review & comm
 k2so commit-merge                    # AI Commit & Merge: commit then merge into main
 ```
 
+### Reviews
+```
+k2so reviews                         # List all pending reviews
+k2so review approve <agent> <branch> # Approve and merge a branch
+k2so review reject <agent>           # Reject work (back to inbox)
+k2so review feedback <agent> -m ".." # Request changes with feedback
+```
+
+### Session Management
+```
+k2so agents lock <name>              # Mark agent as busy
+k2so agents unlock <name>            # Mark agent as available
+k2so agents profile <name>           # Read agent's profile
+k2so agents triage                   # Show triage summary
+k2so work move --agent <name> --file <f> --from inbox --to active
+```
+
+### Workspace Mode
+```
+k2so mode                            # Show current mode (off/agent/pod)
+k2so mode <off|agent|pod>            # Set workspace agent mode
+k2so heartbeat                       # Manually trigger heartbeat triage
+```
+
 "#;
 
 const WORKFLOW_DOCS: &str = r#"## Workflow

@@ -46,6 +46,7 @@ interface Project {
   createdAt: number
   agentEnabled: number
   heartbeatEnabled: number
+  agentMode: string // 'off' | 'agent' | 'pod'
 }
 
 export interface ProjectWithWorkspaces extends Project {

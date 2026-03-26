@@ -93,12 +93,13 @@ pub struct Project {
     pub created_at: i64,
     pub agent_enabled: i64,
     pub heartbeat_enabled: i64,
+    pub agent_mode: String,
 }
 
 impl Project {
     pub fn list(conn: &Connection) -> Result<Vec<Project>> {
         let mut stmt = conn.prepare(
-            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at, agent_enabled, heartbeat_enabled \
+            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at, agent_enabled, heartbeat_enabled, agent_mode \
              FROM projects ORDER BY tab_order",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -118,6 +119,7 @@ impl Project {
                 created_at: row.get(12)?,
                 agent_enabled: row.get(13)?,
                 heartbeat_enabled: row.get(14)?,
+                agent_mode: row.get::<_, String>(15).unwrap_or_else(|_| "off".to_string()),
             })
         })?;
         rows.collect()
@@ -125,7 +127,7 @@ impl Project {
 
     pub fn get(conn: &Connection, id: &str) -> Result<Project> {
         conn.query_row(
-            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at, agent_enabled, heartbeat_enabled \
+            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at, agent_enabled, heartbeat_enabled, agent_mode \
              FROM projects WHERE id = ?1",
             params![id],
             |row| {
@@ -145,6 +147,7 @@ impl Project {
                     created_at: row.get(12)?,
                     agent_enabled: row.get(13)?,
                     heartbeat_enabled: row.get(14)?,
+                    agent_mode: row.get::<_, String>(15).unwrap_or_else(|_| "off".to_string()),
                 })
             },
         )
@@ -183,6 +186,7 @@ impl Project {
         manually_active: Option<i64>,
         agent_enabled: Option<i64>,
         heartbeat_enabled: Option<i64>,
+        agent_mode: Option<String>,
     ) -> Result<()> {
         if let Some(v) = name {
             conn.execute("UPDATE projects SET name = ?1 WHERE id = ?2", params![v, id])?;
@@ -216,6 +220,12 @@ impl Project {
         }
         if let Some(v) = heartbeat_enabled {
             conn.execute("UPDATE projects SET heartbeat_enabled = ?1 WHERE id = ?2", params![v, id])?;
+        }
+        if let Some(ref v) = agent_mode {
+            conn.execute("UPDATE projects SET agent_mode = ?1 WHERE id = ?2", params![v, id])?;
+            // Keep agent_enabled in sync for backward compat
+            let enabled = if v == "off" { 0i64 } else { 1i64 };
+            conn.execute("UPDATE projects SET agent_enabled = ?1 WHERE id = ?2", params![enabled, id])?;
         }
         Ok(())
     }

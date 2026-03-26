@@ -49,6 +49,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         ("0010_active_workspaces", include_str!("../../drizzle_sql/0010_active_workspaces.sql")),
         ("0011_add_indexes", include_str!("../../drizzle_sql/0011_add_indexes.sql")),
         ("0012_agent_mode", include_str!("../../drizzle_sql/0012_agent_mode.sql")),
+        ("0013_agent_mode_selector", include_str!("../../drizzle_sql/0013_agent_mode_selector.sql")),
     ];
 
     for (name, sql) in migrations {
