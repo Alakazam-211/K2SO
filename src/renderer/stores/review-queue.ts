@@ -72,15 +72,19 @@ export const useReviewQueueStore = create<ReviewQueueState>((set) => ({
     const allReviews: GlobalReviewItem[] = []
 
     for (const project of projects) {
-      if (!project.agentEnabled) continue
+      if (!project.agentEnabled && (!project.agentMode || project.agentMode === 'off')) continue
       try {
         const reviews = await invoke<ReviewItem[]>('k2so_agents_review_queue', {
           projectPath: project.path,
         })
         for (const review of reviews) {
-          // Find matching workspace for jump-to
+          // Find matching workspace for jump-to — try branch match, worktree path, or partial branch match
           const ws = project.workspaces.find(
-            (w) => w.branch === review.branch || w.worktreePath === review.worktreePath
+            (w) =>
+              w.branch === review.branch ||
+              w.worktreePath === review.worktreePath ||
+              (w.branch && review.branch && review.branch.includes(w.branch)) ||
+              (w.branch && review.branch && w.branch.includes(review.branch))
           )
           allReviews.push({
             ...review,

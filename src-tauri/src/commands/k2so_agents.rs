@@ -30,6 +30,7 @@ pub struct WorkItem {
     pub created: String,
     pub item_type: String,
     pub folder: String,
+    pub body_preview: String,
 }
 
 // ── Path helpers ────────────────────────────────────────────────────────
@@ -76,6 +77,21 @@ fn read_work_item(path: &Path, folder: &str) -> Option<WorkItem> {
     let content = fs::read_to_string(path).ok()?;
     let fm = parse_frontmatter(&content);
     let filename = path.file_name()?.to_string_lossy().to_string();
+
+    // Extract body preview (first ~120 chars after frontmatter)
+    let body_preview = if content.starts_with("---") {
+        if let Some(end) = content[3..].find("---") {
+            let body = content[3 + end + 3..].trim();
+            let preview: String = body.chars().take(120).collect();
+            if body.len() > 120 { format!("{}...", preview.trim()) } else { preview.trim().to_string() }
+        } else {
+            String::new()
+        }
+    } else {
+        let preview: String = content.chars().take(120).collect();
+        if content.len() > 120 { format!("{}...", preview.trim()) } else { preview.trim().to_string() }
+    };
+
     Some(WorkItem {
         filename,
         title: fm.get("title").cloned().unwrap_or_default(),
@@ -84,6 +100,7 @@ fn read_work_item(path: &Path, folder: &str) -> Option<WorkItem> {
         created: fm.get("created").cloned().unwrap_or_default(),
         item_type: fm.get("type").cloned().unwrap_or("task".to_string()),
         folder: folder.to_string(),
+        body_preview,
     })
 }
 
@@ -281,6 +298,7 @@ pub fn k2so_agents_work_create(
     let path = target_dir.join(&filename);
     fs::write(&path, &content).map_err(|e| format!("Failed to write work item: {}", e))?;
 
+    let body_preview = if body.len() > 120 { format!("{}...", &body[..120].trim()) } else { body.trim().to_string() };
     Ok(WorkItem {
         filename,
         title,
@@ -289,6 +307,7 @@ pub fn k2so_agents_work_create(
         created: now,
         item_type,
         folder: if agent_name.is_some() { "inbox".to_string() } else { "workspace-inbox".to_string() },
+        body_preview,
     })
 }
 
@@ -484,6 +503,7 @@ pub fn k2so_agents_workspace_inbox_create(
     let path = dir.join(&filename);
     fs::write(&path, &content).map_err(|e| e.to_string())?;
 
+    let body_preview = if body.len() > 120 { format!("{}...", &body[..120].trim()) } else { body.trim().to_string() };
     Ok(WorkItem {
         filename,
         title,
@@ -492,6 +512,7 @@ pub fn k2so_agents_workspace_inbox_create(
         created: now,
         item_type,
         folder: "workspace-inbox".to_string(),
+        body_preview,
     })
 }
 

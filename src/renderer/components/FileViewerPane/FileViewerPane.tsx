@@ -359,7 +359,7 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
               }`}
               onClick={() => setViewMode('rendered')}
             >
-              Rendered
+              Preview
             </button>
             <button
               className={`px-2 py-0.5 text-[10px] font-medium transition-colors ${
@@ -369,7 +369,7 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
               }`}
               onClick={() => setViewMode('raw')}
             >
-              Raw
+              Edit
             </button>
           </div>
         )}
@@ -473,7 +473,7 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
       ) : category === 'image' && viewMode === 'raw' ? (
         <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef}>
           <div className="p-4 text-xs text-[var(--color-text-muted)]">
-            <p>Binary image file. Switch to Rendered mode to view.</p>
+            <p>Binary image file. Switch to Preview mode to view.</p>
           </div>
         </div>
       ) : category === 'markdown' && viewMode === 'rendered' ? (

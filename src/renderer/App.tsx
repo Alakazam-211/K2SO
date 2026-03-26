@@ -225,6 +225,15 @@ export default function App(): React.JSX.Element {
         e.preventDefault()
         toggleReviewQueue()
       }
+      // Cmd+[ to go back, Cmd+] to go forward
+      if (e.metaKey && !e.shiftKey && e.key === '[') {
+        e.preventDefault()
+        useTabsStore.getState().goBack()
+      }
+      if (e.metaKey && !e.shiftKey && e.key === ']') {
+        e.preventDefault()
+        useTabsStore.getState().goForward()
+      }
       // Cmd+Shift++ to increase terminal font size
       if (e.metaKey && e.shiftKey && e.key === '+') {
         e.preventDefault()

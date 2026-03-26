@@ -3,6 +3,7 @@ import { TOPBAR_HEIGHT } from '../../../shared/constants'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useSettingsStore } from '@/stores/settings'
+import { useTabsStore } from '@/stores/tabs'
 import { useReviewQueueStore } from '@/stores/review-queue'
 import TimerButton from '@/components/Timer/TimerButton'
 
@@ -132,6 +133,8 @@ export default function TopBar({
         </button>
         {/* Review Queue */}
         <ReviewQueueTopBarButton />
+        {/* Back / Forward navigation */}
+        <NavButtons />
       </div>
 
       {/* Center: workspace + worktree name */}
@@ -282,5 +285,45 @@ function ReviewQueueTopBarButton(): React.JSX.Element | null {
         </span>
       )}
     </button>
+  )
+}
+
+function NavButtons(): React.JSX.Element {
+  const canBack = useTabsStore((s) => s.canGoBack())
+  const canForward = useTabsStore((s) => s.canGoForward())
+
+  return (
+    <div className="flex items-center gap-0.5">
+      <button
+        onClick={() => useTabsStore.getState().goBack()}
+        disabled={!canBack}
+        className={`flex h-5 w-5 items-center justify-center transition-colors ${
+          canBack
+            ? 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-elevated)]'
+            : 'text-[var(--color-text-muted)] opacity-30'
+        }`}
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        title="Go Back (⌘[)"
+      >
+        <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="6 2 3 5 6 8" />
+        </svg>
+      </button>
+      <button
+        onClick={() => useTabsStore.getState().goForward()}
+        disabled={!canForward}
+        className={`flex h-5 w-5 items-center justify-center transition-colors ${
+          canForward
+            ? 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-elevated)]'
+            : 'text-[var(--color-text-muted)] opacity-30'
+        }`}
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        title="Go Forward (⌘])"
+      >
+        <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="4 2 7 5 4 8" />
+        </svg>
+      </button>
+    </div>
   )
 }

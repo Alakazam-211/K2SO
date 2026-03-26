@@ -42,7 +42,7 @@ function getTabLabel(item: Item): string {
   }
   if (item.type === 'agent') {
     const data = item.data as AgentItemData
-    return `Agent: ${data.agentName}`
+    return data.agentName === '__workspace__' ? 'Work Board' : `Agent: ${data.agentName}`
   }
   return 'Unknown'
 }

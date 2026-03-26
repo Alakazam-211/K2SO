@@ -427,6 +427,11 @@ pub fn run() {
             commands::k2so_agents::k2so_agents_install_heartbeat,
             commands::k2so_agents::k2so_agents_uninstall_heartbeat,
             commands::k2so_agents::k2so_agents_update_heartbeat_projects,
+            // Review Checklist
+            commands::review_checklist::review_checklist_read,
+            commands::review_checklist::review_checklist_write,
+            commands::review_checklist::review_checklist_toggle,
+            commands::review_checklist::review_checklist_init,
         ])
         .run(tauri::generate_context!())
         .expect("error while running K2SO");

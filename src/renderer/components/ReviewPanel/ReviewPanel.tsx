@@ -47,6 +47,27 @@ interface ChecklistItem {
   checked: boolean
 }
 
+// ── Custom Checkbox ─────────────────────────────────────────────────
+
+function ReviewCheckbox({ checked, onChange }: { checked: boolean; onChange: () => void }): React.JSX.Element {
+  return (
+    <button
+      onClick={(e) => { e.preventDefault(); onChange() }}
+      className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 flex items-center justify-center border transition-colors no-drag cursor-pointer"
+      style={{
+        backgroundColor: checked ? 'var(--color-accent)' : 'transparent',
+        borderColor: checked ? 'var(--color-accent)' : 'rgba(255,255,255,0.25)',
+      }}
+    >
+      {checked && (
+        <svg className="w-2.5 h-2.5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3.5} strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      )}
+    </button>
+  )
+}
+
 // ── Acceptance Criteria Parser ──────────────────────────────────────
 
 function extractAcceptanceCriteria(workItems: WorkItem[], projectPath: string): Promise<ChecklistItem[]> {
@@ -106,6 +127,7 @@ export default function ReviewPanel(): React.JSX.Element {
   const [chats, setChats] = useState<ChatSession[]>([])
   const [criteria, setCriteria] = useState<Map<string, ChecklistItem[]>>(new Map())
   const [previewRunning, setPreviewRunning] = useState<Map<string, string | null>>(new Map()) // agentName → URL or null (pending)
+  const [checklistItems, setChecklistItems] = useState<Map<string, Array<{ text: string; checked: boolean; section: string }>>>(new Map()) // agentName → items from file
 
   const agenticEnabled = useSettingsStore((s) => s.agenticSystemsEnabled)
   const projects = useProjectsStore((s) => s.projects)
@@ -176,6 +198,40 @@ export default function ReviewPanel(): React.JSX.Element {
     const interval = setInterval(() => { fetchReviews(); fetchChats() }, 15_000)
     return () => clearInterval(interval)
   }, [fetchReviews, fetchChats])
+
+  // Load or initialize checklist files for each review
+  useEffect(() => {
+    for (const review of reviews) {
+      const path = review.worktreePath ?? activeProject?.path
+      if (!path) continue
+
+      // Build initial items from work items + extracted criteria
+      const criteriaItems = criteria.get(review.agentName) ?? []
+      const initialItems = [
+        ...review.workItems.map((w) => ({ text: w.title || w.filename, checked: false, section: 'verify' })),
+        ...criteriaItems.map((c) => ({ text: c.text, checked: false, section: 'criteria' })),
+      ]
+
+      // Init the file (only writes if it doesn't exist)
+      invoke('review_checklist_init', {
+        workspacePath: path,
+        items: initialItems,
+        agentName: review.agentName,
+        branch: review.branch,
+      }).catch(() => {})
+
+      // Read current state from file
+      invoke<Array<{ text: string; checked: boolean; section: string }>>('review_checklist_read', {
+        workspacePath: path,
+      }).then((items) => {
+        setChecklistItems((prev) => {
+          const next = new Map(prev)
+          next.set(review.agentName, items)
+          return next
+        })
+      }).catch(() => {})
+    }
+  }, [reviews, criteria, activeProject?.path])
 
   // Match chat sessions to review items by branch
   const getChatsForReview = useCallback((review: ReviewItem): ChatSession[] => {
@@ -294,17 +350,35 @@ export default function ReviewPanel(): React.JSX.Element {
     }
   }, [activeProject, feedbackAgent, feedbackText, fetchReviews])
 
-  const toggleCriteria = useCallback((agentName: string, index: number) => {
-    setCriteria((prev) => {
+  const toggleChecklistItem = useCallback((review: ReviewItem, index: number) => {
+    const path = review.worktreePath ?? activeProject?.path
+    if (!path) return
+
+    // Optimistic update
+    setChecklistItems((prev) => {
       const next = new Map(prev)
-      const items = [...(next.get(agentName) ?? [])]
+      const items = [...(next.get(review.agentName) ?? [])]
       if (items[index]) {
         items[index] = { ...items[index], checked: !items[index].checked }
-        next.set(agentName, items)
+        next.set(review.agentName, items)
       }
       return next
     })
-  }, [])
+
+    // Persist to file
+    invoke<Array<{ text: string; checked: boolean; section: string }>>('review_checklist_toggle', {
+      workspacePath: path,
+      index,
+      agentName: review.agentName,
+      branch: review.branch,
+    }).then((items) => {
+      setChecklistItems((prev) => {
+        const next = new Map(prev)
+        next.set(review.agentName, items)
+        return next
+      })
+    }).catch(console.error)
+  }, [activeProject?.path])
 
   // ── Render ──────────────────────────────────────────────────────────
 
@@ -357,124 +431,160 @@ export default function ReviewPanel(): React.JSX.Element {
 
       {scopedReviews.map((review) => {
         const reviewChats = getChatsForReview(review)
-        const reviewCriteria = criteria.get(review.agentName) ?? []
+        const fileChecklist = checklistItems.get(review.agentName) ?? []
         const isPreviewUp = previewRunning.has(review.agentName)
         const previewUrl = previewRunning.get(review.agentName) ?? null
+        const totalAdditions = review.diffSummary.reduce((sum, f) => sum + f.additions, 0)
+        const totalDeletions = review.diffSummary.reduce((sum, f) => sum + f.deletions, 0)
 
         return (
-          <div key={review.agentName} className="border-b border-[var(--color-border)] p-3 space-y-2">
-            {/* Header */}
-            <div className="flex items-center justify-between">
-              <div>
-                <span className="text-xs font-medium text-[var(--color-text-primary)]">
-                  {review.agentName}
-                </span>
-                {review.branch && (
-                  <span className="text-[10px] text-[var(--color-text-muted)] ml-2">
-                    {review.branch}
-                  </span>
-                )}
-              </div>
-              <span className="text-[10px] text-green-400">
-                {review.workItems.length} completed
-              </span>
-            </div>
+          <div key={review.agentName} className="p-4 flex flex-col gap-4">
 
-            {/* Work items */}
-            <div className="space-y-0.5">
-              {review.workItems.map((item) => (
-                <div key={item.filename} className="text-[10px] text-[var(--color-text-secondary)] flex items-center gap-1.5">
-                  <span className={`w-1 h-1 rounded-full flex-shrink-0 ${
-                    item.priority === 'high' ? 'bg-red-400' :
-                    item.priority === 'critical' ? 'bg-red-600' : 'bg-green-400'
-                  }`} />
-                  {item.title || item.filename}
+            {/* ── Header: agent name + branch ── */}
+            <div>
+              <div className="text-sm font-medium text-[var(--color-text-primary)]">
+                {review.agentName}
+              </div>
+              {review.branch && (
+                <div className="text-[11px] font-mono text-[var(--color-text-muted)] mt-0.5 truncate" title={review.branch}>
+                  {review.branch}
                 </div>
-              ))}
-            </div>
-
-            {/* Diff summary */}
-            {review.diffSummary.length > 0 && (
-              <div className="text-[10px] text-[var(--color-text-muted)]">
-                {review.diffSummary.length} files changed
-                <span className="text-green-400 ml-1.5">
-                  +{review.diffSummary.reduce((sum, f) => sum + f.additions, 0)}
-                </span>
-                <span className="text-red-400 ml-1">
-                  -{review.diffSummary.reduce((sum, f) => sum + f.deletions, 0)}
-                </span>
-              </div>
-            )}
-
-            {/* Acceptance Criteria Checklist */}
-            {reviewCriteria.length > 0 && (
-              <div className="border border-[var(--color-border)] p-2">
-                <div className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider mb-1">
-                  Acceptance Criteria
-                </div>
-                {reviewCriteria.map((item, i) => (
-                  <label
-                    key={i}
-                    className="flex items-start gap-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)] cursor-pointer hover:text-[var(--color-text-primary)]"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={item.checked}
-                      onChange={() => toggleCriteria(review.agentName, i)}
-                      className="mt-0.5 accent-[var(--color-accent)]"
-                    />
-                    <span className={item.checked ? 'line-through opacity-50' : ''}>
-                      {item.text}
-                    </span>
-                  </label>
-                ))}
-              </div>
-            )}
-
-            {/* Preview Server */}
-            <div className="flex items-center gap-1.5">
-              {!isPreviewUp ? (
-                <button
-                  onClick={() => handleStartPreview(review)}
-                  className="px-2 py-0.5 text-[10px] text-white bg-[var(--color-accent)] hover:opacity-90 transition-colors no-drag cursor-pointer"
-                >
-                  Start Preview
-                </button>
-              ) : (
-                <span className="text-[10px] text-green-400 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                  Preview launching...
-                </span>
               )}
             </div>
 
-            {/* Associated Chat Sessions */}
-            {reviewChats.length > 0 && (
-              <div>
-                <div className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider mb-1">
-                  Agent Sessions
-                </div>
-                <div className="space-y-0.5">
-                  {reviewChats.map((chat) => (
-                    <div key={chat.sessionId} className="flex items-center justify-between">
-                      <span className="text-[10px] text-[var(--color-text-secondary)] truncate flex-1 mr-2">
-                        {chat.title}
-                      </span>
-                      <button
-                        onClick={() => handleResumeChat(chat)}
-                        className="px-1.5 py-0.5 text-[10px] text-[var(--color-accent)] hover:underline no-drag cursor-pointer flex-shrink-0"
-                      >
-                        Resume
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+            {/* ── Stats row ── */}
+            <div className="flex items-center gap-3 text-[10px] text-[var(--color-text-muted)]">
+              {review.diffSummary.length > 0 && (
+                <span>{review.diffSummary.length} file{review.diffSummary.length !== 1 ? 's' : ''}</span>
+              )}
+              {totalAdditions > 0 && <span className="text-green-400 font-mono">+{totalAdditions}</span>}
+              {totalDeletions > 0 && <span className="text-red-400 font-mono">-{totalDeletions}</span>}
+              <span className="ml-auto text-green-400">{review.workItems.length} completed</span>
+            </div>
 
-            {/* Feedback form */}
+            {/* ── Verify Features (file-backed checklist) ── */}
+            {fileChecklist.length > 0 && (() => {
+              const checkedCount = fileChecklist.filter((i) => i.checked).length
+              const totalItems = fileChecklist.length
+              return (
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <div className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider">
+                      Verify Features
+                    </div>
+                    <span className={`text-[10px] font-mono ${checkedCount === totalItems ? 'text-green-400' : 'text-[var(--color-text-muted)]'}`}>
+                      {checkedCount}/{totalItems}
+                    </span>
+                  </div>
+                  <div className="space-y-0.5">
+                    {fileChecklist.map((item, i) => (
+                      <div
+                        key={i}
+                        className="flex items-start gap-2 py-0.5 text-[11px] text-[var(--color-text-secondary)] cursor-pointer hover:text-[var(--color-text-primary)]"
+                        onClick={() => toggleChecklistItem(review, i)}
+                      >
+                        <ReviewCheckbox checked={item.checked} onChange={() => toggleChecklistItem(review, i)} />
+                        <span className={item.checked ? 'line-through opacity-50' : ''}>
+                          {item.text}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )
+            })()}
+
+            {/* ── Preview ── */}
+            <div>
+              <div className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider mb-1.5">
+                Preview
+              </div>
+              {!isPreviewUp ? (
+                <button
+                  onClick={() => handleStartPreview(review)}
+                  className="w-full flex items-center justify-center gap-1.5 py-1.5 text-[11px] font-medium text-white bg-[var(--color-accent)] hover:opacity-90 transition-colors no-drag cursor-pointer"
+                >
+                  <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+                    <polygon points="6,3 20,12 6,21" />
+                  </svg>
+                  Start Preview
+                </button>
+              ) : (
+                <div className="flex items-center gap-2 py-1.5 px-2 bg-green-500/10 border border-green-500/20">
+                  <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse flex-shrink-0" />
+                  {previewUrl ? (
+                    <a
+                      href={previewUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[11px] text-green-400 font-mono hover:underline truncate"
+                    >
+                      {previewUrl}
+                    </a>
+                  ) : (
+                    <span className="text-[11px] text-green-400">Launching...</span>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* ── Agent Chat ── */}
+            <div>
+              <div className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider mb-1.5">
+                Agent Chat
+              </div>
+              {reviewChats.length > 0 ? (
+                <div>
+                  <div className="space-y-1 mb-1.5">
+                    {reviewChats.map((chat) => (
+                      <div
+                        key={chat.sessionId}
+                        className="flex items-center gap-2 py-1 px-2 bg-white/[0.03]"
+                      >
+                        <svg className="w-3 h-3 flex-shrink-0 text-[var(--color-text-muted)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                        </svg>
+                        <span className="text-[10px] text-[var(--color-text-secondary)] truncate flex-1">
+                          {chat.title}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    onClick={() => handleResumeChat(reviewChats[0])}
+                    className="w-full flex items-center justify-center gap-1.5 py-1.5 text-[11px] font-medium bg-[var(--color-bg-elevated)] text-[var(--color-text-secondary)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer"
+                  >
+                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                    </svg>
+                    Resume Chat
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => {
+                    const path = review.worktreePath ?? workspacePath
+                    if (!path) return
+                    const tabsStore = useTabsStore.getState()
+                    tabsStore.addTab(path, {
+                      title: `Chat: ${review.branch || review.agentName}`,
+                      command: 'claude',
+                      args: [],
+                    })
+                  }}
+                  className="w-full flex items-center justify-center gap-1.5 py-1.5 text-[11px] font-medium bg-[var(--color-bg-elevated)] text-[var(--color-text-secondary)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer"
+                >
+                  <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                  </svg>
+                  Open Claude in this branch
+                </button>
+              )}
+            </div>
+
+            {/* ── Feedback form ── */}
             {feedbackAgent === review.agentName && (
-              <div className="space-y-1">
+              <div className="space-y-1.5">
                 <textarea
                   className="w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] px-2 py-1.5 resize-none outline-none focus:border-[var(--color-accent)] placeholder:text-[var(--color-text-muted)]"
                   placeholder="Describe what needs to change..."
@@ -483,17 +593,17 @@ export default function ReviewPanel(): React.JSX.Element {
                   onChange={(e) => setFeedbackText(e.target.value)}
                   autoFocus
                 />
-                <div className="flex gap-1">
+                <div className="flex gap-1.5">
                   <button
                     onClick={handleRequestChanges}
                     disabled={acting || !feedbackText.trim()}
-                    className="px-2 py-0.5 text-[10px] font-medium bg-yellow-600 text-white hover:bg-yellow-500 transition-colors no-drag cursor-pointer disabled:opacity-50"
+                    className="flex-1 py-1 text-[10px] font-medium bg-yellow-600 text-white hover:bg-yellow-500 transition-colors no-drag cursor-pointer disabled:opacity-50"
                   >
                     Send Feedback
                   </button>
                   <button
                     onClick={() => { setFeedbackAgent(null); setFeedbackText('') }}
-                    className="px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] no-drag cursor-pointer"
+                    className="px-3 py-1 text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] no-drag cursor-pointer"
                   >
                     Cancel
                   </button>
@@ -501,30 +611,35 @@ export default function ReviewPanel(): React.JSX.Element {
               </div>
             )}
 
-            {/* Action buttons */}
-            <div className="flex gap-1.5">
+            {/* ── Actions ── */}
+            <div className="flex flex-col gap-1.5 pt-2 border-t border-[var(--color-border)]">
               <button
                 onClick={() => handleApprove(review)}
                 disabled={acting || !review.branch}
-                className="px-2.5 py-1 text-[10px] font-medium bg-green-600 text-white hover:bg-green-500 transition-colors no-drag cursor-pointer disabled:opacity-50"
+                className="w-full py-1.5 text-[11px] font-medium bg-green-600 text-white hover:bg-green-500 transition-colors no-drag cursor-pointer disabled:opacity-50"
               >
                 Approve & Merge
               </button>
-              <button
-                onClick={() => setFeedbackAgent(review.agentName)}
-                disabled={acting}
-                className="px-2.5 py-1 text-[10px] font-medium bg-yellow-600/80 text-white hover:bg-yellow-500 transition-colors no-drag cursor-pointer disabled:opacity-50"
-              >
-                Request Changes
-              </button>
-              <button
-                onClick={() => handleReject(review)}
-                disabled={acting}
-                className="px-2.5 py-1 text-[10px] text-red-400 border border-red-500/30 hover:bg-red-500/10 transition-colors no-drag cursor-pointer disabled:opacity-50"
-              >
-                Reject
-              </button>
+              <div className="flex gap-1.5">
+                <button
+                  onClick={() => setFeedbackAgent(review.agentName)}
+                  disabled={acting}
+                  className="flex-1 py-1.5 text-[11px] font-medium bg-[var(--color-bg-elevated)] text-[var(--color-text-secondary)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer disabled:opacity-50"
+                >
+                  Request Changes
+                </button>
+                <button
+                  onClick={() => handleReject(review)}
+                  disabled={acting}
+                  className="flex-1 py-1.5 text-[11px] text-red-400 border border-red-500/30 hover:bg-red-500/10 transition-colors no-drag cursor-pointer disabled:opacity-50"
+                >
+                  Reject
+                </button>
+              </div>
             </div>
+
+            {/* Separator between reviews */}
+            <div className="border-b border-[var(--color-border)]" />
           </div>
         )
       })}

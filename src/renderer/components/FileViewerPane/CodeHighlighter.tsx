@@ -66,6 +66,9 @@ export function detectLanguage(filePath: string): BundledLanguage | undefined {
   if (FILENAME_TO_LANG[name] && name in bundledLanguages) return FILENAME_TO_LANG[name]
   if (FILENAME_TO_LANG[name]) return FILENAME_TO_LANG[name]
 
+  // .env files (.env, .env.local, .env.production, etc.)
+  if (name === '.env' || name.startsWith('.env.')) return 'dotenv' as BundledLanguage
+
   // Check extension (handle multi-part extensions like .test.ts)
   const parts = name.split('.')
   if (parts.length > 1) {

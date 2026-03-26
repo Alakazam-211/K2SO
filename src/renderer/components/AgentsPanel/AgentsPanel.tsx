@@ -206,7 +206,7 @@ export default function AgentsPanel(): React.JSX.Element {
         >
           Launch Agent
         </button>
-        <WorkspaceInboxSummary projectPath={activeProject.path} />
+        <WorkspaceInboxButton projectPath={activeProject.path} />
       </div>
     )
   }
@@ -382,7 +382,7 @@ export default function AgentsPanel(): React.JSX.Element {
       </div>
 
       {/* Workspace inbox summary */}
-      <WorkspaceInboxSummary projectPath={activeProject.path} />
+      <WorkspaceInboxButton projectPath={activeProject.path} />
     </div>
   )
 }
@@ -397,64 +397,39 @@ interface WorkItem {
   folder: string
 }
 
-function WorkspaceInboxSummary({ projectPath }: { projectPath: string }): React.JSX.Element | null {
-  const [items, setItems] = useState<WorkItem[]>([])
-  const [expanded, setExpanded] = useState(true)
+function WorkspaceInboxButton({ projectPath }: { projectPath: string }): React.JSX.Element | null {
+  const [count, setCount] = useState(0)
 
   useEffect(() => {
     const check = async () => {
       try {
-        const result = await invoke<WorkItem[]>('k2so_agents_workspace_inbox_list', { projectPath })
-        setItems(result)
-      } catch {
-        setItems([])
-      }
+        const items = await invoke<unknown[]>('k2so_agents_workspace_inbox_list', { projectPath })
+        setCount(items.length)
+      } catch { setCount(0) }
     }
     check()
     const interval = setInterval(check, 15_000)
     return () => clearInterval(interval)
   }, [projectPath])
 
-  if (items.length === 0) return null
-
-  const openWorkItem = (item: WorkItem) => {
-    const filePath = `${projectPath}/.k2so/work/inbox/${item.filename}`
-    useTabsStore.getState().openFileAsTab(filePath)
-  }
-
-  const priorityColor = (p: string) => {
-    if (p === 'critical') return 'text-red-400'
-    if (p === 'high') return 'text-orange-400'
-    return 'text-[var(--color-text-muted)]'
+  const openBoard = () => {
+    // Open the workspace board as an agent pane for the workspace itself
+    useTabsStore.getState().openAgentPane('__workspace__', projectPath)
   }
 
   return (
-    <div className="border-t border-[var(--color-border)] flex-shrink-0">
+    <div className="border-t border-[var(--color-border)] flex-shrink-0 px-3 py-2">
       <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full px-3 py-1.5 flex items-center justify-between bg-[var(--color-bg-elevated)] hover:bg-[var(--color-bg-hover)] transition-colors no-drag cursor-pointer"
+        onClick={openBoard}
+        className="w-full flex items-center justify-between px-2.5 py-1.5 bg-[var(--color-bg-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-muted)]/30 transition-colors no-drag cursor-pointer"
       >
-        <span className="text-[9px] font-medium text-[var(--color-accent)] uppercase tracking-wider">
-          Workspace Inbox ({items.length})
-        </span>
-        <span className="text-[9px] text-[var(--color-text-muted)]">{expanded ? '▾' : '▸'}</span>
+        <span className="text-[10px] text-[var(--color-text-secondary)]">Work Board</span>
+        {count > 0 && (
+          <span className="text-[9px] tabular-nums font-medium px-1.5 py-0.5 bg-[var(--color-accent)]/10 text-[var(--color-accent)]">
+            {count}
+          </span>
+        )}
       </button>
-      {expanded && (
-        <div className="max-h-[200px] overflow-y-auto">
-          {items.map((item) => (
-            <div
-              key={item.filename}
-              onClick={() => openWorkItem(item)}
-              className="px-3 py-1.5 border-t border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] cursor-pointer transition-colors"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] text-[var(--color-text-primary)] truncate flex-1 mr-2">{item.title}</span>
-                <span className={`text-[9px] flex-shrink-0 ${priorityColor(item.priority)}`}>{item.priority}</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   )
 }

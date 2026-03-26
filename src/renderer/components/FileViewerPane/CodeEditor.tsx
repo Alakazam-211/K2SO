@@ -65,7 +65,7 @@ const FILENAME_LANG_MAP: Record<string, LanguageFn> = {
   'Gemfile': () => python(),
   'Rakefile': () => python(),
   '.gitignore': () => python(),
-  '.env': () => python(),
+  '.env': () => yaml(),
 }
 
 function getLanguageExtension(filePath: string): Extension | null {
@@ -73,6 +73,9 @@ function getLanguageExtension(filePath: string): Extension | null {
 
   // Check full filename first
   if (FILENAME_LANG_MAP[name]) return FILENAME_LANG_MAP[name]()
+
+  // .env files (.env.local, .env.production, etc.)
+  if (name.startsWith('.env.')) return yaml()
 
   // Check extension
   const parts = name.split('.')

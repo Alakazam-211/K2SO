@@ -207,6 +207,14 @@ interface TabsState {
   moveTabToGroup: (fromGroup: number, toGroup: number, tabId: string) => void
   getGroupTabs: (groupIndex: number) => { tabs: Tab[], activeTabId: string | null }
 
+  // Navigation history (back/forward)
+  navHistory: string[]     // stack of tabIds
+  navIndex: number         // current position (-1 = no history)
+  canGoBack: () => boolean
+  canGoForward: () => boolean
+  goBack: () => void
+  goForward: () => void
+
   // Layout persistence per workspace
   activeWorkspaceKey: string | null  // "projectId:workspaceId" for auto-save
   backgroundWorkspaces: Record<string, WorkspaceTabSnapshot>
@@ -489,6 +497,33 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   splitCount: 1,
   extraGroups: [],
   activeGroupIndex: 0,
+  navHistory: [],
+  navIndex: -1,
+
+  canGoBack: () => get().navIndex > 0,
+  canGoForward: () => {
+    const s = get()
+    return s.navIndex < s.navHistory.length - 1
+  },
+  goBack: () => {
+    const s = get()
+    if (s.navIndex <= 0) return
+    const newIndex = s.navIndex - 1
+    const tabId = s.navHistory[newIndex]
+    // Check the tab still exists
+    const allTabs = [...s.tabs, ...s.extraGroups.flatMap((g) => g.tabs)]
+    if (!allTabs.find((t) => t.id === tabId)) return
+    set({ activeTabId: tabId, navIndex: newIndex })
+  },
+  goForward: () => {
+    const s = get()
+    if (s.navIndex >= s.navHistory.length - 1) return
+    const newIndex = s.navIndex + 1
+    const tabId = s.navHistory[newIndex]
+    const allTabs = [...s.tabs, ...s.extraGroups.flatMap((g) => g.tabs)]
+    if (!allTabs.find((t) => t.id === tabId)) return
+    set({ activeTabId: tabId, navIndex: newIndex })
+  },
 
   addTab: (cwd: string, options?: { title?: string; command?: string; args?: string[] }) => {
     // Route to the active group
@@ -577,7 +612,15 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   },
 
   setActiveTab: (tabId: string) => {
-    set({ activeTabId: tabId })
+    const state = get()
+    if (tabId !== state.activeTabId) {
+      // Push to nav history (truncate any forward history)
+      const history = state.navHistory.slice(0, state.navIndex + 1)
+      if (state.activeTabId) history.push(state.activeTabId)
+      set({ activeTabId: tabId, navHistory: history, navIndex: history.length })
+    } else {
+      set({ activeTabId: tabId })
+    }
   },
 
   splitPane: (tabId, existingPaneGroupId, newPaneGroupId, newPane, direction) => {
@@ -773,7 +816,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     }
     const tab: Tab = {
       id: tabId,
-      title: `Agent: ${agentName}`,
+      title: agentName === '__workspace__' ? 'Work Board' : `Agent: ${agentName}`,
       mosaicTree: pgId,
       paneGroups: new Map([[pgId, pg]]),
     }
@@ -1276,6 +1319,17 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   },
 
   setActiveTabInGroup: (groupIndex: number, tabId: string) => {
+    // Track in nav history
+    const state = get()
+    const currentActive = groupIndex === 0
+      ? state.activeTabId
+      : state.extraGroups[groupIndex - 1]?.activeTabId
+    if (currentActive && currentActive !== tabId) {
+      const history = state.navHistory.slice(0, state.navIndex + 1)
+      history.push(currentActive)
+      set({ navHistory: history, navIndex: history.length })
+    }
+
     if (groupIndex === 0) {
       set({ activeTabId: tabId })
       return

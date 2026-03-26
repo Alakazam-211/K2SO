@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useTabsStore } from '@/stores/tabs'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -12,16 +14,15 @@ interface WorkItem {
   created: string
   itemType: string
   folder: string
+  bodyPreview: string
 }
 
 interface AgentProfile {
   name: string
   role: string
   podLeader: boolean
-  raw: string // full agent.md content
+  raw: string
 }
-
-// ── Props ───────────────────────────────────────────────────────────────
 
 interface AgentPaneProps {
   agentName: string
@@ -29,217 +30,289 @@ interface AgentPaneProps {
   onClose?: () => void
 }
 
-// ── Component ───────────────────────────────────────────────────────────
+// ── Helpers ─────────────────────────────────────────────────────────────
+
+const priorityBadge = (p: string) => {
+  const colors: Record<string, string> = {
+    critical: 'bg-red-500/15 text-red-400',
+    high: 'bg-orange-500/15 text-orange-400',
+    normal: 'bg-white/5 text-[var(--color-text-muted)]',
+    low: 'bg-white/5 text-[var(--color-text-muted)] opacity-60',
+  }
+  return colors[p] || colors.normal
+}
+
+// ── Kanban Card ─────────────────────────────────────────────────────────
+
+function KanbanCard({ item, onClick }: { item: WorkItem; onClick: () => void }): React.JSX.Element {
+  return (
+    <div
+      onClick={onClick}
+      className="px-3 py-2.5 bg-[var(--color-bg-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-muted)]/30 cursor-pointer transition-colors mb-2"
+    >
+      <div className="text-xs font-medium text-[var(--color-text-primary)] leading-snug">{item.title}</div>
+      {item.bodyPreview && (
+        <div className="text-[10px] text-[var(--color-text-muted)] leading-relaxed mt-1.5 line-clamp-2">{item.bodyPreview}</div>
+      )}
+      <div className="flex items-center gap-1.5 mt-2">
+        <span className={`text-[9px] font-medium px-1.5 py-0.5 ${priorityBadge(item.priority)}`}>
+          {item.priority}
+        </span>
+        <span className="text-[9px] text-[var(--color-text-muted)]">{item.itemType}</span>
+      </div>
+      {item.assignedBy && item.assignedBy !== 'user' && item.assignedBy !== 'external' && item.assignedBy !== 'delegated' && (
+        <div className="mt-2">
+          <span className="text-[9px] font-medium px-1.5 py-0.5 bg-[var(--color-accent)]/10 text-[var(--color-accent)]">
+            {item.assignedBy}
+          </span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Kanban Column ───────────────────────────────────────────────────────
+
+function KanbanColumn({ title, items, color, agentDir, onOpenFile }: {
+  title: string
+  items: WorkItem[]
+  color: string
+  agentDir: string
+  onOpenFile: (path: string) => void
+}): React.JSX.Element {
+  return (
+    <div className="flex-1 min-w-0 flex flex-col">
+      <div className="flex items-center gap-1.5 mb-2.5 px-1">
+        <span className={`text-[10px] font-semibold uppercase tracking-wider ${color}`}>{title}</span>
+        {items.length > 0 && (
+          <span className="text-[9px] tabular-nums font-medium px-1.5 py-0.5 bg-white/5 text-[var(--color-text-muted)]">
+            {items.length}
+          </span>
+        )}
+      </div>
+      <div className="flex-1 overflow-y-auto px-0.5">
+        {items.length === 0 ? (
+          <div className="px-3 py-4 text-[11px] text-[var(--color-text-muted)] text-center border border-dashed border-[var(--color-border)]">
+            None
+          </div>
+        ) : (
+          items.map((item) => (
+            <KanbanCard
+              key={item.filename}
+              item={item}
+              onClick={() => onOpenFile(`${agentDir}/work/${item.folder}/${item.filename}`)}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Main Component ──────────────────────────────────────────────────────
 
 export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX.Element {
+  const isWorkspaceBoard = agentName === '__workspace__'
+
   const [profile, setProfile] = useState<AgentProfile | null>(null)
   const [claudeMd, setClaudeMd] = useState<string>('')
   const [workItems, setWorkItems] = useState<WorkItem[]>([])
-  const [activeSection, setActiveSection] = useState<'profile' | 'claude-md' | 'work'>('profile')
+  const [wsInboxItems, setWsInboxItems] = useState<WorkItem[]>([])
+  const [allAgentWork, setAllAgentWork] = useState<WorkItem[]>([])
+  const [viewMode, setViewMode] = useState<'preview' | 'edit'>('preview')
+  const [activeSection, setActiveSection] = useState<'profile' | 'claude-md' | 'work'>('work')
 
   const agentDir = `${projectPath}/.k2so/agents/${agentName}`
 
   const fetchProfile = useCallback(async () => {
+    if (isWorkspaceBoard) return
     try {
-      const content = await invoke<{ content: string }>('k2so_agents_get_profile', {
-        projectPath,
-        agentName,
-      })
-      // Parse frontmatter
+      const content = await invoke<{ content: string }>('k2so_agents_get_profile', { projectPath, agentName })
       const raw = content.content || ''
       const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/)
-      let name = agentName
-      let role = ''
-      let podLeader = false
+      let name = agentName, role = '', podLeader = false
       if (fmMatch) {
         const fm = fmMatch[1]
-        const nameMatch = fm.match(/^name:\s*(.+)$/m)
-        const roleMatch = fm.match(/^role:\s*(.+)$/m)
-        const leaderMatch = fm.match(/^pod_leader:\s*(.+)$/m)
-        if (nameMatch) name = nameMatch[1].trim()
-        if (roleMatch) role = roleMatch[1].trim()
-        if (leaderMatch) podLeader = leaderMatch[1].trim() === 'true'
+        name = fm.match(/^name:\s*(.+)$/m)?.[1]?.trim() || name
+        role = fm.match(/^role:\s*(.+)$/m)?.[1]?.trim() || ''
+        podLeader = fm.match(/^pod_leader:\s*(.+)$/m)?.[1]?.trim() === 'true'
       }
       setProfile({ name, role, podLeader, raw })
-    } catch {
-      setProfile(null)
-    }
-  }, [projectPath, agentName])
+    } catch { setProfile(null) }
+  }, [projectPath, agentName, isWorkspaceBoard])
 
   const fetchClaudeMd = useCallback(async () => {
+    if (isWorkspaceBoard) return
     try {
-      const content = await invoke<string>('k2so_agents_generate_claude_md', {
-        projectPath,
-        agentName,
-      })
-      setClaudeMd(content)
-    } catch {
-      setClaudeMd('')
-    }
-  }, [projectPath, agentName])
+      setClaudeMd(await invoke<string>('k2so_agents_generate_claude_md', { projectPath, agentName }))
+    } catch { setClaudeMd('') }
+  }, [projectPath, agentName, isWorkspaceBoard])
 
   const fetchWork = useCallback(async () => {
-    try {
-      const items = await invoke<WorkItem[]>('k2so_agents_work_list', {
-        projectPath,
-        agentName,
-        folder: null,
-      })
-      setWorkItems(items)
-    } catch {
-      setWorkItems([])
+    if (isWorkspaceBoard) {
+      // Fetch workspace inbox + all agents' work
+      try {
+        const wsItems = await invoke<WorkItem[]>('k2so_agents_workspace_inbox_list', { projectPath })
+        setWsInboxItems(wsItems)
+      } catch { setWsInboxItems([]) }
+      try {
+        const agents = await invoke<{ name: string }[]>('k2so_agents_list', { projectPath })
+        const all: WorkItem[] = []
+        for (const agent of agents) {
+          try {
+            const items = await invoke<WorkItem[]>('k2so_agents_work_list', { projectPath, agentName: agent.name, folder: null })
+            all.push(...items.map((i) => ({ ...i, assignedBy: agent.name })))
+          } catch { /* skip */ }
+        }
+        setAllAgentWork(all)
+      } catch { setAllAgentWork([]) }
+    } else {
+      try {
+        setWorkItems(await invoke<WorkItem[]>('k2so_agents_work_list', { projectPath, agentName, folder: null }))
+      } catch { setWorkItems([]) }
     }
-  }, [projectPath, agentName])
+  }, [projectPath, agentName, isWorkspaceBoard])
 
   useEffect(() => {
-    fetchProfile()
-    fetchClaudeMd()
-    fetchWork()
+    fetchProfile(); fetchClaudeMd(); fetchWork()
     const interval = setInterval(fetchWork, 10_000)
     return () => clearInterval(interval)
   }, [fetchProfile, fetchClaudeMd, fetchWork])
 
-  const openFile = (filePath: string) => {
-    useTabsStore.getState().openFileAsTab(filePath)
-  }
+  const openFile = (filePath: string) => useTabsStore.getState().openFileAsTab(filePath)
 
-  const priorityColor = (p: string) => {
-    if (p === 'critical') return 'text-red-400'
-    if (p === 'high') return 'text-orange-400'
-    if (p === 'low') return 'text-[var(--color-text-muted)]'
-    return 'text-[var(--color-text-secondary)]'
-  }
-
-  const folderColor = (f: string) => {
-    if (f === 'active') return 'text-yellow-400'
-    if (f === 'done') return 'text-green-400'
-    return 'text-[var(--color-text-muted)]'
-  }
-
+  // For single agent view
   const inbox = workItems.filter((w) => w.folder === 'inbox')
   const active = workItems.filter((w) => w.folder === 'active')
   const done = workItems.filter((w) => w.folder === 'done')
 
+  // For workspace board view
+  const wsUnassigned = wsInboxItems
+  const wsInProgress = allAgentWork.filter((w) => w.folder === 'inbox' || w.folder === 'active')
+  const wsReview = allAgentWork.filter((w) => w.folder === 'done')
+
   return (
-    <div className="h-full flex flex-col bg-[var(--color-bg-primary)] overflow-hidden">
-      {/* Header */}
-      <div className="px-4 py-3 border-b border-[var(--color-border)] flex-shrink-0">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-semibold text-[var(--color-text-primary)]">{agentName}</span>
+    <div className="h-full flex flex-col bg-[var(--color-bg)] overflow-hidden">
+      {/* Header — tabs on left, agent name after */}
+      <div className="px-3 py-2 border-b border-[var(--color-border)] flex-shrink-0 flex items-center gap-3">
+        {/* Pill tabs on the left */}
+        {!isWorkspaceBoard && (
+          <div className="flex gap-0.5 flex-shrink-0">
+            {(['work', 'profile', 'claude-md'] as const).map((section) => {
+              const labels = { work: 'Work', profile: 'Profile', 'claude-md': 'CLAUDE.md' }
+              const isActive = activeSection === section
+              return (
+                <button
+                  key={section}
+                  onClick={() => setActiveSection(section)}
+                  className={`px-3 py-1.5 text-[11px] font-medium transition-colors no-drag cursor-pointer ${
+                    isActive
+                      ? 'bg-[var(--color-accent)] text-white'
+                      : 'bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] border border-[var(--color-border)]'
+                  }`}
+                >
+                  {labels[section]}
+                </button>
+              )
+            })}
+          </div>
+        )}
+        {/* Agent name + badge */}
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-xs font-semibold text-[var(--color-text-primary)] truncate">
+            {isWorkspaceBoard ? 'Work Board' : agentName}
+          </span>
           {profile?.podLeader && (
-            <span className="text-[9px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 px-1.5 py-0.5">
+            <span className="text-[9px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 px-1.5 py-0.5 flex-shrink-0">
               LEADER
             </span>
           )}
+          {profile && !isWorkspaceBoard && (
+            <span className="text-[10px] text-[var(--color-text-muted)] truncate">{profile.role}</span>
+          )}
         </div>
-        {profile && (
-          <p className="text-[11px] text-[var(--color-text-muted)] mt-0.5">{profile.role}</p>
+        {/* Preview/Edit toggle for profile/claude-md tabs */}
+        {!isWorkspaceBoard && (activeSection === 'profile' || activeSection === 'claude-md') && (
+          <div className="ml-auto flex gap-0.5 flex-shrink-0">
+            {(['preview', 'edit'] as const).map((mode) => (
+              <button
+                key={mode}
+                onClick={() => {
+                  if (mode === 'edit') {
+                    openFile(`${agentDir}/${activeSection === 'profile' ? 'agent.md' : 'CLAUDE.md'}`)
+                  }
+                  setViewMode(mode)
+                }}
+                className={`px-2 py-1 text-[10px] font-medium transition-colors no-drag cursor-pointer ${
+                  viewMode === mode
+                    ? 'bg-[var(--color-accent)] text-white'
+                    : 'bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] border border-[var(--color-border)]'
+                }`}
+              >
+                {mode === 'preview' ? 'Preview' : 'Edit'}
+              </button>
+            ))}
+          </div>
         )}
-      </div>
-
-      {/* Section tabs */}
-      <div className="flex border-b border-[var(--color-border)] flex-shrink-0">
-        {(['profile', 'claude-md', 'work'] as const).map((section) => {
-          const labels = { profile: 'Profile', 'claude-md': 'CLAUDE.md', work: 'Work Queue' }
-          const isActive = activeSection === section
-          return (
-            <button
-              key={section}
-              onClick={() => setActiveSection(section)}
-              className={`flex-1 px-3 py-2 text-[10px] font-medium transition-colors no-drag cursor-pointer ${
-                isActive
-                  ? 'text-[var(--color-accent)] border-b-2 border-[var(--color-accent)]'
-                  : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]'
-              }`}
-            >
-              {labels[section]}
-              {section === 'work' && workItems.length > 0 && (
-                <span className="ml-1 text-[9px] text-[var(--color-text-muted)]">({workItems.length})</span>
-              )}
-            </button>
-          )
-        })}
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto">
-        {activeSection === 'profile' && (
-          <div className="p-4">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-[11px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">agent.md</h3>
-              <button
-                onClick={() => openFile(`${agentDir}/agent.md`)}
-                className="text-[10px] text-[var(--color-accent)] hover:text-[var(--color-accent)]/80 no-drag cursor-pointer"
-              >
-                Edit
-              </button>
-            </div>
-            <pre className="text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap font-mono bg-[var(--color-bg-elevated)] border border-[var(--color-border)] p-3 leading-relaxed">
-              {profile?.raw || 'No agent.md found'}
-            </pre>
+      <div className="flex-1 overflow-y-auto min-h-0">
+        {/* ── Workspace Board (Kanban) ── */}
+        {isWorkspaceBoard && (
+          <div className="h-full flex gap-3 p-3">
+            <KanbanColumn title="Unassigned" items={wsUnassigned} color="text-[var(--color-accent)]" agentDir={`${projectPath}/.k2so/work`} onOpenFile={openFile} />
+            <KanbanColumn title="In Progress" items={wsInProgress} color="text-yellow-400" agentDir={`${projectPath}/.k2so/agents`} onOpenFile={openFile} />
+            <KanbanColumn title="Review" items={wsReview} color="text-green-400" agentDir={`${projectPath}/.k2so/agents`} onOpenFile={openFile} />
           </div>
         )}
 
-        {activeSection === 'claude-md' && (
-          <div className="p-4">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-[11px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">CLAUDE.md</h3>
-              <button
-                onClick={() => openFile(`${agentDir}/CLAUDE.md`)}
-                className="text-[10px] text-[var(--color-accent)] hover:text-[var(--color-accent)]/80 no-drag cursor-pointer"
-              >
-                Edit
-              </button>
-            </div>
-            {claudeMd ? (
-              <pre className="text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap font-mono bg-[var(--color-bg-elevated)] border border-[var(--color-border)] p-3 leading-relaxed">
-                {claudeMd}
-              </pre>
+        {/* ── Agent Work Queue (Kanban) ── */}
+        {!isWorkspaceBoard && activeSection === 'work' && (
+          <div className="h-full flex gap-3 p-3">
+            <KanbanColumn title="Inbox" items={inbox} color="text-[var(--color-accent)]" agentDir={agentDir} onOpenFile={openFile} />
+            <KanbanColumn title="Active" items={active} color="text-yellow-400" agentDir={agentDir} onOpenFile={openFile} />
+            <KanbanColumn title="Done" items={done} color="text-green-400" agentDir={agentDir} onOpenFile={openFile} />
+          </div>
+        )}
+
+        {/* ── Profile ── */}
+        {!isWorkspaceBoard && activeSection === 'profile' && (
+          <div className="flex-1 overflow-y-auto overflow-x-hidden">
+            {viewMode === 'preview' ? (
+              <div className="markdown-content p-4">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {profile?.raw || '*No agent.md found*'}
+                </ReactMarkdown>
+              </div>
             ) : (
-              <p className="text-[11px] text-[var(--color-text-muted)]">No CLAUDE.md generated yet. Launch the agent to generate one.</p>
+              <pre className="text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap font-mono p-4 leading-relaxed">
+                {profile?.raw || 'No agent.md found'}
+              </pre>
             )}
           </div>
         )}
 
-        {activeSection === 'work' && (
-          <div className="p-4 space-y-4">
-            {/* Work sections */}
-            {[
-              { label: 'Active', items: active, color: 'text-yellow-400' },
-              { label: 'Inbox', items: inbox, color: 'text-[var(--color-accent)]' },
-              { label: 'Done', items: done, color: 'text-green-400' },
-            ].map(({ label, items, color }) => (
-              <div key={label}>
-                <h3 className={`text-[10px] font-semibold uppercase tracking-wider mb-2 ${color}`}>
-                  {label} {items.length > 0 && `(${items.length})`}
-                </h3>
-                {items.length === 0 ? (
-                  <p className="text-[10px] text-[var(--color-text-muted)] pl-2">No items</p>
-                ) : (
-                  <div className="border border-[var(--color-border)]">
-                    {items.map((item, i) => (
-                      <div
-                        key={item.filename}
-                        onClick={() => openFile(`${agentDir}/work/${item.folder}/${item.filename}`)}
-                        className={`px-3 py-2 cursor-pointer hover:bg-[var(--color-bg-elevated)] transition-colors ${
-                          i < items.length - 1 ? 'border-b border-[var(--color-border)]' : ''
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs text-[var(--color-text-primary)]">{item.title}</span>
-                          <span className={`text-[9px] ${priorityColor(item.priority)}`}>{item.priority}</span>
-                        </div>
-                        <div className="flex items-center gap-2 mt-0.5">
-                          <span className={`text-[9px] ${folderColor(item.folder)}`}>{item.folder}</span>
-                          <span className="text-[9px] text-[var(--color-text-muted)]">{item.itemType}</span>
-                          <span className="text-[9px] text-[var(--color-text-muted)]">{item.created}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
+        {/* ── CLAUDE.md ── */}
+        {!isWorkspaceBoard && activeSection === 'claude-md' && (
+          <div className="flex-1 overflow-y-auto overflow-x-hidden">
+            {claudeMd ? (
+              viewMode === 'preview' ? (
+                <div className="markdown-content p-4">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {claudeMd}
+                  </ReactMarkdown>
+                </div>
+              ) : (
+                <pre className="text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap font-mono p-4 leading-relaxed">
+                  {claudeMd}
+                </pre>
+              )
+            ) : (
+              <div className="p-4">
+                <p className="text-xs text-[var(--color-text-muted)]">No CLAUDE.md generated yet. Launch the agent to generate one.</p>
               </div>
-            ))}
+            )}
           </div>
         )}
       </div>
