@@ -26,7 +26,7 @@ interface PresetsState {
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-function parseCommand(commandStr: string): { command: string; args: string[] } {
+export function parseCommand(commandStr: string): { command: string; args: string[] } {
   // Split respecting quoted strings
   const parts: string[] = []
   let current = ''

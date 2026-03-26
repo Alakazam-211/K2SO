@@ -2,11 +2,14 @@ import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import { useProjectsStore } from '@/stores/projects'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
 import { useSettingsStore } from '@/stores/settings'
+import { usePresetsStore, parseCommand } from '@/stores/presets'
+import { useTabsStore } from '@/stores/tabs'
 import { useAssistantStore } from '@/stores/assistant'
 import { useToastStore } from '@/stores/toast'
 import { useActiveAgentsStore } from '@/stores/active-agents'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import { useCommandPaletteStore } from '@/stores/command-palette'
+import { useReviewQueueStore } from '@/stores/review-queue'
 import { invoke } from '@tauri-apps/api/core'
 import { showContextMenu } from '@/lib/context-menu'
 import { useGitInfo, useGitChanges } from '@/hooks/useGit'
@@ -60,16 +63,55 @@ function WorkspaceStatusDot({ path }: { path?: string }): React.JSX.Element | nu
 
 function DiffStats({ path }: { path: string }): React.JSX.Element | null {
   const { data: changes } = useGitChanges(path)
+  const defaultAgent = useSettingsStore((s) => s.defaultAgent)
+  const presets = usePresetsStore((s) => s.presets)
+  const [hovered, setHovered] = useState(false)
 
   const added = changes.filter((f) => f.status === 'added' || f.status === 'untracked').length
   const deleted = changes.filter((f) => f.status === 'deleted').length
 
   if (added === 0 && deleted === 0) return null
 
+  const handleAiCommit = (e: React.MouseEvent) => {
+    e.stopPropagation()
+
+    const preset = presets.find((p) => p.id === defaultAgent)
+    if (!preset) return
+
+    const { command, args } = parseCommand(preset.command)
+
+    const MAX_FILES = 80
+    const fileLines = changes.slice(0, MAX_FILES).map((f) => `${f.status}: ${f.path}`)
+    if (changes.length > MAX_FILES) {
+      fileLines.push(`...and ${changes.length - MAX_FILES} more files`)
+    }
+
+    const prompt = `Review the following changes in this repository and create a well-structured commit with an appropriate commit message.\n\nChanged files:\n${fileLines.join('\n')}`
+
+    const tabsStore = useTabsStore.getState()
+    const activeGroup = tabsStore.activeGroupIndex
+    tabsStore.addTabToGroup(activeGroup, path, {
+      title: 'AI Commit',
+      command,
+      args: [...args, prompt]
+    })
+  }
+
   return (
-    <span className="flex items-center gap-1 text-[10px] tabular-nums font-medium flex-shrink-0 px-1.5 py-0.5 bg-white/[0.06] font-mono">
-      {added > 0 && <span className="text-green-400">+{added}</span>}
-      {deleted > 0 && <span className="text-red-400">-{deleted}</span>}
+    <span
+      className="flex items-center gap-1 text-[10px] tabular-nums font-medium flex-shrink-0 px-1.5 py-0.5 bg-white/[0.06] font-mono cursor-pointer"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onClick={handleAiCommit}
+    >
+      {hovered ? (
+        <span className="text-[var(--color-accent)] whitespace-nowrap">AI Commit</span>
+      ) : (
+        <>
+          {added > 0 && <span className="text-green-400">+{added}</span>}
+          {deleted > 0 && <span className="text-red-400">-{deleted}</span>}
+        </>
+      )}
     </span>
   )
 }
@@ -1011,6 +1053,7 @@ export default function Sidebar(): React.JSX.Element {
           </svg>
           Add Workspace
         </button>
+        <ReviewQueueButton />
         <button
           className="no-drag flex items-center gap-1.5 px-2.5 py-2 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] bg-white/[0.04] hover:bg-white/[0.08] transition-colors"
           onClick={() => useAssistantStore.getState().toggle()}
@@ -1042,5 +1085,26 @@ export default function Sidebar(): React.JSX.Element {
         />
       )}
     </div>
+  )
+}
+
+function ReviewQueueButton(): React.JSX.Element {
+  const pendingCount = useReviewQueueStore((s) => s.pendingCount)
+  return (
+    <button
+      className="no-drag relative flex items-center gap-1.5 px-2.5 py-2 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] bg-white/[0.04] hover:bg-white/[0.08] transition-colors"
+      onClick={() => useReviewQueueStore.getState().toggle()}
+      title="Review Queue (⌘P)"
+    >
+      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M9 11l3 3L22 4" />
+        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+      </svg>
+      {pendingCount > 0 && (
+        <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] flex items-center justify-center text-[8px] font-bold text-white bg-[var(--color-accent)] rounded-full px-0.5">
+          {pendingCount > 99 ? '99+' : pendingCount}
+        </span>
+      )}
+    </button>
   )
 }

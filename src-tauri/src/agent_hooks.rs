@@ -230,23 +230,67 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             .map(|content| serde_json::json!({"content": content}).to_string())
                     }
                     "/cli/heartbeat" => {
-                        // Heartbeat triage: find agents with actionable work and launch them
+                        // Heartbeat triage: check workspace inbox + sub-agent inboxes
                         match crate::commands::k2so_agents::k2so_agents_triage_decide(project_path.clone()) {
                             Ok(agents_to_launch) => {
+                                let mut launched = Vec::new();
                                 for agent_name in &agents_to_launch {
-                                    if let Ok(launch_info) = crate::commands::k2so_agents::k2so_agents_build_launch(
-                                        project_path.clone(), agent_name.clone(), None,
-                                    ) {
-                                        let _ = app_handle.emit("cli:agent-launch", &launch_info);
+                                    if agent_name == "__lead__" {
+                                        // Wake lead agent — launch with workspace-level context
+                                        // The lead agent's CLAUDE.md includes triage instructions
+                                        let lead_name = std::path::Path::new(&project_path)
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().to_lowercase().replace(' ', "-"))
+                                            .unwrap_or_else(|| "lead".to_string());
+                                        if let Ok(launch_info) = crate::commands::k2so_agents::k2so_agents_build_launch(
+                                            project_path.clone(), lead_name.clone(), None,
+                                        ) {
+                                            let _ = app_handle.emit("cli:agent-launch", &launch_info);
+                                            launched.push(format!("lead:{}", lead_name));
+                                        }
+                                    } else {
+                                        // Wake sub-agent
+                                        if let Ok(launch_info) = crate::commands::k2so_agents::k2so_agents_build_launch(
+                                            project_path.clone(), agent_name.clone(), None,
+                                        ) {
+                                            let _ = app_handle.emit("cli:agent-launch", &launch_info);
+                                            launched.push(agent_name.clone());
+                                        }
                                     }
                                 }
                                 Ok(serde_json::json!({
-                                    "launched": agents_to_launch,
-                                    "count": agents_to_launch.len(),
+                                    "launched": launched,
+                                    "count": launched.len(),
                                 }).to_string())
                             }
                             Err(e) => Err(e),
                         }
+                    }
+                    "/cli/work/inbox" => {
+                        crate::commands::k2so_agents::k2so_agents_workspace_inbox_list(project_path)
+                            .map(|items| serde_json::to_string(&items).unwrap_or_default())
+                    }
+                    "/cli/work/inbox/create" => {
+                        let workspace = params.get("workspace").cloned().unwrap_or(project_path.clone());
+                        let title = params.get("title").cloned().unwrap_or_default();
+                        let body = params.get("body").cloned().unwrap_or_default();
+                        let priority = params.get("priority").cloned();
+                        let item_type = params.get("type").cloned();
+                        let assigned_by = params.get("assigned_by").cloned();
+                        crate::commands::k2so_agents::k2so_agents_workspace_inbox_create(
+                            workspace, title, body, priority, item_type, assigned_by,
+                        )
+                        .map(|item| serde_json::to_string(&item).unwrap_or_default())
+                    }
+                    "/cli/agents/lock" => {
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        crate::commands::k2so_agents::k2so_agents_lock(project_path, agent)
+                            .map(|_| r#"{"success":true}"#.to_string())
+                    }
+                    "/cli/agents/unlock" => {
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        crate::commands::k2so_agents::k2so_agents_unlock(project_path, agent)
+                            .map(|_| r#"{"success":true}"#.to_string())
                     }
                     "/cli/agents/triage" => {
                         crate::commands::k2so_agents::k2so_agents_triage_summary(project_path)

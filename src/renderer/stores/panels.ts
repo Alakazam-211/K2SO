@@ -7,7 +7,7 @@ import {
 import { invoke } from '@tauri-apps/api/core'
 import type { AppSettingsResponse } from '@shared/types'
 
-type PanelTab = 'files' | 'changes' | 'history' | 'reviews'
+type PanelTab = 'files' | 'changes' | 'history' | 'reviews' | 'agents'
 
 interface PanelsState {
   // Left auxiliary panel (between projects sidebar and terminal)
@@ -50,7 +50,7 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
   leftPanelOpen: false,
   leftPanelWidth: SIDEBAR_DEFAULT_WIDTH,
   leftPanelActiveTab: 'files',
-  leftPanelTabs: ['files'],
+  leftPanelTabs: ['files', 'agents'],
 
   rightPanelOpen: false,
   rightPanelWidth: SIDEBAR_DEFAULT_WIDTH,

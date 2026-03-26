@@ -45,8 +45,8 @@ fn agent_work_dir(project_path: &str, agent_name: &str, folder: &str) -> PathBuf
     agent_dir(project_path, agent_name).join("work").join(folder)
 }
 
-fn unassigned_dir(project_path: &str) -> PathBuf {
-    PathBuf::from(project_path).join(".k2so").join("work").join("unassigned")
+fn workspace_inbox_dir(project_path: &str) -> PathBuf {
+    PathBuf::from(project_path).join(".k2so").join("work").join("inbox")
 }
 
 // ── Frontmatter parsing ────────────────────────────────────────────────
@@ -165,7 +165,7 @@ pub fn k2so_agents_create(
         .map_err(|e| format!("Failed to create active: {}", e))?;
     fs::create_dir_all(agent_work_dir(&project_path, &name, "done"))
         .map_err(|e| format!("Failed to create done: {}", e))?;
-    let _ = fs::create_dir_all(unassigned_dir(&project_path));
+    let _ = fs::create_dir_all(workspace_inbox_dir(&project_path));
 
     let agent_md = dir.join("agent.md");
     let content = format!(
@@ -246,7 +246,7 @@ pub fn k2so_agents_work_create(
             dir
         }
         None => {
-            let dir = unassigned_dir(&project_path);
+            let dir = workspace_inbox_dir(&project_path);
             fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             dir
         }
@@ -283,7 +283,7 @@ pub fn k2so_agents_work_create(
         assigned_by: "user".to_string(),
         created: now,
         item_type,
-        folder: if agent_name.is_some() { "inbox".to_string() } else { "unassigned".to_string() },
+        folder: if agent_name.is_some() { "inbox".to_string() } else { "workspace-inbox".to_string() },
     })
 }
 
@@ -363,6 +363,104 @@ pub fn k2so_agents_update_profile(
     }
     let path = dir.join("agent.md");
     fs::write(&path, content).map_err(|e| e.to_string())
+}
+
+// ── Workspace Inbox ─────────────────────────────────────────────────────
+
+/// List items in the workspace-level inbox.
+#[tauri::command]
+pub fn k2so_agents_workspace_inbox_list(project_path: String) -> Result<Vec<WorkItem>, String> {
+    let dir = workspace_inbox_dir(&project_path);
+    if !dir.exists() {
+        return Ok(vec![]);
+    }
+    let mut items = Vec::new();
+    for entry in fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+        let path = entry.path();
+        if path.extension().map_or(false, |ext| ext == "md") {
+            if let Some(item) = read_work_item(&path, "workspace-inbox") {
+                items.push(item);
+            }
+        }
+    }
+    Ok(items)
+}
+
+/// Create a work item in a workspace inbox (for cross-workspace delegation).
+#[tauri::command]
+pub fn k2so_agents_workspace_inbox_create(
+    workspace_path: String,
+    title: String,
+    body: String,
+    priority: Option<String>,
+    item_type: Option<String>,
+    assigned_by: Option<String>,
+) -> Result<WorkItem, String> {
+    let dir = workspace_inbox_dir(&workspace_path);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let priority = priority.unwrap_or_else(|| "normal".to_string());
+    let item_type = item_type.unwrap_or_else(|| "task".to_string());
+    let assigned_by = assigned_by.unwrap_or_else(|| "external".to_string());
+
+    let slug: String = title
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<&str>>()
+        .join("-");
+    let slug = &slug[..slug.len().min(60)];
+    let filename = format!("{}.md", slug);
+
+    let now = simple_date();
+    let content = format!(
+        "---\ntitle: {}\npriority: {}\nassigned_by: {}\ncreated: {}\ntype: {}\n---\n\n{}\n",
+        title, priority, assigned_by, now, item_type, body
+    );
+
+    let path = dir.join(&filename);
+    fs::write(&path, &content).map_err(|e| e.to_string())?;
+
+    Ok(WorkItem {
+        filename,
+        title,
+        priority,
+        assigned_by,
+        created: now,
+        item_type,
+        folder: "workspace-inbox".to_string(),
+    })
+}
+
+// ── Lock Files ──────────────────────────────────────────────────────────
+
+/// Create a lock file for an agent (called when a Claude session starts).
+#[tauri::command]
+pub fn k2so_agents_lock(project_path: String, agent_name: String) -> Result<(), String> {
+    let lock_path = agent_work_dir(&project_path, &agent_name, "").join(".lock");
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    fs::write(&lock_path, simple_date()).map_err(|e| e.to_string())
+}
+
+/// Remove a lock file for an agent (called when a Claude session ends).
+#[tauri::command]
+pub fn k2so_agents_unlock(project_path: String, agent_name: String) -> Result<(), String> {
+    let lock_path = agent_work_dir(&project_path, &agent_name, "").join(".lock");
+    if lock_path.exists() {
+        fs::remove_file(&lock_path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Check if an agent is locked (has an active session).
+pub fn is_agent_locked(project_path: &str, agent_name: &str) -> bool {
+    let lock_path = agent_work_dir(project_path, agent_name, "").join(".lock");
+    lock_path.exists()
 }
 
 // ── CLAUDE.md Generator ─────────────────────────────────────────────────
@@ -571,6 +669,188 @@ pub fn k2so_agents_build_launch(
     }))
 }
 
+/// Generate a comprehensive CLAUDE.md for the workspace root.
+/// This is the lead agent's complete operating manual for K2SO.
+/// Written to `<project-root>/CLAUDE.md` so Claude Code auto-discovers it.
+#[tauri::command]
+pub fn k2so_agents_generate_workspace_claude_md(
+    project_path: String,
+) -> Result<String, String> {
+    let project_name = std::path::Path::new(&project_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".to_string());
+
+    // Scaffold .k2so/ structure if it doesn't exist
+    let k2so_dir = PathBuf::from(&project_path).join(".k2so");
+    let _ = fs::create_dir_all(k2so_dir.join("agents"));
+    let _ = fs::create_dir_all(k2so_dir.join("work").join("inbox"));
+
+    // List existing agents
+    let mut agent_list = String::new();
+    let agents_root = agents_dir(&project_path);
+    if agents_root.exists() {
+        if let Ok(entries) = fs::read_dir(&agents_root) {
+            for entry in entries.flatten() {
+                if entry.file_type().map_or(false, |ft| ft.is_dir()) {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let agent_md = entry.path().join("agent.md");
+                    let role = if agent_md.exists() {
+                        let content = fs::read_to_string(&agent_md).unwrap_or_default();
+                        let fm = parse_frontmatter(&content);
+                        fm.get("role").cloned().unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    agent_list.push_str(&format!("- **{}** — {}\n", name, role));
+                }
+            }
+        }
+    }
+
+    // List workspace inbox items
+    let mut inbox_summary = String::new();
+    let ws_inbox = workspace_inbox_dir(&project_path);
+    if ws_inbox.exists() {
+        if let Ok(entries) = fs::read_dir(&ws_inbox) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "md") {
+                    if let Some(item) = read_work_item(&path, "inbox") {
+                        inbox_summary.push_str(&format!(
+                            "- **{}** (priority: {}, type: {})\n",
+                            item.title, item.priority, item.item_type
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    let md = format!(
+        r#"# K2SO Lead Agent: {project_name}
+
+You are the **lead agent** for the {project_name} workspace, operating inside K2SO.
+
+## Your Role
+
+You are an orchestrator. You:
+- **Triage** incoming requests from the workspace inbox (`.k2so/work/inbox/`)
+- **Plan** work by creating PRDs, milestones, and technical specifications
+- **Create sub-agents** to handle specialized work (backend, frontend, testing, etc.)
+- **Delegate** tasks to the right sub-agents based on their skills
+- **Coordinate** across the pod of agents in this workspace
+- **You do NOT write code yourself** — you break work down and delegate to sub-agents who execute in worktrees
+
+## Workspace Inbox
+
+Incoming requests land at `.k2so/work/inbox/`. Check this first on every session.
+
+{inbox_section}
+
+## Your Pod
+
+Sub-agents in this workspace:
+
+{agent_section}
+
+To create a new sub-agent:
+```bash
+k2so agents create <name> --role "Description of what this agent does"
+```
+
+## How to Plan Work
+
+1. When a request arrives in the workspace inbox, read it carefully
+2. Check existing PRDs and milestones in `.k2so/` for context
+3. Break the request into actionable tasks with clear acceptance criteria
+4. Create work items and assign to the right sub-agents:
+   ```bash
+   k2so work create --agent backend-eng --title "Implement OAuth endpoints" --body "..." --priority high --type technical-spec
+   ```
+5. For large features, create a PRD first:
+   ```bash
+   cat > .k2so/prds/oauth-support.md << 'EOF'
+   ---
+   title: OAuth Support
+   status: planning
+   ---
+   ## Goal
+   ...
+   ## Milestones
+   ...
+   EOF
+   ```
+
+## How to Delegate
+
+- Move workspace inbox items to agent inboxes: `k2so delegate <agent> <file>`
+- Create new tasks directly: `k2so work create --agent <name> --title "..."`
+- Check agent status: `k2so agents list` and `k2so agents work <name>`
+- Send work to other workspaces: `k2so work send --workspace /path/to/project --title "..."`
+
+{cli_section}
+
+{workflow_section}
+"#,
+        project_name = project_name,
+        inbox_section = if inbox_summary.is_empty() {
+            "*Workspace inbox is empty.*".to_string()
+        } else {
+            format!("### Current Inbox\n{}", inbox_summary)
+        },
+        agent_section = if agent_list.is_empty() {
+            "*No sub-agents created yet. Create agents as you identify the skills needed for this project.*".to_string()
+        } else {
+            agent_list
+        },
+        cli_section = CLI_TOOLS_DOCS,
+        workflow_section = WORKFLOW_DOCS,
+    );
+
+    let claude_md_path = PathBuf::from(&project_path).join("CLAUDE.md");
+    let disabled_path = PathBuf::from(&project_path).join(".k2so").join("CLAUDE.md.disabled");
+
+    if disabled_path.exists() {
+        // Restore previously disabled CLAUDE.md (preserves user edits)
+        fs::rename(&disabled_path, &claude_md_path)
+            .map_err(|e| format!("Failed to restore CLAUDE.md: {}", e))?;
+        // Also save the freshly generated version for reference
+        let generated_path = PathBuf::from(&project_path).join(".k2so").join("CLAUDE.md.generated");
+        let _ = fs::write(&generated_path, &md);
+        // Read back what was restored
+        return fs::read_to_string(&claude_md_path).map_err(|e| e.to_string());
+    }
+
+    if claude_md_path.exists() {
+        // CLAUDE.md already exists — don't overwrite user edits
+        // Save generated version for reference so agents can diff if needed
+        let generated_path = PathBuf::from(&project_path).join(".k2so").join("CLAUDE.md.generated");
+        let _ = fs::write(&generated_path, &md);
+        return fs::read_to_string(&claude_md_path).map_err(|e| e.to_string());
+    }
+
+    // First time — write fresh CLAUDE.md
+    fs::write(&claude_md_path, &md)
+        .map_err(|e| format!("Failed to write CLAUDE.md: {}", e))?;
+
+    Ok(md)
+}
+
+/// Remove or disable the workspace CLAUDE.md (when Agent toggle is turned off).
+#[tauri::command]
+pub fn k2so_agents_disable_workspace_claude_md(project_path: String) -> Result<(), String> {
+    let claude_md = PathBuf::from(&project_path).join("CLAUDE.md");
+    let disabled = PathBuf::from(&project_path).join(".k2so").join("CLAUDE.md.disabled");
+
+    if claude_md.exists() {
+        // Move to .k2so/ rather than delete — preserves any user edits
+        fs::rename(&claude_md, &disabled)
+            .map_err(|e| format!("Failed to disable CLAUDE.md: {}", e))?;
+    }
+    Ok(())
+}
+
 const CLI_TOOLS_DOCS: &str = r#"## K2SO CLI Tools
 
 You are operating inside K2SO. The `k2so` command is available in your terminal. Use it to interact with K2SO's workspace orchestration.
@@ -590,6 +870,13 @@ k2so work create --title "..." --body "..."  # Create a work item
   --type prd|milestone|task                   # Set type
 ```
 
+### Workspace Inbox
+```
+k2so work inbox                      # Show items in workspace-level inbox
+k2so work send --workspace <path>    # Send work to another workspace's inbox
+  --title "..." --body "..."
+```
+
 ### Delegation
 ```
 k2so delegate <agent> <work-file>    # Move work item to another agent's inbox
@@ -605,7 +892,19 @@ k2so commit-merge                    # AI Commit & Merge: commit then merge into
 
 const WORKFLOW_DOCS: &str = r#"## Workflow
 
-1. Check your inbox: read files in `.k2so/agents/<your-name>/work/inbox/`
+### If you are the Lead Agent (orchestrator):
+1. Check the workspace inbox: `ls .k2so/work/inbox/` or `k2so work inbox`
+2. Read each request and assess what needs to happen
+3. Check existing PRDs/milestones in `.k2so/` for context
+4. Decide which sub-agent should handle each request:
+   - `k2so agents list` to see available agents and their roles
+   - `k2so delegate <agent> <file>` to assign work to a sub-agent
+   - Or break the request into sub-tasks and create work items: `k2so work create --agent <name> --title "..."`
+5. If a request is blocked or needs user input, leave it in the workspace inbox and add a note
+6. You do NOT implement code yourself — you orchestrate and plan
+
+### If you are a Sub-Agent (executor):
+1. Check your inbox: `ls .k2so/agents/<your-name>/work/inbox/`
 2. Pick the highest priority item
 3. Move it to `active/`: `mv .k2so/agents/<name>/work/inbox/<file> .k2so/agents/<name>/work/active/`
 4. Create a worktree if needed for isolated work
@@ -615,6 +914,10 @@ const WORKFLOW_DOCS: &str = r#"## Workflow
 8. If sub-tasks need other skills, delegate to appropriate agents using `k2so delegate`
 9. Use `k2so commit` when ready to finalize your changes
 
+## Cross-Workspace Coordination
+- Send work to another workspace: `k2so work send --workspace /path/to/project --title "..." --body "..."`
+- This drops a work item in that workspace's inbox for its lead agent to triage
+
 ## Important Rules
 
 - Always read your work item fully before starting
@@ -622,6 +925,7 @@ const WORKFLOW_DOCS: &str = r#"## Workflow
 - Create clear commit messages that reference the work item
 - If blocked, document the blocker in the work item and move it back to inbox
 - You can create new work items for other agents using `k2so work create --agent <name>`
+- Never grab a work item that another agent has in their active/ folder
 "#;
 
 // ── Review Queue ────────────────────────────────────────────────────────
@@ -886,39 +1190,58 @@ pub fn k2so_agents_triage_summary(project_path: String) -> Result<String, String
     }
 }
 
-/// Determine which agents should be launched based on triage.
-/// Returns a list of agent names that have actionable inbox items and are not already active.
+/// Determine what should be launched based on triage.
+/// Returns a structured result: whether the lead agent should wake (workspace inbox has items),
+/// and which sub-agents have actionable inbox items.
+///
+/// Triage order:
+/// 1. Workspace inbox has items → wake lead agent (returned as "__lead__")
+/// 2. Sub-agent inboxes have items + no active work + no lock → wake those sub-agents
 #[tauri::command]
 pub fn k2so_agents_triage_decide(project_path: String) -> Result<Vec<String>, String> {
-    let dir = agents_dir(&project_path);
-    if !dir.exists() {
-        return Ok(vec![]);
+    let mut launchable = Vec::new();
+
+    // Step 1: Check workspace inbox
+    let ws_inbox = workspace_inbox_dir(&project_path);
+    let has_workspace_inbox = ws_inbox.exists() && fs::read_dir(&ws_inbox)
+        .map(|e| e.flatten().any(|e| e.path().extension().map_or(false, |ext| ext == "md")))
+        .unwrap_or(false);
+
+    if has_workspace_inbox {
+        // Wake the lead agent to triage workspace inbox
+        launchable.push("__lead__".to_string());
     }
 
-    let mut launchable = Vec::new();
-    let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
+    // Step 2: Check sub-agent inboxes
+    let dir = agents_dir(&project_path);
+    if dir.exists() {
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
 
-    for entry in entries.flatten() {
-        if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
+                // Skip if locked (active Claude session)
+                if is_agent_locked(&project_path, &name) {
+                    continue;
+                }
 
-        let inbox = agent_work_dir(&project_path, &name, "inbox");
-        let active = agent_work_dir(&project_path, &name, "active");
+                let inbox = agent_work_dir(&project_path, &name, "inbox");
+                let active = agent_work_dir(&project_path, &name, "active");
 
-        // Has inbox items?
-        let has_inbox = inbox.exists() && fs::read_dir(&inbox)
-            .map(|e| e.flatten().any(|e| e.path().extension().map_or(false, |ext| ext == "md")))
-            .unwrap_or(false);
+                let has_inbox = inbox.exists() && fs::read_dir(&inbox)
+                    .map(|e| e.flatten().any(|e| e.path().extension().map_or(false, |ext| ext == "md")))
+                    .unwrap_or(false);
 
-        // Already active? (skip if already working)
-        let has_active = active.exists() && fs::read_dir(&active)
-            .map(|e| e.flatten().any(|e| e.path().extension().map_or(false, |ext| ext == "md")))
-            .unwrap_or(false);
+                let has_active = active.exists() && fs::read_dir(&active)
+                    .map(|e| e.flatten().any(|e| e.path().extension().map_or(false, |ext| ext == "md")))
+                    .unwrap_or(false);
 
-        if has_inbox && !has_active {
-            launchable.push(name);
+                if has_inbox && !has_active {
+                    launchable.push(name);
+                }
+            }
         }
     }
 

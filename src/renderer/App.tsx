@@ -6,6 +6,9 @@ import FileTree from './components/FileTree/FileTree'
 import ChangesPanel from './components/ChangesPanel/ChangesPanel'
 import ChatHistory from './components/ChatHistory/ChatHistory'
 import ReviewPanel from './components/ReviewPanel/ReviewPanel'
+import AgentsPanel from './components/AgentsPanel/AgentsPanel'
+import ReviewQueueModal from './components/ReviewQueueModal/ReviewQueueModal'
+import { useReviewQueueStore, startReviewQueuePolling, stopReviewQueuePolling } from './stores/review-queue'
 import TabbedPanel from './components/TabbedPanel/TabbedPanel'
 import { TerminalArea } from './components/Terminal/TerminalArea'
 import Settings from './components/Settings/Settings'
@@ -69,6 +72,7 @@ function LeftPanelContent({ rootPath, header }: { rootPath?: string; header?: Re
       {activeTab === 'changes' && <ChangesPanel />}
       {activeTab === 'history' && <ChatHistory />}
       {activeTab === 'reviews' && <ReviewPanel />}
+      {activeTab === 'agents' && <AgentsPanel />}
     </TabbedPanel>
   )
 }
@@ -96,6 +100,7 @@ function RightPanelContent({ rootPath, header }: { rootPath?: string; header?: R
       {activeTab === 'changes' && <ChangesPanel />}
       {activeTab === 'history' && <ChatHistory />}
       {activeTab === 'reviews' && <ReviewPanel />}
+      {activeTab === 'agents' && <AgentsPanel />}
     </TabbedPanel>
   )
 }
@@ -153,6 +158,7 @@ function FocusModeContent({ activeProject, cwd }: { activeProject: any; cwd: str
       </FocusLayout>
       <GitInitDialog />
       <CommandPalette />
+      <ReviewQueueModal />
       <ContextMenu />
       <ConfirmDialog />
       <MergeDialog />
@@ -180,8 +186,9 @@ export default function App(): React.JSX.Element {
   const toggleCommandPalette = useCommandPaletteStore((s) => s.toggle)
 
   const toggleAssistant = useAssistantStore((s) => s.toggle)
+  const toggleReviewQueue = useReviewQueueStore((s) => s.toggle)
 
-  // Cmd+, to open settings, Cmd+K to toggle command palette, Cmd+L to toggle assistant
+  // Cmd+, settings, Cmd+K command palette, Cmd+L assistant, Cmd+P review queue
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
       if (e.metaKey && e.key === ',') {
@@ -195,6 +202,10 @@ export default function App(): React.JSX.Element {
       if (e.metaKey && e.key === 'l') {
         e.preventDefault()
         toggleAssistant()
+      }
+      if (e.metaKey && e.key === 'p') {
+        e.preventDefault()
+        toggleReviewQueue()
       }
       // Cmd+Shift++ to increase terminal font size
       if (e.metaKey && e.shiftKey && e.key === '+') {
@@ -228,7 +239,7 @@ export default function App(): React.JSX.Element {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [openSettings, toggleCommandPalette, toggleAssistant])
+  }, [openSettings, toggleCommandPalette, toggleAssistant, toggleReviewQueue])
 
   // Listen for menu events from Tauri backend
   useEffect(() => {
@@ -294,6 +305,9 @@ export default function App(): React.JSX.Element {
       listen('menu:command-palette', () => {
         toggleCommandPalette()
       }).then((fn) => unlisteners.push(fn))
+      listen('menu:review-queue', () => {
+        useReviewQueueStore.getState().toggle()
+      }).then((fn) => unlisteners.push(fn))
       listen('menu:toggle-sidebar', () => {
         useSidebarStore.getState().toggle()
       }).then((fn) => unlisteners.push(fn))
@@ -328,10 +342,11 @@ export default function App(): React.JSX.Element {
   const [showQuitDialog, setShowQuitDialog] = useState(false)
   const [quitAgents, setQuitAgents] = useState<ReturnType<typeof useActiveAgentsStore.getState>['getActiveAgentsList']>([])
 
-  // Start agent polling
+  // Start agent polling + review queue polling
   useEffect(() => {
     startAgentPolling()
-    return () => stopAgentPolling()
+    startReviewQueuePolling()
+    return () => { stopAgentPolling(); stopReviewQueuePolling() }
   }, [])
 
   // Check for updates on launch and every 3 hours
@@ -499,6 +514,7 @@ export default function App(): React.JSX.Element {
       </Layout>
       <GitInitDialog />
       <CommandPalette />
+      <ReviewQueueModal />
       <ContextMenu />
       <ConfirmDialog />
       <MergeDialog />

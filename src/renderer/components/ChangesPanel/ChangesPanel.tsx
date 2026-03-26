@@ -2,6 +2,8 @@ import { useState, useMemo, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
+import { usePresetsStore, parseCommand } from '@/stores/presets'
+import { useSettingsStore } from '@/stores/settings'
 import { useGitInfo, useGitChanges } from '@/hooks/useGit'
 
 // ── Status helpers ───────────────────────────────────────────────────────────
@@ -90,6 +92,47 @@ export default function ChangesPanel(): React.JSX.Element {
       setCommitting(false)
     }
   }, [workspacePath, commitMsg, staged.length, refetch])
+
+  // ── AI Commit ────────────────────────────────────────────────────────
+
+  const defaultAgent = useSettingsStore((s) => s.defaultAgent)
+  const presets = usePresetsStore((s) => s.presets)
+  const isWorktree = activeWorkspace?.type === 'worktree'
+  const branchName = gitInfo?.currentBranch ?? 'current branch'
+
+  const handleAiCommit = useCallback((includeMerge: boolean) => {
+    if (!workspacePath) return
+
+    const preset = presets.find((p) => p.id === defaultAgent)
+    if (!preset) {
+      console.error('[changes] No preset found for default agent:', defaultAgent)
+      return
+    }
+
+    const { command, args } = parseCommand(preset.command)
+
+    // Build concise changed-files summary (agent will run git diff itself)
+    const MAX_FILES = 80
+    const fileLines = changes.slice(0, MAX_FILES).map((f) => `${f.status}: ${f.path}`)
+    if (changes.length > MAX_FILES) {
+      fileLines.push(`...and ${changes.length - MAX_FILES} more files`)
+    }
+    const changedSummary = fileLines.join('\n')
+
+    let prompt = `Review the following changes in this repository and create a well-structured commit with an appropriate commit message.\n\nChanged files:\n${changedSummary}`
+
+    if (includeMerge) {
+      prompt += `\n\nAfter committing, merge the branch "${branchName}" back into main and resolve any conflicts. Once merged, remove the worktree with "git worktree remove" and delete the branch with "git branch -d ${branchName}".`
+    }
+
+    const tabsStore = useTabsStore.getState()
+    const activeGroup = tabsStore.activeGroupIndex
+    tabsStore.addTabToGroup(activeGroup, workspacePath, {
+      title: includeMerge ? 'AI Commit & Merge' : 'AI Commit',
+      command,
+      args: [...args, prompt]
+    })
+  }, [workspacePath, changes, presets, defaultAgent, branchName])
 
   const handleOpenDiff = useCallback((filePath: string) => {
     const activeTab = useTabsStore.getState().getActiveTab()
@@ -185,6 +228,26 @@ export default function ChangesPanel(): React.JSX.Element {
           </>
         )}
       </div>
+
+      {/* AI Commit buttons — shown when there are changes */}
+      {totalCount > 0 && (
+        <div className="border-t border-[var(--color-border)] p-2 flex flex-col gap-1">
+          <button
+            className="w-full px-3 py-1.5 text-xs font-medium bg-[var(--color-accent)] text-white hover:opacity-90 transition-colors cursor-pointer"
+            onClick={() => handleAiCommit(false)}
+          >
+            AI Commit
+          </button>
+          {isWorktree && (
+            <button
+              className="w-full px-3 py-1.5 text-xs font-medium bg-[var(--color-accent)] text-white hover:opacity-90 transition-colors cursor-pointer"
+              onClick={() => handleAiCommit(true)}
+            >
+              AI Commit & Merge
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Commit input — shown when there are staged files */}
       {staged.length > 0 && (

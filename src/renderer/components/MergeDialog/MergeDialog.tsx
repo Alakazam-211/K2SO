@@ -83,36 +83,8 @@ export default function MergeDialog(): React.JSX.Element | null {
       })
   }, [open, projectPath, branch])
 
-  const handleMerge = useCallback(async () => {
-    setStep('merging')
-    setError(null)
-
+  const cleanupWorktree = useCallback(async () => {
     try {
-      const result = await invoke<MergeResult>('git_merge_branch', {
-        path: projectPath,
-        branch,
-      })
-
-      if (result.success) {
-        setStep('success')
-      } else {
-        setConflicts(result.conflicts)
-        setStep('conflicts')
-      }
-    } catch (e) {
-      setError(String(e))
-      setStep('preview')
-    }
-  }, [projectPath, branch])
-
-  const handleAbortMerge = useCallback(async () => {
-    await invoke('git_abort_merge', { path: projectPath }).catch(console.error)
-    close()
-  }, [projectPath, close])
-
-  const handleDeleteWorktree = useCallback(async () => {
-    try {
-      // Find the worktree path
       const project = useProjectsStore.getState().projects.find((p) => p.id === projectId)
       const workspace = project?.workspaces.find((w) => w.id === workspaceId)
       const worktreePath = workspace?.worktreePath
@@ -133,8 +105,38 @@ export default function MergeDialog(): React.JSX.Element | null {
     } catch (e) {
       console.error('[merge] Cleanup failed:', e)
     }
+  }, [projectPath, projectId, workspaceId, branch, fetchProjects])
+
+  const handleMerge = useCallback(async () => {
+    setStep('merging')
+    setError(null)
+
+    try {
+      const result = await invoke<MergeResult>('git_merge_branch', {
+        path: projectPath,
+        branch,
+      })
+
+      if (result.success) {
+        // Auto-cleanup: move worktree to Trash and delete branch
+        if (workspaceId) {
+          await cleanupWorktree()
+        }
+        setStep('success')
+      } else {
+        setConflicts(result.conflicts)
+        setStep('conflicts')
+      }
+    } catch (e) {
+      setError(String(e))
+      setStep('preview')
+    }
+  }, [projectPath, branch, workspaceId, cleanupWorktree])
+
+  const handleAbortMerge = useCallback(async () => {
+    await invoke('git_abort_merge', { path: projectPath }).catch(console.error)
     close()
-  }, [projectPath, projectId, workspaceId, branch, fetchProjects, close])
+  }, [projectPath, close])
 
   const handleDone = useCallback(() => {
     fetchProjects()
@@ -226,7 +228,7 @@ export default function MergeDialog(): React.JSX.Element | null {
               </p>
               {workspaceId && (
                 <p className="text-xs text-[var(--color-text-muted)]">
-                  You can now delete the worktree and branch to clean up.
+                  Worktree and branch have been cleaned up. Files were moved to Trash for recovery if needed.
                 </p>
               )}
             </div>
@@ -270,22 +272,12 @@ export default function MergeDialog(): React.JSX.Element | null {
           )}
 
           {step === 'success' && (
-            <>
-              {workspaceId && (
-                <button
-                  className="px-3 py-1.5 text-xs text-red-400 hover:text-red-300"
-                  onClick={handleDeleteWorktree}
-                >
-                  Delete Worktree & Branch
-                </button>
-              )}
-              <button
-                className="px-3 py-1.5 text-xs font-medium bg-[var(--color-accent)] text-white hover:opacity-90"
-                onClick={handleDone}
-              >
-                Done
-              </button>
-            </>
+            <button
+              className="px-3 py-1.5 text-xs font-medium bg-[var(--color-accent)] text-white hover:opacity-90"
+              onClick={handleDone}
+            >
+              Done
+            </button>
           )}
 
           {step === 'conflicts' && (

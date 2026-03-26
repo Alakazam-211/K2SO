@@ -1,23 +1,70 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useMemo } from 'react'
 import { useProjectsStore, type ProjectWithWorkspaces } from '@/stores/projects'
 import { useActiveAgentsStore } from '@/stores/active-agents'
-import { useGitInfo } from '@/hooks/useGit'
+import { useSettingsStore } from '@/stores/settings'
+import { usePresetsStore, parseCommand } from '@/stores/presets'
+import { useTabsStore } from '@/stores/tabs'
+import { useGitInfo, useGitChanges } from '@/hooks/useGit'
 import { useMergeDialogStore } from '@/components/MergeDialog/MergeDialog'
 import { useContextMenuStore } from '@/stores/context-menu'
 import WorktreeDialog from '@/components/Sidebar/WorktreeDialog'
 
-// ── Git status badge (changed files count) ────────────────────────────────
+// ── Git status badge (changed files count → AI Commit on hover) ───────────
 
 function GitBadge({ path }: { path?: string }): React.JSX.Element | null {
   const { data } = useGitInfo(path)
+  const { data: changes } = useGitChanges(path)
+  const defaultAgent = useSettingsStore((s) => s.defaultAgent)
+  const presets = usePresetsStore((s) => s.presets)
+  const [hovered, setHovered] = useState(false)
+
   if (!data?.isRepo) return null
 
   const count = data.changedFiles + data.untrackedFiles
   if (count === 0) return null
 
+  const handleAiCommit = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!path) return
+
+    const preset = presets.find((p) => p.id === defaultAgent)
+    if (!preset) return
+
+    const { command, args } = parseCommand(preset.command)
+
+    const MAX_FILES = 80
+    const fileLines = changes.slice(0, MAX_FILES).map((f: { status: string; path: string }) => `${f.status}: ${f.path}`)
+    if (changes.length > MAX_FILES) {
+      fileLines.push(`...and ${changes.length - MAX_FILES} more files`)
+    }
+
+    const prompt = `Review the following changes in this repository and create a well-structured commit with an appropriate commit message.\n\nChanged files:\n${fileLines.join('\n')}`
+
+    const tabsStore = useTabsStore.getState()
+    const activeGroup = tabsStore.activeGroupIndex
+    tabsStore.addTabToGroup(activeGroup, path, {
+      title: 'AI Commit',
+      command,
+      args: [...args, prompt]
+    })
+  }
+
   return (
-    <span className="ml-1 text-[10px] tabular-nums font-medium px-1 bg-yellow-400/10 text-yellow-400 flex-shrink-0 leading-none">
-      {count}
+    <span
+      className="ml-1 flex-shrink-0 cursor-pointer"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onClick={handleAiCommit}
+    >
+      {hovered ? (
+        <span className="text-[10px] font-medium px-1 bg-[var(--color-accent)]/15 text-[var(--color-accent)] leading-none whitespace-nowrap">
+          AI Commit
+        </span>
+      ) : (
+        <span className="text-[10px] tabular-nums font-medium px-1 bg-yellow-400/10 text-yellow-400 leading-none">
+          {count}
+        </span>
+      )}
     </span>
   )
 }

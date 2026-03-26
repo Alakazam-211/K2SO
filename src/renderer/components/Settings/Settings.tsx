@@ -2871,23 +2871,15 @@ function ProjectDetail({
               const newVal = project.agentEnabled ? 0 : 1
               await invoke('projects_update', { id: project.id, agentEnabled: newVal })
               if (newVal === 1) {
-                // Scaffold .k2so directory and generate CLAUDE.md
-                await invoke('k2so_agents_generate_claude_md', {
+                // Scaffold .k2so/ and generate CLAUDE.md at workspace root
+                await invoke('k2so_agents_generate_workspace_claude_md', {
                   projectPath: project.path,
-                  agentName: project.name.toLowerCase().replace(/\s+/g, '-'),
-                }).catch(() => {
-                  // Agent may not exist yet — create default agent structure
-                  invoke('k2so_agents_create', {
-                    projectPath: project.path,
-                    name: project.name.toLowerCase().replace(/\s+/g, '-'),
-                    role: `Lead agent for ${project.name}`,
-                  }).then(() =>
-                    invoke('k2so_agents_generate_claude_md', {
-                      projectPath: project.path,
-                      agentName: project.name.toLowerCase().replace(/\s+/g, '-'),
-                    })
-                  ).catch(console.error)
-                })
+                }).catch(console.error)
+              } else {
+                // Disable — move CLAUDE.md to .k2so/CLAUDE.md.disabled
+                await invoke('k2so_agents_disable_workspace_claude_md', {
+                  projectPath: project.path,
+                }).catch(console.error)
               }
               // If disabling agent, also disable heartbeat
               if (newVal === 0 && project.heartbeatEnabled) {

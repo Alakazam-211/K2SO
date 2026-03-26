@@ -409,6 +409,37 @@ pub fn remove_worktree(
     worktree_path: &str,
     force: bool,
 ) -> Result<(), String> {
+    let wt = Path::new(worktree_path);
+
+    if wt.exists() {
+        // Rename to a temp name so the UI path disappears instantly
+        let temp_name = format!(
+            ".k2so-delete-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        let temp_path = wt.parent().unwrap_or(wt).join(&temp_name);
+
+        if std::fs::rename(wt, &temp_path).is_ok() {
+            // Prune git metadata (detach the worktree ref)
+            let _ = Command::new("git")
+                .args(["worktree", "prune"])
+                .current_dir(project_path)
+                .output();
+
+            // Move to Trash in background thread (recoverable)
+            let trash_path = temp_path.to_path_buf();
+            std::thread::spawn(move || {
+                let _ = trash::delete(&trash_path);
+            });
+
+            return Ok(());
+        }
+    }
+
+    // Fallback: try git worktree remove directly
     let mut args = vec!["worktree", "remove"];
     if force {
         args.push("--force");
@@ -422,12 +453,10 @@ pub fn remove_worktree(
         .map_err(|e| format!("Failed to run git worktree remove: {}", e))?;
 
     if !output.status.success() {
-        // Fallback: trash the worktree directory and prune references
+        // Last resort: trash directly and prune
         if Path::new(worktree_path).exists() {
             let _ = trash::delete(worktree_path);
         }
-
-        // Prune stale worktree references
         let _ = Command::new("git")
             .args(["worktree", "prune"])
             .current_dir(project_path)

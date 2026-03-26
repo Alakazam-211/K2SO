@@ -67,7 +67,8 @@ export const HOTKEYS: HotkeyDefinition[] = [
   { id: 'newDocument', label: 'New Document', defaultKey: 'Meta+N', category: 'App' },
   { id: 'openWorkspace', label: 'Open Workspace', defaultKey: 'Meta+O', category: 'App' },
   { id: 'focusWindow', label: 'Open in Focus Window', defaultKey: 'Meta+Shift+F', category: 'App' },
-  { id: 'toggleAssistant', label: 'Toggle Assistant', defaultKey: 'Meta+L', category: 'App' }
+  { id: 'toggleAssistant', label: 'Toggle Assistant', defaultKey: 'Meta+L', category: 'App' },
+  { id: 'reviewQueue', label: 'Review Queue', defaultKey: 'Meta+P', category: 'App' }
 ]
 
 /** Build a map of id -> defaultKey for quick lookup */
