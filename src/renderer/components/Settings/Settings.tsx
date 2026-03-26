@@ -2762,13 +2762,10 @@ function ProjectDetail({
         <p className="text-[11px] text-[var(--color-text-muted)] mt-1 break-all">{project.path}</p>
       </div>
 
-      {/* ── Icon ── */}
-      <div className="space-y-3">
-        <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
-          Icon
-        </h3>
-        <div className="flex items-center gap-4">
-          {/* Current icon preview */}
+      {/* ── Group 1: Workspace — Icon, Color, Focus Group ── */}
+      <SettingsGroup title="Workspace">
+        {/* Icon */}
+        <div className="flex items-center gap-4 py-2">
           <div
             className="flex-shrink-0 flex items-center justify-center overflow-hidden"
             style={{
@@ -2793,8 +2790,6 @@ function ProjectDetail({
               </span>
             )}
           </div>
-
-          {/* Action buttons */}
           <div className="flex items-center gap-2">
             <button
               onClick={handleDetectIcon}
@@ -2828,16 +2823,50 @@ function ProjectDetail({
             )}
           </div>
         </div>
-      </div>
 
-      {/* ── Workspace Settings ── */}
-      <div className="space-y-3">
-        <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
-          Workspace
-        </h3>
+        {/* Color */}
+        <div className="flex items-center justify-between py-2 border-t border-[var(--color-border)]">
+          <span className="text-xs text-[var(--color-text-secondary)]">Color</span>
+          <div className="flex items-center gap-1.5">
+            {['#3b82f6', '#ef4444', '#22c55e', '#f59e0b', '#a855f7', '#ec4899', '#06b6d4', '#64748b'].map((color) => (
+              <button
+                key={color}
+                onClick={async () => {
+                  await invoke('projects_update', { id: project.id, color })
+                  await fetchProjects()
+                }}
+                className={`w-4 h-4 flex-shrink-0 no-drag cursor-pointer transition-transform ${
+                  project.color === color ? 'scale-125 ring-1 ring-white/50' : 'hover:scale-110'
+                }`}
+                style={{ backgroundColor: color }}
+              />
+            ))}
+          </div>
+        </div>
 
+        {/* Focus Group */}
+        {focusGroupsEnabled && (
+          <div className="flex items-center justify-between py-2 border-t border-[var(--color-border)]">
+            <span className="text-xs text-[var(--color-text-secondary)]">Focus Group</span>
+            <SettingDropdown
+              value={project.focusGroupId ?? ''}
+              options={[
+                { value: '', label: 'No Group' },
+                ...focusGroups.map((g) => ({ value: g.id, label: g.name })),
+              ]}
+              onChange={async (v) => {
+                await assignProjectToGroup(project.id, v || null)
+                await fetchProjects()
+              }}
+            />
+          </div>
+        )}
+      </SettingsGroup>
+
+      {/* ── Group 2: Worktree Settings — Toggle, Worktrees table, Folders on Disk ── */}
+      <SettingsGroup title="Worktree Settings">
         {/* Worktrees toggle */}
-        <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
+        <div className="flex items-center justify-between py-2">
           <div>
             <span className="text-xs text-[var(--color-text-secondary)]">Enable Worktrees</span>
             <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
@@ -2858,48 +2887,38 @@ function ProjectDetail({
           </button>
         </div>
 
-        {/* Color */}
-        <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
-          <span className="text-xs text-[var(--color-text-secondary)]">Workspace Color</span>
-          <div className="flex items-center gap-1.5">
-            {['#3b82f6', '#ef4444', '#22c55e', '#f59e0b', '#a855f7', '#ec4899', '#06b6d4', '#64748b'].map((color) => (
-              <button
-                key={color}
-                onClick={async () => {
-                  await invoke('projects_update', { id: project.id, color })
-                  await fetchProjects()
-                }}
-                className={`w-4 h-4 flex-shrink-0 no-drag cursor-pointer transition-transform ${
-                  project.color === color ? 'scale-125 ring-1 ring-white/50' : 'hover:scale-110'
+        {/* Worktrees table */}
+        {project.worktreeMode === 1 && project.workspaces.length > 0 && (
+          <div className="border border-[var(--color-border)]">
+            {project.workspaces.map((ws, i) => (
+              <div
+                key={ws.id}
+                className={`flex items-center gap-2 px-3 py-1.5 ${
+                  i < project.workspaces.length - 1 ? 'border-b border-[var(--color-border)]' : ''
                 }`}
-                style={{ backgroundColor: color }}
-              />
+              >
+                <svg className="w-3 h-3 flex-shrink-0 text-[var(--color-text-muted)]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
+                <span className="text-xs text-[var(--color-text-primary)] flex-1 truncate">{ws.name}</span>
+                {ws.branch && (
+                  <span className="text-[10px] text-[var(--color-text-muted)] truncate max-w-[120px]">{ws.branch}</span>
+                )}
+                <span className="text-[10px] text-[var(--color-text-muted)]">{ws.type}</span>
+              </div>
             ))}
-          </div>
-        </div>
-
-        {/* Focus group assignment */}
-        {focusGroupsEnabled && (
-          <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
-            <span className="text-xs text-[var(--color-text-secondary)]">Focus Group</span>
-            <SettingDropdown
-              value={project.focusGroupId ?? ''}
-              options={[
-                { value: '', label: 'No Group' },
-                ...focusGroups.map((g) => ({ value: g.id, label: g.name })),
-              ]}
-              onChange={async (v) => {
-                await assignProjectToGroup(project.id, v || null)
-                await fetchProjects()
-              }}
-            />
           </div>
         )}
 
-        {/* Agent Settings */}
-        <div className="space-y-2 py-2 border-b border-[var(--color-border)]">
-          <span className="text-xs text-[var(--color-text-secondary)]">Agent Settings</span>
+        {/* Worktree Folders on Disk */}
+        {project.worktreeMode === 1 && (
+          <WorktreeFoldersOnDisk project={project} fetchProjects={fetchProjects} />
+        )}
+      </SettingsGroup>
 
+      {/* ── Group 3: Agent Settings — Mode tabs, Heartbeat, Agents list ── */}
+      <SettingsGroup title="Agent Settings">
+        <div className="space-y-2">
           {/* Mode selector */}
           <div className="flex gap-1">
             {(['off', 'agent', 'pod'] as const).map((mode) => {
@@ -2950,8 +2969,9 @@ function ProjectDetail({
             {(project.agentMode || 'off') === 'pod' && 'A team of sub-agents accepts and works on tasks. The workspace acts as lead orchestrator.'}
           </p>
 
+          {/* Heartbeat — only when a mode is active */}
           {(project.agentMode || 'off') !== 'off' && (
-            <div className="flex items-center justify-between pt-1">
+            <div className="flex items-center justify-between py-2 border-t border-[var(--color-border)]">
               <div>
                 <span className="text-[10px] text-[var(--color-text-secondary)]">Heartbeat</span>
                 <p className="text-[9px] text-[var(--color-text-muted)]">
@@ -2980,49 +3000,20 @@ function ProjectDetail({
               </button>
             </div>
           )}
+
+          {/* Agents list — only in Pod mode */}
+          {(project.agentMode || 'off') === 'pod' && (
+            <div className="pt-2 border-t border-[var(--color-border)]">
+              <ProjectAgentsPanel projectPath={project.path} />
+            </div>
+          )}
         </div>
-      </div>
+      </SettingsGroup>
 
-      {/* ── Worktrees ── */}
-      {project.worktreeMode === 1 && project.workspaces.length > 0 && (
-        <div className="space-y-2">
-          <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
-            Worktrees ({project.workspaces.length})
-          </h3>
-          <div className="border border-[var(--color-border)]">
-            {project.workspaces.map((ws, i) => (
-              <div
-                key={ws.id}
-                className={`flex items-center gap-2 px-3 py-1.5 ${
-                  i < project.workspaces.length - 1 ? 'border-b border-[var(--color-border)]' : ''
-                }`}
-              >
-                <svg className="w-3 h-3 flex-shrink-0 text-[var(--color-text-muted)]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                </svg>
-                <span className="text-xs text-[var(--color-text-primary)] flex-1 truncate">{ws.name}</span>
-                {ws.branch && (
-                  <span className="text-[10px] text-[var(--color-text-muted)] truncate max-w-[120px]">{ws.branch}</span>
-                )}
-                <span className="text-[10px] text-[var(--color-text-muted)]">{ws.type}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ── Worktree Folders on Disk ── */}
-      {project.worktreeMode === 1 && (
-        <WorktreeFoldersOnDisk project={project} fetchProjects={fetchProjects} />
-      )}
-
-      {/* ── K2SO Agents — only in Pod mode ── */}
-      {(project.agentMode || 'off') === 'pod' && (
-        <ProjectAgentsPanel projectPath={project.path} />
-      )}
-
-      {/* ── Cursor Chat Migration ── */}
-      <CursorMigrationPanel projectPath={project.path} />
+      {/* ── Group 4: Chat Migrations ── */}
+      <SettingsGroup title="Chat Migrations">
+        <CursorMigrationPanel projectPath={project.path} />
+      </SettingsGroup>
 
       {/* ── Danger zone ── */}
       <div className="pt-4 border-t border-[var(--color-border)]">
@@ -3627,6 +3618,25 @@ function SettingRow({
     <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
       <span className="text-xs text-[var(--color-text-secondary)]">{label}</span>
       {children}
+    </div>
+  )
+}
+
+function SettingsGroup({
+  title,
+  children
+}: {
+  title: string
+  children: React.ReactNode
+}): React.JSX.Element {
+  return (
+    <div className="space-y-2">
+      <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
+        {title}
+      </h3>
+      <div className="ml-2 pl-3 border-l-2 border-[var(--color-border)] space-y-1">
+        {children}
+      </div>
     </div>
   )
 }
