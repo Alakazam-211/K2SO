@@ -282,7 +282,10 @@ export default function AgentsPanel(): React.JSX.Element {
           <div className="px-3 py-1.5">
             <span className="text-[9px] font-medium text-[var(--color-accent)] uppercase tracking-wider">Pod Leader</span>
           </div>
-          <div className="px-3 py-2 border-b border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] transition-colors group">
+          <div
+            className="px-3 py-2 border-b border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] transition-colors group cursor-pointer"
+            onClick={() => openAgentPane(podLeader.name)}
+          >
             <div className="flex items-center gap-2">
               <span
                 className="w-1.5 h-1.5 rounded-full flex-shrink-0"
@@ -302,7 +305,7 @@ export default function AgentsPanel(): React.JSX.Element {
               </div>
               <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
                 <button
-                  onClick={() => handleLaunch(podLeader.name)}
+                  onClick={(e) => { e.stopPropagation(); handleLaunch(podLeader.name) }}
                   className="px-1.5 py-0.5 text-[9px] text-[var(--color-accent)] hover:text-[var(--color-accent)]/80 hover:bg-[var(--color-accent)]/10 no-drag cursor-pointer"
                   title="Launch pod leader session"
                 >
@@ -416,10 +419,7 @@ function WorkspaceInboxSummary({ projectPath }: { projectPath: string }): React.
 
   const openWorkItem = (item: WorkItem) => {
     const filePath = `${projectPath}/.k2so/work/inbox/${item.filename}`
-    const tab = useTabsStore.getState().getActiveTab()
-    if (tab) {
-      useTabsStore.getState().openFileInPane(tab.id, filePath)
-    }
+    useTabsStore.getState().openFileAsTab(filePath)
   }
 
   const priorityColor = (p: string) => {

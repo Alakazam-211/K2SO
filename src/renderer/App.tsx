@@ -172,29 +172,19 @@ function FocusModeContent({ activeProject, cwd }: { activeProject: any; cwd: str
 }
 
 // ── App Zoom ─────────────────────────────────────────────────────────────
-// Uses CSS transform:scale on #root to zoom content. Adjusts #root width/height
-// to the inverse of the scale so it fills the physical window at any zoom level.
-// This makes all px-based sizes (Tailwind classes) scale proportionally while
-// the layout reflows to fit the available space.
+// Uses CSS `zoom` on #root for crisp text at any zoom level.
+// Native WKWebView zoom is disabled via zoomHotkeysEnabled:false.
 declare global {
   interface Window { __k2soZoom?: number }
 }
 
 function applyK2SOZoom(): void {
   const z = window.__k2soZoom ?? 1
-  const root = document.getElementById('root')
-  if (!root) return
   if (z === 1) {
-    root.style.transform = ''
-    root.style.transformOrigin = ''
-    root.style.width = ''
-    root.style.height = ''
+    document.documentElement.style.zoom = ''
     document.title = 'K2SO'
   } else {
-    root.style.transform = `scale(${z})`
-    root.style.transformOrigin = 'top left'
-    root.style.width = `${100 / z}%`
-    root.style.height = `${100 / z}%`
+    document.documentElement.style.zoom = String(z)
     document.title = `K2SO — ${Math.round(z * 100)}%`
   }
 }

@@ -47,6 +47,9 @@ function useActiveBarItems(): ProjectWithWorkspaces[] {
       // Skip pinned projects — they're always visible at the top
       if (p.pinned) return false
 
+      // Skip agent workspaces — they're shown in the agents section
+      if (p.agentMode && p.agentMode !== 'off') return false
+
       // 1. Manually active — always included
       if (p.manuallyActive) return true
 
@@ -256,6 +259,7 @@ export function getActiveBarItems(): ProjectWithWorkspaces[] {
 
   return projects.filter((p) => {
     if (p.pinned) return false
+    if (p.agentMode && p.agentMode !== 'off') return false
     if (p.manuallyActive) return true
     if (p.lastInteractionAt && (now - p.lastInteractionAt) < TWENTY_FOUR_HOURS) return true
     if (p.id === activeProjectId && (hasActiveAgents || hasHookActivity)) return true

@@ -168,6 +168,7 @@ interface TabsState {
   getActiveTab: () => Tab | undefined
   openFileInPane: (tabId: string, filePath: string) => void
   openAgentPane: (agentName: string, projectPath: string) => void
+  openFileAsTab: (filePath: string) => void
   openFileInPaneGroup: (tabId: string, paneGroupId: string, filePath: string) => void
   openDiffInPane: (tabId: string, filePath: string) => void
   pinPane: (tabId: string, paneGroupId: string) => void
@@ -742,49 +743,72 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
   openAgentPane: (agentName: string, projectPath: string) => {
     const state = get()
-    const tab = state.tabs.find((t) => t.id === state.activeTabId)
-    if (!tab) return
 
-    const activePgId = getFirstLeaf(tab.mosaicTree)
-    if (!activePgId) return
-
-    const pg = tab.paneGroups.get(activePgId)
-    if (!pg) return
-
-    // Check if this agent is already open
-    const existingIdx = pg.items.findIndex(
-      (item) => item.type === 'agent' && (item.data as AgentItemData).agentName === agentName
-    )
-    if (existingIdx !== -1) {
-      set((s) => ({
-        tabs: s.tabs.map((t) =>
-          t.id !== tab.id ? t : {
-            ...t,
-            paneGroups: new Map(t.paneGroups).set(activePgId, { ...pg, activeItemIndex: existingIdx }),
-          }
-        ),
-      }))
-      return
+    // Check if a tab for this agent already exists — switch to it
+    for (const tab of state.tabs) {
+      for (const [, pg] of tab.paneGroups) {
+        const match = pg.items.find(
+          (item) => item.type === 'agent' && (item.data as AgentItemData).agentName === agentName
+        )
+        if (match) {
+          set({ activeTabId: tab.id })
+          return
+        }
+      }
     }
 
-    const newItem: Item = {
+    // Create a new tab with a single agent pane
+    tabCounter++
+    const tabId = crypto.randomUUID()
+    const pgId = crypto.randomUUID()
+    const agentItem: Item = {
       id: crypto.randomUUID(),
       type: 'agent',
       data: { agentName, projectPath },
     }
-    const newItems = [...pg.items, newItem]
-    set((s) => ({
-      tabs: s.tabs.map((t) =>
-        t.id !== tab.id ? t : {
-          ...t,
-          paneGroups: new Map(t.paneGroups).set(activePgId, {
-            ...pg,
-            items: newItems,
-            activeItemIndex: newItems.length - 1,
-          }),
+    const pg: PaneGroup = {
+      id: pgId,
+      items: [agentItem],
+      activeItemIndex: 0,
+    }
+    const tab: Tab = {
+      id: tabId,
+      title: `Agent: ${agentName}`,
+      mosaicTree: pgId,
+      paneGroups: new Map([[pgId, pg]]),
+    }
+    set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tabId }))
+  },
+
+  openFileAsTab: (filePath: string) => {
+    const state = get()
+
+    // Check if a tab for this file already exists — switch to it
+    for (const tab of state.tabs) {
+      for (const [, pg] of tab.paneGroups) {
+        const match = pg.items.find(
+          (item) => item.type === 'file-viewer' && (item.data as FileViewerItemData).filePath === filePath
+        )
+        if (match) {
+          set({ activeTabId: tab.id })
+          return
         }
-      ),
-    }))
+      }
+    }
+
+    // Create a new tab with a file-viewer pane
+    tabCounter++
+    const tabId = crypto.randomUUID()
+    const pgId = crypto.randomUUID()
+    const title = filePath.split('/').pop() || filePath
+    const pg = makeFileViewerPaneGroup(pgId, filePath, false)
+    const tab: Tab = {
+      id: tabId,
+      title,
+      mosaicTree: pgId,
+      paneGroups: new Map([[pgId, pg]]),
+    }
+    set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tabId }))
   },
 
   openFileInPaneGroup: (tabId: string, paneGroupId: string, filePath: string) => {

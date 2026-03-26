@@ -100,10 +100,7 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
   }, [fetchProfile, fetchClaudeMd, fetchWork])
 
   const openFile = (filePath: string) => {
-    const tab = useTabsStore.getState().getActiveTab()
-    if (tab) {
-      useTabsStore.getState().openFileInPane(tab.id, filePath)
-    }
+    useTabsStore.getState().openFileAsTab(filePath)
   }
 
   const priorityColor = (p: string) => {
