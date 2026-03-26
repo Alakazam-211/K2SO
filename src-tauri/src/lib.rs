@@ -77,6 +77,9 @@ pub fn run() {
                     }
                 }
             }
+            // Native WebKit zoom is disabled via zoomHotkeysEnabled:false in tauri.conf.json.
+            // App zoom is handled by transform:scale() in the frontend (App.tsx).
+
             // Save window state and clean up terminals on close
             let app_handle = app.handle().clone();
             if let Some(win) = app.get_webview_window("main") {

@@ -106,15 +106,15 @@ export default function Settings(): React.JSX.Element {
   }, [closeSettings])
 
   return (
-    <div className="flex h-full w-full bg-[var(--color-bg)]">
+    <div className="flex h-full w-full min-h-0 bg-[var(--color-bg)]">
       {/* Left nav */}
-      <div className="w-48 flex-shrink-0 border-r border-[var(--color-border)] bg-[var(--color-bg-surface)] flex flex-col">
-        <div className="px-4 py-3 border-b border-[var(--color-border)]">
+      <div className="w-48 flex-shrink-0 border-r border-[var(--color-border)] bg-[var(--color-bg-surface)] flex flex-col min-h-0">
+        <div className="px-4 py-3 border-b border-[var(--color-border)] flex-shrink-0">
           <span className="text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">
             Settings
           </span>
         </div>
-        <nav className="flex-1 py-1">
+        <nav className="flex-1 py-1 overflow-y-auto">
           {SECTIONS.map((s) => (
             <button
               key={s.id}
@@ -129,7 +129,7 @@ export default function Settings(): React.JSX.Element {
             </button>
           ))}
         </nav>
-        <div className="px-4 py-3 border-t border-[var(--color-border)]">
+        <div className="px-4 py-3 border-t border-[var(--color-border)] flex-shrink-0">
           <button
             onClick={closeSettings}
             className="flex items-center gap-2 text-xs text-[var(--color-text-primary)] hover:text-[var(--color-text-primary)] no-drag cursor-pointer"
@@ -141,7 +141,7 @@ export default function Settings(): React.JSX.Element {
       </div>
 
       {/* Content area */}
-      <div className={`flex-1 p-6 ${activeSection === 'projects' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
+      <div className={`flex-1 min-h-0 ${activeSection === 'projects' ? 'overflow-hidden p-0' : 'overflow-y-auto p-6'}`}>
         {activeSection === 'general' && <GeneralSection />}
         {activeSection === 'terminal' && <TerminalSection />}
         {activeSection === 'editors-agents' && <EditorsAgentsSection />}
@@ -1913,7 +1913,7 @@ function ProjectsSection(): React.JSX.Element {
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId) ?? null
   const editors = ['Cursor', 'VS Code', 'Zed', 'Other']
-  const ungroupedProjects = projects.filter((p) => !p.focusGroupId && !p.pinned)
+  const ungroupedProjects = projects.filter((p) => !p.focusGroupId && !p.pinned && !agentIds.has(p.id))
 
   const toggleGroupCollapse = useCallback((groupId: string) => {
     setCollapsedGroups((prev) => {
@@ -2170,7 +2170,7 @@ function ProjectsSection(): React.JSX.Element {
   }, [selectedProjectId, reorderDragId, handleReorderMouseDown, fetchProjects])
 
   return (
-    <div className="flex h-[calc(100%+3rem)] -m-6">
+    <div className="flex h-full min-h-0">
       {/* ── Left panel: focus group toggle + organized workspace list ── */}
       <div className="w-60 flex-shrink-0 border-r border-[var(--color-border)] flex flex-col">
         {/* Focus groups toggle at top */}
@@ -2223,9 +2223,12 @@ function ProjectsSection(): React.JSX.Element {
           {/* ── Agent workspaces ── */}
           {agentPinnedProjects.length > 0 && (
             <div className="mb-1 pb-1 border-b border-[var(--color-border)]">
-              <div className="px-2 pt-1 pb-1">
+              <div className="px-2 pt-1 pb-1 flex items-center gap-1.5">
                 <span className="text-[10px] font-semibold text-[var(--color-accent)] uppercase tracking-wider">
                   Agents
+                </span>
+                <span className="text-[9px] tabular-nums font-medium px-1.5 py-0.5 bg-[var(--color-accent)]/10 text-[var(--color-accent)]">
+                  {agentPinnedProjects.length}
                 </span>
               </div>
               <div data-reorder-zone="agents">
@@ -2267,7 +2270,7 @@ function ProjectsSection(): React.JSX.Element {
               {/* Focus group folders */}
               <div data-focus-group-reorder-container>
               {focusGroups.map((group, groupIdx) => {
-                const groupProjects = projects.filter((p) => p.focusGroupId === group.id && !p.pinned)
+                const groupProjects = projects.filter((p) => p.focusGroupId === group.id && !p.pinned && !agentIds.has(p.id))
                 const isCollapsed = collapsedGroups.has(group.id)
                 const isDragOver = dragOverGroupId === group.id
                 const zoneId = `group:${group.id}`
@@ -2413,7 +2416,7 @@ function ProjectsSection(): React.JSX.Element {
                 </span>
               </div>
               <div data-reorder-zone="flat">
-                {projects.filter((p) => !p.pinned).map((p, idx) => (
+                {projects.filter((p) => !p.pinned && !agentIds.has(p.id)).map((p, idx) => (
                   <div key={p.id}>
                     {reorderZone === 'flat' && reorderDropIndex === idx && (
                       <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
@@ -2633,8 +2636,9 @@ function WorktreeFoldersOnDisk({
 
   return (
     <div className="space-y-2">
-      <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
-        Worktree Folders on Disk ({nonBare.length})
+      <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider flex items-center gap-1.5">
+        Worktree Folders on Disk
+        <span className="text-[9px] tabular-nums font-medium px-1.5 py-0.5 bg-white/5 text-[var(--color-text-muted)]">{nonBare.length}</span>
       </h3>
       <div className="border border-[var(--color-border)]">
         {nonBare.map((wt, i) => {
@@ -3012,8 +3016,8 @@ function ProjectDetail({
                   }`} />
                 </div>
                 <div>
-                  <span className="text-[10px] text-[var(--color-text-secondary)]">Heartbeat</span>
-                  <p className="text-[9px] text-[var(--color-text-muted)]">
+                  <span className={`text-xs ${project.heartbeatEnabled ? 'text-[var(--color-text-primary)]' : 'text-[var(--color-text-secondary)]'}`}>Heartbeat</span>
+                  <p className={`text-[9px] ${project.heartbeatEnabled ? 'text-[var(--color-text-secondary)]' : 'text-[var(--color-text-muted)]'}`}>
                     {project.heartbeatEnabled ? 'Wakes up automatically to work' : 'Only works when manually launched'}
                   </p>
                 </div>
@@ -3328,8 +3332,11 @@ function ProjectAgentsPanel({ projectPath }: { projectPath: string }): React.JSX
       {/* Pod Members section */}
       <div>
         <div className="flex items-center justify-between mb-1">
-          <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
-            Agents {podMembers.length > 0 && `(${podMembers.length})`}
+          <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider flex items-center gap-1.5">
+            Agents
+            {podMembers.length > 0 && (
+              <span className="text-[9px] tabular-nums font-medium px-1.5 py-0.5 bg-white/5 text-[var(--color-text-muted)]">{podMembers.length}</span>
+            )}
           </h3>
           <button
             onClick={() => setShowCreate(!showCreate)}
@@ -3467,8 +3474,9 @@ function CursorMigrationPanel({ projectPath }: { projectPath: string }): React.J
 
   return (
     <div className="space-y-2">
-      <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
-        Cursor IDE Conversations ({sessions.length})
+      <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider flex items-center gap-1.5">
+        Cursor IDE Conversations
+        <span className="text-[9px] tabular-nums font-medium px-1.5 py-0.5 bg-white/5 text-[var(--color-text-muted)]">{sessions.length}</span>
       </h3>
 
       <p className="text-[10px] text-[var(--color-text-muted)]">

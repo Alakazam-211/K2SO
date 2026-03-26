@@ -119,7 +119,7 @@ class FocusErrorBoundary extends React.Component<
   render(): React.ReactNode {
     if (this.state.error) {
       return (
-        <div className="flex h-screen w-screen items-center justify-center bg-[var(--color-bg)] text-red-400 text-xs p-8">
+        <div className="flex h-full w-full items-center justify-center bg-[var(--color-bg)] text-red-400 text-xs p-8">
           <div>
             <p className="font-bold mb-2">Focus window error:</p>
             <pre className="whitespace-pre-wrap">{this.state.error.message}</pre>
@@ -171,6 +171,34 @@ function FocusModeContent({ activeProject, cwd }: { activeProject: any; cwd: str
   )
 }
 
+// ── App Zoom ─────────────────────────────────────────────────────────────
+// Uses CSS transform:scale on #root to zoom content. Adjusts #root width/height
+// to the inverse of the scale so it fills the physical window at any zoom level.
+// This makes all px-based sizes (Tailwind classes) scale proportionally while
+// the layout reflows to fit the available space.
+declare global {
+  interface Window { __k2soZoom?: number }
+}
+
+function applyK2SOZoom(): void {
+  const z = window.__k2soZoom ?? 1
+  const root = document.getElementById('root')
+  if (!root) return
+  if (z === 1) {
+    root.style.transform = ''
+    root.style.transformOrigin = ''
+    root.style.width = ''
+    root.style.height = ''
+    document.title = 'K2SO'
+  } else {
+    root.style.transform = `scale(${z})`
+    root.style.transformOrigin = 'top left'
+    root.style.width = `${100 / z}%`
+    root.style.height = `${100 / z}%`
+    document.title = `K2SO — ${Math.round(z * 100)}%`
+  }
+}
+
 export default function App(): React.JSX.Element {
   const settingsLoaded = useSettingsStore((s) => s.loaded)
   const focusProjectId = useMemo(() => parseFocusProjectId(), [])
@@ -217,24 +245,21 @@ export default function App(): React.JSX.Element {
         e.preventDefault()
         useTerminalSettingsStore.getState().decrementFontSize()
       }
-      // Cmd+= (plus) to zoom in the entire app
+      // App zoom — scales #root via transform and adjusts its dimensions to fill the window
       if (e.metaKey && !e.shiftKey && (e.key === '=' || e.key === '+')) {
         e.preventDefault()
-        const current = parseFloat(document.documentElement.style.zoom || '1')
-        const next = Math.min(current + 0.1, 2.0)
-        document.documentElement.style.zoom = String(next)
+        window.__k2soZoom = Math.min(Math.round(((window.__k2soZoom ?? 1) + 0.1) * 10) / 10, 2.0)
+        applyK2SOZoom()
       }
-      // Cmd+- (minus) to zoom out the entire app
       if (e.metaKey && !e.shiftKey && e.key === '-') {
         e.preventDefault()
-        const current = parseFloat(document.documentElement.style.zoom || '1')
-        const next = Math.max(current - 0.1, 0.5)
-        document.documentElement.style.zoom = String(next)
+        window.__k2soZoom = Math.max(Math.round(((window.__k2soZoom ?? 1) - 0.1) * 10) / 10, 0.5)
+        applyK2SOZoom()
       }
-      // Cmd+0 to reset app zoom
       if (e.metaKey && !e.shiftKey && e.key === '0') {
         e.preventDefault()
-        document.documentElement.style.zoom = '1'
+        window.__k2soZoom = 1
+        applyK2SOZoom()
       }
     }
     window.addEventListener('keydown', handler)
@@ -321,6 +346,21 @@ export default function App(): React.JSX.Element {
             invoke('projects_open_focus_window', { projectId }).catch((e) => console.warn('[app]', e))
           })
         }
+      }).then((fn) => unlisteners.push(fn))
+      // Zoom events from menu — use native WKWebView zoom via Tauri API
+      listen('app:zoom-in', () => {
+        import('@tauri-apps/api/webview').then(m => m.getCurrentWebview().setZoom(
+          (window as any).__k2soNativeZoom = Math.min(((window as any).__k2soNativeZoom ?? 1) + 0.2, 3)
+        ))
+      }).then((fn) => unlisteners.push(fn))
+      listen('app:zoom-out', () => {
+        import('@tauri-apps/api/webview').then(m => m.getCurrentWebview().setZoom(
+          (window as any).__k2soNativeZoom = Math.max(((window as any).__k2soNativeZoom ?? 1) - 0.2, 0.4)
+        ))
+      }).then((fn) => unlisteners.push(fn))
+      listen('app:zoom-reset', () => {
+        (window as any).__k2soNativeZoom = 1
+        import('@tauri-apps/api/webview').then(m => m.getCurrentWebview().setZoom(1))
       }).then((fn) => unlisteners.push(fn))
     })
     return () => {
@@ -450,14 +490,14 @@ export default function App(): React.JSX.Element {
 
   // Wait for stores to initialize before rendering to prevent flicker
   if (!settingsLoaded) {
-    return <div className="h-screen w-screen bg-[var(--color-bg)]" />
+    return <div className="h-full w-full bg-[var(--color-bg)]" />
   }
 
   // Settings overlay — replaces main content
   if (settingsOpen) {
     return (
       <>
-        <div className="flex h-screen w-screen flex-col overflow-hidden bg-[var(--color-bg)]">
+        <div className="flex h-full w-full flex-col overflow-hidden bg-[var(--color-bg)]">
           <div
             className="h-[38px] flex-shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-surface)]"
             data-tauri-drag-region
@@ -465,7 +505,7 @@ export default function App(): React.JSX.Element {
               import('@tauri-apps/api/window').then(m => m.getCurrentWindow().startDragging())
             }}
           />
-          <div className="flex-1 overflow-hidden">
+          <div className="flex-1 min-h-0">
             <Settings />
           </div>
         </div>

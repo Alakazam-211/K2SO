@@ -16,15 +16,29 @@
   --color-accent: #3b82f6;
 }
 
-html,
+html {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
 body {
   margin: 0;
   padding: 0;
+  width: 100%;
+  height: 100%;
   background: var(--color-bg);
   color: var(--color-text-primary);
   overflow: hidden;
   font-family: 'MesloLGM Nerd Font', Menlo, Monaco, 'Cascadia Code', 'Fira Code', 'SF Mono', Consolas, monospace, 'Apple Color Emoji', 'Segoe UI Emoji';
   -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  width: 100%;
+  height: 100%;
 }
 
 /* macOS traffic light drag region — only the top bar is draggable */

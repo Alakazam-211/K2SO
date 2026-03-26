@@ -316,8 +316,11 @@ export default function AgentsPanel(): React.JSX.Element {
 
       {/* Pod Members header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)]">
-        <span className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider">
-          Agents {podMembers.length > 0 && `(${podMembers.length})`}
+        <span className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider flex items-center gap-1.5">
+          Agents
+          {podMembers.length > 0 && (
+            <span className="text-[9px] tabular-nums font-medium px-1 py-0.5 bg-white/5 text-[var(--color-text-muted)]">{podMembers.length}</span>
+          )}
         </span>
         <button
           onClick={() => setShowCreate(!showCreate)}

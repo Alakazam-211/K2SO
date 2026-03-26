@@ -25,7 +25,7 @@ export default function FocusLayout({
   const toggleRightPanel = usePanelsStore((s) => s.toggleRightPanel)
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-[var(--color-bg)]">
+    <div className="flex h-full w-full flex-col overflow-hidden bg-[var(--color-bg)]">
       {/* Top bar — no primary sidebar toggle, but has left/right panel toggles */}
       <div
         className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg-surface)] px-3 select-none"

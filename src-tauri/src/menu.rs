@@ -70,9 +70,9 @@ pub fn create_menu(handle: &AppHandle) -> Result<Menu<tauri::Wry>, tauri::Error>
             &MenuItem::with_id(handle, "toggle-assistant", "Toggle Assistant", true, Some("CmdOrCtrl+L"))?,
             &MenuItem::with_id(handle, "focus-window", "Open in Focus Window", true, Some("CmdOrCtrl+Shift+F"))?,
             &PredefinedMenuItem::separator(handle)?,
-            &MenuItem::with_id(handle, "app-zoom-in", "Zoom In", true, Some("CmdOrCtrl+Equal"))?,
-            &MenuItem::with_id(handle, "app-zoom-out", "Zoom Out", true, Some("CmdOrCtrl+-"))?,
-            &MenuItem::with_id(handle, "app-zoom-reset", "Zoom Reset", true, Some("CmdOrCtrl+0"))?,
+            &MenuItem::with_id(handle, "app-zoom-in", "Zoom In", true, None::<&str>)?,
+            &MenuItem::with_id(handle, "app-zoom-out", "Zoom Out", true, None::<&str>)?,
+            &MenuItem::with_id(handle, "app-zoom-reset", "Zoom Reset", true, None::<&str>)?,
             &PredefinedMenuItem::separator(handle)?,
             &MenuItem::with_id(handle, "terminal-zoom-in", "Terminal Zoom In", true, Some("CmdOrCtrl+Shift+Equal"))?,
             &MenuItem::with_id(handle, "terminal-zoom-out", "Terminal Zoom Out", true, Some("CmdOrCtrl+Shift+-"))?,
@@ -113,14 +113,28 @@ pub fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
                 let _ = win.emit("menu:open-settings", ());
             }
         }
-        "app-zoom-in" => {
-            emit_to_focused(app, "app:zoom-in");
-        }
-        "app-zoom-out" => {
-            emit_to_focused(app, "app:zoom-out");
-        }
-        "app-zoom-reset" => {
-            emit_to_focused(app, "app:zoom-reset");
+        "app-zoom-in" | "app-zoom-out" | "app-zoom-reset" => {
+            // Zoom via menu items (keyboard zoom handled in App.tsx)
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static ZOOM_LEVEL: AtomicU32 = AtomicU32::new(100); // percentage
+
+            let current = ZOOM_LEVEL.load(Ordering::Relaxed);
+            let next = match id {
+                "app-zoom-in" => (current + 10).min(200),
+                "app-zoom-out" => current.saturating_sub(10).max(50),
+                _ => 100, // reset
+            };
+            ZOOM_LEVEL.store(next, Ordering::Relaxed);
+
+            if let Some(win) = app.get_webview_window("main") {
+                let scale = next as f64 / 100.0;
+                let js = format!(
+                    "document.documentElement.style.zoom='{}';document.title='{}'",
+                    scale,
+                    if next == 100 { "K2SO".to_string() } else { format!("K2SO — {}%", next) }
+                );
+                let _ = win.eval(&js);
+            }
         }
         "terminal-zoom-in" => {
             emit_to_focused(app, "terminal:zoom-in");

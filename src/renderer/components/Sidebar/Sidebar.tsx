@@ -678,10 +678,10 @@ export default function Sidebar(): React.JSX.Element {
   const regularPinned = pinnedProjects
 
   const filteredProjects = useMemo(() => {
-    const unpinned = projects.filter((p) => !p.pinned)
+    const unpinned = projects.filter((p) => !p.pinned && !agentIds.has(p.id))
     if (!focusGroupsEnabled || activeFocusGroupId === null) return unpinned
     return unpinned.filter((p) => p.focusGroupId === activeFocusGroupId)
-  }, [projects, focusGroupsEnabled, activeFocusGroupId])
+  }, [projects, focusGroupsEnabled, activeFocusGroupId, agentIds])
 
   // ── Nudge to enable focus groups at 10+ workspaces (every 3 hours) ──
   useEffect(() => {

@@ -37,7 +37,7 @@ export default function Layout({
   const toggleRightPanel = usePanelsStore((s) => s.toggleRightPanel)
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-[var(--color-bg)]">
+    <div className="flex h-full w-full flex-col overflow-hidden bg-[var(--color-bg)]">
       {/* TopBar */}
       <TopBar
         projectName={projectName}
