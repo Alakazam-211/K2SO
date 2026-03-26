@@ -228,7 +228,7 @@ function GeneralSection(): React.JSX.Element {
             </div>
             <button
               className="px-3 py-1 text-xs font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
-              onClick={() => invoke('plugin:shell|open', { path: updateInfo!.download_url }).catch((e) => console.warn('[settings]', e))}
+              onClick={() => invoke('open_external', { url: updateInfo!.download_url }).catch((e) => console.warn('[settings]', e))}
             >
               Download
             </button>
@@ -2965,6 +2965,27 @@ function ProjectDetail({
                     const currentMode = project.agentMode || 'off'
                     if (currentMode === mode) return
 
+                    // Confirm before modifying CLAUDE.md
+                    if (mode === 'agent' || mode === 'pod') {
+                      const description = mode === 'agent'
+                        ? 'This generates a CLAUDE.md in your workspace root that teaches Claude how to use K2SO as an AI Planner — setting up workspaces, creating PRDs, and coordinating projects.'
+                        : 'This generates a CLAUDE.md in your workspace root that teaches Claude how to manage a pod of agents — delegating work, reviewing branches, and driving milestones. A pod-leader agent will also be created.'
+
+                      const confirmed = await useConfirmDialogStore.getState().confirm({
+                        title: `Enable ${mode === 'agent' ? 'Agent' : 'Pod'} Mode`,
+                        message: `${description}\n\nIf a CLAUDE.md already exists, it will not be overwritten — the generated version is saved to .k2so/CLAUDE.md.generated for reference.`,
+                        confirmLabel: `Enable ${mode === 'agent' ? 'Agent' : 'Pod'} Mode`,
+                      })
+                      if (!confirmed) return
+                    } else if (mode === 'off' && currentMode !== 'off') {
+                      const confirmed = await useConfirmDialogStore.getState().confirm({
+                        title: 'Disable Agent Mode',
+                        message: 'The CLAUDE.md file will be moved to .k2so/CLAUDE.md.disabled. Your content is preserved and will be restored if you re-enable agent mode.',
+                        confirmLabel: 'Disable',
+                      })
+                      if (!confirmed) return
+                    }
+
                     if (currentMode !== 'off') {
                       await invoke('k2so_agents_disable_workspace_claude_md', {
                         projectPath: project.path,
@@ -4025,12 +4046,73 @@ function AIAssistantSection(): React.JSX.Element {
       )}
 
       {/* Info */}
-      <div className="border-t border-[var(--color-border)] pt-4">
+      <div className="border-t border-[var(--color-border)] pt-4 mb-6">
         <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed">
           The AI assistant runs entirely on your machine — no data is sent to external servers.
           Models are stored in <span className="font-mono">~/.k2so/models/</span>.
           Workspace commands use minimal context (2048 tokens) so even small models work well.
         </p>
+      </div>
+
+      {/* ── Using Claude with K2SO ── */}
+      <div className="border-t border-[var(--color-border)] pt-4">
+        <h3 className="text-xs font-medium text-[var(--color-text-secondary)] mb-3 uppercase tracking-wider">
+          Using Claude with K2SO
+        </h3>
+        <div className="space-y-3 text-xs text-[var(--color-text-muted)] leading-relaxed">
+          <p>
+            K2SO includes a CLI tool (<span className="font-mono text-[var(--color-text-secondary)]">k2so</span>) that lets any AI agent orchestrate your workspaces.
+            When you open a terminal inside K2SO, the CLI is automatically available — no setup needed.
+          </p>
+
+          <div>
+            <p className="text-[var(--color-text-secondary)] font-medium mb-1">Option 1: Agent Mode (recommended)</p>
+            <p>
+              Set any workspace to <span className="font-mono text-[var(--color-text-secondary)]">Agent</span> mode in its settings.
+              K2SO generates a CLAUDE.md file that teaches Claude everything about the CLI, workspace setup,
+              and how to orchestrate work across projects. Just open a Claude terminal in that workspace and it already knows what to do.
+            </p>
+          </div>
+
+          <div>
+            <p className="text-[var(--color-text-secondary)] font-medium mb-1">Option 2: Manual Setup</p>
+            <p>
+              If you prefer to use Claude CLI directly from your own terminal, you can teach it about K2SO by
+              adding the CLI reference to your project's <span className="font-mono text-[var(--color-text-secondary)]">CLAUDE.md</span> file.
+              The key commands:
+            </p>
+          </div>
+
+          <div className="bg-[var(--color-bg-elevated)] border border-[var(--color-border)] p-3 font-mono text-[10px] text-[var(--color-text-secondary)] leading-relaxed space-y-1">
+            <div><span className="text-[var(--color-accent)]">k2so agents list</span>          <span className="text-[var(--color-text-muted)]"># List all agents</span></div>
+            <div><span className="text-[var(--color-accent)]">k2so delegate</span> &lt;agent&gt; &lt;file&gt;  <span className="text-[var(--color-text-muted)]"># Assign work (creates worktree + launches)</span></div>
+            <div><span className="text-[var(--color-accent)]">k2so work create</span> --title &quot;...&quot; <span className="text-[var(--color-text-muted)]"># Create a work item</span></div>
+            <div><span className="text-[var(--color-accent)]">k2so reviews</span>               <span className="text-[var(--color-text-muted)]"># See pending reviews</span></div>
+            <div><span className="text-[var(--color-accent)]">k2so review approve</span> &lt;a&gt; &lt;b&gt; <span className="text-[var(--color-text-muted)]"># Merge + cleanup</span></div>
+            <div><span className="text-[var(--color-accent)]">k2so mode pod</span>              <span className="text-[var(--color-text-muted)]"># Enable pod mode</span></div>
+            <div><span className="text-[var(--color-accent)]">k2so worktree on</span>           <span className="text-[var(--color-text-muted)]"># Enable worktrees</span></div>
+            <div><span className="text-[var(--color-accent)]">k2so heartbeat on</span>          <span className="text-[var(--color-text-muted)]"># Enable auto heartbeat</span></div>
+            <div><span className="text-[var(--color-accent)]">k2so settings</span>              <span className="text-[var(--color-text-muted)]"># Show workspace settings</span></div>
+            <div><span className="text-[var(--color-accent)]">k2so help</span>                  <span className="text-[var(--color-text-muted)]"># Full command reference</span></div>
+          </div>
+
+          <p>
+            The CLI communicates with K2SO via a local HTTP server. The environment variables
+            <span className="font-mono text-[var(--color-text-secondary)]"> K2SO_PORT</span> and
+            <span className="font-mono text-[var(--color-text-secondary)]"> K2SO_HOOK_TOKEN</span> are
+            automatically set in every terminal K2SO creates. For external terminals, K2SO writes
+            the connection details to <span className="font-mono text-[var(--color-text-secondary)]">~/.k2so/heartbeat.port</span> and
+            <span className="font-mono text-[var(--color-text-secondary)]"> ~/.k2so/heartbeat.token</span>.
+          </p>
+
+          <div className="bg-[var(--color-accent)]/5 border border-[var(--color-accent)]/20 p-3">
+            <p className="text-[var(--color-accent)] text-[11px]">
+              Tip: Setting a workspace to Agent mode is the easiest way to get started.
+              The generated CLAUDE.md includes the full CLI reference, workspace setup instructions,
+              and workflow patterns — Claude picks it up automatically.
+            </p>
+          </div>
+        </div>
       </div>
     </div>
   )

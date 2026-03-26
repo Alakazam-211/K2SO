@@ -124,19 +124,43 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
         }
       }
 
-      // If we have projects but no active one, select the first
+      // If we have projects but no active one, try to restore last session
       if (!get().activeProjectId && projectsWithWorkspaces.length > 0) {
-        const firstProject = projectsWithWorkspaces[0]
-        const firstWorkspaceId = firstProject.workspaces[0]?.id ?? null
+        let restoredProject = null
+        let restoredWorkspaceId: string | null = null
+
+        // Try to restore from saved session
+        try {
+          const settings = await invoke<{ lastActiveProjectId?: string | null; lastActiveWorkspaceId?: string | null }>('settings_get')
+          if (settings.lastActiveProjectId) {
+            const savedProject = projectsWithWorkspaces.find((p) => p.id === settings.lastActiveProjectId)
+            if (savedProject) {
+              restoredProject = savedProject
+              // Restore exact workspace, or fall back to first
+              restoredWorkspaceId = settings.lastActiveWorkspaceId
+                && savedProject.workspaces.find((w) => w.id === settings.lastActiveWorkspaceId)
+                ? settings.lastActiveWorkspaceId
+                : savedProject.workspaces[0]?.id ?? null
+            }
+          }
+        } catch { /* settings_read failed, fall back to first */ }
+
+        // Fall back to first project if restore failed
+        if (!restoredProject) {
+          restoredProject = projectsWithWorkspaces[0]
+          restoredWorkspaceId = restoredProject.workspaces[0]?.id ?? null
+        }
+
         set({
-          activeProjectId: firstProject.id,
-          activeWorkspaceId: firstWorkspaceId
+          activeProjectId: restoredProject.id,
+          activeWorkspaceId: restoredWorkspaceId
         })
 
-        // Load saved layout for the initial workspace (if any)
-        if (firstWorkspaceId) {
-          const cwd = firstProject.workspaces[0]?.worktreePath ?? firstProject.path ?? '~'
-          useTabsStore.getState().loadLayoutForWorkspace(firstProject.id, firstWorkspaceId, cwd)
+        // Load saved layout for the restored workspace
+        if (restoredWorkspaceId) {
+          const workspace = restoredProject.workspaces.find((w) => w.id === restoredWorkspaceId)
+          const cwd = workspace?.worktreePath ?? restoredProject.path ?? '~'
+          useTabsStore.getState().loadLayoutForWorkspace(restoredProject.id, restoredWorkspaceId, cwd)
         }
       }
     } catch (err) {
@@ -259,6 +283,9 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
         activeWorkspaceId: newWorkspaceId
       })
 
+      // Persist for session restore
+      invoke('settings_update', { updates: { lastActiveProjectId: id, lastActiveWorkspaceId: newWorkspaceId } }).catch(() => {})
+
       if (newWorkspaceId) {
         const cwd = project.workspaces[0]?.worktreePath ?? project.path ?? '~'
         const newKey = `${id}:${newWorkspaceId}`
@@ -280,6 +307,9 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
       activeProjectId: projectId,
       activeWorkspaceId: workspaceId
     })
+
+    // Persist for session restore
+    invoke('settings_update', { updates: { lastActiveProjectId: projectId, lastActiveWorkspaceId: workspaceId } }).catch(() => {})
 
     const project = state.projects.find((p) => p.id === projectId)
     const workspace = project?.workspaces.find((w) => w.id === workspaceId)

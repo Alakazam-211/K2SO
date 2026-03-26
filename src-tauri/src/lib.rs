@@ -55,6 +55,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_drag::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(app_state)
         .menu(|handle| menu::create_menu(handle))
         .on_menu_event(menu::handle_menu_event)
@@ -302,6 +303,7 @@ pub fn run() {
             commands::filesystem::fs_rename,
             commands::filesystem::fs_create_entry,
             commands::filesystem::fs_duplicate,
+            commands::filesystem::open_external,
             // Filesystem watcher
             watcher::fs_watch_dir,
             watcher::fs_unwatch_dir,

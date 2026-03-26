@@ -155,12 +155,12 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
               const termCwd = (item.data as TerminalItemData).cwd
               // Open the cwd in the default terminal app
               if (defaultTerminal === 'Terminal') {
-                invoke('plugin:shell|open', { path: termCwd }).catch((e) => console.warn('[tab-bar]', e))
+                import('@tauri-apps/plugin-opener').then(({ openPath }) => openPath(termCwd)).catch((e) => console.warn('[tab-bar]', e))
               } else {
                 // Use the terminal app's CLI to open
                 invoke('projects_open_in_terminal', { terminalApp: defaultTerminal, path: termCwd }).catch(() => {
                   // Fallback to generic open
-                  invoke('plugin:shell|open', { path: termCwd }).catch((e) => console.warn('[tab-bar]', e))
+                  import('@tauri-apps/plugin-opener').then(({ openPath }) => openPath(termCwd)).catch((e) => console.warn('[tab-bar]', e))
                 })
               }
               return

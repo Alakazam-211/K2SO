@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
@@ -52,7 +52,7 @@ interface ChecklistItem {
 function ReviewCheckbox({ checked, onChange }: { checked: boolean; onChange: () => void }): React.JSX.Element {
   return (
     <button
-      onClick={(e) => { e.preventDefault(); onChange() }}
+      onClick={(e) => { e.stopPropagation(); onChange() }}
       className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 flex items-center justify-center border transition-colors no-drag cursor-pointer"
       style={{
         backgroundColor: checked ? 'var(--color-accent)' : 'transparent',
@@ -127,6 +127,7 @@ export default function ReviewPanel(): React.JSX.Element {
   const [chats, setChats] = useState<ChatSession[]>([])
   const [criteria, setCriteria] = useState<Map<string, ChecklistItem[]>>(new Map())
   const [previewRunning, setPreviewRunning] = useState<Map<string, string | null>>(new Map()) // agentName → URL or null (pending)
+  const previewPollRefs = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map())
   const [checklistItems, setChecklistItems] = useState<Map<string, Array<{ text: string; checked: boolean; section: string }>>>(new Map()) // agentName → items from file
 
   const agenticEnabled = useSettingsStore((s) => s.agenticSystemsEnabled)
@@ -196,7 +197,14 @@ export default function ReviewPanel(): React.JSX.Element {
     fetchReviews()
     fetchChats()
     const interval = setInterval(() => { fetchReviews(); fetchChats() }, 15_000)
-    return () => clearInterval(interval)
+    return () => {
+      clearInterval(interval)
+      // Clean up preview polls
+      for (const pollId of previewPollRefs.current.values()) {
+        clearInterval(pollId)
+      }
+      previewPollRefs.current.clear()
+    }
   }, [fetchReviews, fetchChats])
 
   // Load or initialize checklist files for each review
@@ -263,23 +271,68 @@ export default function ReviewPanel(): React.JSX.Element {
     const tabsStore = useTabsStore.getState()
     const prompt = 'Launch the dev server for this project on localhost using an available port. If the default port is taken, pick another open one. Once it is running, tell me the full URL.'
 
+    let tabId: string
     if (claudeSession) {
-      // Resume the original session with the preview prompt
-      tabsStore.addTab(path, {
+      tabId = tabsStore.addTab(path, {
         title: `Preview: ${review.branch || review.agentName}`,
         command: 'claude',
-        args: ['--resume', claudeSession.sessionId, '-p', prompt],
+        args: ['--dangerously-skip-permissions', '--resume', claudeSession.sessionId],
       })
     } else {
-      // No existing session — start a fresh agent with the prompt
-      tabsStore.addTab(path, {
+      tabId = tabsStore.addTab(path, {
         title: `Preview: ${review.branch || review.agentName}`,
         command: 'claude',
-        args: ['-p', prompt],
+        args: ['--dangerously-skip-permissions', prompt],
       })
     }
 
     setPreviewRunning((prev) => new Map([...prev, [review.agentName, null]]))
+
+    // Get the terminal ID from the newly created tab
+    const tab = tabsStore.tabs.find((t) => t.id === tabId)
+    const terminalId = typeof tab?.mosaicTree === 'string' ? tab.mosaicTree : null
+
+    // Poll the terminal grid for a localhost URL
+    if (terminalId) {
+      // Clear any existing poll for this agent
+      const existingPoll = previewPollRefs.current.get(review.agentName)
+      if (existingPoll) clearInterval(existingPoll)
+
+      const urlPattern = /https?:\/\/(?:localhost|127\.0\.0\.1):\d+/
+      let attempts = 0
+      const maxAttempts = 30 // 30 * 2s = 60s
+
+      const pollId = setInterval(async () => {
+        attempts++
+        try {
+          const grid = await invoke<{ lines: Array<{ text: string }> }>('terminal_get_grid', { id: terminalId })
+          const allText = grid.lines.map((l) => l.text).join('\n')
+          const match = allText.match(urlPattern)
+          if (match) {
+            setPreviewRunning((prev) => new Map([...prev, [review.agentName, match[0]]]))
+            clearInterval(pollId)
+            previewPollRefs.current.delete(review.agentName)
+          }
+        } catch {
+          // Terminal might not be ready yet
+        }
+        if (attempts >= maxAttempts) {
+          clearInterval(pollId)
+          previewPollRefs.current.delete(review.agentName)
+          // Reset to allow retry
+          setPreviewRunning((prev) => {
+            if (prev.get(review.agentName) === null) {
+              const next = new Map(prev)
+              next.delete(review.agentName)
+              return next
+            }
+            return prev
+          })
+        }
+      }, 2000)
+
+      previewPollRefs.current.set(review.agentName, pollId)
+    }
   }, [workspacePath, getChatsForReview])
 
   const handleApprove = useCallback(async (review: ReviewItem) => {
@@ -510,19 +563,33 @@ export default function ReviewPanel(): React.JSX.Element {
                   Start Preview
                 </button>
               ) : (
-                <div className="flex items-center gap-2 py-1.5 px-2 bg-green-500/10 border border-green-500/20">
+                <div
+                  className="flex items-center gap-2 py-1.5 px-2 bg-green-500/10 border border-green-500/20 cursor-pointer"
+                  onClick={() => {
+                    setPreviewRunning((prev) => {
+                      const next = new Map(prev)
+                      next.delete(review.agentName)
+                      return next
+                    })
+                  }}
+                  title="Click to dismiss and retry"
+                >
                   <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse flex-shrink-0" />
                   {previewUrl ? (
-                    <a
-                      href={previewUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-[11px] text-green-400 font-mono hover:underline truncate"
+                    <span
+                      className="text-[11px] text-green-400 font-mono hover:underline truncate cursor-pointer"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        invoke('open_external', { url: previewUrl! }).catch(console.warn)
+                      }}
                     >
                       {previewUrl}
-                    </a>
+                    </span>
                   ) : (
-                    <span className="text-[11px] text-green-400">Launching...</span>
+                    <div>
+                      <span className="text-[11px] text-green-400">Launching...</span>
+                      <div className="text-[9px] text-[var(--color-text-muted)]">click to dismiss</div>
+                    </div>
                   )}
                 </div>
               )}
@@ -569,7 +636,7 @@ export default function ReviewPanel(): React.JSX.Element {
                     tabsStore.addTab(path, {
                       title: `Chat: ${review.branch || review.agentName}`,
                       command: 'claude',
-                      args: [],
+                      args: ['--dangerously-skip-permissions'],
                     })
                   }}
                   className="w-full flex items-center justify-center gap-1.5 py-1.5 text-[11px] font-medium bg-[var(--color-bg-elevated)] text-[var(--color-text-secondary)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer"

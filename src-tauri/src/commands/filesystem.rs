@@ -554,3 +554,41 @@ pub fn fs_duplicate(path: String) -> Result<String, String> {
 
     Ok(target.to_string_lossy().to_string())
 }
+
+/// Open a URL in the system default browser via NSWorkspace (macOS) or xdg-open (Linux).
+#[tauri::command]
+pub fn open_external(url: String) -> Result<String, String> {
+    let clean: String = url.chars().filter(|c| !c.is_control() && *c != '\0').collect();
+    let clean = clean.trim().to_string();
+
+    if clean.is_empty() {
+        return Err("URL is empty after cleaning".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("/usr/bin/open")
+            .arg(&clean)
+            .output()
+            .map_err(|e| format!("Failed to open URL: {}", e))?;
+
+        if output.status.success() {
+            return Ok(format!("Opened: {}", clean));
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("open failed: {}", stderr));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _output = Command::new("xdg-open")
+            .arg(&clean)
+            .output()
+            .map_err(|e| format!("Failed to open URL: {}", e))?;
+        return Ok(format!("Opened: {}", clean));
+    }
+
+    #[allow(unreachable_code)]
+    Err("Unsupported platform".to_string())
+}

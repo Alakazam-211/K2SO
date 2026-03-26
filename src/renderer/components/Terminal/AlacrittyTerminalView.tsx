@@ -634,7 +634,7 @@ export function AlacrittyTerminalView({
     e.stopPropagation()
 
     if (clicked.type === 'url') {
-      invoke('plugin:shell|open', { path: clicked.target }).catch((e) => console.warn('[terminal]', e))
+      invoke('open_external', { url: clicked.target }).catch((e: unknown) => console.warn('[terminal-link]', e))
     } else if (clicked.type === 'file' && clicked.filePath) {
       const tabsStore = useTabsStore.getState()
       const openInSplit = useTerminalSettingsStore.getState().openLinksInSplitPane

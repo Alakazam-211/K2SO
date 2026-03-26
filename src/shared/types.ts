@@ -83,4 +83,6 @@ export interface AppSettingsResponse {
   timer: TimerSettingsBackend
   agenticSystemsEnabled: boolean
   claudeAuthAutoRefresh: boolean
+  lastActiveProjectId: string | null
+  lastActiveWorkspaceId: string | null
 }

@@ -25,8 +25,25 @@
     "core:window:allow-start-resize-dragging",
     "core:webview:default",
     "shell:default",
-    "shell:allow-open",
+    {
+      "identifier": "shell:allow-open",
+      "allow": [
+        { "url": "https://**" },
+        { "url": "http://**" },
+        { "url": "mailto:**" }
+      ]
+    },
     "shell:allow-execute",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://**" },
+        { "url": "http://**" },
+        { "url": "mailto:**" }
+      ]
+    },
+    "opener:allow-open-path",
+    "opener:allow-reveal-item-in-dir",
     "dialog:default",
     "dialog:allow-open",
     "dialog:allow-save",

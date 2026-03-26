@@ -13,7 +13,7 @@ const TAB_LABELS: Record<PanelTab, string> = {
   files: 'Files',
   changes: 'Changes',
   history: 'Chats',
-  reviews: 'Reviews',
+  reviews: 'Review',
   agents: 'Agents'
 }
 

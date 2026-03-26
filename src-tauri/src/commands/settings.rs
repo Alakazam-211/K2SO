@@ -130,6 +130,10 @@ pub struct AppSettings {
     pub agentic_systems_enabled: bool,
     #[serde(default)]
     pub claude_auth_auto_refresh: bool,
+    #[serde(default)]
+    pub last_active_project_id: Option<String>,
+    #[serde(default)]
+    pub last_active_workspace_id: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -153,6 +157,8 @@ impl Default for AppSettings {
             timer: TimerSettings::default(),
             agentic_systems_enabled: false,
             claude_auth_auto_refresh: false,
+            last_active_project_id: None,
+            last_active_workspace_id: None,
         }
     }
 }

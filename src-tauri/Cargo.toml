@@ -1,6 +1,6 @@
 [package]
 name = "k2so"
-version = "0.18.3"
+version = "0.19.0"
 edition = "2021"
 description = "Developer workspace with terminals, git worktrees, and agent presets"
 license = "MIT"
@@ -38,9 +38,11 @@ llama-cpp-2 = { version = "0.1", features = ["metal", "sampler"] }
 encoding_rs = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 tauri-plugin-drag = "2.1.0"
+tauri-plugin-opener = "2"
 notify = { version = "7", features = ["macos_fsevent"] }
 notify-debouncer-mini = "0.5"
 trash = "5"
+
 
 # Alacritty terminal backend
 alacritty_terminal = "0.26.0-rc1"

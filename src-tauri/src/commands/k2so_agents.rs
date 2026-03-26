@@ -1187,13 +1187,29 @@ k2so commit                          # AI-assisted commit review
 k2so commit-merge                    # AI commit then merge into main
 ```
 
-### Other
+### Workspace Setup
 ```
-k2so agents create <name> --role "..."   # Create a new agent
+k2so mode                               # Show current settings
+k2so mode <off|agent|pod>               # Set workspace agent mode
+k2so worktree <on|off>                  # Enable/disable worktree mode
+k2so heartbeat <on|off>                 # Enable/disable automatic heartbeat
+k2so heartbeat                          # Trigger triage manually (no on/off)
+k2so settings                           # Show all workspace settings
+```
+
+### Agent Management
+```
+k2so agents create <name> --role "..."  # Create a new agent
+k2so agents list                        # List all agents with work counts
 k2so agents profile <name>              # Read agent's identity
-k2so work move --agent <name> --file <f> --from inbox --to active
+k2so agents work <name>                 # Show agent's work items
+k2so agents launch <name>              # Launch agent's Claude session
+```
+
+### Cross-Workspace
+```
 k2so work send --workspace <path> --title "..." --body "..."
-k2so heartbeat                          # Trigger triage manually
+k2so work move --agent <name> --file <f> --from inbox --to active
 ```
 
 "#;
