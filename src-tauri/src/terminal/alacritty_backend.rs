@@ -345,13 +345,14 @@ impl TerminalManager {
 
         // K2SO CLI: add cli/ directory to PATH so agents can call `k2so` commands
         // Search order:
-        //   1. Bundled resources: K2SO.app/Contents/Resources/cli/ (production)
+        //   1. Bundled resources: K2SO.app/Contents/Resources/_up_/cli/ (production)
         //   2. Repo root: ../../cli/ relative to binary (development)
         if let Ok(exe_path) = std::env::current_exe() {
             let cli_dir = if let Some(macos_dir) = exe_path.parent() {
-                // Production: K2SO.app/Contents/MacOS/k2so → Contents/Resources/cli/
+                // Production: K2SO.app/Contents/MacOS/k2so → Contents/Resources/_up_/cli/
+                // Tauri puts "../cli/*" resources under Resources/_up_/cli/
                 let resources_cli = macos_dir.parent()
-                    .map(|contents| contents.join("Resources").join("cli"));
+                    .map(|contents| contents.join("Resources").join("_up_").join("cli"));
                 if resources_cli.as_ref().map_or(false, |p| p.exists()) {
                     resources_cli
                 } else {

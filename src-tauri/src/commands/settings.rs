@@ -273,9 +273,10 @@ fn find_cli_script() -> Option<PathBuf> {
     let exe_path = std::env::current_exe().ok()?;
     let macos_dir = exe_path.parent()?;
 
-    // Production: K2SO.app/Contents/MacOS/k2so → Contents/Resources/cli/k2so
+    // Production: K2SO.app/Contents/MacOS/k2so → Contents/Resources/_up_/cli/k2so
+    // Tauri puts "../cli/*" resources under Resources/_up_/cli/
     let resources_cli = macos_dir.parent()
-        .map(|contents| contents.join("Resources").join("cli").join("k2so"));
+        .map(|contents| contents.join("Resources").join("_up_").join("cli").join("k2so"));
     if let Some(ref p) = resources_cli {
         if p.exists() { return resources_cli; }
     }
