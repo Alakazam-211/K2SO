@@ -1,18 +1,30 @@
 #!/bin/bash
 # K2SO CLI — Agent interface to K2SO workspace orchestration
 # This script communicates with K2SO's running instance via HTTP.
-# Agents and users call this from terminal sessions within K2SO.
+# Works inside K2SO terminals (auto-configured) and external terminals
+# (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
 set -euo pipefail
 
 # Connection details (set by K2SO when creating terminal sessions)
+# Falls back to ~/.k2so/heartbeat.{port,token} for external terminals
 PORT="${K2SO_PORT:-}"
 TOKEN="${K2SO_HOOK_TOKEN:-}"
 PROJECT="${K2SO_PROJECT_PATH:-$(pwd)}"
 
+# Auto-discover connection from ~/.k2so/ if not in a K2SO terminal
 if [ -z "$PORT" ] || [ -z "$TOKEN" ]; then
-    echo "Error: Not running inside a K2SO terminal session." >&2
-    echo "K2SO_PORT and K2SO_HOOK_TOKEN must be set." >&2
+    K2SO_HOME="${HOME}/.k2so"
+    if [ -f "${K2SO_HOME}/heartbeat.port" ] && [ -f "${K2SO_HOME}/heartbeat.token" ]; then
+        PORT="${PORT:-$(cat "${K2SO_HOME}/heartbeat.port" 2>/dev/null)}"
+        TOKEN="${TOKEN:-$(cat "${K2SO_HOME}/heartbeat.token" 2>/dev/null)}"
+    fi
+fi
+
+if [ -z "$PORT" ] || [ -z "$TOKEN" ]; then
+    echo "Error: Cannot connect to K2SO." >&2
+    echo "Either run this from a K2SO terminal, or ensure K2SO is running." >&2
+    echo "(Connection details: ~/.k2so/heartbeat.port and ~/.k2so/heartbeat.token)" >&2
     exit 1
 fi
 

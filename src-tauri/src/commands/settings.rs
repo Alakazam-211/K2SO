@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter};
 
 // ── Settings types ──────────────────────────────────────────────────────
@@ -264,4 +264,139 @@ pub fn settings_reset(app: AppHandle) -> Result<AppSettings, String> {
     write_settings(&defaults);
     let _ = app.emit("sync:settings", ());
     Ok(defaults)
+}
+
+// ── CLI Install ────────────────────────────────────────────────────────
+
+/// Find the bundled cli/k2so script (production or development).
+fn find_cli_script() -> Option<PathBuf> {
+    let exe_path = std::env::current_exe().ok()?;
+    let macos_dir = exe_path.parent()?;
+
+    // Production: K2SO.app/Contents/MacOS/k2so → Contents/Resources/cli/k2so
+    let resources_cli = macos_dir.parent()
+        .map(|contents| contents.join("Resources").join("cli").join("k2so"));
+    if let Some(ref p) = resources_cli {
+        if p.exists() { return resources_cli; }
+    }
+
+    // Development: target/debug/k2so → ../../cli/k2so
+    let dev_cli = macos_dir.parent()
+        .and_then(|p| p.parent())
+        .map(|repo| repo.join("cli").join("k2so"));
+    if let Some(ref p) = dev_cli {
+        if p.exists() { return dev_cli; }
+    }
+
+    None
+}
+
+const CLI_SYMLINK_PATH: &str = "/usr/local/bin/k2so";
+
+#[tauri::command]
+pub fn cli_install_status() -> Result<serde_json::Value, String> {
+    let symlink_path = Path::new(CLI_SYMLINK_PATH);
+    let installed = symlink_path.exists() || symlink_path.is_symlink();
+    let target = if installed {
+        fs::read_link(symlink_path).ok().map(|p| p.to_string_lossy().to_string())
+    } else {
+        None
+    };
+    let bundled = find_cli_script().map(|p| p.to_string_lossy().to_string());
+
+    Ok(serde_json::json!({
+        "installed": installed,
+        "symlinkPath": CLI_SYMLINK_PATH,
+        "target": target,
+        "bundledPath": bundled,
+    }))
+}
+
+#[tauri::command]
+pub fn cli_install() -> Result<String, String> {
+    let cli_script = find_cli_script()
+        .ok_or_else(|| "CLI script not found in app bundle".to_string())?;
+
+    // Ensure the script is executable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&cli_script, fs::Permissions::from_mode(0o755));
+    }
+
+    let symlink_path = Path::new(CLI_SYMLINK_PATH);
+
+    // Check if /usr/local/bin exists and is writable
+    let bin_dir = symlink_path.parent().unwrap();
+    if !bin_dir.exists() {
+        // Try to create /usr/local/bin via osascript (prompts for password)
+        let output = std::process::Command::new("osascript")
+            .args(["-e", &format!(
+                "do shell script \"mkdir -p {}\" with administrator privileges",
+                bin_dir.display()
+            )])
+            .output()
+            .map_err(|e| format!("Failed to create {}: {}", bin_dir.display(), e))?;
+        if !output.status.success() {
+            return Err(format!("Failed to create {}: {}", bin_dir.display(),
+                String::from_utf8_lossy(&output.stderr)));
+        }
+    }
+
+    // Try direct symlink first (works if user owns /usr/local/bin)
+    let _ = fs::remove_file(symlink_path);
+    #[cfg(unix)]
+    {
+        if std::os::unix::fs::symlink(&cli_script, symlink_path).is_ok() {
+            return Ok(CLI_SYMLINK_PATH.to_string());
+        }
+    }
+
+    // Fall back to osascript with admin privileges
+    let script = format!(
+        "do shell script \"ln -sf '{}' '{}'\" with administrator privileges",
+        cli_script.display(),
+        CLI_SYMLINK_PATH
+    );
+    let output = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .map_err(|e| format!("Failed to create symlink: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!("Failed to install CLI: {}",
+            String::from_utf8_lossy(&output.stderr)));
+    }
+
+    Ok(CLI_SYMLINK_PATH.to_string())
+}
+
+#[tauri::command]
+pub fn cli_uninstall() -> Result<(), String> {
+    let symlink_path = Path::new(CLI_SYMLINK_PATH);
+    if !symlink_path.exists() && !symlink_path.is_symlink() {
+        return Ok(());
+    }
+
+    // Try direct remove first
+    if fs::remove_file(symlink_path).is_ok() {
+        return Ok(());
+    }
+
+    // Fall back to osascript with admin privileges
+    let script = format!(
+        "do shell script \"rm -f '{}'\" with administrator privileges",
+        CLI_SYMLINK_PATH
+    );
+    let output = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .map_err(|e| format!("Failed to remove symlink: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!("Failed to uninstall CLI: {}",
+            String::from_utf8_lossy(&output.stderr)));
+    }
+
+    Ok(())
 }

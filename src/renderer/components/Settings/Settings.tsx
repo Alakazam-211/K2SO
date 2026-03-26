@@ -990,6 +990,111 @@ const CLI_INSTALL_ENTRIES: {
   }
 ]
 
+function K2SOCLIInstall(): React.JSX.Element {
+  const [status, setStatus] = useState<{
+    installed: boolean
+    symlinkPath: string
+    target: string | null
+    bundledPath: string | null
+  } | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  const checkStatus = useCallback(async () => {
+    try {
+      const result = await invoke<{
+        installed: boolean
+        symlinkPath: string
+        target: string | null
+        bundledPath: string | null
+      }>('cli_install_status')
+      setStatus(result)
+    } catch {
+      // silently fail
+    }
+  }, [])
+
+  useEffect(() => { checkStatus() }, [checkStatus])
+
+  const handleInstall = useCallback(async () => {
+    setLoading(true)
+    try {
+      await invoke('cli_install')
+      await checkStatus()
+    } catch (err) {
+      console.error('[cli] install failed:', err)
+    } finally {
+      setLoading(false)
+    }
+  }, [checkStatus])
+
+  const handleUninstall = useCallback(async () => {
+    setLoading(true)
+    try {
+      await invoke('cli_uninstall')
+      await checkStatus()
+    } catch (err) {
+      console.error('[cli] uninstall failed:', err)
+    } finally {
+      setLoading(false)
+    }
+  }, [checkStatus])
+
+  return (
+    <div className="border-t border-[var(--color-border)] pt-4 mb-4">
+      <h3 className="text-xs font-medium text-[var(--color-text-secondary)] mb-3 uppercase tracking-wider">
+        K2SO CLI
+      </h3>
+      <div className="space-y-3">
+        <p className="text-xs text-[var(--color-text-muted)] leading-relaxed">
+          Install the <span className="font-mono text-[var(--color-text-secondary)]">k2so</span> command
+          to use it from any terminal — not just terminals inside K2SO.
+        </p>
+
+        <div className="flex items-center gap-3">
+          {status?.installed ? (
+            <>
+              <div className="flex items-center gap-2 flex-1 min-w-0">
+                <div className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" />
+                <span className="text-xs text-[var(--color-text-secondary)]">Installed</span>
+                <span className="text-[10px] font-mono text-[var(--color-text-muted)] truncate">
+                  {status.symlinkPath}
+                </span>
+              </div>
+              <button
+                onClick={handleUninstall}
+                disabled={loading}
+                className="flex-shrink-0 px-3 py-1.5 text-[11px] border border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors no-drag cursor-pointer disabled:opacity-50"
+              >
+                {loading ? 'Removing...' : 'Uninstall'}
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="flex items-center gap-2 flex-1 min-w-0">
+                <div className="w-2 h-2 rounded-full bg-[var(--color-text-muted)] opacity-40 flex-shrink-0" />
+                <span className="text-xs text-[var(--color-text-muted)]">Not installed</span>
+              </div>
+              <button
+                onClick={handleInstall}
+                disabled={loading || !status?.bundledPath}
+                className="flex-shrink-0 px-3 py-1.5 text-[11px] bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity no-drag cursor-pointer disabled:opacity-50"
+              >
+                {loading ? 'Installing...' : 'Install k2so to PATH'}
+              </button>
+            </>
+          )}
+        </div>
+
+        {status?.installed && status?.target && (
+          <p className="text-[10px] text-[var(--color-text-muted)] font-mono">
+            {status.symlinkPath} → {status.target}
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function CLIInstallGuide(): React.JSX.Element {
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null)
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
@@ -4054,6 +4159,9 @@ function AIAssistantSection(): React.JSX.Element {
         </p>
       </div>
 
+      {/* ── K2SO CLI ── */}
+      <K2SOCLIInstall />
+
       {/* ── Using Claude with K2SO ── */}
       <div className="border-t border-[var(--color-border)] pt-4">
         <h3 className="text-xs font-medium text-[var(--color-text-secondary)] mb-3 uppercase tracking-wider">
@@ -4075,9 +4183,10 @@ function AIAssistantSection(): React.JSX.Element {
           </div>
 
           <div>
-            <p className="text-[var(--color-text-secondary)] font-medium mb-1">Option 2: Manual Setup</p>
+            <p className="text-[var(--color-text-secondary)] font-medium mb-1">Option 2: External Terminal</p>
             <p>
-              If you prefer to use Claude CLI directly from your own terminal, you can teach it about K2SO by
+              Install the K2SO CLI above, then use <span className="font-mono text-[var(--color-text-secondary)]">k2so</span> from
+              any terminal while K2SO is running. You can also teach Claude about K2SO by
               adding the CLI reference to your project's <span className="font-mono text-[var(--color-text-secondary)]">CLAUDE.md</span> file.
               The key commands:
             </p>

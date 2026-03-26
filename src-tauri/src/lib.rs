@@ -153,6 +153,21 @@ pub fn run() {
                             let port_file = home.join(".k2so/heartbeat.port");
                             let _ = std::fs::remove_file(&port_file);
                         }
+
+                        // Force-drop the LLM model to release Metal/GPU resources.
+                        if let Some(state) = app_handle.try_state::<AppState>() {
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                let mut manager = state.llm_manager.lock();
+                                manager.unload();
+                            }));
+                        }
+
+                        // Use _exit() to skip C++ static destructors (ggml_metal).
+                        // Without this, __cxa_finalize_ranges runs ggml's Metal cleanup
+                        // which races against macOS Metal device teardown → SIGABRT.
+                        // All important cleanup (window state, terminals, LLM, port file)
+                        // is already done above.
+                        unsafe { libc::_exit(0); }
                     }
                 });
             }
@@ -321,6 +336,9 @@ pub fn run() {
             commands::settings::settings_get,
             commands::settings::settings_update,
             commands::settings::settings_reset,
+            commands::settings::cli_install_status,
+            commands::settings::cli_install,
+            commands::settings::cli_uninstall,
             // Project Config
             commands::project_config::project_config_get,
             commands::project_config::project_config_has_run_command,

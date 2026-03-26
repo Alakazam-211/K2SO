@@ -344,18 +344,32 @@ impl TerminalManager {
         }
 
         // K2SO CLI: add cli/ directory to PATH so agents can call `k2so` commands
+        // Search order:
+        //   1. Bundled resources: K2SO.app/Contents/Resources/cli/ (production)
+        //   2. Repo root: ../../cli/ relative to binary (development)
         if let Ok(exe_path) = std::env::current_exe() {
-            // The CLI script lives at <app-bundle>/cli/ or <repo>/cli/
-            // Try: next to the binary's grandparent (repo root or app bundle)
-            if let Some(app_dir) = exe_path.parent().and_then(|p| p.parent()) {
-                let cli_dir = app_dir.join("cli");
-                if cli_dir.exists() {
-                    let existing_path = std::env::var("PATH").unwrap_or_default();
-                    pty_options.env.insert(
-                        "PATH".to_string(),
-                        format!("{}:{}", cli_dir.to_string_lossy(), existing_path),
-                    );
+            let cli_dir = if let Some(macos_dir) = exe_path.parent() {
+                // Production: K2SO.app/Contents/MacOS/k2so → Contents/Resources/cli/
+                let resources_cli = macos_dir.parent()
+                    .map(|contents| contents.join("Resources").join("cli"));
+                if resources_cli.as_ref().map_or(false, |p| p.exists()) {
+                    resources_cli
+                } else {
+                    // Development: target/debug/k2so → ../../cli/
+                    macos_dir.parent().and_then(|p| p.parent())
+                        .map(|repo| repo.join("cli"))
+                        .filter(|p| p.exists())
                 }
+            } else {
+                None
+            };
+
+            if let Some(cli_dir) = cli_dir {
+                let existing_path = std::env::var("PATH").unwrap_or_default();
+                pty_options.env.insert(
+                    "PATH".to_string(),
+                    format!("{}:{}", cli_dir.to_string_lossy(), existing_path),
+                );
             }
         }
 
