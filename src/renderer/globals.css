@@ -1,4 +1,8 @@
-@import "tailwindcss";
+@import "tailwindcss" layer(tw);
+
+/* Place ALL Tailwind output into a named layer so unlayered styles         */
+/* (our CodeMirror overrides below) always take precedence, even in         */
+/* production builds where CSS order can differ from source order.          */
 
 /* System font for modifier key symbols (⌘⇧⌥⌃↵) — renders crisp Apple glyphs */
 .key-symbol {
@@ -64,22 +68,72 @@ a,
 }
 
 /* ── CodeMirror overrides ────────────────────────────────────────────── */
-/* Tailwind v4 preflight resets padding/margin on all elements which can */
-/* break CodeMirror's internal layout. Restore critical properties.      */
+/* Tailwind v4 preflight resets color, padding, margin, white-space on   */
+/* ALL elements via @layer base. These !important rules restore the       */
+/* critical properties CodeMirror needs to render text.                   */
 .cm-editor {
-  color: #e4e4e7;
+  color: #e4e4e7 !important;
+  position: relative !important;
 }
 .cm-editor .cm-content {
-  white-space: pre-wrap;
-  word-break: break-word;
+  white-space: pre-wrap !important;
+  word-break: break-word !important;
+  color: #e4e4e7 !important;
+  display: block !important;
+  min-height: 100% !important;
+}
+.cm-editor .cm-content[contenteditable] {
+  -webkit-user-modify: read-write-plaintext-only !important;
 }
 .cm-editor .cm-line {
-  padding: 0 2px 0 4px;
+  padding: 0 2px 0 4px !important;
+  display: block !important;
+  color: inherit !important;
+}
+.cm-editor .cm-line span {
+  color: inherit;
 }
 .cm-editor .cm-scroller {
-  overflow: auto;
-  font-family: 'MesloLGM Nerd Font', Menlo, Monaco, 'Courier New', monospace;
-  line-height: 1.6;
+  overflow: auto !important;
+  font-family: 'MesloLGM Nerd Font', Menlo, Monaco, 'Courier New', monospace !important;
+  line-height: 1.6 !important;
+  display: flex !important;
+  position: relative !important;
+  align-items: flex-start !important;
+}
+.cm-editor .cm-gutters {
+  display: flex !important;
+  flex-shrink: 0 !important;
+  position: sticky !important;
+  left: 0 !important;
+  z-index: 200 !important;
+}
+.cm-editor .cm-gutter {
+  display: flex !important;
+  flex-direction: column !important;
+}
+.cm-editor .cm-gutterElement {
+  display: block !important;
+}
+/* Ensure syntax highlighting colors are not stripped */
+.cm-editor .cm-line .ͼ1,
+.cm-editor .cm-line .ͼ2,
+.cm-editor .cm-line .ͼ3,
+.cm-editor .cm-line .ͼ4,
+.cm-editor .cm-line .ͼ5,
+.cm-editor .cm-line .ͼ6,
+.cm-editor .cm-line .ͼ7,
+.cm-editor .cm-line .ͼ8,
+.cm-editor .cm-line .ͼ9,
+.cm-editor .cm-line [class^="ͼ"] {
+  color: inherit !important;
+}
+/* CodeMirror panels (search, vim status) */
+.cm-editor .cm-panels {
+  display: block !important;
+}
+.cm-editor .cm-panel {
+  display: block !important;
 }
 .cm-editor .cm-scroller::-webkit-scrollbar {
   width: 8px;
