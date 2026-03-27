@@ -131,6 +131,7 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
   const [searchVisible, setSearchVisible] = useState(false)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
+  const editorContainerRef = useRef<HTMLDivElement>(null)
 
   const fileName = getFileName(filePath)
   const shortPath = getShortPath(filePath)
@@ -364,15 +365,23 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
 
         <div className="flex-1" />
 
-        {/* Search toggle */}
+        {/* Search toggle — in edit mode, opens CodeMirror's built-in search panel */}
         <button
           className={`p-1 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors ${searchVisible ? 'text-[var(--color-accent)]' : ''}`}
           onClick={() => {
-            setSearchVisible(!searchVisible)
-            if (!searchVisible) {
-              requestAnimationFrame(() => searchInputRef.current?.focus())
+            if (viewMode === 'edit') {
+              // Dispatch Cmd+F into the CodeMirror editor to open its search panel
+              const cmEl = editorContainerRef.current?.querySelector('.cm-editor')
+              if (cmEl) {
+                cmEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true }))
+              }
             } else {
-              setSearchQuery('')
+              setSearchVisible(!searchVisible)
+              if (!searchVisible) {
+                requestAnimationFrame(() => searchInputRef.current?.focus())
+              } else {
+                setSearchQuery('')
+              }
             }
           }}
           title="Search (Cmd+F)"
@@ -476,8 +485,8 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
         )}
       </div>
 
-      {/* Search bar */}
-      {searchVisible && (
+      {/* Search bar (rendered/preview mode only — edit mode uses CodeMirror's built-in search) */}
+      {searchVisible && viewMode !== 'edit' && (
         <div className="flex items-center gap-2 border-b border-[var(--color-border)] bg-[#111111] px-3 py-1.5 flex-shrink-0">
           <svg className="w-3 h-3 text-[var(--color-text-muted)] flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
             <circle cx="11" cy="11" r="8" />
@@ -556,7 +565,7 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
         </div>
       ) : (
         <>
-          <div className="flex-1 overflow-hidden">
+          <div className="flex-1 overflow-hidden" ref={editorContainerRef}>
             <CodeEditor
               code={editedContent ?? content}
               filePath={filePath}

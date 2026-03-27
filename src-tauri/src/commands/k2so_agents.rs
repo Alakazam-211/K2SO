@@ -18,6 +18,8 @@ pub struct K2soAgentInfo {
     pub active_count: usize,
     pub done_count: usize,
     pub pod_leader: bool,
+    /// Agent type: "k2so", "custom", "pod-leader", "pod-member"
+    pub agent_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,14 +137,18 @@ pub fn k2so_agents_list(project_path: String) -> Result<Vec<K2soAgentInfo>, Stri
         let name = entry.file_name().to_string_lossy().to_string();
         let agent_md = entry.path().join("agent.md");
 
-        let (role, is_pod_leader) = if agent_md.exists() {
+        let (role, is_pod_leader, agent_type) = if agent_md.exists() {
             let content = fs::read_to_string(&agent_md).unwrap_or_default();
             let fm = parse_frontmatter(&content);
             let role = fm.get("role").cloned().unwrap_or_default();
             let is_leader = fm.get("pod_leader").map(|v| v == "true").unwrap_or(false);
-            (role, is_leader)
+            let agent_type = fm.get("type").cloned().unwrap_or_else(|| {
+                // Infer type from existing agents that predate the type field
+                if is_leader { "pod-leader".to_string() } else { "pod-member".to_string() }
+            });
+            (role, is_leader, agent_type)
         } else {
-            (String::new(), false)
+            (String::new(), false, "pod-member".to_string())
         };
 
         let inbox_count = count_md_files(&agent_work_dir(&project_path, &name, "inbox"));
@@ -156,6 +162,7 @@ pub fn k2so_agents_list(project_path: String) -> Result<Vec<K2soAgentInfo>, Stri
             active_count,
             done_count,
             pod_leader: is_pod_leader,
+            agent_type,
         });
     }
 
@@ -164,12 +171,14 @@ pub fn k2so_agents_list(project_path: String) -> Result<Vec<K2soAgentInfo>, Stri
 }
 
 /// Create a new K2SO agent with directory structure.
+/// `agent_type` can be: "k2so", "custom", "pod-leader", "pod-member" (defaults to "pod-member").
 #[tauri::command]
 pub fn k2so_agents_create(
     project_path: String,
     name: String,
     role: String,
     prompt: Option<String>,
+    agent_type: Option<String>,
 ) -> Result<K2soAgentInfo, String> {
     if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
         return Err("Agent name must be alphanumeric (hyphens and underscores allowed)".to_string());
@@ -180,6 +189,9 @@ pub fn k2so_agents_create(
         return Err(format!("Agent '{}' already exists", name));
     }
 
+    let agent_type = agent_type.unwrap_or_else(|| "pod-member".to_string());
+    let is_pod_leader = agent_type == "pod-leader";
+
     fs::create_dir_all(agent_work_dir(&project_path, &name, "inbox"))
         .map_err(|e| format!("Failed to create inbox: {}", e))?;
     fs::create_dir_all(agent_work_dir(&project_path, &name, "active"))
@@ -189,10 +201,13 @@ pub fn k2so_agents_create(
     let _ = fs::create_dir_all(workspace_inbox_dir(&project_path));
 
     let agent_md = dir.join("agent.md");
+    let mut frontmatter = format!("name: {}\nrole: {}\ntype: {}", name, role, agent_type);
+    if is_pod_leader {
+        frontmatter.push_str("\npod_leader: true");
+    }
     let content = format!(
-        "---\nname: {}\nrole: {}\n---\n\n{}\n",
-        name,
-        role,
+        "---\n{}\n---\n\n{}\n",
+        frontmatter,
         prompt.unwrap_or_default()
     );
     fs::write(&agent_md, content).map_err(|e| format!("Failed to write agent.md: {}", e))?;
@@ -203,7 +218,8 @@ pub fn k2so_agents_create(
         inbox_count: 0,
         active_count: 0,
         done_count: 0,
-        pod_leader: false,
+        pod_leader: is_pod_leader,
+        agent_type,
     })
 }
 
@@ -706,6 +722,16 @@ fn log_agent_warning(project_path: &str, agent_name: &str, message: &str) {
     }
 }
 
+/// Strip YAML frontmatter (--- delimited) from markdown content, returning just the body.
+fn strip_frontmatter(content: &str) -> String {
+    if content.starts_with("---") {
+        if let Some(end) = content[3..].find("---") {
+            return content[3 + end + 3..].trim().to_string();
+        }
+    }
+    content.trim().to_string()
+}
+
 /// Generate the CLAUDE.md content for an agent, optionally focused on a specific task.
 fn generate_agent_claude_md_content(
     project_path: &str,
@@ -722,16 +748,25 @@ fn generate_agent_claude_md_content(
     let agent_md = fs::read_to_string(&agent_md_path).unwrap_or_default();
     let fm = parse_frontmatter(&agent_md);
     let role = fm.get("role").cloned().unwrap_or("AI Agent".to_string());
+    let agent_type = fm.get("type").cloned().unwrap_or("pod-member".to_string());
+    let is_custom = agent_type == "custom";
 
-    let agent_body = if agent_md.starts_with("---") {
-        if let Some(end) = agent_md[3..].find("---") {
-            agent_md[3 + end + 3..].trim().to_string()
-        } else {
-            agent_md.clone()
+    let agent_body = strip_frontmatter(&agent_md);
+
+    let mut md = String::new();
+
+    if is_custom {
+        // ── Custom Agent: agent.md body only (no K2SO infrastructure) ──
+        md.push_str(&format!("# {}\n\n", agent_name));
+        md.push_str(&format!("**Role:** {}\n\n", role));
+        if !agent_body.is_empty() {
+            md.push_str(&format!("{}\n\n", agent_body));
         }
-    } else {
-        agent_md.clone()
-    };
+
+        return Ok(md);
+    }
+
+    // ── K2SO / Pod agents: full infrastructure CLAUDE.md ───────────────
 
     // List other agents for delegation awareness
     let mut other_agents = Vec::new();
@@ -757,7 +792,6 @@ fn generate_agent_claude_md_content(
         }
     }
 
-    let mut md = String::new();
     md.push_str(&format!("# K2SO Agent: {}\n\n", agent_name));
     md.push_str(&format!("## Identity\n**Role:** {}\n\n", role));
     if !agent_body.is_empty() {
@@ -834,7 +868,7 @@ pub fn k2so_agents_generate_workspace_claude_md(
         let _ = fs::create_dir_all(pod_leader_dir.join("work").join("active"));
         let _ = fs::create_dir_all(pod_leader_dir.join("work").join("done"));
         let pod_leader_md = format!(
-            "---\nname: pod-leader\nrole: Pod orchestrator — delegates work to agents, reviews completed branches, drives milestones\npod_leader: true\n---\n\nYou are the pod leader for the {} workspace.\n",
+            "---\nname: pod-leader\nrole: Pod orchestrator — delegates work to agents, reviews completed branches, drives milestones\ntype: pod-leader\npod_leader: true\n---\n\nYou are the pod leader for the {} workspace.\n",
             project_name
         );
         let _ = fs::write(pod_leader_dir.join("agent.md"), &pod_leader_md);
@@ -1979,4 +2013,85 @@ fn update_assigned_by(content: &str, new_value: &str) -> String {
         }
     }
     content.to_string()
+}
+
+// ── Agent Editor ───────────────────────────────────────────────────────
+
+/// Get full context needed for the AIFileEditor agent editing session.
+#[tauri::command]
+pub fn k2so_agents_get_editor_context(
+    project_path: String,
+    agent_name: String,
+) -> Result<serde_json::Value, String> {
+    let dir = agent_dir(&project_path, &agent_name);
+    if !dir.exists() {
+        return Err(format!("Agent '{}' does not exist", agent_name));
+    }
+
+    let agent_md = fs::read_to_string(dir.join("agent.md")).unwrap_or_default();
+    let fm = parse_frontmatter(&agent_md);
+    let is_pod_leader = fm.get("pod_leader").map_or(false, |v| v == "true");
+    let role = fm.get("role").cloned().unwrap_or_default();
+    let agent_type = fm.get("type").cloned().unwrap_or("pod-member".to_string());
+
+    Ok(serde_json::json!({
+        "agentName": agent_name,
+        "role": role,
+        "agentType": agent_type,
+        "isPodLeader": is_pod_leader,
+        "agentMd": agent_md,
+        "agentMdPath": dir.join("agent.md").to_string_lossy(),
+        "agentDir": dir.to_string_lossy(),
+    }))
+}
+
+/// Save an agent's agent.md file, creating a timestamped backup of the previous version.
+#[tauri::command]
+pub fn k2so_agents_save_agent_md(
+    project_path: String,
+    agent_name: String,
+    content: String,
+) -> Result<(), String> {
+    let dir = agent_dir(&project_path, &agent_name);
+    if !dir.exists() {
+        return Err(format!("Agent '{}' does not exist", agent_name));
+    }
+
+    let agent_md_path = dir.join("agent.md");
+
+    // Back up existing agent.md before overwriting
+    if agent_md_path.exists() {
+        let backup_dir = dir.join("agent-backups");
+        fs::create_dir_all(&backup_dir).ok();
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let backup_name = format!("agent-{}.md", timestamp);
+        let existing = fs::read_to_string(&agent_md_path).unwrap_or_default();
+        fs::write(backup_dir.join(&backup_name), &existing).ok();
+
+        // Keep only the 20 most recent backups
+        cleanup_agent_backups(&backup_dir, 20);
+    }
+
+    fs::write(&agent_md_path, &content).map_err(|e| e.to_string())
+}
+
+/// Remove oldest backups, keeping only the most recent `keep` files.
+fn cleanup_agent_backups(backup_dir: &std::path::Path, keep: usize) {
+    if let Ok(entries) = fs::read_dir(backup_dir) {
+        let mut files: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().map_or(false, |ext| ext == "md"))
+            .collect();
+        files.sort();
+        if files.len() > keep {
+            for old in &files[..files.len() - keep] {
+                fs::remove_file(old).ok();
+            }
+        }
+    }
 }

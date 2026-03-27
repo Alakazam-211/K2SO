@@ -25,6 +25,9 @@ import DisableWorktreesDialog from './DisableWorktreesDialog'
 import { showContextMenu } from '@/lib/context-menu'
 import AgentIcon from '@/components/AgentIcon/AgentIcon'
 import { EDITOR_THEMES, EDITOR_FONTS, CodeEditor } from '@/components/FileViewerPane/CodeEditor'
+import { CustomThemeCreator } from './CustomThemeCreator'
+import { AgentPersonaEditor } from '@/components/AgentPersonaEditor/AgentPersonaEditor'
+import { useCustomThemesStore } from '@/stores/custom-themes'
 import { KeyCombo } from '@/components/KeySymbol'
 import { useClaudeAuthStore } from '@/stores/claude-auth'
 import type { ClaudeAuthState } from '@/stores/claude-auth'
@@ -143,7 +146,7 @@ export default function Settings(): React.JSX.Element {
       </div>
 
       {/* Content area */}
-      <div className={`flex-1 min-h-0 ${activeSection === 'projects' ? 'overflow-hidden p-0' : 'overflow-y-auto p-6'}`}>
+      <div className={`flex-1 min-h-0 relative ${activeSection === 'projects' ? 'overflow-hidden p-0' : 'overflow-y-auto p-6'}`}>
         {activeSection === 'general' && <GeneralSection />}
         {activeSection === 'terminal' && <TerminalSection />}
         {activeSection === 'code-editor' && <CodeEditorSettingsSection />}
@@ -916,21 +919,56 @@ function EditorsAgentsSection(): React.JSX.Element {
 function CodeEditorSettingsSection(): React.JSX.Element {
   const editor = useSettingsStore((s) => s.editor)
   const updateEditorSettings = useSettingsStore((s) => s.updateEditorSettings)
+  const customThemes = useCustomThemesStore((s) => s.customThemes)
+  const creatorOpen = useCustomThemesStore((s) => s.creatorOpen)
+  const openCreator = useCustomThemesStore((s) => s.openCreator)
+  const closeCreatorStore = useCustomThemesStore((s) => s.closeCreator)
+  const [showCreator, setShowCreator] = useState(false)
+  const [editingThemePath, setEditingThemePath] = useState<string | undefined>(undefined)
+  const [showThemeManager, setShowThemeManager] = useState(false)
+  const isCustomTheme = editor.theme.startsWith('custom:')
+  const deleteCustomTheme = useCustomThemesStore((s) => s.deleteCustomTheme)
 
-  const toggleRow = (label: string, description: string, key: keyof typeof editor, isLast = false) => (
-    <div key={key} className={`flex items-center justify-between px-3 py-2.5 ${!isLast ? 'border-b border-[var(--color-border)]' : ''}`}>
+  const LIGATURE_FONTS = new Set(['Fira Code', 'JetBrains Mono', 'Lilex'])
+  const fontSupportsLigatures = LIGATURE_FONTS.has(editor.fontFamily)
+
+  // Build combined theme list: built-in + custom
+  const allThemeOptions = useMemo(() => {
+    const builtIn = EDITOR_THEMES.map(t => ({ value: t.id, label: t.label }))
+    const custom = customThemes.map(t => ({ value: t.id, label: `${t.name}` }))
+    if (custom.length > 0) {
+      return [...builtIn, { value: '__divider__', label: '── Custom ──' }, ...custom]
+    }
+    return builtIn
+  }, [customThemes])
+
+  // Open creator for an existing custom theme
+  const handleCustomize = useCallback(() => {
+    const theme = customThemes.find((t) => t.id === editor.theme)
+    setEditingThemePath(theme?.path)
+    setShowCreator(true)
+  }, [customThemes, editor.theme])
+
+  // Open creator for a brand new theme
+  const handleNewTheme = useCallback(() => {
+    setEditingThemePath(undefined)
+    setShowCreator(true)
+  }, [])
+
+  const toggleRow = (label: string, description: string, key: keyof typeof editor, isLast = false, disabled = false) => (
+    <div key={key} className={`flex items-center justify-between px-3 py-2.5 ${!isLast ? 'border-b border-[var(--color-border)]' : ''} ${disabled ? 'opacity-40' : ''}`}>
       <div>
         <div className="text-xs text-[var(--color-text-secondary)]">{label}</div>
         <div className="text-[10px] text-[var(--color-text-muted)] mt-0.5">{description}</div>
       </div>
       <button
-        onClick={() => updateEditorSettings({ [key]: !editor[key] })}
-        className={`w-7 h-3.5 flex items-center transition-colors no-drag cursor-pointer flex-shrink-0 ${
-          editor[key] ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
+        onClick={() => { if (!disabled) updateEditorSettings({ [key]: !editor[key] }) }}
+        className={`w-7 h-3.5 flex items-center transition-colors flex-shrink-0 ${disabled ? 'cursor-default' : 'no-drag cursor-pointer'} ${
+          editor[key] && !disabled ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
         }`}
       >
         <span className={`w-2.5 h-2.5 bg-white block transition-transform ${
-          editor[key] ? 'translate-x-3.5' : 'translate-x-0.5'
+          editor[key] && !disabled ? 'translate-x-3.5' : 'translate-x-0.5'
         }`} />
       </button>
     </div>
@@ -946,86 +984,146 @@ function CodeEditorSettingsSection(): React.JSX.Element {
     </div>
   )
 
-  // Sample code for the live preview
-  const previewCode = `import { useState, useEffect } from 'react'
+  // Sample code for the live preview — K2SO coding in a galaxy far, far away
+  const previewCode = `import { useState, useEffect, useCallback } from 'react'
 
-interface CounterProps {
-  name: string
-  initialCount?: number
-  onCountChange?: (count: number) => void
+// K2SO Security Droid — Imperial Data Vault Access Module
+// "I find that answer vague and unconvincing." — K2SO
+
+interface SecurityProtocol {
+  clearanceLevel: 'rebel' | 'imperial' | 'classified'
+  accessCode: string
+  probabilityOfSuccess: number
+  isStealthMode?: boolean
 }
 
-export function Counter({ name, initialCount = 0, onCountChange }: CounterProps) {
-  const [value, setValue] = useState(initialCount)
-  const [history, setHistory] = useState<number[]>([])
+type MissionStatus = 'infiltrating' | 'compromised' | 'success' | 'told-you-so'
 
-  // Sync count changes to parent
-  useEffect(() => {
-    onCountChange?.(value)
-  }, [value, onCountChange])
+/**
+ * Calculates the survival odds for a given mission.
+ * Spoiler: they're never good enough for K2SO's standards.
+ */
+export function calculateSurvivalOdds(
+  crew: string[],
+  hasForceSensitive: boolean,
+  imperialPresence: number
+): { odds: number; commentary: string } {
+  const baseOdds = 100 - (imperialPresence * 12.7)
+  const crewBonus = crew.length * 3.2
+  const forceMultiplier = hasForceSensitive ? 1.47 : 0.89
 
-  const increment = () => {
-    setHistory((prev) => [...prev, value])
-    setValue((prev) => prev + 1)
-  }
-
-  const decrement = () => {
-    setHistory((prev) => [...prev, value])
-    setValue((prev) => Math.max(0, prev - 1))
-  }
-
-  const reset = () => {
-    setHistory((prev) => [...prev, value])
-    setValue(initialCount)
-  }
-
-  return (
-    <div className="counter-container">
-      <h2 className="counter-title">
-        {name}: {value}
-      </h2>
-      <div className="counter-actions">
-        <button onClick={decrement}>-</button>
-        <button onClick={reset}>Reset</button>
-        <button onClick={increment}>+</button>
-      </div>
-      {history.length > 0 && (
-        <p className="counter-history">
-          History: {history.join(' → ')}
-        </p>
-      )}
-    </div>
+  const finalOdds = Math.min(
+    97.6,
+    Math.max(0, (baseOdds + crewBonus) * forceMultiplier)
   )
+
+  // K2SO always has something to say about the odds
+  const commentary =
+    finalOdds > 80 ? "Acceptable. I still don't like it." :
+    finalOdds > 50 ? "I have a bad feeling about this." :
+    finalOdds > 20 ? "Would you like to know the probability of failure?" :
+    "I'm not very optimistic about our chances."
+
+  return { odds: Math.round(finalOdds * 100) / 100, commentary }
+}
+
+export function useImperialVault(protocol: SecurityProtocol) {
+  const [status, setStatus] = useState<MissionStatus>('infiltrating')
+  const [dataStolen, setDataStolen] = useState<string[]>([])
+  const [alarmTriggered, setAlarmTriggered] = useState(false)
+
+  // Attempt to slice into the Imperial network
+  const sliceTerminal = useCallback(async (terminalId: string) => {
+    if (protocol.probabilityOfSuccess < 32.5) {
+      setStatus('told-you-so')
+      return { success: false, message: "I told you this would happen." }
+    }
+
+    try {
+      const deathStarPlans = await fetchClassifiedData(terminalId)
+      setDataStolen((prev) => [...prev, ...deathStarPlans])
+      setStatus('success')
+      return { success: true, message: "The plans are in the droid." }
+    } catch {
+      setAlarmTriggered(true)
+      setStatus('compromised')
+      return { success: false, message: "There are a lot of them." }
+    }
+  }, [protocol.probabilityOfSuccess])
+
+  // Monitor for Stormtroopers (they never check behind crates)
+  useEffect(() => {
+    if (!protocol.isStealthMode) return
+
+    const patrol = setInterval(() => {
+      const detected = Math.random() > 0.85
+      if (detected && !alarmTriggered) {
+        setAlarmTriggered(true)
+        setStatus('compromised')
+        console.warn('[K2SO] Congratulations. You are being rescued.')
+      }
+    }, 5000)
+
+    return () => clearInterval(patrol)
+  }, [protocol.isStealthMode, alarmTriggered])
+
+  return { status, dataStolen, alarmTriggered, sliceTerminal }
+}
+
+async function fetchClassifiedData(id: string): Promise<string[]> {
+  // "Quiet! And there is a fresh one if you mouth off again."
+  const response = await fetch(\`/api/imperial/\${id}/plans\`)
+  if (!response.ok) throw new Error('Access denied. Probably.')
+  return response.json()
 }
 `
 
-  // Demo diff data: simulate added, modified, and deleted lines
+  // Demo diff data: K2SO's latest code review changes
   const demoChanges = useMemo(() => {
     const m = new Map<number, 'added' | 'modified' | 'deleted'>()
-    // "New" lines — added
-    m.set(6, 'added')
-    m.set(13, 'added')
-    m.set(14, 'added')
-    // Modified lines
-    m.set(17, 'modified')
-    m.set(18, 'modified')
-    // New function added
+    // Added stealth mode to the protocol
+    m.set(11, 'added')
+    // New mission status type
+    m.set(14, 'modified')
+    // Added survival odds calculator
+    m.set(21, 'added')
     m.set(22, 'added')
     m.set(23, 'added')
     m.set(24, 'added')
     m.set(25, 'added')
-    // Deleted line marker
-    m.set(30, 'deleted')
-    // Modified return block
-    m.set(36, 'modified')
-    m.set(37, 'modified')
-    // Added history section
-    m.set(43, 'added')
-    m.set(44, 'added')
-    m.set(45, 'added')
-    m.set(46, 'added')
+    // Modified odds calculation
+    m.set(30, 'modified')
+    m.set(31, 'modified')
+    // K2SO commentary — added
+    m.set(37, 'added')
+    m.set(38, 'added')
+    m.set(39, 'added')
+    m.set(40, 'added')
+    // Deleted old approach
+    m.set(55, 'deleted')
+    // Modified stealth monitoring
+    m.set(73, 'modified')
+    m.set(74, 'modified')
+    m.set(75, 'modified')
+    m.set(76, 'modified')
+    // Added console.warn
+    m.set(79, 'added')
     return m
   }, [])
+
+  if (showCreator) {
+    return (
+      <SectionErrorBoundary>
+        <div className="absolute inset-0 overflow-hidden bg-[var(--color-bg)]">
+          <CustomThemeCreator
+            currentThemeId={editor.theme}
+            existingThemePath={editingThemePath}
+            onClose={() => setShowCreator(false)}
+          />
+        </div>
+      </SectionErrorBoundary>
+    )
+  }
 
   return (
     <div className="flex gap-6">
@@ -1035,9 +1133,82 @@ export function Counter({ name, initialCount = 0, onCountChange }: CounterProps)
         <div>
           <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-3">Appearance</h2>
           <div className="border border-[var(--color-border)]">
-            {dropdownRow('Theme', 'Color theme for the code editor', editor.theme,
-              EDITOR_THEMES.map(t => ({ value: t.id, label: t.label })),
-              (v) => updateEditorSettings({ theme: v })
+            <div className="flex items-center justify-between px-3 py-2.5 border-b border-[var(--color-border)]">
+              <div>
+                <div className="text-xs text-[var(--color-text-secondary)]">Theme</div>
+                <div className="text-[10px] text-[var(--color-text-muted)] mt-0.5">Color theme for the code editor</div>
+              </div>
+              <div className="flex items-center gap-1.5">
+                {customThemes.length > 0 && (
+                  <button
+                    onClick={() => setShowThemeManager(!showThemeManager)}
+                    className="px-2 py-1 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-secondary)] transition-colors cursor-pointer no-drag"
+                  >
+                    Manage
+                  </button>
+                )}
+                {isCustomTheme && (
+                  <button
+                    onClick={handleCustomize}
+                    className="px-2 py-1 text-[10px] text-[var(--color-accent)] border border-[var(--color-accent)]/30 hover:bg-[var(--color-accent)]/10 transition-colors cursor-pointer no-drag"
+                  >
+                    Customize
+                  </button>
+                )}
+                <SettingDropdown
+                  value={editor.theme}
+                  options={allThemeOptions.filter(o => o.value !== '__divider__')}
+                  onChange={(v) => updateEditorSettings({ theme: v })}
+                />
+                <button
+                  onClick={handleNewTheme}
+                  className="px-2 py-1 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-secondary)] transition-colors cursor-pointer no-drag whitespace-nowrap"
+                >
+                  + New
+                </button>
+              </div>
+            </div>
+            {/* Theme manager — list custom themes with edit/delete */}
+            {showThemeManager && customThemes.length > 0 && (
+              <div className="border-b border-[var(--color-border)] bg-[var(--color-bg)]/50">
+                <div className="px-3 py-2">
+                  <div className="text-[10px] text-[var(--color-text-muted)] uppercase tracking-wider mb-2">Custom Themes</div>
+                  {customThemes.map((t) => (
+                    <div key={t.id} className="flex items-center justify-between py-1.5 group">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="w-3 h-3 flex-shrink-0 border border-[var(--color-border)]" style={{ backgroundColor: t.colors.bg }} />
+                        <span className="text-xs text-[var(--color-text-primary)] truncate">{t.name}</span>
+                        {editor.theme === t.id && (
+                          <span className="text-[9px] text-[var(--color-accent)] flex-shrink-0">active</span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button
+                          onClick={() => {
+                            setEditingThemePath(t.path)
+                            setShowCreator(true)
+                            setShowThemeManager(false)
+                          }}
+                          className="px-1.5 py-0.5 text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] cursor-pointer no-drag"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={async () => {
+                            if (editor.theme === t.id) {
+                              updateEditorSettings({ theme: 'k2so-dark' })
+                            }
+                            await deleteCustomTheme(t.id)
+                          }}
+                          className="px-1.5 py-0.5 text-[10px] text-[var(--color-text-muted)] hover:text-red-400 cursor-pointer no-drag"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
             {dropdownRow('Font Family', 'Monospace font for code editing', editor.fontFamily,
               EDITOR_FONTS.map(f => ({ value: f.id, label: f.label })),
@@ -1047,7 +1218,7 @@ export function Counter({ name, initialCount = 0, onCountChange }: CounterProps)
               [10, 11, 12, 13, 14, 15, 16, 18, 20].map(n => ({ value: String(n), label: `${n}px` })),
               (v) => updateEditorSettings({ fontSize: Number(v) })
             )}
-            {toggleRow('Font Ligatures', 'Enable programming ligatures (e.g. => becomes arrow)', 'fontLigatures')}
+            {toggleRow('Font Ligatures', fontSupportsLigatures ? 'Enable programming ligatures (e.g. => becomes arrow)' : 'Requires Fira Code, JetBrains Mono, or Lilex', 'fontLigatures', false, !fontSupportsLigatures)}
             {dropdownRow('Cursor Style', 'Shape of the text cursor', editor.cursorStyle,
               [{ value: 'bar', label: 'Bar' }, { value: 'block', label: 'Block' }, { value: 'underline', label: 'Underline' }],
               (v) => updateEditorSettings({ cursorStyle: v as 'bar' | 'block' | 'underline' })
@@ -1122,7 +1293,7 @@ export function Counter({ name, initialCount = 0, onCountChange }: CounterProps)
       </div>
 
       {/* ── Live Preview (sticky) ── */}
-      <div className="w-[690px] flex-shrink-0 sticky top-0 self-start">
+      <div className="flex-1 min-w-[400px] sticky top-0 self-start">
         <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-3">Preview</h2>
         <div className="border border-[var(--color-border)] h-[calc(100vh-120px)] overflow-hidden">
           <CodeEditor
@@ -1269,57 +1440,53 @@ function K2SOCLIInstall(): React.JSX.Element {
   }, [checkStatus])
 
   return (
-    <div className="border-t border-[var(--color-border)] pt-4 mb-4">
-      <h3 className="text-xs font-medium text-[var(--color-text-secondary)] mb-3 uppercase tracking-wider">
-        K2SO CLI
-      </h3>
-      <div className="space-y-3">
-        <p className="text-xs text-[var(--color-text-muted)] leading-relaxed">
-          Install the <span className="font-mono text-[var(--color-text-secondary)]">k2so</span> command
-          to use it from any terminal — not just terminals inside K2SO.
-        </p>
-
-        <div className="flex items-center gap-3">
+    <div className="border border-[var(--color-border)]">
+      <div className="flex items-center justify-between px-4 py-3">
+        <div>
+          <span className="text-xs text-[var(--color-text-primary)]">Install CLI</span>
+          <p className="text-[11px] text-[var(--color-text-muted)] mt-0.5">
+            Add <span className="font-mono text-[var(--color-text-secondary)]">k2so</span> to your PATH for use in any terminal
+          </p>
+        </div>
+        <div className="flex items-center gap-3 flex-shrink-0">
           {status?.installed ? (
             <>
-              <div className="flex items-center gap-2 flex-1 min-w-0">
-                <div className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" />
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 bg-green-500 flex-shrink-0" />
                 <span className="text-xs text-[var(--color-text-secondary)]">Installed</span>
-                <span className="text-[10px] font-mono text-[var(--color-text-muted)] truncate">
-                  {status.symlinkPath}
-                </span>
               </div>
               <button
                 onClick={handleUninstall}
                 disabled={loading}
-                className="flex-shrink-0 px-3 py-1.5 text-[11px] border border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors no-drag cursor-pointer disabled:opacity-50"
+                className="px-3 py-1.5 text-[11px] border border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors no-drag cursor-pointer disabled:opacity-50"
               >
                 {loading ? 'Removing...' : 'Uninstall'}
               </button>
             </>
           ) : (
             <>
-              <div className="flex items-center gap-2 flex-1 min-w-0">
-                <div className="w-2 h-2 rounded-full bg-[var(--color-text-muted)] opacity-40 flex-shrink-0" />
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 bg-[var(--color-text-muted)] opacity-40 flex-shrink-0" />
                 <span className="text-xs text-[var(--color-text-muted)]">Not installed</span>
               </div>
               <button
                 onClick={handleInstall}
-                disabled={loading || !status?.bundledPath}
-                className="flex-shrink-0 px-3 py-1.5 text-[11px] bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity no-drag cursor-pointer disabled:opacity-50"
+                disabled={loading}
+                className="px-3 py-1.5 text-[11px] bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity no-drag cursor-pointer disabled:opacity-50"
               >
                 {loading ? 'Installing...' : 'Install k2so to PATH'}
               </button>
             </>
           )}
         </div>
-
-        {status?.installed && status?.target && (
+      </div>
+      {status?.installed && status?.target && (
+        <div className="px-4 pb-3">
           <p className="text-[10px] text-[var(--color-text-muted)] font-mono">
             {status.symlinkPath} → {status.target}
           </p>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -2247,7 +2414,6 @@ function ProjectsSection(): React.JSX.Element {
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId) ?? null
   const editors = ['Cursor', 'VS Code', 'Zed', 'Other']
-  const ungroupedProjects = projects.filter((p) => !p.focusGroupId && !p.pinned && !agentIds.has(p.id))
 
   const toggleGroupCollapse = useCallback((groupId: string) => {
     setCollapsedGroups((prev) => {
@@ -2282,11 +2448,12 @@ function ProjectsSection(): React.JSX.Element {
 
   const settingsAgenticEnabled = useSettingsStore((s) => s.agenticSystemsEnabled)
   const agentPinnedProjects = useMemo(() =>
-    settingsAgenticEnabled ? projects.filter((p) => p.agentMode === 'agent') : [],
+    settingsAgenticEnabled ? projects.filter((p) => p.agentMode === 'agent' || p.agentMode === 'custom') : [],
     [projects, settingsAgenticEnabled])
   const agentIds = useMemo(() => new Set(agentPinnedProjects.map((p) => p.id)), [agentPinnedProjects])
   const pinnedProjects = useMemo(() => projects.filter((p) => p.pinned && !agentIds.has(p.id)), [projects, agentIds])
   const regularPinnedProjects = pinnedProjects
+  const ungroupedProjects = projects.filter((p) => !p.focusGroupId && !p.pinned && !agentIds.has(p.id))
   const reorderProjects = useProjectsStore((s) => s.reorderProjects)
 
   const handleReorderMouseDown = useCallback((
@@ -2789,7 +2956,7 @@ function ProjectsSection(): React.JSX.Element {
       </div>
 
       {/* ── Right panel: selected workspace settings ── */}
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="flex-1 overflow-y-auto p-6 min-h-0 relative">
         {selectedProject ? (
           <ProjectDetail
             project={selectedProject}
@@ -3054,6 +3221,8 @@ function ProjectDetail({
 }): React.JSX.Element {
   const [iconLoading, setIconLoading] = useState(false)
   const [cropImage, setCropImage] = useState<string | null>(null)
+  const [agentEditorOpen, setAgentEditorOpen] = useState(false)
+  const [agentEditorName, setAgentEditorName] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
 
@@ -3113,6 +3282,21 @@ function ProjectDetail({
   }
 
   const firstLetter = project.name.charAt(0).toUpperCase()
+
+  // Full-screen agent editor takeover (same pattern as CustomThemeCreator)
+  if (agentEditorOpen && agentEditorName) {
+    return (
+      <SectionErrorBoundary>
+        <div className="absolute inset-0 overflow-hidden bg-[var(--color-bg)]">
+          <AgentPersonaEditor
+            agentName={agentEditorName}
+            projectPath={project.path}
+            onClose={() => setAgentEditorOpen(false)}
+          />
+        </div>
+      </SectionErrorBoundary>
+    )
+  }
 
   return (
     <>
@@ -3231,7 +3415,224 @@ function ProjectDetail({
         )}
       </SettingsGroup>
 
-      {/* ── Group 2: Worktree Settings — Toggle, Worktrees table, Folders on Disk ── */}
+      {/* ── Group 2: Agent Settings — Mode tabs, Heartbeat, Agents list ── */}
+      {useSettingsStore.getState().agenticSystemsEnabled && <SettingsGroup title="Agent Settings (BETA)">
+        <div className="space-y-2">
+          {/* Mode selector */}
+          <div className="flex gap-1">
+            {(['off', 'custom', 'agent', 'pod'] as const).map((mode) => {
+              const isActive = (project.agentMode || 'off') === mode
+              const labels = { off: 'Off', custom: 'Custom Agent', agent: 'K2SO Agent', pod: 'Pod' }
+              return (
+                <button
+                  key={mode}
+                  onClick={async () => {
+                    const currentMode = project.agentMode || 'off'
+                    if (currentMode === mode) return
+
+                    // Confirm before modifying CLAUDE.md — explain what will happen
+                    const fromLabel = currentMode === 'off' ? null : labels[currentMode as keyof typeof labels]
+                    const toLabel = labels[mode]
+
+                    if (mode === 'off') {
+                      const confirmed = await useConfirmDialogStore.getState().confirm({
+                        title: `Disable ${fromLabel} Mode`,
+                        message: [
+                          'This will:',
+                          '',
+                          '• Move CLAUDE.md to .k2so/CLAUDE.md.disabled',
+                          '• Your content is preserved and restored if you re-enable',
+                          '• The heartbeat will be turned off if active',
+                        ].join('\n'),
+                        confirmLabel: 'Disable',
+                      })
+                      if (!confirmed) return
+                    } else if (mode === 'custom') {
+                      const lines = [
+                        'Train a single agent to operate any software via the heartbeat.',
+                        '',
+                        'What happens:',
+                        '• No CLAUDE.md is generated — the agent runs from its persona only',
+                        '• Use "Manage Persona" to define its behavior with the AI editor',
+                        '• Worktrees are disabled in this mode',
+                      ]
+                      if (currentMode !== 'off') {
+                        lines.push('', `Switching from ${fromLabel}:`, '• The current CLAUDE.md will be moved to .k2so/CLAUDE.md.disabled')
+                      }
+                      const confirmed = await useConfirmDialogStore.getState().confirm({
+                        title: `Enable ${toLabel} Mode`,
+                        message: lines.join('\n'),
+                        confirmLabel: `Enable ${toLabel} Mode`,
+                      })
+                      if (!confirmed) return
+                    } else if (mode === 'agent') {
+                      const lines = [
+                        'A K2SO planner agent that helps you build PRDs, milestones, and technical plans.',
+                        '',
+                        'What happens:',
+                        '• Generates a CLAUDE.md with K2SO planner instructions',
+                        '• If a user-written CLAUDE.md exists, it won\'t be overwritten',
+                        '  (the generated version is saved to .k2so/CLAUDE.md.generated)',
+                      ]
+                      if (currentMode !== 'off') {
+                        lines.push('', `Switching from ${fromLabel}:`, '• The current CLAUDE.md will be moved to .k2so/CLAUDE.md.disabled')
+                      }
+                      const confirmed = await useConfirmDialogStore.getState().confirm({
+                        title: `Enable ${toLabel} Mode`,
+                        message: lines.join('\n'),
+                        confirmLabel: `Enable ${toLabel} Mode`,
+                      })
+                      if (!confirmed) return
+                    } else if (mode === 'pod') {
+                      const lines = [
+                        'A pod leader delegates work to pod members that execute in parallel worktrees.',
+                        '',
+                        'What happens:',
+                        '• Generates a CLAUDE.md with pod leader instructions',
+                        '• A pod-leader agent is created automatically',
+                        '• If a user-written CLAUDE.md exists, it won\'t be overwritten',
+                        '  (the generated version is saved to .k2so/CLAUDE.md.generated)',
+                      ]
+                      if (currentMode !== 'off') {
+                        lines.push('', `Switching from ${fromLabel}:`, '• The current CLAUDE.md will be moved to .k2so/CLAUDE.md.disabled')
+                      }
+                      const confirmed = await useConfirmDialogStore.getState().confirm({
+                        title: `Enable ${toLabel} Mode`,
+                        message: lines.join('\n'),
+                        confirmLabel: `Enable ${toLabel} Mode`,
+                      })
+                      if (!confirmed) return
+                    }
+
+                    if (currentMode !== 'off') {
+                      await invoke('k2so_agents_disable_workspace_claude_md', {
+                        projectPath: project.path,
+                      }).catch(console.error)
+                    }
+
+                    await invoke('projects_update', { id: project.id, agentMode: mode })
+
+                    if (mode === 'agent' || mode === 'pod') {
+                      await invoke('k2so_agents_generate_workspace_claude_md', {
+                        projectPath: project.path,
+                      }).catch(console.error)
+                    }
+
+                    if (mode === 'off' && project.heartbeatEnabled) {
+                      await invoke('projects_update', { id: project.id, heartbeatEnabled: 0 })
+                    }
+
+                    await fetchProjects()
+                  }}
+                  className={`flex-1 px-2 py-1.5 text-[10px] font-medium transition-colors no-drag cursor-pointer ${
+                    isActive
+                      ? 'bg-[var(--color-accent)] text-white'
+                      : 'bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] border border-[var(--color-border)]'
+                  }`}
+                >
+                  {labels[mode]}
+                </button>
+              )
+            })}
+          </div>
+
+          <p className="text-[10px] text-[var(--color-text-muted)]">
+            {(project.agentMode || 'off') === 'off' && 'No agent features enabled for this workspace.'}
+            {(project.agentMode || 'off') === 'custom' && 'Custom Agent — train agents to operate any software via the heartbeat. Customize each agent\'s behavior with the AI persona editor.'}
+            {(project.agentMode || 'off') === 'agent' && 'K2SO Agent — a planner that helps you build PRDs, milestones, and technical plans for this workspace.'}
+            {(project.agentMode || 'off') === 'pod' && 'Pod mode — a pod leader delegates work to pod members that execute in parallel worktrees.'}
+          </p>
+
+          {/* Heartbeat — only when a mode is active */}
+          {(project.agentMode || 'off') !== 'off' && (
+            <div className="flex items-center justify-between py-2 border-t border-[var(--color-border)]">
+              <div className="flex items-center gap-2">
+                {/* Heartbeat indicator with pulse waves */}
+                <div className="relative flex items-center justify-center w-5 h-5 flex-shrink-0 overflow-hidden">
+                  <span className={`absolute w-5 h-5 rounded-full transition-opacity ${project.heartbeatEnabled ? 'bg-red-500/30 animate-[heartwave_1.2s_ease-out_infinite] opacity-100' : 'opacity-0'}`} />
+                  <span className={`absolute w-5 h-5 rounded-full transition-opacity ${project.heartbeatEnabled ? 'bg-red-500/20 animate-[heartwave_1.2s_ease-out_0.3s_infinite] opacity-100' : 'opacity-0'}`} />
+                  <span className={`relative w-2 h-2 rounded-full transition-colors ${
+                    project.heartbeatEnabled ? 'bg-red-500 animate-[heartpulse_1.2s_ease-in-out_infinite]' : 'bg-red-500/25'
+                  }`} />
+                </div>
+                <div>
+                  <span className={`text-xs ${project.heartbeatEnabled ? 'text-[var(--color-text-primary)]' : 'text-[var(--color-text-secondary)]'}`}>Heartbeat</span>
+                  <p className={`text-[9px] ${project.heartbeatEnabled ? 'text-[var(--color-text-secondary)]' : 'text-[var(--color-text-muted)]'}`}>
+                    {project.heartbeatEnabled ? 'Wakes up automatically to work' : 'Only works when manually launched'}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={async () => {
+                  const newVal = project.heartbeatEnabled ? 0 : 1
+
+                  // If enabling heartbeat on a K2SO Agent, check for conflicts
+                  if (newVal === 1 && (project.agentMode || 'off') === 'agent') {
+                    const allProjects = useProjectsStore.getState().projects
+                    const otherK2so = allProjects.find(
+                      (p) => p.id !== project.id && p.agentMode === 'agent' && p.heartbeatEnabled
+                    )
+                    if (otherK2so) {
+                      const confirmed = await useConfirmDialogStore.getState().confirm({
+                        title: 'Move K2SO Heartbeat?',
+                        message: `The K2SO Agent heartbeat is currently active in "${otherK2so.name}". Only one K2SO Agent can have an active heartbeat to avoid conflicting autonomous decisions.\n\nMove the heartbeat from "${otherK2so.name}" to "${project.name}"?`,
+                        confirmLabel: 'Move Heartbeat',
+                      })
+                      if (!confirmed) return
+
+                      // Disable heartbeat on the other workspace
+                      const store = useProjectsStore.getState()
+                      const updated = store.projects.map((p) =>
+                        p.id === otherK2so.id ? { ...p, heartbeatEnabled: 0 } : p
+                      )
+                      useProjectsStore.setState({ projects: updated })
+                      await invoke('projects_update', { id: otherK2so.id, heartbeatEnabled: 0 })
+                    }
+                  }
+
+                  // Update store in-place to avoid full re-render jiggle
+                  const store = useProjectsStore.getState()
+                  const updatedProjects = store.projects.map((p) =>
+                    p.id === project.id ? { ...p, heartbeatEnabled: newVal } : p
+                  )
+                  useProjectsStore.setState({ projects: updatedProjects })
+                  await invoke('projects_update', { id: project.id, heartbeatEnabled: newVal })
+                  await invoke('k2so_agents_update_heartbeat_projects').catch(console.error)
+                  if (newVal === 1) {
+                    await invoke('k2so_agents_install_heartbeat').catch(console.error)
+                  }
+                }}
+                className={`w-8 h-4 flex items-center transition-colors no-drag cursor-pointer ${
+                  project.heartbeatEnabled ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
+                }`}
+              >
+                <span
+                  className={`w-3 h-3 bg-white block transition-transform ${
+                    project.heartbeatEnabled ? 'translate-x-4.5' : 'translate-x-0.5'
+                  }`}
+                />
+              </button>
+            </div>
+          )}
+
+          {/* Custom Agent persona — only in Custom Agent mode */}
+          {(project.agentMode || 'off') === 'custom' && (
+            <div className="pt-2 border-t border-[var(--color-border)]">
+              <CustomAgentPersonaButton projectPath={project.path} projectName={project.name} onOpenEditor={(name) => { setAgentEditorName(name); setAgentEditorOpen(true) }} />
+            </div>
+          )}
+
+          {/* Pod agents list — only in Pod mode */}
+          {(project.agentMode || 'off') === 'pod' && (
+            <div className="pt-2 border-t border-[var(--color-border)]">
+              <ProjectAgentsPanel projectPath={project.path} />
+            </div>
+          )}
+        </div>
+      </SettingsGroup>}
+
+      {/* ── Group 3: Worktree Settings — hidden in agent/custom mode (no worktrees needed) ── */}
+      {(project.agentMode || 'off') !== 'agent' && (project.agentMode || 'off') !== 'custom' && (
       <SettingsGroup title="Worktree Settings">
         {/* Worktrees toggle */}
         <div className="flex items-center justify-between py-2">
@@ -3283,136 +3684,7 @@ function ProjectDetail({
           <WorktreeFoldersOnDisk project={project} fetchProjects={fetchProjects} />
         </div>
       </SettingsGroup>
-
-      {/* ── Group 3: Agent Settings — Mode tabs, Heartbeat, Agents list ── */}
-      {useSettingsStore.getState().agenticSystemsEnabled && <SettingsGroup title="Agent Settings">
-        <div className="space-y-2">
-          {/* Mode selector */}
-          <div className="flex gap-1">
-            {(['off', 'agent', 'pod'] as const).map((mode) => {
-              const isActive = (project.agentMode || 'off') === mode
-              const labels = { off: 'Off', agent: 'Agent', pod: 'Pod' }
-              return (
-                <button
-                  key={mode}
-                  onClick={async () => {
-                    const currentMode = project.agentMode || 'off'
-                    if (currentMode === mode) return
-
-                    // Confirm before modifying CLAUDE.md
-                    if (mode === 'agent' || mode === 'pod') {
-                      const description = mode === 'agent'
-                        ? 'This generates a CLAUDE.md in your workspace root that teaches Claude how to use K2SO as an AI Planner — setting up workspaces, creating PRDs, and coordinating projects.'
-                        : 'This generates a CLAUDE.md in your workspace root that teaches Claude how to manage a pod of agents — delegating work, reviewing branches, and driving milestones. A pod-leader agent will also be created.'
-
-                      const confirmed = await useConfirmDialogStore.getState().confirm({
-                        title: `Enable ${mode === 'agent' ? 'Agent' : 'Pod'} Mode`,
-                        message: `${description}\n\nIf a CLAUDE.md already exists, it will not be overwritten — the generated version is saved to .k2so/CLAUDE.md.generated for reference.`,
-                        confirmLabel: `Enable ${mode === 'agent' ? 'Agent' : 'Pod'} Mode`,
-                      })
-                      if (!confirmed) return
-                    } else if (mode === 'off' && currentMode !== 'off') {
-                      const confirmed = await useConfirmDialogStore.getState().confirm({
-                        title: 'Disable Agent Mode',
-                        message: 'The CLAUDE.md file will be moved to .k2so/CLAUDE.md.disabled. Your content is preserved and will be restored if you re-enable agent mode.',
-                        confirmLabel: 'Disable',
-                      })
-                      if (!confirmed) return
-                    }
-
-                    if (currentMode !== 'off') {
-                      await invoke('k2so_agents_disable_workspace_claude_md', {
-                        projectPath: project.path,
-                      }).catch(console.error)
-                    }
-
-                    await invoke('projects_update', { id: project.id, agentMode: mode })
-
-                    if (mode === 'agent' || mode === 'pod') {
-                      await invoke('k2so_agents_generate_workspace_claude_md', {
-                        projectPath: project.path,
-                      }).catch(console.error)
-                    }
-
-                    if (mode === 'off' && project.heartbeatEnabled) {
-                      await invoke('projects_update', { id: project.id, heartbeatEnabled: 0 })
-                    }
-
-                    await fetchProjects()
-                  }}
-                  className={`flex-1 px-2 py-1.5 text-[10px] font-medium transition-colors no-drag cursor-pointer ${
-                    isActive
-                      ? 'bg-[var(--color-accent)] text-white'
-                      : 'bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] border border-[var(--color-border)]'
-                  }`}
-                >
-                  {labels[mode]}
-                </button>
-              )
-            })}
-          </div>
-
-          <p className="text-[10px] text-[var(--color-text-muted)]">
-            {(project.agentMode || 'off') === 'off' && 'No agent features enabled for this workspace.'}
-            {(project.agentMode || 'off') === 'agent' && 'AI Planner — collaborates with you to plan work, set up workspaces, and coordinate across projects.'}
-            {(project.agentMode || 'off') === 'pod' && 'Pod mode — a pod leader delegates work to agent templates that execute in parallel worktrees.'}
-          </p>
-
-          {/* Heartbeat — only when a mode is active */}
-          {(project.agentMode || 'off') !== 'off' && (
-            <div className="flex items-center justify-between py-2 border-t border-[var(--color-border)]">
-              <div className="flex items-center gap-2">
-                {/* Heartbeat indicator with pulse waves */}
-                <div className="relative flex items-center justify-center w-5 h-5 flex-shrink-0 overflow-hidden">
-                  <span className={`absolute w-5 h-5 rounded-full transition-opacity ${project.heartbeatEnabled ? 'bg-red-500/30 animate-[heartwave_1.2s_ease-out_infinite] opacity-100' : 'opacity-0'}`} />
-                  <span className={`absolute w-5 h-5 rounded-full transition-opacity ${project.heartbeatEnabled ? 'bg-red-500/20 animate-[heartwave_1.2s_ease-out_0.3s_infinite] opacity-100' : 'opacity-0'}`} />
-                  <span className={`relative w-2 h-2 rounded-full transition-colors ${
-                    project.heartbeatEnabled ? 'bg-red-500 animate-[heartpulse_1.2s_ease-in-out_infinite]' : 'bg-red-500/25'
-                  }`} />
-                </div>
-                <div>
-                  <span className={`text-xs ${project.heartbeatEnabled ? 'text-[var(--color-text-primary)]' : 'text-[var(--color-text-secondary)]'}`}>Heartbeat</span>
-                  <p className={`text-[9px] ${project.heartbeatEnabled ? 'text-[var(--color-text-secondary)]' : 'text-[var(--color-text-muted)]'}`}>
-                    {project.heartbeatEnabled ? 'Wakes up automatically to work' : 'Only works when manually launched'}
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={async () => {
-                  const newVal = project.heartbeatEnabled ? 0 : 1
-                  // Update store in-place to avoid full re-render jiggle
-                  const store = useProjectsStore.getState()
-                  const updatedProjects = store.projects.map((p) =>
-                    p.id === project.id ? { ...p, heartbeatEnabled: newVal } : p
-                  )
-                  useProjectsStore.setState({ projects: updatedProjects })
-                  await invoke('projects_update', { id: project.id, heartbeatEnabled: newVal })
-                  await invoke('k2so_agents_update_heartbeat_projects').catch(console.error)
-                  if (newVal === 1) {
-                    await invoke('k2so_agents_install_heartbeat').catch(console.error)
-                  }
-                }}
-                className={`w-8 h-4 flex items-center transition-colors no-drag cursor-pointer ${
-                  project.heartbeatEnabled ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
-                }`}
-              >
-                <span
-                  className={`w-3 h-3 bg-white block transition-transform ${
-                    project.heartbeatEnabled ? 'translate-x-4.5' : 'translate-x-0.5'
-                  }`}
-                />
-              </button>
-            </div>
-          )}
-
-          {/* Agents list — only in Pod mode */}
-          {(project.agentMode || 'off') === 'pod' && (
-            <div className="pt-2 border-t border-[var(--color-border)]">
-              <ProjectAgentsPanel projectPath={project.path} />
-            </div>
-          )}
-        </div>
-      </SettingsGroup>}
+      )}
 
       {/* ── Group 4: Chat Migrations ── */}
       <SettingsGroup title="Chat Migrations">
@@ -3490,6 +3762,53 @@ function AgentKebabMenu({ onSettings, onDelete }: { onSettings: () => void; onDe
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+function CustomAgentPersonaButton({ projectPath, projectName, onOpenEditor }: { projectPath: string; projectName: string; onOpenEditor: (agentName: string) => void }): React.JSX.Element {
+  const [ready, setReady] = useState(false)
+  const [agentName, setAgentName] = useState(projectName.toLowerCase().replace(/\s+/g, '-'))
+
+  // Ensure the single custom agent exists for this workspace
+  useEffect(() => {
+    const ensure = async () => {
+      try {
+        const agents = await invoke<(K2soAgentInfo & { agentType?: string })[]>('k2so_agents_list', { projectPath })
+        const existing = agents.find((a: any) => a.agentType === 'custom')
+        if (existing) {
+          setAgentName(existing.name)
+        } else {
+          const name = projectName.toLowerCase().replace(/\s+/g, '-')
+          await invoke('k2so_agents_create', {
+            projectPath,
+            name,
+            role: 'Custom agent — customize via the persona editor',
+            agentType: 'custom',
+          })
+          setAgentName(name)
+        }
+        setReady(true)
+      } catch (e) {
+        console.error('[custom-agent] Init failed:', e)
+        setReady(true)
+      }
+    }
+    ensure()
+  }, [projectPath, projectName])
+
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <p className="text-[10px] text-[var(--color-text-muted)]">
+        Define what this agent does when it wakes up on the heartbeat.
+      </p>
+      <button
+        onClick={() => onOpenEditor(agentName)}
+        disabled={!ready}
+        className="px-3 py-1.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer disabled:opacity-50 flex-shrink-0"
+      >
+        ✎ Manage Persona
+      </button>
     </div>
   )
 }
@@ -4259,195 +4578,176 @@ function AIAssistantSection(): React.JSX.Element {
   }, [customPath])
 
   return (
-    <div className="max-w-xl">
-      <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-1">AI Workspace Assistant</h2>
-      <p className="text-xs text-[var(--color-text-muted)] mb-6">
-        A local LLM that translates natural language into workspace operations. Press <kbd className="px-1 py-0.5 bg-white/[0.06] text-[var(--color-text-secondary)] font-mono text-[10px]">&#8984;L</kbd> to open.
-      </p>
-
-      {/* Enable/Disable Toggle */}
-      <div className="mb-6 flex items-center justify-between">
-        <div>
-          <h3 className="text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">Enabled</h3>
-          <p className="text-[10px] text-[var(--color-text-muted)] mt-1">
-            Disabling saves battery by not loading the model into memory
-          </p>
-        </div>
-        <button
-          onClick={() => setAiAssistantEnabled(!aiAssistantEnabled)}
-          className="no-drag cursor-pointer flex-shrink-0 relative"
-          style={{
-            width: 36,
-            height: 20,
-            backgroundColor: aiAssistantEnabled ? 'var(--color-accent)' : '#333',
-            border: 'none',
-            transition: 'background-color 150ms'
-          }}
-        >
-          <span
-            style={{
-              position: 'absolute',
-              top: 2,
-              left: aiAssistantEnabled ? 18 : 2,
-              width: 16,
-              height: 16,
-              backgroundColor: '#fff',
-              transition: 'left 150ms'
-            }}
-          />
-        </button>
-      </div>
-
-      {/* Model Status */}
-      <div className="mb-6">
-        <h3 className="text-xs font-medium text-[var(--color-text-secondary)] mb-3 uppercase tracking-wider">Model Status</h3>
-        <div className="flex items-center gap-2 mb-3">
-          <span
-            className="w-2 h-2 flex-shrink-0"
-            style={{ backgroundColor: modelLoaded ? '#4ade80' : '#ef4444' }}
-          />
-          <span className="text-xs text-[var(--color-text-primary)]">
-            {modelLoaded ? 'Model loaded and ready' : 'No model loaded'}
-          </span>
-        </div>
-        {modelPath && (
-          <p className="text-[10px] font-mono text-[var(--color-text-muted)] break-all mb-2">
-            {modelPath}
-          </p>
-        )}
-      </div>
-
-      {/* Download Default Model */}
-      <div className="mb-6">
-        <h3 className="text-xs font-medium text-[var(--color-text-secondary)] mb-3 uppercase tracking-wider">Default Model</h3>
-        <p className="text-xs text-[var(--color-text-muted)] mb-3">
-          Qwen2.5-1.5B-Instruct (Q4_K_M) — ~1.1GB download. Runs locally with Metal GPU acceleration.
+    <div className="max-w-xl space-y-6">
+      {/* ── Local LLM ── */}
+      <div>
+        <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-3">Local LLM</h2>
+        <p className="text-xs text-[var(--color-text-muted)] mb-4">
+          A local LLM that translates natural language into workspace operations. Press <kbd className="px-1 py-0.5 bg-white/[0.06] text-[var(--color-text-secondary)] font-mono text-[10px]">&#8984;L</kbd> to open.
+          Runs entirely on your machine — no data is sent to external servers.
         </p>
-
-        {isDownloading ? (
-          <div className="mb-3">
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-xs text-[var(--color-text-secondary)]">Downloading...</span>
-              <span className="text-xs font-mono text-[var(--color-text-muted)]">{Math.round(downloadProgress)}%</span>
+        <div className="border border-[var(--color-border)]">
+          {/* Enabled */}
+          <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)]">
+            <div>
+              <span className="text-xs text-[var(--color-text-primary)]">Enabled</span>
+              <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">Disabling saves battery by not loading the model into memory</p>
             </div>
-            <div className="h-1.5 bg-[var(--color-bg-elevated)] overflow-hidden">
-              <div
-                className="h-full bg-[var(--color-accent)] transition-all duration-300"
-                style={{ width: `${downloadProgress}%` }}
+            <button
+              onClick={() => setAiAssistantEnabled(!aiAssistantEnabled)}
+              className="no-drag cursor-pointer flex-shrink-0 relative"
+              style={{
+                width: 36,
+                height: 20,
+                backgroundColor: aiAssistantEnabled ? 'var(--color-accent)' : '#333',
+                border: 'none',
+                transition: 'background-color 150ms'
+              }}
+            >
+              <span
+                style={{
+                  position: 'absolute',
+                  top: 2,
+                  left: aiAssistantEnabled ? 18 : 2,
+                  width: 16,
+                  height: 16,
+                  backgroundColor: '#fff',
+                  transition: 'left 150ms'
+                }}
               />
+            </button>
+          </div>
+          {/* Model Status */}
+          <div className="px-4 py-3 border-b border-[var(--color-border)]">
+            <span className="text-xs text-[var(--color-text-primary)]">Model Status</span>
+            <div className="flex items-center gap-2 mt-2">
+              <span
+                className="w-2 h-2 flex-shrink-0"
+                style={{ backgroundColor: modelLoaded ? '#4ade80' : '#ef4444' }}
+              />
+              <span className="text-xs text-[var(--color-text-secondary)]">
+                {modelLoaded ? 'Model loaded and ready' : 'No model loaded'}
+              </span>
+            </div>
+            {modelPath && (
+              <p className="text-[10px] font-mono text-[var(--color-text-muted)] break-all mt-1">
+                {modelPath}
+              </p>
+            )}
+          </div>
+          {/* Default Model */}
+          <div className="px-4 py-3 border-b border-[var(--color-border)]">
+            <span className="text-xs text-[var(--color-text-primary)]">Default Model</span>
+            <p className="text-[10px] text-[var(--color-text-muted)] mt-1 mb-2">
+              Qwen2.5-1.5B-Instruct (Q4_K_M) — ~1.1GB download. Runs locally with Metal GPU acceleration.
+            </p>
+            {isDownloading ? (
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs text-[var(--color-text-secondary)]">Downloading...</span>
+                  <span className="text-xs font-mono text-[var(--color-text-muted)]">{Math.round(downloadProgress)}%</span>
+                </div>
+                <div className="h-1.5 bg-[var(--color-bg)] overflow-hidden">
+                  <div
+                    className="h-full bg-[var(--color-accent)] transition-all duration-300"
+                    style={{ width: `${downloadProgress}%` }}
+                  />
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={handleDownload}
+                disabled={modelExists === true && modelLoaded}
+                className="px-3 py-1.5 text-xs bg-[var(--color-bg-elevated)] text-[var(--color-text-primary)] border border-[var(--color-border)] hover:bg-white/[0.08] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-default no-drag"
+              >
+                {modelExists ? (modelLoaded ? 'Downloaded & Loaded' : 'Download & Load') : 'Download Default Model'}
+              </button>
+            )}
+          </div>
+          {/* Custom Model */}
+          <div className="px-4 py-3">
+            <span className="text-xs text-[var(--color-text-primary)]">Custom Model</span>
+            <p className="text-[10px] text-[var(--color-text-muted)] mt-1 mb-2">
+              Point to any GGUF model file. It will be copied to <span className="font-mono">~/.k2so/models/</span> automatically.
+            </p>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={customPath}
+                onChange={(e) => setCustomPath(e.target.value)}
+                placeholder="~/.k2so/models/your-model.gguf"
+                className="flex-1 px-2 py-1.5 text-xs font-mono bg-[var(--color-bg)] border border-[var(--color-border)] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-accent)] no-drag"
+              />
+              <button
+                onClick={handleLoadCustom}
+                disabled={!customPath.trim() || loadingModel}
+                className="px-3 py-1.5 text-xs bg-[var(--color-bg-elevated)] text-[var(--color-text-primary)] border border-[var(--color-border)] hover:bg-white/[0.08] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-default no-drag flex-shrink-0"
+              >
+                {loadingModel ? 'Loading...' : 'Load'}
+              </button>
             </div>
           </div>
-        ) : (
-          <button
-            onClick={handleDownload}
-            disabled={modelExists === true && modelLoaded}
-            className="px-3 py-1.5 text-xs bg-[var(--color-bg-elevated)] text-[var(--color-text-primary)] border border-[var(--color-border)] hover:bg-white/[0.08] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-default no-drag"
-          >
-            {modelExists ? (modelLoaded ? 'Downloaded & Loaded' : 'Download & Load') : 'Download Default Model'}
-          </button>
+        </div>
+        {/* Error Display */}
+        {loadError && (
+          <div className="p-2 text-xs text-red-400 bg-red-500/5 border border-red-500/20 mt-3">
+            {loadError}
+          </div>
         )}
       </div>
 
-      {/* Custom Model Path */}
-      <div className="mb-6">
-        <h3 className="text-xs font-medium text-[var(--color-text-secondary)] mb-3 uppercase tracking-wider">Custom Model</h3>
-        <p className="text-xs text-[var(--color-text-muted)] mb-3">
-          Point to any GGUF model file. It will be copied to <span className="font-mono">~/.k2so/models/</span> automatically. Larger models give better results but use more memory.
+      {/* ── CLI ── */}
+      <div>
+        <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-3">CLI</h2>
+        <p className="text-xs text-[var(--color-text-muted)] mb-4">
+          The K2SO CLI lets any AI agent orchestrate your workspaces.
+          When you open a terminal inside K2SO, the CLI is automatically available — no setup needed.
         </p>
-        <div className="flex gap-2">
-          <input
-            type="text"
-            value={customPath}
-            onChange={(e) => setCustomPath(e.target.value)}
-            placeholder="~/.k2so/models/your-model.gguf"
-            className="flex-1 px-2 py-1.5 text-xs font-mono bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-accent)] no-drag"
-          />
-          <button
-            onClick={handleLoadCustom}
-            disabled={!customPath.trim() || loadingModel}
-            className="px-3 py-1.5 text-xs bg-[var(--color-bg-elevated)] text-[var(--color-text-primary)] border border-[var(--color-border)] hover:bg-white/[0.08] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-default no-drag flex-shrink-0"
-          >
-            {loadingModel ? 'Loading...' : 'Load'}
-          </button>
-        </div>
-      </div>
 
-      {/* Error Display */}
-      {loadError && (
-        <div className="p-2 text-xs text-red-400 bg-red-500/5 border border-red-500/20 mb-4">
-          {loadError}
-        </div>
-      )}
+        {/* CLI Install */}
+        <K2SOCLIInstall />
 
-      {/* Info */}
-      <div className="border-t border-[var(--color-border)] pt-4 mb-6">
-        <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed">
-          The AI assistant runs entirely on your machine — no data is sent to external servers.
-          Models are stored in <span className="font-mono">~/.k2so/models/</span>.
-          Workspace commands use minimal context (2048 tokens) so even small models work well.
-        </p>
-      </div>
-
-      {/* ── K2SO CLI ── */}
-      <K2SOCLIInstall />
-
-      {/* ── Using Claude with K2SO ── */}
-      <div className="border-t border-[var(--color-border)] pt-4">
-        <h3 className="text-xs font-medium text-[var(--color-text-secondary)] mb-3 uppercase tracking-wider">
-          Using Claude with K2SO
-        </h3>
-        <div className="space-y-3 text-xs text-[var(--color-text-muted)] leading-relaxed">
-          <p>
-            K2SO includes a CLI tool (<span className="font-mono text-[var(--color-text-secondary)]">k2so</span>) that lets any AI agent orchestrate your workspaces.
-            When you open a terminal inside K2SO, the CLI is automatically available — no setup needed.
-          </p>
-
-          <div>
-            <p className="text-[var(--color-text-secondary)] font-medium mb-1">Option 1: Agent Mode (recommended)</p>
-            <p>
+        {/* Using Claude with K2SO */}
+        <div className="border border-[var(--color-border)] mt-4">
+          <div className="px-4 py-3 border-b border-[var(--color-border)]">
+            <span className="text-xs text-[var(--color-text-primary)]">Agent Mode (recommended)</span>
+            <p className="text-[11px] text-[var(--color-text-muted)] mt-1 leading-relaxed">
               Set any workspace to <span className="font-mono text-[var(--color-text-secondary)]">Agent</span> mode in its settings.
               K2SO generates a CLAUDE.md file that teaches Claude everything about the CLI, workspace setup,
-              and how to orchestrate work across projects. Just open a Claude terminal in that workspace and it already knows what to do.
+              and how to orchestrate work across projects.
             </p>
           </div>
-
-          <div>
-            <p className="text-[var(--color-text-secondary)] font-medium mb-1">Option 2: External Terminal</p>
-            <p>
+          <div className="px-4 py-3 border-b border-[var(--color-border)]">
+            <span className="text-xs text-[var(--color-text-primary)]">External Terminal</span>
+            <p className="text-[11px] text-[var(--color-text-muted)] mt-1 leading-relaxed">
               Install the K2SO CLI above, then use <span className="font-mono text-[var(--color-text-secondary)]">k2so</span> from
-              any terminal while K2SO is running. You can also teach Claude about K2SO by
-              adding the CLI reference to your project's <span className="font-mono text-[var(--color-text-secondary)]">CLAUDE.md</span> file.
-              The key commands:
+              any terminal while K2SO is running.
             </p>
           </div>
-
-          <div className="bg-[var(--color-bg-elevated)] border border-[var(--color-border)] p-3 font-mono text-[10px] text-[var(--color-text-secondary)] leading-relaxed space-y-1">
-            <div><span className="text-[var(--color-accent)]">k2so agents list</span>          <span className="text-[var(--color-text-muted)]"># List all agents</span></div>
-            <div><span className="text-[var(--color-accent)]">k2so delegate</span> &lt;agent&gt; &lt;file&gt;  <span className="text-[var(--color-text-muted)]"># Assign work (creates worktree + launches)</span></div>
-            <div><span className="text-[var(--color-accent)]">k2so work create</span> --title &quot;...&quot; <span className="text-[var(--color-text-muted)]"># Create a work item</span></div>
-            <div><span className="text-[var(--color-accent)]">k2so reviews</span>               <span className="text-[var(--color-text-muted)]"># See pending reviews</span></div>
-            <div><span className="text-[var(--color-accent)]">k2so review approve</span> &lt;a&gt; &lt;b&gt; <span className="text-[var(--color-text-muted)]"># Merge + cleanup</span></div>
-            <div><span className="text-[var(--color-accent)]">k2so mode pod</span>              <span className="text-[var(--color-text-muted)]"># Enable pod mode</span></div>
-            <div><span className="text-[var(--color-accent)]">k2so worktree on</span>           <span className="text-[var(--color-text-muted)]"># Enable worktrees</span></div>
-            <div><span className="text-[var(--color-accent)]">k2so heartbeat on</span>          <span className="text-[var(--color-text-muted)]"># Enable auto heartbeat</span></div>
-            <div><span className="text-[var(--color-accent)]">k2so settings</span>              <span className="text-[var(--color-text-muted)]"># Show workspace settings</span></div>
-            <div><span className="text-[var(--color-accent)]">k2so help</span>                  <span className="text-[var(--color-text-muted)]"># Full command reference</span></div>
+          <div className="px-4 py-3 border-b border-[var(--color-border)]">
+            <span className="text-xs text-[var(--color-text-primary)]">Key Commands</span>
+            <div className="mt-2 bg-[var(--color-bg)] border border-[var(--color-border)] p-3 font-mono text-[11px] text-[var(--color-text-secondary)] leading-relaxed space-y-1">
+              <div><span className="text-[var(--color-accent)]">k2so agents list</span>          <span className="text-[var(--color-text-muted)]"># List all agents</span></div>
+              <div><span className="text-[var(--color-accent)]">k2so delegate</span> &lt;agent&gt; &lt;file&gt;  <span className="text-[var(--color-text-muted)]"># Assign work (creates worktree + launches)</span></div>
+              <div><span className="text-[var(--color-accent)]">k2so work create</span> --title &quot;...&quot; <span className="text-[var(--color-text-muted)]"># Create a work item</span></div>
+              <div><span className="text-[var(--color-accent)]">k2so reviews</span>               <span className="text-[var(--color-text-muted)]"># See pending reviews</span></div>
+              <div><span className="text-[var(--color-accent)]">k2so review approve</span> &lt;a&gt; &lt;b&gt; <span className="text-[var(--color-text-muted)]"># Merge + cleanup</span></div>
+              <div><span className="text-[var(--color-accent)]">k2so mode pod</span>              <span className="text-[var(--color-text-muted)]"># Enable pod mode</span></div>
+              <div><span className="text-[var(--color-accent)]">k2so worktree on</span>           <span className="text-[var(--color-text-muted)]"># Enable worktrees</span></div>
+              <div><span className="text-[var(--color-accent)]">k2so heartbeat on</span>          <span className="text-[var(--color-text-muted)]"># Enable auto heartbeat</span></div>
+              <div><span className="text-[var(--color-accent)]">k2so settings</span>              <span className="text-[var(--color-text-muted)]"># Show workspace settings</span></div>
+              <div><span className="text-[var(--color-accent)]">k2so help</span>                  <span className="text-[var(--color-text-muted)]"># Full command reference</span></div>
+            </div>
           </div>
-
-          <p>
-            The CLI communicates with K2SO via a local HTTP server. The environment variables
-            <span className="font-mono text-[var(--color-text-secondary)]"> K2SO_PORT</span> and
-            <span className="font-mono text-[var(--color-text-secondary)]"> K2SO_HOOK_TOKEN</span> are
-            automatically set in every terminal K2SO creates. For external terminals, K2SO writes
-            the connection details to <span className="font-mono text-[var(--color-text-secondary)]">~/.k2so/heartbeat.port</span> and
-            <span className="font-mono text-[var(--color-text-secondary)]"> ~/.k2so/heartbeat.token</span>.
-          </p>
-
-          <div className="bg-[var(--color-accent)]/5 border border-[var(--color-accent)]/20 p-3">
-            <p className="text-[var(--color-accent)] text-[11px]">
-              Tip: Setting a workspace to Agent mode is the easiest way to get started.
-              The generated CLAUDE.md includes the full CLI reference, workspace setup instructions,
-              and workflow patterns — Claude picks it up automatically.
+          <div className="px-4 py-3">
+            <span className="text-xs text-[var(--color-text-primary)]">Connection Details</span>
+            <p className="text-[11px] text-[var(--color-text-muted)] mt-1 leading-relaxed">
+              The CLI communicates via a local HTTP server.
+              <span className="font-mono text-[var(--color-text-secondary)]"> K2SO_PORT</span> and
+              <span className="font-mono text-[var(--color-text-secondary)]"> K2SO_HOOK_TOKEN</span> are
+              set automatically in K2SO terminals. For external terminals, connection details are at
+              <span className="font-mono text-[var(--color-text-secondary)]"> ~/.k2so/heartbeat.port</span> and
+              <span className="font-mono text-[var(--color-text-secondary)]"> ~/.k2so/heartbeat.token</span>.
             </p>
           </div>
         </div>

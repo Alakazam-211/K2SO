@@ -66,7 +66,13 @@ export const useAssistantStore = create<AssistantState>((set) => ({
   modelLoaded: false,
   lastResult: null,
   history: [],
-  interactionLog: [],
+  interactionLog: [{
+    timestamp: Date.now(),
+    message: 'system',
+    result: 'Loading model...',
+    parsed: null,
+    debugPasses: [],
+  }],
   showDebugLog: false,
 
   open: () => set({ isOpen: true }),
@@ -78,7 +84,22 @@ export const useAssistantStore = create<AssistantState>((set) => ({
       isDownloading: downloading,
       downloadProgress: progress ?? (downloading ? 0 : 100)
     }),
-  setModelLoaded: (loaded) => set({ modelLoaded: loaded }),
+  setModelLoaded: (loaded) => set((s) => {
+    // Log model status to console so user sees it
+    if (loaded && !s.modelLoaded) {
+      const entry: InteractionLogEntry = {
+        timestamp: Date.now(),
+        message: 'system',
+        result: 'Model loaded — ready for commands',
+        parsed: null,
+        debugPasses: [],
+      }
+      const log = [...s.interactionLog, entry]
+      if (log.length > MAX_LOG) log.splice(0, log.length - MAX_LOG)
+      return { modelLoaded: loaded, interactionLog: log }
+    }
+    return { modelLoaded: loaded }
+  }),
   setLastResult: (result) => set({ lastResult: result }),
   addToHistory: (command) =>
     set((s) => {

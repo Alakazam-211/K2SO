@@ -258,7 +258,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                         let name = params.get("name").cloned().unwrap_or_default();
                         let role = params.get("role").cloned().unwrap_or_default();
                         let prompt = params.get("prompt").cloned();
-                        crate::commands::k2so_agents::k2so_agents_create(project_path, name, role, prompt)
+                        let agent_type = params.get("agent_type").cloned();
+                        crate::commands::k2so_agents::k2so_agents_create(project_path, name, role, prompt, agent_type)
                             .map(|info| serde_json::to_string(&info).unwrap_or_default())
                     }
                     "/cli/agents/work/create" => {

@@ -133,6 +133,7 @@ export function keyEventToSequence(e: KeyboardEvent, mode: number = 0): string |
   // ── Special keys ──────────────────────────────────────────────────
   switch (key) {
     case 'Enter':
+      if (e.shiftKey) return '\n'  // Shift+Enter: newline (for multi-line input in Claude CLI etc.)
       return '\r'
     case 'Backspace':
       // Backspace always sends DEL (0x7f) — this is correct for modern terminals.

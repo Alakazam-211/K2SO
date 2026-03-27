@@ -61,6 +61,29 @@ impl LlmManager {
         Ok(())
     }
 
+    /// Load a model with CPU-only inference (no Metal GPU).
+    /// Used by the worker subprocess to avoid Metal contention with the main app.
+    pub fn load_model_cpu(&mut self, path: &str) -> Result<(), String> {
+        if self.backend.is_none() {
+            let backend = LlamaBackend::init()
+                .map_err(|e| format!("Failed to initialize LLM backend: {e}"))?;
+            self.backend = Some(backend);
+        }
+
+        let backend = self.backend.as_ref()
+            .ok_or_else(|| "Backend not initialized".to_string())?;
+
+        // Zero GPU layers = CPU only
+        let model_params = LlamaModelParams::default().with_n_gpu_layers(0);
+
+        let model = LlamaModel::load_from_file(backend, path, &model_params)
+            .map_err(|e| format!("Failed to load model from '{path}': {e}"))?;
+
+        self.model = Some(model);
+        self.model_path = Some(path.to_string());
+        Ok(())
+    }
+
     /// Returns whether a model is currently loaded.
     pub fn is_loaded(&self) -> bool {
         self.model.is_some()
@@ -113,9 +136,9 @@ impl LlmManager {
             .apply_chat_template(&chat_template, &messages, true)
             .map_err(|e| format!("Failed to apply chat template: {e}"))?;
 
-        // Create context — 4096 tokens to accommodate file index context
+        // Create context — 6144 tokens to fit tools + settings schema + git tools
         let ctx_params = LlamaContextParams::default()
-            .with_n_ctx(std::num::NonZeroU32::new(4096))
+            .with_n_ctx(std::num::NonZeroU32::new(6144))
             .with_n_threads(4)
             .with_n_threads_batch(4);
 
@@ -128,8 +151,10 @@ impl LlmManager {
             .str_to_token(&prompt, AddBos::Always)
             .map_err(|e| format!("Failed to tokenize prompt: {e}"))?;
 
-        if tokens.len() > 3500 {
-            return Err("Prompt too long for context window".to_string());
+        log_debug!("[llm] Prompt: {} tokens (max 3500)", tokens.len());
+
+        if tokens.len() > 5500 {
+            return Err(format!("Prompt too long: {} tokens (max 5500)", tokens.len()));
         }
 
         // Feed prompt tokens into the context via batch

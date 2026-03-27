@@ -43,6 +43,23 @@ const VALID_TOOLS = new Set([
   'create_worktree',   // Create a new worktree branch
   'ai_commit',         // AI-powered commit: launches fresh Claude to review and commit
   'ai_commit_merge',   // AI-powered commit & merge: commit then merge branch into main
+  'update_settings',   // Change an app setting via dot-path
+])
+
+// ── Allowed settings paths (whitelist for update_settings tool) ──────
+const ALLOWED_SETTINGS_PATHS = new Set([
+  'editor.theme', 'editor.fontSize', 'editor.fontFamily', 'editor.tabSize',
+  'editor.cursorStyle', 'editor.wordWrap', 'editor.showWhitespace',
+  'editor.indentGuides', 'editor.lineNumbers', 'editor.highlightActiveLine',
+  'editor.bracketMatching', 'editor.autocomplete', 'editor.foldGutter',
+  'editor.vimMode', 'editor.formatOnSave', 'editor.diffStyle',
+  'editor.scrollbarAnnotations', 'editor.ligatures', 'editor.minimap',
+  'editor.stickyScroll',
+  'terminal.fontSize', 'terminal.fontFamily', 'terminal.cursorStyle',
+  'terminal.scrollback', 'terminal.naturalTextEditing',
+  'sidebarCollapsed', 'leftPanelOpen', 'rightPanelOpen',
+  'defaultAgent', 'aiAssistantEnabled', 'agenticSystemsEnabled',
+  'claudeAuthAutoRefresh', 'focusGroupsEnabled',
 ])
 
 interface ChildDescriptor {
@@ -196,6 +213,13 @@ function validateAndSanitize(toolCalls: ToolCall[], cwd: string): ToolCall[] {
         sanitized.push({ tool: call.tool, args: { branch: args.branch } })
         break
       }
+
+      case 'update_settings': {
+        if (!args.path || typeof args.path !== 'string') continue
+        if (!ALLOWED_SETTINGS_PATHS.has(args.path as string)) continue
+        sanitized.push({ tool: call.tool, args: { path: args.path, value: args.value } })
+        break
+      }
     }
   }
 
@@ -211,7 +235,7 @@ function resolveFilePath(relativePath: string, cwd: string): string {
 }
 
 /** Execute validated tool calls on the tabs store */
-function executeToolCalls(toolCalls: ToolCall[]): string {
+async function executeToolCalls(toolCalls: ToolCall[]): Promise<string> {
   const tabsStore = useTabsStore.getState()
   const projectsStore = useProjectsStore.getState()
 
@@ -444,6 +468,23 @@ function executeToolCalls(toolCalls: ToolCall[]): string {
           results.push(includeMerge ? 'AI Commit & Merge' : 'AI Commit')
           break
         }
+
+        case 'update_settings': {
+          const settingsPath = call.args.path as string
+          const settingsValue = call.args.value
+
+          // Convert dot-path to nested object: "editor.diffStyle" → { editor: { diffStyle: "gutter" } }
+          const parts = settingsPath.split('.')
+          let update: unknown = settingsValue
+          for (let i = parts.length - 1; i >= 0; i--) {
+            update = { [parts[i]]: update }
+          }
+
+          await invoke('settings_update', { updates: update })
+          await useSettingsStore.getState().fetchSettings()
+          results.push(`Updated ${settingsPath} to ${JSON.stringify(settingsValue)}`)
+          break
+        }
       }
     } catch {
       results.push(`Failed: ${call.tool}`)
@@ -622,15 +663,17 @@ export default function AssistantBar(): React.JSX.Element | null {
     }
   }, [isOpen, setLastResult])
 
-  // Listen for Escape globally during loading (no input is rendered to capture keys)
+  // Listen for Escape globally whenever the console is open
   useEffect(() => {
-    if (!isOpen || !isLoading) return
+    if (!isOpen) return
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
-        abortedRef.current = true
-        setLoading(false)
+        if (isLoading) {
+          abortedRef.current = true
+          setLoading(false)
+        }
         close()
       }
     }
@@ -638,13 +681,12 @@ export default function AssistantBar(): React.JSX.Element | null {
     return () => window.removeEventListener('keydown', handler, true)
   }, [isOpen, isLoading, setLoading, close])
 
-  // Auto-clear result after 2 seconds
+  // Clear lastResult after it's been logged (no auto-close)
   useEffect(() => {
     if (lastResult) {
       resultTimerRef.current = setTimeout(() => {
         setLastResult(null)
-        close()
-      }, 2000)
+      }, 300)
       return () => {
         if (resultTimerRef.current) {
           clearTimeout(resultTimerRef.current)
@@ -652,7 +694,7 @@ export default function AssistantBar(): React.JSX.Element | null {
         }
       }
     }
-  }, [lastResult, setLastResult, close])
+  }, [lastResult, setLastResult])
 
   const handleSubmit = useCallback(async () => {
     const trimmed = message.trim()
@@ -700,7 +742,7 @@ export default function AssistantBar(): React.JSX.Element | null {
 
       let result: string
       if (toolCalls && toolCalls.length > 0) {
-        result = executeToolCalls(toolCalls)
+        result = await executeToolCalls(toolCalls)
       } else if (response.parsed?.message) {
         result = response.parsed.message
       } else {
@@ -811,6 +853,12 @@ export default function AssistantBar(): React.JSX.Element | null {
     inputRef.current?.focus()
   }, [])
 
+  // Auto-scroll ref for console log (must be before conditional return)
+  const logEndRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [interactionLog.length, isLoading])
+
   if (!isOpen) return null
 
   // Shared bar style
@@ -889,34 +937,10 @@ export default function AssistantBar(): React.JSX.Element | null {
     )
   }
 
-  // Result display
-  if (lastResult) {
-    return (
-      <div
-        className="fixed bottom-0 left-0 right-0 z-[900] flex items-center"
-        style={{ height: '48px', ...barStyle }}
-      >
-        <div className="flex items-center gap-3 px-4 w-full">
-          <span className="text-[11px] text-[var(--color-text-muted)] flex-shrink-0 tracking-wide">
-            K2SO
-          </span>
-          <span className="text-[11px] text-[var(--color-text-primary)] flex-1 truncate">
-            {lastResult}
-          </span>
-        </div>
-      </div>
-    )
-  }
-
-  // Recent history for the dropdown (most recent first, capped)
-  const recentHistory = history.length > 0
-    ? [...history].reverse().slice(0, VISIBLE_HISTORY)
-    : []
-
-  // Main input state
+  // Main console UI
   return (
     <div className="fixed bottom-0 left-0 right-0 z-[900]" style={barStyle}>
-      {/* ── Debug log panel ───────────────────────────────────────── */}
+      {/* ── Debug log panel (expandable raw output) ────────────────── */}
       {showDebugLog && (
         <div
           style={{
@@ -928,7 +952,7 @@ export default function AssistantBar(): React.JSX.Element | null {
         >
           <div className="flex items-center justify-between px-4 py-2" style={{ borderBottom: '1px solid var(--color-border)' }}>
             <span className="text-[11px] text-[var(--color-text-muted)] tracking-wide">
-              Assistant Debug Log ({interactionLog.length} entries)
+              Debug Log ({interactionLog.length})
             </span>
             {interactionLog.length > 0 && (
               <button
@@ -942,7 +966,7 @@ export default function AssistantBar(): React.JSX.Element | null {
           </div>
           {interactionLog.length === 0 ? (
             <div className="px-4 py-3 text-[11px] text-[var(--color-text-muted)]">
-              No interactions yet. Send a command to see debug output here.
+              No interactions yet.
             </div>
           ) : (
             [...interactionLog].reverse().map((entry, i) => (
@@ -952,57 +976,93 @@ export default function AssistantBar(): React.JSX.Element | null {
         </div>
       )}
 
-      {/* ── History dropdown ──────────────────────────────────────── */}
-      {!showDebugLog && showHistory && recentHistory.length > 0 && (
+      {/* ── Console log (command → response history) ──────────────── */}
+      {!showDebugLog && (
         <div
           style={{
-            borderBottom: '1px solid var(--color-border)',
-            background: '#0d0d0d',
-            maxHeight: '160px',
+            background: '#0a0a0a',
+            minHeight: '120px',
+            maxHeight: '200px',
             overflowY: 'auto',
           }}
         >
-          {recentHistory.map((cmd, i) => {
-            const isActive = historyIndex === i
+          {interactionLog.length === 0 && !isLoading && (
+            <div className="flex items-center justify-center h-[120px]">
+              <span className="text-[11px] text-[var(--color-text-muted)] opacity-30">No commands yet</span>
+            </div>
+          )}
+          {interactionLog.map((entry, i) => {
+            const isSystem = entry.message === 'system'
+            const isError = (entry.result ?? '').startsWith('Error')
+            const isLoaded = (entry.result ?? '').includes('ready')
+
+            if (isSystem) {
+              return (
+                <div key={`${entry.timestamp}-${i}`} className="px-4 py-1.5">
+                  <span className="text-[10px]" style={{ color: isLoaded ? '#22c55e' : 'var(--color-text-muted)', opacity: isLoaded ? 0.7 : 0.4 }}>
+                    {isLoaded ? '●' : '○'} {entry.result}
+                  </span>
+                </div>
+              )
+            }
+
             return (
-              <button
-                key={`${i}-${cmd}`}
-                onClick={() => handleHistoryClick(cmd)}
-                className="w-full text-left bg-transparent border-none cursor-pointer outline-none"
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                  padding: '5px 16px 5px 44px',
-                  fontFamily: 'inherit',
-                  fontSize: '11px',
-                  color: isActive
-                    ? 'var(--color-text-primary)'
-                    : 'var(--color-text-muted)',
-                  background: isActive ? '#1a1a1a' : 'transparent',
-                }}
-              >
-                <span style={{ opacity: 0.4, flexShrink: 0, fontSize: '10px' }}>
-                  {isActive ? '>' : ' '}
-                </span>
-                <span className="truncate">{cmd}</span>
-              </button>
+              <div key={`${entry.timestamp}-${i}`} className="px-4 py-1.5">
+                <div className="flex items-baseline gap-2">
+                  <span className="text-[10px] text-[var(--color-text-muted)] flex-shrink-0 opacity-40">{'>'}</span>
+                  <span className="text-[11px] text-[var(--color-text-muted)]">{entry.message}</span>
+                </div>
+                <div className="flex items-baseline gap-2 mt-0.5">
+                  <span className="text-[10px] flex-shrink-0" style={{ color: isError ? '#f87171' : '#22c55e' }}>
+                    {isError ? '✗' : '✓'}
+                  </span>
+                  <span
+                    className="text-[11px]"
+                    style={{ color: isError ? '#f87171' : 'var(--color-text-primary)' }}
+                  >
+                    {entry.result || 'Done'}
+                  </span>
+                  {isError && !isLoading && (
+                    <button
+                      className="text-[10px] text-[var(--color-accent)] hover:underline bg-transparent border-none cursor-pointer outline-none ml-1"
+                      style={{ fontFamily: 'inherit' }}
+                      onClick={() => {
+                        setMessage(entry.message)
+                        requestAnimationFrame(() => inputRef.current?.focus())
+                      }}
+                    >
+                      retry
+                    </button>
+                  )}
+                </div>
+              </div>
             )
           })}
+          {isLoading && (
+            <div className="px-4 py-1.5">
+              <div className="flex items-baseline gap-2">
+                <span className="text-[10px] text-[var(--color-text-muted)] flex-shrink-0 opacity-40">{'>'}</span>
+                <span className="text-[11px] text-[var(--color-text-muted)]">{history[history.length - 1]}</span>
+              </div>
+              <div className="flex items-baseline gap-2 mt-0.5">
+                <span className="text-[10px] text-[var(--color-accent)] assistant-pulse">⏳</span>
+                <span className="text-[11px] text-[var(--color-text-muted)] assistant-pulse">thinking...</span>
+              </div>
+            </div>
+          )}
+          <div ref={logEndRef} />
         </div>
       )}
 
       {/* ── Input bar ─────────────────────────────────────────────── */}
-      <div className="flex items-center gap-3 px-4 w-full" style={{ height: '48px' }}>
+      <div className="flex items-center gap-3 px-4 w-full" style={{ height: '42px' }}>
         <span className="text-[11px] text-[var(--color-text-muted)] flex-shrink-0 tracking-wide">
           K2SO
         </span>
 
         {isLoading ? (
           <>
-            <span className="text-[11px] text-[var(--color-text-muted)] flex-1 assistant-pulse">
-              thinking...
-            </span>
+            <div className="flex-1" />
             <kbd
               className="text-[10px] px-1.5 py-0.5 border border-[var(--color-border)] text-[var(--color-text-muted)]"
               style={{ background: '#1a1a1a', opacity: 0.6 }}
@@ -1017,17 +1077,10 @@ export default function AssistantBar(): React.JSX.Element | null {
             value={message}
             onChange={handleChange}
             onKeyDown={handleKeyDown}
-            onFocus={() => {
-              if (history.length > 0 && !message) setShowHistory(true)
-            }}
-            onBlur={() => {
-              // Delay so click on history item registers before blur hides it
-              setTimeout(() => setShowHistory(false), 150)
-            }}
             placeholder={
               history.length > 0
-                ? 'Describe your workspace setup...  (↑↓ history)'
-                : 'Describe your workspace setup...'
+                ? 'Type a command...  (↑↓ history)'
+                : 'Type a command...'
             }
             spellCheck={false}
             autoComplete="off"
@@ -1036,7 +1089,7 @@ export default function AssistantBar(): React.JSX.Element | null {
               fontFamily: 'inherit',
               background: '#1a1a1a',
               padding: '6px 10px',
-              height: '30px'
+              height: '28px'
             }}
           />
         )}
@@ -1046,7 +1099,7 @@ export default function AssistantBar(): React.JSX.Element | null {
             <button
               onClick={handleSubmit}
               disabled={!message.trim()}
-              className="text-[11px] px-2 py-1 border border-[var(--color-border)] bg-transparent cursor-pointer outline-none transition-colors"
+              className="text-[10px] px-2 py-1 border border-[var(--color-border)] bg-transparent cursor-pointer outline-none transition-colors"
               style={{
                 color: message.trim()
                   ? 'var(--color-text-primary)'
@@ -1055,12 +1108,12 @@ export default function AssistantBar(): React.JSX.Element | null {
                 opacity: message.trim() ? 1 : 0.5
               }}
             >
-              Run
+              ⏎
             </button>
             <button
               onClick={toggleDebugLog}
               title="Toggle debug log"
-              className="text-[11px] px-1.5 py-1 border bg-transparent cursor-pointer outline-none transition-colors"
+              className="text-[10px] px-1.5 py-1 border bg-transparent cursor-pointer outline-none transition-colors"
               style={{
                 fontFamily: 'inherit',
                 color: showDebugLog ? 'var(--color-accent)' : 'var(--color-text-muted)',
@@ -1070,6 +1123,16 @@ export default function AssistantBar(): React.JSX.Element | null {
             >
               Log
             </button>
+            {interactionLog.length > 0 && (
+              <button
+                onClick={clearLog}
+                title="Clear console"
+                className="text-[10px] px-1.5 py-1 border border-[var(--color-border)] bg-transparent cursor-pointer outline-none text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
+                style={{ fontFamily: 'inherit' }}
+              >
+                Clear
+              </button>
+            )}
             <kbd
               className="text-[10px] px-1.5 py-0.5 border border-[var(--color-border)] text-[var(--color-text-muted)]"
               style={{ background: '#1a1a1a' }}

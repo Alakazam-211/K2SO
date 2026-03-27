@@ -310,3 +310,8 @@ export function getEffectiveKeybinding(
 
 // Initialize on import
 useSettingsStore.getState().fetchSettings()
+
+// Load custom editor themes from ~/.k2so/themes/ after settings are ready
+import('./custom-themes').then(({ useCustomThemesStore }) => {
+  useCustomThemesStore.getState().loadCustomThemes()
+}).catch(() => {})

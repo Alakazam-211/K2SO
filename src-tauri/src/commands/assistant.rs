@@ -90,6 +90,70 @@ fn execute_file_tools(
 /// If the LLM's first response contains `list_files` tool calls, they are
 /// executed server-side and the results are fed back for a second inference
 /// pass (max 2 passes to keep latency bounded).
+/// Run LLM inference in a child process to isolate Metal/ggml crashes.
+/// The ggml backend calls C abort() on certain Metal failures, which kills
+/// the entire process. No signal handler or catch_unwind can prevent this.
+/// By forking into a subprocess, crashes only kill the child — K2SO survives.
+fn safe_generate(
+    _manager: &crate::llm::LlmManager,
+    system_prompt: &str,
+    user_message: &str,
+) -> Result<String, String> {
+    // Get the model path so the child process can load it independently
+    let model_path = _manager.get_model_path()
+        .ok_or_else(|| "No model loaded".to_string())?;
+
+    let exe = std::env::current_exe().map_err(|e| format!("Cannot find exe: {e}"))?;
+
+    // Pass system prompt and user message via a temp file to avoid arg length limits
+    let tmp = std::env::temp_dir().join(format!("k2so-llm-{}.json", std::process::id()));
+    let payload = serde_json::json!({
+        "model": model_path,
+        "system": system_prompt,
+        "message": user_message,
+    });
+    std::fs::write(&tmp, payload.to_string())
+        .map_err(|e| format!("Failed to write LLM payload: {e}"))?;
+
+    let output = std::process::Command::new(&exe)
+        .args(["--llm-worker", tmp.to_string_lossy().as_ref()])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| format!("Failed to spawn LLM worker: {e}"))?;
+
+    let _ = std::fs::remove_file(&tmp);
+
+    let exit_code = output.status.code();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Log token count from worker stderr if present
+    for line in stderr.lines() {
+        if line.contains("Prompt:") || line.contains("tokens") {
+            log_debug!("[llm-worker] {}", line.trim());
+        }
+    }
+
+    if output.status.success() {
+        let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        log_debug!("[llm-worker] Output: {} bytes", result.len());
+        if result.is_empty() {
+            Err("LLM produced empty output".to_string())
+        } else {
+            Ok(result)
+        }
+    } else {
+        let stderr_trimmed = stderr.trim().to_string();
+        log_debug!("[llm-worker] Failed: exit={:?} stderr_len={}", exit_code, stderr_trimmed.len());
+        if exit_code.is_none() || stderr_trimmed.contains("abort") {
+            // Signal kill (no exit code) = Metal crash
+            Err(format!("LLM crashed (signal). Last stderr: {}",
+                stderr_trimmed.lines().rev().take(3).collect::<Vec<_>>().join(" | ")))
+        } else {
+            Err(format!("LLM error: {}", if stderr_trimmed.is_empty() { "unknown" } else { &stderr_trimmed }))
+        }
+    }
+}
+
 #[tauri::command]
 pub fn assistant_chat(
     state: State<'_, AppState>,
@@ -99,13 +163,19 @@ pub fn assistant_chat(
 ) -> Result<ChatResponse, String> {
     let manager = state.llm_manager.lock();
 
+    // Guard: ensure model is loaded before attempting inference
+    if !manager.is_loaded() {
+        return Err("Model is still loading. Please wait a moment and try again.".to_string());
+    }
+
     let system_prompt = tools::build_system_prompt(is_git_repo.unwrap_or(false));
     let mut debug_passes: Vec<DebugPass> = Vec::new();
 
     log_debug!("[assistant] User message: {message}");
+    log_debug!("[assistant] System prompt length: {} chars", system_prompt.len());
 
-    // First pass
-    let raw = manager.generate(&system_prompt, &message)?;
+    // First pass (wrapped in catch_unwind to survive Metal crashes)
+    let raw = safe_generate(&manager, &system_prompt, &message)?;
     log_debug!("[assistant] Raw LLM response (pass 1): {raw}");
     debug_passes.push(DebugPass {
         prompt: message.clone(),
@@ -135,7 +205,7 @@ pub fn assistant_chat(
                     );
                     log_debug!("[assistant] Follow-up prompt (pass 2): {follow_up}");
 
-                    let raw2 = manager.generate(&system_prompt, &follow_up)?;
+                    let raw2 = safe_generate(&manager, &system_prompt, &follow_up)?;
                     log_debug!("[assistant] Raw LLM response (pass 2): {raw2}");
                     debug_passes.push(DebugPass {
                         prompt: follow_up,

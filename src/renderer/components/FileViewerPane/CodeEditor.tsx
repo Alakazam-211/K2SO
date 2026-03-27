@@ -4,11 +4,14 @@ import { EditorState, Compartment, RangeSet, type Extension } from '@codemirror/
 import type { EditorSettingsBackend, EditorThemeId } from '@shared/types'
 import { invoke } from '@tauri-apps/api/core'
 import { useSettingsStore } from '@/stores/settings'
+import { useCustomThemesStore } from '@/stores/custom-themes'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { oneDarkHighlightStyle } from '@codemirror/theme-one-dark'
+import { tags } from '@lezer/highlight'
 import {
   syntaxHighlighting, defaultHighlightStyle, bracketMatching, indentOnInput,
   foldGutter, codeFolding, foldKeymap, StreamLanguage, indentUnit, syntaxTree,
+  HighlightStyle,
 } from '@codemirror/language'
 import { search, searchKeymap, highlightSelectionMatches, selectNextOccurrence } from '@codemirror/search'
 import { autocompletion, closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
@@ -379,6 +382,201 @@ const THEME_COLORS: Record<string, ThemeColors> = {
     bracketOutline: '#58a6ff66', searchMatch: '#e3b34166', searchMatchSelected: '#e3b341aa',
     accent: '#58a6ff', panelBg: '#161b22', panelBorder: '#30363d', tooltipBg: '#161b22', tooltipBorder: '#30363d',
   },
+  'gruvbox-dark': {
+    bg: '#282828', fg: '#ebdbb2', gutterBg: '#282828', gutterFg: '#7c6f64', gutterBorder: '#3c3836',
+    activeLine: '#3c383644', selection: '#504945', cursor: '#83a598', bracket: '#83a59833',
+    bracketOutline: '#83a59866', searchMatch: '#fabd2e44', searchMatchSelected: '#fabd2e88',
+    accent: '#83a598', panelBg: '#1d2021', panelBorder: '#3c3836', tooltipBg: '#1d2021', tooltipBorder: '#3c3836',
+  },
+  'ayu-mirage': {
+    bg: '#242936', fg: '#cccac2', gutterBg: '#242936', gutterFg: '#5c6166', gutterBorder: '#2b313a',
+    activeLine: '#2b313a44', selection: '#33415e', cursor: '#ffcc66', bracket: '#ffcc6633',
+    bracketOutline: '#ffcc6666', searchMatch: '#e6b45066', searchMatchSelected: '#e6b450aa',
+    accent: '#ffcc66', panelBg: '#1f2430', panelBorder: '#2b313a', tooltipBg: '#1f2430', tooltipBorder: '#2b313a',
+  },
+  'parchment': {
+    bg: '#f4f0e8', fg: '#3b3228', gutterBg: '#ece8df', gutterFg: '#9e9688', gutterBorder: '#ddd8ce',
+    activeLine: '#e8e3d888', selection: '#d4cfc4', cursor: '#3b3228', bracket: '#7b685433',
+    bracketOutline: '#7b685466', searchMatch: '#e6c07b66', searchMatchSelected: '#e6c07baa',
+    accent: '#7b6854', panelBg: '#ece8df', panelBorder: '#ddd8ce', tooltipBg: '#ece8df', tooltipBorder: '#ddd8ce',
+  },
+}
+
+// ── Per-theme syntax highlight styles ────────────────────────────────
+// Each theme gets its own HighlightStyle with colors from Zed/industry standards
+
+const THEME_HIGHLIGHTS: Record<string, HighlightStyle> = {
+  'k2so-dark': HighlightStyle.define([
+    { tag: tags.keyword, color: '#c678dd' },
+    { tag: tags.operator, color: '#56b6c2' },
+    { tag: tags.string, color: '#98c379' },
+    { tag: tags.number, color: '#d19a66' },
+    { tag: tags.bool, color: '#d19a66' },
+    { tag: tags.null, color: '#d19a66' },
+    { tag: tags.comment, color: '#5c6370', fontStyle: 'italic' },
+    { tag: tags.function(tags.variableName), color: '#61afef' },
+    { tag: tags.typeName, color: '#e5c07b' },
+    { tag: tags.className, color: '#e5c07b' },
+    { tag: tags.definition(tags.variableName), color: '#e06c75' },
+    { tag: tags.propertyName, color: '#e06c75' },
+    { tag: tags.variableName, color: '#e4e4e7' },
+    { tag: tags.attributeName, color: '#d19a66' },
+    { tag: tags.tagName, color: '#e06c75' },
+    { tag: tags.meta, color: '#abb2bf' },
+    { tag: tags.regexp, color: '#98c379' },
+    { tag: tags.punctuation, color: '#abb2bf' },
+  ]),
+  'one-dark': HighlightStyle.define([
+    { tag: tags.keyword, color: '#c678dd' },
+    { tag: tags.operator, color: '#56b6c2' },
+    { tag: tags.string, color: '#98c379' },
+    { tag: tags.number, color: '#d19a66' },
+    { tag: tags.bool, color: '#d19a66' },
+    { tag: tags.null, color: '#d19a66' },
+    { tag: tags.comment, color: '#5c6370', fontStyle: 'italic' },
+    { tag: tags.function(tags.variableName), color: '#61afef' },
+    { tag: tags.typeName, color: '#e5c07b' },
+    { tag: tags.className, color: '#e5c07b' },
+    { tag: tags.definition(tags.variableName), color: '#e06c75' },
+    { tag: tags.propertyName, color: '#e06c75' },
+    { tag: tags.variableName, color: '#abb2bf' },
+    { tag: tags.attributeName, color: '#d19a66' },
+    { tag: tags.tagName, color: '#e06c75' },
+    { tag: tags.meta, color: '#abb2bf' },
+    { tag: tags.regexp, color: '#98c379' },
+    { tag: tags.punctuation, color: '#abb2bf' },
+  ]),
+  'dracula': HighlightStyle.define([
+    { tag: tags.keyword, color: '#ff79c6' },
+    { tag: tags.operator, color: '#ff79c6' },
+    { tag: tags.string, color: '#f1fa8c' },
+    { tag: tags.number, color: '#bd93f9' },
+    { tag: tags.bool, color: '#bd93f9' },
+    { tag: tags.null, color: '#bd93f9' },
+    { tag: tags.comment, color: '#6272a4', fontStyle: 'italic' },
+    { tag: tags.function(tags.variableName), color: '#50fa7b' },
+    { tag: tags.typeName, color: '#8be9fd', fontStyle: 'italic' },
+    { tag: tags.className, color: '#8be9fd' },
+    { tag: tags.definition(tags.variableName), color: '#f8f8f2' },
+    { tag: tags.propertyName, color: '#66d9ef' },
+    { tag: tags.variableName, color: '#f8f8f2' },
+    { tag: tags.attributeName, color: '#50fa7b' },
+    { tag: tags.tagName, color: '#ff79c6' },
+    { tag: tags.meta, color: '#f8f8f2' },
+    { tag: tags.regexp, color: '#f1fa8c' },
+    { tag: tags.punctuation, color: '#f8f8f2' },
+  ]),
+  'nord': HighlightStyle.define([
+    { tag: tags.keyword, color: '#81a1c1' },
+    { tag: tags.operator, color: '#81a1c1' },
+    { tag: tags.string, color: '#a3be8c' },
+    { tag: tags.number, color: '#b48ead' },
+    { tag: tags.bool, color: '#81a1c1' },
+    { tag: tags.null, color: '#81a1c1' },
+    { tag: tags.comment, color: '#616e88', fontStyle: 'italic' },
+    { tag: tags.function(tags.variableName), color: '#88c0d0' },
+    { tag: tags.typeName, color: '#8fbcbb' },
+    { tag: tags.className, color: '#8fbcbb' },
+    { tag: tags.definition(tags.variableName), color: '#d8dee9' },
+    { tag: tags.propertyName, color: '#88c0d0' },
+    { tag: tags.variableName, color: '#d8dee9' },
+    { tag: tags.attributeName, color: '#8fbcbb' },
+    { tag: tags.tagName, color: '#81a1c1' },
+    { tag: tags.meta, color: '#d8dee9' },
+    { tag: tags.regexp, color: '#ebcb8b' },
+    { tag: tags.punctuation, color: '#eceff4' },
+  ]),
+  'github-dark': HighlightStyle.define([
+    { tag: tags.keyword, color: '#ff7b72' },
+    { tag: tags.operator, color: '#ff7b72' },
+    { tag: tags.string, color: '#a5d6ff' },
+    { tag: tags.number, color: '#79c0ff' },
+    { tag: tags.bool, color: '#79c0ff' },
+    { tag: tags.null, color: '#79c0ff' },
+    { tag: tags.comment, color: '#8b949e', fontStyle: 'italic' },
+    { tag: tags.function(tags.variableName), color: '#d2a8ff' },
+    { tag: tags.typeName, color: '#ffa657' },
+    { tag: tags.className, color: '#ffa657' },
+    { tag: tags.definition(tags.variableName), color: '#ffa657' },
+    { tag: tags.propertyName, color: '#79c0ff' },
+    { tag: tags.variableName, color: '#c9d1d9' },
+    { tag: tags.attributeName, color: '#79c0ff' },
+    { tag: tags.tagName, color: '#7ee787' },
+    { tag: tags.meta, color: '#c9d1d9' },
+    { tag: tags.regexp, color: '#a5d6ff' },
+    { tag: tags.punctuation, color: '#c9d1d9' },
+  ]),
+  'gruvbox-dark': HighlightStyle.define([
+    { tag: tags.keyword, color: '#fb4934' },
+    { tag: tags.operator, color: '#8ec07c' },
+    { tag: tags.string, color: '#b8bb26' },
+    { tag: tags.number, color: '#d3869b' },
+    { tag: tags.bool, color: '#d3869b' },
+    { tag: tags.null, color: '#d3869b' },
+    { tag: tags.comment, color: '#928374', fontStyle: 'italic' },
+    { tag: tags.function(tags.variableName), color: '#b8bb26' },
+    { tag: tags.typeName, color: '#fabd2f' },
+    { tag: tags.className, color: '#fabd2f' },
+    { tag: tags.definition(tags.variableName), color: '#83a598' },
+    { tag: tags.propertyName, color: '#83a598' },
+    { tag: tags.variableName, color: '#ebdbb2' },
+    { tag: tags.attributeName, color: '#fabd2f' },
+    { tag: tags.tagName, color: '#8ec07c' },
+    { tag: tags.meta, color: '#ebdbb2' },
+    { tag: tags.regexp, color: '#b8bb26' },
+    { tag: tags.punctuation, color: '#a89984' },
+  ]),
+  'ayu-mirage': HighlightStyle.define([
+    { tag: tags.keyword, color: '#ffad66' },
+    { tag: tags.operator, color: '#f29e74' },
+    { tag: tags.string, color: '#d5ff80' },
+    { tag: tags.number, color: '#dfbfff' },
+    { tag: tags.bool, color: '#dfbfff' },
+    { tag: tags.null, color: '#dfbfff' },
+    { tag: tags.comment, color: '#5c6773', fontStyle: 'italic' },
+    { tag: tags.function(tags.variableName), color: '#ffd173' },
+    { tag: tags.typeName, color: '#73d0ff' },
+    { tag: tags.className, color: '#73d0ff' },
+    { tag: tags.definition(tags.variableName), color: '#73d0ff' },
+    { tag: tags.propertyName, color: '#5ccfe6' },
+    { tag: tags.variableName, color: '#cccac2' },
+    { tag: tags.attributeName, color: '#ffd173' },
+    { tag: tags.tagName, color: '#73d0ff' },
+    { tag: tags.meta, color: '#cccac2' },
+    { tag: tags.regexp, color: '#95e6cb' },
+    { tag: tags.punctuation, color: '#b8cfe6' },
+  ]),
+  'parchment': HighlightStyle.define([
+    { tag: tags.keyword, color: '#8b4513' },
+    { tag: tags.operator, color: '#6b5344' },
+    { tag: tags.string, color: '#2e7d32' },
+    { tag: tags.number, color: '#7b1fa2' },
+    { tag: tags.bool, color: '#7b1fa2' },
+    { tag: tags.null, color: '#7b1fa2' },
+    { tag: tags.comment, color: '#9e9688', fontStyle: 'italic' },
+    { tag: tags.function(tags.variableName), color: '#1565c0' },
+    { tag: tags.typeName, color: '#c56200' },
+    { tag: tags.className, color: '#c56200' },
+    { tag: tags.definition(tags.variableName), color: '#ad1457' },
+    { tag: tags.propertyName, color: '#1565c0' },
+    { tag: tags.variableName, color: '#3b3228' },
+    { tag: tags.attributeName, color: '#c56200' },
+    { tag: tags.tagName, color: '#ad1457' },
+    { tag: tags.meta, color: '#6b5344' },
+    { tag: tags.regexp, color: '#2e7d32' },
+    { tag: tags.punctuation, color: '#6b5344' },
+  ]),
+}
+
+function getHighlightExtension(themeId: string): Extension {
+  if (themeId.startsWith('custom:')) {
+    const custom = useCustomThemesStore.getState().getTheme(themeId)
+    if (custom) {
+      return [syntaxHighlighting(custom.highlight), syntaxHighlighting(defaultHighlightStyle, { fallback: true })]
+    }
+  }
+  const hl = THEME_HIGHLIGHTS[themeId] || THEME_HIGHLIGHTS['k2so-dark']
+  return [syntaxHighlighting(hl), syntaxHighlighting(defaultHighlightStyle, { fallback: true })]
 }
 
 export const EDITOR_THEMES: { id: string; label: string }[] = [
@@ -387,19 +585,23 @@ export const EDITOR_THEMES: { id: string; label: string }[] = [
   { id: 'dracula', label: 'Dracula' },
   { id: 'nord', label: 'Nord' },
   { id: 'github-dark', label: 'GitHub Dark' },
+  { id: 'gruvbox-dark', label: 'Gruvbox Dark' },
+  { id: 'ayu-mirage', label: 'Ayu Mirage' },
+  { id: 'parchment', label: 'Parchment' },
 ]
+
+const LIGHT_THEMES = new Set(['parchment'])
 
 export const EDITOR_FONTS: { id: string; label: string }[] = [
   { id: 'MesloLGM Nerd Font', label: 'MesloLGM Nerd Font' },
   { id: 'JetBrains Mono', label: 'JetBrains Mono' },
   { id: 'Fira Code', label: 'Fira Code' },
-  { id: 'SF Mono', label: 'SF Mono' },
-  { id: 'Cascadia Code', label: 'Cascadia Code' },
+  { id: 'Lilex', label: 'Lilex' },
   { id: 'Menlo', label: 'Menlo' },
   { id: 'Monaco', label: 'Monaco' },
 ]
 
-function buildEditorTheme(colors: ThemeColors): Extension {
+function buildEditorTheme(colors: ThemeColors, isLight = false): Extension {
   return EditorView.theme({
     '&': {
       backgroundColor: colors.bg,
@@ -495,15 +697,27 @@ function buildEditorTheme(colors: ThemeColors): Extension {
     '.cm-indentation-marker': { opacity: '0.15' },
     '.cm-indentation-marker.active': { opacity: '0.35' },
     '&.cm-focused': { outline: 'none' },
-  }, { dark: true })
+  }, { dark: !isLight })
 }
 
 function getThemeExtension(themeId: string): Extension {
+  if (themeId.startsWith('custom:')) {
+    const custom = useCustomThemesStore.getState().getTheme(themeId)
+    if (custom) {
+      return buildEditorTheme(custom.colors, custom.isLight)
+    }
+  }
   const colors = THEME_COLORS[themeId] || THEME_COLORS['k2so-dark']
-  return buildEditorTheme(colors)
+  return buildEditorTheme(colors, LIGHT_THEMES.has(themeId))
 }
 
 // ── Component ────────────────────────────────────────────────────────
+
+interface ThemeOverride {
+  colors: import('@/lib/editor-themes').ThemeColors
+  highlight: import('@codemirror/language').HighlightStyle
+  isLight?: boolean
+}
 
 interface CodeEditorProps {
   code: string
@@ -514,6 +728,8 @@ interface CodeEditorProps {
   readOnly?: boolean
   /** Inject fake diff data for preview/demo purposes (skips real git polling) */
   demoLineChanges?: Map<number, 'added' | 'modified' | 'deleted'>
+  /** Override theme from settings — used by the custom theme creator for live preview */
+  themeOverride?: ThemeOverride
 }
 
 // ── Compartments for live-reconfigurable settings ───────────────────
@@ -535,6 +751,7 @@ const vimCompartment = new Compartment()
 const stickyScrollCompartment = new Compartment()
 const minimapCompartment = new Compartment()
 const gitGutterCompartment = new Compartment()
+const highlightCompartment = new Compartment()
 
 // ── Git gutter markers ──────────────────────────────────────────────
 
@@ -733,9 +950,14 @@ function buildGitGutterExtension(
 
 function buildFontFamilyExtension(family: string, ligatures: boolean): Extension {
   const fontStack = `"${family}", "Menlo", "Monaco", "Courier New", monospace`
+  const ligatureCSS = ligatures
+    ? { fontVariantLigatures: 'normal', fontFeatureSettings: '"liga" 1, "calt" 1' }
+    : { fontVariantLigatures: 'none', fontFeatureSettings: '"liga" 0, "calt" 0' }
   return EditorView.theme({
     '&': { fontFamily: fontStack },
-    '.cm-content': { fontVariantLigatures: ligatures ? 'normal' : 'none' },
+    '.cm-scroller': { fontFamily: 'inherit' },
+    '.cm-content': ligatureCSS,
+    '.cm-line': ligatureCSS,
     '.cm-tooltip.cm-tooltip-autocomplete > ul': { fontFamily: fontStack },
   })
 }
@@ -928,7 +1150,7 @@ const stickyScrollPlugin = ViewPlugin.fromClass(
   }
 )
 
-export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, readOnly = false, demoLineChanges }: CodeEditorProps): React.JSX.Element {
+export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, readOnly = false, demoLineChanges, themeOverride }: CodeEditorProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
   const onSaveRef = useRef(onSave)
@@ -937,6 +1159,8 @@ export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, r
   const codeRef = useRef(code)
 
   const editorSettings = useSettingsStore((s) => s.editor)
+  // Subscribe to custom themes so we re-render when they load/change
+  const customThemes = useCustomThemesStore((s) => s.customThemes)
 
   // Keep refs current
   onSaveRef.current = onSave
@@ -1028,11 +1252,18 @@ export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, r
         ...foldKeymap,
         indentWithTab,
       ]),
-      // Syntax highlighting
-      syntaxHighlighting(oneDarkHighlightStyle),
-      syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+      // Syntax highlighting (per-theme colors via compartment)
+      highlightCompartment.of(
+        themeOverride
+          ? [syntaxHighlighting(themeOverride.highlight), syntaxHighlighting(defaultHighlightStyle, { fallback: true })]
+          : getHighlightExtension(es.theme || 'k2so-dark')
+      ),
       // Theme (via compartment for live switching)
-      themeCompartment.of(getThemeExtension(es.theme || 'k2so-dark')),
+      themeCompartment.of(
+        themeOverride
+          ? buildEditorTheme(themeOverride.colors, themeOverride.isLight)
+          : getThemeExtension(es.theme || 'k2so-dark')
+      ),
       // Change tracking
       updateListener,
     ]
@@ -1077,7 +1308,16 @@ export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, r
         fontSizeCompartment.reconfigure(EditorView.theme({ '&': { fontSize: `${editorSettings.fontSize}px` }, '.cm-gutters': { fontSize: `${Math.max(editorSettings.fontSize - 1, 10)}px` } })),
         fontFamilyCompartment.reconfigure(buildFontFamilyExtension(editorSettings.fontFamily || 'MesloLGM Nerd Font', editorSettings.fontLigatures ?? false)),
         cursorCompartment.reconfigure(buildCursorExtension(editorSettings.cursorStyle || 'bar', editorSettings.cursorBlink ?? true)),
-        themeCompartment.reconfigure(getThemeExtension(editorSettings.theme || 'k2so-dark')),
+        themeCompartment.reconfigure(
+          themeOverride
+            ? buildEditorTheme(themeOverride.colors, themeOverride.isLight)
+            : getThemeExtension(editorSettings.theme || 'k2so-dark')
+        ),
+        highlightCompartment.reconfigure(
+          themeOverride
+            ? [syntaxHighlighting(themeOverride.highlight), syntaxHighlighting(defaultHighlightStyle, { fallback: true })]
+            : getHighlightExtension(editorSettings.theme || 'k2so-dark')
+        ),
         scrollPastEndCompartment.reconfigure(editorSettings.scrollPastEnd ? scrollPastEnd() : []),
         minimapCompartment.reconfigure(editorSettings.minimap ? showMinimap.compute(['doc'], () => ({
           enabled: true, displayText: 'blocks' as const, showOverlay: 'mouse-over' as const,
@@ -1086,7 +1326,7 @@ export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, r
         vimCompartment.reconfigure(editorSettings.vimMode ? vim() : []),
       ],
     })
-  }, [editorSettings])
+  }, [editorSettings, themeOverride, customThemes])
 
   // Update content when external changes arrive (file polling)
   useEffect(() => {
@@ -1141,7 +1381,7 @@ export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, r
     fetchDiff()
     const interval = setInterval(fetchDiff, 15000)
     return () => clearInterval(interval)
-  }, [filePath, demoLineChanges])
+  }, [filePath, demoLineChanges, editorSettings.diffStyle, editorSettings.scrollbarAnnotations])
 
   return (
     <div

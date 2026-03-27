@@ -103,7 +103,8 @@ export default function ConfirmDialog(): React.JSX.Element | null {
             fontSize: '12px',
             color: 'var(--color-text-secondary)',
             lineHeight: '1.5',
-            marginBottom: 20
+            marginBottom: 20,
+            whiteSpace: 'pre-line',
           }}
         >
           {message}

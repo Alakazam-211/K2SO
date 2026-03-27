@@ -5,6 +5,17 @@
 @layer tw, cm-overrides;
 @import "tailwindcss" layer(tw);
 
+/* ── Bundled coding fonts ─────────────────────────────────────────── */
+@font-face { font-family: 'MesloLGM Nerd Font'; src: url('./fonts/MesloLGMNerdFontMono-Regular.ttf') format('truetype'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'MesloLGM Nerd Font'; src: url('./fonts/MesloLGMNerdFontMono-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'MesloLGM Nerd Font'; src: url('./fonts/MesloLGMNerdFontMono-Italic.ttf') format('truetype'); font-weight: 400; font-style: italic; font-display: swap; }
+@font-face { font-family: 'JetBrains Mono'; src: url('./fonts/JetBrainsMono-Regular.ttf') format('truetype'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Fira Code'; src: url('./fonts/FiraCode-Regular.ttf') format('truetype'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Fira Code'; src: url('./fonts/FiraCode-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Lilex'; src: url('./fonts/Lilex-Regular.ttf') format('truetype'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Lilex'; src: url('./fonts/Lilex-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Lilex'; src: url('./fonts/Lilex-Italic.ttf') format('truetype'); font-weight: 400; font-style: italic; font-display: swap; }
+
 /* System font for modifier key symbols (⌘⇧⌥⌃↵) — renders crisp Apple glyphs */
 .key-symbol {
   font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
@@ -190,6 +201,7 @@ a,
     color: var(--color-text-secondary) !important;
     padding: 3px 10px !important;
     font-size: 11px !important;
+    border-radius: 0 !important;
     cursor: pointer;
     transition: background-color 150ms, color 150ms;
   }
@@ -199,10 +211,21 @@ a,
   }
   .cm-panel.cm-search button[name="close"] {
     color: var(--color-text-muted) !important;
-    padding: 3px 6px !important;
+    background: transparent !important;
+    border: none !important;
+    padding: 4px !important;
+    font-size: 14px !important;
+    line-height: 1 !important;
+    width: 22px !important;
+    height: 22px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    transition: color 150ms !important;
   }
   .cm-panel.cm-search button[name="close"]:hover {
-    color: #ef4444 !important;
+    color: #f87171 !important;
+    background: transparent !important;
   }
   .cm-panel.cm-search input[type="text"],
   .cm-panel.cm-search input:not([type]) {

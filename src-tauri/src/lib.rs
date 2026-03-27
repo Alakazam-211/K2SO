@@ -26,6 +26,51 @@ use std::collections::HashMap;
 use parking_lot::Mutex;
 use tauri::Manager;
 
+/// Entry point for the LLM worker subprocess.
+/// Loads the model, runs inference, prints the result to stdout, then exits.
+pub fn llm_worker_main(payload_path: &str) {
+    let raw = match std::fs::read_to_string(payload_path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to read payload: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let payload: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Failed to parse payload: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let model_path = payload["model"].as_str().unwrap_or("");
+    let system_prompt = payload["system"].as_str().unwrap_or("");
+    let user_message = payload["message"].as_str().unwrap_or("");
+
+    let mut manager = llm::LlmManager::new();
+    if let Err(e) = manager.load_model(model_path) {
+        eprintln!("Failed to load model: {e}");
+        std::process::exit(1);
+    }
+
+    match manager.generate(system_prompt, user_message) {
+        Ok(output) => {
+            // Write to stdout and flush BEFORE _exit (which skips cleanup)
+            use std::io::Write;
+            let _ = std::io::stdout().write_all(output.as_bytes());
+            let _ = std::io::stdout().flush();
+            // Force-exit to skip Metal cleanup (same _exit trick as shutdown)
+            unsafe { libc::_exit(0); }
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 pub fn run() {
     // Ignore SIGPIPE so writing to a dead PTY returns EPIPE instead of
     // killing the entire process.
@@ -457,6 +502,9 @@ pub fn run() {
             commands::k2so_agents::k2so_agents_install_heartbeat,
             commands::k2so_agents::k2so_agents_uninstall_heartbeat,
             commands::k2so_agents::k2so_agents_update_heartbeat_projects,
+            // Agent Editor
+            commands::k2so_agents::k2so_agents_get_editor_context,
+            commands::k2so_agents::k2so_agents_save_agent_md,
             // Review Checklist
             commands::review_checklist::review_checklist_read,
             commands::review_checklist::review_checklist_write,
@@ -465,6 +513,11 @@ pub fn run() {
             // Format
             commands::format::format_file,
             commands::format::format_file_check,
+            commands::themes::get_themes_dir,
+            commands::themes::themes_ensure_dir,
+            commands::themes::themes_create_template,
+            commands::themes::themes_list_custom,
+            commands::themes::themes_delete,
         ])
         .build(tauri::generate_context!())
         .expect("error while building K2SO")

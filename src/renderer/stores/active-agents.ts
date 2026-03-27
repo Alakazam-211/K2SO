@@ -198,9 +198,10 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
 
     // Re-triage: if an agent session just stopped, check if there's more work
     // to do for heartbeat-enabled projects (with concurrency guard)
+    // Only runs when agentic systems are enabled
     if (eventType === 'stop') {
       const projectId = get().paneProjectMap.get(paneId)
-      if (projectId) {
+      if (projectId && useSettingsStore.getState().agenticSystemsEnabled) {
         const project = useProjectsStore.getState().projects.find(p => p.id === projectId)
         if (project && project.heartbeatEnabled) {
           // Skip if triage already in flight for this project

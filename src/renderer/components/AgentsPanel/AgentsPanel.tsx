@@ -12,6 +12,7 @@ interface K2soAgentInfo {
   activeCount: number
   doneCount: number
   podLeader: boolean
+  agentType: string // "k2so" | "custom" | "pod-leader" | "pod-member"
 }
 
 export default function AgentsPanel(): React.JSX.Element {
@@ -22,6 +23,7 @@ export default function AgentsPanel(): React.JSX.Element {
   const [newName, setNewName] = useState('')
   const [newRole, setNewRole] = useState('')
   const [creating, setCreating] = useState(false)
+  const [createType, setCreateType] = useState<string>('pod-member')
   const nameInputRef = useRef<HTMLInputElement>(null)
 
   const activeProject = useProjectsStore((s) => {
@@ -70,7 +72,7 @@ export default function AgentsPanel(): React.JSX.Element {
     }
   }, [showCreate])
 
-  const handleCreate = useCallback(async () => {
+  const handleCreate = useCallback(async (typeOverride?: string) => {
     if (!activeProject || !newName.trim() || !newRole.trim()) return
     setCreating(true)
     try {
@@ -78,6 +80,7 @@ export default function AgentsPanel(): React.JSX.Element {
         projectPath: activeProject.path,
         name: newName.trim().toLowerCase().replace(/\s+/g, '-'),
         role: newRole.trim(),
+        agentType: typeOverride || createType,
       })
       setNewName('')
       setNewRole('')
@@ -88,7 +91,7 @@ export default function AgentsPanel(): React.JSX.Element {
     } finally {
       setCreating(false)
     }
-  }, [activeProject, newName, newRole, fetchAgents])
+  }, [activeProject, newName, newRole, createType, fetchAgents])
 
   const handleLaunch = useCallback(async (agentName: string) => {
     if (!activeProject) return
@@ -162,62 +165,6 @@ export default function AgentsPanel(): React.JSX.Element {
 
   const agentMode = activeProject.agentMode || 'off'
 
-  if (agentMode === 'off') {
-    return (
-      <div className="h-full flex flex-col items-center justify-center p-4 gap-2">
-        <p className="text-[10px] text-[var(--color-text-muted)] text-center">
-          No agent mode enabled for this workspace
-        </p>
-        <p className="text-[9px] text-[var(--color-text-muted)] text-center">
-          Enable Agent or Pod mode in workspace settings
-        </p>
-      </div>
-    )
-  }
-
-  if (agentMode === 'agent') {
-    return (
-      <div className="h-full flex flex-col p-4 gap-3">
-        <div>
-          <span className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider">Agent Mode</span>
-          <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">
-            This workspace operates as a single AI agent. Open a Claude terminal to start working.
-          </p>
-        </div>
-        <button
-          onClick={async () => {
-            try {
-              const launchInfo = await invoke<{
-                command: string; args: string[]; cwd: string; agentName: string
-              }>('k2so_agents_build_launch', {
-                projectPath: activeProject.path,
-                agentName: activeProject.name.toLowerCase().replace(/\s+/g, '-'),
-              })
-              useTabsStore.getState().addTab(launchInfo.cwd, {
-                title: `Agent: ${activeProject.name}`,
-                command: launchInfo.command,
-                args: launchInfo.args,
-              })
-            } catch (e) {
-              console.error('[agents] Launch failed:', e)
-            }
-          }}
-          className="px-3 py-1.5 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
-        >
-          Launch Agent
-        </button>
-        <WorkspaceInboxButton projectPath={activeProject.path} />
-      </div>
-    )
-  }
-
-  // Pod mode — show pod leader + pod leader + pod members
-
-  const podLeader = agents.find((a) => a.podLeader)
-  const podMembers = agents.filter((a) => !a.podLeader)
-  const totalDelegated = podMembers.reduce((sum, a) => sum + a.inboxCount + a.activeCount, 0)
-  const totalDone = podMembers.reduce((sum, a) => sum + a.doneCount, 0)
-
   const openAgentPane = (name: string) => {
     if (!activeProject) return
     useTabsStore.getState().openAgentPane(name, activeProject.path)
@@ -260,6 +207,17 @@ export default function AgentsPanel(): React.JSX.Element {
           >
             ▶
           </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              if (!activeProject) return
+              useTabsStore.getState().openAgentPane(agent.name, activeProject.path)
+            }}
+            className="px-1.5 py-0.5 text-[9px] text-[var(--color-text-muted)] hover:text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 no-drag cursor-pointer"
+            title="Edit persona"
+          >
+            ✎
+          </button>
           {showDelete && (
             <button
               onClick={(e) => { e.stopPropagation(); handleDelete(agent.name) }}
@@ -273,6 +231,120 @@ export default function AgentsPanel(): React.JSX.Element {
       </div>
     </div>
   )
+
+  if (agentMode === 'off') {
+    return (
+      <div className="h-full flex flex-col items-center justify-center p-4 gap-2">
+        <p className="text-[10px] text-[var(--color-text-muted)] text-center">
+          No agent mode enabled for this workspace
+        </p>
+        <p className="text-[9px] text-[var(--color-text-muted)] text-center">
+          Enable Agent or Pod mode in workspace settings
+        </p>
+      </div>
+    )
+  }
+
+  if (agentMode === 'custom') {
+    const customAgent = agents.find((a) => a.agentType === 'custom')
+
+    return (
+      <div className="h-full flex flex-col p-4 gap-3">
+        <div>
+          <span className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider">Custom Agent</span>
+          <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">
+            {customAgent
+              ? `"${customAgent.name}" — ${customAgent.role}`
+              : 'This workspace runs a single custom agent. Configure its persona in Settings.'}
+          </p>
+        </div>
+        {customAgent && (
+          <button
+            onClick={() => handleLaunch(customAgent.name)}
+            className="px-3 py-1.5 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
+          >
+            Launch Agent
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  if (agentMode === 'agent') {
+    const k2soAgent = agents.find((a) => a.agentType === 'k2so')
+
+    return (
+      <div className="h-full flex flex-col overflow-hidden">
+        {/* K2SO Agent section */}
+        <div className="border-b border-[var(--color-border)]">
+          <div className="px-3 py-1.5">
+            <span className="text-[9px] font-medium text-[var(--color-accent)] uppercase tracking-wider">K2SO Agent</span>
+          </div>
+          {k2soAgent ? (
+            <div
+              className="px-3 py-2 border-b border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] transition-colors group cursor-pointer"
+              onClick={() => openAgentPane(k2soAgent.name)}
+            >
+              <div className="flex items-center gap-2">
+                <span
+                  className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                  style={{ backgroundColor: statusColor(k2soAgent) }}
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs text-[var(--color-text-primary)] truncate">{k2soAgent.name}</div>
+                  <div className="text-[10px] text-[var(--color-text-muted)] truncate">{k2soAgent.role}</div>
+                </div>
+                <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); handleLaunch(k2soAgent.name) }}
+                    className="px-1.5 py-0.5 text-[9px] text-[var(--color-accent)] hover:text-[var(--color-accent)]/80 hover:bg-[var(--color-accent)]/10 no-drag cursor-pointer"
+                    title="Launch K2SO agent session"
+                  >
+                    ▶
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="px-3 py-2 border-b border-[var(--color-border)]">
+              <p className="text-[10px] text-[var(--color-text-muted)]">
+                No K2SO agent yet. This agent helps you build PRDs, milestones, and technical plans.
+              </p>
+              <button
+                onClick={async () => {
+                  if (!activeProject) return
+                  try {
+                    const name = activeProject.name.toLowerCase().replace(/\s+/g, '-')
+                    await invoke('k2so_agents_create', {
+                      projectPath: activeProject.path,
+                      name,
+                      role: 'K2SO AI Planner — builds PRDs, milestones, technical plans, and coordinates workspace setup',
+                      agentType: 'k2so',
+                    })
+                    await fetchAgents()
+                  } catch (e) {
+                    console.error('[agents] Create K2SO agent failed:', e)
+                  }
+                }}
+                className="mt-2 px-3 py-1.5 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
+              >
+                Create K2SO Agent
+              </button>
+            </div>
+          )}
+        </div>
+
+        <WorkspaceInboxButton projectPath={activeProject.path} />
+      </div>
+    )
+  }
+
+  // Pod mode — show pod leader + pod members
+
+  const podLeader = agents.find((a) => a.podLeader)
+  const podMembers = agents.filter((a) => !a.podLeader && a.agentType !== 'custom' && a.agentType !== 'k2so')
+  const totalDelegated = podMembers.reduce((sum, a) => sum + a.inboxCount + a.activeCount, 0)
+  const totalDone = podMembers.reduce((sum, a) => sum + a.doneCount, 0)
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
@@ -320,15 +392,15 @@ export default function AgentsPanel(): React.JSX.Element {
       {/* Pod Members header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)]">
         <span className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider flex items-center gap-1.5">
-          Agents
+          Pod Members
           {podMembers.length > 0 && (
             <span className="text-[9px] tabular-nums font-medium px-1 py-0.5 bg-white/5 text-[var(--color-text-muted)]">{podMembers.length}</span>
           )}
         </span>
         <button
-          onClick={() => setShowCreate(!showCreate)}
+          onClick={() => { setCreateType('pod-member'); setShowCreate(!showCreate) }}
           className="text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] no-drag cursor-pointer"
-          title="New Agent"
+          title="New Pod Member"
         >
           {showCreate ? '×' : '+'}
         </button>
@@ -364,7 +436,7 @@ export default function AgentsPanel(): React.JSX.Element {
         </div>
       )}
 
-      {/* Agent list */}
+      {/* Pod member list */}
       <div className="flex-1 overflow-y-auto">
         {loading ? (
           <div className="p-3">
@@ -373,7 +445,7 @@ export default function AgentsPanel(): React.JSX.Element {
         ) : podMembers.length === 0 ? (
           <div className="p-3">
             <p className="text-[10px] text-[var(--color-text-muted)]">
-              No agents yet. Click + to create one.
+              No pod members yet. Click + to create one.
             </p>
           </div>
         ) : (

@@ -381,12 +381,15 @@ export default function App(): React.JSX.Element {
   const [showQuitDialog, setShowQuitDialog] = useState(false)
   const [quitAgents, setQuitAgents] = useState<ReturnType<typeof useActiveAgentsStore.getState>['getActiveAgentsList']>([])
 
-  // Start agent polling + review queue polling
+  // Start agent polling + review queue polling (only when agentic systems enabled)
+  const agenticEnabled = useSettingsStore((s) => s.agenticSystemsEnabled)
   useEffect(() => {
-    startAgentPolling()
-    startReviewQueuePolling()
+    if (agenticEnabled) {
+      startAgentPolling()
+      startReviewQueuePolling()
+    }
     return () => { stopAgentPolling(); stopReviewQueuePolling() }
-  }, [])
+  }, [agenticEnabled])
 
   // Check for updates on launch and every 3 hours
   useUpdateChecker()
