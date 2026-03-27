@@ -41,6 +41,12 @@ fn is_available(cmd: &str) -> bool {
 #[tauri::command]
 pub fn format_file(file_path: String) -> Result<String, String> {
     let path = Path::new(&file_path);
+
+    // Validate file exists and is a regular file
+    if !path.is_file() {
+        return Err(format!("Not a file: {}", file_path));
+    }
+
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -54,20 +60,45 @@ pub fn format_file(file_path: String) -> Result<String, String> {
         return Err(format!("Formatter '{}' not found on PATH", cmd));
     }
 
+    let parent = path.parent().ok_or("Cannot determine parent directory")?;
+
     let mut args = base_args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     args.push(file_path.clone());
 
-    let output = Command::new(cmd)
+    let mut child = Command::new(cmd)
         .args(&args)
-        .current_dir(path.parent().unwrap_or(Path::new(".")))
-        .output()
+        .current_dir(parent)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| format!("Failed to run {}: {}", cmd, e))?;
 
-    if output.status.success() {
-        Ok(format!("Formatted with {}", cmd))
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("{} failed: {}", cmd, stderr.trim()))
+    // Wait with 30-second timeout (npx may need to download)
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(30);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    return Ok(format!("Formatted with {}", cmd));
+                } else {
+                    let mut stderr = String::new();
+                    if let Some(mut err) = child.stderr.take() {
+                        use std::io::Read;
+                        let _ = err.read_to_string(&mut stderr);
+                    }
+                    return Err(format!("{} failed: {}", cmd, stderr.trim()));
+                }
+            }
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    return Err(format!("{} timed out after 30 seconds", cmd));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("Failed to wait for {}: {}", cmd, e)),
+        }
     }
 }
 

@@ -685,9 +685,15 @@ function buildGitGutterExtension(
           }
         }
 
-        this.container.innerHTML = marks.map(m =>
-          `<div style="position:absolute;right:0;width:6px;top:${m.top}%;height:${m.height}%;min-height:2px;background:${m.color};opacity:0.7;pointer-events:none;border-radius:1px;"></div>`
-        ).join('')
+        this.container.textContent = ''
+        for (const m of marks) {
+          const el = document.createElement('div')
+          el.style.cssText = 'position:absolute;right:0;width:6px;min-height:2px;opacity:0.7;pointer-events:none;border-radius:1px;'
+          el.style.top = `${m.top}%`
+          el.style.height = `${m.height}%`
+          el.style.background = m.color
+          this.container.appendChild(el)
+        }
       }
       destroy() {
         this.container.remove()
@@ -797,23 +803,43 @@ const RAINBOW_COLORS = ['#fbbf24', '#c084fc', '#22d3ee', '#f472b6', '#34d399', '
 function buildRainbowDecorations(view: EditorView): DecorationSet {
   const decorations: { from: number; to: number; color: string }[] = []
   const stack: { char: string; pos: number }[] = []
-  const doc = view.state.doc
-  const text = doc.toString()
 
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]
+  // Only scan visible viewport + 500 char buffer (not entire document)
+  const { from: vpFrom, to: vpTo } = view.viewport
+  const scanFrom = Math.max(0, vpFrom - 500)
+  const scanTo = Math.min(view.state.doc.length, vpTo + 500)
+
+  // Pre-scan from document start to scanFrom to establish bracket depth
+  if (scanFrom > 0) {
+    const prefix = view.state.sliceDoc(0, scanFrom)
+    for (let i = 0; i < prefix.length; i++) {
+      const ch = prefix[i]
+      if (BRACKET_PAIRS[ch]) {
+        stack.push({ char: ch, pos: i })
+      } else if (CLOSE_BRACKETS.has(ch)) {
+        const last = stack.length > 0 ? stack[stack.length - 1] : null
+        if (last && BRACKET_PAIRS[last.char] === ch) stack.pop()
+      }
+    }
+  }
+
+  // Scan visible region and decorate
+  const visible = view.state.sliceDoc(scanFrom, scanTo)
+  for (let i = 0; i < visible.length; i++) {
+    const ch = visible[i]
+    const absPos = scanFrom + i
     if (BRACKET_PAIRS[ch]) {
       const depth = stack.length
       const color = RAINBOW_COLORS[depth % RAINBOW_COLORS.length]
-      stack.push({ char: ch, pos: i })
-      decorations.push({ from: i, to: i + 1, color })
+      stack.push({ char: ch, pos: absPos })
+      decorations.push({ from: absPos, to: absPos + 1, color })
     } else if (CLOSE_BRACKETS.has(ch)) {
       const last = stack.length > 0 ? stack[stack.length - 1] : null
       if (last && BRACKET_PAIRS[last.char] === ch) {
         stack.pop()
         const depth = stack.length
         const color = RAINBOW_COLORS[depth % RAINBOW_COLORS.length]
-        decorations.push({ from: i, to: i + 1, color })
+        decorations.push({ from: absPos, to: absPos + 1, color })
       }
     }
   }
@@ -1113,7 +1139,7 @@ export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, r
     }
 
     fetchDiff()
-    const interval = setInterval(fetchDiff, 5000)
+    const interval = setInterval(fetchDiff, 15000)
     return () => clearInterval(interval)
   }, [filePath, demoLineChanges])
 

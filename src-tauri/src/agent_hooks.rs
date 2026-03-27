@@ -97,17 +97,51 @@ fn urldecode(s: &str) -> String {
     result
 }
 
+/// Shell-escape a string for safe interpolation into shell commands.
+/// Uses single-quote wrapping with escaped internal single quotes.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Gather git context (branch, status, diff stat, recent log) for AI commit prompts.
+/// Each git command has a 5-second timeout to prevent blocking the HTTP thread.
 fn gather_git_context(project_path: &str) -> serde_json::Value {
     let run = |args: &[&str]| -> String {
-        std::process::Command::new("git")
+        let mut child = match std::process::Command::new("git")
             .args(args)
             .current_dir(project_path)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return String::new(),
+        };
+
+        // Wait with 5-second timeout
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() { return String::new(); }
+                    return child.stdout.take()
+                        .and_then(|mut out| {
+                            let mut buf = String::new();
+                            std::io::Read::read_to_string(&mut out, &mut buf).ok()?;
+                            Some(buf.trim().to_string())
+                        })
+                        .unwrap_or_default();
+                }
+                Ok(None) => {
+                    if start.elapsed() > std::time::Duration::from_secs(5) {
+                        let _ = child.kill();
+                        return String::new();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => return String::new(),
+            }
+        }
     };
 
     let branch = run(&["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -648,7 +682,8 @@ fn register_claude_hooks(hook_script: &str) -> Result<(), String> {
         serde_json::json!({})
     };
 
-    let hook_cmd = format!(r#"[ -x "{}" ] && "{}" "$@" || true"#, hook_script, hook_script);
+    let escaped = shell_escape(hook_script);
+    let hook_cmd = format!("[ -x {} ] && {} \"$@\" || true", escaped, escaped);
 
     let hook_entry = serde_json::json!([{
         "hooks": [{
@@ -716,7 +751,8 @@ fn register_cursor_hooks(hook_script: &str) -> Result<(), String> {
     let hooks_obj = settings.as_object_mut().ok_or("Invalid hooks format")?;
 
     for (event, mapped_type) in &events {
-        let hook_cmd = format!(r#"[ -x "{}" ] && "{}" {} || true"#, hook_script, hook_script, mapped_type);
+        let escaped = shell_escape(hook_script);
+        let hook_cmd = format!("[ -x {} ] && {} {} || true", escaped, escaped, mapped_type);
 
         let already_registered = hooks_obj.get(*event).map_or(false, |v| {
             v.to_string().contains(".k2so/hooks/notify.sh")
@@ -757,7 +793,8 @@ fn register_gemini_hooks(hook_script: &str) -> Result<(), String> {
         serde_json::json!({})
     };
 
-    let hook_cmd = format!(r#"[ -x "{}" ] && "{}" "$@" || true"#, hook_script, hook_script);
+    let escaped = shell_escape(hook_script);
+    let hook_cmd = format!("[ -x {} ] && {} \"$@\" || true", escaped, escaped);
 
     let hook_entry = serde_json::json!([{
         "hooks": [{

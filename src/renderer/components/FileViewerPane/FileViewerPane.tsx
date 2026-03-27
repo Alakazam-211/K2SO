@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
@@ -54,6 +54,35 @@ function getShortPath(filePath: string): string {
   return filePath
 }
 
+// ── Error Boundary ───────────────────────────────────────────────────────
+
+class EditorErrorBoundary extends React.Component<
+  { filePath: string; children: React.ReactNode },
+  { hasError: boolean; error: string | null }
+> {
+  constructor(props: { filePath: string; children: React.ReactNode }) {
+    super(props)
+    this.state = { hasError: false, error: null }
+  }
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error: error.message }
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="h-full flex items-center justify-center text-[var(--color-text-muted)]">
+          <div className="text-center space-y-2">
+            <p className="text-sm">Failed to load editor</p>
+            <p className="text-xs font-mono opacity-60">{this.state.error}</p>
+            <p className="text-xs opacity-40">{this.props.filePath}</p>
+          </div>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
 // ── Component ────────────────────────────────────────────────────────────
 
 export function FileViewerPane({ filePath, mode, paneId, tabId, onClose }: FileViewerPaneProps): React.JSX.Element {
@@ -62,7 +91,11 @@ export function FileViewerPane({ filePath, mode, paneId, tabId, onClose }: FileV
     return <DiffViewer filePath={filePath} className="h-full" />
   }
 
-  return <FileViewerPaneInner filePath={filePath} paneId={paneId} tabId={tabId} onClose={onClose} />
+  return (
+    <EditorErrorBoundary filePath={filePath}>
+      <FileViewerPaneInner filePath={filePath} paneId={paneId} tabId={tabId} onClose={onClose} />
+    </EditorErrorBoundary>
+  )
 }
 
 function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileViewerPaneProps, 'mode'>): React.JSX.Element {
@@ -146,16 +179,15 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
     const interval = setInterval(async () => {
       try {
         const result = await invoke<{ content: string }>('fs_read_file', { path: filePath })
-        if (result.content !== content) {
-          setContent(result.content)
-        }
+        // Functional update avoids stale closure over content
+        setContent(prev => result.content !== prev ? result.content : prev)
       } catch {
         // Ignore polling errors
       }
     }, FILE_POLL_INTERVAL)
 
     return () => clearInterval(interval)
-  }, [filePath, content, isDirty])
+  }, [filePath, isDirty])
 
   // Save file (Cmd+S) — called directly by CodeEditor with current content
   const saveFile = useCallback(async (contentToSave?: string) => {
