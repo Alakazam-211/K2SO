@@ -2526,8 +2526,10 @@ function ProjectsSection(): React.JSX.Element {
           const currentProjects = useProjectsStore.getState().projects
           let list: typeof projects = []
           const z = reorderZoneRef.current
-          if (z === 'pinned') {
-            list = [...currentProjects.filter((p) => p.pinned)]
+          if (z === 'agents') {
+            list = [...currentProjects.filter((p) => p.agentMode === 'agent' || p.agentMode === 'custom')]
+          } else if (z === 'pinned') {
+            list = [...currentProjects.filter((p) => p.pinned && (!p.agentMode || p.agentMode === 'off'))]
           } else if (z === 'ungrouped' || z === 'flat') {
             list = [...currentProjects.filter((p) => !p.pinned && !p.focusGroupId)]
           } else if (z?.startsWith('group:')) {
@@ -2733,11 +2735,17 @@ function ProjectsSection(): React.JSX.Element {
                 </span>
               </div>
               <div data-reorder-zone="agents">
-                {agentPinnedProjects.map((p) => (
+                {agentPinnedProjects.map((p, idx) => (
                   <div key={p.id} className="border-l-2 border-[var(--color-accent)]">
-                    <ProjectRow project={p} zone="pinned" containerSelector="[data-reorder-zone='agents']" />
+                    {reorderZone === 'agents' && reorderDropIndex === idx && (
+                      <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
+                    )}
+                    <ProjectRow project={p} zone="agents" containerSelector="[data-reorder-zone='agents']" />
                   </div>
                 ))}
+                {reorderZone === 'agents' && reorderDropIndex === agentPinnedProjects.length && (
+                  <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
+                )}
               </div>
             </div>
           )}

@@ -665,9 +665,9 @@ export default function Sidebar(): React.JSX.Element {
 
   const agenticEnabled = useSettingsStore((s) => s.agenticSystemsEnabled)
 
-  // Agent-mode workspaces float to top (not pods — pods stay in their normal position)
+  // Agent-mode workspaces float to top (K2SO Agents + Custom Agents, not pods)
   const agentProjects = useMemo(() =>
-    agenticEnabled ? projects.filter((p) => p.agentMode === 'agent') : [],
+    agenticEnabled ? projects.filter((p) => p.agentMode === 'agent' || p.agentMode === 'custom') : [],
     [projects, agenticEnabled])
 
   const agentIds = useMemo(() => new Set(agentProjects.map((p) => p.id)), [agentProjects])
@@ -708,8 +708,9 @@ export default function Sidebar(): React.JSX.Element {
 
   // ── Drag-to-reorder state ──────────────────────────────────────────
   const [dragId, setDragId] = useState<string | null>(null)
-  const [dragZone, setDragZone] = useState<'pinned' | 'unpinned' | null>(null)
+  const [dragZone, setDragZone] = useState<'agents' | 'pinned' | 'unpinned' | null>(null)
   const [dropIndex, setDropIndex] = useState<number | null>(null)
+  const agentsRef = useRef<HTMLDivElement>(null)
   const pinnedRef = useRef<HTMLDivElement>(null)
   const unpinnedRef = useRef<HTMLDivElement>(null)
   const dropIndexRef = useRef<number | null>(null)
@@ -717,7 +718,7 @@ export default function Sidebar(): React.JSX.Element {
   const handleProjectMouseDown = useCallback((
     e: React.MouseEvent,
     projectId: string,
-    zone: 'pinned' | 'unpinned'
+    zone: 'agents' | 'pinned' | 'unpinned'
   ) => {
     if (e.button !== 0) return
     if ((e.target as HTMLElement).closest('button')) return
@@ -738,7 +739,7 @@ export default function Sidebar(): React.JSX.Element {
       if (!started) return
 
       // Determine drop index based on mouse Y
-      const containerEl = (zone === 'pinned' ? pinnedRef : unpinnedRef).current
+      const containerEl = (zone === 'agents' ? agentsRef : zone === 'pinned' ? pinnedRef : unpinnedRef).current
       if (!containerEl) return
 
       const items = containerEl.querySelectorAll('[data-project-id]')
@@ -760,9 +761,12 @@ export default function Sidebar(): React.JSX.Element {
       document.body.style.userSelect = ''
 
       if (started) {
-        const list = zone === 'pinned'
-          ? [...useProjectsStore.getState().projects.filter((p) => p.pinned)]
-          : [...useProjectsStore.getState().projects.filter((p) => !p.pinned)]
+        const allProjects = useProjectsStore.getState().projects
+        const list = zone === 'agents'
+          ? [...allProjects.filter((p) => p.agentMode === 'agent' || p.agentMode === 'custom')]
+          : zone === 'pinned'
+          ? [...allProjects.filter((p) => p.pinned && (!p.agentMode || p.agentMode === 'off'))]
+          : [...allProjects.filter((p) => !p.pinned && (!p.agentMode || p.agentMode === 'off'))]
         const di = dropIndexRef.current
         const fromIdx = list.findIndex((p) => p.id === projectId)
         if (fromIdx >= 0 && di !== null && fromIdx !== di && fromIdx !== di - 1) {
@@ -928,21 +932,72 @@ export default function Sidebar(): React.JSX.Element {
               <KeyCombo combo={useTerminalSettingsStore.getState().shortcutLayout === 'cmd-active-cmdshift-pinned' ? '⇧⌘ 1-9' : '⌘ 1-9'} />
             </span>
           </div>
+          {/* Agents zone — reorderable independently */}
+          {agentProjects.length > 0 && (
+            <div ref={agentsRef}>
+              {(() => {
+                let flatIdx = 0
+                return agentProjects.map((project, idx) => {
+                  const myStartIdx = flatIdx
+                  if (project.worktreeMode === 1 && project.workspaces.length > 0) {
+                    flatIdx += project.workspaces.length
+                  } else {
+                    flatIdx += 1
+                  }
+                  return (
+                    <div
+                      key={project.id}
+                      data-project-id={project.id}
+                      style={{ opacity: dragId === project.id ? 0.4 : 1 }}
+                      onMouseDown={(e) => handleProjectMouseDown(e, project.id, 'agents')}
+                    >
+                      {dragZone === 'agents' && dropIndex === idx && (
+                        <div className="h-[2px] bg-[var(--color-accent)] mx-3" />
+                      )}
+                      <div className="border-l-2 border-[var(--color-accent)]">
+                        {project.worktreeMode === 0 ? (
+                          <SingleProjectItem
+                            project={project}
+                            isActive={project.id === activeProjectId}
+                            onContextMenu={handleContextMenu}
+                            shortcutIndex={myStartIdx}
+                          />
+                        ) : (
+                          <ProjectItem
+                            project={project}
+                            isActive={project.id === activeProjectId}
+                            onContextMenu={handleContextMenu}
+                            shortcutIndex={myStartIdx}
+                          />
+                        )}
+                      </div>
+                    </div>
+                  )
+                })
+              })()}
+              {dragZone === 'agents' && dropIndex === agentProjects.length && (
+                <div className="h-[2px] bg-[var(--color-accent)] mx-3" />
+              )}
+            </div>
+          )}
+
+          {/* Divider between agents and pinned */}
+          {agentProjects.length > 0 && regularPinned.length > 0 && (
+            <div className="mx-3 my-1 border-t border-[var(--color-border)]" />
+          )}
+
+          {/* Pinned zone — reorderable independently */}
           <div ref={pinnedRef}>
             {(() => {
-              let flatIdx = 0
-              // Render agents first, then regular pinned — shared numbering
-              const orderedPinned = [...agentProjects, ...regularPinned]
-              return orderedPinned.map((project, idx) => {
+              let flatIdx = agentProjects.reduce((acc, p) =>
+                acc + (p.worktreeMode === 1 && p.workspaces.length > 0 ? p.workspaces.length : 1), 0)
+              return regularPinned.map((project, idx) => {
                 const myStartIdx = flatIdx
                 if (project.worktreeMode === 1 && project.workspaces.length > 0) {
                   flatIdx += project.workspaces.length
                 } else {
                   flatIdx += 1
                 }
-                const isAgent = agenticEnabled && project.agentMode && project.agentMode !== 'off'
-                // Show a subtle divider between agents and pinned sections
-                const isFirstPinned = isAgent ? false : idx === agentProjects.length && agentProjects.length > 0
                 return (
               <div
                 key={project.id}
@@ -950,13 +1005,10 @@ export default function Sidebar(): React.JSX.Element {
                 style={{ opacity: dragId === project.id ? 0.4 : 1 }}
                 onMouseDown={(e) => handleProjectMouseDown(e, project.id, 'pinned')}
               >
-                {isFirstPinned && (
-                  <div className="mx-3 my-1 border-t border-[var(--color-border)]" />
-                )}
                 {dragZone === 'pinned' && dropIndex === idx && (
                   <div className="h-[2px] bg-[var(--color-accent)] mx-3" />
                 )}
-                <div className={isAgent ? 'border-l-2 border-[var(--color-accent)]' : ''}>
+                <div>
                   {project.worktreeMode === 0 ? (
                     <SingleProjectItem
                       project={project}
