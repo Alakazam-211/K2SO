@@ -1002,9 +1002,9 @@ export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, r
       lineNumbersCompartment.of(es.lineNumbers ? lineNumbers() : []),
       activeLineCompartment.of(es.highlightActiveLine ? [highlightActiveLine(), highlightActiveLineGutter()] : []),
       bracketCompartment.of(es.bracketMatching ? bracketMatching() : []),
-      fontSizeCompartment.of(EditorView.theme({ '&': { fontSize: `${es.fontSize}px` }, '.cm-gutters': { fontSize: `${Math.max(es.fontSize - 1, 10)}px` } })),
-      fontFamilyCompartment.of(buildFontFamilyExtension(es.fontFamily, es.fontLigatures)),
-      cursorCompartment.of(buildCursorExtension(es.cursorStyle, es.cursorBlink)),
+      fontSizeCompartment.of(EditorView.theme({ '&': { fontSize: `${es.fontSize || 12}px` }, '.cm-gutters': { fontSize: `${Math.max((es.fontSize || 12) - 1, 10)}px` } })),
+      fontFamilyCompartment.of(buildFontFamilyExtension(es.fontFamily || 'MesloLGM Nerd Font', es.fontLigatures ?? false)),
+      cursorCompartment.of(buildCursorExtension(es.cursorStyle || 'bar', es.cursorBlink ?? true)),
       scrollPastEndCompartment.of(es.scrollPastEnd ? scrollPastEnd() : []),
       minimapCompartment.of(es.minimap ? showMinimap.compute(['doc'], () => ({
         enabled: true, displayText: 'blocks' as const, showOverlay: 'mouse-over' as const,
@@ -1032,7 +1032,7 @@ export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, r
       syntaxHighlighting(oneDarkHighlightStyle),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       // Theme (via compartment for live switching)
-      themeCompartment.of(getThemeExtension(es.theme)),
+      themeCompartment.of(getThemeExtension(es.theme || 'k2so-dark')),
       // Change tracking
       updateListener,
     ]
@@ -1075,9 +1075,9 @@ export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, r
         activeLineCompartment.reconfigure(editorSettings.highlightActiveLine ? [highlightActiveLine(), highlightActiveLineGutter()] : []),
         bracketCompartment.reconfigure(editorSettings.bracketMatching ? bracketMatching() : []),
         fontSizeCompartment.reconfigure(EditorView.theme({ '&': { fontSize: `${editorSettings.fontSize}px` }, '.cm-gutters': { fontSize: `${Math.max(editorSettings.fontSize - 1, 10)}px` } })),
-        fontFamilyCompartment.reconfigure(buildFontFamilyExtension(editorSettings.fontFamily, editorSettings.fontLigatures)),
-        cursorCompartment.reconfigure(buildCursorExtension(editorSettings.cursorStyle, editorSettings.cursorBlink)),
-        themeCompartment.reconfigure(getThemeExtension(editorSettings.theme)),
+        fontFamilyCompartment.reconfigure(buildFontFamilyExtension(editorSettings.fontFamily || 'MesloLGM Nerd Font', editorSettings.fontLigatures ?? false)),
+        cursorCompartment.reconfigure(buildCursorExtension(editorSettings.cursorStyle || 'bar', editorSettings.cursorBlink ?? true)),
+        themeCompartment.reconfigure(getThemeExtension(editorSettings.theme || 'k2so-dark')),
         scrollPastEndCompartment.reconfigure(editorSettings.scrollPastEnd ? scrollPastEnd() : []),
         minimapCompartment.reconfigure(editorSettings.minimap ? showMinimap.compute(['doc'], () => ({
           enabled: true, displayText: 'blocks' as const, showOverlay: 'mouse-over' as const,

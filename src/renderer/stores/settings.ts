@@ -89,6 +89,23 @@ let _writeSeq = 0
  * We apply the returned state to the store, ensuring we stay in sync
  * with what was actually persisted — no extra fetchSettings round-trip.
  */
+const DEFAULT_EDITOR: EditorSettingsBackend = {
+  tabSize: 2, wordWrap: false, showWhitespace: false, fontSize: 12,
+  indentGuides: true, foldGutter: true, autocomplete: true,
+  bracketMatching: true, lineNumbers: true, highlightActiveLine: true,
+  stickyScroll: false, minimap: false,
+  theme: 'k2so-dark', fontFamily: 'MesloLGM Nerd Font', fontLigatures: false,
+  cursorStyle: 'bar', cursorBlink: true,
+  scrollPastEnd: false, scrollbarAnnotations: true, diffStyle: 'gutter',
+  formatOnSave: false, vimMode: false,
+}
+
+/** Merge backend editor result with defaults so old settings files don't leave fields undefined */
+function mergeEditorDefaults(result: Partial<EditorSettingsBackend> | undefined): EditorSettingsBackend {
+  if (!result) return { ...DEFAULT_EDITOR }
+  return { ...DEFAULT_EDITOR, ...result }
+}
+
 async function persistAndApply(
   set: (state: Partial<SettingsState>) => void,
   updates: Record<string, any>
@@ -103,7 +120,7 @@ async function persistAndApply(
       defaultAgent: result.defaultAgent ?? 'claude',
       agenticSystemsEnabled: result.agenticSystemsEnabled ?? false,
       claudeAuthAutoRefresh: result.claudeAuthAutoRefresh ?? false,
-      editor: result.editor ?? get().editor,
+      editor: mergeEditorDefaults(result.editor),
       loaded: true
     })
   } catch (e) {
@@ -120,19 +137,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   aiAssistantEnabled: true,
   agenticSystemsEnabled: false,
   claudeAuthAutoRefresh: false,
-  editor: {
-    tabSize: 2, wordWrap: false, showWhitespace: false, fontSize: 12,
-    indentGuides: true, foldGutter: true, autocomplete: true,
-    bracketMatching: true, lineNumbers: true, highlightActiveLine: true,
-    stickyScroll: false, minimap: false,
-    theme: 'k2so-dark', fontFamily: 'MesloLGM Nerd Font', fontLigatures: false,
-    cursorStyle: 'bar', cursorBlink: true,
-    scrollPastEnd: false,
-    scrollbarAnnotations: true,
-    diffStyle: 'gutter' as const,
-    formatOnSave: false,
-    vimMode: false,
-  },
+  editor: { ...DEFAULT_EDITOR },
   defaultAgent: 'claude',
   initialProjectId: null,
   loaded: false,
@@ -267,7 +272,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     set({
       terminal: result.terminal,
       keybindings: result.keybindings,
-      projectSettings: result.projectSettings ?? {}
+      projectSettings: result.projectSettings ?? {},
+      editor: mergeEditorDefaults(result.editor),
     })
   },
 
@@ -283,7 +289,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       defaultAgent: result.defaultAgent ?? 'claude',
       agenticSystemsEnabled: result.agenticSystemsEnabled ?? false,
       claudeAuthAutoRefresh: result.claudeAuthAutoRefresh ?? false,
-      editor: result.editor ?? get().editor,
+      editor: mergeEditorDefaults(result.editor),
       loaded: true
     })
   }
