@@ -17,3 +17,4 @@ pub mod workspace_sessions;
 pub mod claude_auth;
 pub mod k2so_agents;
 pub mod review_checklist;
+pub mod format;

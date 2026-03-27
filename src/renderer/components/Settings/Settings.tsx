@@ -24,6 +24,7 @@ import type { HotkeyDefinition } from '@shared/hotkeys'
 import DisableWorktreesDialog from './DisableWorktreesDialog'
 import { showContextMenu } from '@/lib/context-menu'
 import AgentIcon from '@/components/AgentIcon/AgentIcon'
+import { EDITOR_THEMES, EDITOR_FONTS, CodeEditor } from '@/components/FileViewerPane/CodeEditor'
 import { KeyCombo } from '@/components/KeySymbol'
 import { useClaudeAuthStore } from '@/stores/claude-auth'
 import type { ClaudeAuthState } from '@/stores/claude-auth'
@@ -82,6 +83,7 @@ const SECTIONS: { id: SettingsSection; label: string }[] = [
   { id: 'general', label: 'General' },
   { id: 'projects', label: 'Workspaces' },
   { id: 'terminal', label: 'Terminal' },
+  { id: 'code-editor', label: 'Code Editor' },
   { id: 'editors-agents', label: 'Editors & Agents' },
   { id: 'ai-assistant', label: 'AI Assistant' },
   { id: 'keybindings', label: 'Keybindings' },
@@ -144,6 +146,7 @@ export default function Settings(): React.JSX.Element {
       <div className={`flex-1 min-h-0 ${activeSection === 'projects' ? 'overflow-hidden p-0' : 'overflow-y-auto p-6'}`}>
         {activeSection === 'general' && <GeneralSection />}
         {activeSection === 'terminal' && <TerminalSection />}
+        {activeSection === 'code-editor' && <CodeEditorSettingsSection />}
         {activeSection === 'editors-agents' && <EditorsAgentsSection />}
         {activeSection === 'keybindings' && <KeybindingsSection />}
         {activeSection === 'ai-assistant' && <AIAssistantSection />}
@@ -906,6 +909,232 @@ function EditorsAgentsSection(): React.JSX.Element {
 
       {/* ── CLI Install Guide ── */}
       <CLIInstallGuide />
+    </div>
+  )
+}
+
+function CodeEditorSettingsSection(): React.JSX.Element {
+  const editor = useSettingsStore((s) => s.editor)
+  const updateEditorSettings = useSettingsStore((s) => s.updateEditorSettings)
+
+  const toggleRow = (label: string, description: string, key: keyof typeof editor, isLast = false) => (
+    <div key={key} className={`flex items-center justify-between px-3 py-2.5 ${!isLast ? 'border-b border-[var(--color-border)]' : ''}`}>
+      <div>
+        <div className="text-xs text-[var(--color-text-secondary)]">{label}</div>
+        <div className="text-[10px] text-[var(--color-text-muted)] mt-0.5">{description}</div>
+      </div>
+      <button
+        onClick={() => updateEditorSettings({ [key]: !editor[key] })}
+        className={`w-7 h-3.5 flex items-center transition-colors no-drag cursor-pointer flex-shrink-0 ${
+          editor[key] ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
+        }`}
+      >
+        <span className={`w-2.5 h-2.5 bg-white block transition-transform ${
+          editor[key] ? 'translate-x-3.5' : 'translate-x-0.5'
+        }`} />
+      </button>
+    </div>
+  )
+
+  const dropdownRow = (label: string, description: string, value: string, options: { value: string; label: string }[], onChange: (v: string) => void, isLast = false) => (
+    <div className={`flex items-center justify-between px-3 py-2.5 ${!isLast ? 'border-b border-[var(--color-border)]' : ''}`}>
+      <div>
+        <div className="text-xs text-[var(--color-text-secondary)]">{label}</div>
+        <div className="text-[10px] text-[var(--color-text-muted)] mt-0.5">{description}</div>
+      </div>
+      <SettingDropdown value={value} options={options} onChange={onChange} />
+    </div>
+  )
+
+  // Sample code for the live preview
+  const previewCode = `import { useState, useEffect } from 'react'
+
+interface CounterProps {
+  name: string
+  initialCount?: number
+  onCountChange?: (count: number) => void
+}
+
+export function Counter({ name, initialCount = 0, onCountChange }: CounterProps) {
+  const [value, setValue] = useState(initialCount)
+  const [history, setHistory] = useState<number[]>([])
+
+  // Sync count changes to parent
+  useEffect(() => {
+    onCountChange?.(value)
+  }, [value, onCountChange])
+
+  const increment = () => {
+    setHistory((prev) => [...prev, value])
+    setValue((prev) => prev + 1)
+  }
+
+  const decrement = () => {
+    setHistory((prev) => [...prev, value])
+    setValue((prev) => Math.max(0, prev - 1))
+  }
+
+  const reset = () => {
+    setHistory((prev) => [...prev, value])
+    setValue(initialCount)
+  }
+
+  return (
+    <div className="counter-container">
+      <h2 className="counter-title">
+        {name}: {value}
+      </h2>
+      <div className="counter-actions">
+        <button onClick={decrement}>-</button>
+        <button onClick={reset}>Reset</button>
+        <button onClick={increment}>+</button>
+      </div>
+      {history.length > 0 && (
+        <p className="counter-history">
+          History: {history.join(' → ')}
+        </p>
+      )}
+    </div>
+  )
+}
+`
+
+  // Demo diff data: simulate added, modified, and deleted lines
+  const demoChanges = useMemo(() => {
+    const m = new Map<number, 'added' | 'modified' | 'deleted'>()
+    // "New" lines — added
+    m.set(6, 'added')
+    m.set(13, 'added')
+    m.set(14, 'added')
+    // Modified lines
+    m.set(17, 'modified')
+    m.set(18, 'modified')
+    // New function added
+    m.set(22, 'added')
+    m.set(23, 'added')
+    m.set(24, 'added')
+    m.set(25, 'added')
+    // Deleted line marker
+    m.set(30, 'deleted')
+    // Modified return block
+    m.set(36, 'modified')
+    m.set(37, 'modified')
+    // Added history section
+    m.set(43, 'added')
+    m.set(44, 'added')
+    m.set(45, 'added')
+    m.set(46, 'added')
+    return m
+  }, [])
+
+  return (
+    <div className="flex gap-6">
+      {/* Settings panel */}
+      <div className="max-w-xl flex-1 space-y-6 min-w-0">
+        {/* ── Appearance ── */}
+        <div>
+          <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-3">Appearance</h2>
+          <div className="border border-[var(--color-border)]">
+            {dropdownRow('Theme', 'Color theme for the code editor', editor.theme,
+              EDITOR_THEMES.map(t => ({ value: t.id, label: t.label })),
+              (v) => updateEditorSettings({ theme: v })
+            )}
+            {dropdownRow('Font Family', 'Monospace font for code editing', editor.fontFamily,
+              EDITOR_FONTS.map(f => ({ value: f.id, label: f.label })),
+              (v) => updateEditorSettings({ fontFamily: v })
+            )}
+            {dropdownRow('Font Size', 'Editor text size in pixels', String(editor.fontSize),
+              [10, 11, 12, 13, 14, 15, 16, 18, 20].map(n => ({ value: String(n), label: `${n}px` })),
+              (v) => updateEditorSettings({ fontSize: Number(v) })
+            )}
+            {toggleRow('Font Ligatures', 'Enable programming ligatures (e.g. => becomes arrow)', 'fontLigatures')}
+            {dropdownRow('Cursor Style', 'Shape of the text cursor', editor.cursorStyle,
+              [{ value: 'bar', label: 'Bar' }, { value: 'block', label: 'Block' }, { value: 'underline', label: 'Underline' }],
+              (v) => updateEditorSettings({ cursorStyle: v as 'bar' | 'block' | 'underline' })
+            )}
+            {toggleRow('Cursor Blink', 'Animate the cursor blinking', 'cursorBlink', true)}
+          </div>
+        </div>
+
+        {/* ── Editing ── */}
+        <div>
+          <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-3">Editing</h2>
+          <div className="border border-[var(--color-border)]">
+            {dropdownRow('Tab Size', 'Default spaces per indentation (languages may override)', String(editor.tabSize),
+              [{ value: '2', label: '2' }, { value: '4', label: '4' }, { value: '8', label: '8' }],
+              (v) => updateEditorSettings({ tabSize: Number(v) })
+            )}
+            {toggleRow('Word Wrap', 'Wrap long lines instead of horizontal scrolling', 'wordWrap')}
+            {toggleRow('Autocomplete', 'Show word-based completion suggestions as you type', 'autocomplete')}
+            {toggleRow('Bracket Matching', 'Highlight matching brackets', 'bracketMatching')}
+            {toggleRow('Format on Save', 'Auto-format with Prettier, rustfmt, or black on Cmd+S', 'formatOnSave')}
+            {toggleRow('Show Whitespace', 'Render spaces and tabs as visible dots', 'showWhitespace', true)}
+          </div>
+        </div>
+
+        {/* ── Gutter & Display ── */}
+        <div>
+          <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-3">Gutter & Display</h2>
+          <div className="border border-[var(--color-border)]">
+            {toggleRow('Line Numbers', 'Show line numbers in the gutter', 'lineNumbers')}
+            {toggleRow('Indent Guides', 'Show vertical indentation guide lines', 'indentGuides')}
+            {toggleRow('Code Folding', 'Show fold/unfold arrows in the gutter', 'foldGutter')}
+            {toggleRow('Highlight Active Line', 'Subtle background highlight on the current line', 'highlightActiveLine')}
+            {toggleRow('Scroll Past End', 'Allow scrolling beyond the last line', 'scrollPastEnd')}
+            {toggleRow('Minimap', 'Show a miniature overview of the file on the right', 'minimap')}
+            {dropdownRow('Diff Style', 'How changed lines appear in the editor', editor.diffStyle,
+              [{ value: 'gutter', label: 'Gutter' }, { value: 'inline', label: 'Inline (PR view)' }],
+              (v) => updateEditorSettings({ diffStyle: v as 'gutter' | 'inline' })
+            )}
+            {toggleRow('Scrollbar Annotations', 'Show colored markers on the scrollbar where code was changed', 'scrollbarAnnotations')}
+            {toggleRow('Sticky Scroll', 'Pin current function/class header at the top', 'stickyScroll', true)}
+          </div>
+        </div>
+
+        {/* ── Keybindings & Modes ── */}
+        <div>
+          <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-3">Keybindings & Modes</h2>
+          <div className="border border-[var(--color-border)]">
+            {toggleRow('Vim Mode', 'Full vim keybinding emulation (hjkl, modes, commands)', 'vimMode')}
+            <div className="px-3 py-2.5 border-b border-[var(--color-border)]">
+              <div className="flex items-center justify-between">
+                <div className="text-xs text-[var(--color-text-secondary)]">Select Next Occurrence</div>
+                <span className="text-[10px] text-[var(--color-text-muted)] font-mono bg-[var(--color-bg)] px-2 py-0.5 border border-[var(--color-border)]">Cmd+D</span>
+              </div>
+              <div className="text-[10px] text-[var(--color-text-muted)] mt-0.5">Add a cursor at the next match of the selected word</div>
+            </div>
+            <div className="px-3 py-2.5 border-b border-[var(--color-border)]">
+              <div className="flex items-center justify-between">
+                <div className="text-xs text-[var(--color-text-secondary)]">Find & Replace</div>
+                <span className="text-[10px] text-[var(--color-text-muted)] font-mono bg-[var(--color-bg)] px-2 py-0.5 border border-[var(--color-border)]">Cmd+F / Cmd+H</span>
+              </div>
+              <div className="text-[10px] text-[var(--color-text-muted)] mt-0.5">Search with regex, case-sensitive, and replace support</div>
+            </div>
+            <div className="px-3 py-2.5">
+              <div className="flex items-center justify-between">
+                <div className="text-xs text-[var(--color-text-secondary)]">Fold / Unfold</div>
+                <span className="text-[10px] text-[var(--color-text-muted)] font-mono bg-[var(--color-bg)] px-2 py-0.5 border border-[var(--color-border)]">Cmd+Shift+[ / ]</span>
+              </div>
+              <div className="text-[10px] text-[var(--color-text-muted)] mt-0.5">Collapse or expand code blocks at the cursor</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Live Preview (sticky) ── */}
+      <div className="w-[560px] flex-shrink-0 sticky top-0 self-start">
+        <div className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mb-2">Preview</div>
+        <div className="border border-[var(--color-border)] h-[780px] overflow-hidden">
+          <CodeEditor
+            code={previewCode}
+            filePath="preview.tsx"
+            onSave={() => {}}
+            onChange={() => {}}
+            readOnly
+            demoLineChanges={demoChanges}
+          />
+        </div>
+      </div>
     </div>
   )
 }

@@ -552,8 +552,18 @@ pub struct FileDiffSummary {
 pub fn diff_file(repo_path: &str, file_path: &str) -> Result<Vec<DiffHunk>, String> {
     let repo = Repository::discover(repo_path).map_err(|e| format!("Not a git repository: {e}"))?;
 
+    // Make file_path relative to the repo workdir for pathspec matching
+    let rel_path = if let Some(workdir) = repo.workdir() {
+        let abs = std::path::Path::new(file_path);
+        abs.strip_prefix(workdir)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| file_path.to_string())
+    } else {
+        file_path.to_string()
+    };
+
     let mut opts = DiffOptions::new();
-    opts.pathspec(file_path);
+    opts.pathspec(&rel_path);
     opts.context_lines(3);
 
     let head_tree = repo

@@ -85,4 +85,35 @@ export interface AppSettingsResponse {
   claudeAuthAutoRefresh: boolean
   lastActiveProjectId: string | null
   lastActiveWorkspaceId: string | null
+  editor: EditorSettingsBackend
 }
+
+export interface EditorSettingsBackend {
+  tabSize: number
+  wordWrap: boolean
+  showWhitespace: boolean
+  fontSize: number
+  indentGuides: boolean
+  foldGutter: boolean
+  autocomplete: boolean
+  bracketMatching: boolean
+  lineNumbers: boolean
+  highlightActiveLine: boolean
+  // Phase 6
+  stickyScroll: boolean
+  minimap: boolean
+  // Phase 7
+  theme: string
+  fontFamily: string
+  fontLigatures: boolean
+  cursorStyle: 'bar' | 'block' | 'underline'
+  cursorBlink: boolean
+  // Phase 8
+  scrollPastEnd: boolean
+  scrollbarAnnotations: boolean
+  diffStyle: 'gutter' | 'inline'
+  formatOnSave: boolean
+  vimMode: boolean
+}
+
+export type EditorThemeId = 'k2so-dark' | 'one-dark' | 'dracula' | 'nord' | 'github-dark'

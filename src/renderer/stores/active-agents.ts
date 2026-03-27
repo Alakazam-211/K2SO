@@ -402,8 +402,19 @@ export function startAgentPolling(): void {
     })
 
     // Listen for CLI-triggered AI Commit requests
-    listen<{ projectPath: string; includeMerge: boolean; message: string }>('cli:ai-commit', (event) => {
-      const { projectPath, includeMerge, message } = event.payload
+    listen<{
+      projectPath: string
+      includeMerge: boolean
+      message: string
+      gitContext: {
+        branch: string
+        status: string
+        diffStat: string
+        stagedStat: string
+        recentLog: string
+      }
+    }>('cli:ai-commit', (event) => {
+      const { projectPath, includeMerge, message, gitContext } = event.payload
       const defaultAgent = useSettingsStore.getState().defaultAgent
       const presets = usePresetsStore.getState().presets
       const preset = presets.find((p) => p.id === defaultAgent)
@@ -411,11 +422,63 @@ export function startAgentPolling(): void {
 
       const { command, args } = parseCommand(preset.command)
 
-      // Build prompt for the AI agent
-      let prompt = message || 'Review the changes in this repository and create a well-structured commit with an appropriate commit message.'
-      if (includeMerge) {
-        prompt += '\n\nAfter committing, merge this branch back into main and resolve any conflicts.'
+      // Build a rich prompt with git context so the agent has immediate visibility
+      const parts: string[] = []
+
+      if (message) {
+        parts.push(message)
+      } else {
+        parts.push('Create a commit for the changes in this repository.')
       }
+
+      parts.push('')
+      parts.push('## Current State')
+      parts.push(`Branch: ${gitContext.branch || 'unknown'}`)
+
+      if (gitContext.stagedStat) {
+        parts.push('')
+        parts.push('### Staged Changes')
+        parts.push('```')
+        parts.push(gitContext.stagedStat)
+        parts.push('```')
+      }
+
+      if (gitContext.diffStat) {
+        parts.push('')
+        parts.push('### Unstaged Changes')
+        parts.push('```')
+        parts.push(gitContext.diffStat)
+        parts.push('```')
+      }
+
+      if (gitContext.status) {
+        parts.push('')
+        parts.push('### git status')
+        parts.push('```')
+        parts.push(gitContext.status)
+        parts.push('```')
+      }
+
+      if (gitContext.recentLog) {
+        parts.push('')
+        parts.push('### Recent Commits (for style reference)')
+        parts.push('```')
+        parts.push(gitContext.recentLog)
+        parts.push('```')
+      }
+
+      parts.push('')
+      parts.push('## Instructions')
+      parts.push('1. Review the diff carefully with `git diff` and `git diff --cached`')
+      parts.push('2. Stage any unstaged files that should be included (use `git add <file>`, not `git add -A`)')
+      parts.push('3. Write a clear, concise commit message that explains the **why**, matching the style of recent commits above')
+      parts.push('4. Commit the changes')
+
+      if (includeMerge) {
+        parts.push('5. After committing, merge this branch into main and resolve any conflicts')
+      }
+
+      const prompt = parts.join('\n')
 
       const tabsStore = useTabsStore.getState()
       const activeGroup = tabsStore.activeGroupIndex

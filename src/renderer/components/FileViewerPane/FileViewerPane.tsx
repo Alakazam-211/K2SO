@@ -5,9 +5,10 @@ import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import { PDFViewer } from './PDFViewer'
 import { DocxViewer } from './DocxViewer'
 import { HighlightedCodeBlock } from './CodeHighlighter'
-import { CodeEditor } from './CodeEditor'
+import { CodeEditor, getLanguageName } from './CodeEditor'
 import { DiffViewer } from '@/components/DiffViewer/DiffViewer'
 import { useTabsStore } from '@/stores/tabs'
+import { useSettingsStore } from '@/stores/settings'
 import { FILE_POLL_INTERVAL } from '@shared/constants'
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -70,6 +71,7 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [cursorInfo, setCursorInfo] = useState({ line: 1, col: 1, selections: 1 })
 
   const category = getFileCategory(filePath)
   const [viewMode, setViewMode] = useState<ViewMode>(getDefaultViewMode(category))
@@ -172,10 +174,11 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
     }
   }, [filePath, editedContent, content])
 
-  // Cmd+F search and Cmd+S save shortcuts
+  // Cmd+F search (only in rendered/markdown mode — CodeMirror handles its own search in raw mode)
+  // Cmd+S save shortcut
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent): void => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'f' && viewMode === 'rendered') {
         e.preventDefault()
         e.stopPropagation()
         setSearchVisible(true)
@@ -200,7 +203,7 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
       container.addEventListener('keydown', handleKeyDown)
       return () => container.removeEventListener('keydown', handleKeyDown)
     }
-  }, [searchVisible, saveFile, editedContent])
+  }, [searchVisible, saveFile, editedContent, viewMode])
 
   // Highlight search matches
   useEffect(() => {
@@ -374,6 +377,29 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
           </div>
         )}
 
+        {/* Word wrap toggle (only for text/code files) */}
+        {category === 'text' || (category === 'markdown' && viewMode === 'raw') ? (
+          <button
+            className={`p-1 transition-colors ${
+              useSettingsStore.getState().editor.wordWrap
+                ? 'text-[var(--color-accent)]'
+                : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]'
+            }`}
+            onClick={() => {
+              const current = useSettingsStore.getState().editor.wordWrap
+              useSettingsStore.getState().updateEditorSettings({ wordWrap: !current })
+            }}
+            title="Toggle word wrap"
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 6h18" />
+              <path d="M3 12h15a3 3 0 1 1 0 6h-4" />
+              <path d="m16 16-2 2 2 2" />
+              <path d="M3 18h7" />
+            </svg>
+          </button>
+        ) : null}
+
         {/* Refresh */}
         <button
           className="p-1 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
@@ -497,14 +523,25 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
           </div>
         </div>
       ) : (
-        <div className="flex-1 overflow-hidden">
-          <CodeEditor
-            code={editedContent ?? content}
-            filePath={filePath}
-            onSave={saveFile}
-            onChange={(newContent) => setEditedContent(newContent)}
-          />
-        </div>
+        <>
+          <div className="flex-1 overflow-hidden">
+            <CodeEditor
+              code={editedContent ?? content}
+              filePath={filePath}
+              onSave={saveFile}
+              onChange={(newContent) => setEditedContent(newContent)}
+              onCursorChange={(line, col, selections) => setCursorInfo({ line, col, selections })}
+            />
+          </div>
+          {/* Status bar */}
+          <div className="flex items-center gap-3 border-t border-[var(--color-border)] bg-[#111111] px-3 py-0.5 flex-shrink-0 text-[10px] text-[var(--color-text-muted)] font-mono">
+            <span>Ln {cursorInfo.line}, Col {cursorInfo.col}</span>
+            {cursorInfo.selections > 1 && <span>{cursorInfo.selections} selections</span>}
+            <div className="flex-1" />
+            <span>{getLanguageName(filePath)}</span>
+            <span>UTF-8</span>
+          </div>
+        </>
       )}
     </div>
   )

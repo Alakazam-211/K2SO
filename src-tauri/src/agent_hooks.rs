@@ -97,6 +97,34 @@ fn urldecode(s: &str) -> String {
     result
 }
 
+/// Gather git context (branch, status, diff stat, recent log) for AI commit prompts.
+fn gather_git_context(project_path: &str) -> serde_json::Value {
+    let run = |args: &[&str]| -> String {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(project_path)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+
+    let branch = run(&["rev-parse", "--abbrev-ref", "HEAD"]);
+    let status = run(&["status", "--short"]);
+    let diff_stat = run(&["diff", "--stat"]);
+    let staged_stat = run(&["diff", "--cached", "--stat"]);
+    let log = run(&["log", "--oneline", "-5"]);
+
+    serde_json::json!({
+        "branch": branch,
+        "status": status,
+        "diffStat": diff_stat,
+        "stagedStat": staged_stat,
+        "recentLog": log,
+    })
+}
+
 /// Start the notification server on a random port. Returns the port.
 pub fn start_server(app_handle: AppHandle) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind notification server");
@@ -429,10 +457,15 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                     "/cli/commit" | "/cli/commit-merge" => {
                         let include_merge = route == "/cli/commit-merge";
                         let message = params.get("message").cloned().unwrap_or_default();
+
+                        // Gather git context so the AI agent has immediate visibility
+                        let git_context = gather_git_context(&project_path);
+
                         let event_payload = serde_json::json!({
                             "projectPath": project_path,
                             "includeMerge": include_merge,
                             "message": message,
+                            "gitContext": git_context,
                         });
                         let _ = app_handle.emit("cli:ai-commit", &event_payload);
                         Ok(serde_json::json!({

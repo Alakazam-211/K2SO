@@ -1,9 +1,9 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { getDefaultKeybindings } from '@shared/hotkeys'
-import type { AppSettingsResponse } from '@shared/types'
+import type { AppSettingsResponse, EditorSettingsBackend } from '@shared/types'
 
-export type SettingsSection = 'general' | 'terminal' | 'editors-agents' | 'keybindings' | 'projects' | 'ai-assistant' | 'timer'
+export type SettingsSection = 'general' | 'terminal' | 'code-editor' | 'editors-agents' | 'keybindings' | 'projects' | 'ai-assistant' | 'timer'
 
 export interface TerminalSettings {
   fontFamily: string
@@ -35,6 +35,9 @@ interface SettingsState {
   // Claude Auth auto-refresh (background scheduler)
   claudeAuthAutoRefresh: boolean
 
+  // Editor settings
+  editor: EditorSettingsBackend
+
   // Default agent CLI tool (e.g. 'claude', 'codex', 'gemini')
   defaultAgent: string
 
@@ -58,6 +61,7 @@ interface SettingsState {
   updateProjectSetting: (projectId: string, key: string, value: string) => void
   setAiAssistantEnabled: (enabled: boolean) => void
   setClaudeAuthAutoRefresh: (enabled: boolean) => void
+  updateEditorSettings: (partial: Partial<EditorSettingsBackend>) => void
   setDefaultAgent: (agent: string) => void
   resetAllSettings: () => void
   fetchSettings: () => Promise<void>
@@ -99,6 +103,7 @@ async function persistAndApply(
       defaultAgent: result.defaultAgent ?? 'claude',
       agenticSystemsEnabled: result.agenticSystemsEnabled ?? false,
       claudeAuthAutoRefresh: result.claudeAuthAutoRefresh ?? false,
+      editor: result.editor ?? get().editor,
       loaded: true
     })
   } catch (e) {
@@ -115,6 +120,19 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   aiAssistantEnabled: true,
   agenticSystemsEnabled: false,
   claudeAuthAutoRefresh: false,
+  editor: {
+    tabSize: 2, wordWrap: false, showWhitespace: false, fontSize: 12,
+    indentGuides: true, foldGutter: true, autocomplete: true,
+    bracketMatching: true, lineNumbers: true, highlightActiveLine: true,
+    stickyScroll: false, minimap: false,
+    theme: 'k2so-dark', fontFamily: 'MesloLGM Nerd Font', fontLigatures: false,
+    cursorStyle: 'bar', cursorBlink: true,
+    scrollPastEnd: false,
+    scrollbarAnnotations: true,
+    diffStyle: 'gutter' as const,
+    formatOnSave: false,
+    vimMode: false,
+  },
   defaultAgent: 'claude',
   initialProjectId: null,
   loaded: false,
@@ -221,6 +239,18 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }
   },
 
+  updateEditorSettings: async (partial: Partial<EditorSettingsBackend>) => {
+    const prev = get().editor
+    const merged = { ...prev, ...partial }
+    set({ editor: merged })
+    try {
+      await persistAndApply(set, { editor: merged })
+    } catch (err) {
+      console.error('[settings] Failed to persist editor settings:', err)
+      set({ editor: prev })
+    }
+  },
+
   setDefaultAgent: async (agent: string) => {
     const prev = get().defaultAgent
     set({ defaultAgent: agent })
@@ -253,6 +283,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       defaultAgent: result.defaultAgent ?? 'claude',
       agenticSystemsEnabled: result.agenticSystemsEnabled ?? false,
       claudeAuthAutoRefresh: result.claudeAuthAutoRefresh ?? false,
+      editor: result.editor ?? get().editor,
       loaded: true
     })
   }

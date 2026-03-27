@@ -88,6 +88,8 @@ export function useTerminalShortcuts(cwd: string): void {
         }
 
         case 'd': {
+          // Let CodeMirror handle Cmd+D (select next occurrence) when focused in editor
+          if (document.activeElement?.closest('.cm-editor')) return
           e.preventDefault()
           const activeTab = state.tabs.find((t) => t.id === state.activeTabId)
           if (!activeTab) return

@@ -462,6 +462,9 @@ pub fn run() {
             commands::review_checklist::review_checklist_write,
             commands::review_checklist::review_checklist_toggle,
             commands::review_checklist::review_checklist_init,
+            // Format
+            commands::format::format_file,
+            commands::format::format_file_check,
         ])
         .run(tauri::generate_context!())
         .expect("error while running K2SO");

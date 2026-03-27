@@ -134,6 +134,95 @@ pub struct AppSettings {
     pub last_active_project_id: Option<String>,
     #[serde(default)]
     pub last_active_workspace_id: Option<String>,
+    #[serde(default)]
+    pub editor: EditorSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorSettings {
+    #[serde(default = "default_tab_size")]
+    pub tab_size: u32,
+    #[serde(default)]
+    pub word_wrap: bool,
+    #[serde(default)]
+    pub show_whitespace: bool,
+    #[serde(default = "default_editor_font_size")]
+    pub font_size: u32,
+    #[serde(default = "default_true")]
+    pub indent_guides: bool,
+    #[serde(default = "default_true")]
+    pub fold_gutter: bool,
+    #[serde(default = "default_true")]
+    pub autocomplete: bool,
+    #[serde(default = "default_true")]
+    pub bracket_matching: bool,
+    #[serde(default = "default_true")]
+    pub line_numbers: bool,
+    #[serde(default = "default_true")]
+    pub highlight_active_line: bool,
+    // Phase 6
+    #[serde(default)]
+    pub sticky_scroll: bool,
+    #[serde(default)]
+    pub minimap: bool,
+    // Phase 7
+    #[serde(default = "default_editor_theme")]
+    pub theme: String,
+    #[serde(default = "default_editor_font_family")]
+    pub font_family: String,
+    #[serde(default)]
+    pub font_ligatures: bool,
+    #[serde(default = "default_cursor_style")]
+    pub cursor_style: String,
+    #[serde(default = "default_true")]
+    pub cursor_blink: bool,
+    // Phase 8
+    #[serde(default)]
+    pub scroll_past_end: bool,
+    #[serde(default = "default_true")]
+    pub scrollbar_annotations: bool,
+    #[serde(default = "default_diff_style")]
+    pub diff_style: String,
+    #[serde(default)]
+    pub format_on_save: bool,
+    #[serde(default)]
+    pub vim_mode: bool,
+}
+
+fn default_tab_size() -> u32 { 2 }
+fn default_editor_font_size() -> u32 { 12 }
+fn default_diff_style() -> String { "gutter".to_string() }
+fn default_editor_theme() -> String { "k2so-dark".to_string() }
+fn default_editor_font_family() -> String { "MesloLGM Nerd Font".to_string() }
+
+impl Default for EditorSettings {
+    fn default() -> Self {
+        Self {
+            tab_size: 2,
+            word_wrap: false,
+            show_whitespace: false,
+            font_size: 12,
+            indent_guides: true,
+            fold_gutter: true,
+            autocomplete: true,
+            bracket_matching: true,
+            line_numbers: true,
+            highlight_active_line: true,
+            sticky_scroll: false,
+            minimap: false,
+            theme: "k2so-dark".to_string(),
+            font_family: "MesloLGM Nerd Font".to_string(),
+            font_ligatures: false,
+            cursor_style: "bar".to_string(),
+            cursor_blink: true,
+            scroll_past_end: false,
+            scrollbar_annotations: true,
+            diff_style: "gutter".to_string(),
+            format_on_save: false,
+            vim_mode: false,
+        }
+    }
 }
 
 impl Default for AppSettings {
@@ -159,6 +248,7 @@ impl Default for AppSettings {
             claude_auth_auto_refresh: false,
             last_active_project_id: None,
             last_active_workspace_id: None,
+            editor: EditorSettings::default(),
         }
     }
 }
