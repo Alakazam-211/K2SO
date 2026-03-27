@@ -1122,9 +1122,9 @@ export function Counter({ name, initialCount = 0, onCountChange }: CounterProps)
       </div>
 
       {/* ── Live Preview (sticky) ── */}
-      <div className="w-[560px] flex-shrink-0 sticky top-0 self-start">
+      <div className="w-[690px] flex-shrink-0 sticky top-0 self-start">
         <div className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mb-2">Preview</div>
-        <div className="border border-[var(--color-border)] h-[780px] overflow-hidden">
+        <div className="border border-[var(--color-border)] h-[calc(100vh-120px)] overflow-hidden">
           <CodeEditor
             code={previewCode}
             filePath="preview.tsx"
