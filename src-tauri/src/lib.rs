@@ -466,8 +466,17 @@ pub fn run() {
             commands::format::format_file,
             commands::format::format_file_check,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running K2SO");
+        .build(tauri::generate_context!())
+        .expect("error while building K2SO")
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Use _exit() to skip C++ static destructors (ggml_metal).
+                // This handles Cmd+Q (NSApplication terminate:) which bypasses
+                // the window CloseRequested event and goes straight to exit().
+                // Without this, __cxa_finalize_ranges races against Metal teardown → SIGABRT.
+                unsafe { libc::_exit(0); }
+            }
+        });
 }
 
 /// One-time migration: move workspace_layouts from settings.json → workspace_sessions SQLite table.

@@ -1123,7 +1123,7 @@ export function Counter({ name, initialCount = 0, onCountChange }: CounterProps)
 
       {/* ── Live Preview (sticky) ── */}
       <div className="w-[690px] flex-shrink-0 sticky top-0 self-start">
-        <div className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mb-2">Preview</div>
+        <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-3">Preview</h2>
         <div className="border border-[var(--color-border)] h-[calc(100vh-120px)] overflow-hidden">
           <CodeEditor
             code={previewCode}
