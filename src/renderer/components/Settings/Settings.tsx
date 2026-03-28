@@ -384,7 +384,7 @@ function WorkspaceStatesSection(): React.JSX.Element {
 
   // List view
   return (
-    <div className="max-w-2xl">
+    <div>
       <div className="flex items-center justify-between mb-4">
         <div>
           <h2 className="text-sm font-medium text-[var(--color-text-primary)]">Workspace States</h2>
@@ -400,24 +400,51 @@ function WorkspaceStatesSection(): React.JSX.Element {
         </button>
       </div>
 
-      {/* Legend */}
-      <div className="flex gap-4 mb-4 text-[11px]">
-        <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-green-400" /><span className="text-[var(--color-text-secondary)]">Auto</span><span className="text-[var(--color-text-muted)]">— build and merge automatically</span></span>
-        <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-amber-400" /><span className="text-[var(--color-text-secondary)]">Gated</span><span className="text-[var(--color-text-muted)]">— build PRs, wait for approval</span></span>
-        <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-[var(--color-text-muted)]" /><span className="text-[var(--color-text-secondary)]">Off</span><span className="text-[var(--color-text-muted)]">— agents don't act</span></span>
+      {/* Capability columns */}
+      <div className="mb-4">
+        <span className="text-[10px] text-[var(--color-text-muted)] uppercase tracking-wider block mb-1.5">Capability Columns</span>
+        <div className="space-y-1">
+          {CAPABILITIES.map((cap) => (
+            <div key={cap.key} className="flex items-baseline gap-2 text-[11px]">
+              <span className="text-[var(--color-text-secondary)] font-medium w-16 flex-shrink-0">{cap.label}</span>
+              <span className="text-[var(--color-text-muted)]">{cap.desc}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Status levels */}
+      <div className="mb-4">
+        <span className="text-[10px] text-[var(--color-text-muted)] uppercase tracking-wider block mb-1.5">Status Levels</span>
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 text-[11px]">
+            <span className="w-2 h-2 rounded-full bg-green-400 flex-shrink-0" />
+            <span className="text-[var(--color-text-secondary)] font-medium w-16 flex-shrink-0">Auto</span>
+            <span className="text-[var(--color-text-muted)]">Agents handle this automatically without human approval</span>
+          </div>
+          <div className="flex items-center gap-2 text-[11px]">
+            <span className="w-2 h-2 rounded-full bg-amber-400 flex-shrink-0" />
+            <span className="text-[var(--color-text-secondary)] font-medium w-16 flex-shrink-0">Gated</span>
+            <span className="text-[var(--color-text-muted)]">Requires human approval before agents act</span>
+          </div>
+          <div className="flex items-center gap-2 text-[11px]">
+            <span className="w-2 h-2 rounded-full bg-[var(--color-text-muted)] flex-shrink-0" />
+            <span className="text-[var(--color-text-secondary)] font-medium w-16 flex-shrink-0">Off</span>
+            <span className="text-[var(--color-text-muted)]">Not functioning for this capability</span>
+          </div>
+        </div>
       </div>
 
       {/* State comparison table */}
       <div className="border border-[var(--color-border)] overflow-hidden">
         {/* Header */}
-        <div className="grid gap-0 text-[var(--color-text-muted)] bg-[var(--color-bg-surface)]" style={{ gridTemplateColumns: '1fr repeat(5, 90px)' }}>
-          <div className="px-4 py-2.5">
+        <div className="grid gap-0 text-[var(--color-text-muted)] bg-[var(--color-bg-surface)]" style={{ gridTemplateColumns: '2fr repeat(5, 100px)' }}>
+          <div className="px-4 py-2">
             <span className="text-[11px] font-medium">State</span>
           </div>
           {CAPABILITIES.map((cap) => (
-            <div key={cap.key} className="px-2 py-2.5 text-center">
-              <span className="text-[11px] font-medium block">{cap.label}</span>
-              <span className="text-[9px] opacity-60 block mt-0.5">{cap.desc}</span>
+            <div key={cap.key} className="px-2 py-2 text-center">
+              <span className="text-[11px] font-medium">{cap.label}</span>
             </div>
           ))}
         </div>
@@ -427,7 +454,7 @@ function WorkspaceStatesSection(): React.JSX.Element {
           <div
             key={entry.id}
             className="grid gap-0 border-t border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)]/50 group"
-            style={{ gridTemplateColumns: '1fr repeat(5, 90px)' }}
+            style={{ gridTemplateColumns: '2fr repeat(5, 100px)' }}
           >
             <div className="px-4 py-3 flex items-start gap-2">
               <div className="flex-1 min-w-0">
