@@ -82,9 +82,10 @@ class SectionErrorBoundary extends React.Component<
 }
 
 // ── Section nav items ────────────────────────────────────────────────
-const SECTIONS: { id: SettingsSection; label: string }[] = [
+const SECTIONS: { id: SettingsSection; label: string; agenticOnly?: boolean }[] = [
   { id: 'general', label: 'General' },
   { id: 'projects', label: 'Workspaces' },
+  { id: 'workspace-states', label: 'Workspace States', agenticOnly: true },
   { id: 'terminal', label: 'Terminal' },
   { id: 'code-editor', label: 'Code Editor' },
   { id: 'editors-agents', label: 'Editors & Agents' },
@@ -120,7 +121,7 @@ export default function Settings(): React.JSX.Element {
           </span>
         </div>
         <nav className="flex-1 py-1 overflow-y-auto">
-          {SECTIONS.map((s) => (
+          {SECTIONS.filter((s) => !s.agenticOnly || useSettingsStore.getState().agenticSystemsEnabled).map((s) => (
             <button
               key={s.id}
               onClick={() => setSection(s.id)}
@@ -163,12 +164,311 @@ export default function Settings(): React.JSX.Element {
             <ProjectsSection />
           </SectionErrorBoundary>
         )}
+        {activeSection === 'workspace-states' && (
+          <SectionErrorBoundary>
+            <WorkspaceStatesSection />
+          </SectionErrorBoundary>
+        )}
       </div>
     </div>
   )
 }
 
 // ── General Section ──────────────────────────────────────────────────
+// ── Workspace States Section ──────────────────────────────────────────
+
+interface StateData {
+  id: string
+  name: string
+  description: string | null
+  isBuiltIn: number
+  capFeatures: string
+  capIssues: string
+  capCrashes: string
+  capSecurity: string
+  capAudits: string
+  heartbeat: number
+  sortOrder: number
+}
+
+const CAP_STATES = ['auto', 'gated', 'off'] as const
+const CAP_LABELS: Record<string, string> = {
+  auto: 'Auto',
+  gated: 'Gated',
+  off: 'Off',
+}
+const CAP_COLORS: Record<string, string> = {
+  auto: 'text-green-400',
+  gated: 'text-amber-400',
+  off: 'text-[var(--color-text-muted)]',
+}
+
+const CAPABILITIES = [
+  { key: 'capFeatures' as const, label: 'Features', desc: 'New functionality and enhancements' },
+  { key: 'capIssues' as const, label: 'Issues', desc: 'Bug fixes from submitted issues' },
+  { key: 'capCrashes' as const, label: 'Crashes', desc: 'Automatic crash report fixes' },
+  { key: 'capSecurity' as const, label: 'Security', desc: 'Automatic security patches' },
+  { key: 'capAudits' as const, label: 'Audits', desc: 'Scheduled code reviews' },
+]
+
+function WorkspaceStatesSection(): React.JSX.Element {
+  const [states, setStates] = useState<StateData[]>([])
+  const [editingState, setEditingState] = useState<StateData | null>(null)
+  const [creating, setCreating] = useState(false)
+
+  const loadStates = useCallback(async () => {
+    try {
+      const list = await invoke<StateData[]>('states_list')
+      setStates(list)
+    } catch (err) {
+      console.error('[states] Failed to load:', err)
+    }
+  }, [])
+
+  useEffect(() => { loadStates() }, [loadStates])
+
+  const handleSave = async (entry: StateData) => {
+    try {
+      if (creating) {
+        await invoke('states_create', {
+          name: entry.name,
+          description: entry.description,
+          capFeatures: entry.capFeatures,
+          capIssues: entry.capIssues,
+          capCrashes: entry.capCrashes,
+          capSecurity: entry.capSecurity,
+          capAudits: entry.capAudits,
+          heartbeat: entry.heartbeat === 1,
+        })
+      } else {
+        await invoke('states_update', {
+          id: entry.id,
+          name: entry.name,
+          description: entry.description,
+          capFeatures: entry.capFeatures,
+          capIssues: entry.capIssues,
+          capCrashes: entry.capCrashes,
+          capSecurity: entry.capSecurity,
+          capAudits: entry.capAudits,
+          heartbeat: entry.heartbeat === 1,
+        })
+      }
+      setEditingState(null)
+      setCreating(false)
+      loadStates()
+    } catch (err) {
+      console.error('[states] Save failed:', err)
+    }
+  }
+
+  const handleDelete = async (id: string) => {
+    try {
+      await invoke('states_delete', { id })
+      loadStates()
+    } catch (err) {
+      console.error('[states] Delete failed:', err)
+    }
+  }
+
+  const handleNew = () => {
+    setCreating(true)
+    setEditingState({
+      id: '',
+      name: 'New State',
+      description: '',
+      isBuiltIn: 0,
+      capFeatures: 'gated',
+      capIssues: 'gated',
+      capCrashes: 'auto',
+      capSecurity: 'auto',
+      capAudits: 'off',
+      heartbeat: 1,
+      sortOrder: states.length,
+    })
+  }
+
+  // Editor view
+  if (editingState) {
+    return (
+      <div className="max-w-lg">
+        <button
+          onClick={() => { setEditingState(null); setCreating(false) }}
+          className="text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] mb-4 no-drag cursor-pointer"
+        >
+          &larr; Back to states
+        </button>
+
+        <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-4">
+          {creating ? 'Create State' : `Edit: ${editingState.name}`}
+        </h2>
+
+        {/* Name */}
+        <div className="mb-3">
+          <label className="text-[10px] text-[var(--color-text-muted)] block mb-1">Name</label>
+          <input
+            value={editingState.name}
+            onChange={(e) => setEditingState({ ...editingState, name: e.target.value })}
+            className="w-full px-2 py-1 text-xs bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)]"
+            disabled={editingState.isBuiltIn === 1}
+          />
+        </div>
+
+        {/* Description */}
+        <div className="mb-4">
+          <label className="text-[10px] text-[var(--color-text-muted)] block mb-1">Description</label>
+          <input
+            value={editingState.description || ''}
+            onChange={(e) => setEditingState({ ...editingState, description: e.target.value })}
+            className="w-full px-2 py-1 text-xs bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)]"
+          />
+        </div>
+
+        {/* Capabilities */}
+        <div className="mb-4">
+          <label className="text-[10px] text-[var(--color-text-muted)] block mb-2">Capabilities</label>
+          <div className="space-y-2">
+            {CAPABILITIES.map((cap) => (
+              <div key={cap.key} className="flex items-center justify-between py-1.5 px-3 bg-[var(--color-bg-elevated)] border border-[var(--color-border)]">
+                <div>
+                  <span className="text-xs text-[var(--color-text-primary)]">{cap.label}</span>
+                  <p className="text-[9px] text-[var(--color-text-muted)]">{cap.desc}</p>
+                </div>
+                <div className="flex gap-0.5">
+                  {CAP_STATES.map((state) => (
+                    <button
+                      key={state}
+                      onClick={() => setEditingState({ ...editingState, [cap.key]: state })}
+                      className={`px-2 py-0.5 text-[9px] border transition-colors cursor-pointer no-drag ${
+                        editingState[cap.key] === state
+                          ? `border-[var(--color-accent)] ${CAP_COLORS[state]} bg-[var(--color-accent)]/10`
+                          : 'border-[var(--color-border)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]'
+                      }`}
+                    >
+                      {CAP_LABELS[state]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Heartbeat toggle */}
+        <div className="flex items-center justify-between mb-6 py-1.5 px-3 bg-[var(--color-bg-elevated)] border border-[var(--color-border)]">
+          <div>
+            <span className="text-xs text-[var(--color-text-primary)]">Heartbeat</span>
+            <p className="text-[9px] text-[var(--color-text-muted)]">Whether agents can wake up automatically</p>
+          </div>
+          <button
+            onClick={() => setEditingState({ ...editingState, heartbeat: editingState.heartbeat ? 0 : 1 })}
+            className={`w-8 h-4 flex items-center transition-colors no-drag cursor-pointer ${
+              editingState.heartbeat ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
+            }`}
+          >
+            <span className={`w-3 h-3 bg-white block transition-transform ${
+              editingState.heartbeat ? 'translate-x-4.5' : 'translate-x-0.5'
+            }`} />
+          </button>
+        </div>
+
+        {/* Save button */}
+        <button
+          onClick={() => handleSave(editingState)}
+          className="px-4 py-1.5 text-xs bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity no-drag cursor-pointer"
+        >
+          {creating ? 'Create State' : 'Save Changes'}
+        </button>
+      </div>
+    )
+  }
+
+  // List view
+  return (
+    <div className="max-w-2xl">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h2 className="text-sm font-medium text-[var(--color-text-primary)]">Workspace States</h2>
+          <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
+            Define capability states that control what agents can do automatically per workspace.
+          </p>
+        </div>
+        <button
+          onClick={handleNew}
+          className="px-3 py-1 text-[10px] text-[var(--color-accent)] border border-[var(--color-accent)]/30 hover:bg-[var(--color-accent)]/10 transition-colors no-drag cursor-pointer"
+        >
+          + New State
+        </button>
+      </div>
+
+      {/* State comparison table */}
+      <div className="border border-[var(--color-border)] overflow-hidden">
+        {/* Header */}
+        <div className="grid grid-cols-7 gap-0 text-[9px] text-[var(--color-text-muted)] bg-[var(--color-bg-surface)]">
+          <div className="px-3 py-2 col-span-2 font-medium">State</div>
+          {CAPABILITIES.map((cap) => (
+            <div key={cap.key} className="px-2 py-2 text-center font-medium">{cap.label}</div>
+          ))}
+        </div>
+
+        {/* Rows */}
+        {states.map((entry) => (
+          <div
+            key={entry.id}
+            className="grid grid-cols-7 gap-0 border-t border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)]/50 group"
+          >
+            <div className="px-3 py-2.5 col-span-2 flex items-center gap-2">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${entry.heartbeat ? 'bg-green-400' : 'bg-[var(--color-text-muted)]'}`} />
+                  <span className="text-xs text-[var(--color-text-primary)] truncate">{entry.name}</span>
+                  {entry.isBuiltIn === 1 && (
+                    <span className="text-[8px] text-[var(--color-text-muted)] flex-shrink-0">BUILT-IN</span>
+                  )}
+                </div>
+                {entry.description && (
+                  <p className="text-[9px] text-[var(--color-text-muted)] mt-0.5 truncate pl-3">{entry.description}</p>
+                )}
+              </div>
+              <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+                <button
+                  onClick={() => setEditingState(entry)}
+                  className="text-[9px] text-[var(--color-text-muted)] hover:text-[var(--color-accent)] no-drag cursor-pointer"
+                >
+                  Edit
+                </button>
+                {entry.isBuiltIn === 0 && (
+                  <button
+                    onClick={() => handleDelete(entry.id)}
+                    className="text-[9px] text-red-400/50 hover:text-red-400 no-drag cursor-pointer"
+                  >
+                    Delete
+                  </button>
+                )}
+              </div>
+            </div>
+            {CAPABILITIES.map((cap) => {
+              const state = entry[cap.key] as string
+              return (
+                <div key={cap.key} className="px-2 py-2.5 flex items-center justify-center">
+                  <span className={`text-[10px] font-medium ${CAP_COLORS[state] || ''}`}>
+                    {CAP_LABELS[state] || state}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        ))}
+      </div>
+
+      <p className="text-[9px] text-[var(--color-text-muted)] mt-3">
+        <strong>Auto</strong> = agents build and merge automatically.{' '}
+        <strong>Gated</strong> = agents build PRs but wait for approval.{' '}
+        <strong>Off</strong> = agents don't act on this type of work.
+      </p>
+    </div>
+  )
+}
+
 function GeneralSection(): React.JSX.Element {
   const resetAllSettings = useSettingsStore((s) => s.resetAllSettings)
   const [confirming, setConfirming] = useState(false)
@@ -3551,6 +3851,11 @@ function ProjectDetail({
             {(project.agentMode || 'off') === 'pod' && 'Pod mode — a pod leader delegates work to pod members that execute in parallel worktrees.'}
           </p>
 
+          {/* State selector — only when a mode is active */}
+          {(project.agentMode || 'off') !== 'off' && (
+            <StateSelector projectId={project.id} currentStateId={project.stateId} />
+          )}
+
           {/* Heartbeat — only when a mode is active */}
           {(project.agentMode || 'off') !== 'off' && (
             <div className="flex items-center justify-between py-2 border-t border-[var(--color-border)]">
@@ -3622,6 +3927,11 @@ function ProjectDetail({
               </button>
             </div>
           )}
+
+          {/* Adaptive Heartbeat Config — only for custom agents with heartbeat enabled */}
+          {(project.agentMode || 'off') === 'custom' && project.heartbeatEnabled ? (
+            <AdaptiveHeartbeatConfig projectPath={project.path} />
+          ) : null}
 
           {/* Custom Agent persona — only in Custom Agent mode */}
           {(project.agentMode || 'off') === 'custom' && (
@@ -3768,6 +4078,225 @@ function AgentKebabMenu({ onSettings, onDelete }: { onSettings: () => void; onDe
               Delete Agent
             </button>
           )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Adaptive Heartbeat Config (Phase indicator, interval, force-wake) ──
+
+interface HeartbeatConfig {
+  mode: string
+  intervalSeconds: number
+  phase: string
+  maxIntervalSeconds: number
+  minIntervalSeconds: number
+  costBudget: string
+  consecutiveNoOps: number
+  autoBackoff: boolean
+  lastWake: string | null
+  nextWake: string | null
+}
+
+const PHASE_COLORS: Record<string, { dot: string; label: string }> = {
+  setup: { dot: 'bg-blue-400', label: 'text-blue-400' },
+  active: { dot: 'bg-green-400', label: 'text-green-400' },
+  monitoring: { dot: 'bg-amber-400', label: 'text-amber-400' },
+  idle: { dot: 'bg-gray-400', label: 'text-gray-400' },
+  blocked: { dot: 'bg-red-400', label: 'text-red-400' },
+}
+
+function AdaptiveHeartbeatConfig({ projectPath }: { projectPath: string }): React.JSX.Element {
+  const [config, setConfig] = useState<HeartbeatConfig | null>(null)
+  const [agents, setAgents] = useState<{ name: string; type: string }[]>([])
+  const [selectedAgent, setSelectedAgent] = useState<string>('')
+
+  // Load custom agents for this project
+  useEffect(() => {
+    invoke<{ name: string; agentType: string }[]>('k2so_agents_list', { projectPath })
+      .then((list) => {
+        const customAgents = list.filter((a) => a.agentType === 'custom')
+        setAgents(customAgents.map((a) => ({ name: a.name, type: a.agentType })))
+        if (customAgents.length > 0 && !selectedAgent) {
+          setSelectedAgent(customAgents[0].name)
+        }
+      })
+      .catch(() => {})
+  }, [projectPath])
+
+  // Load heartbeat config for selected agent
+  useEffect(() => {
+    if (!selectedAgent) return
+    invoke<HeartbeatConfig>('k2so_agents_get_heartbeat', { projectPath, agentName: selectedAgent })
+      .then(setConfig)
+      .catch(() => setConfig(null))
+  }, [projectPath, selectedAgent])
+
+  if (!config || agents.length === 0) return <></>
+
+  const phaseStyle = PHASE_COLORS[config.phase] || PHASE_COLORS.monitoring
+  const formatInterval = (s: number) => s >= 3600 ? `${Math.round(s / 3600)}h` : s >= 60 ? `${Math.round(s / 60)}m` : `${s}s`
+
+  const handleUpdate = async (updates: { interval?: number; phase?: string }) => {
+    try {
+      const result = await invoke<HeartbeatConfig>('k2so_agents_set_heartbeat', {
+        projectPath,
+        agentName: selectedAgent,
+        interval: updates.interval ?? null,
+        phase: updates.phase ?? null,
+        mode: null,
+        costBudget: null,
+      })
+      setConfig(result)
+    } catch (err) {
+      console.error('[heartbeat] Update failed:', err)
+    }
+  }
+
+  const handleForceWake = async () => {
+    try {
+      await invoke('k2so_agents_set_heartbeat', {
+        projectPath,
+        agentName: selectedAgent,
+        interval: null,
+        phase: null,
+        mode: null,
+        costBudget: null,
+      })
+      // Trigger immediate triage
+      await invoke('k2so_agents_scheduler_tick', { projectPath })
+    } catch (err) {
+      console.error('[heartbeat] Force wake failed:', err)
+    }
+  }
+
+  return (
+    <div className="py-2 border-t border-[var(--color-border)]">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          {/* Phase indicator dot */}
+          <span className={`w-2 h-2 rounded-full ${phaseStyle.dot}`} />
+          <span className={`text-[10px] font-medium ${phaseStyle.label}`}>
+            {config.phase}
+          </span>
+          <span className="text-[10px] text-[var(--color-text-muted)]">
+            every {formatInterval(config.intervalSeconds)}
+          </span>
+          {config.consecutiveNoOps > 0 && (
+            <span className="text-[9px] text-[var(--color-text-muted)] opacity-60">
+              ({config.consecutiveNoOps} idle)
+            </span>
+          )}
+        </div>
+        <button
+          onClick={handleForceWake}
+          className="px-2 py-0.5 text-[9px] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-secondary)] transition-colors cursor-pointer no-drag"
+        >
+          Force Wake
+        </button>
+      </div>
+
+      {/* Interval presets */}
+      <div className="flex gap-1 mb-1.5">
+        {[
+          { label: '1m', seconds: 60, phase: 'active' },
+          { label: '5m', seconds: 300, phase: 'monitoring' },
+          { label: '15m', seconds: 900, phase: 'monitoring' },
+          { label: '1h', seconds: 3600, phase: 'idle' },
+        ].map((preset) => (
+          <button
+            key={preset.label}
+            onClick={() => handleUpdate({ interval: preset.seconds, phase: preset.phase })}
+            className={`px-2 py-0.5 text-[9px] border transition-colors cursor-pointer no-drag ${
+              config.intervalSeconds === preset.seconds
+                ? 'border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-accent)]/10'
+                : 'border-[var(--color-border)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]'
+            }`}
+          >
+            {preset.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Last/next wake info */}
+      <div className="flex gap-3 text-[9px] text-[var(--color-text-muted)]">
+        {config.lastWake && (
+          <span>Last: {new Date(config.lastWake).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+        )}
+        {config.nextWake && (
+          <span>Next: {new Date(config.nextWake).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+        )}
+        {config.autoBackoff && config.consecutiveNoOps >= 3 && (
+          <span className="text-amber-400/80">auto-backoff active</span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── State Selector (per-workspace dropdown) ──────────────────────────────
+
+function StateSelector({ projectId, currentStateId }: { projectId: string; currentStateId?: string | null }): React.JSX.Element {
+  const [states, setStates] = useState<StateData[]>([])
+  const [selectedId, setSelectedId] = useState(currentStateId || '')
+
+  useEffect(() => {
+    invoke<StateData[]>('states_list').then(setStates).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    setSelectedId(currentStateId || '')
+  }, [currentStateId])
+
+  const handleChange = async (stateId: string) => {
+    setSelectedId(stateId)
+    try {
+      await invoke('projects_update', { id: projectId, stateId: stateId || '' })
+      const store = useProjectsStore.getState()
+      const updated = store.projects.map((p) =>
+        p.id === projectId ? { ...p, stateId: stateId || null } : p
+      )
+      useProjectsStore.setState({ projects: updated })
+    } catch (err) {
+      console.error('[state-selector] Update failed:', err)
+    }
+  }
+
+  if (states.length === 0) return <></>
+
+  const activeState = states.find((t) => t.id === selectedId)
+
+  return (
+    <div className="py-2 border-t border-[var(--color-border)]">
+      <div className="flex items-center justify-between">
+        <div>
+          <span className="text-xs text-[var(--color-text-primary)]">State</span>
+          {activeState?.description && (
+            <p className="text-[9px] text-[var(--color-text-muted)] mt-0.5">{activeState.description}</p>
+          )}
+        </div>
+        <select
+          value={selectedId}
+          onChange={(e) => handleChange(e.target.value)}
+          className="px-2 py-1 text-[10px] bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none cursor-pointer no-drag"
+        >
+          <option value="">No state</option>
+          {states.map((t) => (
+            <option key={t.id} value={t.id}>{t.name}</option>
+          ))}
+        </select>
+      </div>
+      {activeState && (
+        <div className="flex gap-3 mt-1.5 text-[9px]">
+          {CAPABILITIES.map((cap) => {
+            const state = activeState[cap.key] as string
+            return (
+              <span key={cap.key} className={CAP_COLORS[state] || ''}>
+                {cap.label}: {CAP_LABELS[state]}
+              </span>
+            )
+          })}
         </div>
       )}
     </div>

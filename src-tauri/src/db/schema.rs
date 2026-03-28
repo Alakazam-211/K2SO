@@ -94,12 +94,13 @@ pub struct Project {
     pub agent_enabled: i64,
     pub heartbeat_enabled: i64,
     pub agent_mode: String,
+    pub state_id: Option<String>,
 }
 
 impl Project {
     pub fn list(conn: &Connection) -> Result<Vec<Project>> {
         let mut stmt = conn.prepare(
-            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at, agent_enabled, heartbeat_enabled, agent_mode \
+            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at, agent_enabled, heartbeat_enabled, agent_mode, tier_id \
              FROM projects ORDER BY tab_order",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -120,6 +121,7 @@ impl Project {
                 agent_enabled: row.get(13)?,
                 heartbeat_enabled: row.get(14)?,
                 agent_mode: row.get::<_, String>(15).unwrap_or_else(|_| "off".to_string()),
+                state_id: row.get(16).ok(),
             })
         })?;
         rows.collect()
@@ -127,7 +129,7 @@ impl Project {
 
     pub fn get(conn: &Connection, id: &str) -> Result<Project> {
         conn.query_row(
-            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at, agent_enabled, heartbeat_enabled, agent_mode \
+            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at, agent_enabled, heartbeat_enabled, agent_mode, tier_id \
              FROM projects WHERE id = ?1",
             params![id],
             |row| {
@@ -148,6 +150,7 @@ impl Project {
                     agent_enabled: row.get(13)?,
                     heartbeat_enabled: row.get(14)?,
                     agent_mode: row.get::<_, String>(15).unwrap_or_else(|_| "off".to_string()),
+                    state_id: row.get(16).ok(),
                 })
             },
         )
@@ -187,6 +190,7 @@ impl Project {
         agent_enabled: Option<i64>,
         heartbeat_enabled: Option<i64>,
         agent_mode: Option<String>,
+        state_id: Option<Option<&str>>,
     ) -> Result<()> {
         if let Some(v) = name {
             conn.execute("UPDATE projects SET name = ?1 WHERE id = ?2", params![v, id])?;
@@ -226,6 +230,12 @@ impl Project {
             // Keep agent_enabled in sync for backward compat
             let enabled = if v == "off" { 0i64 } else { 1i64 };
             conn.execute("UPDATE projects SET agent_enabled = ?1 WHERE id = ?2", params![enabled, id])?;
+        }
+        if let Some(v) = state_id {
+            match v {
+                Some(sid) => conn.execute("UPDATE projects SET tier_id = ?1 WHERE id = ?2", params![sid, id])?,
+                None => conn.execute("UPDATE projects SET tier_id = NULL WHERE id = ?1", params![id])?,
+            };
         }
         Ok(())
     }
@@ -683,4 +693,151 @@ pub struct TerminalPane {
     pub split_ratio: Option<f64>,
     pub pane_order: i64,
     pub created_at: i64,
+}
+
+// ── Workspace States ─────────────────────────────────────────────────────
+
+/// A workspace state defines what agents are allowed to do automatically.
+/// Each capability has three levels: "auto", "gated", "off".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceState {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub is_built_in: i64,
+    /// Features: new functionality, enhancements
+    pub cap_features: String,
+    /// Issues: bug fixes from submitted issues
+    pub cap_issues: String,
+    /// Crashes: automatic crash report fixes
+    pub cap_crashes: String,
+    /// Security: automatic security patches
+    pub cap_security: String,
+    /// Audits: scheduled code reviews
+    pub cap_audits: String,
+    /// Whether the heartbeat scheduler is active
+    pub heartbeat: i64,
+    pub sort_order: i64,
+}
+
+impl WorkspaceState {
+    pub fn list(conn: &Connection) -> Result<Vec<WorkspaceState>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, is_built_in, cap_features, cap_issues, cap_crashes, cap_security, cap_audits, heartbeat, sort_order \
+             FROM workspace_states ORDER BY sort_order"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(WorkspaceState {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                is_built_in: row.get(3)?,
+                cap_features: row.get(4)?,
+                cap_issues: row.get(5)?,
+                cap_crashes: row.get(6)?,
+                cap_security: row.get(7)?,
+                cap_audits: row.get(8)?,
+                heartbeat: row.get(9)?,
+                sort_order: row.get(10)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn get(conn: &Connection, id: &str) -> Result<WorkspaceState> {
+        conn.query_row(
+            "SELECT id, name, description, is_built_in, cap_features, cap_issues, cap_crashes, cap_security, cap_audits, heartbeat, sort_order \
+             FROM workspace_states WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(WorkspaceState {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    description: row.get(2)?,
+                    is_built_in: row.get(3)?,
+                    cap_features: row.get(4)?,
+                    cap_issues: row.get(5)?,
+                    cap_crashes: row.get(6)?,
+                    cap_security: row.get(7)?,
+                    cap_audits: row.get(8)?,
+                    heartbeat: row.get(9)?,
+                    sort_order: row.get(10)?,
+                })
+            },
+        )
+    }
+
+    pub fn create(
+        conn: &Connection,
+        id: &str,
+        name: &str,
+        description: Option<&str>,
+        cap_features: &str,
+        cap_issues: &str,
+        cap_crashes: &str,
+        cap_security: &str,
+        cap_audits: &str,
+        heartbeat: bool,
+    ) -> Result<()> {
+        let max_order: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM workspace_states", [], |r| r.get(0)
+        )?;
+        conn.execute(
+            "INSERT INTO workspace_states (id, name, description, is_built_in, cap_features, cap_issues, cap_crashes, cap_security, cap_audits, heartbeat, sort_order) \
+             VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![id, name, description, cap_features, cap_issues, cap_crashes, cap_security, cap_audits, heartbeat as i64, max_order],
+        )?;
+        Ok(())
+    }
+
+    pub fn update(
+        conn: &Connection,
+        id: &str,
+        name: Option<&str>,
+        description: Option<&str>,
+        cap_features: Option<&str>,
+        cap_issues: Option<&str>,
+        cap_crashes: Option<&str>,
+        cap_security: Option<&str>,
+        cap_audits: Option<&str>,
+        heartbeat: Option<bool>,
+    ) -> Result<()> {
+        if let Some(v) = name { conn.execute("UPDATE workspace_states SET name = ?1 WHERE id = ?2", params![v, id])?; }
+        if let Some(v) = description { conn.execute("UPDATE workspace_states SET description = ?1 WHERE id = ?2", params![v, id])?; }
+        if let Some(v) = cap_features { conn.execute("UPDATE workspace_states SET cap_features = ?1 WHERE id = ?2", params![v, id])?; }
+        if let Some(v) = cap_issues { conn.execute("UPDATE workspace_states SET cap_issues = ?1 WHERE id = ?2", params![v, id])?; }
+        if let Some(v) = cap_crashes { conn.execute("UPDATE workspace_states SET cap_crashes = ?1 WHERE id = ?2", params![v, id])?; }
+        if let Some(v) = cap_security { conn.execute("UPDATE workspace_states SET cap_security = ?1 WHERE id = ?2", params![v, id])?; }
+        if let Some(v) = cap_audits { conn.execute("UPDATE workspace_states SET cap_audits = ?1 WHERE id = ?2", params![v, id])?; }
+        if let Some(v) = heartbeat { conn.execute("UPDATE workspace_states SET heartbeat = ?1 WHERE id = ?2", params![v as i64, id])?; }
+        Ok(())
+    }
+
+    pub fn delete(conn: &Connection, id: &str) -> Result<()> {
+        // Don't delete built-in states
+        let is_built_in: i64 = conn.query_row(
+            "SELECT is_built_in FROM workspace_states WHERE id = ?1", params![id], |r| r.get(0)
+        ).unwrap_or(1);
+        if is_built_in == 1 {
+            return Ok(());
+        }
+        // Clear tier_id on projects using this state
+        conn.execute("UPDATE projects SET tier_id = NULL WHERE tier_id = ?1", params![id])?;
+        conn.execute("DELETE FROM workspace_states WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Get the capability state for a given work item source type.
+    /// Returns "auto", "gated", or "off".
+    pub fn capability_for_source(&self, source: &str) -> &str {
+        match source {
+            "feature" => &self.cap_features,
+            "issue" => &self.cap_issues,
+            "crash" => &self.cap_crashes,
+            "security" => &self.cap_security,
+            "audit" => &self.cap_audits,
+            _ => "gated", // Unknown source → require approval
+        }
+    }
 }

@@ -4,7 +4,7 @@
 //! (Claude Code, Cursor, Gemini). Maps agent events to canonical lifecycle types
 //! and emits Tauri events to the frontend.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -15,6 +15,49 @@ static HOOK_PORT: AtomicU16 = AtomicU16::new(0);
 static HOOK_TOKEN: OnceLock<String> = OnceLock::new();
 /// Guard against concurrent triage runs for the same project path.
 static TRIAGE_IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// Event queue for channel-based agents. Key: "project_path:agent_name"
+static EVENT_QUEUES: OnceLock<Mutex<HashMap<String, VecDeque<ChannelEvent>>>> = OnceLock::new();
+
+const MAX_EVENTS_PER_QUEUE: usize = 100;
+
+#[derive(Clone, serde::Serialize)]
+struct ChannelEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    message: String,
+    priority: String,
+    timestamp: String,
+}
+
+fn event_queues() -> &'static Mutex<HashMap<String, VecDeque<ChannelEvent>>> {
+    EVENT_QUEUES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Push an event into an agent's channel event queue.
+pub fn push_agent_event(project_path: &str, agent_name: &str, event_type: &str, message: &str, priority: &str) {
+    let key = format!("{}:{}", project_path, agent_name);
+    let event = ChannelEvent {
+        event_type: event_type.to_string(),
+        message: message.to_string(),
+        priority: priority.to_string(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    let mut queues = event_queues().lock().unwrap_or_else(|e| e.into_inner());
+    let queue = queues.entry(key).or_insert_with(VecDeque::new);
+    queue.push_back(event);
+    // Cap queue size
+    while queue.len() > MAX_EVENTS_PER_QUEUE {
+        queue.pop_front();
+    }
+}
+
+/// Drain all pending events for an agent (returns them and clears the queue).
+fn drain_agent_events(project_path: &str, agent_name: &str) -> Vec<ChannelEvent> {
+    let key = format!("{}:{}", project_path, agent_name);
+    let mut queues = event_queues().lock().unwrap_or_else(|e| e.into_inner());
+    queues.remove(&key).map(|q| q.into_iter().collect()).unwrap_or_default()
+}
 
 fn triage_lock() -> &'static Mutex<HashSet<String>> {
     TRIAGE_IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
@@ -268,8 +311,9 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                         let body = params.get("body").cloned().unwrap_or_default();
                         let priority = params.get("priority").cloned();
                         let item_type = params.get("type").cloned();
+                        let source = params.get("source").cloned();
                         crate::commands::k2so_agents::k2so_agents_work_create(
-                            project_path, agent, title, body, priority, item_type,
+                            project_path, agent, title, body, priority, item_type, source,
                         )
                         .map(|item| serde_json::to_string(&item).unwrap_or_default())
                     }
@@ -300,6 +344,15 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                         crate::commands::k2so_agents::k2so_agents_get_profile(project_path, agent)
                             .map(|content| serde_json::json!({"content": content}).to_string())
                     }
+                    "/cli/agent/update" => {
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        let field = params.get("field").cloned().unwrap_or_default();
+                        let value = params.get("value").cloned().unwrap_or_default();
+                        crate::commands::k2so_agents::k2so_agents_update_field(
+                            project_path, agent, field, value,
+                        )
+                        .map(|content| serde_json::json!({"success": true, "content": content}).to_string())
+                    }
                     "/cli/work/inbox" => {
                         crate::commands::k2so_agents::k2so_agents_workspace_inbox_list(project_path)
                             .map(|items| serde_json::to_string(&items).unwrap_or_default())
@@ -311,8 +364,9 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                         let priority = params.get("priority").cloned();
                         let item_type = params.get("type").cloned();
                         let assigned_by = params.get("assigned_by").cloned();
+                        let source = params.get("source").cloned();
                         crate::commands::k2so_agents::k2so_agents_workspace_inbox_create(
-                            workspace, title, body, priority, item_type, assigned_by,
+                            workspace, title, body, priority, item_type, assigned_by, source,
                         )
                         .map(|item| serde_json::to_string(&item).unwrap_or_default())
                     }
@@ -480,6 +534,141 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
 
                                 triage_result
                             }
+                        }
+                    }
+                    "/cli/terminal/spawn" => {
+                        // Spawn a sub-terminal for an agent (pane split within agent's tab)
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        let command = params.get("command").cloned().unwrap_or_default();
+                        let title = params.get("title").cloned().unwrap_or("Sub-task".to_string());
+                        let wait = params.get("wait").map(|v| v == "1" || v == "true").unwrap_or(false);
+                        let cwd = params.get("cwd").cloned().unwrap_or(project_path.clone());
+
+                        let _ = app_handle.emit("cli:terminal-spawn", serde_json::json!({
+                            "agentName": agent,
+                            "command": command,
+                            "cwd": cwd,
+                            "title": title,
+                            "wait": wait,
+                            "projectPath": &project_path,
+                        }));
+                        Ok(serde_json::json!({"success": true}).to_string())
+                    }
+                    "/cli/events" => {
+                        // Drain pending events for a channel-based agent
+                        let agent = params.get("agent").cloned().unwrap_or("__lead__".to_string());
+                        let events = drain_agent_events(&project_path, &agent);
+                        Ok(serde_json::to_string(&events).unwrap_or("[]".to_string()))
+                    }
+                    "/cli/agent/reply" => {
+                        // Agent sends a message back to K2SO via channel
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        let message = params.get("message").cloned().unwrap_or_default();
+                        // Emit to frontend so the UI can show it
+                        let _ = app_handle.emit("agent:reply", serde_json::json!({
+                            "agentName": agent,
+                            "message": message,
+                            "projectPath": &project_path,
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                        }));
+                        Ok(r#"{"success":true}"#.to_string())
+                    }
+                    "/cli/agents/heartbeat/noop" => {
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        crate::commands::k2so_agents::k2so_agents_heartbeat_noop(project_path, agent)
+                            .map(|config| serde_json::to_string(&config).unwrap_or_default())
+                    }
+                    "/cli/agents/heartbeat/action" => {
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        crate::commands::k2so_agents::k2so_agents_heartbeat_action(project_path, agent)
+                            .map(|config| serde_json::to_string(&config).unwrap_or_default())
+                    }
+                    "/cli/agents/heartbeat" => {
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        let interval = params.get("interval").and_then(|v| v.parse::<u64>().ok());
+                        let phase = params.get("phase").cloned();
+                        let mode = params.get("mode").cloned();
+                        let cost_budget = params.get("cost_budget").cloned();
+
+                        if interval.is_some() || phase.is_some() || mode.is_some() || cost_budget.is_some() {
+                            // Update
+                            crate::commands::k2so_agents::k2so_agents_set_heartbeat(
+                                project_path, agent, interval, phase, mode, cost_budget,
+                            )
+                            .map(|config| serde_json::to_string(&config).unwrap_or_default())
+                        } else {
+                            // Read
+                            crate::commands::k2so_agents::k2so_agents_get_heartbeat(project_path, agent)
+                                .map(|config| serde_json::to_string(&config).unwrap_or_default())
+                        }
+                    }
+                    "/cli/scheduler-tick" => {
+                        // Enhanced triage: LLM-powered decision with filesystem fallback
+                        let already_running = {
+                            let mut in_flight = triage_lock().lock().unwrap_or_else(|e| e.into_inner());
+                            if in_flight.contains(&project_path) {
+                                true
+                            } else {
+                                in_flight.insert(project_path.clone());
+                                false
+                            }
+                        };
+
+                        if already_running {
+                            Ok(serde_json::json!({"count": 0, "launched": [], "skipped": "triage already in flight"}).to_string())
+                        } else {
+                            // Try LLM-powered triage first, fall back to filesystem triage
+                            let agents_result = {
+                                use tauri::Manager;
+                                let llm_result = app_handle.try_state::<crate::state::AppState>()
+                                    .and_then(|state| {
+                                        let manager = state.llm_manager.lock();
+                                        if manager.is_loaded() {
+                                            Some(crate::commands::k2so_agents::llm_triage_decide(
+                                                &project_path,
+                                                &manager,
+                                            ))
+                                        } else {
+                                            None
+                                        }
+                                    });
+
+                                match llm_result {
+                                    Some(result) => result,
+                                    None => {
+                                        // LLM not available — use adaptive scheduler (filesystem-based)
+                                        crate::commands::k2so_agents::k2so_agents_scheduler_tick(project_path.clone())
+                                    }
+                                }
+                            };
+
+                            let triage_result = agents_result.map(|agents| {
+                                for agent_name in &agents {
+                                    if agent_name == "__lead__" {
+                                        let _ = crate::commands::k2so_agents::k2so_agents_generate_workspace_claude_md(project_path.clone());
+                                        let _ = app_handle.emit("cli:agent-launch", serde_json::json!({
+                                            "command": "claude",
+                                            "args": ["--append-system-prompt", "Check the workspace inbox: `k2so work inbox` and triage any new items to the appropriate sub-agents using `k2so delegate`."],
+                                            "cwd": &project_path,
+                                            "agentName": "__lead__",
+                                        }));
+                                    } else {
+                                        if let Ok(launch) = crate::commands::k2so_agents::k2so_agents_build_launch(
+                                            project_path.clone(), agent_name.clone(), None
+                                        ) {
+                                            let _ = app_handle.emit("cli:agent-launch", &launch);
+                                        }
+                                    }
+                                }
+                                serde_json::json!({"count": agents.len(), "launched": agents, "method": "llm"}).to_string()
+                            });
+
+                            {
+                                let mut in_flight = triage_lock().lock().unwrap_or_else(|e| e.into_inner());
+                                in_flight.remove(&project_path);
+                            }
+
+                            triage_result
                         }
                     }
                     "/cli/settings" => {

@@ -39,6 +39,58 @@ Quick-launch buttons for the agents you already use:
 
 Add your own custom agent presets or edit the built-ins. Set a default agent and launch it instantly with Cmd+Shift+T.
 
+### Autonomous Agent System (BETA)
+
+K2SO includes a closed-loop agent orchestration system where agents at every level are self-aware, self-configuring, and event-driven.
+
+**Agent Hierarchy:**
+- **K2SO Agent** -- Top-level planner that coordinates across workspaces, creates PRDs and milestones
+- **Pod Leaders** -- Per-workspace orchestrators that delegate work to pod members, review completed branches
+- **Pod Members** -- Specialized agents (backend-eng, frontend-eng, qa-tester) that work in isolated worktrees
+- **Custom Agents** -- User-defined agents with adaptive heartbeat timing
+
+**Adaptive Heartbeat with Local LLM Triage:**
+The heartbeat system uses a two-tier cost model. A local LLM (Qwen 1.5B, running on-device via llama.cpp with Metal acceleration) evaluates whether expensive cloud sessions should be launched. The flow: filesystem check ($0) -> lock check ($0) -> quality gate ($0) -> local LLM decision ($0) -> cloud model session (only if the LLM approves). Agents self-adjust their check-in frequency (1 min during active work, 1 hour when idle). Auto-backoff increases the interval by 1.5x after 3 consecutive idle wakes. Active hours windows prevent overnight cost waste.
+
+**Event-Driven via Claude Code Channels:**
+Pod Leaders can run as persistent Claude sessions with MCP channel integration (`--channels`). K2SO implements an MCP channel server that pushes events (new work items, git changes, CI results, agent lifecycle events) directly into the running session. No polling delay, no context reload -- the agent maintains full session context across events.
+
+**Self-Configuring Agents:**
+Pod Leaders create and configure Pod Members via CLI (`k2so agent create`, `k2so agent update`). Agent profiles (`agent.md`) are editable with AI assistance via the built-in AIFileEditor. Each Pod Leader knows its team members' strengths by reading their `agent.md` files before delegating.
+
+**Decentralized Work Discovery:**
+Each Pod Leader knows where to find work (GitHub Issues, Linear, PRDs) via its `agent.md`. No central scanner or integration layer needed -- agents use CLI tools (`gh`, `git`, `curl`) already available in the terminal. The filesystem work queue (`.k2so/agents/{name}/work/{inbox,active,done}/`) is the always-on mechanism, scanned by the local LLM triage at near-zero cost.
+
+**Multi-Terminal Execution:**
+Agents can spawn parallel sub-terminals for concurrent tasks (`k2so terminal spawn`). Sub-terminals appear as pane splits within the agent's tab.
+
+**Session Resume & Transcript Pruning:**
+Heartbeat agents use Claude Code's `--resume` flag to continue from their last session, avoiding full context reload on each wake. No-op sessions (agent woke up, found nothing to do) are pruned automatically -- the session ID is cleared so the next launch starts fresh.
+
+**Launch Failure Detection:**
+If an agent's terminal exits within 5 seconds of starting, K2SO treats it as a launch failure, notifies the user, and retries once after 30 seconds.
+
+### Workspace States
+
+Each workspace operates under a configurable **state** that controls what agents can do automatically. States define per-capability permissions using a three-level model:
+
+- **Auto** -- agents build and merge without asking
+- **Gated** -- agents build PRs and publish review URLs, but wait for human approval before merging
+- **Off** -- agents don't act on this type of work
+
+Work items are tagged by source type (feature, issue, crash, security, audit, manual), and the workspace state gates which sources agents can auto-act on.
+
+**Default States:**
+
+| State | Features | Issues | Crashes | Security | Audits |
+|-------|----------|--------|---------|----------|--------|
+| **Build** | Auto | Auto | Auto | Auto | Auto |
+| **Managed Service** | Gated | Auto | Auto | Auto | Gated |
+| **Maintenance** | Off | Gated | Gated | Gated | Gated |
+| **Locked** | Off | Off | Off | Off | Off |
+
+Users can create custom states with any combination of capability levels. States are defined in Settings and assigned per-workspace.
+
 ### Agent Lifecycle Detection
 K2SO detects when AI agents start, stop, or request permissions via a hook system that integrates with Claude Code, Cursor, and Gemini CLI. Active agents show real-time status indicators (working, awaiting permission, done) in the sidebar.
 
@@ -118,6 +170,10 @@ cargo tauri build
 ├─────────────────────────────────────────────────────┤
 │                    Rust Backend                     │
 │  portable-pty │ rusqlite │ git2 │ llama-cpp-2       │
+├─────────────────────────────────────────────────────┤
+│              Agent Orchestration Layer              │
+│  Heartbeat scheduler │ CLI bridge │ Event queues    │
+│  MCP channel server  │ Work queues │ Worktrees      │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -128,8 +184,9 @@ cargo tauri build
 | IPC | Tauri commands + events | Frontend-backend communication |
 | Backend | Rust, Tauri v2 | Terminal PTY, database, git, LLM |
 | Database | SQLite (rusqlite, WAL mode) | Projects, workspaces, presets, settings |
-| AI | llama-cpp-2 (Metal) | Local LLM for workspace assistant |
+| AI | llama-cpp-2 (Metal) | Local LLM for workspace assistant + heartbeat triage |
 | Agent Hooks | HTTP notification server | Lifecycle detection for Claude/Cursor/Gemini |
+| Agent System | k2so CLI, heartbeat scheduler, MCP channels | Autonomous agent orchestration |
 | Git | git2 | Worktree and branch management |
 
 For the full technical architecture, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useTabsStore } from '@/stores/tabs'
+import { AgentPersonaEditor } from '@/components/AgentPersonaEditor/AgentPersonaEditor'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -121,6 +122,7 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
   const [allAgentWork, setAllAgentWork] = useState<WorkItem[]>([])
   const [viewMode, setViewMode] = useState<'preview' | 'edit'>('preview')
   const [activeSection, setActiveSection] = useState<'profile' | 'claude-md' | 'work'>('work')
+  const [showPersonaEditor, setShowPersonaEditor] = useState(false)
 
   const agentDir = `${projectPath}/.k2so/agents/${agentName}`
 
@@ -191,6 +193,22 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
   const wsInProgress = allAgentWork.filter((w) => w.folder === 'inbox' || w.folder === 'active')
   const wsReview = allAgentWork.filter((w) => w.folder === 'done')
 
+  // Show the AIFileEditor persona editor when "Configure with AI" is clicked
+  if (showPersonaEditor && !isWorkspaceBoard) {
+    return (
+      <div className="h-full">
+        <AgentPersonaEditor
+          agentName={agentName}
+          projectPath={projectPath}
+          onClose={() => {
+            setShowPersonaEditor(false)
+            fetchProfile() // Refresh profile after editing
+          }}
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="h-full flex flex-col bg-[var(--color-bg)] overflow-hidden">
       {/* Header — tabs on left, agent name after */}
@@ -231,27 +249,37 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
             <span className="text-[10px] text-[var(--color-text-muted)] truncate">{profile.role}</span>
           )}
         </div>
-        {/* Preview/Edit toggle for profile/claude-md tabs */}
+        {/* Preview/Edit toggle + Configure with AI for profile/claude-md tabs */}
         {!isWorkspaceBoard && (activeSection === 'profile' || activeSection === 'claude-md') && (
-          <div className="ml-auto flex gap-0.5 flex-shrink-0">
-            {(['preview', 'edit'] as const).map((mode) => (
+          <div className="ml-auto flex gap-1.5 items-center flex-shrink-0">
+            {activeSection === 'profile' && (
               <button
-                key={mode}
-                onClick={() => {
-                  if (mode === 'edit') {
-                    openFile(`${agentDir}/${activeSection === 'profile' ? 'agent.md' : 'CLAUDE.md'}`)
-                  }
-                  setViewMode(mode)
-                }}
-                className={`px-2 py-1 text-[10px] font-medium transition-colors no-drag cursor-pointer ${
-                  viewMode === mode
-                    ? 'bg-[var(--color-accent)] text-white'
-                    : 'bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] border border-[var(--color-border)]'
-                }`}
+                onClick={() => setShowPersonaEditor(true)}
+                className="px-2 py-1 text-[10px] font-medium text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer"
               >
-                {mode === 'preview' ? 'Preview' : 'Edit'}
+                Configure with AI
               </button>
-            ))}
+            )}
+            <div className="flex gap-0.5">
+              {(['preview', 'edit'] as const).map((mode) => (
+                <button
+                  key={mode}
+                  onClick={() => {
+                    if (mode === 'edit') {
+                      openFile(`${agentDir}/${activeSection === 'profile' ? 'agent.md' : 'CLAUDE.md'}`)
+                    }
+                    setViewMode(mode)
+                  }}
+                  className={`px-2 py-1 text-[10px] font-medium transition-colors no-drag cursor-pointer ${
+                    viewMode === mode
+                      ? 'bg-[var(--color-accent)] text-white'
+                      : 'bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] border border-[var(--color-border)]'
+                  }`}
+                >
+                  {mode === 'preview' ? 'Preview' : 'Edit'}
+                </button>
+              ))}
+            </div>
           </div>
         )}
       </div>

@@ -23,6 +23,13 @@ export interface ActiveAgent {
 /** Track in-flight triage calls per project to prevent duplicate launches */
 const _triageInFlight = new Set<string>()
 
+/** Track agent start times for launch failure detection (paneId → timestamp) */
+const _agentStartTimes = new Map<string, number>()
+/** Track failed launches to avoid infinite retry loops (paneId → retry count) */
+const _launchRetries = new Map<string, number>()
+const LAUNCH_FAILURE_THRESHOLD_MS = 5000
+const MAX_LAUNCH_RETRIES = 1
+
 interface ActiveAgentsState {
   agents: Map<string, ActiveAgent>
   outputTimestamps: Map<string, number>
@@ -121,6 +128,7 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
 
     if (eventType === 'start') {
       newStatuses.set(paneId, 'working')
+      _agentStartTimes.set(paneId, Date.now())
       // Record which project this pane belongs to
       const ps = useProjectsStore.getState()
       if (ps.activeProjectId) {
@@ -195,6 +203,36 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
     }
 
     set({ paneStatuses: newStatuses })
+
+    // Launch failure detection: if agent stopped within 5s of starting, retry once
+    if (eventType === 'stop') {
+      const startTime = _agentStartTimes.get(paneId)
+      _agentStartTimes.delete(paneId)
+      if (startTime && (Date.now() - startTime) < LAUNCH_FAILURE_THRESHOLD_MS) {
+        const retries = _launchRetries.get(paneId) || 0
+        if (retries < MAX_LAUNCH_RETRIES) {
+          _launchRetries.set(paneId, retries + 1)
+          const projectId = get().paneProjectMap.get(paneId)
+          if (projectId) {
+            const project = useProjectsStore.getState().projects.find(p => p.id === projectId)
+            if (project) {
+              console.warn(`[agent-launch] Agent in ${project.name} failed within ${LAUNCH_FAILURE_THRESHOLD_MS}ms — retrying in 30s (attempt ${retries + 1})`)
+              toast.addToast('Agent launch failed — retrying in 30s', 'warning', 5000)
+              setTimeout(() => {
+                invoke('k2so_agents_triage_decide', { projectPath: project.path }).catch(() => {})
+              }, 30000)
+            }
+          }
+          return // Don't proceed to normal retriage
+        } else {
+          _launchRetries.delete(paneId)
+          console.error(`[agent-launch] Agent launch failed after ${MAX_LAUNCH_RETRIES} retries`)
+          toast.addToast('Agent launch failed — check agent configuration', 'error', 8000)
+        }
+      } else {
+        _launchRetries.delete(paneId)
+      }
+    }
 
     // Re-triage: if an agent session just stopped, check if there's more work
     // to do for heartbeat-enabled projects (with concurrency guard)
@@ -401,6 +439,39 @@ export function startAgentPolling(): void {
         args
       })
     })
+
+    // Listen for CLI-triggered sub-terminal spawn requests (multi-terminal execution)
+    listen<{ agentName: string; command: string; cwd: string; title: string; wait: boolean; projectPath: string }>(
+      'cli:terminal-spawn', (event) => {
+        const { agentName, command, cwd, title } = event.payload
+        const tabsStore = useTabsStore.getState()
+
+        // Find the agent's existing tab (look for "Agent: <name>" title)
+        const agentTab = tabsStore.tabs.find((t) =>
+          t.title === `Agent: ${agentName}` || t.paneGroups.values().next().value?.panes?.some(
+            (p: any) => p.title === `Agent: ${agentName}`
+          )
+        )
+
+        if (agentTab) {
+          // Split within the existing agent tab
+          const activeGroup = tabsStore.activeGroupIndex
+          tabsStore.addTabToGroup(activeGroup, cwd, {
+            title: `${agentName}: ${title}`,
+            command: command.split(' ')[0],
+            args: command.split(' ').slice(1),
+          })
+        } else {
+          // No agent tab found — create new tab
+          const activeGroup = tabsStore.activeGroupIndex
+          tabsStore.addTabToGroup(activeGroup, cwd, {
+            title: `${agentName}: ${title}`,
+            command: command.split(' ')[0],
+            args: command.split(' ').slice(1),
+          })
+        }
+      }
+    )
 
     // Listen for CLI-triggered AI Commit requests
     listen<{

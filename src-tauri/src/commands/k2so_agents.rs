@@ -33,6 +33,8 @@ pub struct WorkItem {
     pub item_type: String,
     pub folder: String,
     pub body_preview: String,
+    /// Work source: "feature", "issue", "crash", "security", "audit", "manual"
+    pub source: String,
 }
 
 // ── Path helpers ────────────────────────────────────────────────────────
@@ -103,6 +105,7 @@ fn read_work_item(path: &Path, folder: &str) -> Option<WorkItem> {
         item_type: fm.get("type").cloned().unwrap_or("task".to_string()),
         folder: folder.to_string(),
         body_preview,
+        source: fm.get("source").cloned().unwrap_or("manual".to_string()),
     })
 }
 
@@ -115,6 +118,111 @@ fn count_md_files(dir: &Path) -> usize {
                 .count()
         })
         .unwrap_or(0)
+}
+
+// ── Heartbeat Configuration ─────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHeartbeatConfig {
+    /// Execution mode: "heartbeat", "persistent", or "hybrid"
+    #[serde(default = "default_heartbeat_mode")]
+    pub mode: String,
+    /// Current check-in interval in seconds
+    #[serde(default = "default_interval")]
+    pub interval_seconds: u64,
+    /// Current work phase (freeform, but well-known: setup, active, monitoring, idle, blocked)
+    #[serde(default = "default_phase")]
+    pub phase: String,
+    /// Active hours window (optional)
+    #[serde(default)]
+    pub active_hours: Option<ActiveHours>,
+    /// Maximum interval (auto-backoff ceiling)
+    #[serde(default = "default_max_interval")]
+    pub max_interval_seconds: u64,
+    /// Minimum interval (floor)
+    #[serde(default = "default_min_interval")]
+    pub min_interval_seconds: u64,
+    /// Cost budget: "low", "medium", "high"
+    #[serde(default = "default_cost_budget")]
+    pub cost_budget: String,
+    /// Consecutive no-ops (for auto-backoff)
+    #[serde(default)]
+    pub consecutive_no_ops: u32,
+    /// Enable auto-backoff on idle
+    #[serde(default = "default_true")]
+    pub auto_backoff: bool,
+    /// ISO timestamp of last wake
+    #[serde(default)]
+    pub last_wake: Option<String>,
+    /// ISO timestamp of next scheduled wake
+    #[serde(default)]
+    pub next_wake: Option<String>,
+    /// Who last updated: "agent" or "user"
+    #[serde(default = "default_updated_by")]
+    pub updated_by: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveHours {
+    pub start: String,
+    pub end: String,
+    pub timezone: String,
+}
+
+fn default_heartbeat_mode() -> String { "heartbeat".to_string() }
+fn default_interval() -> u64 { 300 }
+fn default_phase() -> String { "monitoring".to_string() }
+fn default_max_interval() -> u64 { 3600 }
+fn default_min_interval() -> u64 { 60 }
+fn default_cost_budget() -> String { "low".to_string() }
+fn default_true() -> bool { true }
+fn default_updated_by() -> String { "user".to_string() }
+
+impl Default for AgentHeartbeatConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_heartbeat_mode(),
+            interval_seconds: default_interval(),
+            phase: default_phase(),
+            active_hours: None,
+            max_interval_seconds: default_max_interval(),
+            min_interval_seconds: default_min_interval(),
+            cost_budget: default_cost_budget(),
+            consecutive_no_ops: 0,
+            auto_backoff: true,
+            last_wake: None,
+            next_wake: None,
+            updated_by: default_updated_by(),
+        }
+    }
+}
+
+/// Read an agent's heartbeat configuration from .k2so/agents/<name>/heartbeat.json
+fn read_heartbeat_config(project_path: &str, agent_name: &str) -> AgentHeartbeatConfig {
+    let path = agent_dir(project_path, agent_name).join("heartbeat.json");
+    if path.exists() {
+        fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    } else {
+        AgentHeartbeatConfig::default()
+    }
+}
+
+/// Write an agent's heartbeat configuration to .k2so/agents/<name>/heartbeat.json
+fn write_heartbeat_config(project_path: &str, agent_name: &str, config: &AgentHeartbeatConfig) -> Result<(), String> {
+    let dir = agent_dir(project_path, agent_name);
+    if !dir.exists() {
+        return Err(format!("Agent '{}' does not exist", agent_name));
+    }
+    let path = dir.join("heartbeat.json");
+    let json = serde_json::to_string_pretty(config)
+        .map_err(|e| format!("Failed to serialize heartbeat config: {}", e))?;
+    fs::write(&path, json)
+        .map_err(|e| format!("Failed to write heartbeat.json: {}", e))?;
+    Ok(())
 }
 
 // ── Tauri Commands ──────────────────────────────────────────────────────
@@ -205,11 +313,15 @@ pub fn k2so_agents_create(
     if is_pod_leader {
         frontmatter.push_str("\npod_leader: true");
     }
-    let content = format!(
-        "---\n{}\n---\n\n{}\n",
-        frontmatter,
-        prompt.unwrap_or_default()
-    );
+
+    // Build type-appropriate default body if no custom prompt provided
+    let body = if let Some(ref p) = prompt {
+        if !p.is_empty() { p.clone() } else { generate_default_agent_body(&agent_type, &name, &role, &project_path) }
+    } else {
+        generate_default_agent_body(&agent_type, &name, &role, &project_path)
+    };
+
+    let content = format!("---\n{}\n---\n\n{}\n", frontmatter, body);
     fs::write(&agent_md, content).map_err(|e| format!("Failed to write agent.md: {}", e))?;
 
     Ok(K2soAgentInfo {
@@ -232,6 +344,98 @@ pub fn k2so_agents_delete(project_path: String, name: String) -> Result<(), Stri
     }
     fs::remove_dir_all(&dir).map_err(|e| format!("Failed to delete agent: {}", e))?;
     Ok(())
+}
+
+/// Update a specific field in an agent's frontmatter (or a markdown section in the body).
+/// `field` can be a frontmatter key (e.g. "role") or a section name (e.g. "Work Sources").
+/// For frontmatter fields, `value` replaces the existing value.
+/// For body sections (## heading), `value` replaces everything from ## heading to the next ## heading.
+#[tauri::command]
+pub fn k2so_agents_update_field(
+    project_path: String,
+    name: String,
+    field: String,
+    value: String,
+) -> Result<String, String> {
+    let dir = agent_dir(&project_path, &name);
+    if !dir.exists() {
+        return Err(format!("Agent '{}' does not exist", name));
+    }
+
+    let md_path = dir.join("agent.md");
+    let content = fs::read_to_string(&md_path)
+        .map_err(|e| format!("Failed to read agent.md: {}", e))?;
+
+    let updated = if content.starts_with("---") {
+        if let Some(end_idx) = content[3..].find("---") {
+            let frontmatter = &content[3..3 + end_idx];
+            let body = &content[3 + end_idx + 3..];
+
+            // Check if it's a frontmatter field
+            let fm_keys: Vec<&str> = frontmatter.lines()
+                .filter_map(|l| l.split_once(':').map(|(k, _)| k.trim()))
+                .collect();
+
+            if fm_keys.contains(&field.as_str()) {
+                // Update frontmatter field
+                let updated_fm: String = frontmatter
+                    .lines()
+                    .map(|line| {
+                        if let Some((key, _)) = line.split_once(':') {
+                            if key.trim() == field {
+                                return format!("{}: {}", field, value);
+                            }
+                        }
+                        line.to_string()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("---\n{}\n---{}", updated_fm.trim(), body)
+            } else {
+                // Try to find and replace a markdown section (## heading)
+                let section_header = format!("## {}", field);
+                if let Some(start) = body.find(&section_header) {
+                    let after_header = start + section_header.len();
+                    // Find the next ## heading or end of body
+                    let end = body[after_header..].find("\n## ")
+                        .map(|pos| after_header + pos)
+                        .unwrap_or(body.len());
+                    let mut new_body = String::new();
+                    new_body.push_str(&body[..start]);
+                    new_body.push_str(&section_header);
+                    new_body.push_str("\n\n");
+                    new_body.push_str(&value);
+                    new_body.push_str("\n\n");
+                    new_body.push_str(body[end..].trim_start());
+                    format!("---\n{}\n---{}", frontmatter.trim(), new_body)
+                } else {
+                    // Section doesn't exist — append it
+                    let mut new_body = body.to_string();
+                    if !new_body.ends_with('\n') {
+                        new_body.push('\n');
+                    }
+                    new_body.push_str(&format!("\n## {}\n\n{}\n", field, value));
+                    format!("---\n{}\n---{}", frontmatter.trim(), new_body)
+                }
+            }
+        } else {
+            return Err("Invalid frontmatter in agent.md".to_string());
+        }
+    } else {
+        return Err("agent.md missing frontmatter".to_string());
+    };
+
+    // Backup before writing
+    let backup_dir = dir.join("agent-backups");
+    let _ = fs::create_dir_all(&backup_dir);
+    let backup_name = format!("agent-{}.md", simple_date().replace(' ', "_").replace(':', "-"));
+    let _ = fs::copy(&md_path, backup_dir.join(&backup_name));
+    cleanup_agent_backups(&backup_dir, 20);
+
+    fs::write(&md_path, &updated)
+        .map_err(|e| format!("Failed to write agent.md: {}", e))?;
+
+    Ok(updated)
 }
 
 /// Get work items for a K2SO agent.
@@ -274,6 +478,7 @@ pub fn k2so_agents_work_create(
     body: String,
     priority: Option<String>,
     item_type: Option<String>,
+    source: Option<String>,
 ) -> Result<WorkItem, String> {
     let target_dir = match &agent_name {
         Some(name) => {
@@ -292,6 +497,7 @@ pub fn k2so_agents_work_create(
 
     let priority = priority.unwrap_or_else(|| "normal".to_string());
     let item_type = item_type.unwrap_or_else(|| "task".to_string());
+    let source = source.unwrap_or_else(|| "manual".to_string());
 
     let slug: String = title
         .to_lowercase()
@@ -307,14 +513,35 @@ pub fn k2so_agents_work_create(
 
     let now = simple_date();
     let content = format!(
-        "---\ntitle: {}\npriority: {}\nassigned_by: user\ncreated: {}\ntype: {}\n---\n\n{}\n",
-        title, priority, now, item_type, body
+        "---\ntitle: {}\npriority: {}\nassigned_by: user\ncreated: {}\ntype: {}\nsource: {}\n---\n\n{}\n",
+        title, priority, now, item_type, source, body
     );
 
     let path = target_dir.join(&filename);
     fs::write(&path, &content).map_err(|e| format!("Failed to write work item: {}", e))?;
 
     let body_preview = if body.len() > 120 { format!("{}...", &body[..120].trim()) } else { body.trim().to_string() };
+
+    // Push channel event for persistent agents
+    if let Some(ref agent) = agent_name {
+        crate::agent_hooks::push_agent_event(
+            &project_path,
+            agent,
+            "work-item",
+            &format!("New work item in your inbox: \"{}\" (priority: {})", title, priority),
+            &priority,
+        );
+    } else {
+        // Workspace inbox — notify the lead agent
+        crate::agent_hooks::push_agent_event(
+            &project_path,
+            "__lead__",
+            "work-item",
+            &format!("New item in workspace inbox: \"{}\" (priority: {})", title, priority),
+            &priority,
+        );
+    }
+
     Ok(WorkItem {
         filename,
         title,
@@ -324,6 +551,7 @@ pub fn k2so_agents_work_create(
         item_type,
         folder: if agent_name.is_some() { "inbox".to_string() } else { "workspace-inbox".to_string() },
         body_preview,
+        source,
     })
 }
 
@@ -490,6 +718,7 @@ pub fn k2so_agents_workspace_inbox_create(
     priority: Option<String>,
     item_type: Option<String>,
     assigned_by: Option<String>,
+    source: Option<String>,
 ) -> Result<WorkItem, String> {
     let dir = workspace_inbox_dir(&workspace_path);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -497,6 +726,7 @@ pub fn k2so_agents_workspace_inbox_create(
     let priority = priority.unwrap_or_else(|| "normal".to_string());
     let item_type = item_type.unwrap_or_else(|| "task".to_string());
     let assigned_by = assigned_by.unwrap_or_else(|| "external".to_string());
+    let source = source.unwrap_or_else(|| "manual".to_string());
 
     let slug: String = title
         .to_lowercase()
@@ -512,8 +742,8 @@ pub fn k2so_agents_workspace_inbox_create(
 
     let now = simple_date();
     let content = format!(
-        "---\ntitle: {}\npriority: {}\nassigned_by: {}\ncreated: {}\ntype: {}\n---\n\n{}\n",
-        title, priority, assigned_by, now, item_type, body
+        "---\ntitle: {}\npriority: {}\nassigned_by: {}\ncreated: {}\ntype: {}\nsource: {}\n---\n\n{}\n",
+        title, priority, assigned_by, now, item_type, source, body
     );
 
     let path = dir.join(&filename);
@@ -529,6 +759,7 @@ pub fn k2so_agents_workspace_inbox_create(
         item_type,
         folder: "workspace-inbox".to_string(),
         body_preview,
+        source,
     })
 }
 
@@ -664,19 +895,34 @@ pub fn k2so_agents_build_launch(
     let claude_md_path = agent_dir(&project_path, &agent_name).join("CLAUDE.md");
     fs::write(&claude_md_path, &claude_md).ok();
 
+    // Check for previous session to resume (avoids cold-start context reload)
+    let session_file = agent_dir(&project_path, &agent_name).join(".last_session");
+    let resume_session = fs::read_to_string(&session_file).ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     let prompt = format!(
         "You are the K2SO agent \"{}\". Your inbox is empty. Report your status and wait for work to be assigned.",
         agent_name
     );
 
+    let mut args = vec!["--append-system-prompt".to_string(), claude_md];
+    if let Some(ref session_id) = resume_session {
+        args.push("--resume".to_string());
+        args.push(session_id.clone());
+    }
+    args.push("-p".to_string());
+    args.push(prompt);
+
     Ok(serde_json::json!({
         "command": command,
-        "args": ["--append-system-prompt", claude_md, "-p", prompt],
+        "args": args,
         "cwd": project_path,
         "claudeMdPath": claude_md_path.to_string_lossy(),
         "agentName": agent_name,
         "worktreePath": null,
         "branch": null,
+        "resumeSession": resume_session,
     }))
 }
 
@@ -710,6 +956,165 @@ fn strip_worktree_from_frontmatter(content: &str) -> String {
         }
     }
     content.to_string()
+}
+
+/// Generate a default agent.md body based on agent type.
+/// This gives each agent a rich starting template that users (or AI) can refine via AIFileEditor.
+fn generate_default_agent_body(agent_type: &str, name: &str, role: &str, project_path: &str) -> String {
+    let project_name = std::path::Path::new(project_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".to_string());
+
+    match agent_type {
+        "pod-leader" => {
+            // List existing pod members for the "Your Team" section
+            let mut team_lines = String::new();
+            let agents_root = agents_dir(project_path);
+            if agents_root.exists() {
+                if let Ok(entries) = fs::read_dir(&agents_root) {
+                    for entry in entries.flatten() {
+                        if entry.file_type().map_or(false, |ft| ft.is_dir()) {
+                            let member_name = entry.file_name().to_string_lossy().to_string();
+                            if member_name == name { continue; }
+                            let md_path = entry.path().join("agent.md");
+                            let member_role = if md_path.exists() {
+                                let content = fs::read_to_string(&md_path).unwrap_or_default();
+                                let fm = parse_frontmatter(&content);
+                                fm.get("role").cloned().unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
+                            team_lines.push_str(&format!(
+                                "- **{}**: `.k2so/agents/{}/agent.md` — {}\n",
+                                member_name, member_name, member_role
+                            ));
+                        }
+                    }
+                }
+            }
+            let team_section = if team_lines.is_empty() {
+                "No pod members yet. Create agents based on the skills this project needs.".to_string()
+            } else {
+                format!("Read their agent.md profiles when delegating to match tasks to the right specialist.\n\n{}", team_lines)
+            };
+
+            format!(
+r#"You are the Pod Leader for the {project_name} workspace.
+
+## Work Sources
+
+Primary (always checked by local LLM triage — near-zero cost):
+- Workspace inbox: `.k2so/work/inbox/` (unassigned work items)
+- Your inbox: `.k2so/agents/{name}/work/inbox/` (delegated to you)
+
+External (scan these proactively when woken — customize for your project):
+- GitHub Issues: `gh issue list --repo OWNER/REPO --label bug,feature --state open`
+- Open PRs needing review: `gh pr list --repo OWNER/REPO --review-requested`
+- Local PRDs: `.k2so/prds/*.md`
+
+## Your Team
+
+{team_section}
+
+## Tools Available
+
+- `k2so agent create --name "new-agent" --role "Specialization description"` — create a new pod member
+- `k2so agent update --name "agent-name" --field role --value "Updated role"` — update a member's profile
+- `k2so delegate <agent> <work-file>` — assign work (creates worktree + launches agent)
+- `k2so work create --agent <name> --title "..." --body "..."` — create a task for an agent
+- `k2so reviews` — see completed work ready for review
+- `k2so review approve <agent> <branch>` — merge completed work
+- `k2so terminal spawn --title "..." --command "..."` — run parallel tasks
+
+## Operational Notes
+
+- An agent is a role template, not a person — the same agent can run in multiple worktrees simultaneously
+- You orchestrate and review — you do NOT implement code yourself
+- When you need a new skill, create a new agent with `k2so agent create`
+- Read pod members' agent.md files to understand their strengths before delegating
+"#,
+                project_name = project_name,
+                name = name,
+                team_section = team_section,
+            )
+        }
+        "pod-member" => {
+            format!(
+r#"## Specialization
+
+{role}
+
+## Capabilities
+
+- Implement changes in isolated git worktrees (one branch per task)
+- Commit frequently with clear messages referencing the task
+- Follow existing code patterns and conventions in the project
+- Run tests before marking work as done
+
+## How You Work
+
+1. You are launched into a dedicated worktree with your task in the CLAUDE.md
+2. Read the task file for full requirements and acceptance criteria
+3. Implement the changes — all work happens in your worktree
+4. Commit to your branch as you go
+5. When done: `k2so work move --agent {name} --file <task>.md --from active --to done`
+6. Your work appears in the review queue for the Pod Leader to approve or reject
+
+## If Blocked
+
+- If you need clarification, move the task back to inbox with a note
+- If you need another agent's work first, document the dependency in the task file
+- Never edit files outside your worktree
+"#,
+                role = role,
+                name = name,
+            )
+        }
+        "custom" => {
+            format!(
+r#"## Role
+
+{role}
+
+## Heartbeat Control
+
+You run on an adaptive heartbeat. Adjust your check-in frequency based on what you're doing:
+
+- `k2so heartbeat set --interval 60 --phase "active"` — check every minute (busy periods)
+- `k2so heartbeat set --interval 300 --phase "monitoring"` — every 5 minutes (watching)
+- `k2so heartbeat set --interval 3600 --phase "idle"` — every hour (dormant)
+
+## Tools Available
+
+- `k2so terminal spawn --title "..." --command "..."` — run parallel tasks
+- `k2so heartbeat set --interval N --phase "..."` — adjust your check-in frequency
+- Standard CLI tools available in your terminal: `gh`, `git`, `curl`, etc.
+
+## Operational Notes
+
+- Your agent.md is your complete identity — everything about who you are and what you do lives here
+- Customize the sections above to match your specific use case
+- Use the AIFileEditor in K2SO Settings to refine your profile with AI assistance
+"#,
+                role = role,
+            )
+        }
+        _ => {
+            // Default (k2so or unknown type)
+            String::new()
+        }
+    }
+}
+
+/// Format a capability state for display in CLAUDE.md.
+fn format_cap(cap: &str) -> &str {
+    match cap {
+        "auto" => "auto (build + merge)",
+        "gated" => "gated (build PR, wait for approval)",
+        "off" => "off (do not act)",
+        _ => cap,
+    }
 }
 
 /// Log a warning for an agent (appends to .k2so/agents/<name>/agent.log).
@@ -756,11 +1161,16 @@ fn generate_agent_claude_md_content(
     let mut md = String::new();
 
     if is_custom {
-        // ── Custom Agent: agent.md body only (no K2SO infrastructure) ──
+        // ── Custom Agent: agent.md body + heartbeat control + tools ──
         md.push_str(&format!("# {}\n\n", agent_name));
         md.push_str(&format!("**Role:** {}\n\n", role));
         if !agent_body.is_empty() {
             md.push_str(&format!("{}\n\n", agent_body));
+        }
+
+        // Add heartbeat control docs if not already in agent body
+        if !agent_body.contains("Heartbeat Control") {
+            md.push_str(CUSTOM_AGENT_HEARTBEAT_DOCS);
         }
 
         return Ok(md);
@@ -816,14 +1226,43 @@ fn generate_agent_claude_md_content(
     md.push_str("- `active/` — items you're currently working on\n");
     md.push_str("- `done/` — move items here when complete\n\n");
 
-    // Other agents
+    // Other agents — for pod leaders, include profile paths so they can read agent.md files
+    let is_pod_leader_type = agent_type == "pod-leader" || agent_type == "k2so";
     if !other_agents.is_empty() {
-        md.push_str("## Other Agents\n");
-        md.push_str("You can delegate work to these agents:\n\n");
-        for (name, their_role) in &other_agents {
-            md.push_str(&format!("- **{}** — {}\n", name, their_role));
+        if is_pod_leader_type {
+            md.push_str("## Your Team\n\n");
+            md.push_str("These are your pod members. Read their `agent.md` profiles to understand their strengths before delegating:\n\n");
+            for (name, their_role) in &other_agents {
+                md.push_str(&format!(
+                    "- **{}** — {} (profile: `.k2so/agents/{}/agent.md`)\n",
+                    name, their_role, name
+                ));
+            }
+            md.push_str("\nYou can create new agents (`k2so agents create <name> --role \"...\"`) or update existing ones (`k2so agent update --name <name> --field role --value \"...\"`).\n\n");
+        } else {
+            md.push_str("## Other Agents\n");
+            md.push_str("You can delegate work to these agents:\n\n");
+            for (name, their_role) in &other_agents {
+                md.push_str(&format!("- **{}** — {}\n", name, their_role));
+            }
+            md.push_str("\n");
         }
-        md.push_str("\n");
+    }
+
+    // Add workspace state constraints
+    if let Some(ws_state) = get_workspace_state(project_path) {
+        md.push_str("## Workspace State Constraints\n\n");
+        md.push_str(&format!("This workspace operates under the **{}** state.\n\n", ws_state.name));
+        if let Some(ref desc) = ws_state.description {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+        md.push_str("| Source Type | Permission |\n|---|---|\n");
+        md.push_str(&format!("| Features | {} |\n", format_cap(&ws_state.cap_features)));
+        md.push_str(&format!("| Issues | {} |\n", format_cap(&ws_state.cap_issues)));
+        md.push_str(&format!("| Crashes | {} |\n", format_cap(&ws_state.cap_crashes)));
+        md.push_str(&format!("| Security | {} |\n", format_cap(&ws_state.cap_security)));
+        md.push_str(&format!("| Audits | {} |\n", format_cap(&ws_state.cap_audits)));
+        md.push_str("\n**auto** = build and merge automatically. **gated** = build PR but wait for human approval. **off** = do not act.\n\n");
     }
 
     md.push_str(CLI_TOOLS_DOCS);
@@ -867,9 +1306,11 @@ pub fn k2so_agents_generate_workspace_claude_md(
         let _ = fs::create_dir_all(pod_leader_dir.join("work").join("inbox"));
         let _ = fs::create_dir_all(pod_leader_dir.join("work").join("active"));
         let _ = fs::create_dir_all(pod_leader_dir.join("work").join("done"));
+        let pod_leader_role = "Pod orchestrator — delegates work to agents, reviews completed branches, drives milestones";
+        let pod_leader_body = generate_default_agent_body("pod-leader", "pod-leader", pod_leader_role, &project_path);
         let pod_leader_md = format!(
-            "---\nname: pod-leader\nrole: Pod orchestrator — delegates work to agents, reviews completed branches, drives milestones\ntype: pod-leader\npod_leader: true\n---\n\nYou are the pod leader for the {} workspace.\n",
-            project_name
+            "---\nname: pod-leader\nrole: {}\ntype: pod-leader\npod_leader: true\n---\n\n{}\n",
+            pod_leader_role, pod_leader_body
         );
         let _ = fs::write(pod_leader_dir.join("agent.md"), &pod_leader_md);
     }
@@ -1030,7 +1471,7 @@ Store plans as markdown files:
             agent_section = if agent_list.is_empty() {
                 "*No agents yet. Create agents based on the skills this project needs.*".to_string()
             } else {
-                agent_list
+                format!("{}\n\nRead each agent's profile at `.k2so/agents/<name>/agent.md` to understand their strengths before delegating. You can also update their profiles with `k2so agent update --name <name> --field role --value \"...\"`.", agent_list)
             },
             cli_section = CLI_TOOLS_DOCS,
             workflow_section = WORKFLOW_DOCS,
@@ -1233,9 +1674,10 @@ k2so settings                           # Show all workspace settings
 
 ### Agent Management
 ```
-k2so agents create <name> --role "..."  # Create a new agent
-k2so agents list                        # List all agents with work counts
-k2so agents profile <name>              # Read agent's identity
+k2so agent create <name> --role "..."   # Create a new agent
+k2so agent update --name <n> --field <f> --value "..."  # Update agent profile
+k2so agent list                         # List all agents with work counts
+k2so agent profile <name>              # Read agent's identity (agent.md)
 k2so agents work <name>                 # Show agent's work items
 k2so agents launch <name>              # Launch agent's Claude session
 ```
@@ -1285,6 +1727,36 @@ You are launched into a dedicated worktree with your task already set up.
 - K2SO creates worktrees, branches, and CLAUDE.md files for you automatically
 - Commit often with clear messages referencing your task
 - If blocked, move your task back to inbox and document the blocker
+"#;
+
+const CUSTOM_AGENT_HEARTBEAT_DOCS: &str = r#"## Heartbeat Control
+
+You run on an adaptive heartbeat. Adjust your check-in frequency based on your current work phase:
+
+```
+k2so heartbeat set --agent <your-name> --interval 60 --phase "active"       # Every minute — actively building
+k2so heartbeat set --agent <your-name> --interval 300 --phase "monitoring"   # Every 5 min — watching
+k2so heartbeat set --agent <your-name> --interval 3600 --phase "idle"        # Every hour — dormant
+```
+
+**Important — report your status after each wake:**
+- If you checked your inbox and had nothing to do: `k2so heartbeat noop --agent <your-name>`
+  (This triggers auto-backoff and saves money by not waking you unnecessarily)
+- If you took action (delegated, built, reviewed): `k2so heartbeat action --agent <your-name>`
+  (This resets the backoff counter so you stay responsive)
+
+The system auto-backs off after 3 consecutive no-ops, increasing your interval by 1.5x each time.
+
+## Available Tools
+
+Standard CLI tools are available in your terminal (`gh`, `git`, `curl`, etc.).
+K2SO tools:
+```
+k2so terminal spawn --title "..." --command "..."   # Run parallel tasks
+k2so heartbeat set --agent <name> --interval N      # Adjust check-in frequency
+k2so heartbeat noop --agent <name>                  # Report no work found (saves cost)
+k2so heartbeat action --agent <name>                # Report action taken (stay responsive)
+```
 "#;
 
 // ── Review Queue ────────────────────────────────────────────────────────
@@ -1521,11 +1993,25 @@ pub fn k2so_agents_review_request_changes(
     Ok(())
 }
 
-// ── Heartbeat Triage ────────────────────────────────────────────────────
+// ── Heartbeat Triage (Workspace State) ──────────────────────────────────
+
+/// Read the workspace state for a project, returning the state or None if unset.
+fn get_workspace_state(project_path: &str) -> Option<crate::db::schema::WorkspaceState> {
+    let db_path = dirs::home_dir()?.join(".k2so").join("k2so.db");
+    let conn = rusqlite::Connection::open(&db_path).ok()?;
+    let state_id: Option<String> = conn.query_row(
+        "SELECT tier_id FROM projects WHERE path = ?1",
+        rusqlite::params![project_path],
+        |row| row.get(0),
+    ).ok()?;
+    let sid = state_id?;
+    crate::db::schema::WorkspaceState::get(&conn, &sid).ok()
+}
 
 /// Build a triage summary for the local LLM to evaluate.
 /// Returns a plain-text summary of all agents with pending work in a project.
 /// The local LLM reads this and decides which agents (if any) should be launched.
+/// Respects workspace state capabilities — items with "off" capability are excluded.
 #[tauri::command]
 pub fn k2so_agents_triage_summary(project_path: String) -> Result<String, String> {
     let dir = agents_dir(&project_path);
@@ -1533,7 +2019,12 @@ pub fn k2so_agents_triage_summary(project_path: String) -> Result<String, String
         return Ok("No agents configured.".to_string());
     }
 
+    // Load workspace state for capability gating
+    let ws_state = get_workspace_state(&project_path);
+    let state_name = ws_state.as_ref().map(|t| t.name.as_str()).unwrap_or("(no state set)");
+
     let mut summary = String::new();
+    summary.push_str(&format!("Workspace state: {}\n\n", state_name));
     let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
 
     for entry in entries.flatten() {
@@ -1569,21 +2060,81 @@ pub fn k2so_agents_triage_summary(project_path: String) -> Result<String, String
             0
         };
 
+        let is_locked = is_agent_locked(&project_path, &name);
+
         if inbox_items.is_empty() && active_count == 0 {
             continue;
         }
 
-        summary.push_str(&format!("Agent: {}\n", name));
+        // Read agent type and role for LLM context
+        let agent_md_path = entry.path().join("agent.md");
+        let (agent_type, agent_role) = if agent_md_path.exists() {
+            let content = fs::read_to_string(&agent_md_path).unwrap_or_default();
+            let fm = parse_frontmatter(&content);
+            (
+                fm.get("type").cloned().unwrap_or("pod-member".to_string()),
+                fm.get("role").cloned().unwrap_or_default(),
+            )
+        } else {
+            ("pod-member".to_string(), String::new())
+        };
+
+        summary.push_str(&format!("Agent: {} (type: {}, role: {})\n", name, agent_type, agent_role));
+        if is_locked {
+            summary.push_str("  Status: LOCKED (active session running)\n");
+        }
         if active_count > 0 {
-            summary.push_str(&format!("  Currently active: {} items in progress\n", active_count));
+            summary.push_str(&format!("  Active: {} items in progress\n", active_count));
         }
         for item in &inbox_items {
+            let cap_status = ws_state.as_ref()
+                .map(|t| t.capability_for_source(&item.source).to_string())
+                .unwrap_or_else(|| "auto".to_string()); // No state = allow all
+            if cap_status == "off" {
+                continue; // State disables this source type — skip entirely
+            }
+            let gate_label = if cap_status == "gated" { " [NEEDS APPROVAL]" } else { "" };
             summary.push_str(&format!(
-                "  Inbox: \"{}\" (priority: {}, type: {})\n",
-                item.title, item.priority, item.item_type
+                "  Inbox: \"{}\" (priority: {}, type: {}, source: {}{})\n",
+                item.title, item.priority, item.item_type, item.source, gate_label
             ));
         }
         summary.push('\n');
+    }
+
+    // Add workspace inbox items
+    let ws_inbox = workspace_inbox_dir(&project_path);
+    if ws_inbox.exists() {
+        let ws_items: Vec<WorkItem> = fs::read_dir(&ws_inbox)
+            .ok()
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.path().extension().map_or(false, |ext| ext == "md"))
+                    .filter_map(|e| read_work_item(&e.path(), "inbox"))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if !ws_items.is_empty() {
+            let lead_locked = is_agent_locked(&project_path, "__lead__");
+            summary.push_str("Workspace Inbox (unassigned — needs Pod Leader):\n");
+            if lead_locked {
+                summary.push_str("  Pod Leader: LOCKED (active session running)\n");
+            }
+            for item in &ws_items {
+                let cap_status = ws_state.as_ref()
+                    .map(|t| t.capability_for_source(&item.source).to_string())
+                    .unwrap_or_else(|| "auto".to_string());
+                if cap_status == "off" { continue; }
+                let gate_label = if cap_status == "gated" { " [NEEDS APPROVAL]" } else { "" };
+                summary.push_str(&format!(
+                    "  \"{}\" (priority: {}, type: {}, source: {}{})\n",
+                    item.title, item.priority, item.item_type, item.source, gate_label
+                ));
+            }
+            summary.push('\n');
+        }
     }
 
     if summary.is_empty() {
@@ -1641,6 +2192,424 @@ pub fn k2so_agents_triage_decide(project_path: String) -> Result<Vec<String>, St
     }
 
     Ok(launchable)
+}
+
+// ── LLM-Powered Triage ──────────────────────────────────────────────────
+
+const TRIAGE_SYSTEM_PROMPT: &str = r#"You are K2SO's agent dispatcher. Your job is to decide which AI agents should be woken up based on their pending work.
+
+Rules:
+1. SKIP agents marked as LOCKED (they already have an active session)
+2. Wake agents with "critical" or "high" priority inbox items first
+3. If an agent already has active items in progress, only wake it for critical new inbox items
+4. Consider dependencies: if one agent's work likely depends on another's output, wake the dependency first
+5. If the workspace inbox has unassigned items and the Pod Leader is not locked, wake __lead__
+6. For "low" priority items, only wake if the agent has no other work in progress
+7. Items marked [NEEDS APPROVAL] can be worked on but must be built as PRs (not auto-merged)
+8. Items with source type "off" in the workspace state are already filtered out — you won't see them
+9. The workspace state controls what kinds of work are allowed. Respect it.
+
+Respond with ONLY a JSON object, no other text:
+{"wake":["agent-name-1","agent-name-2"],"reasoning":"brief explanation"}
+
+If no agents should be woken, respond:
+{"wake":[],"reasoning":"brief explanation"}"#;
+
+/// Run LLM-based triage: feed the triage summary to the local LLM and parse its decision.
+/// Returns the list of agent names to launch.
+/// Falls back to filesystem-based triage if LLM is unavailable or fails.
+pub fn llm_triage_decide(
+    project_path: &str,
+    llm_manager: &crate::llm::LlmManager,
+) -> Result<Vec<String>, String> {
+    // Build the triage summary
+    let summary = k2so_agents_triage_summary(project_path.to_string())?;
+
+    // Quick exit: nothing to triage
+    if summary == "No agents have pending work." {
+        return Ok(vec![]);
+    }
+
+    // Check if LLM is loaded
+    if !llm_manager.is_loaded() {
+        log_agent_warning(project_path, "__lead__", "LLM not loaded — falling back to filesystem triage");
+        return k2so_agents_triage_decide(project_path.to_string());
+    }
+
+    // Call the local LLM via safe subprocess
+    let result = crate::commands::assistant::safe_generate_for_triage(
+        llm_manager,
+        TRIAGE_SYSTEM_PROMPT,
+        &summary,
+    );
+
+    match result {
+        Ok(response) => {
+            // Parse the JSON response
+            match parse_triage_response(&response) {
+                Some(agents) => {
+                    // Log the decision
+                    let k2so_dir = PathBuf::from(project_path).join(".k2so");
+                    let log_path = k2so_dir.join("triage.log");
+                    let entry = format!(
+                        "[{}] LLM triage: wake={:?} | summary_len={}\n",
+                        simple_date(),
+                        agents,
+                        summary.len()
+                    );
+                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&log_path)
+                    {
+                        use std::io::Write;
+                        let _ = file.write_all(entry.as_bytes());
+                    }
+                    Ok(agents)
+                }
+                None => {
+                    log_agent_warning(project_path, "__lead__",
+                        &format!("LLM triage returned unparseable response: {}", &response[..response.len().min(200)]));
+                    // Fallback to filesystem triage
+                    k2so_agents_triage_decide(project_path.to_string())
+                }
+            }
+        }
+        Err(e) => {
+            log_agent_warning(project_path, "__lead__",
+                &format!("LLM triage failed: {} — falling back to filesystem", e));
+            k2so_agents_triage_decide(project_path.to_string())
+        }
+    }
+}
+
+/// Parse the LLM's triage JSON response into a list of agent names.
+fn parse_triage_response(response: &str) -> Option<Vec<String>> {
+    // Try to find JSON in the response (LLM might add extra text)
+    let json_start = response.find('{')?;
+    let json_end = response.rfind('}')? + 1;
+    let json_str = &response[json_start..json_end];
+
+    let parsed: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let wake = parsed.get("wake")?.as_array()?;
+    Some(
+        wake.iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect()
+    )
+}
+
+// ── Adaptive Heartbeat Commands ──────────────────────────────────────────
+
+/// Get an agent's heartbeat configuration.
+#[tauri::command]
+pub fn k2so_agents_get_heartbeat(
+    project_path: String,
+    agent_name: String,
+) -> Result<AgentHeartbeatConfig, String> {
+    let dir = agent_dir(&project_path, &agent_name);
+    if !dir.exists() {
+        return Err(format!("Agent '{}' does not exist", agent_name));
+    }
+    Ok(read_heartbeat_config(&project_path, &agent_name))
+}
+
+/// Update an agent's heartbeat configuration (partial update).
+/// Used by both the CLI (`k2so heartbeat set`) and the frontend settings UI.
+#[tauri::command]
+pub fn k2so_agents_set_heartbeat(
+    project_path: String,
+    agent_name: String,
+    interval: Option<u64>,
+    phase: Option<String>,
+    mode: Option<String>,
+    cost_budget: Option<String>,
+) -> Result<AgentHeartbeatConfig, String> {
+    let dir = agent_dir(&project_path, &agent_name);
+    if !dir.exists() {
+        return Err(format!("Agent '{}' does not exist", agent_name));
+    }
+
+    let mut config = read_heartbeat_config(&project_path, &agent_name);
+
+    if let Some(interval) = interval {
+        // Clamp to min/max
+        config.interval_seconds = interval
+            .max(config.min_interval_seconds)
+            .min(config.max_interval_seconds);
+    }
+    if let Some(phase) = phase {
+        config.phase = phase;
+    }
+    if let Some(mode) = mode {
+        config.mode = mode;
+    }
+    if let Some(budget) = cost_budget {
+        config.cost_budget = budget;
+    }
+    config.updated_by = "agent".to_string();
+
+    // Recalculate next wake
+    let now = chrono::Utc::now();
+    config.next_wake = Some((now + chrono::Duration::seconds(config.interval_seconds as i64)).to_rfc3339());
+
+    write_heartbeat_config(&project_path, &agent_name, &config)?;
+    Ok(config)
+}
+
+/// Scheduler tick: check all agents in a project and return those ready to wake.
+/// Called by the heartbeat script (via /cli/scheduler-tick).
+/// Differentiates between pod agents (inbox-based) and custom agents (timing-based).
+#[tauri::command]
+pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, String> {
+    // Check workspace state — if heartbeat is disabled (Locked state), skip entirely
+    if let Some(ws_state) = get_workspace_state(&project_path) {
+        if ws_state.heartbeat == 0 {
+            return Ok(vec![]); // Locked state — no agent activity
+        }
+    }
+
+    let mut launchable = Vec::new();
+    let now = chrono::Utc::now();
+
+    // Step 1: Check workspace inbox (always — same as before)
+    let ws_inbox = workspace_inbox_dir(&project_path);
+    let has_workspace_inbox = ws_inbox.exists() && fs::read_dir(&ws_inbox)
+        .map(|e| e.flatten().any(|e| e.path().extension().map_or(false, |ext| ext == "md")))
+        .unwrap_or(false);
+
+    if has_workspace_inbox && !is_agent_locked(&project_path, "__lead__") {
+        launchable.push("__lead__".to_string());
+    }
+
+    // Step 2: Check each agent
+    let dir = agents_dir(&project_path);
+    if !dir.exists() {
+        return Ok(launchable);
+    }
+
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+
+            // Skip agents that already have an active session (lock file exists)
+            if is_agent_locked(&project_path, &name) {
+                continue;
+            }
+
+            // Read agent type
+            let agent_md = entry.path().join("agent.md");
+            let agent_type = if agent_md.exists() {
+                let content = fs::read_to_string(&agent_md).unwrap_or_default();
+                let fm = parse_frontmatter(&content);
+                fm.get("type").cloned().unwrap_or("pod-member".to_string())
+            } else {
+                "pod-member".to_string()
+            };
+
+            if agent_type == "custom" {
+                // Custom agents: check heartbeat timing
+                let config = read_heartbeat_config(&project_path, &name);
+
+                // Skip persistent mode agents (they're always running)
+                if config.mode == "persistent" {
+                    continue;
+                }
+
+                // Check active hours
+                if let Some(ref hours) = config.active_hours {
+                    if !is_within_active_hours(hours, &now) {
+                        continue;
+                    }
+                }
+
+                // Check if it's time to wake
+                let should_wake = match &config.next_wake {
+                    Some(next) => {
+                        chrono::DateTime::parse_from_rfc3339(next)
+                            .map(|t| now >= t)
+                            .unwrap_or(true) // If parse fails, wake anyway
+                    }
+                    None => true, // No next_wake set — wake now
+                };
+
+                if should_wake {
+                    // Update last_wake and schedule next
+                    let mut updated = config.clone();
+                    updated.last_wake = Some(now.to_rfc3339());
+                    updated.next_wake = Some(
+                        (now + chrono::Duration::seconds(updated.interval_seconds as i64)).to_rfc3339()
+                    );
+                    let _ = write_heartbeat_config(&project_path, &name, &updated);
+                    launchable.push(name);
+                }
+            } else {
+                // Pod agents (pod-leader, pod-member, k2so): inbox-based triage
+                let inbox = agent_work_dir(&project_path, &name, "inbox");
+                let has_inbox = inbox.exists() && fs::read_dir(&inbox)
+                    .map(|e| e.flatten().any(|e| e.path().extension().map_or(false, |ext| ext == "md")))
+                    .unwrap_or(false);
+
+                if has_inbox {
+                    // Quality gate: skip agents with only low-priority inbox items
+                    // that already have active work in progress
+                    let active_count = count_md_files(&agent_work_dir(&project_path, &name, "active"));
+                    let highest_prio = get_highest_inbox_priority(&project_path, &name);
+                    if active_count > 0 && highest_prio > priority_rank("high") {
+                        // Agent has active work and inbox is only normal/low — defer to next cycle
+                        continue;
+                    }
+                    launchable.push(name);
+                }
+            }
+        }
+    }
+
+    // Sort by highest-priority inbox item (critical > high > normal > low)
+    // The __lead__ agent always goes first if present
+    launchable.sort_by(|a, b| {
+        if a == "__lead__" { return std::cmp::Ordering::Less; }
+        if b == "__lead__" { return std::cmp::Ordering::Greater; }
+        let prio_a = get_highest_inbox_priority(&project_path, a);
+        let prio_b = get_highest_inbox_priority(&project_path, b);
+        prio_a.cmp(&prio_b) // Lower rank = higher priority
+    });
+
+    Ok(launchable)
+}
+
+/// Get the highest priority rank of inbox items for an agent (0=critical, 3=low).
+fn get_highest_inbox_priority(project_path: &str, agent_name: &str) -> u8 {
+    let inbox = agent_work_dir(project_path, agent_name, "inbox");
+    if !inbox.exists() { return 3; }
+    fs::read_dir(&inbox)
+        .ok()
+        .map(|entries| {
+            entries.flatten()
+                .filter(|e| e.path().extension().map_or(false, |ext| ext == "md"))
+                .filter_map(|e| {
+                    let content = fs::read_to_string(e.path()).ok()?;
+                    let fm = parse_frontmatter(&content);
+                    Some(priority_rank(fm.get("priority").map(|s| s.as_str()).unwrap_or("normal")))
+                })
+                .min()
+                .unwrap_or(3)
+        })
+        .unwrap_or(3)
+}
+
+/// Save the last Claude session ID for an agent (enables --resume on next launch).
+#[tauri::command]
+pub fn k2so_agents_save_session_id(
+    project_path: String,
+    agent_name: String,
+    session_id: String,
+) -> Result<(), String> {
+    let dir = agent_dir(&project_path, &agent_name);
+    if !dir.exists() {
+        return Err(format!("Agent '{}' does not exist", agent_name));
+    }
+    let session_file = dir.join(".last_session");
+    fs::write(&session_file, &session_id)
+        .map_err(|e| format!("Failed to save session ID: {}", e))
+}
+
+/// Clear the saved session ID for an agent (called on no-op or when session should be fresh).
+#[tauri::command]
+pub fn k2so_agents_clear_session_id(
+    project_path: String,
+    agent_name: String,
+) -> Result<(), String> {
+    let session_file = agent_dir(&project_path, &agent_name).join(".last_session");
+    if session_file.exists() {
+        let _ = fs::remove_file(&session_file);
+    }
+    Ok(())
+}
+
+/// Record a no-op (agent woke up but had nothing to do) and apply auto-backoff.
+#[tauri::command]
+pub fn k2so_agents_heartbeat_noop(
+    project_path: String,
+    agent_name: String,
+) -> Result<AgentHeartbeatConfig, String> {
+    let mut config = read_heartbeat_config(&project_path, &agent_name);
+    config.consecutive_no_ops += 1;
+
+    // Auto-backoff: after 3 consecutive no-ops, increase interval by 1.5x
+    if config.auto_backoff && config.consecutive_no_ops >= 3 {
+        let new_interval = ((config.interval_seconds as f64) * 1.5) as u64;
+        config.interval_seconds = new_interval.min(config.max_interval_seconds);
+        log_agent_warning(
+            &project_path,
+            &agent_name,
+            &format!(
+                "Auto-backoff: {} consecutive no-ops, interval now {}s",
+                config.consecutive_no_ops, config.interval_seconds
+            ),
+        );
+    }
+
+    // Prune wasteful session: clear the saved session ID so next launch is fresh
+    // (no point resuming a session that was just "I have nothing to do")
+    let session_file = agent_dir(&project_path, &agent_name).join(".last_session");
+    if session_file.exists() {
+        let _ = fs::remove_file(&session_file);
+    }
+
+    write_heartbeat_config(&project_path, &agent_name, &config)?;
+    Ok(config)
+}
+
+/// Record that an agent took action — reset consecutive_no_ops counter.
+#[tauri::command]
+pub fn k2so_agents_heartbeat_action(
+    project_path: String,
+    agent_name: String,
+) -> Result<AgentHeartbeatConfig, String> {
+    let mut config = read_heartbeat_config(&project_path, &agent_name);
+    config.consecutive_no_ops = 0;
+    write_heartbeat_config(&project_path, &agent_name, &config)?;
+    Ok(config)
+}
+
+/// Check if the current time is within the active hours window.
+fn is_within_active_hours(hours: &ActiveHours, now: &chrono::DateTime<chrono::Utc>) -> bool {
+    // Parse HH:MM format
+    let parse_hhmm = |s: &str| -> Option<(u32, u32)> {
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() == 2 {
+            Some((parts[0].parse().ok()?, parts[1].parse().ok()?))
+        } else {
+            None
+        }
+    };
+
+    let (start_h, start_m) = match parse_hhmm(&hours.start) {
+        Some(v) => v,
+        None => return true, // Invalid format — don't block
+    };
+    let (end_h, end_m) = match parse_hhmm(&hours.end) {
+        Some(v) => v,
+        None => return true,
+    };
+
+    // For simplicity, use UTC comparison (timezone support can be added later)
+    let hour = now.format("%H").to_string().parse::<u32>().unwrap_or(0);
+    let minute = now.format("%M").to_string().parse::<u32>().unwrap_or(0);
+    let now_mins = hour * 60 + minute;
+    let start_mins = start_h * 60 + start_m;
+    let end_mins = end_h * 60 + end_m;
+
+    if start_mins <= end_mins {
+        now_mins >= start_mins && now_mins < end_mins
+    } else {
+        // Wraps midnight
+        now_mins >= start_mins || now_mins < end_mins
+    }
 }
 
 // ── Heartbeat Scheduler ─────────────────────────────────────────────────
@@ -1823,7 +2792,7 @@ fi
 while IFS= read -r project_path; do
     [ -z "$project_path" ] && continue
     ENCODED_PATH=$(urlencode "$project_path")
-    RESULT=$(curl -sG "http://127.0.0.1:$PORT/cli/heartbeat?token=$TOKEN&project=$ENCODED_PATH" --connect-timeout 5 --max-time 30 2>>"$LOG_FILE")
+    RESULT=$(curl -sG "http://127.0.0.1:$PORT/cli/scheduler-tick?token=$TOKEN&project=$ENCODED_PATH" --connect-timeout 5 --max-time 30 2>>"$LOG_FILE")
     if [ $? -ne 0 ]; then
         echo "$(ts) ERROR: curl failed for $project_path" >> "$LOG_FILE"
         continue
