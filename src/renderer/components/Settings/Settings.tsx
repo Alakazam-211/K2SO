@@ -400,13 +400,25 @@ function WorkspaceStatesSection(): React.JSX.Element {
         </button>
       </div>
 
+      {/* Legend */}
+      <div className="flex gap-4 mb-4 text-[11px]">
+        <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-green-400" /><span className="text-[var(--color-text-secondary)]">Auto</span><span className="text-[var(--color-text-muted)]">— build and merge automatically</span></span>
+        <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-amber-400" /><span className="text-[var(--color-text-secondary)]">Gated</span><span className="text-[var(--color-text-muted)]">— build PRs, wait for approval</span></span>
+        <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-[var(--color-text-muted)]" /><span className="text-[var(--color-text-secondary)]">Off</span><span className="text-[var(--color-text-muted)]">— agents don't act</span></span>
+      </div>
+
       {/* State comparison table */}
       <div className="border border-[var(--color-border)] overflow-hidden">
         {/* Header */}
-        <div className="grid grid-cols-7 gap-0 text-[9px] text-[var(--color-text-muted)] bg-[var(--color-bg-surface)]">
-          <div className="px-3 py-2 col-span-2 font-medium">State</div>
+        <div className="grid gap-0 text-[var(--color-text-muted)] bg-[var(--color-bg-surface)]" style={{ gridTemplateColumns: '1fr repeat(5, 90px)' }}>
+          <div className="px-4 py-2.5">
+            <span className="text-[11px] font-medium">State</span>
+          </div>
           {CAPABILITIES.map((cap) => (
-            <div key={cap.key} className="px-2 py-2 text-center font-medium">{cap.label}</div>
+            <div key={cap.key} className="px-2 py-2.5 text-center">
+              <span className="text-[11px] font-medium block">{cap.label}</span>
+              <span className="text-[9px] opacity-60 block mt-0.5">{cap.desc}</span>
+            </div>
           ))}
         </div>
 
@@ -414,32 +426,33 @@ function WorkspaceStatesSection(): React.JSX.Element {
         {states.map((entry) => (
           <div
             key={entry.id}
-            className="grid grid-cols-7 gap-0 border-t border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)]/50 group"
+            className="grid gap-0 border-t border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)]/50 group"
+            style={{ gridTemplateColumns: '1fr repeat(5, 90px)' }}
           >
-            <div className="px-3 py-2.5 col-span-2 flex items-center gap-2">
+            <div className="px-4 py-3 flex items-start gap-2">
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-1.5">
-                  <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${entry.heartbeat ? 'bg-green-400' : 'bg-[var(--color-text-muted)]'}`} />
-                  <span className="text-xs text-[var(--color-text-primary)] truncate">{entry.name}</span>
+                <div className="flex items-center gap-2">
+                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${entry.heartbeat ? 'bg-green-400' : 'bg-[var(--color-text-muted)]'}`} />
+                  <span className="text-[12px] font-medium text-[var(--color-text-primary)]">{entry.name}</span>
                   {entry.isBuiltIn === 1 && (
-                    <span className="text-[8px] text-[var(--color-text-muted)] flex-shrink-0">BUILT-IN</span>
+                    <span className="text-[9px] text-[var(--color-text-muted)] px-1 py-0.5 border border-[var(--color-border)] flex-shrink-0">DEFAULT</span>
                   )}
                 </div>
                 {entry.description && (
-                  <p className="text-[9px] text-[var(--color-text-muted)] mt-0.5 truncate pl-3">{entry.description}</p>
+                  <p className="text-[11px] text-[var(--color-text-muted)] mt-1 pl-4 leading-relaxed">{entry.description}</p>
                 )}
               </div>
-              <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+              <div className="flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5">
                 <button
                   onClick={() => setEditingState(entry)}
-                  className="text-[9px] text-[var(--color-text-muted)] hover:text-[var(--color-accent)] no-drag cursor-pointer"
+                  className="text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-accent)] no-drag cursor-pointer"
                 >
                   Edit
                 </button>
                 {entry.isBuiltIn === 0 && (
                   <button
                     onClick={() => handleDelete(entry.id)}
-                    className="text-[9px] text-red-400/50 hover:text-red-400 no-drag cursor-pointer"
+                    className="text-[10px] text-red-400/50 hover:text-red-400 no-drag cursor-pointer"
                   >
                     Delete
                   </button>
@@ -447,11 +460,11 @@ function WorkspaceStatesSection(): React.JSX.Element {
               </div>
             </div>
             {CAPABILITIES.map((cap) => {
-              const state = entry[cap.key] as string
+              const capState = entry[cap.key] as string
               return (
-                <div key={cap.key} className="px-2 py-2.5 flex items-center justify-center">
-                  <span className={`text-[10px] font-medium ${CAP_COLORS[state] || ''}`}>
-                    {CAP_LABELS[state] || state}
+                <div key={cap.key} className="px-2 py-3 flex items-center justify-center">
+                  <span className={`text-[11px] font-medium ${CAP_COLORS[capState] || ''}`}>
+                    {CAP_LABELS[capState] || capState}
                   </span>
                 </div>
               )
@@ -459,12 +472,6 @@ function WorkspaceStatesSection(): React.JSX.Element {
           </div>
         ))}
       </div>
-
-      <p className="text-[9px] text-[var(--color-text-muted)] mt-3">
-        <strong>Auto</strong> = agents build and merge automatically.{' '}
-        <strong>Gated</strong> = agents build PRs but wait for approval.{' '}
-        <strong>Off</strong> = agents don't act on this type of work.
-      </p>
     </div>
   )
 }
@@ -4268,7 +4275,7 @@ function StateSelector({ projectId, currentStateId }: { projectId: string; curre
   const activeState = states.find((t) => t.id === selectedId)
 
   return (
-    <div className="py-2 border-t border-[var(--color-border)]">
+    <div className="pt-3 pb-1 border-t border-[var(--color-border)]">
       <div className="flex items-center justify-between">
         <div>
           <span className="text-xs text-[var(--color-text-primary)]">State</span>
@@ -4276,16 +4283,14 @@ function StateSelector({ projectId, currentStateId }: { projectId: string; curre
             <p className="text-[9px] text-[var(--color-text-muted)] mt-0.5">{activeState.description}</p>
           )}
         </div>
-        <select
-          value={selectedId}
-          onChange={(e) => handleChange(e.target.value)}
-          className="px-2 py-1 text-[10px] bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none cursor-pointer no-drag"
-        >
-          <option value="">No state</option>
-          {states.map((t) => (
-            <option key={t.id} value={t.id}>{t.name}</option>
-          ))}
-        </select>
+        <SettingDropdown
+          value={selectedId || ''}
+          options={[
+            { value: '', label: 'No state' },
+            ...states.map((t) => ({ value: t.id, label: t.name })),
+          ]}
+          onChange={handleChange}
+        />
       </div>
       {activeState && (
         <div className="flex gap-3 mt-1.5 text-[9px]">
@@ -4865,7 +4870,7 @@ function AgenticSystemsToggle(): React.JSX.Element {
   return (
     <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
       <div className="flex-1 min-w-0 mr-3">
-        <span className="text-xs text-[var(--color-text-secondary)]">Agentic Systems</span>
+        <span className="text-xs text-[var(--color-text-secondary)]">Agentic Systems <span className="text-[9px] text-[var(--color-text-muted)]">(BETA)</span></span>
         <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
           {enabled
             ? 'AI agents, pods, heartbeat, and review queue are active'
