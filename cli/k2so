@@ -4,6 +4,8 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
+K2SO_CLI_VERSION="0.22.7"
+
 set -euo pipefail
 
 # Connection details (set by K2SO when creating terminal sessions)
@@ -871,6 +873,9 @@ case "${1:-help}" in
         ;;
     settings)
         shift; cmd_settings "$@"
+        ;;
+    version|--version|-v)
+        echo "k2so $K2SO_CLI_VERSION"
         ;;
     help|--help|-h)
         cmd_help

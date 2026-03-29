@@ -89,7 +89,6 @@ const SECTIONS: { id: SettingsSection; label: string; agenticOnly?: boolean }[] 
   { id: 'terminal', label: 'Terminal' },
   { id: 'code-editor', label: 'Code Editor' },
   { id: 'editors-agents', label: 'Editors & Agents' },
-  { id: 'ai-assistant', label: 'AI Assistant' },
   { id: 'keybindings', label: 'Keybindings' },
   { id: 'timer', label: 'Timer' },
 ]
@@ -153,7 +152,6 @@ export default function Settings(): React.JSX.Element {
         {activeSection === 'code-editor' && <CodeEditorSettingsSection />}
         {activeSection === 'editors-agents' && <EditorsAgentsSection />}
         {activeSection === 'keybindings' && <KeybindingsSection />}
-        {activeSection === 'ai-assistant' && <AIAssistantSection />}
         {activeSection === 'timer' && (
           <SectionErrorBoundary>
             <TimerSection />
@@ -575,11 +573,17 @@ function GeneralSection(): React.JSX.Element {
           </div>
         )}
 
+        {/* CLI Version — right under App Version so it feels like part of the app */}
+        <CLIVersionRow />
+
         {/* Agentic Systems master switch */}
         <AgenticSystemsToggle />
 
         {/* Claude Auth Auto-Refresh */}
         <ClaudeAuthRefreshRow />
+
+        {/* AI Workspace Assistant (Cmd+L) — core feature, belongs in General */}
+        <LocalLLMSettings />
 
         <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
           <span className="text-xs text-[var(--color-text-secondary)]">Config Location</span>
@@ -1724,12 +1728,98 @@ const CLI_INSTALL_ENTRIES: {
   }
 ]
 
+function CLIVersionRow(): React.JSX.Element {
+  const [status, setStatus] = useState<{
+    installed: boolean
+    installedVersion: string | null
+    bundledVersion: string | null
+    updateAvailable: boolean
+  } | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  const checkStatus = useCallback(async () => {
+    try {
+      const result = await invoke<{
+        installed: boolean
+        installedVersion: string | null
+        bundledVersion: string | null
+        updateAvailable: boolean
+      }>('cli_install_status')
+      setStatus(result)
+    } catch {
+      // silently fail
+    }
+  }, [])
+
+  useEffect(() => { checkStatus() }, [checkStatus])
+
+  const handleAction = useCallback(async () => {
+    setLoading(true)
+    try {
+      if (status?.installed) {
+        await invoke('cli_install') // reinstall/update
+      } else {
+        await invoke('cli_install')
+      }
+      await checkStatus()
+    } catch (err) {
+      console.error('[cli]', err)
+    } finally {
+      setLoading(false)
+    }
+  }, [checkStatus, status])
+
+  return (
+    <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
+      <span className="text-xs text-[var(--color-text-secondary)]">CLI Version</span>
+      <div className="flex items-center gap-3">
+        {status?.installed ? (
+          <>
+            <div className="flex items-center gap-1.5">
+              <span
+                className="w-1.5 h-1.5 flex-shrink-0"
+                style={{ backgroundColor: status.updateAvailable ? '#eab308' : '#4ade80' }}
+              />
+              <span className="text-xs text-[var(--color-text-muted)]">
+                v{status.installedVersion || '?'}
+              </span>
+            </div>
+            {status.updateAvailable ? (
+              <button
+                onClick={handleAction}
+                disabled={loading}
+                className="px-2 py-0.5 text-[10px] bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity no-drag cursor-pointer disabled:opacity-50"
+              >
+                {loading ? 'Updating...' : `Update to v${status.bundledVersion}`}
+              </button>
+            ) : null}
+          </>
+        ) : (
+          <>
+            <span className="text-xs text-[var(--color-text-muted)]">Not installed</span>
+            <button
+              onClick={handleAction}
+              disabled={loading}
+              className="px-2 py-0.5 text-[10px] bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity no-drag cursor-pointer disabled:opacity-50"
+            >
+              {loading ? 'Installing...' : 'Install'}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function K2SOCLIInstall(): React.JSX.Element {
   const [status, setStatus] = useState<{
     installed: boolean
     symlinkPath: string
     target: string | null
     bundledPath: string | null
+    bundledVersion: string | null
+    installedVersion: string | null
+    updateAvailable: boolean
   } | null>(null)
   const [loading, setLoading] = useState(false)
 
@@ -1740,6 +1830,9 @@ function K2SOCLIInstall(): React.JSX.Element {
         symlinkPath: string
         target: string | null
         bundledPath: string | null
+        bundledVersion: string | null
+        installedVersion: string | null
+        updateAvailable: boolean
       }>('cli_install_status')
       setStatus(result)
     } catch {
@@ -1786,16 +1879,28 @@ function K2SOCLIInstall(): React.JSX.Element {
           {status?.installed ? (
             <>
               <div className="flex items-center gap-2">
-                <div className="w-2 h-2 bg-green-500 flex-shrink-0" />
-                <span className="text-xs text-[var(--color-text-secondary)]">Installed</span>
+                <div className={`w-2 h-2 flex-shrink-0 ${status.updateAvailable ? 'bg-yellow-500' : 'bg-green-500'}`} />
+                <span className="text-xs text-[var(--color-text-secondary)]">
+                  {status.installedVersion ? `v${status.installedVersion}` : 'Installed'}
+                </span>
               </div>
-              <button
-                onClick={handleUninstall}
-                disabled={loading}
-                className="px-3 py-1.5 text-[11px] border border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors no-drag cursor-pointer disabled:opacity-50"
-              >
-                {loading ? 'Removing...' : 'Uninstall'}
-              </button>
+              {status.updateAvailable ? (
+                <button
+                  onClick={handleInstall}
+                  disabled={loading}
+                  className="px-3 py-1.5 text-[11px] bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity no-drag cursor-pointer disabled:opacity-50"
+                >
+                  {loading ? 'Updating...' : `Update to v${status.bundledVersion}`}
+                </button>
+              ) : (
+                <button
+                  onClick={handleUninstall}
+                  disabled={loading}
+                  className="px-3 py-1.5 text-[11px] border border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors no-drag cursor-pointer disabled:opacity-50"
+                >
+                  {loading ? 'Removing...' : 'Uninstall'}
+                </button>
+              )}
             </>
           ) : (
             <>
@@ -5098,9 +5203,9 @@ function SettingsGroup({
   )
 }
 
-// ── AI Assistant Section ────────────────────────────────────────────
+// ── Local LLM Settings (shared between General and AI Assistant) ────
 
-function AIAssistantSection(): React.JSX.Element {
+function LocalLLMSettings(): React.JSX.Element {
   const { isDownloading, downloadProgress, modelLoaded } = useAssistantStore()
   const aiAssistantEnabled = useSettingsStore((s) => s.aiAssistantEnabled)
   const setAiAssistantEnabled = useSettingsStore((s) => s.setAiAssistantEnabled)
@@ -5110,7 +5215,6 @@ function AIAssistantSection(): React.JSX.Element {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [loadingModel, setLoadingModel] = useState(false)
 
-  // Check model status on mount
   useEffect(() => {
     invoke<{ loaded: boolean; modelPath: string | null; downloading: boolean }>('assistant_status')
       .then((status) => {
@@ -5138,7 +5242,6 @@ function AIAssistantSection(): React.JSX.Element {
     setLoadingModel(true)
     setLoadError(null)
     try {
-      // Backend copies the file to ~/.k2so/models/ and returns the final path
       const finalPath = await invoke<string>('assistant_load_model', { path: customPath.trim() })
       setModelPath(finalPath)
       setCustomPath(finalPath)
@@ -5151,65 +5254,63 @@ function AIAssistantSection(): React.JSX.Element {
   }, [customPath])
 
   return (
-    <div className="max-w-xl space-y-6">
-      {/* ── Local LLM ── */}
-      <div>
-        <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-3">Local LLM</h2>
-        <p className="text-xs text-[var(--color-text-muted)] mb-4">
-          A local LLM that translates natural language into workspace operations. Press <kbd className="px-1 py-0.5 bg-white/[0.06] text-[var(--color-text-secondary)] font-mono text-[10px]">&#8984;L</kbd> to open.
-          Runs entirely on your machine — no data is sent to external servers.
-        </p>
-        <div className="border border-[var(--color-border)]">
-          {/* Enabled */}
-          <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)]">
-            <div>
-              <span className="text-xs text-[var(--color-text-primary)]">Enabled</span>
-              <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">Disabling saves battery by not loading the model into memory</p>
-            </div>
-            <button
-              onClick={() => setAiAssistantEnabled(!aiAssistantEnabled)}
-              className="no-drag cursor-pointer flex-shrink-0 relative"
+    <div>
+      <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-3">AI Workspace Assistant</h2>
+      <p className="text-xs text-[var(--color-text-muted)] mb-4">
+        A local LLM that translates natural language into workspace operations. Press <kbd className="px-1 py-0.5 bg-white/[0.06] text-[var(--color-text-secondary)] font-mono text-[10px]">&#8984;L</kbd> to open.
+        Runs entirely on your machine — no data is sent to external servers.
+      </p>
+      <div className="border border-[var(--color-border)]">
+        {/* Enabled */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)]">
+          <div>
+            <span className="text-xs text-[var(--color-text-primary)]">Enabled</span>
+            <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">Disabling saves battery by not loading the model into memory</p>
+          </div>
+          <button
+            onClick={() => setAiAssistantEnabled(!aiAssistantEnabled)}
+            className="no-drag cursor-pointer flex-shrink-0 relative"
+            style={{
+              width: 36,
+              height: 20,
+              backgroundColor: aiAssistantEnabled ? 'var(--color-accent)' : '#333',
+              border: 'none',
+              transition: 'background-color 150ms'
+            }}
+          >
+            <span
               style={{
-                width: 36,
-                height: 20,
-                backgroundColor: aiAssistantEnabled ? 'var(--color-accent)' : '#333',
-                border: 'none',
-                transition: 'background-color 150ms'
+                position: 'absolute',
+                top: 2,
+                left: aiAssistantEnabled ? 18 : 2,
+                width: 16,
+                height: 16,
+                backgroundColor: '#fff',
+                transition: 'left 150ms'
               }}
-            >
-              <span
-                style={{
-                  position: 'absolute',
-                  top: 2,
-                  left: aiAssistantEnabled ? 18 : 2,
-                  width: 16,
-                  height: 16,
-                  backgroundColor: '#fff',
-                  transition: 'left 150ms'
-                }}
-              />
-            </button>
+            />
+          </button>
+        </div>
+        {/* Model Status */}
+        <div className="px-4 py-3 border-b border-[var(--color-border)]">
+          <span className="text-xs text-[var(--color-text-primary)]">Model Status</span>
+          <div className="flex items-center gap-2 mt-2">
+            <span
+              className="w-2 h-2 flex-shrink-0"
+              style={{ backgroundColor: modelLoaded ? '#4ade80' : '#ef4444' }}
+            />
+            <span className="text-xs text-[var(--color-text-secondary)]">
+              {modelLoaded ? 'Model loaded and ready' : 'No model loaded'}
+            </span>
           </div>
-          {/* Model Status */}
-          <div className="px-4 py-3 border-b border-[var(--color-border)]">
-            <span className="text-xs text-[var(--color-text-primary)]">Model Status</span>
-            <div className="flex items-center gap-2 mt-2">
-              <span
-                className="w-2 h-2 flex-shrink-0"
-                style={{ backgroundColor: modelLoaded ? '#4ade80' : '#ef4444' }}
-              />
-              <span className="text-xs text-[var(--color-text-secondary)]">
-                {modelLoaded ? 'Model loaded and ready' : 'No model loaded'}
-              </span>
-            </div>
-            {modelPath && (
-              <p className="text-[10px] font-mono text-[var(--color-text-muted)] break-all mt-1">
-                {modelPath}
-              </p>
-            )}
-          </div>
-          {/* Default Model */}
-          <div className="px-4 py-3 border-b border-[var(--color-border)]">
+          {modelPath && (
+            <p className="text-[10px] font-mono text-[var(--color-text-muted)] break-all mt-1">
+              {modelPath}
+            </p>
+          )}
+        </div>
+        {/* Default Model */}
+        <div className="px-4 py-3 border-b border-[var(--color-border)]">
             <span className="text-xs text-[var(--color-text-primary)]">Default Model</span>
             <p className="text-[10px] text-[var(--color-text-muted)] mt-1 mb-2">
               Qwen2.5-1.5B-Instruct (Q4_K_M) — ~1.1GB download. Runs locally with Metal GPU acceleration.
@@ -5261,70 +5362,13 @@ function AIAssistantSection(): React.JSX.Element {
             </div>
           </div>
         </div>
-        {/* Error Display */}
-        {loadError && (
-          <div className="p-2 text-xs text-red-400 bg-red-500/5 border border-red-500/20 mt-3">
-            {loadError}
-          </div>
-        )}
-      </div>
-
-      {/* ── CLI ── */}
-      <div>
-        <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-3">CLI</h2>
-        <p className="text-xs text-[var(--color-text-muted)] mb-4">
-          The K2SO CLI lets any AI agent orchestrate your workspaces.
-          When you open a terminal inside K2SO, the CLI is automatically available — no setup needed.
-        </p>
-
-        {/* CLI Install */}
-        <K2SOCLIInstall />
-
-        {/* Using Claude with K2SO */}
-        <div className="border border-[var(--color-border)] mt-4">
-          <div className="px-4 py-3 border-b border-[var(--color-border)]">
-            <span className="text-xs text-[var(--color-text-primary)]">Agent Mode (recommended)</span>
-            <p className="text-[11px] text-[var(--color-text-muted)] mt-1 leading-relaxed">
-              Set any workspace to <span className="font-mono text-[var(--color-text-secondary)]">Agent</span> mode in its settings.
-              K2SO generates a CLAUDE.md file that teaches Claude everything about the CLI, workspace setup,
-              and how to orchestrate work across projects.
-            </p>
-          </div>
-          <div className="px-4 py-3 border-b border-[var(--color-border)]">
-            <span className="text-xs text-[var(--color-text-primary)]">External Terminal</span>
-            <p className="text-[11px] text-[var(--color-text-muted)] mt-1 leading-relaxed">
-              Install the K2SO CLI above, then use <span className="font-mono text-[var(--color-text-secondary)]">k2so</span> from
-              any terminal while K2SO is running.
-            </p>
-          </div>
-          <div className="px-4 py-3 border-b border-[var(--color-border)]">
-            <span className="text-xs text-[var(--color-text-primary)]">Key Commands</span>
-            <div className="mt-2 bg-[var(--color-bg)] border border-[var(--color-border)] p-3 font-mono text-[11px] text-[var(--color-text-secondary)] leading-relaxed space-y-1">
-              <div><span className="text-[var(--color-accent)]">k2so agents list</span>          <span className="text-[var(--color-text-muted)]"># List all agents</span></div>
-              <div><span className="text-[var(--color-accent)]">k2so delegate</span> &lt;agent&gt; &lt;file&gt;  <span className="text-[var(--color-text-muted)]"># Assign work (creates worktree + launches)</span></div>
-              <div><span className="text-[var(--color-accent)]">k2so work create</span> --title &quot;...&quot; <span className="text-[var(--color-text-muted)]"># Create a work item</span></div>
-              <div><span className="text-[var(--color-accent)]">k2so reviews</span>               <span className="text-[var(--color-text-muted)]"># See pending reviews</span></div>
-              <div><span className="text-[var(--color-accent)]">k2so review approve</span> &lt;a&gt; &lt;b&gt; <span className="text-[var(--color-text-muted)]"># Merge + cleanup</span></div>
-              <div><span className="text-[var(--color-accent)]">k2so mode pod</span>              <span className="text-[var(--color-text-muted)]"># Enable pod mode</span></div>
-              <div><span className="text-[var(--color-accent)]">k2so worktree on</span>           <span className="text-[var(--color-text-muted)]"># Enable worktrees</span></div>
-              <div><span className="text-[var(--color-accent)]">k2so heartbeat on</span>          <span className="text-[var(--color-text-muted)]"># Enable auto heartbeat</span></div>
-              <div><span className="text-[var(--color-accent)]">k2so settings</span>              <span className="text-[var(--color-text-muted)]"># Show workspace settings</span></div>
-              <div><span className="text-[var(--color-accent)]">k2so help</span>                  <span className="text-[var(--color-text-muted)]"># Full command reference</span></div>
-            </div>
-          </div>
-          <div className="px-4 py-3">
-            <span className="text-xs text-[var(--color-text-primary)]">Connection Details</span>
-            <p className="text-[11px] text-[var(--color-text-muted)] mt-1 leading-relaxed">
-              The CLI communicates via a local HTTP server.
-              <span className="font-mono text-[var(--color-text-secondary)]"> K2SO_PORT</span> and
-              <span className="font-mono text-[var(--color-text-secondary)]"> K2SO_HOOK_TOKEN</span> are
-              set automatically in K2SO terminals. For external terminals, connection details are at
-              <span className="font-mono text-[var(--color-text-secondary)]"> ~/.k2so/heartbeat.port</span> and
-              <span className="font-mono text-[var(--color-text-secondary)]"> ~/.k2so/heartbeat.token</span>.
-            </p>
-          </div>
+      {/* Error Display */}
+      {loadError && (
+        <div className="p-2 text-xs text-red-400 bg-red-500/5 border border-red-500/20 mt-3">
+          {loadError}
         </div>
-      </div>
+      )}
     </div>
   )
 }
+

@@ -921,7 +921,7 @@ export default function AssistantBar(): React.JSX.Element | null {
             style={{ fontFamily: 'inherit' }}
             onClick={() => {
               close()
-              openSettings('ai-assistant')
+              openSettings('general')
             }}
           >
             Settings

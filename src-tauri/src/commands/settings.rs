@@ -371,9 +371,11 @@ fn find_cli_script() -> Option<PathBuf> {
         if p.exists() { return resources_cli; }
     }
 
-    // Development: target/debug/k2so → ../../cli/k2so
-    let dev_cli = macos_dir.parent()
-        .and_then(|p| p.parent())
+    // Development: src-tauri/target/debug/k2so → ../../../cli/k2so
+    // Binary is at src-tauri/target/debug/, repo root is 3 levels up
+    let dev_cli = macos_dir.parent()       // target/
+        .and_then(|p| p.parent())          // src-tauri/
+        .and_then(|p| p.parent())          // repo root
         .map(|repo| repo.join("cli").join("k2so"));
     if let Some(ref p) = dev_cli {
         if p.exists() { return dev_cli; }
@@ -384,6 +386,17 @@ fn find_cli_script() -> Option<PathBuf> {
 
 const CLI_SYMLINK_PATH: &str = "/usr/local/bin/k2so";
 
+/// Extract the K2SO_CLI_VERSION from a k2so CLI script.
+fn read_cli_version(script_path: &Path) -> Option<String> {
+    let content = fs::read_to_string(script_path).ok()?;
+    for line in content.lines().take(20) {
+        if let Some(rest) = line.strip_prefix("K2SO_CLI_VERSION=") {
+            return Some(rest.trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
 #[tauri::command]
 pub fn cli_install_status() -> Result<serde_json::Value, String> {
     let symlink_path = Path::new(CLI_SYMLINK_PATH);
@@ -393,13 +406,35 @@ pub fn cli_install_status() -> Result<serde_json::Value, String> {
     } else {
         None
     };
-    let bundled = find_cli_script().map(|p| p.to_string_lossy().to_string());
+    let bundled = find_cli_script();
+    let bundled_path = bundled.as_ref().map(|p| p.to_string_lossy().to_string());
+
+    // Read version from bundled CLI (current app version)
+    let bundled_version = bundled.as_ref().and_then(|p| read_cli_version(p));
+
+    // Read version from installed CLI (what's on PATH)
+    let installed_version = if installed {
+        // Read from the actual target, not the symlink
+        let actual_path = fs::read_link(symlink_path).unwrap_or_else(|_| symlink_path.to_path_buf());
+        read_cli_version(&actual_path)
+    } else {
+        None
+    };
+
+    // Determine if an update is available
+    let update_available = match (&bundled_version, &installed_version) {
+        (Some(bundled_v), Some(installed_v)) => bundled_v != installed_v,
+        _ => false,
+    };
 
     Ok(serde_json::json!({
         "installed": installed,
         "symlinkPath": CLI_SYMLINK_PATH,
         "target": target,
-        "bundledPath": bundled,
+        "bundledPath": bundled_path,
+        "bundledVersion": bundled_version,
+        "installedVersion": installed_version,
+        "updateAvailable": update_available,
     }))
 }
 
