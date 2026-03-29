@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { useToastStore } from '@/stores/toast'
+import { usePanelsStore } from '@/stores/panels'
+import { useSettingsStore } from '@/stores/settings'
 import type { Toast as ToastData } from '@/stores/toast'
 
 const ACCENT_COLORS: Record<ToastData['type'], string> = {
@@ -90,11 +92,25 @@ function ToastItem({ toast }: { toast: ToastData }): React.JSX.Element {
 
 export default function Toast(): React.JSX.Element | null {
   const toasts = useToastStore((s) => s.toasts)
+  const rightPanelOpen = usePanelsStore((s) => s.rightPanelOpen)
+  const rightPanelWidth = usePanelsStore((s) => s.rightPanelWidth)
+  const settingsOpen = useSettingsStore((s) => s.settingsOpen)
 
   if (toasts.length === 0) return null
 
+  // Settings page: centered. Otherwise: anchored to the left edge of the right sidebar
+  // (or far right if sidebar is closed)
+  const positionStyle: React.CSSProperties = settingsOpen
+    ? { left: '50%', transform: 'translateX(-50%)' }
+    : rightPanelOpen
+      ? { right: rightPanelWidth + 12 }
+      : { right: 12 }
+
   return (
-    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[9999] flex flex-col items-center gap-2 pointer-events-auto">
+    <div
+      className="fixed bottom-4 z-[9999] flex flex-col items-end gap-2 pointer-events-auto"
+      style={positionStyle}
+    >
       {toasts.map((toast) => (
         <ToastItem key={toast.id} toast={toast} />
       ))}

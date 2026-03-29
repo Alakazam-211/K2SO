@@ -1472,7 +1472,9 @@ export const useTabsStore = create<TabsState>((set, get) => ({
             if (sessionId && command) {
               const toolConfig = RESUMABLE_CLI_TOOLS[command]
               if (toolConfig) {
-                args = [toolConfig.resumeFlag, sessionId]
+                // Preserve original args (e.g. --dangerously-skip-permissions) and append --resume
+                const origArgs = (si.args ?? []).filter((a: string) => a !== toolConfig.resumeFlag && a !== sessionId)
+                args = [...origArgs, toolConfig.resumeFlag, sessionId]
               }
             }
 
@@ -1563,7 +1565,10 @@ export const useTabsStore = create<TabsState>((set, get) => ({
                   const sessionId = si.sessionId
                   if (sessionId && command) {
                     const toolConfig = RESUMABLE_CLI_TOOLS[command]
-                    if (toolConfig) args = [toolConfig.resumeFlag, sessionId]
+                    if (toolConfig) {
+                      const origArgs = (si.args ?? []).filter((a: string) => a !== toolConfig.resumeFlag && a !== sessionId)
+                      args = [...origArgs, toolConfig.resumeFlag, sessionId]
+                    }
                   }
                   return {
                     id: crypto.randomUUID(),

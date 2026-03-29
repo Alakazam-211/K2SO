@@ -336,10 +336,19 @@ async function executeToolCalls(toolCalls: ToolCall[]): Promise<string> {
           const sessionId = call.args.sessionId as string
           const provider = call.args.provider as string
           if (provider === 'claude') {
+            // Include preset flags (e.g. --dangerously-skip-permissions) from user's agent preset
+            const presetsState = usePresetsStore.getState()
+            const claudePreset = presetsState.presets.find((p) => p.command.split(/\s+/)[0] === 'claude' && p.enabled)
+            const presetArgs: string[] = []
+            if (claudePreset) {
+              const parts = claudePreset.command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || []
+              const cleaned = parts.map((p: string) => p.replace(/^["']|["']$/g, ''))
+              presetArgs.push(...cleaned.slice(1).filter((a: string) => a !== '--resume'))
+            }
             tabsStore.addTab(cwd, {
               title: `Claude (resumed)`,
               command: 'claude',
-              args: ['--resume', sessionId]
+              args: [...presetArgs, '--resume', sessionId]
             })
             results.push('Resumed Claude chat')
           }

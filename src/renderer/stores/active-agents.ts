@@ -141,7 +141,13 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
         ps.touchInteraction(ps.activeProjectId)
       }
     } else if (eventType === 'permission') {
+      // Skip duplicate permission toast if already in permission state
+      const currentStatus = paneStatuses.get(paneId)
       newStatuses.set(paneId, 'permission')
+      if (currentStatus === 'permission') {
+        set({ paneStatuses: newStatuses })
+        return
+      }
       // Notify user that agent needs attention
       toast.addToast(
         'An agent needs your permission',

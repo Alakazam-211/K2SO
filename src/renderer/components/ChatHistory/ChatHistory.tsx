@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
 import { useSettingsStore } from '@/stores/settings'
+import { usePresetsStore } from '@/stores/presets'
 import AgentIcon from '@/components/AgentIcon/AgentIcon'
 import { KeyCombo } from '@/components/KeySymbol'
 
@@ -25,6 +26,25 @@ type DateGroup = 'Pinned' | 'Today' | 'Yesterday' | 'This Week' | 'This Month' |
 const PROVIDER_CONFIG: Record<string, { command: string; label: string; resumeFlag: string }> = {
   claude: { command: 'claude', label: 'Claude', resumeFlag: '--resume' },
   cursor: { command: 'cursor-agent', label: 'Cursor', resumeFlag: '--resume' },
+}
+
+/// Get the preset args (e.g. --dangerously-skip-permissions) for a provider command.
+/// Parses the user's agent preset to extract flags that should carry over to resumed sessions.
+function getPresetArgsForProvider(provider: string): string[] {
+  const config = PROVIDER_CONFIG[provider]
+  if (!config) return []
+  try {
+    const presets = usePresetsStore.getState().presets
+    const preset = presets.find((p) => p.command.split(/\s+/)[0] === config.command && p.enabled)
+    if (preset) {
+      // Parse the preset command to extract args after the command name
+      const parts = preset.command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || []
+      const cleaned = parts.map((p: string) => p.replace(/^["']|["']$/g, ''))
+      // Return args only (skip the command itself), excluding --resume which we add separately
+      return cleaned.slice(1).filter((a: string) => a !== '--resume')
+    }
+  } catch { /* preset store not available */ }
+  return []
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -425,7 +445,10 @@ export default function ChatHistory(): React.JSX.Element {
         // One is a worktree, the other is main repo
         || (sessionFromWorktree !== isCurrentlyInWorktree)
 
-      const args = ['--resume', session.sessionId]
+      // Build resume args: include preset flags (e.g. --dangerously-skip-permissions)
+      // so the resumed session has the same permissions as a fresh launch
+      const presetArgs = getPresetArgsForProvider(session.provider)
+      const args = [...presetArgs, '--resume', session.sessionId]
       if (isCrossWorktree && config.command === 'claude') {
         args.push('--fork-session')
       }

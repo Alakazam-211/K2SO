@@ -253,10 +253,18 @@ export default function ReviewPanel(): React.JSX.Element {
     if (!workspacePath) return
     const tabsStore = useTabsStore.getState()
     const command = session.provider === 'cursor' ? 'cursor-agent' : 'claude'
+    // Include preset flags (e.g. --dangerously-skip-permissions) from user's agent preset
+    const presetArgs: string[] = []
+    const preset = usePresetsStore.getState().presets.find((p) => p.command.split(/\s+/)[0] === command && p.enabled)
+    if (preset) {
+      const parts = preset.command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || []
+      const cleaned = parts.map((p: string) => p.replace(/^["']|["']$/g, ''))
+      presetArgs.push(...cleaned.slice(1).filter((a: string) => a !== '--resume'))
+    }
     tabsStore.addTab(workspacePath, {
       title: `Resume: ${session.title.slice(0, 30)}`,
       command,
-      args: ['--resume', session.sessionId],
+      args: [...presetArgs, '--resume', session.sessionId],
     })
   }, [workspacePath])
 
