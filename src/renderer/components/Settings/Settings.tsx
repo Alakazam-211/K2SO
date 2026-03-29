@@ -2747,6 +2747,9 @@ function ProjectsSection(): React.JSX.Element {
   }, [initialProjectId])
 
   const [newGroupName, setNewGroupName] = useState('')
+  const [searchQuery, setSearchQuery] = useState('')
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const [keyboardIndex, setKeyboardIndex] = useState(-1)
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [dragProjectId, setDragProjectId] = useState<string | null>(null)
   const [dragOverGroupId, setDragOverGroupId] = useState<string | null>(null)
@@ -2885,14 +2888,29 @@ function ProjectsSection(): React.JSX.Element {
   const reorderZoneRef = useRef<string | null>(null)
   const dragOverGroupRef = useRef<string | null>(null)
 
+  // Auto-focus search when navigating to Workspaces page
+  useEffect(() => {
+    requestAnimationFrame(() => searchInputRef.current?.focus())
+  }, [])
+
   const settingsAgenticEnabled = useSettingsStore((s) => s.agenticSystemsEnabled)
+
+  // Filter helper for search
+  const matchesSearch = useCallback((p: typeof projects[0]) => {
+    if (!searchQuery.trim()) return true
+    const q = searchQuery.toLowerCase()
+    return p.name.toLowerCase().includes(q) || p.path.toLowerCase().includes(q)
+  }, [searchQuery])
+
   const agentPinnedProjects = useMemo(() =>
-    settingsAgenticEnabled ? projects.filter((p) => p.agentMode === 'agent' || p.agentMode === 'custom') : [],
-    [projects, settingsAgenticEnabled])
-  const agentIds = useMemo(() => new Set(agentPinnedProjects.map((p) => p.id)), [agentPinnedProjects])
-  const pinnedProjects = useMemo(() => projects.filter((p) => p.pinned && !agentIds.has(p.id)), [projects, agentIds])
+    settingsAgenticEnabled ? projects.filter((p) => (p.agentMode === 'agent' || p.agentMode === 'custom') && matchesSearch(p)) : [],
+    [projects, settingsAgenticEnabled, matchesSearch])
+  const agentIds = useMemo(() => new Set(
+    (settingsAgenticEnabled ? projects.filter((p) => p.agentMode === 'agent' || p.agentMode === 'custom') : []).map((p) => p.id)
+  ), [projects, settingsAgenticEnabled])
+  const pinnedProjects = useMemo(() => projects.filter((p) => p.pinned && !agentIds.has(p.id) && matchesSearch(p)), [projects, agentIds, matchesSearch])
   const regularPinnedProjects = pinnedProjects
-  const ungroupedProjects = projects.filter((p) => !p.focusGroupId && !p.pinned && !agentIds.has(p.id))
+  const ungroupedProjects = projects.filter((p) => !p.focusGroupId && !p.pinned && !agentIds.has(p.id) && matchesSearch(p))
   const reorderProjects = useProjectsStore((s) => s.reorderProjects)
 
   const handleReorderMouseDown = useCallback((
@@ -3062,6 +3080,83 @@ function ProjectsSection(): React.JSX.Element {
     }
   }, [gitInitForWorktree, gitInitBranch, fetchProjects])
 
+  // Build flat list of all visible projects for keyboard navigation
+  const allVisibleProjects = useMemo(() => {
+    const result: typeof projects = []
+    result.push(...agentPinnedProjects)
+    result.push(...regularPinnedProjects)
+    if (focusGroupsEnabled) {
+      for (const group of focusGroups) {
+        const gp = projects.filter((p) => p.focusGroupId === group.id && !p.pinned && !agentIds.has(p.id) && matchesSearch(p))
+        result.push(...gp)
+      }
+      result.push(...ungroupedProjects)
+    } else {
+      const flat = projects.filter((p) => !agentIds.has(p.id) && !p.pinned && matchesSearch(p))
+      result.push(...flat)
+    }
+    return result
+  }, [agentPinnedProjects, regularPinnedProjects, focusGroups, focusGroupsEnabled, projects, agentIds, ungroupedProjects, matchesSearch])
+
+  // Reset keyboard index when search changes
+  useEffect(() => { setKeyboardIndex(-1) }, [searchQuery])
+
+  // Keyboard navigation in search
+  const handleSearchKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setKeyboardIndex((prev) => Math.min(prev + 1, allVisibleProjects.length - 1))
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setKeyboardIndex((prev) => Math.max(prev - 1, 0))
+    } else if (e.key === 'Enter' && keyboardIndex >= 0 && keyboardIndex < allVisibleProjects.length) {
+      e.preventDefault()
+      setSelectedProjectId(allVisibleProjects[keyboardIndex].id)
+    }
+  }, [allVisibleProjects, keyboardIndex])
+
+  // Scroll keyboard-selected item into view
+  useEffect(() => {
+    if (keyboardIndex >= 0 && allVisibleProjects[keyboardIndex]) {
+      const el = document.querySelector(`[data-settings-project-id="${allVisibleProjects[keyboardIndex].id}"]`)
+      el?.scrollIntoView({ block: 'nearest' })
+    }
+  }, [keyboardIndex, allVisibleProjects])
+
+  // Right-click context menu for workspace rows
+  const handleProjectContextMenu = useCallback(async (e: React.MouseEvent, p: typeof projects[number]) => {
+    e.preventDefault()
+    e.stopPropagation()
+
+    const menuItems: { id: string; label: string }[] = [
+      { id: 'pin', label: p.pinned ? 'Unpin' : 'Pin to top' },
+    ]
+
+    // Add "Move to" options if focus groups exist
+    if (focusGroupsEnabled && focusGroups.length > 0) {
+      menuItems.push({ id: '__separator__', label: '─' })
+      for (const group of focusGroups) {
+        if (p.focusGroupId === group.id) continue // skip current group
+        menuItems.push({ id: `move:${group.id}`, label: `Move to ${group.name}` })
+      }
+      if (p.focusGroupId) {
+        menuItems.push({ id: 'move:__none__', label: 'Remove from group' })
+      }
+    }
+
+    const clickedId = await showContextMenu(menuItems)
+    if (!clickedId) return
+
+    if (clickedId === 'pin') {
+      await invoke('projects_update', { id: p.id, pinned: p.pinned ? 0 : 1 })
+      await fetchProjects()
+    } else if (clickedId.startsWith('move:')) {
+      const groupId = clickedId.replace('move:', '')
+      await assignProjectToGroup(p.id, groupId === '__none__' ? null : groupId)
+      await fetchProjects()
+    }
+  }, [focusGroupsEnabled, focusGroups, fetchProjects, assignProjectToGroup])
+
   // Workspace row component (reused in groups and ungrouped)
   const ProjectRow = useCallback(({ project: p, zone, containerSelector }: {
     project: typeof projects[number]
@@ -3070,15 +3165,20 @@ function ProjectsSection(): React.JSX.Element {
   }) => {
     const isSelected = selectedProjectId === p.id
     const isDragged = reorderDragId === p.id
+    const kbIdx = allVisibleProjects.findIndex((vp) => vp.id === p.id)
+    const isKeyboardHighlighted = kbIdx >= 0 && kbIdx === keyboardIndex
     return (
       <div
         data-settings-project-id={p.id}
         onClick={() => setSelectedProjectId(p.id)}
-        onMouseDown={(e) => handleReorderMouseDown(e, p.id, zone, containerSelector)}
+        onContextMenu={(e) => handleProjectContextMenu(e, p)}
+        onMouseDown={(e) => { if (e.button === 0) handleReorderMouseDown(e, p.id, zone, containerSelector) }}
         className={`flex items-center gap-2 px-2 py-1.5 transition-colors no-drag cursor-pointer group select-none ${
           isSelected
             ? 'bg-[var(--color-accent)]/15 text-[var(--color-text-primary)]'
-            : 'text-[var(--color-text-secondary)] hover:bg-white/[0.04] hover:text-[var(--color-text-primary)]'
+            : isKeyboardHighlighted
+              ? 'bg-white/[0.06] text-[var(--color-text-primary)]'
+              : 'text-[var(--color-text-secondary)] hover:bg-white/[0.04] hover:text-[var(--color-text-primary)]'
         } ${isDragged ? 'opacity-30' : ''} cursor-grab active:cursor-grabbing`}
       >
         <ProjectAvatar
@@ -3109,7 +3209,7 @@ function ProjectsSection(): React.JSX.Element {
         </button>
       </div>
     )
-  }, [selectedProjectId, reorderDragId, handleReorderMouseDown, fetchProjects])
+  }, [selectedProjectId, reorderDragId, handleReorderMouseDown, fetchProjects, allVisibleProjects, keyboardIndex, handleProjectContextMenu])
 
   return (
     <div className="flex h-full min-h-0">
@@ -3158,6 +3258,19 @@ function ProjectsSection(): React.JSX.Element {
           >
             A→Z Workspaces
           </button>
+        </div>
+
+        {/* Search bar */}
+        <div className="px-2 py-1.5">
+          <input
+            ref={searchInputRef}
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={handleSearchKeyDown}
+            placeholder="Search workspaces..."
+            className="w-full px-2 py-1.5 text-xs bg-[var(--color-bg)] border border-[var(--color-border)] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-accent)] no-drag"
+          />
         </div>
 
         {/* Workspace list — pinned at top, then groups or flat */}
@@ -3218,13 +3331,16 @@ function ProjectsSection(): React.JSX.Element {
               {/* Focus group folders */}
               <div data-focus-group-reorder-container>
               {focusGroups.map((group, groupIdx) => {
-                const groupProjects = projects.filter((p) => p.focusGroupId === group.id && !p.pinned && !agentIds.has(p.id))
+                const groupProjects = projects.filter((p) => p.focusGroupId === group.id && !p.pinned && !agentIds.has(p.id) && matchesSearch(p))
                 const isCollapsed = collapsedGroups.has(group.id)
                 const isDragOver = dragOverGroupId === group.id
                 const zoneId = `group:${group.id}`
                 const isGroupDragged = groupDragId === group.id
                 const showGroupDropBefore = groupDropIndex === groupIdx
                 const showGroupDropAfter = groupDropIndex === focusGroups.length && groupIdx === focusGroups.length - 1
+
+                // Hide empty focus groups when searching
+                if (searchQuery.trim() && groupProjects.length === 0) return null
 
                 return (
                   <div key={group.id} className={`mb-0.5 ${isGroupDragged ? 'opacity-30' : ''}`} data-focus-group-reorder-id={group.id}>
