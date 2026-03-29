@@ -195,9 +195,16 @@ For the full technical architecture, see [docs/ARCHITECTURE.md](docs/ARCHITECTUR
 
 Tests live in the `tests/` directory. Run them against a running K2SO instance.
 
-### CLI Integration Tests
+### Test Suites
 
-Tests all CLI commands end-to-end against a live K2SO instance:
+| Suite | Tests | Prerequisites | What it validates |
+|-------|-------|--------------|-------------------|
+| `cli-integration-test.sh` | 38 pass, 18 skip | Running K2SO | Every CLI command returns expected output |
+| `behavior-test-tier1.sh` | 25 pass | Running K2SO | Auto-backoff math, lock prevention, priority ordering, session resume, CLAUDE.md content, event queue flow, transcript pruning |
+| `behavior-test-tier2.sh` | 8+ pass | Running K2SO + registered workspace | Source gating by state, locked state blocking, state persistence |
+| `behavior-test-tier3.sh` | 22 pass | sqlite3 only | Migration safety, heartbeat script correctness, agent templates, LLM triage prompt validation |
+
+### Running Tests
 
 ```bash
 # 1. Start K2SO
@@ -206,15 +213,18 @@ cargo tauri dev
 # 2. Create a test workspace (one-time setup)
 mkdir -p ~/DevProjects/k2so-cli-test && cd ~/DevProjects/k2so-cli-test && git init
 
-# 3. Run the test suite
-./tests/cli-integration-test.sh
+# 3. Run all test suites
+./tests/cli-integration-test.sh    # CLI command I/O
+./tests/behavior-test-tier1.sh     # Behavioral (no DB needed)
+./tests/behavior-test-tier3.sh     # Unit-style (no K2SO needed)
+
+# 4. For DB-dependent tests, register the workspace in K2SO UI first:
+./tests/behavior-test-tier2.sh
 ```
 
-The test suite covers: agentic systems toggle, workspace states, agent CRUD, work items with source tags, heartbeat management (set/get/force/noop/action), triage, terminal spawn, worktree management, and settings. All test data is cleaned up automatically.
-
-Set `TEST_WORKSPACE` to use a different workspace path:
+Set `TEST_WORKSPACE` to use a different workspace:
 ```bash
-TEST_WORKSPACE=/path/to/workspace ./tests/cli-integration-test.sh
+TEST_WORKSPACE=/path/to/workspace ./tests/behavior-test-tier1.sh
 ```
 
 ## Contributing
