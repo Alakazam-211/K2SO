@@ -115,12 +115,33 @@ fn safe_generate(
     std::fs::write(&tmp, payload.to_string())
         .map_err(|e| format!("Failed to write LLM payload: {e}"))?;
 
-    let output = std::process::Command::new(&exe)
+    let mut child = std::process::Command::new(&exe)
         .args(["--llm-worker", tmp.to_string_lossy().as_ref()])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .output()
+        .spawn()
         .map_err(|e| format!("Failed to spawn LLM worker: {e}"))?;
+
+    // Timeout: kill subprocess if it takes longer than 45 seconds
+    let timeout = std::time::Duration::from_secs(45);
+    let start = std::time::Instant::now();
+    let output = loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => break child.wait_with_output().map_err(|e| format!("LLM worker error: {e}"))?,
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err("LLM inference timed out (45s limit)".to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(format!("LLM worker error: {e}"));
+            }
+        }
+    };
 
     let _ = std::fs::remove_file(&tmp);
 

@@ -520,7 +520,7 @@ pub fn k2so_agents_work_create(
     let path = target_dir.join(&filename);
     fs::write(&path, &content).map_err(|e| format!("Failed to write work item: {}", e))?;
 
-    let body_preview = if body.len() > 120 { format!("{}...", &body[..120].trim()) } else { body.trim().to_string() };
+    let body_preview = { let trimmed = body.trim(); let preview: String = trimmed.chars().take(120).collect(); if trimmed.chars().count() > 120 { format!("{}...", preview.trim()) } else { preview } };
 
     // Push channel event for persistent agents
     if let Some(ref agent) = agent_name {
@@ -749,7 +749,7 @@ pub fn k2so_agents_workspace_inbox_create(
     let path = dir.join(&filename);
     fs::write(&path, &content).map_err(|e| e.to_string())?;
 
-    let body_preview = if body.len() > 120 { format!("{}...", &body[..120].trim()) } else { body.trim().to_string() };
+    let body_preview = { let trimmed = body.trim(); let preview: String = trimmed.chars().take(120).collect(); if trimmed.chars().count() > 120 { format!("{}...", preview.trim()) } else { preview } };
     Ok(WorkItem {
         filename,
         title,
@@ -1999,6 +1999,8 @@ pub fn k2so_agents_review_request_changes(
 fn get_workspace_state(project_path: &str) -> Option<crate::db::schema::WorkspaceState> {
     let db_path = dirs::home_dir()?.join(".k2so").join("k2so.db");
     let conn = rusqlite::Connection::open(&db_path).ok()?;
+    // Safety: read-only access from background threads — set WAL mode and busy timeout
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA query_only=ON;").ok()?;
     let state_id: Option<String> = conn.query_row(
         "SELECT tier_id FROM projects WHERE path = ?1",
         rusqlite::params![project_path],
@@ -2248,13 +2250,19 @@ pub fn llm_triage_decide(
             // Parse the JSON response
             match parse_triage_response(&response) {
                 Some(agents) => {
+                    // Validate agent names — filter out hallucinated names
+                    let agents_root = agents_dir(project_path);
+                    let valid_agents: Vec<String> = agents.into_iter().filter(|name| {
+                        name == "__lead__" || agents_root.join(name).exists()
+                    }).collect();
+
                     // Log the decision
                     let k2so_dir = PathBuf::from(project_path).join(".k2so");
                     let log_path = k2so_dir.join("triage.log");
                     let entry = format!(
                         "[{}] LLM triage: wake={:?} | summary_len={}\n",
                         simple_date(),
-                        agents,
+                        valid_agents,
                         summary.len()
                     );
                     if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -2265,7 +2273,7 @@ pub fn llm_triage_decide(
                         use std::io::Write;
                         let _ = file.write_all(entry.as_bytes());
                     }
-                    Ok(agents)
+                    Ok(valid_agents)
                 }
                 None => {
                     log_agent_warning(project_path, "__lead__",
@@ -2324,6 +2332,7 @@ pub fn k2so_agents_set_heartbeat(
     phase: Option<String>,
     mode: Option<String>,
     cost_budget: Option<String>,
+    force_wake: Option<bool>,
 ) -> Result<AgentHeartbeatConfig, String> {
     let dir = agent_dir(&project_path, &agent_name);
     if !dir.exists() {
@@ -2349,9 +2358,14 @@ pub fn k2so_agents_set_heartbeat(
     }
     config.updated_by = "agent".to_string();
 
-    // Recalculate next wake
+    // Recalculate next wake (or set to now if force_wake)
     let now = chrono::Utc::now();
-    config.next_wake = Some((now + chrono::Duration::seconds(config.interval_seconds as i64)).to_rfc3339());
+    if force_wake.unwrap_or(false) {
+        config.next_wake = Some(now.to_rfc3339()); // Wake immediately on next tick
+        config.updated_by = "user".to_string();
+    } else {
+        config.next_wake = Some((now + chrono::Duration::seconds(config.interval_seconds as i64)).to_rfc3339());
+    }
 
     write_heartbeat_config(&project_path, &agent_name, &config)?;
     Ok(config)
@@ -2577,8 +2591,9 @@ pub fn k2so_agents_heartbeat_action(
 }
 
 /// Check if the current time is within the active hours window.
-fn is_within_active_hours(hours: &ActiveHours, now: &chrono::DateTime<chrono::Utc>) -> bool {
-    // Parse HH:MM format
+/// NOTE: The `timezone` field is accepted but currently compared against local system time.
+/// Full timezone support (chrono-tz) is planned for a future release.
+fn is_within_active_hours(hours: &ActiveHours, _now: &chrono::DateTime<chrono::Utc>) -> bool {
     let parse_hhmm = |s: &str| -> Option<(u32, u32)> {
         let parts: Vec<&str> = s.split(':').collect();
         if parts.len() == 2 {
@@ -2597,9 +2612,10 @@ fn is_within_active_hours(hours: &ActiveHours, now: &chrono::DateTime<chrono::Ut
         None => return true,
     };
 
-    // For simplicity, use UTC comparison (timezone support can be added later)
-    let hour = now.format("%H").to_string().parse::<u32>().unwrap_or(0);
-    let minute = now.format("%M").to_string().parse::<u32>().unwrap_or(0);
+    // Use local system time (best approximation without chrono-tz)
+    let local_now = chrono::Local::now();
+    let hour = local_now.format("%H").to_string().parse::<u32>().unwrap_or(0);
+    let minute = local_now.format("%M").to_string().parse::<u32>().unwrap_or(0);
     let now_mins = hour * 60 + minute;
     let start_mins = start_h * 60 + start_m;
     let end_mins = end_h * 60 + end_m;
@@ -2766,9 +2782,9 @@ if [ -z "$PORT" ] || ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
     exit 0
 fi
 
-# Check if K2SO is alive (exact match, not substring)
+# Check if K2SO is alive (server returns JSON with "status":"ok")
 HEALTH=$(curl -s --connect-timeout 2 "http://127.0.0.1:$PORT/health" 2>/dev/null)
-if [ "$HEALTH" != "ok" ]; then
+if ! echo "$HEALTH" | grep -q '"ok"'; then
     exit 0
 fi
 

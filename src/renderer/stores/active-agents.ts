@@ -27,6 +27,8 @@ const _triageInFlight = new Set<string>()
 const _agentStartTimes = new Map<string, number>()
 /** Track failed launches to avoid infinite retry loops (paneId → retry count) */
 const _launchRetries = new Map<string, number>()
+/** Track pending retry timeouts so they can be cancelled on cleanup */
+const _retryTimeouts = new Set<ReturnType<typeof setTimeout>>()
 const LAUNCH_FAILURE_THRESHOLD_MS = 5000
 const MAX_LAUNCH_RETRIES = 1
 
@@ -218,9 +220,11 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
             if (project) {
               console.warn(`[agent-launch] Agent in ${project.name} failed within ${LAUNCH_FAILURE_THRESHOLD_MS}ms — retrying in 30s (attempt ${retries + 1})`)
               toast.addToast('Agent launch failed — retrying in 30s', 'warning', 5000)
-              setTimeout(() => {
+              const retryTimer = setTimeout(() => {
+                _retryTimeouts.delete(retryTimer)
                 invoke('k2so_agents_triage_decide', { projectPath: project.path }).catch(() => {})
               }, 30000)
+              _retryTimeouts.add(retryTimer)
             }
           }
           return // Don't proceed to normal retriage
@@ -572,4 +576,11 @@ export function stopAgentPolling(): void {
     hookUnlisten()
     hookUnlisten = null
   }
+  // Cancel any pending retry timeouts to prevent ghost launches
+  for (const timer of _retryTimeouts) {
+    clearTimeout(timer)
+  }
+  _retryTimeouts.clear()
+  _agentStartTimes.clear()
+  _launchRetries.clear()
 }

@@ -4181,6 +4181,7 @@ function AdaptiveHeartbeatConfig({ projectPath }: { projectPath: string }): Reac
         phase: updates.phase ?? null,
         mode: null,
         costBudget: null,
+        forceWake: null,
       })
       setConfig(result)
     } catch (err) {
@@ -4190,14 +4191,17 @@ function AdaptiveHeartbeatConfig({ projectPath }: { projectPath: string }): Reac
 
   const handleForceWake = async () => {
     try {
-      await invoke('k2so_agents_set_heartbeat', {
+      // Set next_wake to now so the scheduler picks it up immediately
+      const result = await invoke<HeartbeatConfig>('k2so_agents_set_heartbeat', {
         projectPath,
         agentName: selectedAgent,
         interval: null,
         phase: null,
         mode: null,
         costBudget: null,
+        forceWake: true,
       })
+      setConfig(result)
       // Trigger immediate triage
       await invoke('k2so_agents_scheduler_tick', { projectPath })
     } catch (err) {

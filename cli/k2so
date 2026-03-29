@@ -229,7 +229,7 @@ cmd_terminal_spawn() {
 }
 
 cmd_work_create() {
-    local agent="" title="" body="" priority="" item_type=""
+    local agent="" title="" body="" priority="" item_type="" source=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --agent) agent="$2"; shift 2 ;;
@@ -237,18 +237,98 @@ cmd_work_create() {
             --body) body="$2"; shift 2 ;;
             --priority) priority="$2"; shift 2 ;;
             --type) item_type="$2"; shift 2 ;;
+            --source) source="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
     if [ -z "$title" ]; then
-        echo "Usage: k2so work create --title \"...\" --body \"...\" [--agent <name>] [--priority high|normal|low]" >&2
+        echo "Usage: k2so work create --title \"...\" --body \"...\" [--agent <name>] [--priority high|normal|low] [--source feature|issue|crash|security|audit|manual]" >&2
         exit 1
     fi
     local params="title=$(urlencode "$title")&body=$(urlencode "$body")"
     [ -n "$agent" ] && params="${params}&agent=$(urlencode "$agent")"
     [ -n "$priority" ] && params="${params}&priority=$(urlencode "$priority")"
     [ -n "$item_type" ] && params="${params}&type=$(urlencode "$item_type")"
+    [ -n "$source" ] && params="${params}&source=$(urlencode "$source")"
     cli_request "/cli/agents/work/create" "$params"
+}
+
+cmd_agentic() {
+    local action="${1:-}"
+    case "$action" in
+        on|enable|1|true)
+            cli_request "/cli/agentic" "enable=on"
+            echo "Agentic Systems enabled."
+            ;;
+        off|disable|0|false)
+            cli_request "/cli/agentic" "enable=off"
+            echo "Agentic Systems disabled."
+            ;;
+        *)
+            cli_request "/cli/agentic" | python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+enabled = d.get('agenticEnabled', False)
+print(f'Agentic Systems: {\"on\" if enabled else \"off\"}')
+" 2>/dev/null
+            ;;
+    esac
+}
+
+cmd_state() {
+    local subcmd="${1:-}"
+    case "$subcmd" in
+        list)
+            cli_request "/cli/states/list" | python3 -c "
+import json, sys
+states = json.loads(sys.stdin.read())
+if not states:
+    print('No workspace states defined.')
+    sys.exit(0)
+for s in states:
+    built_in = ' [DEFAULT]' if s.get('isBuiltIn') else ''
+    hb = 'on' if s.get('heartbeat') else 'off'
+    print(f\"  {s['name']}{built_in} (heartbeat: {hb})\")
+    caps = []
+    for k, label in [('capFeatures','Features'),('capIssues','Issues'),('capCrashes','Crashes'),('capSecurity','Security'),('capAudits','Audits')]:
+        caps.append(f'{label}:{s.get(k,\"off\")}')
+    print(f'    {\"  \".join(caps)}')
+    if s.get('description'):
+        print(f'    {s[\"description\"]}')
+" 2>/dev/null
+            ;;
+        get)
+            shift
+            local id="${1:-}"
+            if [ -z "$id" ]; then
+                echo "Usage: k2so state get <state-id>" >&2
+                exit 1
+            fi
+            cli_request "/cli/states/get" "id=$(urlencode "$id")"
+            ;;
+        set)
+            shift
+            local state_id=""
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --state) state_id="$2"; shift 2 ;;
+                    *) [ -z "$state_id" ] && state_id="$1"; shift ;;
+                esac
+            done
+            if [ -z "$state_id" ]; then
+                echo "Usage: k2so state set <state-id>" >&2
+                echo "  Assign a workspace state to the current project." >&2
+                echo "  Use 'k2so state list' to see available states." >&2
+                exit 1
+            fi
+            cli_request "/cli/states/set" "state_id=$(urlencode "$state_id")"
+            echo "Workspace state set to: $state_id"
+            ;;
+        *)
+            echo "Usage: k2so state <list|get|set>" >&2
+            exit 1
+            ;;
+    esac
 }
 
 cmd_agents_launch() {
@@ -524,6 +604,23 @@ cmd_heartbeat_toggle() {
             shift
             cmd_heartbeat_action "$@"
             ;;
+        force)
+            # Force an immediate wake: k2so heartbeat force --agent name
+            shift
+            local agent=""
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --agent) agent="$2"; shift 2 ;;
+                    *) [ -z "$agent" ] && agent="$1"; shift ;;
+                esac
+            done
+            if [ -z "$agent" ]; then
+                echo "Usage: k2so heartbeat force --agent <name>" >&2
+                exit 1
+            fi
+            cli_request "/cli/agents/heartbeat" "agent=$(urlencode "$agent")&force_wake=1"
+            echo "Force wake triggered for agent $agent"
+            ;;
         set)
             # Adaptive heartbeat: k2so heartbeat set --interval 60 --phase "active" [--agent name]
             shift
@@ -615,6 +712,7 @@ print(f\"  Name:      {d.get('name', '?')}\")
 print(f\"  Mode:      {d.get('mode', 'off')}\")
 print(f\"  Worktrees: {'on' if d.get('worktreeMode') else 'off'}\")
 print(f\"  Heartbeat: {'on' if d.get('heartbeatEnabled') else 'off'}\")
+print(f\"  State:     {d.get('stateId', '(none)')}\")
 print(f\"  Pinned:    {'yes' if d.get('pinned') else 'no'}\")
 " 2>/dev/null || cli_request "/cli/settings"
 }
@@ -645,6 +743,7 @@ COMMANDS:
     [--agent <name>]              Assign to agent (omit for workspace inbox)
     [--priority high|normal|low]  Set priority
     [--type prd|milestone|task]   Set work item type
+    [--source feature|issue|...]  Source: feature, issue, crash, security, audit, manual
   work inbox                      Show workspace-level inbox
   work send --workspace <path>    Send work to another workspace's inbox
     --title "..." --body "..."
@@ -671,6 +770,16 @@ COMMANDS:
     [--interval N] [--phase ".."]   Interval in seconds, work phase
     [--mode heartbeat|persistent]   Execution mode
   heartbeat get --agent <name>    Read agent's heartbeat config
+  heartbeat force --agent <name>  Force immediate wake for an agent
+  heartbeat noop --agent <name>   Report no work found (triggers auto-backoff)
+  heartbeat action --agent <name> Report action taken (resets backoff)
+
+  agentic                         Show agentic systems status (on/off)
+  agentic <on|off>                Enable/disable agentic systems globally
+
+  state list                      List all workspace states
+  state get <state-id>            Get details of a workspace state
+  state set <state-id>            Assign a state to the current workspace
 
   settings                        Show all workspace settings
 
@@ -724,6 +833,12 @@ case "${1:-help}" in
             spawn) shift 2; cmd_terminal_spawn "$@" ;;
             *)     echo "Usage: k2so terminal spawn --command \"...\" [--title \"...\"]" >&2; exit 1 ;;
         esac
+        ;;
+    agentic)
+        shift; cmd_agentic "$@"
+        ;;
+    state)
+        shift; cmd_state "$@"
         ;;
     delegate)
         shift; cmd_delegate "$@"

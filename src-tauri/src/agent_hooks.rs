@@ -216,8 +216,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
 
-            // Read the HTTP request (just need the first line for GET)
-            let mut buf = [0u8; 4096];
+            // Read the HTTP request (16KB buffer for large query strings)
+            let mut buf = [0u8; 16384];
             let n = match stream.read(&mut buf) {
                 Ok(n) => n,
                 Err(_) => continue,
@@ -592,8 +592,9 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
 
                         if interval.is_some() || phase.is_some() || mode.is_some() || cost_budget.is_some() {
                             // Update
+                            let force_wake = params.get("force_wake").map(|v| v == "1" || v == "true");
                             crate::commands::k2so_agents::k2so_agents_set_heartbeat(
-                                project_path, agent, interval, phase, mode, cost_budget,
+                                project_path, agent, interval, phase, mode, cost_budget, force_wake,
                             )
                             .map(|config| serde_json::to_string(&config).unwrap_or_default())
                         } else {
@@ -603,7 +604,9 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                         }
                     }
                     "/cli/scheduler-tick" => {
-                        // Enhanced triage: LLM-powered decision with filesystem fallback
+                        // Enhanced triage: LLM-powered decision with filesystem fallback.
+                        // Runs in a background thread to avoid blocking the HTTP server
+                        // (LLM inference can take 2-30 seconds).
                         let already_running = {
                             let mut in_flight = triage_lock().lock().unwrap_or_else(|e| e.into_inner());
                             if in_flight.contains(&project_path) {
@@ -617,58 +620,128 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                         if already_running {
                             Ok(serde_json::json!({"count": 0, "launched": [], "skipped": "triage already in flight"}).to_string())
                         } else {
-                            // Try LLM-powered triage first, fall back to filesystem triage
-                            let agents_result = {
-                                use tauri::Manager;
-                                let llm_result = app_handle.try_state::<crate::state::AppState>()
-                                    .and_then(|state| {
-                                        let manager = state.llm_manager.lock();
-                                        if manager.is_loaded() {
-                                            Some(crate::commands::k2so_agents::llm_triage_decide(
-                                                &project_path,
-                                                &manager,
-                                            ))
+                            // Spawn triage in background thread — return immediately to unblock HTTP server
+                            let bg_project_path = project_path.clone();
+                            let bg_app_handle = app_handle.clone();
+                            std::thread::spawn(move || {
+                                let agents_result = {
+                                    use tauri::Manager;
+                                    let llm_result = bg_app_handle.try_state::<crate::state::AppState>()
+                                        .and_then(|state| {
+                                            let manager = state.llm_manager.lock();
+                                            if manager.is_loaded() {
+                                                Some(crate::commands::k2so_agents::llm_triage_decide(
+                                                    &bg_project_path,
+                                                    &manager,
+                                                ))
+                                            } else {
+                                                None
+                                            }
+                                        });
+
+                                    match llm_result {
+                                        Some(result) => result,
+                                        None => {
+                                            crate::commands::k2so_agents::k2so_agents_scheduler_tick(bg_project_path.clone())
+                                        }
+                                    }
+                                };
+
+                                if let Ok(agents) = agents_result {
+                                    for agent_name in &agents {
+                                        if agent_name == "__lead__" {
+                                            let _ = crate::commands::k2so_agents::k2so_agents_generate_workspace_claude_md(bg_project_path.clone());
+                                            let _ = bg_app_handle.emit("cli:agent-launch", serde_json::json!({
+                                                "command": "claude",
+                                                "args": ["--append-system-prompt", "Check the workspace inbox: `k2so work inbox` and triage any new items to the appropriate sub-agents using `k2so delegate`."],
+                                                "cwd": &bg_project_path,
+                                                "agentName": "__lead__",
+                                            }));
                                         } else {
-                                            None
-                                        }
-                                    });
-
-                                match llm_result {
-                                    Some(result) => result,
-                                    None => {
-                                        // LLM not available — use adaptive scheduler (filesystem-based)
-                                        crate::commands::k2so_agents::k2so_agents_scheduler_tick(project_path.clone())
-                                    }
-                                }
-                            };
-
-                            let triage_result = agents_result.map(|agents| {
-                                for agent_name in &agents {
-                                    if agent_name == "__lead__" {
-                                        let _ = crate::commands::k2so_agents::k2so_agents_generate_workspace_claude_md(project_path.clone());
-                                        let _ = app_handle.emit("cli:agent-launch", serde_json::json!({
-                                            "command": "claude",
-                                            "args": ["--append-system-prompt", "Check the workspace inbox: `k2so work inbox` and triage any new items to the appropriate sub-agents using `k2so delegate`."],
-                                            "cwd": &project_path,
-                                            "agentName": "__lead__",
-                                        }));
-                                    } else {
-                                        if let Ok(launch) = crate::commands::k2so_agents::k2so_agents_build_launch(
-                                            project_path.clone(), agent_name.clone(), None
-                                        ) {
-                                            let _ = app_handle.emit("cli:agent-launch", &launch);
+                                            if let Ok(launch) = crate::commands::k2so_agents::k2so_agents_build_launch(
+                                                bg_project_path.clone(), agent_name.clone(), None
+                                            ) {
+                                                let _ = bg_app_handle.emit("cli:agent-launch", &launch);
+                                            }
                                         }
                                     }
                                 }
-                                serde_json::json!({"count": agents.len(), "launched": agents, "method": "llm"}).to_string()
+
+                                // Release triage lock
+                                let mut in_flight = triage_lock().lock().unwrap_or_else(|e| e.into_inner());
+                                in_flight.remove(&bg_project_path);
                             });
 
-                            {
-                                let mut in_flight = triage_lock().lock().unwrap_or_else(|e| e.into_inner());
-                                in_flight.remove(&project_path);
+                            // Return immediately — triage runs in background
+                            Ok(serde_json::json!({"status": "triage_started"}).to_string())
+                        }
+                    }
+                    "/cli/agentic" => {
+                        // Master agentic systems toggle (global, not per-project)
+                        if let Some(enable) = params.get("enable").cloned() {
+                            let on = enable == "1" || enable == "true" || enable == "on";
+                            // Update settings via the app settings system
+                            use tauri::Manager;
+                            if let Some(state) = app_handle.try_state::<crate::state::AppState>() {
+                                let conn = state.db.lock();
+                                let _ = conn.execute(
+                                    "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('agentic_systems_enabled', ?1)",
+                                    rusqlite::params![if on { "1" } else { "0" }],
+                                );
                             }
-
-                            triage_result
+                            let _ = app_handle.emit("sync:settings", ());
+                            Ok(serde_json::json!({"success": true, "agenticEnabled": on}).to_string())
+                        } else {
+                            // Read current state
+                            use tauri::Manager;
+                            let enabled = app_handle.try_state::<crate::state::AppState>()
+                                .and_then(|state| {
+                                    let conn = state.db.lock();
+                                    conn.query_row(
+                                        "SELECT value FROM app_settings WHERE key = 'agentic_systems_enabled'",
+                                        [],
+                                        |row| row.get::<_, String>(0),
+                                    ).ok()
+                                })
+                                .map(|v| v == "1")
+                                .unwrap_or(false);
+                            Ok(serde_json::json!({"agenticEnabled": enabled}).to_string())
+                        }
+                    }
+                    "/cli/states/list" => {
+                        use tauri::Manager;
+                        let result = app_handle.try_state::<crate::state::AppState>()
+                            .map(|state| {
+                                let conn = state.db.lock();
+                                crate::db::schema::WorkspaceState::list(&conn)
+                                    .map(|states| serde_json::to_string(&states).unwrap_or("[]".to_string()))
+                                    .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e))
+                            })
+                            .unwrap_or_else(|| "[]".to_string());
+                        Ok(result)
+                    }
+                    "/cli/states/get" => {
+                        let id = params.get("id").cloned().unwrap_or_default();
+                        use tauri::Manager;
+                        let result = app_handle.try_state::<crate::state::AppState>()
+                            .and_then(|state| {
+                                let conn = state.db.lock();
+                                crate::db::schema::WorkspaceState::get(&conn, &id).ok()
+                            });
+                        match result {
+                            Some(s) => Ok(serde_json::to_string(&s).unwrap_or_default()),
+                            None => Err(format!("State '{}' not found", id)),
+                        }
+                    }
+                    "/cli/states/set" => {
+                        // Assign a state to the current workspace
+                        let state_id = params.get("state_id").cloned().unwrap_or_default();
+                        match cli_update_project_setting(&project_path, "tier_id", &state_id) {
+                            Ok(_) => {
+                                let _ = app_handle.emit("sync:projects", ());
+                                Ok(serde_json::json!({"success": true, "stateId": state_id}).to_string())
+                            }
+                            Err(e) => Err(e),
                         }
                     }
                     "/cli/settings" => {
@@ -778,7 +851,7 @@ fn cli_get_project_settings(project_path: &str) -> Result<serde_json::Value, Str
         .map_err(|e| format!("Failed to open DB: {}", e))?;
 
     conn.query_row(
-        "SELECT agent_mode, worktree_mode, heartbeat_enabled, agent_enabled, pinned, name FROM projects WHERE path = ?1",
+        "SELECT agent_mode, worktree_mode, heartbeat_enabled, agent_enabled, pinned, name, tier_id FROM projects WHERE path = ?1",
         rusqlite::params![project_path],
         |row| {
             Ok(serde_json::json!({
@@ -788,6 +861,7 @@ fn cli_get_project_settings(project_path: &str) -> Result<serde_json::Value, Str
                 "agentEnabled": row.get::<_, i64>(3).unwrap_or(0) == 1,
                 "pinned": row.get::<_, i64>(4).unwrap_or(0) == 1,
                 "name": row.get::<_, String>(5).unwrap_or_default(),
+                "stateId": row.get::<_, Option<String>>(6).unwrap_or(None),
             }))
         },
     ).map_err(|e| format!("Project not found: {}", e))
