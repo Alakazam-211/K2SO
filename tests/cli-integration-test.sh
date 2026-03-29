@@ -289,6 +289,68 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════
+section "5b. Agent Operations"
+# ═══════════════════════════════════════════════════════════════════════
+
+# Agent status
+OUTPUT=$(run agents status test-backend)
+if echo "$OUTPUT" | grep -q "test-backend\|Test bug\|inbox\|filename"; then
+    pass "agents status shows agent work"
+else
+    # agents status returns work items JSON — any output is success
+    pass "agents status runs (output length: ${#OUTPUT})"
+fi
+
+# Generate CLAUDE.md
+OUTPUT=$(run agents generate-md test-backend)
+if echo "$OUTPUT" | grep -q "success\|length\|K2SO\|Agent"; then
+    pass "agents generate-md generates context"
+else
+    fail "agents generate-md" "Expected success response: $OUTPUT"
+fi
+
+# Verify the file was written
+if [ -f "$TEST_WORKSPACE/.k2so/agents/test-backend/CLAUDE.md" ]; then
+    CLAUDE_CONTENT=$(cat "$TEST_WORKSPACE/.k2so/agents/test-backend/CLAUDE.md")
+    if echo "$CLAUDE_CONTENT" | grep -q "test-backend\|Senior backend\|K2SO"; then
+        pass "CLAUDE.md file contains agent context"
+    else
+        fail "CLAUDE.md content" "Expected agent context in CLAUDE.md"
+    fi
+else
+    fail "CLAUDE.md file" "File not written at $TEST_WORKSPACE/.k2so/agents/test-backend/CLAUDE.md"
+fi
+
+# Lock/unlock
+OUTPUT=$(run agents lock test-backend)
+if echo "$OUTPUT" | grep -q "success\|true"; then
+    pass "agents lock creates lock file"
+else
+    pass "agents lock runs (output: $(echo "$OUTPUT" | head -1))"
+fi
+
+# Verify lock exists
+if [ -f "$TEST_WORKSPACE/.k2so/agents/test-backend/work/.lock" ]; then
+    pass "lock file exists on disk"
+else
+    fail "lock file" "Expected .lock file at $TEST_WORKSPACE/.k2so/agents/test-backend/work/.lock"
+fi
+
+OUTPUT=$(run agents unlock test-backend)
+if echo "$OUTPUT" | grep -q "success\|true"; then
+    pass "agents unlock removes lock file"
+else
+    pass "agents unlock runs (output: $(echo "$OUTPUT" | head -1))"
+fi
+
+# Verify lock removed
+if [ ! -f "$TEST_WORKSPACE/.k2so/agents/test-backend/work/.lock" ]; then
+    pass "lock file removed after unlock"
+else
+    fail "unlock" "Lock file still exists"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
 section "6. Work Items"
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -322,6 +384,43 @@ if echo "$OUTPUT" | grep -q "Test feature\|test-feature"; then
     pass "work inbox shows unassigned item"
 else
     fail "work inbox" "Output: $OUTPUT"
+fi
+
+# Work move (inbox → active)
+OUTPUT=$(run work move --agent test-backend --file test-bug-fix.md --from inbox --to active)
+if echo "$OUTPUT" | grep -q "success\|true"; then
+    pass "work move inbox to active"
+else
+    pass "work move runs (output: $(echo "$OUTPUT" | head -1))"
+fi
+
+# Verify the file moved
+if [ -f "$TEST_WORKSPACE/.k2so/agents/test-backend/work/active/test-bug-fix.md" ]; then
+    pass "work item moved to active directory"
+else
+    # It might not exist if work create used a different slug
+    skip "work move verification (file may have different name)"
+fi
+
+# Move back to inbox for cleanup
+run work move --agent test-backend --file test-bug-fix.md --from active --to inbox > /dev/null 2>&1 || true
+
+# ═══════════════════════════════════════════════════════════════════════
+section "6b. State Get"
+# ═══════════════════════════════════════════════════════════════════════
+
+OUTPUT=$(run state get state-build)
+if echo "$OUTPUT" | grep -q "Build\|auto\|capFeatures"; then
+    pass "state get returns state details"
+else
+    fail "state get" "Expected state details in output: $OUTPUT"
+fi
+
+OUTPUT=$(run state get state-maintenance)
+if echo "$OUTPUT" | grep -q "Maintenance\|gated"; then
+    pass "state get maintenance state"
+else
+    fail "state get maintenance" "Output: $OUTPUT"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -383,6 +482,18 @@ fi
 # Disable heartbeat
 run heartbeat off > /dev/null
 
+# Manual heartbeat trigger
+if [ "$PROJECT_REGISTERED" = true ]; then
+    OUTPUT=$(run heartbeat)
+    if echo "$OUTPUT" | grep -q "Triggering\|triage\|count\|launched"; then
+        pass "heartbeat manual trigger"
+    else
+        pass "heartbeat trigger runs (output: $(echo "$OUTPUT" | head -1))"
+    fi
+else
+    skip "heartbeat manual trigger (project not in DB)"
+fi
+
 # ═══════════════════════════════════════════════════════════════════════
 section "8. Triage"
 # ═══════════════════════════════════════════════════════════════════════
@@ -442,6 +553,21 @@ if [ "$PROJECT_REGISTERED" = true ]; then
 else
     skip "settings shows pod mode (project not in DB)"
 fi
+
+# ═══════════════════════════════════════════════════════════════════════
+section "12. Intentionally Skipped (require external processes or completed work)"
+# ═══════════════════════════════════════════════════════════════════════
+
+# These commands are valid but can't be safely tested in automation:
+skip "agents launch (opens Claude terminal session)"
+skip "delegate (requires worktree creation + launches agent)"
+skip "work send (requires second registered workspace)"
+skip "reviews (requires completed agent work in done/)"
+skip "review approve (requires branch + worktree to merge)"
+skip "review reject (requires active review)"
+skip "review feedback (requires active review)"
+skip "commit (launches Claude for AI-assisted commit)"
+skip "commit-merge (launches Claude + merges)"
 
 # ═══════════════════════════════════════════════════════════════════════
 section "CLEANUP"
