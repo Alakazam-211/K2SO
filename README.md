@@ -191,6 +191,32 @@ cargo tauri build
 
 For the full technical architecture, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## Testing
+
+Tests live in the `tests/` directory. Run them against a running K2SO instance.
+
+### CLI Integration Tests
+
+Tests all CLI commands end-to-end against a live K2SO instance:
+
+```bash
+# 1. Start K2SO
+cargo tauri dev
+
+# 2. Create a test workspace (one-time setup)
+mkdir -p ~/DevProjects/k2so-cli-test && cd ~/DevProjects/k2so-cli-test && git init
+
+# 3. Run the test suite
+./tests/cli-integration-test.sh
+```
+
+The test suite covers: agentic systems toggle, workspace states, agent CRUD, work items with source tags, heartbeat management (set/get/force/noop/action), triage, terminal spawn, worktree management, and settings. All test data is cleaned up automatically.
+
+Set `TEST_WORKSPACE` to use a different workspace path:
+```bash
+TEST_WORKSPACE=/path/to/workspace ./tests/cli-integration-test.sh
+```
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, project structure, and how to add new agent presets, document viewers, and workspace primitives.
