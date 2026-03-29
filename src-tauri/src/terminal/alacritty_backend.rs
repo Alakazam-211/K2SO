@@ -531,13 +531,17 @@ impl TerminalManager {
             // Drop the wakeup channel to unblock the grid emission thread
             instance.wakeup_tx.take();
 
-            // Kill child process
+            // Kill child process (Zed pattern: two-phase kill with proper reaping)
             if let Some(pid) = instance.child_pid {
                 #[cfg(unix)]
                 unsafe {
+                    // Phase 1: SIGHUP to process group (graceful)
                     let pgid = libc::getpgid(pid as i32);
                     if pgid > 0 {
-                        libc::killpg(pgid, libc::SIGHUP);
+                        if libc::killpg(pgid, libc::SIGHUP) != 0 {
+                            // Process group kill failed, try direct kill
+                            libc::kill(pid as i32, libc::SIGHUP);
+                        }
                     } else {
                         libc::kill(pid as i32, libc::SIGHUP);
                     }
@@ -545,29 +549,48 @@ impl TerminalManager {
                 thread::sleep(Duration::from_millis(100));
                 #[cfg(unix)]
                 unsafe {
+                    // Phase 2: SIGKILL (forceful)
                     libc::kill(pid as i32, libc::SIGKILL);
                 }
 
-                // Reap the child process to prevent zombies
+                // Reap the child process to prevent zombies.
+                // Retry waitpid a few times since SIGKILL is async — the process may not
+                // have exited yet after the first call (Zed pattern: timeout-based reaping).
                 #[cfg(unix)]
                 unsafe {
                     let mut status: i32 = 0;
-                    // WNOHANG: don't block if not yet exited (SIGKILL should handle it)
-                    libc::waitpid(pid as i32, &mut status, libc::WNOHANG);
+                    let mut reaped = false;
+                    for _ in 0..5 {
+                        let result = libc::waitpid(pid as i32, &mut status, libc::WNOHANG);
+                        if result > 0 || result == -1 {
+                            reaped = true;
+                            break; // Reaped or error (already reaped by another thread)
+                        }
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    if !reaped {
+                        // Last resort: blocking waitpid with short timeout by trying once more
+                        libc::waitpid(pid as i32, &mut status, libc::WNOHANG);
+                    }
                 }
             }
 
-            // Take the grid thread handle before dropping the instance.
-            // Dropping instance releases:
-            //   - instance.wakeup_tx (already taken above)
-            //   - instance.term (Arc refcount -1, but grid thread still holds a clone)
-            //   - instance.event_loop_sender (event loop will shut down)
-            // Once the event loop stops, no more wakeups are sent. The grid thread's
-            // K2SOListener sender (inside Term Arc) is the last wakeup_tx clone.
-            // When the grid thread's Term Arc is the sole owner and it drops,
-            // recv() returns Disconnected. This is async — we don't wait for it.
-            let _grid_handle = instance.grid_thread_handle.take();
-            // instance is dropped here — grid thread will exit asynchronously.
+            // Join the grid thread with a timeout to prevent thread leaks.
+            // Zed pattern: graceful shutdown then timeout-based force cleanup.
+            if let Some(grid_handle) = instance.grid_thread_handle.take() {
+                // Spawn a joiner thread with 500ms timeout
+                let (join_tx, join_rx) = std::sync::mpsc::channel();
+                let joiner = thread::spawn(move || {
+                    let _ = grid_handle.join();
+                    let _ = join_tx.send(());
+                });
+                if join_rx.recv_timeout(Duration::from_millis(500)).is_err() {
+                    // Grid thread didn't exit in time — detach and move on
+                    // (thread will exit eventually when its Arc<Term> is the last ref)
+                    drop(joiner);
+                }
+            }
+            // instance is dropped here.
         }
         Ok(())
     }
@@ -783,7 +806,13 @@ impl TerminalManager {
         let term = instance.term.lock_unfair();
         let grid = term.grid();
         let cols = grid.columns();
+        let screen_lines = grid.screen_lines();
         let mut text = String::new();
+
+        // Early return for empty grid (prevents out-of-bounds access)
+        if cols == 0 || screen_lines == 0 {
+            return Ok(String::new());
+        }
 
         let (sr, sc, er, ec) = if start_row < end_row || (start_row == end_row && start_col <= end_col) {
             (start_row, start_col, end_row, end_col)
@@ -792,13 +821,13 @@ impl TerminalManager {
         };
 
         for row_idx in sr..=er {
-            let line = Line(row_idx as i32);
-            if row_idx as usize >= grid.screen_lines() {
+            if row_idx as usize >= screen_lines {
                 break;
             }
+            let line = Line(row_idx as i32);
             let row = &grid[line];
 
-            let col_start = if row_idx == sr { sc as usize } else { 0 };
+            let col_start = if row_idx == sr { (sc as usize).min(cols - 1) } else { 0 };
             let col_end = if row_idx == er {
                 (ec as usize).min(cols - 1)
             } else {

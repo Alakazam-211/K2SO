@@ -128,8 +128,19 @@ fn urldecode(s: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '%' {
             let hex: String = chars.by_ref().take(2).collect();
-            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                result.push(byte as char);
+            // Validate we got exactly 2 hex chars before parsing
+            if hex.len() == 2 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                    result.push(byte as char);
+                } else {
+                    // Invalid hex — preserve the original characters
+                    result.push('%');
+                    result.push_str(&hex);
+                }
+            } else {
+                // Malformed percent encoding (e.g., %Z or lone %) — preserve as-is
+                result.push('%');
+                result.push_str(&hex);
             }
         } else if c == '+' {
             result.push(' ');
@@ -216,12 +227,23 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
 
-            // Read the HTTP request (16KB buffer for large query strings)
-            let mut buf = [0u8; 16384];
+            // Read the HTTP request (64KB buffer for large query strings with long paths)
+            let mut buf = [0u8; 65536];
             let n = match stream.read(&mut buf) {
+                Ok(0) => continue, // Connection closed
                 Ok(n) => n,
                 Err(_) => continue,
             };
+            // Detect truncation: if buffer is completely full, the request may have been cut off
+            if n == buf.len() {
+                let body = r#"{"error":"Request too large (>64KB)"}"#;
+                let resp = format!(
+                    "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                continue;
+            }
             let request = String::from_utf8_lossy(&buf[..n]);
 
             // Parse the request line: "GET /hook/complete?... HTTP/1.1"
@@ -237,7 +259,12 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
             };
 
             if method != "GET" {
-                let _ = stream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n");
+                let body = r#"{"error":"Only GET requests are supported"}"#;
+                let resp = format!(
+                    "HTTP/1.1 405 Method Not Allowed\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = stream.write_all(resp.as_bytes());
                 continue;
             }
 
@@ -247,7 +274,12 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                 // Validate auth token
                 let req_token = params.get("token").cloned().unwrap_or_default();
                 if req_token != token {
-                    let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+                    let body = r#"{"error":"Invalid or missing auth token"}"#;
+                    let resp = format!(
+                        "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
                     continue;
                 }
                 let pane_id = params.get("paneId").cloned().unwrap_or_default();
@@ -279,7 +311,12 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                 // Validate auth token
                 let req_token = params.get("token").cloned().unwrap_or_default();
                 if req_token != token {
-                    let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+                    let body = r#"{"error":"Invalid or missing auth token"}"#;
+                    let resp = format!(
+                        "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
                     continue;
                 }
 
@@ -814,9 +851,11 @@ fn cli_update_project_setting(project_path: &str, field: &str, value: &str) -> R
         .join("k2so.db");
     let conn = rusqlite::Connection::open(&db_path)
         .map_err(|e| format!("Failed to open DB: {}", e))?;
+    // Safety pragmas for CLI DB connections (Zed pattern: WAL + busy_timeout + query safety)
+    let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
 
     // Validate field name to prevent SQL injection
-    let allowed = ["agent_mode", "worktree_mode", "heartbeat_enabled", "agent_enabled", "pinned"];
+    let allowed = ["agent_mode", "worktree_mode", "heartbeat_enabled", "agent_enabled", "pinned", "tier_id"];
     if !allowed.contains(&field) {
         return Err(format!("Unknown setting: {}", field));
     }
@@ -849,6 +888,8 @@ fn cli_get_project_settings(project_path: &str) -> Result<serde_json::Value, Str
         .join("k2so.db");
     let conn = rusqlite::Connection::open(&db_path)
         .map_err(|e| format!("Failed to open DB: {}", e))?;
+    // Safety pragmas: WAL for concurrent reads, busy_timeout for lock contention, query_only for safety
+    let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA query_only=ON;");
 
     conn.query_row(
         "SELECT agent_mode, worktree_mode, heartbeat_enabled, agent_enabled, pinned, name, tier_id FROM projects WHERE path = ?1",

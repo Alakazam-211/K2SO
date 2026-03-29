@@ -133,13 +133,14 @@ pub fn run() {
                     if let tauri::WindowEvent::CloseRequested { .. } = event {
                         window::save_window_state(&app_handle);
 
-                        // Parallelize LLM unload and terminal kill with a 2-second timeout.
+                        // Parallelize LLM unload and terminal kill with a 5-second timeout.
                         // These have no dependency on each other and can run concurrently.
+                        // Zed pattern: log panics instead of silently swallowing them.
                         let handle_for_llm = app_handle.clone();
                         let handle_for_term = app_handle.clone();
 
                         let llm_thread = std::thread::spawn(move || {
-                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 if let Some(state) = handle_for_llm.try_state::<AppState>() {
                                     // Use try_lock to avoid blocking if model is still loading
                                     if let Some(mut manager) = state.llm_manager.try_lock() {
@@ -148,22 +149,33 @@ pub fn run() {
                                         log_debug!("[shutdown] LLM lock busy (model loading?) — skipping unload");
                                     }
                                 }
-                            }));
+                            })) {
+                                let msg = panic.downcast_ref::<String>()
+                                    .map(|s| s.as_str())
+                                    .or_else(|| panic.downcast_ref::<&str>().copied())
+                                    .unwrap_or("unknown panic");
+                                log_debug!("[shutdown] LLM unload panicked: {}", msg);
+                            }
                         });
 
                         let term_thread = std::thread::spawn(move || {
-                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 if let Some(state) = handle_for_term.try_state::<AppState>() {
                                     let mut manager = state.terminal_manager.lock();
                                     manager.kill_all();
                                 }
-                            }));
+                            })) {
+                                let msg = panic.downcast_ref::<String>()
+                                    .map(|s| s.as_str())
+                                    .or_else(|| panic.downcast_ref::<&str>().copied())
+                                    .unwrap_or("unknown panic");
+                                log_debug!("[shutdown] Terminal kill panicked: {}", msg);
+                            }
                         });
 
-                        // Wait up to 2 seconds for both to complete.
-                        // Use a parking thread to implement join-with-timeout since
-                        // JoinHandle::join_timeout is not yet stable.
-                        let timeout = std::time::Duration::from_secs(2);
+                        // Wait up to 5 seconds for both to complete (increased from 2s).
+                        // LLM Metal cleanup and terminal process reaping can take time.
+                        let timeout = std::time::Duration::from_secs(5);
                         let (done_tx, done_rx) = std::sync::mpsc::channel();
                         let done_tx2 = done_tx.clone();
 
@@ -181,13 +193,13 @@ pub fn run() {
                         while completed < 2 {
                             let remaining = timeout.saturating_sub(start.elapsed());
                             if remaining.is_zero() {
-                                log_debug!("[shutdown] Cleanup timed out after 2s — exiting anyway");
+                                log_debug!("[shutdown] Cleanup timed out after 5s — exiting anyway");
                                 break;
                             }
                             match done_rx.recv_timeout(remaining) {
                                 Ok(_) => completed += 1,
                                 Err(_) => {
-                                    log_debug!("[shutdown] Cleanup timed out after 2s — exiting anyway");
+                                    log_debug!("[shutdown] Cleanup timed out after 5s — exiting anyway");
                                     break;
                                 }
                             }
@@ -229,10 +241,30 @@ pub fn run() {
                     }
                 }
 
-                // Write port and token to ~/.k2so/ for external heartbeat scripts and CLI
+                // Clean stale port file on startup — if K2SO crashed previously,
+                // the old port file persists and CLI/heartbeat scripts connect to a dead port.
                 let home = dirs::home_dir().unwrap_or_default();
                 let k2so_dir = home.join(".k2so");
                 let _ = std::fs::create_dir_all(&k2so_dir);
+                {
+                    let stale_port_file = k2so_dir.join("heartbeat.port");
+                    if stale_port_file.exists() {
+                        // Check if the old port is still alive; if not, remove it
+                        if let Ok(old_port_str) = std::fs::read_to_string(&stale_port_file) {
+                            if let Ok(old_port) = old_port_str.trim().parse::<u16>() {
+                                if old_port != hook_port {
+                                    // Different port — old instance is dead, clean up
+                                    let _ = std::fs::remove_file(&stale_port_file);
+                                    log_debug!("[startup] Removed stale port file (was port {})", old_port);
+                                }
+                            } else {
+                                let _ = std::fs::remove_file(&stale_port_file);
+                            }
+                        }
+                    }
+                }
+
+                // Write port and token to ~/.k2so/ for external heartbeat scripts and CLI
                 // Atomic write: tmp file + rename to prevent partial reads
                 let port_file = k2so_dir.join("heartbeat.port");
                 let port_tmp = k2so_dir.join("heartbeat.port.tmp");
@@ -244,14 +276,40 @@ pub fn run() {
                 let token_file = k2so_dir.join("heartbeat.token");
                 let token_str = crate::agent_hooks::get_token();
                 if !token_str.is_empty() {
-                    // Set file permissions to owner-only (0600) for security
-                    if let Err(e) = std::fs::write(&token_file, token_str) {
-                        log_debug!("[heartbeat] Failed to write token file: {}", e);
-                    } else {
-                        #[cfg(unix)]
+                    // Create token file with restricted permissions from the start (0600)
+                    // to avoid a race window where the file is world-readable between
+                    // write and chmod. Uses OpenOptions to set permissions atomically.
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        use std::io::Write;
+                        let token_tmp = k2so_dir.join("heartbeat.token.tmp");
+                        match std::fs::OpenOptions::new()
+                            .write(true)
+                            .create(true)
+                            .truncate(true)
+                            .mode(0o600)
+                            .open(&token_tmp)
                         {
-                            use std::os::unix::fs::PermissionsExt;
-                            let _ = std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600));
+                            Ok(mut f) => {
+                                if let Err(e) = f.write_all(token_str.as_bytes())
+                                    .and_then(|_| f.flush())
+                                {
+                                    log_debug!("[heartbeat] Failed to write token file: {}", e);
+                                } else {
+                                    let _ = std::fs::rename(&token_tmp, &token_file);
+                                }
+                            }
+                            Err(e) => log_debug!("[heartbeat] Failed to create token file: {}", e),
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let token_tmp = k2so_dir.join("heartbeat.token.tmp");
+                        if let Err(e) = std::fs::write(&token_tmp, token_str)
+                            .and_then(|_| std::fs::rename(&token_tmp, &token_file))
+                        {
+                            log_debug!("[heartbeat] Failed to write token file: {}", e);
                         }
                     }
                 }

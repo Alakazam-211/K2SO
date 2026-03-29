@@ -78,7 +78,7 @@ fn parse_frontmatter(content: &str) -> std::collections::HashMap<String, String>
 }
 
 fn read_work_item(path: &Path, folder: &str) -> Option<WorkItem> {
-    let content = fs::read_to_string(path).ok()?;
+    let content = safe_read_to_string(path).ok()?;
     let fm = parse_frontmatter(&content);
     let filename = path.file_name()?.to_string_lossy().to_string();
 
@@ -109,15 +109,50 @@ fn read_work_item(path: &Path, folder: &str) -> Option<WorkItem> {
     })
 }
 
+/// Bounded count of .md files in a directory (max 10,000 to prevent memory exhaustion
+/// from corrupted or adversarial directories with millions of entries).
 fn count_md_files(dir: &Path) -> usize {
+    const MAX_COUNT: usize = 10_000;
     fs::read_dir(dir)
         .map(|entries| {
             entries
                 .filter_map(|e| e.ok())
                 .filter(|e| e.path().extension().map_or(false, |ext| ext == "md"))
+                .take(MAX_COUNT)
                 .count()
         })
         .unwrap_or(0)
+}
+
+/// Maximum file size for reading work items and agent profiles (1MB).
+/// Prevents memory exhaustion from malicious or corrupted files.
+const MAX_FILE_SIZE: u64 = 1_048_576;
+
+/// Atomic file write: write to a temp file in the same directory, then rename.
+/// This prevents partial/corrupted files if the process crashes during write.
+/// (Zed pattern: NamedTempFile + persist for atomic rename)
+fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let tmp_path = parent.join(format!(".{}.tmp", path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "k2so".to_string())));
+    fs::write(&tmp_path, content)
+        .map_err(|e| format!("Failed to write temp file: {}", e))?;
+    fs::rename(&tmp_path, path)
+        .map_err(|e| {
+            // Clean up temp file if rename fails
+            let _ = fs::remove_file(&tmp_path);
+            format!("Failed to rename temp file: {}", e)
+        })
+}
+
+/// Read a file with size limit check to prevent OOM from large/malicious files.
+fn safe_read_to_string(path: &Path) -> Result<String, String> {
+    let metadata = fs::metadata(path).map_err(|e| format!("Cannot read {}: {}", path.display(), e))?;
+    if metadata.len() > MAX_FILE_SIZE {
+        return Err(format!("File too large ({} bytes, max {}): {}", metadata.len(), MAX_FILE_SIZE, path.display()));
+    }
+    fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))
 }
 
 // ── Heartbeat Configuration ─────────────────────────────────────────────
@@ -220,9 +255,7 @@ fn write_heartbeat_config(project_path: &str, agent_name: &str, config: &AgentHe
     let path = dir.join("heartbeat.json");
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Failed to serialize heartbeat config: {}", e))?;
-    fs::write(&path, json)
-        .map_err(|e| format!("Failed to write heartbeat.json: {}", e))?;
-    Ok(())
+    atomic_write(&path, &json)
 }
 
 // ── Tauri Commands ──────────────────────────────────────────────────────
@@ -322,7 +355,7 @@ pub fn k2so_agents_create(
     };
 
     let content = format!("---\n{}\n---\n\n{}\n", frontmatter, body);
-    fs::write(&agent_md, content).map_err(|e| format!("Failed to write agent.md: {}", e))?;
+    atomic_write(&agent_md, &content)?;
 
     Ok(K2soAgentInfo {
         name,
@@ -432,8 +465,7 @@ pub fn k2so_agents_update_field(
     let _ = fs::copy(&md_path, backup_dir.join(&backup_name));
     cleanup_agent_backups(&backup_dir, 20);
 
-    fs::write(&md_path, &updated)
-        .map_err(|e| format!("Failed to write agent.md: {}", e))?;
+    atomic_write(&md_path, &updated)?;
 
     Ok(updated)
 }
@@ -518,7 +550,7 @@ pub fn k2so_agents_work_create(
     );
 
     let path = target_dir.join(&filename);
-    fs::write(&path, &content).map_err(|e| format!("Failed to write work item: {}", e))?;
+    atomic_write(&path, &content)?;
 
     let body_preview = { let trimmed = body.trim(); let preview: String = trimmed.chars().take(120).collect(); if trimmed.chars().count() > 120 { format!("{}...", preview.trim()) } else { preview } };
 
@@ -598,15 +630,13 @@ pub fn k2so_agents_delegate(
     let updated = update_assigned_by(&content, "delegated");
     let updated = add_worktree_to_frontmatter(&updated, &worktree.path, &worktree.branch);
     let active_file = active_dir.join(&item.filename);
-    fs::write(&active_file, &updated)
-        .map_err(|e| format!("Failed to write active work item: {}", e))?;
+    atomic_write(&active_file, &updated)?;
     fs::remove_file(&source).map_err(|e| format!("Failed to remove source: {}", e))?;
 
     // 3. Generate a task-specific CLAUDE.md and write it to the worktree root
     let claude_md = generate_agent_claude_md_content(&project_path, &target_agent, Some(&item))?;
     let claude_md_path = PathBuf::from(&worktree.path).join("CLAUDE.md");
-    fs::write(&claude_md_path, &claude_md)
-        .map_err(|e| format!("Failed to write CLAUDE.md to worktree: {}", e))?;
+    atomic_write(&claude_md_path, &claude_md)?;
 
     // 4. Build the launch command for the frontend
     let initial_prompt = format!(
@@ -685,7 +715,7 @@ pub fn k2so_agents_update_profile(
         return Err(format!("Agent '{}' does not exist", agent_name));
     }
     let path = dir.join("agent.md");
-    fs::write(&path, content).map_err(|e| e.to_string())
+    atomic_write(&path, &content)
 }
 
 // ── Workspace Inbox ─────────────────────────────────────────────────────
@@ -747,7 +777,7 @@ pub fn k2so_agents_workspace_inbox_create(
     );
 
     let path = dir.join(&filename);
-    fs::write(&path, &content).map_err(|e| e.to_string())?;
+    atomic_write(&path, &content)?;
 
     let body_preview = { let trimmed = body.trim(); let preview: String = trimmed.chars().take(120).collect(); if trimmed.chars().count() > 120 { format!("{}...", preview.trim()) } else { preview } };
     Ok(WorkItem {
@@ -803,8 +833,7 @@ pub fn k2so_agents_generate_claude_md(
     let md = generate_agent_claude_md_content(&project_path, &agent_name, None)?;
 
     let claude_md_path = agent_dir(&project_path, &agent_name).join("CLAUDE.md");
-    fs::write(&claude_md_path, &md)
-        .map_err(|e| format!("Failed to write CLAUDE.md: {}", e))?;
+    atomic_write(&claude_md_path, &md)?;
 
     Ok(md)
 }
@@ -1579,27 +1608,24 @@ K2SO_PROJECT_PATH="/path/to/new-project" k2so agents create backend-eng --role "
         if disabled_content.starts_with("# K2SO ") {
             // It was our generated content — write fresh for the new mode
             let _ = fs::remove_file(&disabled_path);
-            fs::write(&claude_md_path, &md)
-                .map_err(|e| format!("Failed to write CLAUDE.md: {}", e))?;
+            atomic_write(&claude_md_path, &md)?;
         } else {
             // It was user-written — restore it, save ours for reference
             fs::rename(&disabled_path, &claude_md_path)
                 .map_err(|e| format!("Failed to restore CLAUDE.md: {}", e))?;
-            let _ = fs::write(&generated_path, &md);
+            let _ = atomic_write(&generated_path, &md);
             return fs::read_to_string(&claude_md_path).map_err(|e| e.to_string());
         }
     } else if is_k2so_generated {
         // Existing CLAUDE.md was generated by K2SO — regenerate for current mode
-        fs::write(&claude_md_path, &md)
-            .map_err(|e| format!("Failed to write CLAUDE.md: {}", e))?;
+        atomic_write(&claude_md_path, &md)?;
     } else if claude_md_path.exists() {
         // Existing user-written CLAUDE.md — don't overwrite, save ours for reference
-        let _ = fs::write(&generated_path, &md);
+        let _ = atomic_write(&generated_path, &md);
         return fs::read_to_string(&claude_md_path).map_err(|e| e.to_string());
     } else {
         // No CLAUDE.md exists — write fresh
-        fs::write(&claude_md_path, &md)
-            .map_err(|e| format!("Failed to write CLAUDE.md: {}", e))?;
+        atomic_write(&claude_md_path, &md)?;
     }
 
     Ok(md)
@@ -1927,12 +1953,16 @@ pub fn k2so_agents_review_reject(
     // 1. Find and remove the worktree + branch for this agent
     let worktrees = crate::git::list_worktrees(&project_path);
     for wt in worktrees.iter().filter(|wt| wt.branch.starts_with(&format!("agent/{}/", agent_name))) {
-        let _ = crate::git::remove_worktree(&project_path, &wt.path, true);
-        let _ = crate::git::delete_branch(&project_path, &wt.branch);
+        if let Err(e) = crate::git::remove_worktree(&project_path, &wt.path, true) {
+            log_debug!("[review-reject] Failed to remove worktree {}: {}", wt.path, e);
+        }
+        if let Err(e) = crate::git::delete_branch(&project_path, &wt.branch) {
+            log_debug!("[review-reject] Failed to delete branch {}: {}", wt.branch, e);
+        }
     }
 
     // 2. Move all done items back to inbox (strip worktree info from frontmatter)
-    fs::create_dir_all(&inbox_dir).ok();
+    fs::create_dir_all(&inbox_dir).map_err(|e| format!("Failed to create inbox dir: {}", e))?;
     if let Ok(entries) = fs::read_dir(&done_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -1942,9 +1972,13 @@ pub fn k2so_agents_review_reject(
                 // Strip old worktree info so a fresh worktree gets created on retry
                 if let Ok(content) = fs::read_to_string(&path) {
                     let cleaned = strip_worktree_from_frontmatter(&content);
-                    let _ = fs::write(&target, &cleaned);
+                    if let Err(e) = atomic_write(&target, &cleaned) {
+                        log_debug!("[review-reject] Failed to write cleaned work item: {}", e);
+                    }
                 } else {
-                    let _ = fs::rename(&path, &target);
+                    if let Err(e) = fs::rename(&path, &target) {
+                        log_debug!("[review-reject] Failed to move work item: {}", e);
+                    }
                 }
                 let _ = fs::remove_file(&path);
             }
@@ -1960,7 +1994,7 @@ pub fn k2so_agents_review_reject(
         );
         let filename = format!("review-feedback-{}.md", now);
         let path = inbox_dir.join(&filename);
-        fs::write(&path, &content).map_err(|e| e.to_string())?;
+        atomic_write(&path, &content)?;
     }
 
     // 4. Unlock the agent
@@ -1988,7 +2022,7 @@ pub fn k2so_agents_review_request_changes(
     );
     let filename = format!("review-feedback-{}.md", now);
     let path = inbox_dir.join(&filename);
-    fs::write(&path, &content).map_err(|e| e.to_string())?;
+    atomic_write(&path, &content)?;
 
     Ok(())
 }
@@ -2235,7 +2269,8 @@ pub fn llm_triage_decide(
     // Check if LLM is loaded
     if !llm_manager.is_loaded() {
         log_agent_warning(project_path, "__lead__", "LLM not loaded — falling back to filesystem triage");
-        return k2so_agents_triage_decide(project_path.to_string());
+        // Direct fallback — no recursion, calls scheduler_tick which is non-recursive
+        return k2so_agents_scheduler_tick(project_path.to_string());
     }
 
     // Call the local LLM via safe subprocess
@@ -2277,26 +2312,32 @@ pub fn llm_triage_decide(
                 }
                 None => {
                     log_agent_warning(project_path, "__lead__",
-                        &format!("LLM triage returned unparseable response: {}", &response[..response.len().min(200)]));
-                    // Fallback to filesystem triage
-                    k2so_agents_triage_decide(project_path.to_string())
+                        &format!("LLM triage returned unparseable response: {}",
+                            &response[..response.len().min(200)]));
+                    // Fallback to filesystem triage (non-recursive — calls scheduler_tick directly)
+                    k2so_agents_scheduler_tick(project_path.to_string())
                 }
             }
         }
         Err(e) => {
             log_agent_warning(project_path, "__lead__",
                 &format!("LLM triage failed: {} — falling back to filesystem", e));
-            k2so_agents_triage_decide(project_path.to_string())
+            // Fallback to filesystem triage (non-recursive — calls scheduler_tick directly)
+            k2so_agents_scheduler_tick(project_path.to_string())
         }
     }
 }
 
 /// Parse the LLM's triage JSON response into a list of agent names.
 fn parse_triage_response(response: &str) -> Option<Vec<String>> {
-    // Try to find JSON in the response (LLM might add extra text)
+    // Try to find JSON in the response (LLM might add extra text/preamble)
     let json_start = response.find('{')?;
-    let json_end = response.rfind('}')? + 1;
-    let json_str = &response[json_start..json_end];
+    let json_end = response.rfind('}').map(|i| i + 1)?;
+    // Bounds check: end must be after start
+    if json_end <= json_start {
+        return None;
+    }
+    let json_str = response.get(json_start..json_end)?;
 
     let parsed: serde_json::Value = serde_json::from_str(json_str).ok()?;
     let wake = parsed.get("wake")?.as_array()?;
@@ -2554,9 +2595,13 @@ pub fn k2so_agents_heartbeat_noop(
     config.consecutive_no_ops += 1;
 
     // Auto-backoff: after 3 consecutive no-ops, increase interval by 1.5x
+    // Uses integer arithmetic (3/2) to avoid floating-point precision drift on repeated backoffs.
+    // Clamps to both min and max interval bounds.
     if config.auto_backoff && config.consecutive_no_ops >= 3 {
-        let new_interval = ((config.interval_seconds as f64) * 1.5) as u64;
-        config.interval_seconds = new_interval.min(config.max_interval_seconds);
+        let new_interval = config.interval_seconds.saturating_mul(3) / 2; // 1.5x without floats
+        config.interval_seconds = new_interval
+            .max(config.min_interval_seconds)
+            .min(config.max_interval_seconds);
         log_agent_warning(
             &project_path,
             &agent_name,
@@ -2597,7 +2642,13 @@ fn is_within_active_hours(hours: &ActiveHours, _now: &chrono::DateTime<chrono::U
     let parse_hhmm = |s: &str| -> Option<(u32, u32)> {
         let parts: Vec<&str> = s.split(':').collect();
         if parts.len() == 2 {
-            Some((parts[0].parse().ok()?, parts[1].parse().ok()?))
+            let h: u32 = parts[0].parse().ok()?;
+            let m: u32 = parts[1].parse().ok()?;
+            // Validate ranges: hours 0-23, minutes 0-59
+            if h > 23 || m > 59 {
+                return None;
+            }
+            Some((h, m))
         } else {
             None
         }
@@ -2605,11 +2656,17 @@ fn is_within_active_hours(hours: &ActiveHours, _now: &chrono::DateTime<chrono::U
 
     let (start_h, start_m) = match parse_hhmm(&hours.start) {
         Some(v) => v,
-        None => return true, // Invalid format — don't block
+        None => {
+            log_debug!("[heartbeat] Invalid active_hours start format: '{}' — allowing wake", hours.start);
+            return true; // Invalid format — don't block (permissive)
+        }
     };
     let (end_h, end_m) = match parse_hhmm(&hours.end) {
         Some(v) => v,
-        None => return true,
+        None => {
+            log_debug!("[heartbeat] Invalid active_hours end format: '{}' — allowing wake", hours.end);
+            return true;
+        }
     };
 
     // Use local system time (best approximation without chrono-tz)
@@ -3061,7 +3118,7 @@ pub fn k2so_agents_save_agent_md(
         cleanup_agent_backups(&backup_dir, 20);
     }
 
-    fs::write(&agent_md_path, &content).map_err(|e| e.to_string())
+    atomic_write(&agent_md_path, &content)
 }
 
 /// Remove oldest backups, keeping only the most recent `keep` files.

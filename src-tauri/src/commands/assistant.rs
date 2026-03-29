@@ -1,10 +1,30 @@
 use serde::Serialize;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tauri::{AppHandle, Manager, State};
 
 use crate::llm::download;
 use crate::llm::file_index;
 use crate::llm::tools::{self, AssistantResponse};
 use crate::state::AppState;
+
+/// Maximum concurrent LLM worker subprocesses (prevents GPU/CPU exhaustion).
+/// Zed pattern: semaphore-style concurrency control for resource-intensive operations.
+static LLM_ACTIVE_WORKERS: AtomicU32 = AtomicU32::new(0);
+const MAX_LLM_WORKERS: u32 = 2;
+
+/// Maximum size of LLM subprocess stdout (10MB) to prevent OOM from runaway output.
+const MAX_LLM_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
+
+/// RAII guard that cleans up the temp file when dropped (even on panic).
+/// Zed pattern: `defer()` / `Deferred<F>` for guaranteed cleanup.
+struct TempFileGuard {
+    path: std::path::PathBuf,
+}
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -99,51 +119,77 @@ fn safe_generate(
     system_prompt: &str,
     user_message: &str,
 ) -> Result<String, String> {
+    // Concurrency guard: limit concurrent LLM workers to prevent GPU/CPU exhaustion
+    let current = LLM_ACTIVE_WORKERS.load(Ordering::Relaxed);
+    if current >= MAX_LLM_WORKERS {
+        return Err(format!("Too many concurrent LLM workers ({}/{}). Try again shortly.", current, MAX_LLM_WORKERS));
+    }
+    LLM_ACTIVE_WORKERS.fetch_add(1, Ordering::Relaxed);
+
     // Get the model path so the child process can load it independently
     let model_path = _manager.get_model_path()
-        .ok_or_else(|| "No model loaded".to_string())?;
+        .ok_or_else(|| {
+            LLM_ACTIVE_WORKERS.fetch_sub(1, Ordering::Relaxed);
+            "No model loaded".to_string()
+        })?;
 
-    let exe = std::env::current_exe().map_err(|e| format!("Cannot find exe: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| {
+        LLM_ACTIVE_WORKERS.fetch_sub(1, Ordering::Relaxed);
+        format!("Cannot find exe: {e}")
+    })?;
 
     // Pass system prompt and user message via a temp file to avoid arg length limits
-    let tmp = std::env::temp_dir().join(format!("k2so-llm-{}.json", std::process::id()));
+    // RAII guard ensures cleanup even on panic (Zed's defer pattern)
+    let tmp = std::env::temp_dir().join(format!("k2so-llm-{}-{}.json", std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()));
+    let _tmp_guard = TempFileGuard { path: tmp.clone() };
     let payload = serde_json::json!({
         "model": model_path,
         "system": system_prompt,
         "message": user_message,
     });
     std::fs::write(&tmp, payload.to_string())
-        .map_err(|e| format!("Failed to write LLM payload: {e}"))?;
+        .map_err(|e| {
+            LLM_ACTIVE_WORKERS.fetch_sub(1, Ordering::Relaxed);
+            format!("Failed to write LLM payload: {e}")
+        })?;
 
     let mut child = std::process::Command::new(&exe)
         .args(["--llm-worker", tmp.to_string_lossy().as_ref()])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to spawn LLM worker: {e}"))?;
+        .map_err(|e| {
+            LLM_ACTIVE_WORKERS.fetch_sub(1, Ordering::Relaxed);
+            format!("Failed to spawn LLM worker: {e}")
+        })?;
 
     // Timeout: kill subprocess if it takes longer than 45 seconds
     let timeout = std::time::Duration::from_secs(45);
     let start = std::time::Instant::now();
     let output = loop {
         match child.try_wait() {
-            Ok(Some(_status)) => break child.wait_with_output().map_err(|e| format!("LLM worker error: {e}"))?,
+            Ok(Some(_status)) => break child.wait_with_output().map_err(|e| {
+                LLM_ACTIVE_WORKERS.fetch_sub(1, Ordering::Relaxed);
+                format!("LLM worker error: {e}")
+            })?,
             Ok(None) => {
                 if start.elapsed() > timeout {
                     let _ = child.kill();
-                    let _ = std::fs::remove_file(&tmp);
+                    LLM_ACTIVE_WORKERS.fetch_sub(1, Ordering::Relaxed);
                     return Err("LLM inference timed out (45s limit)".to_string());
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
+                LLM_ACTIVE_WORKERS.fetch_sub(1, Ordering::Relaxed);
                 return Err(format!("LLM worker error: {e}"));
             }
         }
     };
 
-    let _ = std::fs::remove_file(&tmp);
+    LLM_ACTIVE_WORKERS.fetch_sub(1, Ordering::Relaxed);
+    // Note: _tmp_guard handles cleanup via Drop
 
     let exit_code = output.status.code();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -155,6 +201,10 @@ fn safe_generate(
     }
 
     if output.status.success() {
+        // Guard against runaway LLM output (prevents OOM)
+        if output.stdout.len() > MAX_LLM_OUTPUT_BYTES {
+            return Err(format!("LLM output too large ({} bytes, max {})", output.stdout.len(), MAX_LLM_OUTPUT_BYTES));
+        }
         let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
         log_debug!("[llm-worker] Output: {} bytes", result.len());
         if result.is_empty() {

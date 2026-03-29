@@ -192,51 +192,55 @@ impl Project {
         agent_mode: Option<String>,
         state_id: Option<Option<&str>>,
     ) -> Result<()> {
+        // Wrap in transaction so all field updates succeed or fail atomically.
+        // Without this, agent_mode and agent_enabled can diverge if the process crashes mid-update.
+        let tx = conn.unchecked_transaction()?;
         if let Some(v) = name {
-            conn.execute("UPDATE projects SET name = ?1 WHERE id = ?2", params![v, id])?;
+            tx.execute("UPDATE projects SET name = ?1 WHERE id = ?2", params![v, id])?;
         }
         if let Some(v) = path {
-            conn.execute("UPDATE projects SET path = ?1 WHERE id = ?2", params![v, id])?;
+            tx.execute("UPDATE projects SET path = ?1 WHERE id = ?2", params![v, id])?;
         }
         if let Some(v) = color {
-            conn.execute("UPDATE projects SET color = ?1 WHERE id = ?2", params![v, id])?;
+            tx.execute("UPDATE projects SET color = ?1 WHERE id = ?2", params![v, id])?;
         }
         if let Some(v) = tab_order {
-            conn.execute("UPDATE projects SET tab_order = ?1 WHERE id = ?2", params![v, id])?;
+            tx.execute("UPDATE projects SET tab_order = ?1 WHERE id = ?2", params![v, id])?;
         }
         if let Some(v) = worktree_mode {
-            conn.execute("UPDATE projects SET worktree_mode = ?1 WHERE id = ?2", params![v, id])?;
+            tx.execute("UPDATE projects SET worktree_mode = ?1 WHERE id = ?2", params![v, id])?;
         }
         if let Some(v) = icon_url {
-            conn.execute("UPDATE projects SET icon_url = ?1 WHERE id = ?2", params![v, id])?;
+            tx.execute("UPDATE projects SET icon_url = ?1 WHERE id = ?2", params![v, id])?;
         }
         if let Some(v) = focus_group_id {
-            conn.execute("UPDATE projects SET focus_group_id = ?1 WHERE id = ?2", params![v, id])?;
+            tx.execute("UPDATE projects SET focus_group_id = ?1 WHERE id = ?2", params![v, id])?;
         }
         if let Some(v) = pinned {
-            conn.execute("UPDATE projects SET pinned = ?1 WHERE id = ?2", params![v, id])?;
+            tx.execute("UPDATE projects SET pinned = ?1 WHERE id = ?2", params![v, id])?;
         }
         if let Some(v) = manually_active {
-            conn.execute("UPDATE projects SET manually_active = ?1 WHERE id = ?2", params![v, id])?;
+            tx.execute("UPDATE projects SET manually_active = ?1 WHERE id = ?2", params![v, id])?;
         }
         if let Some(v) = agent_enabled {
-            conn.execute("UPDATE projects SET agent_enabled = ?1 WHERE id = ?2", params![v, id])?;
+            tx.execute("UPDATE projects SET agent_enabled = ?1 WHERE id = ?2", params![v, id])?;
         }
         if let Some(v) = heartbeat_enabled {
-            conn.execute("UPDATE projects SET heartbeat_enabled = ?1 WHERE id = ?2", params![v, id])?;
+            tx.execute("UPDATE projects SET heartbeat_enabled = ?1 WHERE id = ?2", params![v, id])?;
         }
         if let Some(ref v) = agent_mode {
-            conn.execute("UPDATE projects SET agent_mode = ?1 WHERE id = ?2", params![v, id])?;
+            tx.execute("UPDATE projects SET agent_mode = ?1 WHERE id = ?2", params![v, id])?;
             // Keep agent_enabled in sync for backward compat
             let enabled = if v == "off" { 0i64 } else { 1i64 };
-            conn.execute("UPDATE projects SET agent_enabled = ?1 WHERE id = ?2", params![enabled, id])?;
+            tx.execute("UPDATE projects SET agent_enabled = ?1 WHERE id = ?2", params![enabled, id])?;
         }
         if let Some(v) = state_id {
             match v {
-                Some(sid) => conn.execute("UPDATE projects SET tier_id = ?1 WHERE id = ?2", params![sid, id])?,
-                None => conn.execute("UPDATE projects SET tier_id = NULL WHERE id = ?1", params![id])?,
+                Some(sid) => tx.execute("UPDATE projects SET tier_id = ?1 WHERE id = ?2", params![sid, id])?,
+                None => tx.execute("UPDATE projects SET tier_id = NULL WHERE id = ?1", params![id])?,
             };
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -780,14 +784,18 @@ impl WorkspaceState {
         cap_audits: &str,
         heartbeat: bool,
     ) -> Result<()> {
-        let max_order: i64 = conn.query_row(
+        // Wrap in transaction to prevent race condition on sort_order
+        // (Zed pattern: savepoint-wrapped mutations for atomicity)
+        let tx = conn.unchecked_transaction()?;
+        let max_order: i64 = tx.query_row(
             "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM workspace_states", [], |r| r.get(0)
         )?;
-        conn.execute(
+        tx.execute(
             "INSERT INTO workspace_states (id, name, description, is_built_in, cap_features, cap_issues, cap_crashes, cap_security, cap_audits, heartbeat, sort_order) \
              VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![id, name, description, cap_features, cap_issues, cap_crashes, cap_security, cap_audits, heartbeat as i64, max_order],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -803,28 +811,39 @@ impl WorkspaceState {
         cap_audits: Option<&str>,
         heartbeat: Option<bool>,
     ) -> Result<()> {
-        if let Some(v) = name { conn.execute("UPDATE workspace_states SET name = ?1 WHERE id = ?2", params![v, id])?; }
-        if let Some(v) = description { conn.execute("UPDATE workspace_states SET description = ?1 WHERE id = ?2", params![v, id])?; }
-        if let Some(v) = cap_features { conn.execute("UPDATE workspace_states SET cap_features = ?1 WHERE id = ?2", params![v, id])?; }
-        if let Some(v) = cap_issues { conn.execute("UPDATE workspace_states SET cap_issues = ?1 WHERE id = ?2", params![v, id])?; }
-        if let Some(v) = cap_crashes { conn.execute("UPDATE workspace_states SET cap_crashes = ?1 WHERE id = ?2", params![v, id])?; }
-        if let Some(v) = cap_security { conn.execute("UPDATE workspace_states SET cap_security = ?1 WHERE id = ?2", params![v, id])?; }
-        if let Some(v) = cap_audits { conn.execute("UPDATE workspace_states SET cap_audits = ?1 WHERE id = ?2", params![v, id])?; }
-        if let Some(v) = heartbeat { conn.execute("UPDATE workspace_states SET heartbeat = ?1 WHERE id = ?2", params![v as i64, id])?; }
+        // Wrap in transaction so all updates succeed or fail together
+        // (Zed pattern: atomic multi-field updates prevent partial state)
+        let tx = conn.unchecked_transaction()?;
+        if let Some(v) = name { tx.execute("UPDATE workspace_states SET name = ?1 WHERE id = ?2", params![v, id])?; }
+        if let Some(v) = description { tx.execute("UPDATE workspace_states SET description = ?1 WHERE id = ?2", params![v, id])?; }
+        if let Some(v) = cap_features { tx.execute("UPDATE workspace_states SET cap_features = ?1 WHERE id = ?2", params![v, id])?; }
+        if let Some(v) = cap_issues { tx.execute("UPDATE workspace_states SET cap_issues = ?1 WHERE id = ?2", params![v, id])?; }
+        if let Some(v) = cap_crashes { tx.execute("UPDATE workspace_states SET cap_crashes = ?1 WHERE id = ?2", params![v, id])?; }
+        if let Some(v) = cap_security { tx.execute("UPDATE workspace_states SET cap_security = ?1 WHERE id = ?2", params![v, id])?; }
+        if let Some(v) = cap_audits { tx.execute("UPDATE workspace_states SET cap_audits = ?1 WHERE id = ?2", params![v, id])?; }
+        if let Some(v) = heartbeat { tx.execute("UPDATE workspace_states SET heartbeat = ?1 WHERE id = ?2", params![v as i64, id])?; }
+        tx.commit()?;
         Ok(())
     }
 
     pub fn delete(conn: &Connection, id: &str) -> Result<()> {
-        // Don't delete built-in states
-        let is_built_in: i64 = conn.query_row(
-            "SELECT is_built_in FROM workspace_states WHERE id = ?1", params![id], |r| r.get(0)
-        ).unwrap_or(1);
-        if is_built_in == 1 {
-            return Ok(());
+        // Don't delete built-in states — explicit check instead of unwrap_or(1) which
+        // silently treats "not found" as "built-in"
+        let is_built_in = conn.query_row(
+            "SELECT is_built_in FROM workspace_states WHERE id = ?1", params![id], |r| r.get::<_, i64>(0)
+        );
+        match is_built_in {
+            Ok(1) => return Ok(()), // Built-in — don't delete
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(()), // Not found — nothing to delete
+            Err(e) => return Err(e),
+            Ok(_) => {} // Custom state — proceed with delete
         }
+        // Wrap cascade + delete in transaction for atomicity
+        let tx = conn.unchecked_transaction()?;
         // Clear tier_id on projects using this state
-        conn.execute("UPDATE projects SET tier_id = NULL WHERE tier_id = ?1", params![id])?;
-        conn.execute("DELETE FROM workspace_states WHERE id = ?1", params![id])?;
+        tx.execute("UPDATE projects SET tier_id = NULL WHERE tier_id = ?1", params![id])?;
+        tx.execute("DELETE FROM workspace_states WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
