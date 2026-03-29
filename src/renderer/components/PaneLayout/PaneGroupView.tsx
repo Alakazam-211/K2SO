@@ -60,6 +60,9 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
     agents: ActiveAgent[]
   } | null>(null)
 
+  // Track panes where the agent command exited — these fall back to a plain shell
+  const [fallbackPanes, setFallbackPanes] = useState<Set<string>>(new Set())
+
   const handleClose = useCallback(
     (itemId: string) => {
       const item = paneGroup?.items.find(i => i.id === itemId)
@@ -122,7 +125,14 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
     )
   }
 
-  const terminalData = activeItem.type === 'terminal' && activeItem.data as TerminalItemData
+  const rawTerminalData = activeItem.type === 'terminal' && activeItem.data as TerminalItemData
+  // If this pane's agent exited, clear the command so it respawns as a plain shell
+  const isFallback = rawTerminalData && fallbackPanes.has(activeItem.id)
+  const terminalData = rawTerminalData
+    ? isFallback
+      ? { ...rawTerminalData, command: undefined, args: undefined, terminalId: `${rawTerminalData.terminalId}-shell` }
+      : rawTerminalData
+    : false
   const fileData = activeItem.type === 'file-viewer' && activeItem.data as FileViewerItemData
   // Only show per-pane tab bar when there are splits
 
@@ -154,7 +164,13 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
                 command={terminalData.command}
                 args={terminalData.args}
                 onExit={(exitCode) => {
-                  if (exitCode === 127) {
+                  const hadCommand = rawTerminalData && rawTerminalData.command
+                  if (hadCommand && !isFallback) {
+                    // Agent command exited — respawn as a plain shell so the user
+                    // gets a working terminal instead of a blank pane
+                    setFallbackPanes((prev) => new Set(prev).add(activeItem.id))
+                  } else if (exitCode === 127) {
+                    // Command not found — remove the tab
                     const store = useTabsStore.getState()
                     const groupIdx = store.tabs.some((t) => t.id === tabId)
                       ? 0
@@ -163,6 +179,7 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
                       removeTabFromGroup(groupIdx, tabId)
                     }
                   } else if (exitCode === 0) {
+                    // Plain shell exited cleanly — close the pane
                     handleClose(activeItem.id)
                   }
                 }}

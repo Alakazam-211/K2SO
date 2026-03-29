@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
-import { useTabsStore } from './tabs'
+import { useTabsStore, registerPresetsStore } from './tabs'
 import type { TerminalPane, Tab, PaneGroup, Item } from './tabs'
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -122,6 +122,9 @@ export const usePresetsStore = create<PresetsState>((set, get) => ({
     }
   }
 }))
+
+// Register with tabs store to break circular dependency
+registerPresetsStore(() => usePresetsStore.getState())
 
 // ── Tree helpers ─────────────────────────────────────────────────────────
 

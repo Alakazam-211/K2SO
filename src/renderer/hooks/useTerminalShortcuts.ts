@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useTabsStore } from '@/stores/tabs'
 import { usePresetsStore } from '@/stores/presets'
+import { useSettingsStore } from '@/stores/settings'
 import { useProjectsStore } from '@/stores/projects'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
 import { useActiveAgentsStore } from '@/stores/active-agents'
@@ -67,9 +68,15 @@ export function useTerminalShortcuts(cwd: string): void {
           if (e.shiftKey) {
             // Cmd+Shift+T: Launch default agent in new tab
             const presetsState = usePresetsStore.getState()
-            const defaultPreset = presetsState.presets.find((p) => p.enabled)
-            if (defaultPreset) {
-              presetsState.launchPreset(defaultPreset.id, cwd, 'tab')
+            const defaultAgent = useSettingsStore.getState().defaultAgent
+            // Match the default agent setting to a preset by command name
+            const defaultPreset = defaultAgent
+              ? presetsState.presets.find((p) => p.command.split(/\s+/)[0] === defaultAgent && p.enabled)
+              : null
+            // Fall back to first enabled preset if default not found
+            const preset = defaultPreset || presetsState.presets.find((p) => p.enabled)
+            if (preset) {
+              presetsState.launchPreset(preset.id, cwd, 'tab')
             }
           } else {
             // Cmd+T: New blank tab

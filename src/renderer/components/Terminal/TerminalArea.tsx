@@ -3,6 +3,8 @@ import { TabBar } from '@/components/TabBar/TabBar'
 import { PaneLayout } from '@/components/PaneLayout/PaneLayout'
 import { PresetsBar } from '@/components/PresetsBar/PresetsBar'
 import { useTabsStore } from '@/stores/tabs'
+import { useSettingsStore } from '@/stores/settings'
+import { usePresetsStore } from '@/stores/presets'
 import { useTerminalShortcuts } from '@/hooks/useTerminalShortcuts'
 import { KeyCombo } from '@/components/KeySymbol'
 
@@ -172,11 +174,7 @@ function TabGroupColumn({
             </div>
           )
         })}
-        {tabs.length === 0 && (
-          <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-[var(--color-text-muted)]">
-            <span>Press <kbd className="px-1.5 py-0.5 bg-white/[0.06] text-[var(--color-text-secondary)] font-mono text-xs"><KeyCombo combo="⌘" />T</kbd> for a terminal</span>
-          </div>
-        )}
+        {tabs.length === 0 && <EmptyWorkspaceHints />}
 
         {/* Drop highlight */}
         {showDropHighlight && (
@@ -189,6 +187,44 @@ function TabGroupColumn({
             }}
           />
         )}
+      </div>
+    </div>
+  )
+}
+
+// ── Empty workspace hints ────────────────────────────────────────────────
+
+function EmptyWorkspaceHints(): React.JSX.Element {
+  const defaultAgent = useSettingsStore((s) => s.defaultAgent)
+  const presets = usePresetsStore((s) => s.presets)
+
+  // Find the default agent preset label
+  const defaultPreset = defaultAgent
+    ? presets.find((p) => p.command.split(/\s+/)[0] === defaultAgent && p.enabled)
+    : null
+  const agentLabel = defaultPreset?.label || defaultAgent || 'AI Agent'
+
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-3 text-[var(--color-text-muted)]">
+      <div className="flex flex-col items-center gap-2.5">
+        <span className="text-xs">
+          <kbd className="px-1.5 py-0.5 bg-white/[0.06] text-[var(--color-text-secondary)] font-mono text-[11px]">
+            <KeyCombo combo="⌘" />T
+          </kbd>
+          <span className="ml-2">Terminal</span>
+        </span>
+        <span className="text-xs">
+          <kbd className="px-1.5 py-0.5 bg-white/[0.06] text-[var(--color-text-secondary)] font-mono text-[11px]">
+            <KeyCombo combo="⌘" /><KeyCombo combo="⇧" />T
+          </kbd>
+          <span className="ml-2">{agentLabel}</span>
+        </span>
+        <span className="text-xs">
+          <kbd className="px-1.5 py-0.5 bg-white/[0.06] text-[var(--color-text-secondary)] font-mono text-[11px]">
+            <KeyCombo combo="⌘" />N
+          </kbd>
+          <span className="ml-2">New file</span>
+        </span>
       </div>
     </div>
   )

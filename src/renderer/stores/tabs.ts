@@ -4,6 +4,13 @@ import type { MosaicNode, MosaicDirection } from 'react-mosaic-component'
 import { RESUMABLE_CLI_TOOLS } from '@shared/constants'
 import { useSettingsStore } from '@/stores/settings'
 
+// Lazy reference to presets store — avoids circular dependency (presets → tabs → presets).
+// Set by presets.ts on init via registerPresetsStore().
+let _presetsStoreRef: (() => { presets: any[] }) | null = null
+export function registerPresetsStore(getter: () => { presets: any[] }): void {
+  _presetsStoreRef = getter
+}
+
 // ── Cross-window tab sync ────────────────────────────────────────────────
 
 export const WINDOW_ID = crypto.randomUUID() // unique per window instance
@@ -230,6 +237,7 @@ interface TabsState {
   detectAndSaveSessionIds: () => Promise<void>
 
   // Background workspace management
+  launchDefaultAgent: (key: string, cwd: string) => void
   stashWorkspace: (key: string) => void
   restoreWorkspace: (key: string, cwd: string) => void
   serializeAllWorkspaces: (activeKey: string) => Promise<void>
@@ -1629,9 +1637,17 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
   saveLayoutForWorkspace: (projectId: string, workspaceId: string) => {
     const state = get()
-    if (state.tabs.length === 0) return
-
     const key = `${projectId}:${workspaceId}`
+
+    if (state.tabs.length === 0) {
+      // Save empty state so next open shows the empty workspace hints
+      // instead of restoring a stale session
+      const { [key]: _, ...remaining } = state.workspaceLayouts
+      set({ workspaceLayouts: remaining })
+      invoke('workspace_session_delete', { projectId, workspaceId }).catch(() => {})
+      return
+    }
+
     const layout = state.serializeCurrentLayout()
     set({ workspaceLayouts: { ...state.workspaceLayouts, [key]: layout } })
 
@@ -1677,60 +1693,12 @@ export const useTabsStore = create<TabsState>((set, get) => ({
               console.error('[tabs] Failed to parse DB layout:', err)
             }
           }
-          // No saved layout — create default tab with default agent after delay (for cross-window sync)
-          setTimeout(() => {
-            if (get().activeWorkspaceKey === key && get().tabs.length === 0) {
-              tabCounter++
-              const tabId = crypto.randomUUID()
-              const paneGroupId = crypto.randomUUID()
-
-              // Look up default agent preset
-              let agentOpts: { command?: string; args?: string[]; title?: string } = {}
-              try {
-                const defaultAgent = useSettingsStore.getState().defaultAgent
-                if (defaultAgent) {
-                  const { usePresetsStore } = require('@/stores/presets')
-                  const presets = usePresetsStore.getState().presets
-                  const preset = presets.find((p: any) => {
-                    const cmd = p.command.split(/\s+/)[0]
-                    return cmd === defaultAgent && p.enabled
-                  })
-                  if (preset) {
-                    const parts = preset.command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || []
-                    const cleaned = parts.map((p: string) => p.replace(/^["']|["']$/g, ''))
-                    agentOpts = { command: cleaned[0], args: cleaned.slice(1), title: preset.label }
-                  }
-                }
-              } catch { /* fall back to plain terminal */ }
-
-              const pg = makeTerminalPaneGroup(paneGroupId, cwd, agentOpts.command ? { command: agentOpts.command, args: agentOpts.args } : undefined)
-              const tab: Tab = {
-                id: tabId,
-                title: agentOpts.title || `Terminal ${tabCounter}`,
-                mosaicTree: paneGroupId,
-                paneGroups: new Map([[paneGroupId, pg]])
-              }
-              set({ tabs: [tab], activeTabId: tabId })
-            }
-          }, 1500)
+          // No saved layout — auto-launch default agent after short delay
+          get().launchDefaultAgent(key, cwd)
         })
         .catch(() => {
-          // DB unavailable — create default tab after delay
-          setTimeout(() => {
-            if (get().activeWorkspaceKey === key && get().tabs.length === 0) {
-              tabCounter++
-              const tabId = crypto.randomUUID()
-              const paneGroupId = crypto.randomUUID()
-              const pg = makeTerminalPaneGroup(paneGroupId, cwd)
-              const tab: Tab = {
-                id: tabId,
-                title: `Terminal ${tabCounter}`,
-                mosaicTree: paneGroupId,
-                paneGroups: new Map([[paneGroupId, pg]])
-              }
-              set({ tabs: [tab], activeTabId: tabId })
-            }
-          }, 1500)
+          // DB unavailable — auto-launch default agent
+          get().launchDefaultAgent(key, cwd)
         })
     }
   },
@@ -1844,9 +1812,63 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
   // ── Background workspace management ─────────────────────────────────
 
+  launchDefaultAgent: (key: string, cwd: string) => {
+    // Short delay (100ms) to let React finish the workspace switch render
+    setTimeout(() => {
+      if (get().activeWorkspaceKey === key && get().tabs.length === 0) {
+        tabCounter++
+        const tabId = crypto.randomUUID()
+        const paneGroupId = crypto.randomUUID()
+
+        // Look up default agent preset
+        let agentOpts: { command?: string; args?: string[]; title?: string } = {}
+        try {
+          const defaultAgent = useSettingsStore.getState().defaultAgent
+          if (defaultAgent && _presetsStoreRef) {
+            const presets = _presetsStoreRef().presets
+            const preset = presets.find((p: any) => {
+              const cmd = p.command.split(/\s+/)[0]
+              return cmd === defaultAgent && p.enabled
+            })
+            if (preset) {
+              const parts = preset.command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || []
+              const cleaned = parts.map((p: string) => p.replace(/^["']|["']$/g, ''))
+              agentOpts = { command: cleaned[0], args: cleaned.slice(1), title: preset.label }
+            }
+          }
+        } catch { /* fall back to plain terminal */ }
+
+        const pg = makeTerminalPaneGroup(paneGroupId, cwd, agentOpts.command ? { command: agentOpts.command, args: agentOpts.args } : undefined)
+        const tab: Tab = {
+          id: tabId,
+          title: agentOpts.title || `Terminal ${tabCounter}`,
+          mosaicTree: paneGroupId,
+          paneGroups: new Map([[paneGroupId, pg]])
+        }
+        set({ tabs: [tab], activeTabId: tabId })
+      }
+    }, 100)
+  },
+
   stashWorkspace: (key: string) => {
     const state = get()
-    if (state.tabs.length === 0 && state.extraGroups.length === 0) return
+    if (state.tabs.length === 0 && state.extraGroups.length === 0) {
+      // Workspace is empty — clear background snapshot AND DB session so
+      // restoreWorkspace doesn't resurrect old tabs from either source
+      const { [key]: _, ...remaining } = state.backgroundWorkspaces
+      const { [key]: _layout, ...remainingLayouts } = state.workspaceLayouts
+      set({
+        backgroundWorkspaces: remaining,
+        workspaceLayouts: remainingLayouts,
+        activeWorkspaceKey: null,
+      })
+      // Delete saved session from DB so loadLayoutForWorkspace falls through to launchDefaultAgent
+      const [projectId, workspaceId] = key.split(':')
+      if (projectId && workspaceId) {
+        invoke('workspace_session_delete', { projectId, workspaceId }).catch(() => {})
+      }
+      return
+    }
 
     // Move active tabs into background (PTYs stay alive)
     set({

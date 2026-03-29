@@ -677,15 +677,6 @@ export function AlacrittyTerminalView({
 
   // Build row elements from the lines map
   const rowElements: React.JSX.Element[] = []
-  // Debug: log the cursor row's data (dev only)
-  if (import.meta.env.DEV) {
-    const cursorRowLine = linesRef.current.get(gridState.cursorRow)
-    if (cursorRowLine && cursorRowLine.spans && cursorRowLine.spans.length > 0) {
-      const lastSpan = cursorRowLine.spans[cursorRowLine.spans.length - 1]
-      const textLen = [...cursorRowLine.text].length
-      console.error(`[cursor-row] row=${gridState.cursorRow} textChars=${textLen} textBytes=${cursorRowLine.text.length} spans=${cursorRowLine.spans.length} lastSpan=s${lastSpan.s}..e${lastSpan.e} bg=${lastSpan.bg} fl=${lastSpan.fl}`)
-    }
-  }
   for (let r = 0; r < gridState.rows; r++) {
     const line = linesRef.current.get(r)
     rowElements.push(
