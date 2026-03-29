@@ -22,6 +22,7 @@ interface AgentProfile {
   name: string
   role: string
   podLeader: boolean
+  agentType: string
   raw: string
 }
 
@@ -121,7 +122,7 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
   const [wsInboxItems, setWsInboxItems] = useState<WorkItem[]>([])
   const [allAgentWork, setAllAgentWork] = useState<WorkItem[]>([])
   const [viewMode, setViewMode] = useState<'preview' | 'edit'>('preview')
-  const [activeSection, setActiveSection] = useState<'profile' | 'claude-md' | 'work'>('work')
+  const [activeSection, setActiveSection] = useState<'profile' | 'claude-md' | 'work'>('claude-md')
   const [showPersonaEditor, setShowPersonaEditor] = useState(false)
 
   const agentDir = `${projectPath}/.k2so/agents/${agentName}`
@@ -129,17 +130,18 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
   const fetchProfile = useCallback(async () => {
     if (isWorkspaceBoard) return
     try {
-      const content = await invoke<{ content: string }>('k2so_agents_get_profile', { projectPath, agentName })
-      const raw = content.content || ''
+      const result = await invoke<string | { content: string }>('k2so_agents_get_profile', { projectPath, agentName })
+      const raw = typeof result === 'string' ? result : (result.content || '')
       const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/)
-      let name = agentName, role = '', podLeader = false
+      let name = agentName, role = '', podLeader = false, agentType = 'pod-member'
       if (fmMatch) {
         const fm = fmMatch[1]
         name = fm.match(/^name:\s*(.+)$/m)?.[1]?.trim() || name
         role = fm.match(/^role:\s*(.+)$/m)?.[1]?.trim() || ''
         podLeader = fm.match(/^pod_leader:\s*(.+)$/m)?.[1]?.trim() === 'true'
+        agentType = fm.match(/^type:\s*(.+)$/m)?.[1]?.trim() || 'pod-member'
       }
-      setProfile({ name, role, podLeader, raw })
+      setProfile({ name, role, podLeader, agentType, raw })
     } catch { setProfile(null) }
   }, [projectPath, agentName, isWorkspaceBoard])
 
@@ -216,7 +218,12 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
         {/* Pill tabs on the left */}
         {!isWorkspaceBoard && (
           <div className="flex gap-0.5 flex-shrink-0">
-            {(['work', 'profile', 'claude-md'] as const).map((section) => {
+            {(() => {
+              const showWork = profile ? (profile.agentType !== 'k2so' && profile.agentType !== 'custom') : false
+              const sections = showWork
+                ? (['work', 'claude-md', 'profile'] as const)
+                : (['claude-md', 'profile'] as const)
+              return sections.map((section) => {
               const labels = { work: 'Work', profile: 'Profile', 'claude-md': 'CLAUDE.md' }
               const isActive = activeSection === section
               return (
@@ -232,7 +239,8 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
                   {labels[section]}
                 </button>
               )
-            })}
+            })
+            })()}
           </div>
         )}
         {/* Agent name + badge */}
@@ -249,17 +257,9 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
             <span className="text-[10px] text-[var(--color-text-muted)] truncate">{profile.role}</span>
           )}
         </div>
-        {/* Preview/Edit toggle + Configure with AI for profile/claude-md tabs */}
+        {/* Preview/Edit toggle for profile/claude-md tabs */}
         {!isWorkspaceBoard && (activeSection === 'profile' || activeSection === 'claude-md') && (
           <div className="ml-auto flex gap-1.5 items-center flex-shrink-0">
-            {activeSection === 'profile' && (
-              <button
-                onClick={() => setShowPersonaEditor(true)}
-                className="px-2 py-1 text-[10px] font-medium text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer"
-              >
-                Configure with AI
-              </button>
-            )}
             <div className="flex gap-0.5">
               {(['preview', 'edit'] as const).map((mode) => (
                 <button

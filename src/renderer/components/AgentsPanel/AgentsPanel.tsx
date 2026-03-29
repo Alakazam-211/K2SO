@@ -170,9 +170,9 @@ export default function AgentsPanel(): React.JSX.Element {
     useTabsStore.getState().openAgentPane(name, activeProject.path)
   }
 
-  const AgentRow = ({ agent, showDelete = true }: { agent: K2soAgentInfo; showDelete?: boolean }) => (
+  const AgentRow = ({ agent }: { agent: K2soAgentInfo }) => (
     <div
-      className="px-3 py-2 border-b border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] transition-colors group cursor-pointer"
+      className="px-3 py-2 border-b border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] transition-colors cursor-pointer"
       onClick={() => openAgentPane(agent.name)}
     >
       <div className="flex items-center gap-2">
@@ -194,40 +194,13 @@ export default function AgentsPanel(): React.JSX.Element {
           </div>
           <div className="text-[10px] text-[var(--color-text-muted)] truncate">{agent.role}</div>
         </div>
-        <div className="flex items-center gap-1 text-[9px] text-[var(--color-text-muted)] flex-shrink-0">
-          {agent.inboxCount > 0 && <span title="Inbox">{agent.inboxCount}i</span>}
-          {agent.activeCount > 0 && <span className="text-yellow-400" title="Active">{agent.activeCount}a</span>}
-          {agent.doneCount > 0 && <span className="text-green-400" title="Done">{agent.doneCount}d</span>}
-        </div>
-        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
-          <button
-            onClick={(e) => { e.stopPropagation(); handleLaunch(agent.name) }}
-            className="px-1.5 py-0.5 text-[9px] text-[var(--color-accent)] hover:text-[var(--color-accent)]/80 hover:bg-[var(--color-accent)]/10 no-drag cursor-pointer"
-            title="Launch agent session"
-          >
-            ▶
-          </button>
-          <button
-            onClick={(e) => {
-              e.stopPropagation()
-              if (!activeProject) return
-              useTabsStore.getState().openAgentPane(agent.name, activeProject.path)
-            }}
-            className="px-1.5 py-0.5 text-[9px] text-[var(--color-text-muted)] hover:text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 no-drag cursor-pointer"
-            title="Edit persona"
-          >
-            ✎
-          </button>
-          {showDelete && (
-            <button
-              onClick={(e) => { e.stopPropagation(); handleDelete(agent.name) }}
-              className="px-1 py-0.5 text-[9px] text-red-400/50 hover:text-red-400 hover:bg-red-500/10 no-drag cursor-pointer"
-              title="Delete agent"
-            >
-              ×
-            </button>
-          )}
-        </div>
+        <button
+          onClick={(e) => { e.stopPropagation(); handleLaunch(agent.name) }}
+          className="px-2 py-0.5 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer flex-shrink-0"
+          title="Launch agent session"
+        >
+          Launch
+        </button>
       </div>
     </div>
   )
@@ -245,96 +218,62 @@ export default function AgentsPanel(): React.JSX.Element {
     )
   }
 
-  if (agentMode === 'custom') {
-    const customAgent = agents.find((a) => a.agentType === 'custom')
-
-    return (
-      <div className="h-full flex flex-col p-4 gap-3">
-        <div>
-          <span className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider">Custom Agent</span>
-          <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">
-            {customAgent
-              ? `"${customAgent.name}" — ${customAgent.role}`
-              : 'This workspace runs a single custom agent. Configure its persona in Settings.'}
-          </p>
-        </div>
-        {customAgent && (
-          <button
-            onClick={() => handleLaunch(customAgent.name)}
-            className="px-3 py-1.5 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
-          >
-            Launch Agent
-          </button>
-        )}
-      </div>
-    )
-  }
-
-  if (agentMode === 'agent') {
-    const k2soAgent = agents.find((a) => a.agentType === 'k2so')
+  if (agentMode === 'custom' || agentMode === 'agent') {
+    const targetType = agentMode === 'custom' ? 'custom' : 'k2so'
+    const label = agentMode === 'custom' ? 'Custom Agent' : 'K2SO Agent'
+    const typeDesc = agentMode === 'custom'
+      ? 'A single agent that runs from its persona on the heartbeat. No K2SO infrastructure is injected.'
+      : 'A planner agent that builds PRDs, milestones, and technical plans for this workspace.'
+    const singleAgent = agents.find((a) => a.agentType === targetType)
 
     return (
       <div className="h-full flex flex-col overflow-hidden">
-        {/* K2SO Agent section */}
-        <div className="border-b border-[var(--color-border)]">
-          <div className="px-3 py-1.5">
-            <span className="text-[9px] font-medium text-[var(--color-accent)] uppercase tracking-wider">K2SO Agent</span>
-          </div>
-          {k2soAgent ? (
-            <div
-              className="px-3 py-2 border-b border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] transition-colors group cursor-pointer"
-              onClick={() => openAgentPane(k2soAgent.name)}
-            >
-              <div className="flex items-center gap-2">
-                <span
-                  className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-                  style={{ backgroundColor: statusColor(k2soAgent) }}
-                />
-                <div className="flex-1 min-w-0">
-                  <div className="text-xs text-[var(--color-text-primary)] truncate">{k2soAgent.name}</div>
-                  <div className="text-[10px] text-[var(--color-text-muted)] truncate">{k2soAgent.role}</div>
-                </div>
-                <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
-                  <button
-                    onClick={(e) => { e.stopPropagation(); handleLaunch(k2soAgent.name) }}
-                    className="px-1.5 py-0.5 text-[9px] text-[var(--color-accent)] hover:text-[var(--color-accent)]/80 hover:bg-[var(--color-accent)]/10 no-drag cursor-pointer"
-                    title="Launch K2SO agent session"
-                  >
-                    ▶
-                  </button>
-                </div>
+        <div className="px-3 py-4 flex flex-col gap-3">
+          {singleAgent ? (
+            <>
+              <div>
+                <h3 className="text-sm font-medium text-[var(--color-text-primary)]">{singleAgent.name}</h3>
+                <span className="text-[9px] font-medium text-[var(--color-accent)] uppercase tracking-wider">{label}</span>
               </div>
-            </div>
+              <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed">{typeDesc}</p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => handleLaunch(singleAgent.name)}
+                  className="px-3 py-1.5 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
+                >
+                  Launch
+                </button>
+                <button
+                  onClick={() => openAgentPane(singleAgent.name)}
+                  className="px-3 py-1.5 text-[10px] font-medium text-[var(--color-text-secondary)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer"
+                >
+                  View
+                </button>
+              </div>
+            </>
           ) : (
-            <div className="px-3 py-2 border-b border-[var(--color-border)]">
+            <div className="flex flex-col gap-2">
               <p className="text-[10px] text-[var(--color-text-muted)]">
-                No K2SO agent yet. This agent helps you build PRDs, milestones, and technical plans.
+                No {label.toLowerCase()} configured yet.
               </p>
               <button
                 onClick={async () => {
                   if (!activeProject) return
                   try {
-                    const name = activeProject.name.toLowerCase().replace(/\s+/g, '-')
-                    await invoke('k2so_agents_create', {
-                      projectPath: activeProject.path,
-                      name,
-                      role: 'K2SO AI Planner — builds PRDs, milestones, technical plans, and coordinates workspace setup',
-                      agentType: 'k2so',
-                    })
+                    // Generate workspace CLAUDE.md which auto-creates the agent
+                    await invoke('k2so_agents_generate_workspace_claude_md', { projectPath: activeProject.path })
                     await fetchAgents()
                   } catch (e) {
-                    console.error('[agents] Create K2SO agent failed:', e)
+                    console.error('[agents] Setup failed:', e)
                   }
                 }}
-                className="mt-2 px-3 py-1.5 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
+                className="self-start px-3 py-1.5 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
               >
-                Create K2SO Agent
+                Set Up Agent
               </button>
             </div>
           )}
         </div>
-
-        <WorkspaceInboxButton projectPath={activeProject.path} />
       </div>
     )
   }
@@ -354,10 +293,7 @@ export default function AgentsPanel(): React.JSX.Element {
           <div className="px-3 py-1.5">
             <span className="text-[9px] font-medium text-[var(--color-accent)] uppercase tracking-wider">Pod Leader</span>
           </div>
-          <div
-            className="px-3 py-2 border-b border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] transition-colors group cursor-pointer"
-            onClick={() => openAgentPane(podLeader.name)}
-          >
+          <div className="px-3 py-2 border-b border-[var(--color-border)]">
             <div className="flex items-center gap-2">
               <span
                 className="w-1.5 h-1.5 rounded-full flex-shrink-0"
@@ -375,66 +311,27 @@ export default function AgentsPanel(): React.JSX.Element {
                 {totalDelegated > 0 && <span className="text-yellow-400" title="Delegated">{totalDelegated}d</span>}
                 {totalDone > 0 && <span className="text-green-400" title="Done">{totalDone}✓</span>}
               </div>
-              <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
-                <button
-                  onClick={(e) => { e.stopPropagation(); handleLaunch(podLeader.name) }}
-                  className="px-1.5 py-0.5 text-[9px] text-[var(--color-accent)] hover:text-[var(--color-accent)]/80 hover:bg-[var(--color-accent)]/10 no-drag cursor-pointer"
-                  title="Launch pod leader session"
-                >
-                  ▶
-                </button>
-              </div>
+              <button
+                onClick={() => handleLaunch(podLeader.name)}
+                className="px-2 py-0.5 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer flex-shrink-0"
+                title="Launch pod leader session"
+              >
+                Launch
+              </button>
             </div>
           </div>
         </div>
       )}
 
       {/* Pod Members header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)]">
+      <div className="flex items-center px-3 py-2 border-b border-[var(--color-border)]">
         <span className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider flex items-center gap-1.5">
           Pod Members
           {podMembers.length > 0 && (
             <span className="text-[9px] tabular-nums font-medium px-1 py-0.5 bg-white/5 text-[var(--color-text-muted)]">{podMembers.length}</span>
           )}
         </span>
-        <button
-          onClick={() => { setCreateType('pod-member'); setShowCreate(!showCreate) }}
-          className="text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] no-drag cursor-pointer"
-          title="New Pod Member"
-        >
-          {showCreate ? '×' : '+'}
-        </button>
       </div>
-
-      {/* Create form */}
-      {showCreate && (
-        <div className="px-3 py-2 border-b border-[var(--color-border)] space-y-1.5">
-          <input
-            ref={nameInputRef}
-            type="text"
-            placeholder="Name (e.g. backend-eng)"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            className="w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-[10px] text-[var(--color-text-primary)] px-2 py-1 outline-none focus:border-[var(--color-accent)] placeholder:text-[var(--color-text-muted)]"
-            onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
-          />
-          <input
-            type="text"
-            placeholder="Role (e.g. Backend API development)"
-            value={newRole}
-            onChange={(e) => setNewRole(e.target.value)}
-            className="w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-[10px] text-[var(--color-text-primary)] px-2 py-1 outline-none focus:border-[var(--color-accent)] placeholder:text-[var(--color-text-muted)]"
-            onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
-          />
-          <button
-            onClick={handleCreate}
-            disabled={creating || !newName.trim() || !newRole.trim()}
-            className="w-full px-2 py-1 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer disabled:opacity-50"
-          >
-            {creating ? 'Creating...' : 'Create'}
-          </button>
-        </div>
-      )}
 
       {/* Pod member list */}
       <div className="flex-1 overflow-y-auto">
@@ -468,6 +365,8 @@ interface WorkItem {
   itemType: string
   folder: string
 }
+
+// ── Workspace Inbox ───────────────────────────────────────────────────────
 
 function WorkspaceInboxButton({ projectPath }: { projectPath: string }): React.JSX.Element | null {
   const [count, setCount] = useState(0)

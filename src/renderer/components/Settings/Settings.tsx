@@ -3872,9 +3872,23 @@ function ProjectDetail({
     )}
     <div className="max-w-xl space-y-6">
       {/* ── Header ── */}
-      <div>
-        <h2 className="text-base font-medium text-[var(--color-text-primary)]">{project.name}</h2>
-        <p className="text-[11px] text-[var(--color-text-muted)] mt-1 break-all">{project.path}</p>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-base font-medium text-[var(--color-text-primary)]">{project.name}</h2>
+          <p className="text-[11px] text-[var(--color-text-muted)] mt-1 break-all">{project.path}</p>
+        </div>
+        <button
+          onClick={() => {
+            const defaultWs = project.workspaces?.[0]
+            if (defaultWs) {
+              useProjectsStore.getState().setActiveWorkspace(project.id, defaultWs.id)
+            }
+            useSettingsStore.getState().closeSettings()
+          }}
+          className="flex-shrink-0 px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer"
+        >
+          Open Workspace
+        </button>
       </div>
 
       {/* ── Group 1: Workspace — Icon, Color, Focus Group ── */}
@@ -4195,10 +4209,17 @@ function ProjectDetail({
             </div>
           )}
 
+          {/* K2SO Agent persona — only in K2SO Agent mode */}
+          {(project.agentMode || 'off') === 'agent' && (
+            <div className="pt-2 border-t border-[var(--color-border)]">
+              <K2SOAgentPersonaButton projectPath={project.path} projectName={project.name} onOpenEditor={(name) => { setAgentEditorName(name); setAgentEditorOpen(true) }} />
+            </div>
+          )}
+
           {/* Pod agents list — only in Pod mode */}
           {(project.agentMode || 'off') === 'pod' && (
             <div className="pt-2 border-t border-[var(--color-border)]">
-              <ProjectAgentsPanel projectPath={project.path} />
+              <ProjectAgentsPanel projectPath={project.path} onOpenEditor={(name) => { setAgentEditorName(name); setAgentEditorOpen(true) }} />
             </div>
           )}
         </div>
@@ -4607,7 +4628,54 @@ function CustomAgentPersonaButton({ projectPath, projectName, onOpenEditor }: { 
   )
 }
 
-function ProjectAgentsPanel({ projectPath }: { projectPath: string }): React.JSX.Element {
+function K2SOAgentPersonaButton({ projectPath, projectName, onOpenEditor }: { projectPath: string; projectName: string; onOpenEditor: (agentName: string) => void }): React.JSX.Element {
+  const [ready, setReady] = useState(false)
+  const [agentName, setAgentName] = useState('k2so-agent')
+
+  // Ensure the K2SO agent exists for this workspace
+  useEffect(() => {
+    const ensure = async () => {
+      try {
+        const agents = await invoke<(K2soAgentInfo & { agentType?: string })[]>('k2so_agents_list', { projectPath })
+        const existing = agents.find((a: any) => a.agentType === 'k2so')
+        if (existing) {
+          setAgentName(existing.name)
+        } else {
+          await invoke('k2so_agents_create', {
+            projectPath,
+            name: 'k2so-agent',
+            role: 'K2SO planner — builds PRDs, milestones, and technical plans',
+            agentType: 'k2so',
+          })
+        }
+        setReady(true)
+      } catch (e) {
+        console.error('[k2so-agent] Init failed:', e)
+        setReady(true)
+      }
+    }
+    ensure()
+  }, [projectPath, projectName])
+
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div className="flex-1 min-w-0">
+        <p className="text-[10px] text-[var(--color-text-muted)]">
+          Customize the K2SO agent&apos;s persona — add work sources, integrations, and project-specific context.
+        </p>
+      </div>
+      <button
+        onClick={() => onOpenEditor(agentName)}
+        disabled={!ready}
+        className="px-3 py-1.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer disabled:opacity-50 flex-shrink-0"
+      >
+        ✎ Manage Persona
+      </button>
+    </div>
+  )
+}
+
+function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string; onOpenEditor: (agentName: string) => void }): React.JSX.Element {
   const [agents, setAgents] = useState<K2soAgentInfo[]>([])
   const [wsInboxCount, setWsInboxCount] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -4733,16 +4801,22 @@ function ProjectAgentsPanel({ projectPath }: { projectPath: string }): React.JSX
         </div>
         <div className="flex items-center gap-1 flex-shrink-0">
           <button
-            onClick={() => handleLaunch(agent.name)}
-            className="px-2 py-0.5 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
-            title="Launch agent session"
+            onClick={() => onOpenEditor(agent.name)}
+            className="px-2 py-0.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer"
+            title="Manage agent persona"
           >
-            Launch
+            ✎ Manage Persona
           </button>
-          <AgentKebabMenu
-            onSettings={() => openAgentSettings(agent.name)}
-            onDelete={() => handleDelete(agent.name)}
-          />
+          <button
+            onClick={() => handleDelete(agent.name)}
+            className="w-5 h-5 flex items-center justify-center text-[var(--color-text-muted)] hover:text-red-400 transition-colors no-drag cursor-pointer"
+            title="Delete agent"
+          >
+            <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <line x1="1" y1="1" x2="7" y2="7" />
+              <line x1="7" y1="1" x2="1" y2="7" />
+            </svg>
+          </button>
         </div>
       </div>
     </div>
@@ -4781,15 +4855,12 @@ function ProjectAgentsPanel({ projectPath }: { projectPath: string }): React.JSX
                 </div>
                 <div className="flex items-center gap-1 flex-shrink-0">
                   <button
-                    onClick={() => handleLaunch(podLeader.name)}
-                    className="px-2 py-0.5 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
-                    title="Launch pod leader session"
+                    onClick={() => onOpenEditor(podLeader.name)}
+                    className="px-2 py-0.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer"
+                    title="Manage pod leader persona"
                   >
-                    Launch
+                    ✎ Manage Persona
                   </button>
-                  <AgentKebabMenu
-                    onSettings={() => openAgentSettings(podLeader.name)}
-                  />
                 </div>
               </div>
             </div>

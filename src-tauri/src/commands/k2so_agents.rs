@@ -1129,8 +1129,49 @@ You run on an adaptive heartbeat. Adjust your check-in frequency based on what y
                 role = role,
             )
         }
+        "k2so" => {
+            format!(
+r#"You are the K2SO Agent for the {project_name} workspace — the top-level planner and orchestrator.
+
+## Work Sources
+
+Primary (checked automatically by the heartbeat system at near-zero cost):
+- Workspace inbox: `.k2so/work/inbox/` (unassigned work items)
+- Your inbox: `.k2so/agents/{name}/work/inbox/` (items delegated to you)
+
+External (add your project-specific sources below — CLI tools only, no MCP):
+- GitHub Issues: `gh issue list --repo OWNER/REPO --label bug,feature --state open`
+- Open PRs: `gh pr list --repo OWNER/REPO --review-requested`
+<!-- Add more work sources here: Linear, Jira, custom APIs, intake directories, etc. -->
+
+## Project Context
+
+<!-- Describe what this project does, key directories, conventions, tech stack -->
+
+## Integration Commands
+
+<!-- CLI tools this agent should use to check for work, report status, or interact with external systems -->
+- `gh` — GitHub CLI for issues, PRs, releases
+- `git` — Version control operations
+- `curl` / `jq` — API calls and JSON processing
+
+## Constraints
+
+<!-- Hours of operation, cost limits, repos off-limits, branches to protect -->
+
+## Operational Notes
+
+- Editing the sections above is how you customize the K2SO agent for your project
+- The default K2SO knowledge (CLI tools, workflow, work queues) is auto-injected at launch
+- Modifying the auto-injected defaults in CLAUDE.md is at your own risk
+- Use the Manage Persona button in Settings to refine this profile with AI assistance
+"#,
+                project_name = project_name,
+                name = name,
+            )
+        }
         _ => {
-            // Default (k2so or unknown type)
+            // Unknown type — empty body
             String::new()
         }
     }
@@ -1342,6 +1383,21 @@ pub fn k2so_agents_generate_workspace_claude_md(
             pod_leader_role, pod_leader_body
         );
         let _ = fs::write(pod_leader_dir.join("agent.md"), &pod_leader_md);
+    }
+
+    // Auto-create K2SO agent if it doesn't exist (for agent mode)
+    let k2so_agent_dir = k2so_dir.join("agents").join("k2so-agent");
+    if !k2so_agent_dir.exists() {
+        let _ = fs::create_dir_all(k2so_agent_dir.join("work").join("inbox"));
+        let _ = fs::create_dir_all(k2so_agent_dir.join("work").join("active"));
+        let _ = fs::create_dir_all(k2so_agent_dir.join("work").join("done"));
+        let k2so_role = "K2SO planner — builds PRDs, milestones, and technical plans";
+        let k2so_body = generate_default_agent_body("k2so", "k2so-agent", k2so_role, &project_path);
+        let k2so_md = format!(
+            "---\nname: k2so-agent\nrole: {}\ntype: k2so\n---\n\n{}\n",
+            k2so_role, k2so_body
+        );
+        let _ = fs::write(k2so_agent_dir.join("agent.md"), &k2so_md);
     }
 
     // List existing agents

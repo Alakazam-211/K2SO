@@ -115,22 +115,40 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
   const agentPrompt = useMemo(() => {
     if (!context) return ''
     const isCustom = context.agentType === 'custom'
-    return [
-      `You're helping the user configure an AI agent. Here's the context:`,
-      ``,
-      `Agent: "${context.agentName}"`,
-      `Role: ${context.role}`,
-      `Type: ${isCustom ? 'Custom Agent' : context.isPodLeader ? 'Pod Leader' : 'Pod Member'}`,
-      ``,
-      `Edit the file agent.md in the current directory. This single file defines everything about the agent:`,
-      ``,
-      `• Frontmatter (between --- delimiters): name, role, type — these are read by the system`,
-      `• Body (below frontmatter): all instructions, behavior, personality, tools, integrations`,
-      ``,
-      `Current contents:`,
-      context.agentMd,
-      ``,
-      isCustom
+    const isK2SO = context.agentType === 'k2so'
+
+    const typeLabel = isK2SO ? 'K2SO Agent' : isCustom ? 'Custom Agent' : context.isPodLeader ? 'Pod Leader' : 'Pod Member'
+
+    const typeGuidance = isK2SO
+      ? [
+          `This is the K2SO Agent — the top-level planner and orchestrator for this workspace.`,
+          ``,
+          `IMPORTANT: The default K2SO agent knowledge (CLI tools, workflow docs, work queue structure)`,
+          `is auto-injected at launch. Editing those defaults is at the user's own risk.`,
+          ``,
+          `Your job is to help the user ADD project-specific context, NOT replace the defaults.`,
+          `Focus on helping them define:`,
+          ``,
+          `• Work Sources — Where does new work come from? Examples:`,
+          `  - GitHub Issues: \`gh issue list --repo OWNER/REPO --label bug --state open\``,
+          `  - Linear: \`linear issue list --team TEAM --status "In Progress"\``,
+          `  - Jira: \`jira issue list --project KEY --status "To Do"\``,
+          `  - Custom API: \`curl -s https://api.example.com/tasks | jq '.items[]'\``,
+          `  - Local directory: check \`/path/to/intake/\` for new .md files`,
+          ``,
+          `• Project Context — What does this codebase do? What are the key directories?`,
+          `  What conventions should the agent follow?`,
+          ``,
+          `• Integration Commands — CLI tools the agent should use to check for work,`,
+          `  report status, or interact with external systems (NO MCP servers — CLI only).`,
+          ``,
+          `• Constraints — Hours of operation, cost limits, repos that are off-limits,`,
+          `  branches that should never be modified directly.`,
+          ``,
+          `Ask the user: "Where does new work come from for this project?" and help them`,
+          `configure the Work Sources section with the right CLI commands.`,
+        ].join('\n')
+      : isCustom
         ? [
             `This is a Custom Agent — it runs purely from agent.md with no K2SO infrastructure injected.`,
             `The body of agent.md IS the agent's entire system prompt when it wakes up on the heartbeat.`,
@@ -144,7 +162,24 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
             `• Other agents list (for delegation awareness)`,
             ``,
             `Focus agent.md body on what makes this agent unique beyond the standard K2SO setup.`,
-          ].join('\n'),
+          ].join('\n')
+
+    return [
+      `You're helping the user configure an AI agent. Here's the context:`,
+      ``,
+      `Agent: "${context.agentName}"`,
+      `Role: ${context.role}`,
+      `Type: ${typeLabel}`,
+      ``,
+      `Edit the file agent.md in the current directory. This single file defines everything about the agent:`,
+      ``,
+      `• Frontmatter (between --- delimiters): name, role, type — these are read by the system`,
+      `• Body (below frontmatter): all instructions, behavior, personality, tools, integrations`,
+      ``,
+      `Current contents:`,
+      context.agentMd,
+      ``,
+      typeGuidance,
       ``,
       `The user sees a live preview on the right. Only edit agent.md.`,
     ].join('\n')
