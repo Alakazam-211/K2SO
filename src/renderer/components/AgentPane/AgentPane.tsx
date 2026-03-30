@@ -217,10 +217,10 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
   const [wsInboxItems, setWsInboxItems] = useState<WorkItem[]>([])
   const [allAgentWork, setAllAgentWork] = useState<WorkItem[]>([])
   const [viewMode, setViewMode] = useState<'preview' | 'edit'>('preview')
-  const [activeSection, setActiveSection] = useState<'chat' | 'profile' | 'claude-md' | 'work'>('chat')
+  const [activeSection, setActiveSection] = useState<'chat' | 'profile' | 'claude-md' | 'work'>('claude-md')
   const [showPersonaEditor, setShowPersonaEditor] = useState(false)
   // Track whether the chat terminal has been mounted (lazy — only on first visit)
-  const [chatMounted, setChatMounted] = useState(true)
+  const [chatMounted, setChatMounted] = useState(false)
 
   const agentDir = `${projectPath}/.k2so/agents/${agentName}`
 
@@ -320,8 +320,8 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
           <div className="flex gap-0.5 flex-shrink-0">
             {(() => {
               const sections: Array<'chat' | 'work' | 'claude-md' | 'profile'> = showWork
-                ? ['chat', 'work', 'claude-md', 'profile']
-                : ['chat', 'claude-md', 'profile']
+                ? ['work', 'chat', 'claude-md', 'profile']
+                : ['claude-md', 'chat', 'profile']
               return sections.map((section) => {
               const labels = { chat: 'Chat', work: 'Work', profile: 'Profile', 'claude-md': 'CLAUDE.md' }
               const isActive = activeSection === section
