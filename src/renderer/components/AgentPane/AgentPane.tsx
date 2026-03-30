@@ -254,8 +254,12 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
     } catch { setClaudeMd('') }
   }, [projectPath, agentName, isWorkspaceBoard])
 
+  const isPodLeader = profile?.podLeader || profile?.agentType === 'pod-leader'
+
   const fetchWork = useCallback(async () => {
-    if (isWorkspaceBoard) {
+    if (isWorkspaceBoard || isPodLeader) {
+      // Pod leader and workspace board both see the full picture:
+      // workspace inbox (unassigned) + all agents' work (delegated + review)
       try {
         const wsItems = await invoke<WorkItem[]>('k2so_agents_workspace_inbox_list', { projectPath })
         setWsInboxItems(wsItems)
@@ -264,6 +268,7 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
         const agents = await invoke<{ name: string }[]>('k2so_agents_list', { projectPath })
         const all: WorkItem[] = []
         for (const agent of agents) {
+          if (agent.name === agentName) continue // skip pod-leader's own empty queue
           try {
             const items = await invoke<WorkItem[]>('k2so_agents_work_list', { projectPath, agentName: agent.name, folder: null })
             all.push(...items.map((i) => ({ ...i, assignedBy: agent.name })))
@@ -276,7 +281,7 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
         setWorkItems(await invoke<WorkItem[]>('k2so_agents_work_list', { projectPath, agentName, folder: null }))
       } catch { setWorkItems([]) }
     }
-  }, [projectPath, agentName, isWorkspaceBoard])
+  }, [projectPath, agentName, isWorkspaceBoard, isPodLeader])
 
   useEffect(() => {
     fetchProfile(); fetchClaudeMd(); fetchWork()
@@ -410,11 +415,21 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
 
         {/* ── Agent Work Queue (Kanban) ── */}
         {!isWorkspaceBoard && activeSection === 'work' && (
-          <div className="absolute inset-0 z-10 flex gap-3 p-3 overflow-y-auto bg-[var(--color-bg)]">
-            <KanbanColumn title="Inbox" items={inbox} color="text-[var(--color-accent)]" agentDir={agentDir} onOpenFile={openFile} />
-            <KanbanColumn title="Active" items={active} color="text-yellow-400" agentDir={agentDir} onOpenFile={openFile} />
-            <KanbanColumn title="Done" items={done} color="text-green-400" agentDir={agentDir} onOpenFile={openFile} />
-          </div>
+          isPodLeader ? (
+            // Pod Leader sees: Inbox (workspace unassigned), Delegated (agents' inbox+active), Review (agents' done)
+            <div className="absolute inset-0 z-10 flex gap-3 p-3 overflow-y-auto bg-[var(--color-bg)]">
+              <KanbanColumn title="Inbox" items={wsUnassigned} color="text-[var(--color-accent)]" agentDir={`${projectPath}/.k2so/work`} onOpenFile={openFile} />
+              <KanbanColumn title="Delegated" items={wsInProgress} color="text-yellow-400" agentDir={`${projectPath}/.k2so/agents`} onOpenFile={openFile} />
+              <KanbanColumn title="Review" items={wsReview} color="text-green-400" agentDir={`${projectPath}/.k2so/agents`} onOpenFile={openFile} />
+            </div>
+          ) : (
+            // Pod members see their own work queue
+            <div className="absolute inset-0 z-10 flex gap-3 p-3 overflow-y-auto bg-[var(--color-bg)]">
+              <KanbanColumn title="Inbox" items={inbox} color="text-[var(--color-accent)]" agentDir={agentDir} onOpenFile={openFile} />
+              <KanbanColumn title="Active" items={active} color="text-yellow-400" agentDir={agentDir} onOpenFile={openFile} />
+              <KanbanColumn title="Done" items={done} color="text-green-400" agentDir={agentDir} onOpenFile={openFile} />
+            </div>
+          )
         )}
 
         {/* ── Profile ── */}
