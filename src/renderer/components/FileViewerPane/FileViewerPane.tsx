@@ -314,9 +314,6 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
           <span className="text-xs font-semibold text-[var(--color-text-primary)] truncate">
             {fileName}
           </span>
-          <span className="text-[10px] text-[var(--color-text-muted)] truncate hidden sm:inline" title={filePath}>
-            {shortPath}
-          </span>
           <div className="flex-1" />
           {onClose && (
             <button
@@ -351,9 +348,6 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
         {/* File info */}
         <span className="text-xs font-semibold text-[var(--color-text-primary)] truncate">
           {fileName}
-        </span>
-        <span className="text-[10px] text-[var(--color-text-muted)] truncate hidden sm:inline" title={filePath}>
-          {shortPath}
         </span>
 
         {/* Dirty / saving indicator */}
@@ -583,6 +577,15 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
             <span>UTF-8</span>
           </div>
         </>
+      )}
+
+      {/* Filepath bar — shown for non-editor views (preview, image, markdown) */}
+      {viewMode !== 'edit' && (
+        <div className="flex items-center border-t border-[var(--color-border)] bg-[#111111] px-3 py-0.5 flex-shrink-0">
+          <span className="text-[10px] text-[var(--color-text-muted)] font-mono truncate" title={filePath}>
+            {filePath}
+          </span>
+        </div>
       )}
     </div>
   )
