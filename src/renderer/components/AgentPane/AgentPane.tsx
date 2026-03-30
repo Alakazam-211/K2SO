@@ -355,9 +355,6 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
               LEADER
             </span>
           )}
-          {profile && !isWorkspaceBoard && (
-            <span className="text-[10px] text-[var(--color-text-muted)] truncate">{profile.role}</span>
-          )}
         </div>
         {/* Preview/Edit toggle for profile/claude-md tabs */}
         {!isWorkspaceBoard && (activeSection === 'profile' || activeSection === 'claude-md') && (
