@@ -3,6 +3,44 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { AlacrittyTerminalView } from '../Terminal/AlacrittyTerminalView'
 
+// ── Session file helpers ────────────────────────────────────────────
+
+const SESSION_FILE = '.last_editor_session'
+
+async function readEditorSession(cwd: string): Promise<string | null> {
+  try {
+    const result = await invoke<{ content: string }>('fs_read_file', {
+      path: `${cwd}/${SESSION_FILE}`,
+    })
+    const id = result.content.trim()
+    return id || null
+  } catch {
+    return null
+  }
+}
+
+async function saveEditorSession(cwd: string, command: string | undefined): Promise<void> {
+  if (!command) return
+  // Map command to provider name for session detection
+  const provider = command === 'claude' ? 'claude' : command === 'cursor' ? 'cursor' : null
+  if (!provider) return
+
+  try {
+    const sessionId = await invoke<string | null>('chat_history_detect_active_session', {
+      provider,
+      projectPath: cwd,
+    })
+    if (sessionId) {
+      await invoke('fs_write_file', {
+        path: `${cwd}/${SESSION_FILE}`,
+        content: sessionId,
+      })
+    }
+  } catch {
+    // Non-fatal — session save is best-effort
+  }
+}
+
 // ── Props ────────────────────────────────────────────────────────────
 
 interface AIFileEditorProps {
@@ -53,10 +91,42 @@ export function AIFileEditor({
   const [activeFilePath, setActiveFilePath] = useState(filePath)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // ── Session resume: detect previous editor session ────────────────
+  const [resolvedArgs, setResolvedArgs] = useState<string[] | undefined>(undefined)
+  const [argsReady, setArgsReady] = useState(false)
+  const commandRef = useRef(command)
+  commandRef.current = command
+
+  useEffect(() => {
+    let cancelled = false
+    const resolve = async () => {
+      if (!command || command !== 'claude') {
+        // Non-Claude commands: use args as-is
+        setResolvedArgs(args)
+        setArgsReady(true)
+        return
+      }
+
+      // Check for a saved editor session to resume
+      const savedSession = await readEditorSession(cwd)
+      if (cancelled) return
+
+      if (savedSession) {
+        // Resume previous session: strip any existing --resume flags, then add ours
+        const baseArgs = (args ?? []).filter(
+          (a, i, arr) => a !== '--resume' && (i === 0 || arr[i - 1] !== '--resume')
+        )
+        setResolvedArgs([...baseArgs, '--resume', savedSession])
+      } else {
+        setResolvedArgs(args)
+      }
+      setArgsReady(true)
+    }
+    resolve()
+    return () => { cancelled = true }
+  }, [command, args, cwd])
+
   // ── File watching + polling fallback ─────────────────────────────────
-  // Instead of tracking a single file, we scan the watch directory for the
-  // most recently modified file matching the extension. This handles renames,
-  // atomic writes, and file recreation by the AI agent.
   const lastContentRef = useRef<string>('')
   const fileExtension = filePath.split('.').pop() || 'json'
 
@@ -65,7 +135,6 @@ export function AIFileEditor({
 
     const findAndRead = async () => {
       try {
-        // List all matching files in the directory, find most recently modified
         const entries = await invoke<{ name: string; path: string; isDirectory: boolean; modifiedAt: number }[]>(
           'fs_read_dir', { path: watchDir }
         )
@@ -76,7 +145,6 @@ export function AIFileEditor({
         const target = matching[0]
         if (!target) return
 
-        // Update the active file path if it changed (rename detection)
         setActiveFilePath((prev) => {
           if (prev !== target.path) return target.path
           return prev
@@ -93,18 +161,15 @@ export function AIFileEditor({
       }
     }
 
-    // Start watching the directory
     invoke('fs_watch_dir', { path: watchDir }).catch((err) => {
       console.warn('[ai-editor] Failed to start watcher:', err)
     })
 
-    // On any change in the directory, scan for the latest file
     listen<{ path: string; kind: string }>('fs://change', () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
       debounceRef.current = setTimeout(findAndRead, 300)
     }).then((fn) => { unlisten = fn })
 
-    // Polling fallback: scan every 2s in case the watcher misses events
     const pollInterval = setInterval(findAndRead, 2000)
 
     return () => {
@@ -125,11 +190,13 @@ export function AIFileEditor({
     }
   }, [])
 
-  // Explicit close: kill terminal first, then notify parent
-  const handleClose = useCallback(() => {
+  // Explicit close: save session, kill terminal, then notify parent
+  const handleClose = useCallback(async () => {
+    // Save the current Claude session ID so we can resume next time
+    await saveEditorSession(cwd, commandRef.current)
     invoke('terminal_kill', { id: terminalIdRef.current }).catch(() => {})
     onClose()
-  }, [onClose])
+  }, [cwd, onClose])
 
   const fileName = filePath.split('/').pop() || 'file'
 
@@ -172,14 +239,20 @@ export function AIFileEditor({
 
       {/* ── Split view: terminal + preview ── */}
       <div className="flex flex-1 min-h-0">
-        {/* Terminal (left) */}
+        {/* Terminal (left) — wait for session resolution before mounting */}
         <div className="flex-1 min-w-0 border-r border-[var(--color-border)]">
-          <AlacrittyTerminalView
-            terminalId={terminalIdRef.current}
-            cwd={cwd}
-            command={command}
-            args={args}
-          />
+          {argsReady ? (
+            <AlacrittyTerminalView
+              terminalId={terminalIdRef.current}
+              cwd={cwd}
+              command={command}
+              args={resolvedArgs}
+            />
+          ) : (
+            <div className="flex items-center justify-center h-full text-xs text-[var(--color-text-muted)]">
+              Checking for previous session...
+            </div>
+          )}
         </div>
 
         {/* Preview (right) */}

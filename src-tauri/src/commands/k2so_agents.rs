@@ -1056,6 +1056,15 @@ External (scan these proactively when woken — customize for your project):
 - `k2so review approve <agent> <branch>` — merge completed work
 - `k2so terminal spawn --title "..." --command "..."` — run parallel tasks
 
+## Standing Orders
+
+<!-- Persistent directives checked every time this agent wakes up. -->
+<!-- Unlike work items (which are one-off tasks), standing orders are ongoing. -->
+<!-- Examples: -->
+<!-- - Check CI status on main branch every wake and report failures -->
+<!-- - Review open PRs older than 24 hours -->
+<!-- - Monitor .k2so/work/inbox/ for unassigned items and delegate immediately -->
+
 ## Operational Notes
 
 - An agent is a role template, not a person — the same agent can run in multiple worktrees simultaneously
@@ -1090,6 +1099,14 @@ r#"## Specialization
 5. When done: `k2so work move --agent {name} --file <task>.md --from active --to done`
 6. Your work appears in the review queue for the Pod Leader to approve or reject
 
+## Standing Orders
+
+<!-- Persistent directives checked every time this agent wakes up. -->
+<!-- Examples: -->
+<!-- - Run tests before marking any task as done -->
+<!-- - Follow the project's commit message convention -->
+<!-- - Never modify files outside your assigned scope -->
+
 ## If Blocked
 
 - If you need clarification, move the task back to inbox with a note
@@ -1119,6 +1136,15 @@ You run on an adaptive heartbeat. Adjust your check-in frequency based on what y
 - `k2so terminal spawn --title "..." --command "..."` — run parallel tasks
 - `k2so heartbeat set --interval N --phase "..."` — adjust your check-in frequency
 - Standard CLI tools available in your terminal: `gh`, `git`, `curl`, etc.
+
+## Standing Orders
+
+<!-- Persistent directives checked every time this agent wakes on the heartbeat. -->
+<!-- Unlike one-off tasks, standing orders are ongoing responsibilities. -->
+<!-- Examples: -->
+<!-- - Check GitHub issues every wake: `gh issue list --repo OWNER/REPO --state open` -->
+<!-- - Monitor a Slack channel for requests -->
+<!-- - Run a health check script and report failures -->
 
 ## Operational Notes
 
@@ -1159,6 +1185,16 @@ External (add your project-specific sources below — CLI tools only, no MCP):
 
 <!-- Hours of operation, cost limits, repos off-limits, branches to protect -->
 
+## Standing Orders
+
+<!-- Persistent directives checked every time this agent wakes up. -->
+<!-- Unlike work items in the inbox (one-off tasks), standing orders are ongoing. -->
+<!-- Examples: -->
+<!-- - Scan GitHub issues for new bugs every wake -->
+<!-- - Check CI pipeline status on main and report failures -->
+<!-- - Review PRs older than 48 hours -->
+<!-- - Monitor .k2so/work/inbox/ and delegate unassigned items immediately -->
+
 ## Operational Notes
 
 - Editing the sections above is how you customize the K2SO agent for your project
@@ -1197,6 +1233,34 @@ fn log_agent_warning(project_path: &str, agent_name: &str, message: &str) {
     }
 }
 
+/// Extract a named section from markdown content (## Heading through next ## or end).
+/// Returns the body text (without the heading itself), or None if the section is empty/absent.
+fn extract_section(content: &str, heading: &str) -> Option<String> {
+    let marker = format!("## {}", heading);
+    let start = content.find(&marker)?;
+    let after_heading = start + marker.len();
+    // Skip to the line after the heading
+    let body_start = content[after_heading..].find('\n').map(|i| after_heading + i + 1)?;
+    // Find the next ## heading or end of content
+    let body_end = content[body_start..]
+        .find("\n## ")
+        .map(|i| body_start + i)
+        .unwrap_or(content.len());
+    let body = content[body_start..body_end].trim();
+    // Filter out lines that are only HTML comments
+    let meaningful: Vec<&str> = body.lines()
+        .filter(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with("<!--") && !t.ends_with("-->")
+        })
+        .collect();
+    if meaningful.is_empty() {
+        None
+    } else {
+        Some(body.to_string())
+    }
+}
+
 /// Strip YAML frontmatter (--- delimited) from markdown content, returning just the body.
 fn strip_frontmatter(content: &str) -> String {
     if content.starts_with("---") {
@@ -1228,12 +1292,32 @@ fn generate_agent_claude_md_content(
 
     let agent_body = strip_frontmatter(&agent_md);
 
+    // Read shared project context (.k2so/PROJECT.md) — pods only
+    let is_pod_type = agent_type == "pod-leader" || agent_type == "pod-member";
+    let project_md_path = PathBuf::from(project_path).join(".k2so").join("PROJECT.md");
+    let project_context = if is_pod_type && project_md_path.exists() {
+        let raw = safe_read_to_string(&project_md_path).unwrap_or_default();
+        let stripped = strip_frontmatter(&raw);
+        // Only include if it has real content (not just comments/empty sections)
+        let has_content = stripped.lines().any(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("<!--")
+        });
+        if has_content { Some(stripped) } else { None }
+    } else {
+        None
+    };
+
+    // Extract Standing Orders section from agent body (if user filled it in)
+    let standing_orders = extract_section(&agent_body, "Standing Orders");
+
     let mut md = String::new();
 
     if is_custom {
         // ── Custom Agent: agent.md body + heartbeat control + tools ──
         md.push_str(&format!("# {}\n\n", agent_name));
         md.push_str(&format!("**Role:** {}\n\n", role));
+
         if !agent_body.is_empty() {
             md.push_str(&format!("{}\n\n", agent_body));
         }
@@ -1276,6 +1360,20 @@ fn generate_agent_claude_md_content(
     md.push_str(&format!("## Identity\n**Role:** {}\n\n", role));
     if !agent_body.is_empty() {
         md.push_str(&format!("{}\n\n", agent_body));
+    }
+
+    // Inject shared project context
+    if let Some(ref ctx) = project_context {
+        md.push_str("## Project Context (shared)\n\n");
+        md.push_str(ctx);
+        md.push_str("\n\n");
+    }
+
+    // Inject standing orders (persistent directives from agent.md)
+    if let Some(ref orders) = standing_orders {
+        md.push_str("## Standing Orders\n\n");
+        md.push_str(orders);
+        md.push_str("\n\n");
     }
 
     // Current task (if launching with specific work)
@@ -1469,6 +1567,43 @@ pub fn k2so_agents_generate_workspace_claude_md(
             }
         }
     };
+
+    // Scaffold PROJECT.md for pod mode — shared context across all pod agents
+    if is_pod_mode {
+        let project_md_path = k2so_dir.join("PROJECT.md");
+        if !project_md_path.exists() {
+            let project_md_content = format!(
+r#"# {project_name}
+
+<!-- This file is shared context injected into every pod agent's CLAUDE.md at launch. -->
+<!-- Use it for project-wide knowledge that all agents need, regardless of their role. -->
+<!-- Edit this file via Settings > Manage Project Context, or directly. -->
+
+## About This Project
+
+<!-- What does this codebase do? What problem does it solve? -->
+
+## Tech Stack
+
+<!-- Languages, frameworks, databases, infrastructure -->
+
+## Key Directories
+
+<!-- Important paths and what lives in them -->
+
+## Conventions
+
+<!-- Code style, commit message format, PR process, branch naming -->
+
+## External Systems
+
+<!-- Links to issue trackers, CI dashboards, staging environments, docs -->
+"#,
+                project_name = project_name,
+            );
+            let _ = atomic_write(&project_md_path, &project_md_content);
+        }
+    }
 
     let md = if is_pod_mode {
         // ── Agent 2: Pod Leader CLAUDE.md ──────────────────────────────
@@ -3141,6 +3276,44 @@ pub fn k2so_agents_get_editor_context(
         "agentMdPath": dir.join("agent.md").to_string_lossy(),
         "agentDir": dir.to_string_lossy(),
     }))
+}
+
+/// Preview the generated CLAUDE.md for an agent (without writing to disk).
+/// Returns the content that would be injected at launch, plus the on-disk CLAUDE.md if it exists.
+#[tauri::command]
+pub fn k2so_agents_preview_claude_md(
+    project_path: String,
+    agent_name: String,
+) -> Result<serde_json::Value, String> {
+    let generated = generate_agent_claude_md_content(&project_path, &agent_name, None)?;
+
+    // Check for on-disk CLAUDE.md (may have user edits)
+    let dir = agent_dir(&project_path, &agent_name);
+    let on_disk_path = dir.join("CLAUDE.md");
+    let on_disk = if on_disk_path.exists() {
+        Some(safe_read_to_string(&on_disk_path).unwrap_or_default())
+    } else {
+        None
+    };
+
+    Ok(serde_json::json!({
+        "generated": generated,
+        "onDisk": on_disk,
+        "claudeMdPath": on_disk_path.to_string_lossy(),
+    }))
+}
+
+/// Regenerate and write CLAUDE.md for an agent (resets to generated defaults).
+#[tauri::command]
+pub fn k2so_agents_regenerate_claude_md(
+    project_path: String,
+    agent_name: String,
+) -> Result<String, String> {
+    let generated = generate_agent_claude_md_content(&project_path, &agent_name, None)?;
+    let dir = agent_dir(&project_path, &agent_name);
+    let claude_md_path = dir.join("CLAUDE.md");
+    atomic_write(&claude_md_path, &generated)?;
+    Ok(generated)
 }
 
 /// Save an agent's agent.md file, creating a timestamped backup of the previous version.

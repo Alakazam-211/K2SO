@@ -576,6 +576,8 @@ pub fn run() {
             commands::k2so_agents::k2so_agents_update_heartbeat_projects,
             // Agent Editor
             commands::k2so_agents::k2so_agents_get_editor_context,
+            commands::k2so_agents::k2so_agents_preview_claude_md,
+            commands::k2so_agents::k2so_agents_regenerate_claude_md,
             commands::k2so_agents::k2so_agents_save_agent_md,
             // Review Checklist
             commands::review_checklist::review_checklist_read,

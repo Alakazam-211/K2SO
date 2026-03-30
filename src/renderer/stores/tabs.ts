@@ -1819,7 +1819,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
   launchDefaultAgent: (key: string, cwd: string) => {
     // Short delay (100ms) to let React finish the workspace switch render
-    setTimeout(() => {
+    setTimeout(async () => {
       if (get().activeWorkspaceKey === key && get().tabs.length === 0) {
         tabCounter++
         const tabId = crypto.randomUUID()
@@ -1842,6 +1842,25 @@ export const useTabsStore = create<TabsState>((set, get) => ({
             }
           }
         } catch { /* fall back to plain terminal */ }
+
+        // Resume previous session if this is a resumable CLI tool (e.g. Claude)
+        // This makes returning to K2SO/Custom agent workspaces feel like picking
+        // up an ongoing conversation rather than starting fresh every time.
+        if (agentOpts.command) {
+          const toolConfig = RESUMABLE_CLI_TOOLS[agentOpts.command]
+          if (toolConfig) {
+            try {
+              const sessionId = await invoke<string | null>('chat_history_detect_active_session', {
+                provider: toolConfig.provider,
+                projectPath: cwd,
+              })
+              if (sessionId) {
+                const baseArgs = agentOpts.args ?? []
+                agentOpts.args = [...baseArgs, toolConfig.resumeFlag, sessionId]
+              }
+            } catch { /* session detection failed — launch fresh */ }
+          }
+        }
 
         const pg = makeTerminalPaneGroup(paneGroupId, cwd, agentOpts.command ? { command: agentOpts.command, args: agentOpts.args } : undefined)
         const tab: Tab = {

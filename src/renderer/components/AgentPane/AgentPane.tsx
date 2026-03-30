@@ -1,7 +1,11 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useTabsStore } from '@/stores/tabs'
+import { useSettingsStore } from '@/stores/settings'
+import { usePresetsStore, parseCommand } from '@/stores/presets'
 import { AgentPersonaEditor } from '@/components/AgentPersonaEditor/AgentPersonaEditor'
+import { AlacrittyTerminalView } from '@/components/Terminal/AlacrittyTerminalView'
+import { RESUMABLE_CLI_TOOLS } from '@shared/constants'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -111,6 +115,98 @@ function KanbanColumn({ title, items, color, agentDir, onOpenFile }: {
   )
 }
 
+// ── Agent Chat Terminal ─────────────────────────────────────────────────
+
+function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: string; agentDir: string; autoFocus?: boolean }): React.JSX.Element {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const terminalIdRef = useRef(`agent-chat-${agentName}-${crypto.randomUUID()}`)
+  const [resolvedArgs, setResolvedArgs] = useState<string[] | undefined>(undefined)
+  const [ready, setReady] = useState(false)
+
+  // Resolve the user's default AI agent command
+  const defaultAgent = useSettingsStore((s) => s.defaultAgent)
+  const presets = usePresetsStore((s) => s.presets)
+  const agentCommand = useMemo(() => {
+    const preset = presets.find((p) => p.id === defaultAgent) || presets.find((p) => p.enabled)
+    if (!preset) return null
+    return parseCommand(preset.command)
+  }, [defaultAgent, presets])
+
+  // Detect previous session and build args
+  useEffect(() => {
+    let cancelled = false
+    const resolve = async () => {
+      const command = agentCommand?.command
+      if (!command) {
+        setReady(true)
+        return
+      }
+
+      const baseArgs = [...(agentCommand?.args ?? [])]
+
+      // Check for a previous chat session to resume
+      const toolConfig = RESUMABLE_CLI_TOOLS[command]
+      if (toolConfig) {
+        try {
+          const sessionId = await invoke<string | null>('chat_history_detect_active_session', {
+            provider: toolConfig.provider,
+            projectPath: agentDir,
+          })
+          if (!cancelled && sessionId) {
+            setResolvedArgs([...baseArgs, toolConfig.resumeFlag, sessionId])
+            setReady(true)
+            return
+          }
+        } catch { /* fall through to fresh session */ }
+      }
+
+      if (!cancelled) {
+        setResolvedArgs(baseArgs)
+        setReady(true)
+      }
+    }
+    resolve()
+    return () => { cancelled = true }
+  }, [agentCommand, agentDir])
+
+  // Cleanup terminal on unmount
+  useEffect(() => {
+    const id = terminalIdRef.current
+    return () => {
+      invoke('terminal_kill', { id }).catch(() => {})
+    }
+  }, [])
+
+  // Auto-focus the terminal container when the chat tab becomes active
+  useEffect(() => {
+    if (autoFocus && ready) {
+      requestAnimationFrame(() => {
+        const el = containerRef.current?.querySelector('[tabindex]') as HTMLElement | null
+        el?.focus()
+      })
+    }
+  }, [autoFocus, ready])
+
+  if (!agentCommand || !ready) {
+    return (
+      <div className="flex items-center justify-center h-full text-xs text-[var(--color-text-muted)]">
+        {!agentCommand ? 'No AI agent configured. Set a default in Settings.' : 'Loading session...'}
+      </div>
+    )
+  }
+
+  return (
+    <div ref={containerRef} className="h-full">
+      <AlacrittyTerminalView
+        terminalId={terminalIdRef.current}
+        cwd={agentDir}
+        command={agentCommand.command}
+        args={resolvedArgs}
+      />
+    </div>
+  )
+}
+
 // ── Main Component ──────────────────────────────────────────────────────
 
 export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX.Element {
@@ -122,8 +218,10 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
   const [wsInboxItems, setWsInboxItems] = useState<WorkItem[]>([])
   const [allAgentWork, setAllAgentWork] = useState<WorkItem[]>([])
   const [viewMode, setViewMode] = useState<'preview' | 'edit'>('preview')
-  const [activeSection, setActiveSection] = useState<'profile' | 'claude-md' | 'work'>('claude-md')
+  const [activeSection, setActiveSection] = useState<'chat' | 'profile' | 'claude-md' | 'work'>('chat')
   const [showPersonaEditor, setShowPersonaEditor] = useState(false)
+  // Track whether the chat terminal has been mounted (lazy — only on first visit)
+  const [chatMounted, setChatMounted] = useState(true)
 
   const agentDir = `${projectPath}/.k2so/agents/${agentName}`
 
@@ -154,7 +252,6 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
 
   const fetchWork = useCallback(async () => {
     if (isWorkspaceBoard) {
-      // Fetch workspace inbox + all agents' work
       try {
         const wsItems = await invoke<WorkItem[]>('k2so_agents_workspace_inbox_list', { projectPath })
         setWsInboxItems(wsItems)
@@ -204,12 +301,16 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
           projectPath={projectPath}
           onClose={() => {
             setShowPersonaEditor(false)
-            fetchProfile() // Refresh profile after editing
+            fetchProfile()
           }}
         />
       </div>
     )
   }
+
+  // Determine which tabs to show
+  const showWork = profile ? (profile.agentType !== 'k2so' && profile.agentType !== 'custom') : false
+  const showChat = !isWorkspaceBoard
 
   return (
     <div className="h-full flex flex-col bg-[var(--color-bg)] overflow-hidden">
@@ -219,17 +320,19 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
         {!isWorkspaceBoard && (
           <div className="flex gap-0.5 flex-shrink-0">
             {(() => {
-              const showWork = profile ? (profile.agentType !== 'k2so' && profile.agentType !== 'custom') : false
-              const sections = showWork
-                ? (['work', 'claude-md', 'profile'] as const)
-                : (['claude-md', 'profile'] as const)
+              const sections: Array<'chat' | 'work' | 'claude-md' | 'profile'> = showWork
+                ? ['chat', 'work', 'claude-md', 'profile']
+                : ['chat', 'claude-md', 'profile']
               return sections.map((section) => {
-              const labels = { work: 'Work', profile: 'Profile', 'claude-md': 'CLAUDE.md' }
+              const labels = { chat: 'Chat', work: 'Work', profile: 'Profile', 'claude-md': 'CLAUDE.md' }
               const isActive = activeSection === section
               return (
                 <button
                   key={section}
-                  onClick={() => setActiveSection(section)}
+                  onClick={() => {
+                    setActiveSection(section)
+                    if (section === 'chat') setChatMounted(true)
+                  }}
                   className={`px-3 py-1.5 text-[11px] font-medium transition-colors no-drag cursor-pointer ${
                     isActive
                       ? 'bg-[var(--color-accent)] text-white'
@@ -284,11 +387,19 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
         )}
       </div>
 
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto min-h-0">
+      {/* Content — relative container so chat terminal can stay absolutely positioned
+           and maintain its dimensions even when another tab is in front of it. */}
+      <div className="flex-1 overflow-hidden min-h-0 relative">
+        {/* ── Chat Terminal — always mounted at full size, layered behind when inactive ── */}
+        {showChat && chatMounted && (
+          <div className={`absolute inset-0 ${activeSection === 'chat' ? 'z-10' : 'z-0 pointer-events-none'}`}>
+            <AgentChatTerminal agentName={agentName} agentDir={agentDir} autoFocus={activeSection === 'chat'} />
+          </div>
+        )}
+
         {/* ── Workspace Board (Kanban) ── */}
         {isWorkspaceBoard && (
-          <div className="h-full flex gap-3 p-3">
+          <div className="absolute inset-0 z-10 flex gap-3 p-3 overflow-y-auto">
             <KanbanColumn title="Unassigned" items={wsUnassigned} color="text-[var(--color-accent)]" agentDir={`${projectPath}/.k2so/work`} onOpenFile={openFile} />
             <KanbanColumn title="In Progress" items={wsInProgress} color="text-yellow-400" agentDir={`${projectPath}/.k2so/agents`} onOpenFile={openFile} />
             <KanbanColumn title="Review" items={wsReview} color="text-green-400" agentDir={`${projectPath}/.k2so/agents`} onOpenFile={openFile} />
@@ -297,7 +408,7 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
 
         {/* ── Agent Work Queue (Kanban) ── */}
         {!isWorkspaceBoard && activeSection === 'work' && (
-          <div className="h-full flex gap-3 p-3">
+          <div className="absolute inset-0 z-10 flex gap-3 p-3 overflow-y-auto bg-[var(--color-bg)]">
             <KanbanColumn title="Inbox" items={inbox} color="text-[var(--color-accent)]" agentDir={agentDir} onOpenFile={openFile} />
             <KanbanColumn title="Active" items={active} color="text-yellow-400" agentDir={agentDir} onOpenFile={openFile} />
             <KanbanColumn title="Done" items={done} color="text-green-400" agentDir={agentDir} onOpenFile={openFile} />
@@ -306,7 +417,7 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
 
         {/* ── Profile ── */}
         {!isWorkspaceBoard && activeSection === 'profile' && (
-          <div className="flex-1 overflow-y-auto overflow-x-hidden">
+          <div className="absolute inset-0 z-10 overflow-y-auto overflow-x-hidden bg-[var(--color-bg)]">
             {viewMode === 'preview' ? (
               <div className="markdown-content p-4">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
@@ -323,7 +434,7 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
 
         {/* ── CLAUDE.md ── */}
         {!isWorkspaceBoard && activeSection === 'claude-md' && (
-          <div className="flex-1 overflow-y-auto overflow-x-hidden">
+          <div className="absolute inset-0 z-10 overflow-y-auto overflow-x-hidden bg-[var(--color-bg)]">
             {claudeMd ? (
               viewMode === 'preview' ? (
                 <div className="markdown-content p-4">

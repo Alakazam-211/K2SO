@@ -4,7 +4,7 @@ import { useSettingsStore, getEffectiveKeybinding } from '@/stores/settings'
 import type { SettingsSection, TerminalSettings } from '@/stores/settings'
 import { useProjectsStore } from '@/stores/projects'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
-import { usePresetsStore } from '@/stores/presets'
+import { usePresetsStore, parseCommand } from '@/stores/presets'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import type { LinkClickMode } from '@/stores/terminal-settings'
 import { invoke } from '@tauri-apps/api/core'
@@ -27,6 +27,9 @@ import AgentIcon from '@/components/AgentIcon/AgentIcon'
 import { EDITOR_THEMES, EDITOR_FONTS, CodeEditor } from '@/components/FileViewerPane/CodeEditor'
 import { CustomThemeCreator } from './CustomThemeCreator'
 import { AgentPersonaEditor } from '@/components/AgentPersonaEditor/AgentPersonaEditor'
+import { AIFileEditor } from '@/components/AIFileEditor/AIFileEditor'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useCustomThemesStore } from '@/stores/custom-themes'
 import { KeyCombo } from '@/components/KeySymbol'
 import { useClaudeAuthStore } from '@/stores/claude-auth'
@@ -3851,11 +3854,19 @@ function ProjectDetail({
     return (
       <SectionErrorBoundary>
         <div className="absolute inset-0 overflow-hidden bg-[var(--color-bg)]">
-          <AgentPersonaEditor
-            agentName={agentEditorName}
-            projectPath={project.path}
-            onClose={() => setAgentEditorOpen(false)}
-          />
+          {agentEditorName === '__project_context__' ? (
+            <ProjectContextEditor
+              projectPath={project.path}
+              projectName={project.name}
+              onClose={() => setAgentEditorOpen(false)}
+            />
+          ) : (
+            <AgentPersonaEditor
+              agentName={agentEditorName}
+              projectPath={project.path}
+              onClose={() => setAgentEditorOpen(false)}
+            />
+          )}
         </div>
       </SectionErrorBoundary>
     )
@@ -4581,6 +4592,153 @@ function StateSelector({ projectId, currentStateId }: { projectId: string; curre
   )
 }
 
+// ── Project Context Editor (AIFileEditor for .k2so/PROJECT.md) ──────
+
+function ProjectContextEditor({ projectPath, projectName, onClose }: { projectPath: string; projectName: string; onClose: () => void }): React.JSX.Element {
+  const [content, setContent] = useState('')
+  const [previewMode, setPreviewMode] = useState<'preview' | 'edit'>('preview')
+  const [previewScale, setPreviewScale] = useState(100)
+  const cssScale = Math.round(previewScale * 0.7)
+
+  const filePath = `${projectPath}/.k2so/PROJECT.md`
+  const watchDir = `${projectPath}/.k2so`
+
+  // Resolve the user's default AI agent command
+  const defaultAgent = useSettingsStore((s) => s.defaultAgent)
+  const presets = usePresetsStore((s) => s.presets)
+  const agentCommand = useMemo(() => {
+    const preset = presets.find((p) => p.id === defaultAgent) || presets.find((p) => p.enabled)
+    if (!preset) return null
+    return parseCommand(preset.command)
+  }, [defaultAgent, presets])
+
+  // Load content
+  useEffect(() => {
+    invoke<{ content: string }>('fs_read_file', { path: filePath })
+      .then((r) => setContent(r.content))
+      .catch(() => setContent(''))
+  }, [filePath])
+
+  const handleFileChange = useCallback((c: string) => setContent(c), [])
+
+  const systemPrompt = useMemo(() => [
+    `You're helping the user define shared project context for their AI agent pod.`,
+    ``,
+    `Project: "${projectName}"`,
+    `File: .k2so/PROJECT.md`,
+    ``,
+    `This file is injected into EVERY pod agent's CLAUDE.md at launch.`,
+    `It should contain project-wide knowledge that all agents need:`,
+    ``,
+    `• About This Project — what the codebase does, what problem it solves`,
+    `• Tech Stack — languages, frameworks, databases, infrastructure`,
+    `• Key Directories — important paths and what lives in them`,
+    `• Conventions — code style, commit format, PR process, branch naming`,
+    `• External Systems — issue trackers, CI dashboards, staging environments`,
+    ``,
+    `Edit PROJECT.md in the current directory. The user sees a live preview on the right.`,
+    ``,
+    `Current contents:`,
+    content,
+  ].join('\n'), [projectName, content])
+
+  const terminalCommand = agentCommand?.command
+  const terminalArgs = useMemo(() => {
+    if (!agentCommand) return undefined
+    const baseArgs = [...agentCommand.args]
+    if (agentCommand.command === 'claude') {
+      return [
+        ...baseArgs,
+        '--append-system-prompt', systemPrompt,
+        `Open and read PROJECT.md in the current directory. This defines shared context for all pod agents in "${projectName}". Start by asking about their tech stack and project structure.`,
+      ]
+    }
+    return baseArgs
+  }, [agentCommand, systemPrompt, projectName])
+
+  return (
+    <AIFileEditor
+      filePath={filePath}
+      watchDir={watchDir}
+      cwd={watchDir}
+      command={terminalCommand}
+      args={terminalArgs}
+      title={`Project Context: ${projectName}`}
+      instructions={`Editing .k2so/PROJECT.md — shared context injected into all pod agents at launch.`}
+      warningText="Changes here affect all pod agents in this workspace."
+      onFileChange={handleFileChange}
+      onClose={onClose}
+      preview={
+        <div className="h-full flex flex-col">
+          <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--color-border)] flex-shrink-0">
+            <div className="text-xs text-[var(--color-text-muted)]">
+              <span className="font-medium text-[var(--color-text-primary)]">PROJECT.md</span>
+              <span className="mx-2">&middot;</span>
+              <span>Shared pod context</span>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              {previewMode === 'preview' && (
+                <div className="flex items-center gap-0.5">
+                  <button
+                    onClick={() => setPreviewScale((s) => Math.max(50, s - 10))}
+                    className="w-5 h-5 flex items-center justify-center text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] bg-[var(--color-bg-elevated)] border border-[var(--color-border)] no-drag cursor-pointer"
+                  >
+                    −
+                  </button>
+                  <span className="text-[9px] tabular-nums text-[var(--color-text-muted)] w-7 text-center">{previewScale}%</span>
+                  <button
+                    onClick={() => setPreviewScale((s) => Math.min(200, s + 10))}
+                    className="w-5 h-5 flex items-center justify-center text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] bg-[var(--color-bg-elevated)] border border-[var(--color-border)] no-drag cursor-pointer"
+                  >
+                    +
+                  </button>
+                </div>
+              )}
+              <div className="flex gap-0.5">
+                {(['preview', 'edit'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    onClick={() => setPreviewMode(mode)}
+                    className={`px-2 py-1 text-[10px] font-medium transition-colors no-drag cursor-pointer ${
+                      previewMode === mode
+                        ? 'bg-[var(--color-accent)] text-white'
+                        : 'bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] border border-[var(--color-border)]'
+                    }`}
+                  >
+                    {mode === 'preview' ? 'Preview' : 'Edit'}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          {previewMode === 'preview' ? (
+            <div className="flex-1 overflow-auto p-4">
+              <div className="markdown-content" style={{ fontSize: `${cssScale}%` }}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {content || '*No content yet. Use the AI assistant to set up your project context.*'}
+                </ReactMarkdown>
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 overflow-hidden">
+              <CodeEditor
+                code={content}
+                filePath={filePath}
+                onSave={async (c) => {
+                  try { await invoke('fs_write_file', { path: filePath, content: c }) } catch {}
+                }}
+                onChange={(c) => setContent(c)}
+              />
+            </div>
+          )}
+        </div>
+      }
+    />
+  )
+}
+
+// ── Custom Agent Persona Button ──────────────────────────────────────
+
 function CustomAgentPersonaButton({ projectPath, projectName, onOpenEditor }: { projectPath: string; projectName: string; onOpenEditor: (agentName: string) => void }): React.JSX.Element {
   const [ready, setReady] = useState(false)
   const [agentName, setAgentName] = useState(projectName.toLowerCase().replace(/\s+/g, '-'))
@@ -4867,6 +5025,29 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
           </div>
         </div>
       )}
+
+      {/* Project Context */}
+      <div>
+        <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mb-1">
+          Project Context
+        </h3>
+        <div className="border border-[var(--color-border)] px-3 py-2">
+          <div className="flex items-center justify-between">
+            <div className="flex-1 min-w-0 mr-3">
+              <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed">
+                Shared knowledge about this codebase that all pod agents receive at launch — tech stack, conventions, key directories.
+              </p>
+            </div>
+            <button
+              onClick={() => onOpenEditor('__project_context__')}
+              className="px-2 py-0.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer flex-shrink-0"
+              title="Edit shared project context"
+            >
+              ✎ Manage Project Context
+            </button>
+          </div>
+        </div>
+      </div>
 
       {/* Pod Members section */}
       <div>

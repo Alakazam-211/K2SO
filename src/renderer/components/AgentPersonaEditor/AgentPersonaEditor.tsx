@@ -30,6 +30,14 @@ interface EditorContext {
   agentDir: string
 }
 
+interface ClaudeMdPreview {
+  generated: string
+  onDisk: string | null
+  claudeMdPath: string
+}
+
+type PreviewTab = 'profile' | 'claude-md'
+
 interface AgentPersonaEditorProps {
   agentName: string
   projectPath: string
@@ -46,8 +54,14 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
   const [error, setError] = useState<string | null>(null)
   const [previewMode, setPreviewMode] = useState<'preview' | 'edit'>('preview')
   const [previewScale, setPreviewScale] = useState(100)
-  // 100% display maps to 70% CSS font-size as the baseline
   const cssScale = Math.round(previewScale * 0.7)
+
+  // Tabbed preview state
+  const [activeTab, setActiveTab] = useState<PreviewTab>('profile')
+  const [claudeMdContent, setClaudeMdContent] = useState<string>('')
+  const [claudeMdPath, setClaudeMdPath] = useState<string>('')
+  const [claudeMdGenerated, setClaudeMdGenerated] = useState<string>('')
+  const [regenerating, setRegenerating] = useState(false)
 
   // Resolve the user's default AI agent command
   const defaultAgent = useSettingsStore((s) => s.defaultAgent)
@@ -58,7 +72,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
     return parseCommand(preset.command)
   }, [defaultAgent, presets])
 
-  // Initialize: fetch agent context
+  // Initialize: fetch agent context + CLAUDE.md preview
   useEffect(() => {
     const init = async () => {
       try {
@@ -70,6 +84,19 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
         setAgentContent(ctx.agentMd)
         setAgentMdPath(ctx.agentMdPath)
         setWatchDir(ctx.agentDir)
+
+        // Fetch CLAUDE.md preview
+        try {
+          const preview = await invoke<ClaudeMdPreview>('k2so_agents_preview_claude_md', {
+            projectPath,
+            agentName,
+          })
+          setClaudeMdGenerated(preview.generated)
+          setClaudeMdContent(preview.onDisk ?? preview.generated)
+          setClaudeMdPath(preview.claudeMdPath)
+        } catch {
+          // CLAUDE.md preview not available — non-fatal
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         console.error('[agent-editor] Init failed:', msg)
@@ -111,11 +138,40 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
     onClose()
   }, [projectPath, agentName, agentMdPath, onClose])
 
+  // Regenerate CLAUDE.md to defaults
+  const handleRegenerate = useCallback(async () => {
+    setRegenerating(true)
+    try {
+      const content = await invoke<string>('k2so_agents_regenerate_claude_md', {
+        projectPath,
+        agentName,
+      })
+      setClaudeMdContent(content)
+      setClaudeMdGenerated(content)
+    } catch (err) {
+      console.error('[agent-editor] Regenerate failed:', err)
+    } finally {
+      setRegenerating(false)
+    }
+  }, [projectPath, agentName])
+
+  // Save CLAUDE.md edits
+  const handleSaveClaudeMd = useCallback(async (content: string) => {
+    if (!claudeMdPath) return
+    try {
+      await invoke('fs_write_file', { path: claudeMdPath, content })
+      setClaudeMdContent(content)
+    } catch (err) {
+      console.error('[agent-editor] CLAUDE.md save failed:', err)
+    }
+  }, [claudeMdPath])
+
   // Build the system prompt for the AI assistant
   const agentPrompt = useMemo(() => {
     if (!context) return ''
     const isCustom = context.agentType === 'custom'
     const isK2SO = context.agentType === 'k2so'
+    const isPod = context.agentType === 'pod-leader' || context.agentType === 'pod-member'
 
     const typeLabel = isK2SO ? 'K2SO Agent' : isCustom ? 'Custom Agent' : context.isPodLeader ? 'Pod Leader' : 'Pod Member'
 
@@ -164,6 +220,16 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
             `Focus agent.md body on what makes this agent unique beyond the standard K2SO setup.`,
           ].join('\n')
 
+    const projectMdNote = isPod
+      ? [
+          ``,
+          `• **PROJECT.md** — There is a shared project context file at \`.k2so/PROJECT.md\` that gets`,
+          `  injected into every pod agent's context at launch. If the user mentions project-wide info`,
+          `  (tech stack, conventions, key directories), suggest putting it in PROJECT.md instead of`,
+          `  duplicating it in each agent's file. You can read it: \`cat .k2so/PROJECT.md\``,
+        ].join('\n')
+      : ''
+
     return [
       `You're helping the user configure an AI agent. Here's the context:`,
       ``,
@@ -176,12 +242,20 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
       `• Frontmatter (between --- delimiters): name, role, type — these are read by the system`,
       `• Body (below frontmatter): all instructions, behavior, personality, tools, integrations`,
       ``,
+      `## Key Sections to Help Configure:`,
+      ``,
+      `• **Standing Orders** — Persistent directives the agent follows every time it wakes up.`,
+      `  Unlike inbox work items (one-off tasks), standing orders are ongoing responsibilities.`,
+      `  Help the user define what this agent should ALWAYS check or do on each wake cycle.`,
+      `  Examples: "Check CI status", "Review open PRs older than 24h", "Scan for new issues".`,
+      projectMdNote,
+      ``,
       `Current contents:`,
       context.agentMd,
       ``,
       typeGuidance,
       ``,
-      `The user sees a live preview on the right. Only edit agent.md.`,
+      `The user sees a tabbed preview on the right with Profile and CLAUDE.md tabs. Only edit agent.md.`,
     ].join('\n')
   }, [context])
 
@@ -194,7 +268,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
       return [
         ...baseArgs,
         '--append-system-prompt', agentPrompt,
-        `Open and read agent.md in the current directory. This defines the agent "${context.agentName}" (${context.role}). The user sees a live preview on the right. Start by asking what they want this agent to do.`,
+        `Open and read agent.md in the current directory. This defines the agent "${context.agentName}" (${context.role}). The user sees a tabbed preview on the right (Profile + CLAUDE.md). Start by asking what they want this agent to do.`,
       ]
     }
     return baseArgs
@@ -219,6 +293,10 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
     )
   }
 
+  // The content/path for the current tab
+  const currentContent = activeTab === 'profile' ? agentContent : claudeMdContent
+  const currentPath = activeTab === 'profile' ? agentMdPath : claudeMdPath
+
   return (
     <AIFileEditor
       filePath={agentMdPath}
@@ -234,12 +312,22 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
       onManualRefresh={handleManualRefresh}
       preview={
         <div className="h-full flex flex-col">
-          {/* Header: agent info + Preview/Edit toggle */}
-          <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--color-border)] flex-shrink-0">
-            <div className="text-xs text-[var(--color-text-muted)]">
-              <span className="font-medium text-[var(--color-text-primary)]">{context.agentName}</span>
-              <span className="mx-2">&middot;</span>
-              <span>{context.role}</span>
+          {/* Tab bar */}
+          <div className="flex items-center justify-between px-3 py-1.5 border-b border-[var(--color-border)] flex-shrink-0">
+            <div className="flex items-center gap-1">
+              {(['profile', 'claude-md'] as const).map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => { setActiveTab(tab); setPreviewMode('preview') }}
+                  className={`px-2.5 py-1 text-[10px] font-medium transition-colors no-drag cursor-pointer ${
+                    activeTab === tab
+                      ? 'text-[var(--color-text-primary)] border-b-2 border-[var(--color-accent)]'
+                      : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]'
+                  }`}
+                >
+                  {tab === 'profile' ? 'Profile' : 'CLAUDE.md'}
+                </button>
+              ))}
             </div>
             <div className="flex items-center gap-2 flex-shrink-0">
               {/* Zoom controls — only in preview mode */}
@@ -262,6 +350,17 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
                   </button>
                 </div>
               )}
+              {/* Regenerate button — CLAUDE.md tab only */}
+              {activeTab === 'claude-md' && (
+                <button
+                  onClick={handleRegenerate}
+                  disabled={regenerating}
+                  className="px-2 py-1 text-[10px] font-medium text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] bg-[var(--color-bg-elevated)] border border-[var(--color-border)] no-drag cursor-pointer disabled:opacity-50"
+                  title="Regenerate CLAUDE.md from defaults"
+                >
+                  {regenerating ? 'Regenerating...' : 'Regenerate'}
+                </button>
+              )}
               {/* Preview/Edit toggle */}
               <div className="flex gap-0.5">
                 {(['preview', 'edit'] as const).map((mode) => (
@@ -280,28 +379,54 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
               </div>
             </div>
           </div>
+
+          {/* CLAUDE.md warning banner */}
+          {activeTab === 'claude-md' && (
+            <div className="px-3 py-2 bg-yellow-500/5 border-b border-yellow-500/20 flex-shrink-0">
+              <p className="text-[10px] text-yellow-500/80 leading-relaxed">
+                This file is auto-generated at launch from your Profile, Standing Orders, and infrastructure docs.
+                Edits here will persist but may be overwritten when you click Regenerate or when K2SO updates
+                the agent context (e.g., mode change, new team members). To make lasting changes, edit the
+                Profile tab instead.
+              </p>
+            </div>
+          )}
+
           {/* Content */}
           {previewMode === 'preview' ? (
             <div className="flex-1 overflow-auto p-4">
               <div className="markdown-content" style={{ fontSize: `${cssScale}%` }}>
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {stripFrontmatter(agentContent) || '*No content yet*'}
+                  {activeTab === 'profile'
+                    ? (stripFrontmatter(agentContent) || '*No content yet*')
+                    : (claudeMdContent || '*CLAUDE.md not yet generated. Click Regenerate to create it.*')
+                  }
                 </ReactMarkdown>
               </div>
             </div>
           ) : (
             <div className="flex-1 overflow-hidden">
               <CodeEditor
-                code={agentContent}
-                filePath={agentMdPath}
+                code={currentContent}
+                filePath={currentPath}
                 onSave={async (content) => {
-                  try {
-                    await invoke('fs_write_file', { path: agentMdPath, content })
-                  } catch (err) {
-                    console.error('[agent-editor] Save failed:', err)
+                  if (activeTab === 'profile') {
+                    try {
+                      await invoke('fs_write_file', { path: agentMdPath, content })
+                    } catch (err) {
+                      console.error('[agent-editor] Save failed:', err)
+                    }
+                  } else {
+                    await handleSaveClaudeMd(content)
                   }
                 }}
-                onChange={(content) => setAgentContent(content)}
+                onChange={(content) => {
+                  if (activeTab === 'profile') {
+                    setAgentContent(content)
+                  } else {
+                    setClaudeMdContent(content)
+                  }
+                }}
               />
             </div>
           )}
