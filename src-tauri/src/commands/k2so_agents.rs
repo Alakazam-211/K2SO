@@ -399,8 +399,9 @@ pub fn k2so_agents_delete_inner(project_path: &str, name: &str, force: bool) -> 
         let active_dir = agent_work_dir(project_path, name, "active");
         if active_dir.exists() {
             let active_count = fs::read_dir(&active_dir)
-                .map(|entries| entries.flatten().count())
-                .unwrap_or(0);
+                .map_err(|e| format!("Cannot check active work for '{}': {}", name, e))?
+                .flatten()
+                .count();
             if active_count > 0 {
                 return Err(format!(
                     "Agent '{}' has {} active work item(s). Use --force to delete anyway.",
@@ -1274,19 +1275,27 @@ fn extract_section(content: &str, heading: &str) -> Option<String> {
     let marker = format!("## {}", heading);
     let start = content.find(&marker)?;
     let after_heading = start + marker.len();
-    // Skip to the line after the heading
-    let body_start = content[after_heading..].find('\n').map(|i| after_heading + i + 1)?;
+    // Skip to the line after the heading (or use remaining content if heading is at EOF)
+    let body_start = match content[after_heading..].find('\n') {
+        Some(i) => after_heading + i + 1,
+        None => return None, // heading at EOF with no body
+    };
     // Find the next ## heading or end of content
     let body_end = content[body_start..]
         .find("\n## ")
         .map(|i| body_start + i)
         .unwrap_or(content.len());
     let body = content[body_start..body_end].trim();
-    // Filter out lines that are only HTML comments
+    // Check if there's meaningful content (not just pure HTML comments)
+    // A line is a "pure comment" only if it starts with <!-- and ends with -->
+    // Lines with mixed content (e.g., "real text<!-- note -->") are kept
     let meaningful: Vec<&str> = body.lines()
         .filter(|l| {
             let t = l.trim();
-            !t.is_empty() && !t.starts_with("<!--") && !t.ends_with("-->")
+            if t.is_empty() { return false; }
+            // Pure comment line: starts with <!-- and ends with -->
+            if t.starts_with("<!--") && t.ends_with("-->") { return false; }
+            true
         })
         .collect();
     if meaningful.is_empty() {

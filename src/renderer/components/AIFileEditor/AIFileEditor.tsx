@@ -112,10 +112,12 @@ export function AIFileEditor({
       if (cancelled) return
 
       if (savedSession) {
-        // Resume previous session: strip any existing --resume flags, then add ours
-        const baseArgs = (args ?? []).filter(
-          (a, i, arr) => a !== '--resume' && (i === 0 || arr[i - 1] !== '--resume')
-        )
+        // Resume previous session: strip any existing --resume + sessionId pair, then add ours
+        const raw = args ?? []
+        const resumeIdx = raw.indexOf('--resume')
+        const baseArgs = resumeIdx === -1
+          ? raw
+          : [...raw.slice(0, resumeIdx), ...raw.slice(resumeIdx + 2)]
         setResolvedArgs([...baseArgs, '--resume', savedSession])
       } else {
         setResolvedArgs(args)

@@ -153,7 +153,7 @@ fn urldecode(s: &str) -> String {
     }
     String::from_utf8(bytes).unwrap_or_else(|e| {
         // Fallback: lossy conversion if somehow the result isn't valid UTF-8
-        String::from_utf8_lossy(e.as_bytes()).into_owned()
+        String::from_utf8_lossy(e.into_bytes().as_slice()).into_owned()
     })
 }
 
