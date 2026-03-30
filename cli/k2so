@@ -447,6 +447,31 @@ cmd_commit_merge() {
     cli_request "/cli/commit-merge" "$params"
 }
 
+cmd_agents_delete() {
+    local agent="" force=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --force|-f) force="1"; shift ;;
+            *) [ -z "$agent" ] && agent="$1"; shift ;;
+        esac
+    done
+    if [ -z "$agent" ]; then
+        echo "Usage: k2so agents delete <name> [--force]" >&2
+        echo "  Removes agent and all its work directories." >&2
+        echo "  --force  Skip safety checks (active work, pod-leader)" >&2
+        exit 1
+    fi
+    local params="agent=$(urlencode "$agent")"
+    [ -n "$force" ] && params="${params}&force=1"
+    RESULT=$(cli_request "/cli/agents/delete" "$params")
+    if echo "$RESULT" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('success') else 1)" 2>/dev/null; then
+        echo "Agent '$agent' deleted."
+    else
+        echo "$RESULT" >&2
+        exit 1
+    fi
+}
+
 cmd_agents_lock() {
     local agent="${1:-}"
     [ -z "$agent" ] && { echo "Usage: k2so agents lock <name>" >&2; exit 1; }
@@ -734,6 +759,7 @@ COMMANDS:
   agents work <name>              Show agent's work items
   agents status <name>            Show agent status and work summary
   agents create <name> --role "." Create a new agent (alias)
+  agents delete <name> [--force]  Delete an agent and its work directories
   agents launch <name>            Launch agent's Claude session in K2SO
   agents generate-md <name>       Generate agent's CLAUDE.md context file
   agents profile <name>           Read an agent's profile (agent.md)
@@ -800,6 +826,7 @@ case "${1:-help}" in
     agent)
         case "${2:-}" in
             create) shift 2; cmd_agents_create "$@" ;;
+            delete|remove) shift 2; cmd_agents_delete "$@" ;;
             update) shift 2; cmd_agent_update "$@" ;;
             list)   cmd_agents_list ;;
             profile) shift 2; cmd_agents_profile "$@" ;;
@@ -812,6 +839,7 @@ case "${1:-help}" in
             work)   shift 2; cmd_agents_work "$@" ;;
             status) shift 2; cmd_agents_status "$@" ;;
             create) shift 2; cmd_agents_create "$@" ;;
+            delete|remove) shift 2; cmd_agents_delete "$@" ;;
             launch) shift 2; cmd_agents_launch "$@" ;;
             generate-md) shift 2; cmd_agents_generate_md "$@" ;;
             profile) shift 2; cmd_agents_profile "$@" ;;

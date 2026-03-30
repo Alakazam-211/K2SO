@@ -272,6 +272,21 @@ pub fn run() {
                     .and_then(|_| std::fs::rename(&port_tmp, &port_file))
                 {
                     log_debug!("[heartbeat] Failed to write port file: {}", e);
+                    // Fallback: try direct write without atomic rename
+                    let _ = std::fs::write(&port_file, hook_port.to_string());
+                }
+                // Verify the port file was actually written
+                match std::fs::read_to_string(&port_file) {
+                    Ok(contents) if contents.trim() == hook_port.to_string() => {
+                        log_debug!("[heartbeat] Port file verified: {}", port_file.display());
+                    }
+                    Ok(contents) => {
+                        log_debug!("[heartbeat] WARNING: Port file has wrong content: '{}' (expected {})", contents.trim(), hook_port);
+                        let _ = std::fs::write(&port_file, hook_port.to_string());
+                    }
+                    Err(e) => {
+                        log_debug!("[heartbeat] WARNING: Port file not readable after write: {}", e);
+                    }
                 }
                 let token_file = k2so_dir.join("heartbeat.token");
                 let token_str = crate::agent_hooks::get_token();
@@ -312,6 +327,28 @@ pub fn run() {
                             log_debug!("[heartbeat] Failed to write token file: {}", e);
                         }
                     }
+                }
+
+                // Watchdog: periodically verify the port file exists and is correct.
+                // If another process deletes it or it gets corrupted, recreate it so
+                // the heartbeat script can always find the running K2SO instance.
+                {
+                    let watchdog_port = hook_port;
+                    let watchdog_dir = k2so_dir.clone();
+                    std::thread::spawn(move || {
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_secs(60));
+                            let port_file = watchdog_dir.join("heartbeat.port");
+                            let needs_write = match std::fs::read_to_string(&port_file) {
+                                Ok(contents) => contents.trim() != watchdog_port.to_string(),
+                                Err(_) => true,
+                            };
+                            if needs_write {
+                                log_debug!("[heartbeat] Port file missing or stale — recreating");
+                                let _ = std::fs::write(&port_file, watchdog_port.to_string());
+                            }
+                        }
+                    });
                 }
             }
 

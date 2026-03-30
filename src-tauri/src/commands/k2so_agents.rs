@@ -371,10 +371,45 @@ pub fn k2so_agents_create(
 /// Delete a K2SO agent and its directory.
 #[tauri::command]
 pub fn k2so_agents_delete(project_path: String, name: String) -> Result<(), String> {
-    let dir = agent_dir(&project_path, &name);
+    k2so_agents_delete_inner(&project_path, &name, false)
+}
+
+/// Delete an agent with optional force flag.
+/// - Refuses to delete pod-leader (unless force)
+/// - Refuses to delete if agent has active work (unless force)
+/// - Removes .k2so/agents/<name>/ directory
+pub fn k2so_agents_delete_inner(project_path: &str, name: &str, force: bool) -> Result<(), String> {
+    let dir = agent_dir(project_path, name);
     if !dir.exists() {
         return Err(format!("Agent '{}' does not exist", name));
     }
+
+    // Read agent type to check if it's a pod-leader
+    let agent_md = dir.join("agent.md");
+    if agent_md.exists() {
+        let content = fs::read_to_string(&agent_md).unwrap_or_default();
+        let fm = parse_frontmatter(&content);
+        if fm.get("type").map_or(false, |t| t == "pod-leader") && !force {
+            return Err("Cannot delete pod-leader agent. Use --force to override.".to_string());
+        }
+    }
+
+    // Check for active work items
+    if !force {
+        let active_dir = agent_work_dir(project_path, name, "active");
+        if active_dir.exists() {
+            let active_count = fs::read_dir(&active_dir)
+                .map(|entries| entries.flatten().count())
+                .unwrap_or(0);
+            if active_count > 0 {
+                return Err(format!(
+                    "Agent '{}' has {} active work item(s). Use --force to delete anyway.",
+                    name, active_count
+                ));
+            }
+        }
+    }
+
     fs::remove_dir_all(&dir).map_err(|e| format!("Failed to delete agent: {}", e))?;
     Ok(())
 }

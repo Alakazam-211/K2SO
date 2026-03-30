@@ -123,32 +123,38 @@ fn parse_query_params(url: &str) -> std::collections::HashMap<String, String> {
 }
 
 fn urldecode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
+    // Decode percent-encoded bytes into a byte buffer first, then convert
+    // to UTF-8. This correctly handles multi-byte UTF-8 sequences like
+    // em dash (— = %E2%80%94) which span multiple percent-encoded bytes.
+    let mut bytes = Vec::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
         if c == '%' {
             let hex: String = chars.by_ref().take(2).collect();
-            // Validate we got exactly 2 hex chars before parsing
             if hex.len() == 2 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
                 if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    result.push(byte as char);
+                    bytes.push(byte);
                 } else {
-                    // Invalid hex — preserve the original characters
-                    result.push('%');
-                    result.push_str(&hex);
+                    bytes.push(b'%');
+                    bytes.extend_from_slice(hex.as_bytes());
                 }
             } else {
-                // Malformed percent encoding (e.g., %Z or lone %) — preserve as-is
-                result.push('%');
-                result.push_str(&hex);
+                bytes.push(b'%');
+                bytes.extend_from_slice(hex.as_bytes());
             }
         } else if c == '+' {
-            result.push(' ');
+            bytes.push(b' ');
         } else {
-            result.push(c);
+            // Regular ASCII/UTF-8 chars — encode as UTF-8 bytes
+            let mut buf = [0u8; 4];
+            let encoded = c.encode_utf8(&mut buf);
+            bytes.extend_from_slice(encoded.as_bytes());
         }
     }
-    result
+    String::from_utf8(bytes).unwrap_or_else(|e| {
+        // Fallback: lossy conversion if somehow the result isn't valid UTF-8
+        String::from_utf8_lossy(e.as_bytes()).into_owned()
+    })
 }
 
 /// Shell-escape a string for safe interpolation into shell commands.
@@ -406,6 +412,12 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             workspace, title, body, priority, item_type, assigned_by, source,
                         )
                         .map(|item| serde_json::to_string(&item).unwrap_or_default())
+                    }
+                    "/cli/agents/delete" => {
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        let force = params.get("force").map_or(false, |v| v == "1" || v == "true");
+                        crate::commands::k2so_agents::k2so_agents_delete_inner(&project_path, &agent, force)
+                            .map(|_| format!(r#"{{"success":true,"deleted":"{}"}}"#, agent))
                     }
                     "/cli/agents/lock" => {
                         let agent = params.get("agent").cloned().unwrap_or_default();
