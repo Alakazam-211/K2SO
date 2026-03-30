@@ -1,4 +1,4 @@
-import { useCallback, useState, useRef } from 'react'
+import { useCallback, useState, useRef, useEffect } from 'react'
 import { useTabsStore, type TerminalItemData } from '@/stores/tabs'
 import { useSettingsStore } from '@/stores/settings'
 import { useActiveAgentsStore } from '@/stores/active-agents'
@@ -171,6 +171,16 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
     }
   }, [groupIndex, removeTabFromGroup])
 
+  // Scroll active tab into view when it changes
+  useEffect(() => {
+    if (!activeTabId || !tabBarRef.current) return
+    const container = tabBarRef.current
+    const activeEl = container.querySelector(`[data-tab-id="${activeTabId}"]`) as HTMLElement | null
+    if (activeEl) {
+      activeEl.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
+    }
+  }, [activeTabId])
+
   return (
     <div
       className="flex h-9 items-center border-b border-[var(--color-border)] bg-[var(--color-bg-surface)] no-drag"
@@ -189,6 +199,7 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
           return (
             <div
               key={tab.id}
+              data-tab-id={tab.id}
               data-tab-reorder-index={index}
               className={`group relative flex h-full min-w-[100px] max-w-[200px] flex-shrink-0 items-center border-r border-[var(--color-border)] px-3 text-xs transition-colors select-none ${
                 isActive
