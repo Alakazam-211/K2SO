@@ -79,13 +79,27 @@ function KanbanCard({ item, onClick }: { item: WorkItem; onClick: () => void }):
 
 // ── Kanban Column ───────────────────────────────────────────────────────
 
-function KanbanColumn({ title, items, color, agentDir, onOpenFile }: {
+function KanbanColumn({ title, items, color, projectPath, agentDir, onOpenFile }: {
   title: string
   items: WorkItem[]
   color: string
-  agentDir: string
+  projectPath: string
+  agentDir?: string  // for regular agent views
   onOpenFile: (path: string) => void
 }): React.JSX.Element {
+  const resolvePath = (item: WorkItem) => {
+    // If item has assignedBy (from aggregated agent work), path is under that agent's dir
+    if (item.assignedBy && item.assignedBy !== 'user' && item.assignedBy !== 'external' && item.assignedBy !== 'delegated') {
+      return `${projectPath}/.k2so/agents/${item.assignedBy}/work/${item.folder}/${item.filename}`
+    }
+    // If agentDir is set (regular agent view), use it
+    if (agentDir) {
+      return `${agentDir}/work/${item.folder}/${item.filename}`
+    }
+    // Workspace-level items
+    return `${projectPath}/.k2so/work/${item.folder}/${item.filename}`
+  }
+
   return (
     <div className="flex-1 min-w-0 flex flex-col">
       <div className="flex items-center gap-1.5 mb-2.5 px-1">
@@ -106,7 +120,7 @@ function KanbanColumn({ title, items, color, agentDir, onOpenFile }: {
             <KanbanCard
               key={item.filename}
               item={item}
-              onClick={() => onOpenFile(`${agentDir}/work/${item.folder}/${item.filename}`)}
+              onClick={() => onOpenFile(resolvePath(item))}
             />
           ))
         )}
@@ -407,9 +421,9 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
         {/* ── Workspace Board (Kanban) ── */}
         {isWorkspaceBoard && (
           <div className="absolute inset-0 z-10 flex gap-3 p-3 overflow-y-auto">
-            <KanbanColumn title="Unassigned" items={wsUnassigned} color="text-[var(--color-accent)]" agentDir={`${projectPath}/.k2so/work`} onOpenFile={openFile} />
-            <KanbanColumn title="In Progress" items={wsInProgress} color="text-yellow-400" agentDir={`${projectPath}/.k2so/agents`} onOpenFile={openFile} />
-            <KanbanColumn title="Review" items={wsReview} color="text-green-400" agentDir={`${projectPath}/.k2so/agents`} onOpenFile={openFile} />
+            <KanbanColumn title="Unassigned" items={wsUnassigned} color="text-[var(--color-accent)]" projectPath={projectPath} onOpenFile={openFile} />
+            <KanbanColumn title="In Progress" items={wsInProgress} color="text-yellow-400" projectPath={projectPath} onOpenFile={openFile} />
+            <KanbanColumn title="Review" items={wsReview} color="text-green-400" projectPath={projectPath} onOpenFile={openFile} />
           </div>
         )}
 
@@ -418,16 +432,16 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
           isPodLeader ? (
             // Pod Leader sees: Inbox (workspace unassigned), Delegated (agents' inbox+active), Review (agents' done)
             <div className="absolute inset-0 z-10 flex gap-3 p-3 overflow-y-auto bg-[var(--color-bg)]">
-              <KanbanColumn title="Inbox" items={wsUnassigned} color="text-[var(--color-accent)]" agentDir={`${projectPath}/.k2so/work`} onOpenFile={openFile} />
-              <KanbanColumn title="Delegated" items={wsInProgress} color="text-yellow-400" agentDir={`${projectPath}/.k2so/agents`} onOpenFile={openFile} />
-              <KanbanColumn title="Review" items={wsReview} color="text-green-400" agentDir={`${projectPath}/.k2so/agents`} onOpenFile={openFile} />
+              <KanbanColumn title="Inbox" items={wsUnassigned} color="text-[var(--color-accent)]" projectPath={projectPath} onOpenFile={openFile} />
+              <KanbanColumn title="Delegated" items={wsInProgress} color="text-yellow-400" projectPath={projectPath} onOpenFile={openFile} />
+              <KanbanColumn title="Review" items={wsReview} color="text-green-400" projectPath={projectPath} onOpenFile={openFile} />
             </div>
           ) : (
             // Pod members see their own work queue
             <div className="absolute inset-0 z-10 flex gap-3 p-3 overflow-y-auto bg-[var(--color-bg)]">
-              <KanbanColumn title="Inbox" items={inbox} color="text-[var(--color-accent)]" agentDir={agentDir} onOpenFile={openFile} />
-              <KanbanColumn title="Active" items={active} color="text-yellow-400" agentDir={agentDir} onOpenFile={openFile} />
-              <KanbanColumn title="Done" items={done} color="text-green-400" agentDir={agentDir} onOpenFile={openFile} />
+              <KanbanColumn title="Inbox" items={inbox} color="text-[var(--color-accent)]" projectPath={projectPath} agentDir={agentDir} onOpenFile={openFile} />
+              <KanbanColumn title="Active" items={active} color="text-yellow-400" projectPath={projectPath} agentDir={agentDir} onOpenFile={openFile} />
+              <KanbanColumn title="Done" items={done} color="text-green-400" projectPath={projectPath} agentDir={agentDir} onOpenFile={openFile} />
             </div>
           )
         )}
