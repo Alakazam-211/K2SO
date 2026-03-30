@@ -811,6 +811,10 @@ COMMANDS:
 
   settings                        Show all workspace settings
 
+  update                          Update CLI to latest version from GitHub
+  update --check                  Check if an update is available
+  version                         Show installed CLI version
+
   help                            Show this help message
 
 ENVIRONMENT:
@@ -818,6 +822,82 @@ ENVIRONMENT:
   K2SO_HOOK_TOKEN    Auth token (set automatically)
   K2SO_PROJECT_PATH  Project root (defaults to $PWD)
 EOF
+}
+
+# ── Self-Update ──────────────────────────────────────────────────────
+
+K2SO_CLI_RAW_URL="https://raw.githubusercontent.com/Alakazam-211/K2SO/main/cli/k2so"
+
+cmd_update() {
+    local check_only=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --check|-c) check_only=1; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    echo "Checking for updates..."
+
+    # Download the latest version string from GitHub
+    local remote_script
+    remote_script=$(curl -sS --connect-timeout 5 --max-time 15 "$K2SO_CLI_RAW_URL" 2>/dev/null)
+    if [ -z "$remote_script" ]; then
+        echo "Error: Could not reach GitHub to check for updates." >&2
+        exit 1
+    fi
+
+    # Extract the version from the remote script
+    local remote_version
+    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="//' | sed 's/"//')
+    if [ -z "$remote_version" ]; then
+        echo "Error: Could not parse remote version." >&2
+        exit 1
+    fi
+
+    echo "  Installed: $K2SO_CLI_VERSION"
+    echo "  Latest:    $remote_version"
+
+    # Compare versions (simple string comparison works for semver with same format)
+    if [ "$K2SO_CLI_VERSION" = "$remote_version" ]; then
+        echo "Already up to date."
+        exit 0
+    fi
+
+    # Check if remote is actually newer (not a downgrade)
+    local newer
+    newer=$(printf '%s\n%s\n' "$K2SO_CLI_VERSION" "$remote_version" | sort -V | tail -1)
+    if [ "$newer" = "$K2SO_CLI_VERSION" ]; then
+        echo "Installed version is newer than remote (dev build?)."
+        exit 0
+    fi
+
+    if [ "$check_only" = "1" ]; then
+        echo "Update available: $K2SO_CLI_VERSION → $remote_version"
+        echo "Run 'k2so update' to install."
+        exit 0
+    fi
+
+    # Find where k2so is installed
+    local install_path
+    install_path=$(which k2so 2>/dev/null)
+    if [ -z "$install_path" ]; then
+        echo "Error: Could not find k2so in PATH." >&2
+        exit 1
+    fi
+
+    # Check if we can write to the install path
+    if [ ! -w "$install_path" ]; then
+        echo "Updating $install_path (requires sudo)..."
+        echo "$remote_script" | sudo tee "$install_path" > /dev/null
+        sudo chmod +x "$install_path"
+    else
+        echo "Updating $install_path..."
+        echo "$remote_script" > "$install_path"
+        chmod +x "$install_path"
+    fi
+
+    echo "Updated k2so: $K2SO_CLI_VERSION → $remote_version"
 }
 
 # ── Router ───────────────────────────────────────────────────────────
@@ -901,6 +981,9 @@ case "${1:-help}" in
         ;;
     settings)
         shift; cmd_settings "$@"
+        ;;
+    update)
+        shift; cmd_update "$@"
         ;;
     version|--version|-v)
         echo "k2so $K2SO_CLI_VERSION"
