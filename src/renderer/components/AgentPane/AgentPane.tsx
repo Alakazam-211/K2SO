@@ -206,6 +206,9 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
   )
 }
 
+// Remember which tab each agent was on so navigating back doesn't reset
+const lastActiveTab = new Map<string, 'chat' | 'profile' | 'claude-md' | 'work'>()
+
 // ── Main Component ──────────────────────────────────────────────────────
 
 export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX.Element {
@@ -217,10 +220,12 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
   const [wsInboxItems, setWsInboxItems] = useState<WorkItem[]>([])
   const [allAgentWork, setAllAgentWork] = useState<WorkItem[]>([])
   const [viewMode, setViewMode] = useState<'preview' | 'edit'>('preview')
-  const [activeSection, setActiveSection] = useState<'chat' | 'profile' | 'claude-md' | 'work'>('claude-md')
+  const [activeSection, setActiveSection] = useState<'chat' | 'profile' | 'claude-md' | 'work'>(
+    lastActiveTab.get(agentName) ?? 'work'
+  )
   const [showPersonaEditor, setShowPersonaEditor] = useState(false)
   // Track whether the chat terminal has been mounted (lazy — only on first visit)
-  const [chatMounted, setChatMounted] = useState(false)
+  const [chatMounted, setChatMounted] = useState(lastActiveTab.get(agentName) === 'chat')
 
   const agentDir = `${projectPath}/.k2so/agents/${agentName}`
 
@@ -330,6 +335,7 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
                   key={section}
                   onClick={() => {
                     setActiveSection(section)
+                    lastActiveTab.set(agentName, section)
                     if (section === 'chat') setChatMounted(true)
                   }}
                   className={`px-3 py-1.5 text-[11px] font-medium transition-colors no-drag cursor-pointer ${
