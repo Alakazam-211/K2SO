@@ -767,7 +767,7 @@ pub fn k2so_agents_workspace_inbox_list(project_path: String) -> Result<Vec<Work
     for entry in fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
         let path = entry.path();
         if path.extension().map_or(false, |ext| ext == "md") {
-            if let Some(item) = read_work_item(&path, "workspace-inbox") {
+            if let Some(item) = read_work_item(&path, "inbox") {
                 items.push(item);
             }
         }
