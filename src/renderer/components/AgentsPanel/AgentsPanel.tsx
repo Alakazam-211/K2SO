@@ -293,7 +293,10 @@ export default function AgentsPanel(): React.JSX.Element {
           <div className="px-3 py-1.5">
             <span className="text-[9px] font-medium text-[var(--color-accent)] uppercase tracking-wider">Pod Leader</span>
           </div>
-          <div className="px-3 py-2 border-b border-[var(--color-border)]">
+          <div
+            className="px-3 py-2 border-b border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] transition-colors cursor-pointer"
+            onClick={() => openAgentPane(podLeader.name)}
+          >
             <div className="flex items-center gap-2">
               <span
                 className="w-1.5 h-1.5 rounded-full flex-shrink-0"
@@ -312,7 +315,7 @@ export default function AgentsPanel(): React.JSX.Element {
                 {totalDone > 0 && <span className="text-green-400" title="Done">{totalDone}✓</span>}
               </div>
               <button
-                onClick={() => handleLaunch(podLeader.name)}
+                onClick={(e) => { e.stopPropagation(); handleLaunch(podLeader.name) }}
                 className="px-2 py-0.5 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer flex-shrink-0"
                 title="Launch pod leader session"
               >
