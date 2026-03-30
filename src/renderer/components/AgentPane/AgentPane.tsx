@@ -119,7 +119,9 @@ function KanbanColumn({ title, items, color, agentDir, onOpenFile }: {
 
 function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: string; agentDir: string; autoFocus?: boolean }): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
-  const terminalIdRef = useRef(`agent-chat-${agentName}-${crypto.randomUUID()}`)
+  // Stable terminal ID based on agent name — survives workspace stash/restore cycles
+  // so the same PTY is reused and conversations aren't lost on workspace switch
+  const terminalIdRef = useRef(`agent-chat-${agentName}`)
   const [resolvedArgs, setResolvedArgs] = useState<string[] | undefined>(undefined)
   const [ready, setReady] = useState(false)
 
@@ -169,13 +171,10 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
     return () => { cancelled = true }
   }, [agentCommand, agentDir])
 
-  // Cleanup terminal on unmount
-  useEffect(() => {
-    const id = terminalIdRef.current
-    return () => {
-      invoke('terminal_kill', { id }).catch(() => {})
-    }
-  }, [])
+  // NOTE: We intentionally do NOT kill the terminal on unmount.
+  // When workspaces are stashed, React unmounts but PTYs stay alive in the
+  // backend so conversations survive workspace switches. The terminal is
+  // cleaned up by the backend when the app shuts down or via terminal_kill_all.
 
   // Auto-focus the terminal container when the chat tab becomes active
   useEffect(() => {

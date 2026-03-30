@@ -183,12 +183,18 @@ export function AIFileEditor({
   }, [watchDir, fileExtension, onFileChange])
 
   // ── Terminal cleanup on unmount ────────────────────────────────────
+  const cwdRef = useRef(cwd)
+  cwdRef.current = cwd
+
   useEffect(() => {
     const id = terminalIdRef.current
     const t = setTimeout(() => setTerminalReady(true), 100)
     return () => {
       clearTimeout(t)
-      invoke('terminal_kill', { id }).catch(() => {})
+      // Save session before killing so it can be resumed next time
+      saveEditorSession(cwdRef.current, commandRef.current).finally(() => {
+        invoke('terminal_kill', { id }).catch(() => {})
+      })
     }
   }, [])
 
