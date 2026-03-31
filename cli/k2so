@@ -13,22 +13,33 @@ set -euo pipefail
 PORT="${K2SO_PORT:-}"
 TOKEN="${K2SO_HOOK_TOKEN:-}"
 
-# Resolve project root: use K2SO_PROJECT_PATH if set, otherwise walk up
-# from CWD to find the directory containing .k2so/ (like git finds .git/)
-if [ -n "${K2SO_PROJECT_PATH:-}" ]; then
-    PROJECT="$K2SO_PROJECT_PATH"
-else
-    PROJECT="$(pwd)"
+# Resolve project root: walk up from CWD (or K2SO_PROJECT_PATH) to find
+# the directory containing .k2so/ — like how git finds .git/ regardless
+# of where you invoke it. Always walk up even if K2SO_PROJECT_PATH is set,
+# because it may point to a subdirectory (worktree, agent dir).
+PROJECT="$(pwd)"
+_dir="${K2SO_PROJECT_PATH:-$PROJECT}"
+_found=""
+while [ "$_dir" != "/" ]; do
+    if [ -d "$_dir/.k2so" ]; then
+        _found="$_dir"
+        break
+    fi
+    _dir="$(dirname "$_dir")"
+done
+# If walk-up from K2SO_PROJECT_PATH failed, try from CWD
+if [ -z "$_found" ] && [ -n "${K2SO_PROJECT_PATH:-}" ]; then
     _dir="$PROJECT"
     while [ "$_dir" != "/" ]; do
         if [ -d "$_dir/.k2so" ]; then
-            PROJECT="$_dir"
+            _found="$_dir"
             break
         fi
         _dir="$(dirname "$_dir")"
     done
-    unset _dir
 fi
+PROJECT="${_found:-$PROJECT}"
+unset _dir _found
 
 # Auto-discover connection from ~/.k2so/ if not in a K2SO terminal
 if [ -z "$PORT" ] || [ -z "$TOKEN" ]; then
