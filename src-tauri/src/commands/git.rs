@@ -4,18 +4,24 @@ use crate::db::schema::Workspace;
 use crate::state::AppState;
 
 #[tauri::command]
-pub fn git_info(path: String) -> Result<git::GitInfo, String> {
-    Ok(git::get_git_info(&path))
+pub async fn git_info(path: String) -> Result<git::GitInfo, String> {
+    tokio::task::spawn_blocking(move || git::get_git_info(&path))
+        .await
+        .map_err(|e| format!("git_info task failed: {}", e))
 }
 
 #[tauri::command]
-pub fn git_branches(path: String) -> Result<git::BranchList, String> {
-    Ok(git::list_branches(&path))
+pub async fn git_branches(path: String) -> Result<git::BranchList, String> {
+    tokio::task::spawn_blocking(move || git::list_branches(&path))
+        .await
+        .map_err(|e| format!("git_branches task failed: {}", e))
 }
 
 #[tauri::command]
-pub fn git_worktrees(path: String) -> Result<Vec<git::WorktreeInfo>, String> {
-    Ok(git::list_worktrees(&path))
+pub async fn git_worktrees(path: String) -> Result<Vec<git::WorktreeInfo>, String> {
+    tokio::task::spawn_blocking(move || git::list_worktrees(&path))
+        .await
+        .map_err(|e| format!("git_worktrees task failed: {}", e))
 }
 
 #[tauri::command]
@@ -97,8 +103,10 @@ pub fn git_reopen_worktree(
 }
 
 #[tauri::command]
-pub fn git_changes(path: String) -> Result<Vec<git::ChangedFile>, String> {
-    Ok(git::get_changed_files(&path))
+pub async fn git_changes(path: String) -> Result<Vec<git::ChangedFile>, String> {
+    tokio::task::spawn_blocking(move || git::get_changed_files(&path))
+        .await
+        .map_err(|e| format!("git_changes task failed: {}", e))
 }
 
 // ── Diff Commands ────────────────────────────────────────────────────────

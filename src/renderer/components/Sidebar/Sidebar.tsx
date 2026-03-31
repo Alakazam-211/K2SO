@@ -362,12 +362,8 @@ function ProjectItem({
   const fetchProjects = useProjectsStore((s) => s.fetchProjects)
 
   const handleClick = useCallback(() => {
-    const t0 = performance.now()
     setIsExpanded((prev) => !prev)
-    requestAnimationFrame(() => {
-      console.log(`[sidebar] Expand/collapse rendered in ${(performance.now() - t0).toFixed(1)}ms (${project.workspaces.length} workspaces)`)
-    })
-  }, [project.workspaces.length])
+  }, [])
 
   const handleWorkspaceClick = useCallback(
     (workspaceId: string) => {
