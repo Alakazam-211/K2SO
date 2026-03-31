@@ -326,7 +326,10 @@ function WorkspaceButton({
             </svg>
           )}
 
-          <span className="truncate flex-1">{workspace.name}</span>
+          <span className="truncate flex-1" title={workspace.name}>
+            {/* Strip agent/<name>/ prefix for readability — show just the task portion */}
+            {workspace.name.replace(/^agent\/[^/]+\//, '')}
+          </span>
 
           <AgentOrDiffStats projectId={workspace.projectId} path={workspacePath} />
           <AgentSpinner projectId={workspace.projectId} />
