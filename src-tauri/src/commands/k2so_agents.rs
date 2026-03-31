@@ -703,16 +703,18 @@ pub fn k2so_agents_delegate(
     atomic_write(&claude_md_path, &claude_md)?;
 
     // 4. Build the launch command for the frontend
-    let initial_prompt = format!(
-        "You are the K2SO agent \"{agent}\". You are working in a dedicated worktree at `{wt_path}` on branch `{branch}`.\n\n\
-        Your current task:\n**{title}** (priority: {priority})\n\n\
-        The full task description is in `.k2so/agents/{agent}/work/active/{filename}`.\n\n\
-        Instructions:\n\
-        1. Read the task file for full details and acceptance criteria\n\
-        2. Implement the changes — all your work happens in this worktree\n\
-        3. Commit your work to branch `{branch}`\n\
-        4. When done, run: `k2so work move --agent {agent} --file {filename} --from active --to done`\n\
-        5. Your work will be reviewed and either approved (merged to main) or sent back with feedback",
+    // Use --append-system-prompt with task instructions baked in (NOT -p which is non-interactive).
+    // The CLAUDE.md already contains agent identity + task context. We append the initial
+    // instructions so Claude starts in interactive mode with full context loaded.
+    let task_instructions = format!(
+        "\n\n## Your Current Assignment\n\n\
+        You are working in a dedicated worktree at `{wt_path}` on branch `{branch}`.\n\n\
+        **{title}** (priority: {priority})\n\n\
+        Read the full task file at `.k2so/agents/{agent}/work/active/{filename}` for details and acceptance criteria.\n\n\
+        When done:\n\
+        1. Commit your work to branch `{branch}`\n\
+        2. Run: `k2so work move --agent {agent} --file {filename} --from active --to done`\n\
+        3. Your work will be reviewed and either approved or sent back with feedback",
         agent = target_agent,
         wt_path = worktree.path,
         branch = worktree.branch,
@@ -721,9 +723,12 @@ pub fn k2so_agents_delegate(
         filename = item.filename,
     );
 
+    // Append task instructions to the CLAUDE.md content for the system prompt
+    let full_system_prompt = format!("{}\n{}", claude_md, task_instructions);
+
     Ok(serde_json::json!({
         "command": "claude",
-        "args": ["--append-system-prompt", claude_md, "-p", initial_prompt],
+        "args": ["--append-system-prompt", full_system_prompt],
         "cwd": worktree.path,
         "claudeMdPath": claude_md_path.to_string_lossy(),
         "agentName": target_agent,
@@ -935,18 +940,20 @@ pub fn k2so_agents_build_launch(
                             let claude_md_path = PathBuf::from(wt_path).join("CLAUDE.md");
                             fs::write(&claude_md_path, &claude_md).ok();
 
-                            let prompt = format!(
-                                "You are the K2SO agent \"{agent}\". Resuming work in worktree `{wt_path}` on branch `{branch}`.\n\n\
-                                Your current task: **{title}** (priority: {priority})\n\
+                            let resume_context = format!(
+                                "{}\n\n## Resuming Work\n\n\
+                                You are in worktree `{wt_path}` on branch `{branch}`.\n\
+                                Current task: **{title}** (priority: {priority})\n\
                                 Task file: `.k2so/agents/{agent}/work/active/{filename}`\n\n\
                                 Continue where you left off. When done: `k2so work move --agent {agent} --file {filename} --from active --to done`",
+                                claude_md,
                                 agent = agent_name, wt_path = wt_path, branch = branch,
                                 title = item.title, priority = item.priority, filename = item.filename,
                             );
 
                             return Ok(serde_json::json!({
                                 "command": command,
-                                "args": ["--append-system-prompt", claude_md, "-p", prompt],
+                                "args": ["--append-system-prompt", resume_context],
                                 "cwd": wt_path,
                                 "claudeMdPath": claude_md_path.to_string_lossy(),
                                 "agentName": agent_name,
@@ -994,18 +1001,11 @@ pub fn k2so_agents_build_launch(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    let prompt = format!(
-        "You are the K2SO agent \"{}\". Your inbox is empty. Report your status and wait for work to be assigned.",
-        agent_name
-    );
-
     let mut args = vec!["--append-system-prompt".to_string(), claude_md];
     if let Some(ref session_id) = resume_session {
         args.push("--resume".to_string());
         args.push(session_id.clone());
     }
-    args.push("-p".to_string());
-    args.push(prompt);
 
     Ok(serde_json::json!({
         "command": command,
@@ -1451,6 +1451,11 @@ fn generate_agent_claude_md_content(
 
     md.push_str(&format!("# K2SO Agent: {}\n\n", agent_name));
     md.push_str(&format!("## Identity\n**Role:** {}\n\n", role));
+    // Reference the agent's full profile (absolute path so it resolves from worktrees)
+    md.push_str(&format!(
+        "**Full profile:** `{}`\n\n",
+        agent_md_path.to_string_lossy()
+    ));
     if !agent_body.is_empty() {
         md.push_str(&format!("{}\n\n", agent_body));
     }
