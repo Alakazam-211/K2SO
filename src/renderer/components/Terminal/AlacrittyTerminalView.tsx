@@ -298,16 +298,15 @@ export function AlacrittyTerminalView({
       const exists = await invoke<boolean>('terminal_exists', { id: terminalId })
 
       if (!exists) {
-        // Don't pass fixed dimensions — let the PTY use defaults (80x24).
-        // The resize poll (500ms) corrects to actual container size immediately.
-        // This avoids locking CLI tools to a cached width on startup.
+        // Measure container and create terminal with correct initial dimensions
+        const { cols, rows } = calculateDimensions()
+        lastColsRef.current = cols
+        lastRowsRef.current = rows
         await invoke('terminal_create', {
           id: terminalId, cwd,
           command: command ?? null, args: args ?? null,
+          cols, rows,
         })
-        // Reset so the resize poll fires on the next tick
-        lastColsRef.current = 0
-        lastRowsRef.current = 0
       }
 
       // Reattach: get current grid state
@@ -372,17 +371,12 @@ export function AlacrittyTerminalView({
     const container = containerRef.current
     if (!container || !created) return
 
-    let resizeCount = 0
     const doResize = () => {
       const { cols, rows } = calculateDimensions()
       if (cols <= 0 || rows <= 0) return
       const colDiff = Math.abs(cols - lastColsRef.current)
       const rowDiff = Math.abs(rows - lastRowsRef.current)
       if (colDiff <= 2 && rowDiff <= 2 && lastColsRef.current > 0) return
-      resizeCount++
-      if (resizeCount <= 3) {
-        console.log(`[resize] ${ptyIdRef.current?.slice(0,8)}: ${lastColsRef.current}x${lastRowsRef.current} → ${cols}x${rows} (container: ${containerRef.current?.clientWidth}x${containerRef.current?.clientHeight})`)
-      }
       lastColsRef.current = cols
       lastRowsRef.current = rows
       if (ptyIdRef.current) {
