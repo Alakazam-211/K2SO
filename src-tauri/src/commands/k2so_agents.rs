@@ -726,9 +726,16 @@ pub fn k2so_agents_delegate(
     // Append task instructions to the CLAUDE.md content for the system prompt
     let full_system_prompt = format!("{}\n{}", claude_md, task_instructions);
 
+    // Initial message to kick off work (positional arg, NOT -p which is non-interactive)
+    let kickoff = format!(
+        "Read your task file at `{}` and begin implementing the fix. \
+        Commit your work as you go.",
+        agent_work_dir(&project_path, &target_agent, "active").join(&item.filename).to_string_lossy()
+    );
+
     Ok(serde_json::json!({
         "command": "claude",
-        "args": ["--append-system-prompt", full_system_prompt],
+        "args": ["--append-system-prompt", full_system_prompt, kickoff],
         "cwd": worktree.path,
         "claudeMdPath": claude_md_path.to_string_lossy(),
         "agentName": target_agent,
@@ -951,9 +958,14 @@ pub fn k2so_agents_build_launch(
                                 title = item.title, priority = item.priority, filename = item.filename,
                             );
 
+                            let resume_kickoff = format!(
+                                "Continue working on your task: **{}**. Check your progress and pick up where you left off.",
+                                item.title
+                            );
+
                             return Ok(serde_json::json!({
                                 "command": command,
-                                "args": ["--append-system-prompt", resume_context],
+                                "args": ["--append-system-prompt", resume_context, resume_kickoff],
                                 "cwd": wt_path,
                                 "claudeMdPath": claude_md_path.to_string_lossy(),
                                 "agentName": agent_name,
