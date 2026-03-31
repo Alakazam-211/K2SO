@@ -372,14 +372,17 @@ export function AlacrittyTerminalView({
     const container = containerRef.current
     if (!container || !created) return
 
+    let resizeCount = 0
     const doResize = () => {
       const { cols, rows } = calculateDimensions()
       if (cols <= 0 || rows <= 0) return
-      // Skip if dimensions haven't changed significantly (±2 cols/rows tolerance)
-      // to avoid resize thrashing from sub-pixel layout reflow
       const colDiff = Math.abs(cols - lastColsRef.current)
       const rowDiff = Math.abs(rows - lastRowsRef.current)
       if (colDiff <= 2 && rowDiff <= 2 && lastColsRef.current > 0) return
+      resizeCount++
+      if (resizeCount <= 3) {
+        console.log(`[resize] ${ptyIdRef.current?.slice(0,8)}: ${lastColsRef.current}x${lastRowsRef.current} → ${cols}x${rows} (container: ${containerRef.current?.clientWidth}x${containerRef.current?.clientHeight})`)
+      }
       lastColsRef.current = cols
       lastRowsRef.current = rows
       if (ptyIdRef.current) {
