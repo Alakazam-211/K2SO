@@ -367,6 +367,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             Ok(launch_info) => {
                                 // Emit launch event so the frontend opens a terminal
                                 let _ = app_handle.emit("cli:agent-launch", launch_info.clone());
+                                // Refresh sidebar — new worktree was registered in DB
+                                let _ = app_handle.emit("sync:projects", ());
                                 Ok(serde_json::to_string(&launch_info).unwrap_or_default())
                             }
                             Err(e) => Err(e),
