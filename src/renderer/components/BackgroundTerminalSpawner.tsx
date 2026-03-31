@@ -17,13 +17,15 @@ export function BackgroundTerminalSpawner(): React.JSX.Element | null {
     <div
       style={{
         position: 'fixed',
-        width: 1,
-        height: 1,
+        width: 200,
+        height: 100,
         overflow: 'hidden',
         opacity: 0,
         pointerEvents: 'none',
-        top: -1,
-        left: -1,
+        // Position off-screen so it's invisible but has real dimensions
+        // for the terminal to initialize with a valid grid size
+        top: -9999,
+        left: -9999,
       }}
       aria-hidden
     >
