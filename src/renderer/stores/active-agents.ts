@@ -501,8 +501,8 @@ export function startAgentPolling(): void {
                   command,
                   args: args,
                   id: terminalId,
-                  cols: 120,
-                  rows: 30,
+                  cols: 250,
+                  rows: 80,
                 })
                 console.log('[agent-launch] Background PTY created:', terminalId)
               } catch (err) {
