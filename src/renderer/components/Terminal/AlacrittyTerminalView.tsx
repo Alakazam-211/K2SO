@@ -322,6 +322,18 @@ export function AlacrittyTerminalView({
           const grid = await invoke<GridUpdate>('terminal_get_grid', { id: terminalId })
           if (mounted) applyGridUpdate(grid)
         } catch { /* fallback */ }
+
+        // Force resize after layout settles — the container may not have
+        // its final dimensions yet when connecting to a background PTY
+        setTimeout(() => {
+          if (!mounted) return
+          const { cols, rows } = calculateDimensions()
+          if (cols > 0 && rows > 0) {
+            lastColsRef.current = cols
+            lastRowsRef.current = rows
+            invoke('terminal_resize', { id: terminalId, cols, rows }).catch(() => {})
+          }
+        }, 200)
       }
 
       if (!mounted) return
