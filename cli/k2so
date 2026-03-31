@@ -12,7 +12,23 @@ set -euo pipefail
 # Falls back to ~/.k2so/heartbeat.{port,token} for external terminals
 PORT="${K2SO_PORT:-}"
 TOKEN="${K2SO_HOOK_TOKEN:-}"
-PROJECT="${K2SO_PROJECT_PATH:-$(pwd)}"
+
+# Resolve project root: use K2SO_PROJECT_PATH if set, otherwise walk up
+# from CWD to find the directory containing .k2so/ (like git finds .git/)
+if [ -n "${K2SO_PROJECT_PATH:-}" ]; then
+    PROJECT="$K2SO_PROJECT_PATH"
+else
+    PROJECT="$(pwd)"
+    _dir="$PROJECT"
+    while [ "$_dir" != "/" ]; do
+        if [ -d "$_dir/.k2so" ]; then
+            PROJECT="$_dir"
+            break
+        fi
+        _dir="$(dirname "$_dir")"
+    done
+    unset _dir
+fi
 
 # Auto-discover connection from ~/.k2so/ if not in a K2SO terminal
 if [ -z "$PORT" ] || [ -z "$TOKEN" ]; then
@@ -41,7 +57,7 @@ cli_request() {
         params="${params}&${param}"
     done
     curl -sG "${BASE_URL}${endpoint}" \
-        --connect-timeout 3 --max-time 10 \
+        --connect-timeout 5 --max-time 30 \
         -d "$params" 2>/dev/null
 }
 

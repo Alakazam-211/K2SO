@@ -374,8 +374,23 @@ impl TerminalManager {
             }
         }
 
-        // Set project path so the CLI knows which workspace it's operating in
-        pty_options.env.insert("K2SO_PROJECT_PATH".to_string(), safe_cwd.clone());
+        // Set project path so the CLI knows which workspace it's operating in.
+        // Resolve the project root by walking up from cwd to find .k2so/ or .git/,
+        // similar to how `git` finds its repo root. This ensures k2so CLI commands
+        // work correctly even when the terminal cwd is a worktree or subdirectory.
+        let project_root = {
+            let mut dir = std::path::PathBuf::from(&safe_cwd);
+            let mut found = None;
+            for _ in 0..20 { // safety limit
+                if dir.join(".k2so").is_dir() {
+                    found = Some(dir.to_string_lossy().to_string());
+                    break;
+                }
+                if !dir.pop() { break; }
+            }
+            found.unwrap_or_else(|| safe_cwd.clone())
+        };
+        pty_options.env.insert("K2SO_PROJECT_PATH".to_string(), project_root);
 
         // Strip unwanted env vars
         for (key, _) in std::env::vars() {
