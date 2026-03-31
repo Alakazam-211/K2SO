@@ -1795,7 +1795,15 @@ function CLIVersionRow(): React.JSX.Element {
               >
                 {loading ? 'Updating...' : `Update to v${status.bundledVersion}`}
               </button>
-            ) : null}
+            ) : (
+              <button
+                onClick={handleAction}
+                disabled={loading}
+                className="px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer disabled:opacity-50"
+              >
+                {loading ? 'Reinstalling...' : 'Reinstall'}
+              </button>
+            )}
           </>
         ) : (
           <>
