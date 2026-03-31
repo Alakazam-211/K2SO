@@ -374,8 +374,14 @@ export function AlacrittyTerminalView({
 
     const doResize = () => {
       const { cols, rows } = calculateDimensions()
-      if (cols <= 0 || rows <= 0) return
+      const cw = containerRef.current?.clientWidth ?? 0
+      const ch = containerRef.current?.clientHeight ?? 0
+      if (cols <= 0 || rows <= 0) {
+        console.log(`[resize-poll] ${ptyIdRef.current?.slice(0,8)}: skip (${cols}x${rows}) container=${cw}x${ch}`)
+        return
+      }
       if (cols === lastColsRef.current && rows === lastRowsRef.current) return
+      console.log(`[resize-poll] ${ptyIdRef.current?.slice(0,8)}: ${lastColsRef.current}x${lastRowsRef.current} → ${cols}x${rows} container=${cw}x${ch}`)
       lastColsRef.current = cols
       lastRowsRef.current = rows
       if (ptyIdRef.current) {
