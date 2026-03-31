@@ -655,7 +655,8 @@ pub fn k2so_agents_delegate(
         .ok_or_else(|| "Could not parse work item".to_string())?;
 
     // 1. Create a worktree for this task
-    let task_slug = item.filename.trim_end_matches(".md");
+    let full_slug = item.filename.trim_end_matches(".md");
+    let task_slug = shorten_slug(full_slug, 40);
     let branch_name = format!("agent/{}/{}", target_agent, task_slug);
     let worktree = crate::git::create_worktree(&project_path, &branch_name)
         .map_err(|e| format!("Failed to create worktree: {}", e))?;
@@ -1293,6 +1294,27 @@ fn log_agent_warning(project_path: &str, agent_name: &str, message: &str) {
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
         use std::io::Write;
         let _ = file.write_all(entry.as_bytes());
+    }
+}
+
+/// Shorten a slug to a maximum length, breaking at word boundaries.
+/// Strips common filler prefixes (bug-, feature-) and filler words.
+fn shorten_slug(slug: &str, max_len: usize) -> String {
+    // Strip common prefixes
+    let stripped = slug
+        .strip_prefix("bug-").or_else(|| slug.strip_prefix("feature-"))
+        .or_else(|| slug.strip_prefix("task-"))
+        .unwrap_or(slug);
+
+    if stripped.len() <= max_len {
+        return stripped.to_string();
+    }
+
+    // Truncate at a word boundary (hyphen)
+    let truncated = &stripped[..max_len];
+    match truncated.rfind('-') {
+        Some(pos) if pos > max_len / 2 => truncated[..pos].to_string(),
+        _ => truncated.to_string(),
     }
 }
 

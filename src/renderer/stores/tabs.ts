@@ -243,6 +243,9 @@ interface TabsState {
   serializeAllWorkspaces: (activeKey: string) => Promise<void>
   clearBackgroundWorkspace: (key: string) => void
   persistActiveWorkspace: () => void
+  /** Add a tab to a workspace without switching to it. If the workspace is active,
+   *  adds directly. If background/stashed, saves to DB session so it's there when restored. */
+  addTabToWorkspace: (workspaceKey: string, cwd: string, options: { title: string; command: string; args: string[] }) => void
 
   // Cross-window sync
   applyRemoteTabChange: (payload: TabSyncPayload) => void
@@ -2023,6 +2026,55 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         }).catch((err) => console.error('[tabs] Auto-save failed:', err))
       }
     }, 1000)
+  },
+
+  addTabToWorkspace: (workspaceKey: string, cwd: string, options: { title: string; command: string; args: string[] }) => {
+    const state = get()
+
+    // If this IS the active workspace, just add the tab directly
+    if (state.activeWorkspaceKey === workspaceKey) {
+      state.addTabToGroup(0, cwd, options)
+      return
+    }
+
+    // Otherwise, save a session to the DB for this workspace so the tab
+    // is waiting when the user navigates there. Build a minimal serialized layout.
+    const tabId = crypto.randomUUID()
+    const pgId = crypto.randomUUID()
+    const terminalId = pgId
+
+    const layout: SerializedLayout = {
+      tabs: [{
+        id: tabId,
+        title: options.title,
+        mosaicTree: pgId,
+        paneGroups: {
+          [pgId]: {
+            id: pgId,
+            items: [{
+              id: crypto.randomUUID(),
+              type: 'terminal',
+              cwd,
+              command: options.command,
+              args: options.args,
+            }],
+            activeItemIndex: 0,
+          }
+        }
+      }],
+      activeTabId: tabId,
+      splitCount: 1,
+      activeGroupIndex: 0,
+    }
+
+    const [projectId, workspaceId] = workspaceKey.split(':')
+    if (projectId && workspaceId) {
+      invoke('workspace_session_save', {
+        projectId,
+        workspaceId,
+        layoutJson: JSON.stringify(layout),
+      }).catch((err) => console.error('[tabs] Failed to save agent tab to workspace:', err))
+    }
   },
 
   applyRemoteTabChange: (payload: TabSyncPayload) => {

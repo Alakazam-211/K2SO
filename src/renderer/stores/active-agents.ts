@@ -439,15 +439,30 @@ export function startAgentPolling(): void {
     })
 
     // Listen for CLI-triggered agent launch requests
-    listen<{ command: string; args: string[]; cwd: string; agentName: string }>('cli:agent-launch', (event) => {
-      const { command, args, cwd, agentName } = event.payload
+    listen<{ command: string; args: string[]; cwd: string; agentName: string; worktreePath?: string }>('cli:agent-launch', async (event) => {
+      const { command, args, cwd, agentName, worktreePath } = event.payload
+      const tabOpts = { title: `Agent: ${agentName}`, command, args }
+
+      // If this launch is for a worktree, add the tab to that workspace
+      // WITHOUT switching the user's focus (no jarring workspace switch)
+      if (worktreePath) {
+        // Refresh projects first — the worktree was just registered in DB
+        await useProjectsStore.getState().fetchProjects()
+
+        const projectsStore = useProjectsStore.getState()
+        for (const project of projectsStore.projects) {
+          const ws = project.workspaces.find((w) => w.worktreePath === worktreePath)
+          if (ws) {
+            const workspaceKey = `${project.id}:${ws.id}`
+            useTabsStore.getState().addTabToWorkspace(workspaceKey, cwd, tabOpts)
+            return
+          }
+        }
+      }
+
+      // Fallback: add tab to current workspace
       const tabsStore = useTabsStore.getState()
-      const activeGroup = tabsStore.activeGroupIndex
-      tabsStore.addTabToGroup(activeGroup, cwd, {
-        title: `Agent: ${agentName}`,
-        command,
-        args
-      })
+      tabsStore.addTabToGroup(tabsStore.activeGroupIndex, cwd, tabOpts)
     })
 
     // Listen for CLI-triggered sub-terminal spawn requests (multi-terminal execution)
