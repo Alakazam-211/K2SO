@@ -32,6 +32,15 @@ const _retryTimeouts = new Set<ReturnType<typeof setTimeout>>()
 const LAUNCH_FAILURE_THRESHOLD_MS = 5000
 const MAX_LAUNCH_RETRIES = 1
 
+/** A terminal that needs to be briefly mounted off-screen to spawn its PTY */
+export interface BackgroundSpawn {
+  id: string
+  terminalId: string
+  cwd: string
+  command: string
+  args: string[]
+}
+
 interface ActiveAgentsState {
   agents: Map<string, ActiveAgent>
   outputTimestamps: Map<string, number>
@@ -39,6 +48,8 @@ interface ActiveAgentsState {
   paneStatuses: Map<string, PaneStatus>
   /** Maps paneId → projectId so we know which project an agent belongs to */
   paneProjectMap: Map<string, string>
+  /** Terminals waiting to be briefly mounted off-screen to spawn their PTY */
+  backgroundSpawns: BackgroundSpawn[]
 
   hasActiveAgents: () => boolean
   getActiveAgentsList: () => ActiveAgent[]
@@ -49,6 +60,8 @@ interface ActiveAgentsState {
   getProjectStatus: (projectId: string) => PaneStatus
   recordOutput: (terminalId: string) => void
   handleLifecycleEvent: (paneId: string, tabId: string, eventType: string) => void
+  addBackgroundSpawn: (spawn: BackgroundSpawn) => void
+  removeBackgroundSpawn: (id: string) => void
 
   pollOnce: () => Promise<void>
 }
@@ -58,6 +71,16 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
   outputTimestamps: new Map(),
   paneStatuses: new Map(),
   paneProjectMap: new Map(),
+  backgroundSpawns: [],
+
+  addBackgroundSpawn: (spawn: BackgroundSpawn) => {
+    set((s) => ({ backgroundSpawns: [...s.backgroundSpawns, spawn] }))
+    // Auto-remove after 2s — PTY is created within ~500ms of mounting
+    setTimeout(() => get().removeBackgroundSpawn(spawn.id), 2000)
+  },
+  removeBackgroundSpawn: (id: string) => {
+    set((s) => ({ backgroundSpawns: s.backgroundSpawns.filter((b) => b.id !== id) }))
+  },
 
   hasActiveAgents: () => {
     // Check both polling-detected agents and hook-detected working panes
@@ -454,7 +477,20 @@ export function startAgentPolling(): void {
           const ws = project.workspaces.find((w) => w.worktreePath === worktreePath)
           if (ws) {
             const workspaceKey = `${project.id}:${ws.id}`
-            useTabsStore.getState().addTabToWorkspace(workspaceKey, cwd, tabOpts)
+            const terminalId = useTabsStore.getState().addTabToWorkspace(workspaceKey, cwd, tabOpts)
+
+            // Spawn the PTY immediately via a hidden off-screen terminal mount.
+            // The terminal ID matches the saved layout, so when the user navigates
+            // to the workspace, it connects to the already-running PTY.
+            if (terminalId) {
+              useActiveAgentsStore.getState().addBackgroundSpawn({
+                id: terminalId,
+                terminalId,
+                cwd,
+                command,
+                args,
+              })
+            }
             return
           }
         }

@@ -19,6 +19,7 @@ import ContextMenu from './components/ContextMenu/ContextMenu'
 import ConfirmDialog from './components/ConfirmDialog/ConfirmDialog'
 import MergeDialog from './components/MergeDialog/MergeDialog'
 import Toast from './components/Toast/Toast'
+import { BackgroundTerminalSpawner } from './components/BackgroundTerminalSpawner'
 import AssistantBar from './components/WorkspaceAssistant/AssistantBar'
 import { useProjectsStore } from './stores/projects'
 import { usePanelsStore } from './stores/panels'
@@ -163,6 +164,7 @@ function FocusModeContent({ activeProject, cwd }: { activeProject: any; cwd: str
       <ConfirmDialog />
       <MergeDialog />
       <Toast />
+      <BackgroundTerminalSpawner />
       <AssistantBar />
       <CountdownOverlay />
       <MemoDialog />

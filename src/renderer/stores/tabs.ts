@@ -244,8 +244,9 @@ interface TabsState {
   clearBackgroundWorkspace: (key: string) => void
   persistActiveWorkspace: () => void
   /** Add a tab to a workspace without switching to it. If the workspace is active,
-   *  adds directly. If background/stashed, saves to DB session so it's there when restored. */
-  addTabToWorkspace: (workspaceKey: string, cwd: string, options: { title: string; command: string; args: string[] }) => void
+   *  adds directly. If background/stashed, saves to DB session so it's there when restored.
+   *  Returns the terminal ID (paneGroupId) so the caller can spawn a background PTY. */
+  addTabToWorkspace: (workspaceKey: string, cwd: string, options: { title: string; command: string; args: string[] }) => string | null
 
   // Cross-window sync
   applyRemoteTabChange: (payload: TabSyncPayload) => void
@@ -2028,13 +2029,13 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     }, 1000)
   },
 
-  addTabToWorkspace: (workspaceKey: string, cwd: string, options: { title: string; command: string; args: string[] }) => {
+  addTabToWorkspace: (workspaceKey: string, cwd: string, options: { title: string; command: string; args: string[] }): string | null => {
     const state = get()
 
     // If this IS the active workspace, just add the tab directly
     if (state.activeWorkspaceKey === workspaceKey) {
       state.addTabToGroup(0, cwd, options)
-      return
+      return null // terminal created by the live tab
     }
 
     // Otherwise, save a session to the DB for this workspace so the tab
@@ -2075,6 +2076,8 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         layoutJson: JSON.stringify(layout),
       }).catch((err) => console.error('[tabs] Failed to save agent tab to workspace:', err))
     }
+
+    return pgId // terminal ID for background PTY spawning
   },
 
   applyRemoteTabChange: (payload: TabSyncPayload) => {
