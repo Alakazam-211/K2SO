@@ -660,12 +660,12 @@ pub fn k2so_agents_delegate(
     let worktree = crate::git::create_worktree(&project_path, &branch_name)
         .map_err(|e| format!("Failed to create worktree: {}", e))?;
 
-    // Register the worktree as a workspace in the DB so it appears in the sidebar
+    // Register the worktree as a workspace in the DB so it appears in the sidebar.
+    // Uses the same schema as git_create_worktree: (id, project_id, name, type, branch, tab_order, worktree_path)
     if let Some(home) = dirs::home_dir() {
         let db_path = home.join(".k2so").join("k2so.db");
         if let Ok(conn) = rusqlite::Connection::open(&db_path) {
             conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;").ok();
-            // Look up the project ID
             if let Ok(project_id) = conn.query_row(
                 "SELECT id FROM projects WHERE path = ?1",
                 rusqlite::params![project_path],
@@ -677,11 +677,12 @@ pub fn k2so_agents_delegate(
                     rusqlite::params![project_id],
                     |row| row.get(0),
                 ).unwrap_or(0);
-                let ws_name = format!("{}/{}", target_agent, task_slug);
-                conn.execute(
-                    "INSERT OR IGNORE INTO workspaces (id, project_id, name, ws_type, branch, display_name, tab_order, path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    rusqlite::params![ws_id, project_id, ws_name, "worktree", worktree.branch, worktree.branch, max_order, worktree.path],
-                ).ok();
+                if let Err(e) = conn.execute(
+                    "INSERT INTO workspaces (id, project_id, name, type, branch, tab_order, worktree_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    rusqlite::params![ws_id, project_id, worktree.branch, "worktree", worktree.branch, max_order, worktree.path],
+                ) {
+                    log_debug!("[delegate] Failed to register worktree in DB: {}", e);
+                }
             }
         }
     }
