@@ -74,9 +74,13 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
   backgroundSpawns: [],
 
   addBackgroundSpawn: (spawn: BackgroundSpawn) => {
+    console.log('[bg-spawn] Adding:', spawn.terminalId, spawn.command)
     set((s) => ({ backgroundSpawns: [...s.backgroundSpawns, spawn] }))
-    // Auto-remove after 2s — PTY is created within ~500ms of mounting
-    setTimeout(() => get().removeBackgroundSpawn(spawn.id), 2000)
+    // Keep mounted for 10s — Claude needs time to initialize after PTY creation
+    setTimeout(() => {
+      console.log('[bg-spawn] Removing:', spawn.terminalId)
+      get().removeBackgroundSpawn(spawn.id)
+    }, 10000)
   },
   removeBackgroundSpawn: (id: string) => {
     set((s) => ({ backgroundSpawns: s.backgroundSpawns.filter((b) => b.id !== id) }))
@@ -462,37 +466,57 @@ export function startAgentPolling(): void {
     })
 
     // Listen for CLI-triggered agent launch requests
+    console.log('[agent-launch] Registering cli:agent-launch listener')
     listen<{ command: string; args: string[]; cwd: string; agentName: string; worktreePath?: string }>('cli:agent-launch', async (event) => {
+      console.log('[agent-launch] EVENT RECEIVED:', JSON.stringify(event.payload).slice(0, 200))
       const { command, args, cwd, agentName, worktreePath } = event.payload
       const tabOpts = { title: `Agent: ${agentName}`, command, args }
 
       // If this launch is for a worktree, add the tab to that workspace
       // WITHOUT switching the user's focus (no jarring workspace switch)
       if (worktreePath) {
+        console.log('[agent-launch] Worktree launch:', worktreePath)
         // Refresh projects first — the worktree was just registered in DB
         await useProjectsStore.getState().fetchProjects()
 
         const projectsStore = useProjectsStore.getState()
+        let found = false
         for (const project of projectsStore.projects) {
           const ws = project.workspaces.find((w) => w.worktreePath === worktreePath)
           if (ws) {
+            found = true
             const workspaceKey = `${project.id}:${ws.id}`
+            console.log('[agent-launch] Found workspace:', workspaceKey, ws.name)
             const terminalId = useTabsStore.getState().addTabToWorkspace(workspaceKey, cwd, tabOpts)
+            console.log('[agent-launch] Tab saved, terminalId:', terminalId)
 
-            // Spawn the PTY immediately via a hidden off-screen terminal mount.
-            // The terminal ID matches the saved layout, so when the user navigates
-            // to the workspace, it connects to the already-running PTY.
+            // Spawn the PTY immediately via terminal_create backend call.
+            // Uses the same terminal ID as the saved layout so when the user
+            // navigates to the workspace, restoreLayout finds the existing PTY.
             if (terminalId) {
-              useActiveAgentsStore.getState().addBackgroundSpawn({
-                id: terminalId,
-                terminalId,
-                cwd,
-                command,
-                args,
-              })
+              console.log('[agent-launch] Spawning background PTY:', terminalId)
+              try {
+                await invoke('terminal_create', {
+                  cwd,
+                  command,
+                  args: args,
+                  id: terminalId,
+                  cols: 120,
+                  rows: 30,
+                })
+                console.log('[agent-launch] Background PTY created:', terminalId)
+              } catch (err) {
+                console.error('[agent-launch] Failed to spawn background PTY:', err)
+              }
+            } else {
+              console.log('[agent-launch] No terminalId — tab was added to active workspace directly')
             }
             return
           }
+        }
+        if (!found) {
+          console.log('[agent-launch] Workspace NOT found for worktree:', worktreePath)
+          console.log('[agent-launch] Available worktrees:', projectsStore.projects.flatMap(p => p.workspaces.map(w => w.worktreePath)).filter(Boolean))
         }
       }
 

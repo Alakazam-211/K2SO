@@ -1462,7 +1462,10 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         idMap.set('default', pgId)
       } else {
       for (const [oldPgId, serializedPg] of Object.entries(serializedPaneGroups)) {
-        const newPgId = crypto.randomUUID()
+        // Reuse the saved ID — if a background PTY was already spawned with it
+        // (e.g. delegate), the backend skips re-creation and connects to the
+        // existing process. If no PTY exists, a new one is created with this ID.
+        const newPgId = oldPgId
         idMap.set(oldPgId, newPgId)
 
         const rawItems = Array.isArray(serializedPg?.items) ? serializedPg.items : []
