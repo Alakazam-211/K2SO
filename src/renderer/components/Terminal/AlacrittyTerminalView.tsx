@@ -386,21 +386,31 @@ export function AlacrittyTerminalView({
   useEffect(() => {
     const container = containerRef.current
     if (!container || !created) return
+
+    const doResize = () => {
+      const { cols, rows } = calculateDimensions()
+      if (cols <= 0 || rows <= 0) return
+      if (cols === lastColsRef.current && rows === lastRowsRef.current) return
+      lastColsRef.current = cols
+      lastRowsRef.current = rows
+      if (ptyIdRef.current) {
+        invoke('terminal_resize', { id: ptyIdRef.current, cols, rows }).catch((e) => console.warn('[terminal]', e))
+      }
+    }
+
+    // ResizeObserver for immediate response to container changes
     let resizeTimer: ReturnType<typeof setTimeout>
     const observer = new ResizeObserver(() => {
       clearTimeout(resizeTimer)
-      resizeTimer = setTimeout(() => {
-        const { cols, rows } = calculateDimensions()
-        if (cols === lastColsRef.current && rows === lastRowsRef.current) return
-        lastColsRef.current = cols
-        lastRowsRef.current = rows
-        if (ptyIdRef.current) {
-          invoke('terminal_resize', { id: ptyIdRef.current, cols, rows }).catch((e) => console.warn('[terminal]', e))
-        }
-      }, 80)
+      resizeTimer = setTimeout(doResize, 80)
     })
     observer.observe(container)
-    return () => { clearTimeout(resizeTimer); observer.disconnect() }
+
+    // Polling fallback (500ms) — catches cases ResizeObserver misses,
+    // like background PTYs connecting to a new container
+    const pollInterval = setInterval(doResize, 500)
+
+    return () => { clearTimeout(resizeTimer); observer.disconnect(); clearInterval(pollInterval) }
   }, [created, calculateDimensions])
 
   // ── Focus tracking ─────────────────────────────────────────────────
