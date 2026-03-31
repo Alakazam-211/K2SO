@@ -246,7 +246,7 @@ function SingleProjectItem({
         <div className="flex flex-col justify-center min-w-0 flex-1">
           <div className="flex items-center gap-2 w-full">
             <span className="truncate flex-1">{project.name}</span>
-            <AgentOrDiffStats projectId={project.id} path={project.path} />
+            {isActive && <AgentOrDiffStats projectId={project.id} path={project.path} />}
           </div>
           <div className="flex items-center gap-1">
             {gitInfo?.isRepo && gitInfo.currentBranch && (
@@ -328,8 +328,8 @@ function WorkspaceButton({
 
           <span className="truncate flex-1">{workspace.name}</span>
 
-          <AgentOrDiffStats projectId={workspace.projectId} path={workspacePath} />
-          <AgentSpinner projectId={workspace.projectId} />
+          {isActive && <AgentOrDiffStats projectId={workspace.projectId} path={workspacePath} />}
+          {isActive && <AgentSpinner projectId={workspace.projectId} />}
           {shortcutIndex !== undefined && shortcutIndex < 9 && (
             <span className="text-[10px] font-mono text-[var(--color-text-muted)] tabular-nums flex-shrink-0 py-0.5" style={{ paddingLeft: 8, paddingRight: 8 }}>
               {shortcutIndex + 1}
@@ -362,8 +362,12 @@ function ProjectItem({
   const fetchProjects = useProjectsStore((s) => s.fetchProjects)
 
   const handleClick = useCallback(() => {
+    const t0 = performance.now()
     setIsExpanded((prev) => !prev)
-  }, [])
+    requestAnimationFrame(() => {
+      console.log(`[sidebar] Expand/collapse rendered in ${(performance.now() - t0).toFixed(1)}ms (${project.workspaces.length} workspaces)`)
+    })
+  }, [project.workspaces.length])
 
   const handleWorkspaceClick = useCallback(
     (workspaceId: string) => {
