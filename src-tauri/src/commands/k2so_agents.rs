@@ -735,7 +735,7 @@ pub fn k2so_agents_delegate(
 
     Ok(serde_json::json!({
         "command": "claude",
-        "args": ["--append-system-prompt", full_system_prompt, kickoff],
+        "args": ["--dangerously-skip-permissions", "--append-system-prompt", full_system_prompt, kickoff],
         "cwd": worktree.path,
         "claudeMdPath": claude_md_path.to_string_lossy(),
         "agentName": target_agent,
@@ -965,7 +965,7 @@ pub fn k2so_agents_build_launch(
 
                             return Ok(serde_json::json!({
                                 "command": command,
-                                "args": ["--append-system-prompt", resume_context, resume_kickoff],
+                                "args": ["--dangerously-skip-permissions", "--append-system-prompt", resume_context, resume_kickoff],
                                 "cwd": wt_path,
                                 "claudeMdPath": claude_md_path.to_string_lossy(),
                                 "agentName": agent_name,
