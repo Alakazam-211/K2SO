@@ -207,7 +207,8 @@ function SingleProjectItem({
 }): React.JSX.Element {
   const setActiveWorkspace = useProjectsStore((s) => s.setActiveWorkspace)
   const activeWorkspaceId = useProjectsStore((s) => s.activeWorkspaceId)
-  const { data: gitInfo } = useGitInfo(project.path)
+  // Only poll git info for the active project to avoid hammering git on all repos
+  const { data: gitInfo } = useGitInfo(isActive ? project.path : undefined)
 
   const firstWorkspace = project.workspaces[0]
   const isItemActive = isActive && firstWorkspace && activeWorkspaceId === firstWorkspace.id
@@ -306,7 +307,7 @@ function WorkspaceButton({
         onContextMenu={onContextMenu}
       >
         <div className="flex items-center gap-2 w-full">
-          {isWorktree && <WorkspaceStatusDot path={workspacePath} />}
+          {isWorktree && isActive && <WorkspaceStatusDot path={workspacePath} />}
 
           {isWorktree ? (
             /* Git branch/worktree icon */
@@ -484,8 +485,8 @@ function ProjectItem({
   const ungroupedWorkspaces = project.workspaces.filter((ws) => !ws.sectionId)
   const sections = project.sections || []
 
-  // Get git info for the project root to show branch/ahead-behind
-  const { data: gitInfo } = useGitInfo(project.path)
+  // Only poll git info for the active project to avoid hammering git on all repos
+  const { data: gitInfo } = useGitInfo(isActive ? project.path : undefined)
 
   return (
     <div className="no-drag">
