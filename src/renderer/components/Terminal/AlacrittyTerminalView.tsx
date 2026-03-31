@@ -308,32 +308,25 @@ export function AlacrittyTerminalView({
         })
       }
 
-      // Resize with measured metrics
-      const { cols: newCols, rows: newRows } = calculateDimensions()
-      if (newCols !== lastColsRef.current || newRows !== lastRowsRef.current) {
-        lastColsRef.current = newCols
-        lastRowsRef.current = newRows
-        await invoke('terminal_resize', { id: terminalId, cols: newCols, rows: newRows }).catch((e) => console.warn('[terminal]', e))
-      }
-
       // Reattach: get current grid state
       if (exists) {
         try {
           const grid = await invoke<GridUpdate>('terminal_get_grid', { id: terminalId })
           if (mounted) applyGridUpdate(grid)
         } catch { /* fallback */ }
-
-        // Force resize after layout settles — the container may not have
-        // its final dimensions yet when connecting to a background PTY
-        setTimeout(() => {
-          if (!mounted) return
-          const { cols, rows } = calculateDimensions()
-          if (cols > 0 && rows > 0) {
-            lastColsRef.current = cols
-            lastRowsRef.current = rows
-            invoke('terminal_resize', { id: terminalId, cols, rows }).catch(() => {})
-          }
-        }, 200)
+        // Reset lastCols/lastRows so the resize poll forces an update
+        // on the next tick — the PTY may have been created with different
+        // dimensions than the container (e.g. background spawn at 120x30)
+        lastColsRef.current = 0
+        lastRowsRef.current = 0
+      } else {
+        // New terminal — resize to measured dimensions
+        const { cols: newCols, rows: newRows } = calculateDimensions()
+        if (newCols !== lastColsRef.current || newRows !== lastRowsRef.current) {
+          lastColsRef.current = newCols
+          lastRowsRef.current = newRows
+          await invoke('terminal_resize', { id: terminalId, cols: newCols, rows: newRows }).catch((e) => console.warn('[terminal]', e))
+        }
       }
 
       if (!mounted) return
@@ -391,7 +384,6 @@ export function AlacrittyTerminalView({
       const { cols, rows } = calculateDimensions()
       if (cols <= 0 || rows <= 0) return
       if (cols === lastColsRef.current && rows === lastRowsRef.current) return
-      console.log(`[terminal-resize] ${ptyIdRef.current?.slice(0,8)}: ${lastColsRef.current}x${lastRowsRef.current} → ${cols}x${rows}`)
       lastColsRef.current = cols
       lastRowsRef.current = rows
       if (ptyIdRef.current) {
