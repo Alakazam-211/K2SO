@@ -391,6 +391,7 @@ export function AlacrittyTerminalView({
       const { cols, rows } = calculateDimensions()
       if (cols <= 0 || rows <= 0) return
       if (cols === lastColsRef.current && rows === lastRowsRef.current) return
+      console.log(`[terminal-resize] ${ptyIdRef.current?.slice(0,8)}: ${lastColsRef.current}x${lastRowsRef.current} → ${cols}x${rows}`)
       lastColsRef.current = cols
       lastRowsRef.current = rows
       if (ptyIdRef.current) {
