@@ -1476,21 +1476,24 @@ fn generate_agent_claude_md_content(
 
     // Current task (if launching with specific work)
     if let Some(task) = current_task {
+        // Use absolute path so it resolves from worktrees (where relative .k2so/ doesn't exist)
+        let task_file_abs = agent_work_dir(project_path, agent_name, "active").join(&task.filename);
         md.push_str("## Current Task\n\n");
         md.push_str(&format!("**{}** (priority: {}, type: {})\n\n", task.title, task.priority, task.item_type));
-        md.push_str(&format!("Task file: `.k2so/agents/{}/work/active/{}`\n\n", agent_name, task.filename));
-        md.push_str("Read the full task file for acceptance criteria and details.\n\n");
+        md.push_str(&format!("Task file: `{}`\n\n", task_file_abs.to_string_lossy()));
+        md.push_str("Read the full task file for complete details, acceptance criteria, and context.\n\n");
     }
 
-    // Work queue info
+    // Work queue info (absolute paths for worktree compatibility)
+    let work_dir_abs = PathBuf::from(project_path).join(".k2so").join("agents").join(agent_name).join("work");
     md.push_str("## Work Queue\n\n");
     md.push_str(&format!(
-        "Your work items are at: `.k2so/agents/{}/work/`\n",
-        agent_name
+        "Your work items are at: `{}/`\n",
+        work_dir_abs.to_string_lossy()
     ));
-    md.push_str("- `inbox/` — assigned to you, pick the highest priority\n");
-    md.push_str("- `active/` — items you're currently working on\n");
-    md.push_str("- `done/` — move items here when complete\n\n");
+    md.push_str(&format!("- `{}/inbox/` — assigned to you, pick the highest priority\n", work_dir_abs.to_string_lossy()));
+    md.push_str(&format!("- `{}/active/` — items you're currently working on\n", work_dir_abs.to_string_lossy()));
+    md.push_str(&format!("- `{}/done/` — move items here when complete\n\n", work_dir_abs.to_string_lossy()));
 
     // Other agents — for pod leaders, include profile paths so they can read agent.md files
     let is_pod_leader_type = agent_type == "pod-leader" || agent_type == "k2so";
