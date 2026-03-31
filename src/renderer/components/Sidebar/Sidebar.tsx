@@ -246,7 +246,7 @@ function SingleProjectItem({
         <div className="flex flex-col justify-center min-w-0 flex-1">
           <div className="flex items-center gap-2 w-full">
             <span className="truncate flex-1">{project.name}</span>
-            {isActive && <AgentOrDiffStats projectId={project.id} path={project.path} />}
+            <AgentOrDiffStats projectId={project.id} path={project.path} />
           </div>
           <div className="flex items-center gap-1">
             {gitInfo?.isRepo && gitInfo.currentBranch && (
@@ -307,7 +307,7 @@ function WorkspaceButton({
         onContextMenu={onContextMenu}
       >
         <div className="flex items-center gap-2 w-full">
-          {isWorktree && isActive && <WorkspaceStatusDot path={workspacePath} />}
+          {isWorktree && <WorkspaceStatusDot path={workspacePath} />}
 
           {isWorktree ? (
             /* Git branch/worktree icon */
@@ -328,8 +328,8 @@ function WorkspaceButton({
 
           <span className="truncate flex-1">{workspace.name}</span>
 
-          {isActive && <AgentOrDiffStats projectId={workspace.projectId} path={workspacePath} />}
-          {isActive && <AgentSpinner projectId={workspace.projectId} />}
+          <AgentOrDiffStats projectId={workspace.projectId} path={workspacePath} />
+          <AgentSpinner projectId={workspace.projectId} />
           {shortcutIndex !== undefined && shortcutIndex < 9 && (
             <span className="text-[10px] font-mono text-[var(--color-text-muted)] tabular-nums flex-shrink-0 py-0.5" style={{ paddingLeft: 8, paddingRight: 8 }}>
               {shortcutIndex + 1}
