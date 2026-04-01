@@ -458,7 +458,7 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                         }
                     }
                     "/cli/reviews" => {
-                        crate::commands::k2so_agents::k2so_agents_review_queue(project_path)
+                        crate::commands::k2so_agents::k2so_agents_review_queue_inner(&project_path)
                             .map(|items| serde_json::to_string(&items).unwrap_or_default())
                     }
                     "/cli/review/approve" => {

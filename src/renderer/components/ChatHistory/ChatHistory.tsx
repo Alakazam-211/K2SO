@@ -217,12 +217,11 @@ export default function ChatHistory(): React.JSX.Element {
     fetchCustomNames()
   }, [fetchSessions, fetchCustomNames])
 
-  // Poll every 5 seconds to catch new sessions quickly
-  // (cheap operation — reads small files)
+  // Poll every 30 seconds for new sessions
   useEffect(() => {
     pollIntervalRef.current = setInterval(() => {
       fetchSessions(false) // silent refresh, no loading indicator
-    }, 5000)
+    }, 30_000)
 
     return () => {
       if (pollIntervalRef.current) {

@@ -2112,7 +2112,13 @@ pub struct ReviewItem {
 
 /// Get the review queue — agents with completed work in worktree branches.
 #[tauri::command]
-pub fn k2so_agents_review_queue(project_path: String) -> Result<Vec<ReviewItem>, String> {
+pub async fn k2so_agents_review_queue(project_path: String) -> Result<Vec<ReviewItem>, String> {
+    tokio::task::spawn_blocking(move || k2so_agents_review_queue_inner(&project_path))
+        .await
+        .map_err(|e| format!("review_queue task failed: {}", e))?
+}
+
+pub fn k2so_agents_review_queue_inner(project_path: &str) -> Result<Vec<ReviewItem>, String> {
     let dir = agents_dir(&project_path);
     if !dir.exists() {
         return Ok(vec![]);

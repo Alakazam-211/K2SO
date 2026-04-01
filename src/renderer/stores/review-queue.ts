@@ -68,7 +68,12 @@ export const useReviewQueueStore = create<ReviewQueueState>((set) => ({
 
   fetchAll: async () => {
     set({ loading: true })
-    const projects = useProjectsStore.getState().projects
+    const projectsState = useProjectsStore.getState()
+    const activeProjectId = projectsState.activeProjectId
+    // Only check the active project to avoid hammering git across all repos
+    const projects = activeProjectId
+      ? projectsState.projects.filter((p) => p.id === activeProjectId)
+      : []
     const allReviews: GlobalReviewItem[] = []
 
     for (const project of projects) {

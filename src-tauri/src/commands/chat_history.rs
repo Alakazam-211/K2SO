@@ -610,13 +610,17 @@ pub fn chat_history_list(project_path: Option<String>) -> Result<Vec<ChatSession
 }
 
 #[tauri::command]
-pub fn chat_history_list_for_project(project_path: String) -> Result<Vec<ChatSession>, String> {
-    let mut all = parse_claude_sessions(Some(&project_path))?;
-    let cursor_cli = parse_cursor_sessions(Some(&project_path))?;
-    all.extend(cursor_cli);
-    all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-    all.truncate(100);
-    Ok(all)
+pub async fn chat_history_list_for_project(project_path: String) -> Result<Vec<ChatSession>, String> {
+    tokio::task::spawn_blocking(move || {
+        let mut all = parse_claude_sessions(Some(&project_path))?;
+        let cursor_cli = parse_cursor_sessions(Some(&project_path))?;
+        all.extend(cursor_cli);
+        all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        all.truncate(100);
+        Ok(all)
+    })
+    .await
+    .map_err(|e| format!("chat_history task failed: {}", e))?
 }
 
 // ── Storage path discovery ──────────────────────────────────────────────
