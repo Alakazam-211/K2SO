@@ -2433,7 +2433,7 @@ dependencies = [
 
 [[package]]
 name = "k2so"
-version = "0.22.16"
+version = "0.22.18"
 dependencies = [
  "alacritty_terminal",
  "base64 0.22.1",

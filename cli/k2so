@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.22.17"
+K2SO_CLI_VERSION="0.22.18"
 
 set -euo pipefail
 
