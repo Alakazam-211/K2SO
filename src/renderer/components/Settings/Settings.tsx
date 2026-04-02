@@ -1739,6 +1739,7 @@ function CLIVersionRow(): React.JSX.Element {
     updateAvailable: boolean
   } | null>(null)
   const [loading, setLoading] = useState(false)
+  const [checking, setChecking] = useState(false)
 
   const checkStatus = useCallback(async () => {
     try {
@@ -1756,21 +1757,30 @@ function CLIVersionRow(): React.JSX.Element {
 
   useEffect(() => { checkStatus() }, [checkStatus])
 
-  const handleAction = useCallback(async () => {
+  const handleInstallOrUpdate = useCallback(async () => {
     setLoading(true)
     try {
-      if (status?.installed) {
-        await invoke('cli_install') // reinstall/update
-      } else {
-        await invoke('cli_install')
-      }
+      await invoke('cli_install')
       await checkStatus()
     } catch (err) {
       console.error('[cli]', err)
     } finally {
       setLoading(false)
     }
-  }, [checkStatus, status])
+  }, [checkStatus])
+
+  const handleCheckForUpdates = useCallback(async () => {
+    setChecking(true)
+    try {
+      await checkStatus()
+    } finally {
+      setChecking(false)
+    }
+  }, [checkStatus])
+
+  // Determine if update is available: bundled version is newer than installed
+  const updateAvailable = status?.installed && status.bundledVersion && status.installedVersion
+    && status.bundledVersion !== status.installedVersion
 
   return (
     <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
@@ -1781,15 +1791,15 @@ function CLIVersionRow(): React.JSX.Element {
             <div className="flex items-center gap-1.5">
               <span
                 className="w-1.5 h-1.5 flex-shrink-0"
-                style={{ backgroundColor: status.updateAvailable ? '#eab308' : '#4ade80' }}
+                style={{ backgroundColor: updateAvailable ? '#eab308' : '#4ade80' }}
               />
               <span className="text-xs text-[var(--color-text-muted)]">
                 v{status.installedVersion || '?'}
               </span>
             </div>
-            {status.updateAvailable ? (
+            {updateAvailable ? (
               <button
-                onClick={handleAction}
+                onClick={handleInstallOrUpdate}
                 disabled={loading}
                 className="px-2 py-0.5 text-[10px] bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity no-drag cursor-pointer disabled:opacity-50"
               >
@@ -1797,11 +1807,11 @@ function CLIVersionRow(): React.JSX.Element {
               </button>
             ) : (
               <button
-                onClick={handleAction}
-                disabled={loading}
+                onClick={handleCheckForUpdates}
+                disabled={checking}
                 className="px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer disabled:opacity-50"
               >
-                {loading ? 'Reinstalling...' : 'Reinstall'}
+                {checking ? 'Checking...' : 'Check for Updates'}
               </button>
             )}
           </>
@@ -1809,7 +1819,7 @@ function CLIVersionRow(): React.JSX.Element {
           <>
             <span className="text-xs text-[var(--color-text-muted)]">Not installed</span>
             <button
-              onClick={handleAction}
+              onClick={handleInstallOrUpdate}
               disabled={loading}
               className="px-2 py-0.5 text-[10px] bg-[var(--color-accent)] text-white hover:opacity-90 transition-opacity no-drag cursor-pointer disabled:opacity-50"
             >
