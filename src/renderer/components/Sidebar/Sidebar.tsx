@@ -933,7 +933,7 @@ export default function Sidebar(): React.JSX.Element {
               {agentProjects.length > 0 && pinnedProjects.length > 0 ? 'Agents & Pinned' : agentProjects.length > 0 ? 'Agents' : 'Pinned'}
             </span>
             <span className="text-[9px] font-mono text-[var(--color-text-muted)] opacity-50">
-              <KeyCombo combo={useTerminalSettingsStore.getState().shortcutLayout === 'cmd-active-cmdshift-pinned' ? '⇧⌘ 1-9' : '⌘ 1-9'} />
+              <KeyCombo combo={useTerminalSettingsStore.getState().shortcutLayout === 'cmd-active-cmdshift-pinned' ? '⌥⇧ 1-9' : '⌘ 1-9'} />
             </span>
           </div>
           {/* Agents zone — reorderable independently */}

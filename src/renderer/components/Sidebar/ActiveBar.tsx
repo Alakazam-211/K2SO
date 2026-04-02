@@ -209,7 +209,7 @@ export default function ActiveBar(): React.JSX.Element | null {
           {items.length}
         </span>
         <span className="text-[9px] font-mono text-[var(--color-text-muted)] opacity-50">
-          <KeyCombo combo={shortcutLayout === 'cmd-active-cmdshift-pinned' ? '⌘ 1-9' : '⇧⌘ 1-9'} />
+          <KeyCombo combo={shortcutLayout === 'cmd-active-cmdshift-pinned' ? '⌘ 1-9' : '⌥⇧ 1-9'} />
         </span>
         <span className="flex-1" />
         <svg

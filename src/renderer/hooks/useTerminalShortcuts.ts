@@ -41,8 +41,9 @@ export function useTerminalShortcuts(cwd: string): void {
         }
       }
 
-      // Cmd+Shift+1-9: switch to pinned or active workspace (depends on layout)
-      if (e.metaKey && e.shiftKey && !e.altKey && !e.ctrlKey) {
+      // Option+Shift+1-9: switch to pinned or active workspace (depends on layout)
+      // (Changed from Cmd+Shift which conflicts with macOS screenshot shortcuts)
+      if (e.altKey && e.shiftKey && !e.metaKey && !e.ctrlKey) {
         const num = parseInt(e.key, 10)
         if (!isNaN(num) && num >= 1 && num <= 9) {
           e.preventDefault()
