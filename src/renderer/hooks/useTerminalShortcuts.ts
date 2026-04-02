@@ -45,14 +45,11 @@ export function useTerminalShortcuts(cwd: string): void {
       // (Cmd+Shift conflicts with macOS screenshots, Option+Shift produces UTF-8 chars)
       // Use e.code (Digit1-Digit9) instead of e.key because Option modifies key values on macOS
       if (e.metaKey && e.altKey && !e.shiftKey && !e.ctrlKey) {
-        console.log('[shortcut] Cmd+Option detected, code:', e.code, 'key:', e.key)
         const digitMatch = e.code.match(/^Digit(\d)$/)
         const num = digitMatch ? parseInt(digitMatch[1], 10) : NaN
         if (!isNaN(num) && num >= 1 && num <= 9) {
           e.preventDefault()
           const layout = useTerminalSettingsStore.getState().shortcutLayout
-          const target = layout === 'cmd-active-cmdshift-pinned' ? 'pinned' : 'active'
-          console.log('[shortcut] Switching to', target, 'index:', num - 1, 'layout:', layout)
           if (layout === 'cmd-active-cmdshift-pinned') {
             switchToPinnedByIndex(num - 1)
           } else {

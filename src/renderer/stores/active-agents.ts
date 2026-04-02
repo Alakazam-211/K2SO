@@ -74,13 +74,8 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
   backgroundSpawns: [],
 
   addBackgroundSpawn: (spawn: BackgroundSpawn) => {
-    console.log('[bg-spawn] Adding:', spawn.terminalId, spawn.command)
     set((s) => ({ backgroundSpawns: [...s.backgroundSpawns, spawn] }))
-    // Keep mounted for 10s — Claude needs time to initialize after PTY creation
-    setTimeout(() => {
-      console.log('[bg-spawn] Removing:', spawn.terminalId)
-      get().removeBackgroundSpawn(spawn.id)
-    }, 10000)
+    setTimeout(() => get().removeBackgroundSpawn(spawn.id), 10000)
   },
   removeBackgroundSpawn: (id: string) => {
     set((s) => ({ backgroundSpawns: s.backgroundSpawns.filter((b) => b.id !== id) }))
@@ -466,35 +461,27 @@ export function startAgentPolling(): void {
     })
 
     // Listen for CLI-triggered agent launch requests
-    console.log('[agent-launch] Registering cli:agent-launch listener')
     listen<{ command: string; args: string[]; cwd: string; agentName: string; worktreePath?: string }>('cli:agent-launch', async (event) => {
-      console.log('[agent-launch] EVENT RECEIVED:', JSON.stringify(event.payload).slice(0, 200))
       const { command, args, cwd, agentName, worktreePath } = event.payload
       const tabOpts = { title: `Agent: ${agentName}`, command, args }
 
       // If this launch is for a worktree, add the tab to that workspace
       // WITHOUT switching the user's focus (no jarring workspace switch)
       if (worktreePath) {
-        console.log('[agent-launch] Worktree launch:', worktreePath)
         // Refresh projects first — the worktree was just registered in DB
         await useProjectsStore.getState().fetchProjects()
 
         const projectsStore = useProjectsStore.getState()
-        let found = false
         for (const project of projectsStore.projects) {
           const ws = project.workspaces.find((w) => w.worktreePath === worktreePath)
           if (ws) {
-            found = true
             const workspaceKey = `${project.id}:${ws.id}`
-            console.log('[agent-launch] Found workspace:', workspaceKey, ws.name)
             const terminalId = useTabsStore.getState().addTabToWorkspace(workspaceKey, cwd, tabOpts)
-            console.log('[agent-launch] Tab saved, terminalId:', terminalId)
 
             // Spawn the PTY immediately via terminal_create backend call.
             // Uses the same terminal ID as the saved layout so when the user
             // navigates to the workspace, restoreLayout finds the existing PTY.
             if (terminalId) {
-              console.log('[agent-launch] Spawning background PTY:', terminalId)
               try {
                 await invoke('terminal_create', {
                   cwd,
@@ -502,19 +489,12 @@ export function startAgentPolling(): void {
                   args: args,
                   id: terminalId,
                 })
-                console.log('[agent-launch] Background PTY created:', terminalId)
-              } catch (err) {
-                console.error('[agent-launch] Failed to spawn background PTY:', err)
+              } catch {
+                // Terminal creation failed — will be created when user navigates
               }
-            } else {
-              console.log('[agent-launch] No terminalId — tab was added to active workspace directly')
             }
             return
           }
-        }
-        if (!found) {
-          console.log('[agent-launch] Workspace NOT found for worktree:', worktreePath)
-          console.log('[agent-launch] Available worktrees:', projectsStore.projects.flatMap(p => p.workspaces.map(w => w.worktreePath)).filter(Boolean))
         }
       }
 
