@@ -47,8 +47,9 @@ function useActiveBarItems(): ProjectWithWorkspaces[] {
       // Skip pinned projects — they're always visible at the top
       if (p.pinned) return false
 
-      // Skip agent workspaces — they're shown in the agents section
-      if (p.agentMode && p.agentMode !== 'off') return false
+      // Skip single-agent workspaces (K2SO Agent, Custom Agent) — shown in agents section
+      // Pod workspaces with worktrees should still appear in the active bar
+      if (p.agentMode === 'agent' || p.agentMode === 'custom') return false
 
       // 1. Manually active — always included
       if (p.manuallyActive) return true
