@@ -2116,7 +2116,7 @@ function KeybindingsSection(): React.JSX.Element {
                     <span className="text-[10px] text-[var(--color-text-muted)] ml-2">1-9</span>
                   </div>
                   <span className="text-xs font-mono text-[var(--color-text-muted)] bg-white/[0.06] px-2 py-0.5">
-                    <KeyCombo combo={shortcutLayout === 'cmd-active-cmdshift-pinned' ? '⌘ 1-9' : '⌥⇧ 1-9'} />
+                    <KeyCombo combo={shortcutLayout === 'cmd-active-cmdshift-pinned' ? '⌘ 1-9' : '⌥⌘ 1-9'} />
                   </span>
                 </div>
                 <div className="flex items-center justify-between px-3 py-2">
@@ -2125,7 +2125,7 @@ function KeybindingsSection(): React.JSX.Element {
                     <span className="text-[10px] text-[var(--color-text-muted)] ml-2">1-9</span>
                   </div>
                   <span className="text-xs font-mono text-[var(--color-text-muted)] bg-white/[0.06] px-2 py-0.5">
-                    <KeyCombo combo={shortcutLayout === 'cmd-active-cmdshift-pinned' ? '⌥⇧ 1-9' : '⌘ 1-9'} />
+                    <KeyCombo combo={shortcutLayout === 'cmd-active-cmdshift-pinned' ? '⌥⌘ 1-9' : '⌘ 1-9'} />
                   </span>
                 </div>
               </div>
