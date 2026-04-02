@@ -45,11 +45,14 @@ export function useTerminalShortcuts(cwd: string): void {
       // (Cmd+Shift conflicts with macOS screenshots, Option+Shift produces UTF-8 chars)
       // Use e.code (Digit1-Digit9) instead of e.key because Option modifies key values on macOS
       if (e.metaKey && e.altKey && !e.shiftKey && !e.ctrlKey) {
+        console.log('[shortcut] Cmd+Option detected, code:', e.code, 'key:', e.key)
         const digitMatch = e.code.match(/^Digit(\d)$/)
         const num = digitMatch ? parseInt(digitMatch[1], 10) : NaN
         if (!isNaN(num) && num >= 1 && num <= 9) {
           e.preventDefault()
           const layout = useTerminalSettingsStore.getState().shortcutLayout
+          const target = layout === 'cmd-active-cmdshift-pinned' ? 'pinned' : 'active'
+          console.log('[shortcut] Switching to', target, 'index:', num - 1, 'layout:', layout)
           if (layout === 'cmd-active-cmdshift-pinned') {
             switchToPinnedByIndex(num - 1)
           } else {
@@ -201,18 +204,26 @@ export function useTerminalShortcuts(cwd: string): void {
 
 function switchToPinnedByIndex(targetIdx: number): void {
   const projectsState = useProjectsStore.getState()
-  const pinnedProjects = projectsState.projects.filter((p) => p.pinned)
+  const agenticEnabled = useSettingsStore.getState().agenticSystemsEnabled
 
-  // Build flat list of all workspaces across pinned projects
+  // Agent workspaces (top of sidebar) + pinned workspaces
+  const agentProjects = agenticEnabled
+    ? projectsState.projects.filter((p) => p.agentMode === 'agent' || p.agentMode === 'custom')
+    : []
+  const pinnedProjects = projectsState.projects.filter(
+    (p) => p.pinned && p.agentMode !== 'agent' && p.agentMode !== 'custom'
+  )
+  const topProjects = [...agentProjects, ...pinnedProjects]
+
+  // Build flat list of all workspaces across top-section projects
   let flatIdx = 0
-  for (const project of pinnedProjects) {
+  for (const project of topProjects) {
     const workspaces = project.worktreeMode === 1 && project.workspaces.length > 0
       ? project.workspaces
       : project.workspaces.slice(0, 1)
 
     for (const ws of workspaces) {
       if (flatIdx === targetIdx) {
-        // Pinned workspaces are always visible — don't change focus group
         projectsState.setActiveWorkspace(project.id, ws.id)
         return
       }
