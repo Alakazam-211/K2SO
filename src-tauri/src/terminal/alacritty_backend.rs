@@ -529,11 +529,22 @@ impl TerminalManager {
             cell_height: 16,
         };
 
-        // Send resize to event loop — it handles both PTY resize and term grid resize.
-        // Do NOT also call term.resize() here to avoid racing with the event loop thread.
+        // 1. Resize the PTY fd (sends ioctl TIOCSWINSZ, kernel delivers SIGWINCH)
         let _ = instance
             .event_loop_sender
             .send(Msg::Resize(window_size));
+
+        // 2. Resize the terminal grid (reflows content, adjusts cursor position).
+        //    Both Alacritty and Zed do this from outside the event loop — the Term
+        //    is behind a FairMutex so there's no race condition.
+        struct TermSize(usize, usize);
+        impl Dimensions for TermSize {
+            fn total_lines(&self) -> usize { self.0 }
+            fn screen_lines(&self) -> usize { self.0 }
+            fn columns(&self) -> usize { self.1 }
+        }
+        let mut term = instance.term.lock();
+        term.resize(TermSize(rows as usize, cols as usize));
 
         Ok(())
     }
