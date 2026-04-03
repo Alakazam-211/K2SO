@@ -260,7 +260,8 @@ export function getActiveBarItems(): ProjectWithWorkspaces[] {
 
   return projects.filter((p) => {
     if (p.pinned) return false
-    if (p.agentMode && p.agentMode !== 'off') return false
+    // Only exclude single-agent workspaces (shown in agents section), not pods
+    if (p.agentMode === 'agent' || p.agentMode === 'custom') return false
     if (p.manuallyActive) return true
     if (p.lastInteractionAt && (now - p.lastInteractionAt) < TWENTY_FOUR_HOURS) return true
     if (p.id === activeProjectId && (hasActiveAgents || hasHookActivity)) return true
