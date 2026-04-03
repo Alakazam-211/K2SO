@@ -129,10 +129,17 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
     const settings = useSettingsStore.getState()
     const defaultTerminal = (settings.projectSettings['__global__'] as any)?.defaultTerminal ?? 'Terminal'
 
+    const allTabs = groupIndex === 0 ? useTabsStore.getState().tabs : useTabsStore.getState().extraGroups[groupIndex - 1]?.tabs ?? []
+    const hasOtherTabs = allTabs.length > 1
+
     const menuItems = [
       { id: 'open-terminal', label: `Open in ${defaultTerminal}` },
       { id: 'separator', label: '', type: 'separator' as const },
       { id: 'close', label: 'Close Tab' },
+      ...(hasOtherTabs ? [
+        { id: 'close-others', label: 'Close Other Tabs' },
+        { id: 'close-all', label: 'Close All Tabs' },
+      ] : []),
     ]
 
     const clickedId = await showContextMenu(menuItems)
@@ -142,6 +149,17 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
         setPendingClose({ tabId, agents })
       } else {
         removeTabFromGroup(groupIndex, tabId)
+      }
+    } else if (clickedId === 'close-others') {
+      // Close all tabs except the right-clicked one
+      for (const tab of allTabs) {
+        if (tab.id !== tabId) {
+          removeTabFromGroup(groupIndex, tab.id)
+        }
+      }
+    } else if (clickedId === 'close-all') {
+      for (const tab of allTabs) {
+        removeTabFromGroup(groupIndex, tab.id)
       }
     } else if (clickedId === 'open-terminal') {
       // Find the cwd from the tab's first terminal pane
