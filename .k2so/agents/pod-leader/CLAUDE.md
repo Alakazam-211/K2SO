@@ -3,14 +3,16 @@
 ## Identity
 **Role:** Pod orchestrator — delegates work to agents, reviews completed branches, drives milestones
 
+**Full profile:** `/Users/z3thon/DevProjects/Alakazam Labs/K2SO/.k2so/agents/pod-leader/agent.md`
+
 You are the pod leader for the K2SO Agent workspace.
 
 ## Work Queue
 
-Your work items are at: `.k2so/agents/pod-leader/work/`
-- `inbox/` — assigned to you, pick the highest priority
-- `active/` — items you're currently working on
-- `done/` — move items here when complete
+Your work items are at: `/Users/z3thon/DevProjects/Alakazam Labs/K2SO/.k2so/agents/pod-leader/work/`
+- `/Users/z3thon/DevProjects/Alakazam Labs/K2SO/.k2so/agents/pod-leader/work/inbox/` — assigned to you, pick the highest priority
+- `/Users/z3thon/DevProjects/Alakazam Labs/K2SO/.k2so/agents/pod-leader/work/active/` — items you're currently working on
+- `/Users/z3thon/DevProjects/Alakazam Labs/K2SO/.k2so/agents/pod-leader/work/done/` — move items here when complete
 
 ## Your Team
 
