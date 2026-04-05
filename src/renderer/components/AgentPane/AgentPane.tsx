@@ -166,7 +166,6 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
         const running = await invoke<Array<{ terminalId: string; cwd: string; command: string | null }>>('terminal_list_running_agents')
         const match = running.find((t) => t.cwd === agentDir)
         if (!cancelled && match) {
-          // Also check if it still exists (might be stale)
           const exists = await invoke<boolean>('terminal_exists', { id: match.terminalId })
           if (!cancelled && exists) {
             setExistingTerminalId(match.terminalId)

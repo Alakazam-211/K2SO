@@ -701,43 +701,38 @@ impl TerminalManager {
         Ok(String::new())
     }
 
-    /// Read the last N lines of text from the terminal buffer (screen + scrollback).
+    /// Read the last N lines of text from the terminal buffer (visible screen).
+    /// Uses the same grid access pattern as snapshot_grid for correctness.
     pub fn read_lines(&self, id: &str, count: usize) -> Result<Vec<String>, String> {
         let instance = self.terminals.get(id)
             .ok_or_else(|| format!("Terminal {} not found", id))?;
         let term = instance.term.lock_unfair();
+        let content = term.renderable_content();
         let grid = term.grid();
         let screen_lines = grid.screen_lines();
-        let history_len = grid.history_size();
-        let total = screen_lines + history_len;
         let cols = grid.columns();
+        let display_offset = content.display_offset;
 
-        // Collect lines from bottom up
-        let mut lines = Vec::with_capacity(count.min(total));
-        // Row 0 is the topmost visible line, screen_lines-1 is the bottom.
-        // Negative Line values go into scrollback history.
-        // We want the last N lines: start from screen bottom and go up.
-        for i in 0..total.min(count) {
-            let row_idx = (screen_lines as i32 - 1) - i as i32;
-            let line = alacritty_terminal::index::Line(row_idx);
-            if line.0 < -(history_len as i32) {
-                break;
-            }
+        // Read all visible screen lines (same indexing as snapshot_grid)
+        let mut all_lines = Vec::with_capacity(screen_lines);
+        for row_idx in 0..screen_lines {
+            let line = alacritty_terminal::index::Line(row_idx as i32 - display_offset as i32);
             let row = &grid[line];
             let mut text = String::with_capacity(cols);
             for col in 0..cols {
                 let cell = &row[alacritty_terminal::index::Column(col)];
                 text.push(cell.c);
             }
-            let trimmed = text.trim_end().to_string();
-            lines.push(trimmed);
+            all_lines.push(text.trim_end().to_string());
         }
-        lines.reverse(); // oldest first
-        // Remove leading empty lines
-        while lines.first().map_or(false, |l| l.is_empty()) {
-            lines.remove(0);
-        }
-        Ok(lines)
+
+        // Take last N non-empty lines
+        // First, find the last non-empty line
+        let last_non_empty = all_lines.iter().rposition(|l| !l.is_empty()).unwrap_or(0);
+        let start = if last_non_empty + 1 > count { last_non_empty + 1 - count } else { 0 };
+        let result: Vec<String> = all_lines[start..=last_non_empty].to_vec();
+
+        Ok(result)
     }
 
     /// List all terminal IDs and their CWD.
