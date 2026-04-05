@@ -467,10 +467,8 @@ export function startAgentPolling(): void {
 
       // If this launch is for a worktree, create the PTY in the background.
       // The Chat tab discovers it when the user navigates to the worktree.
+      // Note: sync:projects event from Rust refreshes the project list automatically.
       if (worktreePath) {
-        // Refresh projects so the new worktree appears in the Workspace panel
-        await useProjectsStore.getState().fetchProjects()
-
         // Create PTY in background with deterministic ID based on workspace
         const projectsStore = useProjectsStore.getState()
         for (const project of projectsStore.projects) {
