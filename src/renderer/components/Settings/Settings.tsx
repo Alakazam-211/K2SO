@@ -4026,9 +4026,9 @@ function ProjectDetail({
         <div className="space-y-2">
           {/* Mode selector */}
           <div className="flex gap-1">
-            {(['off', 'custom', 'agent', 'pod'] as const).map((mode) => {
-              const isActive = (project.agentMode || 'off') === mode
-              const labels = { off: 'Off', custom: 'Custom Agent', agent: 'K2SO Agent', pod: 'Pod' }
+            {(['off', 'custom', 'agent', 'coordinator'] as const).map((mode) => {
+              const isActive = (project.agentMode || 'off') === mode || (mode === 'coordinator' && project.agentMode === 'pod')
+              const labels = { off: 'Off', custom: 'Custom Agent', agent: 'K2SO Agent', coordinator: 'Coordinator' }
               return (
                 <button
                   key={mode}
@@ -4089,13 +4089,13 @@ function ProjectDetail({
                         confirmLabel: `Enable ${toLabel} Mode`,
                       })
                       if (!confirmed) return
-                    } else if (mode === 'pod') {
+                    } else if (mode === 'coordinator') {
                       const lines = [
-                        'A pod leader delegates work to pod members that execute in parallel worktrees.',
+                        'A coordinator delegates work to agent templates that execute in parallel worktrees.',
                         '',
                         'What happens:',
-                        '• Generates a CLAUDE.md with pod leader instructions',
-                        '• A pod-leader agent is created automatically',
+                        '• Generates a CLAUDE.md with coordinator instructions',
+                        '• A coordinator agent is created automatically',
                         '• If a user-written CLAUDE.md exists, it won\'t be overwritten',
                         '  (the generated version is saved to .k2so/CLAUDE.md.generated)',
                       ]
@@ -4118,7 +4118,7 @@ function ProjectDetail({
 
                     await invoke('projects_update', { id: project.id, agentMode: mode })
 
-                    if (mode === 'agent' || mode === 'pod') {
+                    if (mode === 'agent' || mode === 'coordinator') {
                       await invoke('k2so_agents_generate_workspace_claude_md', {
                         projectPath: project.path,
                       }).catch(console.error)
@@ -4146,7 +4146,7 @@ function ProjectDetail({
             {(project.agentMode || 'off') === 'off' && 'No agent features enabled for this workspace.'}
             {(project.agentMode || 'off') === 'custom' && 'Custom Agent — train agents to operate any software via the heartbeat. Customize each agent\'s behavior with the AI persona editor.'}
             {(project.agentMode || 'off') === 'agent' && 'K2SO Agent — a planner that helps you build PRDs, milestones, and technical plans for this workspace.'}
-            {(project.agentMode || 'off') === 'pod' && 'Pod mode — a pod leader delegates work to pod members that execute in parallel worktrees.'}
+            {((project.agentMode || 'off') === 'coordinator' || project.agentMode === 'pod') && 'Coordinator — delegates work to agent templates that execute in parallel worktrees.'}
           </p>
 
           {/* State selector — only when a mode is active */}
@@ -4245,8 +4245,8 @@ function ProjectDetail({
             </div>
           )}
 
-          {/* Pod agents list — only in Pod mode */}
-          {(project.agentMode || 'off') === 'pod' && (
+          {/* Agent templates list — only in Coordinator mode */}
+          {((project.agentMode || 'off') === 'coordinator' || project.agentMode === 'pod') && (
             <div className="pt-2 border-t border-[var(--color-border)]">
               <ProjectAgentsPanel projectPath={project.path} onOpenEditor={(name) => { setAgentEditorName(name); setAgentEditorOpen(true) }} />
             </div>
@@ -4336,7 +4336,7 @@ interface K2soAgentInfo {
   inboxCount: number
   activeCount: number
   doneCount: number
-  podLeader: boolean
+  isCoordinator: boolean
 }
 
 function AgentKebabMenu({ onSettings, onDelete }: { onSettings: () => void; onDelete?: () => void }): React.JSX.Element {
@@ -4640,12 +4640,12 @@ function ProjectContextEditor({ projectPath, projectName, onClose }: { projectPa
   const handleFileChange = useCallback((c: string) => setContent(c), [])
 
   const systemPrompt = useMemo(() => [
-    `You're helping the user define shared project context for their AI agent pod.`,
+    `You're helping the user define shared project context for their AI agent workspace.`,
     ``,
     `Project: "${projectName}"`,
     `File: .k2so/PROJECT.md`,
     ``,
-    `This file is injected into EVERY pod agent's CLAUDE.md at launch.`,
+    `This file is injected into EVERY agent's CLAUDE.md at launch.`,
     `It should contain project-wide knowledge that all agents need:`,
     ``,
     `• About This Project — what the codebase does, what problem it solves`,
@@ -4668,7 +4668,7 @@ function ProjectContextEditor({ projectPath, projectName, onClose }: { projectPa
       return [
         ...baseArgs,
         '--append-system-prompt', systemPrompt,
-        `Open and read PROJECT.md in the current directory. This defines shared context for all pod agents in "${projectName}". Start by asking about their tech stack and project structure.`,
+        `Open and read PROJECT.md in the current directory. This defines shared context for all agents in "${projectName}". Start by asking about their tech stack and project structure.`,
       ]
     }
     return baseArgs
@@ -4682,8 +4682,8 @@ function ProjectContextEditor({ projectPath, projectName, onClose }: { projectPa
       command={terminalCommand}
       args={terminalArgs}
       title={`Project Context: ${projectName}`}
-      instructions={`Editing .k2so/PROJECT.md — shared context injected into all pod agents at launch.`}
-      warningText="Changes here affect all pod agents in this workspace."
+      instructions={`Editing .k2so/PROJECT.md — shared context injected into all agents at launch.`}
+      warningText="Changes here affect all agents in this workspace."
       onFileChange={handleFileChange}
       onClose={onClose}
       preview={
@@ -4692,7 +4692,7 @@ function ProjectContextEditor({ projectPath, projectName, onClose }: { projectPa
             <div className="text-xs text-[var(--color-text-muted)]">
               <span className="font-medium text-[var(--color-text-primary)]">PROJECT.md</span>
               <span className="mx-2">&middot;</span>
-              <span>Shared pod context</span>
+              <span>Shared agent context</span>
             </div>
             <div className="flex items-center gap-2 flex-shrink-0">
               {previewMode === 'preview' && (
@@ -4951,10 +4951,10 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
     }
   }, [projectPath])
 
-  const podLeader = agents.find((a) => a.podLeader)
-  const podMembers = agents.filter((a) => !a.podLeader)
-  const totalDelegated = podMembers.reduce((sum, a) => sum + a.inboxCount + a.activeCount, 0)
-  const totalDone = podMembers.reduce((sum, a) => sum + a.doneCount, 0)
+  const coordinator = agents.find((a) => a.isCoordinator)
+  const agentTemplates = agents.filter((a) => !a.isCoordinator)
+  const totalDelegated = agentTemplates.reduce((sum, a) => sum + a.inboxCount + a.activeCount, 0)
+  const totalDone = agentTemplates.reduce((sum, a) => sum + a.doneCount, 0)
 
   const openAgentSettings = (agentName: string) => {
     useTabsStore.getState().openAgentPane(agentName, projectPath)
@@ -5000,20 +5000,20 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
 
   return (
     <div className="space-y-3">
-      {/* Pod Leader section */}
-      {podLeader && (
+      {/* Coordinator section */}
+      {coordinator && (
         <div>
           <h3 className="text-[10px] font-semibold text-[var(--color-accent)] uppercase tracking-wider mb-1">
-            Pod Leader
+            Coordinator
           </h3>
           <div className="border border-[var(--color-accent)]/30">
             <div className="px-3 py-2">
               <div className="flex items-center justify-between">
                 <div className="flex-1 min-w-0 mr-3">
                   <div className="flex items-center">
-                    <span className="text-xs font-medium text-[var(--color-text-primary)] flex-shrink-0">{podLeader.name}</span>
+                    <span className="text-xs font-medium text-[var(--color-text-primary)] flex-shrink-0">{coordinator.name}</span>
                     <span className="text-[9px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 px-1.5 py-0.5 ml-1.5 flex-shrink-0">
-                      LEADER
+                      COORDINATOR
                     </span>
                     <div className="flex items-center justify-end gap-1.5 text-[10px] flex-1 ml-2">
                       {wsInboxCount > 0 && (
@@ -5027,13 +5027,13 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
                       )}
                     </div>
                   </div>
-                  <p className="text-[10px] text-[var(--color-text-muted)] truncate mt-0.5">{podLeader.role}</p>
+                  <p className="text-[10px] text-[var(--color-text-muted)] truncate mt-0.5">{coordinator.role}</p>
                 </div>
                 <div className="flex items-center gap-1 flex-shrink-0">
                   <button
-                    onClick={() => onOpenEditor(podLeader.name)}
+                    onClick={() => onOpenEditor(coordinator.name)}
                     className="px-2 py-0.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer"
-                    title="Manage pod leader persona"
+                    title="Manage coordinator persona"
                   >
                     ✎ Manage Persona
                   </button>
@@ -5053,7 +5053,7 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
           <div className="flex items-center justify-between">
             <div className="flex-1 min-w-0 mr-3">
               <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed">
-                Shared knowledge about this codebase that all pod agents receive at launch — tech stack, conventions, key directories.
+                Shared knowledge about this codebase that all agents receive at launch — tech stack, conventions, key directories.
               </p>
             </div>
             <button
@@ -5067,13 +5067,13 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
         </div>
       </div>
 
-      {/* Pod Members section */}
+      {/* Agent Templates section */}
       <div>
         <div className="flex items-center justify-between mb-1">
           <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider flex items-center gap-1.5">
-            Agents
-            {podMembers.length > 0 && (
-              <span className="text-[9px] tabular-nums font-medium px-1.5 py-0.5 bg-white/5 text-[var(--color-text-muted)]">{podMembers.length}</span>
+            Agent Templates
+            {agentTemplates.length > 0 && (
+              <span className="text-[9px] tabular-nums font-medium px-1.5 py-0.5 bg-white/5 text-[var(--color-text-muted)]">{agentTemplates.length}</span>
             )}
           </h3>
           <button
@@ -5117,13 +5117,13 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
         {/* Agent list */}
         {loading ? (
           <p className="text-[10px] text-[var(--color-text-muted)]">Loading agents...</p>
-        ) : podMembers.length === 0 && !showCreate ? (
+        ) : agentTemplates.length === 0 && !showCreate ? (
           <p className="text-[10px] text-[var(--color-text-muted)]">
             No agents configured. Create one to enable autonomous work.
           </p>
         ) : (
           <div className="border border-[var(--color-border)]">
-            {podMembers.map((agent) => (
+            {agentTemplates.map((agent) => (
               <AgentListItem key={agent.name} agent={agent} />
             ))}
           </div>
@@ -5395,7 +5395,7 @@ function AgenticSystemsToggle(): React.JSX.Element {
         <span className="text-xs text-[var(--color-text-secondary)]">Agentic Systems <span className="text-[9px] text-[var(--color-text-muted)]">(BETA)</span></span>
         <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
           {enabled
-            ? 'AI agents, pods, heartbeat, and review queue are active'
+            ? 'AI agents, coordinator, heartbeat, and review queue are active'
             : 'Enable to unlock AI agent orchestration across workspaces'}
         </p>
       </div>

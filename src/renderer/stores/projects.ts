@@ -17,6 +17,7 @@ interface Workspace {
   name: string
   tabOrder: number
   worktreePath: string | null
+  navVisible: number
   createdAt: number
 }
 
@@ -297,6 +298,10 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   setActiveWorkspace: (projectId: string, workspaceId: string) => {
     const state = get()
+
+    // Skip if already on this workspace — prevents unnecessary stash/restore
+    if (state.activeProjectId === projectId && state.activeWorkspaceId === workspaceId) return
+
     const tabsStore = useTabsStore.getState()
 
     // Stash current workspace (PTYs stay alive in background)

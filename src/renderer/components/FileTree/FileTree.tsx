@@ -819,9 +819,9 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
       } else {
         // Plain click: single select
         selection.select(entry.path)
-        // Open file on plain click
+        // Open file on plain click — dedup: switch to existing tab if already open
         if (!entry.isDirectory) {
-          useTabsStore.getState().openFileInNewTab(entry.path)
+          useTabsStore.getState().openFileAsTab(entry.path)
         }
       }
     },
@@ -1216,7 +1216,7 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
                   className="inline-flex items-center gap-1.5 px-2 py-1 text-[11px] bg-white/[0.04] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-white/[0.08] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors"
                   onClick={() => {
                     useFileSelectionStore.getState().select(entry.path)
-                    useTabsStore.getState().openFileInNewTab(entry.path)
+                    useTabsStore.getState().openFileAsTab(entry.path)
                   }}
                   title={entry.name}
                 >
@@ -1264,7 +1264,7 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
                       useFileSelectionStore.getState().select(entry.path)
                     } else {
                       useFileSelectionStore.getState().select(entry.path)
-                      useTabsStore.getState().openFileInNewTab(entry.path)
+                      useTabsStore.getState().openFileAsTab(entry.path)
                     }
                   }}
                   title={entry.name}

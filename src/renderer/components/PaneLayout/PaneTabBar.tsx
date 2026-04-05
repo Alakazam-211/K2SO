@@ -1,4 +1,5 @@
 import { useCallback } from 'react'
+import { useTabsStore } from '@/stores/tabs'
 
 // ── Types (from tabs store — will be available after store refactor) ──
 
@@ -55,6 +56,8 @@ interface PaneTabBarProps {
   onActivate: (index: number) => void
   onClose: (itemId: string) => void
   onClosePane?: () => void  // Close the entire pane/split
+  tabId?: string
+  paneGroupId?: string
 }
 
 // ── Component ────────────────────────────────────────────────────────────
@@ -64,7 +67,9 @@ export function PaneTabBar({
   activeItemIndex,
   onActivate,
   onClose,
-  onClosePane
+  onClosePane,
+  tabId,
+  paneGroupId
 }: PaneTabBarProps): React.JSX.Element {
   const handleClose = useCallback(
     (e: React.MouseEvent, itemId: string) => {
@@ -72,6 +77,65 @@ export function PaneTabBar({
       onClose(itemId)
     },
     [onClose]
+  )
+
+  // Cross-pane drag detection: track mousedown on an item for potential drag-to-move
+  const handleItemMouseDown = useCallback(
+    (e: React.MouseEvent, itemId: string) => {
+      if (e.button !== 0 || !tabId || !paneGroupId) return
+      // Only trigger if target is not the close button
+      if ((e.target as HTMLElement).closest('button')) return
+
+      const startX = e.clientX
+      const startY = e.clientY
+      let dragging = false
+
+      const onMouseMove = (ev: MouseEvent): void => {
+        if (!dragging && (Math.abs(ev.clientX - startX) > 5 || Math.abs(ev.clientY - startY) > 5)) {
+          dragging = true
+          document.body.style.cursor = 'grabbing'
+          document.body.style.userSelect = 'none'
+        }
+        if (!dragging) return
+
+        // Find the pane group under the cursor
+        const el = document.elementFromPoint(ev.clientX, ev.clientY)
+        const paneEl = el?.closest('[data-pane-group-id]') as HTMLElement | null
+        if (paneEl) {
+          paneEl.style.outline = '1px solid var(--color-accent)'
+        }
+      }
+
+      const onMouseUp = (ev: MouseEvent): void => {
+        document.removeEventListener('mousemove', onMouseMove)
+        document.removeEventListener('mouseup', onMouseUp)
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
+
+        // Clear any outlines
+        document.querySelectorAll('[data-pane-group-id]').forEach((el) => {
+          (el as HTMLElement).style.outline = ''
+        })
+
+        if (!dragging) return
+
+        // Find drop target
+        const el = document.elementFromPoint(ev.clientX, ev.clientY)
+        const paneEl = el?.closest('[data-pane-group-id]') as HTMLElement | null
+        if (!paneEl) return
+
+        const toTabId = paneEl.dataset.tabId
+        const toPaneGroupId = paneEl.dataset.paneGroupId
+        if (!toTabId || !toPaneGroupId) return
+        if (toTabId === tabId && toPaneGroupId === paneGroupId) return // same pane
+
+        useTabsStore.getState().moveItemBetweenPanes(tabId, paneGroupId, itemId, toTabId, toPaneGroupId)
+      }
+
+      document.addEventListener('mousemove', onMouseMove)
+      document.addEventListener('mouseup', onMouseUp)
+    },
+    [tabId, paneGroupId]
   )
 
   return (
@@ -105,6 +169,7 @@ export function PaneTabBar({
                 maxWidth: '160px'
               }}
               onClick={() => onActivate(index)}
+              onMouseDown={(e) => handleItemMouseDown(e, item.id)}
             >
               <span className="truncate" style={{ lineHeight: '24px' }}>
                 {getTabLabel(item)}

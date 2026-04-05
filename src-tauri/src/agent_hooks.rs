@@ -508,7 +508,7 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                     let has_agents = agents_dir.exists() && std::fs::read_dir(&agents_dir)
                                         .map(|e| e.count() > 0).unwrap_or(false);
                                     let claude_md = std::path::PathBuf::from(&project_path).join("CLAUDE.md");
-                                    let mode = if !claude_md.exists() { "off" } else if has_agents { "pod" } else { "agent" };
+                                    let mode = if !claude_md.exists() { "off" } else if has_agents { "coordinator" } else { "agent" };
                                     Ok(serde_json::json!({"mode": mode}).to_string())
                                 }
                             }

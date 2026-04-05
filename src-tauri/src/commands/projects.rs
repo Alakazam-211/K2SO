@@ -446,6 +446,16 @@ pub fn projects_delete(app: AppHandle, state: State<'_, AppState>, id: String) -
 }
 
 #[tauri::command]
+pub fn workspace_set_nav_visible(state: State<'_, AppState>, id: String, visible: bool) -> Result<(), String> {
+    let conn = state.db.lock();
+    conn.execute(
+        "UPDATE workspaces SET nav_visible = ?1 WHERE id = ?2",
+        rusqlite::params![if visible { 1 } else { 0 }, id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 pub fn projects_reorder(app: AppHandle, state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
     let conn = state.db.lock();
     for (i, id) in ids.iter().enumerate() {

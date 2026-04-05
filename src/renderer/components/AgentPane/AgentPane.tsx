@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useTabsStore } from '@/stores/tabs'
+import { useProjectsStore } from '@/stores/projects'
+import { addNavWorktree } from '@/components/Sidebar/Sidebar'
 import { useSettingsStore } from '@/stores/settings'
 import { usePresetsStore, parseCommand } from '@/stores/presets'
 import { AgentPersonaEditor } from '@/components/AgentPersonaEditor/AgentPersonaEditor'
@@ -25,7 +27,7 @@ interface WorkItem {
 interface AgentProfile {
   name: string
   role: string
-  podLeader: boolean
+  isCoordinator: boolean
   agentType: string
   raw: string
 }
@@ -226,6 +228,14 @@ const lastActiveTab = new Map<string, 'chat' | 'profile' | 'claude-md' | 'work'>
 // ── Main Component ──────────────────────────────────────────────────────
 
 export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX.Element {
+  // Worktree views are a completely separate component — no shared hooks
+  if (agentName.startsWith('__wt:')) {
+    return <WorktreeDetailPane worktreeId={agentName.slice(5)} projectPath={projectPath} />
+  }
+  return <AgentPaneInner agentName={agentName} projectPath={projectPath} />
+}
+
+function AgentPaneInner({ agentName, projectPath }: AgentPaneProps): React.JSX.Element {
   const isWorkspaceBoard = agentName === '__workspace__'
 
   const [profile, setProfile] = useState<AgentProfile | null>(null)
@@ -249,15 +259,17 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
       const result = await invoke<string | { content: string }>('k2so_agents_get_profile', { projectPath, agentName })
       const raw = typeof result === 'string' ? result : (result.content || '')
       const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/)
-      let name = agentName, role = '', podLeader = false, agentType = 'pod-member'
+      let name = agentName, role = '', isCoordinator = false, agentType = 'agent-template'
       if (fmMatch) {
         const fm = fmMatch[1]
         name = fm.match(/^name:\s*(.+)$/m)?.[1]?.trim() || name
         role = fm.match(/^role:\s*(.+)$/m)?.[1]?.trim() || ''
-        podLeader = fm.match(/^pod_leader:\s*(.+)$/m)?.[1]?.trim() === 'true'
-        agentType = fm.match(/^type:\s*(.+)$/m)?.[1]?.trim() || 'pod-member'
+        isCoordinator = fm.match(/^pod_leader:\s*(.+)$/m)?.[1]?.trim() === 'true'
+          || fm.match(/^coordinator:\s*(.+)$/m)?.[1]?.trim() === 'true'
+        const rawType = fm.match(/^type:\s*(.+)$/m)?.[1]?.trim() || 'agent-template'
+        agentType = rawType === 'pod-leader' ? 'coordinator' : rawType === 'pod-member' ? 'agent-template' : rawType
       }
-      setProfile({ name, role, podLeader, agentType, raw })
+      setProfile({ name, role, isCoordinator, agentType, raw })
     } catch { setProfile(null) }
   }, [projectPath, agentName, isWorkspaceBoard])
 
@@ -268,11 +280,11 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
     } catch { setClaudeMd('') }
   }, [projectPath, agentName, isWorkspaceBoard])
 
-  const isPodLeader = profile?.podLeader || profile?.agentType === 'pod-leader'
+  const isCoordinator = profile?.isCoordinator || profile?.agentType === 'coordinator'
 
   const fetchWork = useCallback(async () => {
-    if (isWorkspaceBoard || isPodLeader) {
-      // Pod leader and workspace board both see the full picture:
+    if (isWorkspaceBoard || isCoordinator) {
+      // Coordinator and workspace board both see the full picture:
       // workspace inbox (unassigned) + all agents' work (delegated + review)
       try {
         const wsItems = await invoke<WorkItem[]>('k2so_agents_workspace_inbox_list', { projectPath })
@@ -282,7 +294,7 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
         const agents = await invoke<{ name: string }[]>('k2so_agents_list', { projectPath })
         const all: WorkItem[] = []
         for (const agent of agents) {
-          if (agent.name === agentName) continue // skip pod-leader's own empty queue
+          if (agent.name === agentName) continue // skip coordinator's own empty queue
           try {
             const items = await invoke<WorkItem[]>('k2so_agents_work_list', { projectPath, agentName: agent.name, folder: null })
             all.push(...items.map((i) => ({ ...i, assignedBy: agent.name })))
@@ -295,7 +307,7 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
         setWorkItems(await invoke<WorkItem[]>('k2so_agents_work_list', { projectPath, agentName, folder: null }))
       } catch { setWorkItems([]) }
     }
-  }, [projectPath, agentName, isWorkspaceBoard, isPodLeader])
+  }, [projectPath, agentName, isWorkspaceBoard, isCoordinator])
 
   useEffect(() => {
     fetchProfile(); fetchClaudeMd(); fetchWork()
@@ -375,9 +387,9 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
           <span className="text-xs font-semibold text-[var(--color-text-primary)] truncate">
             {isWorkspaceBoard ? 'Work Board' : agentName}
           </span>
-          {profile?.podLeader && (
+          {profile?.isCoordinator && (
             <span className="text-[9px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 px-1.5 py-0.5 flex-shrink-0">
-              LEADER
+              COORDINATOR
             </span>
           )}
         </div>
@@ -429,15 +441,15 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
 
         {/* ── Agent Work Queue (Kanban) ── */}
         {!isWorkspaceBoard && activeSection === 'work' && (
-          isPodLeader ? (
-            // Pod Leader sees: Inbox (workspace unassigned), Delegated (agents' inbox+active), Review (agents' done)
+          isCoordinator ? (
+            // Coordinator sees: Inbox (workspace unassigned), Delegated (agents' inbox+active), Review (agents' done)
             <div className="absolute inset-0 z-10 flex gap-3 p-3 overflow-y-auto bg-[var(--color-bg)]">
               <KanbanColumn title="Inbox" items={wsUnassigned} color="text-[var(--color-accent)]" projectPath={projectPath} onOpenFile={openFile} />
               <KanbanColumn title="Delegated" items={wsInProgress} color="text-yellow-400" projectPath={projectPath} onOpenFile={openFile} />
               <KanbanColumn title="Review" items={wsReview} color="text-green-400" projectPath={projectPath} onOpenFile={openFile} />
             </div>
           ) : (
-            // Pod members see their own work queue
+            // Agent templates see their own work queue
             <div className="absolute inset-0 z-10 flex gap-3 p-3 overflow-y-auto bg-[var(--color-bg)]">
               <KanbanColumn title="Inbox" items={inbox} color="text-[var(--color-accent)]" projectPath={projectPath} agentDir={agentDir} onOpenFile={openFile} />
               <KanbanColumn title="Active" items={active} color="text-yellow-400" projectPath={projectPath} agentDir={agentDir} onOpenFile={openFile} />
@@ -489,3 +501,244 @@ export function AgentPane({ agentName, projectPath }: AgentPaneProps): React.JSX
     </div>
   )
 }
+
+// ── Worktree Detail Pane ────────────────────────────────────────────────
+
+const worktreeLastTab = new Map<string, 'task' | 'chat' | 'review'>()
+
+function WorktreeDetailPane({ worktreeId, projectPath }: { worktreeId: string; projectPath: string }): React.JSX.Element {
+  const [activeTab, setActiveTab] = useState<'task' | 'chat' | 'review'>(
+    worktreeLastTab.get(worktreeId) ?? 'chat'
+  )
+  const [taskContent, setTaskContent] = useState<string>('')
+  const [reviewContent, setReviewContent] = useState<string>('')
+  const [chatMounted, setChatMounted] = useState(activeTab === 'chat')
+  const [reviewAvailable, setReviewAvailable] = useState(false)
+
+  // Look up workspace info from projects store (separate selectors to avoid new-object re-renders)
+  const workspace = useProjectsStore(useCallback((s) => {
+    for (const p of s.projects) {
+      const ws = p.workspaces.find((w) => w.id === worktreeId)
+      if (ws) return ws
+    }
+    return null
+  }, [worktreeId]))
+  const projectId = useProjectsStore(useCallback((s) => {
+    for (const p of s.projects) {
+      if (p.workspaces.some((w) => w.id === worktreeId)) return p.id
+    }
+    return null
+  }, [worktreeId]))
+  const setActiveWorkspace = useProjectsStore((s) => s.setActiveWorkspace)
+
+  const displayName = workspace?.name?.replace(/^agent\/[^/]+\//, '') || workspace?.branch || 'Worktree'
+  const agentMatch = workspace?.name?.match(/^agent\/([^/]+)\//)
+  const agentTemplate = agentMatch?.[1]
+  const worktreePath = workspace?.worktreePath || projectPath
+
+  // Fetch task content (the delegated work item)
+  useEffect(() => {
+    if (!agentTemplate) {
+      setTaskContent('')
+      return
+    }
+    const loadTask = async () => {
+      try {
+        // Look for active work items for this agent template
+        const items = await invoke<WorkItem[]>('k2so_agents_work_list', {
+          projectPath,
+          agentName: agentTemplate,
+          folder: 'active',
+        })
+        if (items.length > 0) {
+          // Read the first active task's full content
+          const taskPath = `${projectPath}/.k2so/agents/${agentTemplate}/work/active/${items[0].filename}`
+          const result = await invoke<{ content: string }>('fs_read_file', { path: taskPath })
+          setTaskContent(result.content)
+        } else {
+          setTaskContent('')
+        }
+      } catch { setTaskContent('') }
+    }
+    loadTask()
+  }, [projectPath, agentTemplate])
+
+  // Fetch review content (done work items)
+  useEffect(() => {
+    if (!agentTemplate) {
+      setReviewAvailable(false)
+      return
+    }
+    const loadReview = async () => {
+      try {
+        const items = await invoke<WorkItem[]>('k2so_agents_work_list', {
+          projectPath,
+          agentName: agentTemplate,
+          folder: 'done',
+        })
+        if (items.length > 0) {
+          setReviewAvailable(true)
+          const reviewPath = `${projectPath}/.k2so/agents/${agentTemplate}/work/done/${items[0].filename}`
+          const result = await invoke<{ content: string }>('fs_read_file', { path: reviewPath })
+          setReviewContent(result.content)
+        } else {
+          setReviewAvailable(false)
+          setReviewContent('')
+        }
+      } catch {
+        setReviewAvailable(false)
+        setReviewContent('')
+      }
+    }
+    loadReview()
+  }, [projectPath, agentTemplate])
+
+  // Mark chat as mounted when first visited
+  useEffect(() => {
+    if (activeTab === 'chat') setChatMounted(true)
+  }, [activeTab])
+
+  const tabs: Array<{ key: 'task' | 'chat' | 'review'; label: string; disabled: boolean }> = [
+    { key: 'task', label: 'Task', disabled: !agentTemplate || !taskContent },
+    { key: 'chat', label: 'Chat', disabled: false },
+    { key: 'review', label: 'Review', disabled: !reviewAvailable },
+  ]
+
+  return (
+    <div className="h-full flex flex-col bg-[var(--color-bg)] overflow-hidden">
+      {/* Header */}
+      <div className="px-3 py-2 border-b border-[var(--color-border)] flex-shrink-0 flex items-center gap-3">
+        <div className="flex gap-0.5 flex-shrink-0">
+          {tabs.map(({ key, label, disabled }) => (
+            <button
+              key={key}
+              onClick={() => {
+                if (!disabled) {
+                  setActiveTab(key)
+                  worktreeLastTab.set(worktreeId, key)
+                }
+              }}
+              disabled={disabled}
+              className={`px-3 py-1 text-[10px] font-medium transition-colors no-drag cursor-pointer ${
+                activeTab === key
+                  ? 'bg-[var(--color-accent)] text-white'
+                  : disabled
+                    ? 'bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)]/40 cursor-not-allowed'
+                    : 'bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <span className="text-xs font-semibold text-[var(--color-text-primary)] truncate">
+          {displayName}
+        </span>
+        {agentTemplate && (
+          <span className="text-[9px] font-medium text-[var(--color-text-muted)] bg-white/5 px-1.5 py-0.5 flex-shrink-0">
+            {agentTemplate}
+          </span>
+        )}
+
+        <div className="flex-1" />
+
+        {projectId && (
+          <button
+            onClick={() => {
+              // Close this worktree tab first, then switch to the full workspace
+              const currentTabId = useTabsStore.getState().activeTabId
+              if (currentTabId) {
+                useTabsStore.getState().removeTab(currentTabId)
+              }
+              // Add to nav permanently, then switch to the worktree workspace
+              addNavWorktree(worktreeId)
+              setTimeout(() => setActiveWorkspace(projectId, worktreeId), 50)
+            }}
+            className="text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors no-drag cursor-pointer flex-shrink-0 flex items-center gap-1"
+            title="Open this worktree as a full workspace with file tree and changes"
+          >
+            <svg className="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M7 2H3a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V9" />
+              <path d="M14 2l-7 7" />
+              <path d="M10 2h4v4" />
+            </svg>
+            Open Full Workspace
+          </button>
+        )}
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 overflow-hidden relative">
+        {/* Task tab */}
+        {activeTab === 'task' && (
+          <div className="h-full overflow-y-auto p-4">
+            {taskContent ? (
+              <div className="prose prose-sm prose-invert max-w-none">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{taskContent}</ReactMarkdown>
+              </div>
+            ) : (
+              <div className="flex items-center justify-center h-full">
+                <p className="text-xs text-[var(--color-text-muted)]">
+                  {agentTemplate ? 'No active task assigned.' : 'This worktree was not created by the agent system.'}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Chat tab — lazy mount, absolute positioning to preserve terminal state */}
+        {chatMounted && (
+          <div
+            className="absolute inset-0"
+            style={{ zIndex: activeTab === 'chat' ? 1 : 0, visibility: activeTab === 'chat' ? 'visible' : 'hidden' }}
+          >
+            <AgentChatTerminal
+              agentName={`wt-${worktreeId}`}
+              agentDir={worktreePath}
+              autoFocus={activeTab === 'chat'}
+            />
+          </div>
+        )}
+
+        {/* Review tab */}
+        {activeTab === 'review' && (
+          <div className="h-full overflow-y-auto p-4">
+            {reviewAvailable ? (
+              <div className="space-y-4">
+                <div className="prose prose-sm prose-invert max-w-none">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{reviewContent}</ReactMarkdown>
+                </div>
+
+                <div className="border-t border-[var(--color-border)] pt-4 space-y-3">
+                  <button
+                    className="w-full px-4 py-2 text-xs font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
+                    onClick={async () => {
+                      try {
+                        await invoke('git_merge_worktree', { projectPath, workspaceId: worktreeId })
+                      } catch (e) {
+                        console.error('[worktree] Merge failed:', e)
+                      }
+                    }}
+                  >
+                    AI Merge Worktree/Branch
+                  </button>
+                  <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed">
+                    If the work is not right, go to the Chat tab to address the issue with the agent before merging.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center justify-center h-full">
+                <p className="text-xs text-[var(--color-text-muted)]">
+                  No completed work to review yet.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+

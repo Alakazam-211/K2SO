@@ -412,6 +412,7 @@ pub fn run() {
             commands::projects::projects_update,
             commands::projects::projects_delete,
             commands::projects::projects_reorder,
+            commands::projects::workspace_set_nav_visible,
             commands::projects::projects_add_from_path,
             commands::projects::projects_add_without_git,
             commands::projects::projects_init_git_and_open,

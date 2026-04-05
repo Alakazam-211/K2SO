@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
+import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import { useProjectsStore } from '@/stores/projects'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
 import { useSettingsStore } from '@/stores/settings'
@@ -20,6 +20,19 @@ import SectionItem from './SectionItem'
 import FocusGroupDropdown from './FocusGroupDropdown'
 import ActiveBar from './ActiveBar'
 import { KeyCombo } from '@/components/KeySymbol'
+
+// ── Nav-visible worktrees (DB-backed via workspace.navVisible field) ─────────
+
+export function addNavWorktree(worktreeId: string): void {
+  invoke('workspace_set_nav_visible', { id: worktreeId, visible: true }).catch(() => {})
+  // Refresh projects so the sidebar picks up the change
+  useProjectsStore.getState().fetchProjects()
+}
+
+export function removeNavWorktree(worktreeId: string): void {
+  invoke('workspace_set_nav_visible', { id: worktreeId, visible: false }).catch(() => {})
+  useProjectsStore.getState().fetchProjects()
+}
 
 // ── Worktree git badge (shows changed files count) ──────────────────────────
 
@@ -194,6 +207,65 @@ function AheadBehind({ path }: { path: string }): React.JSX.Element | null {
 
 // ── Single Workspace Item (worktreeMode === 0) ─────────────────────────────────
 
+const NavWorktreeRow = React.memo(function NavWorktreeRow({
+  worktreeId,
+  projectId,
+  branchName,
+  isSelected,
+  color,
+  onClose,
+}: {
+  worktreeId: string
+  projectId: string
+  branchName: string
+  isSelected: boolean
+  color: string
+  onClose: () => void
+}): React.JSX.Element {
+  const [hovered, setHovered] = useState(false)
+  const setActiveWorkspace = useProjectsStore((s) => s.setActiveWorkspace)
+
+  return (
+    <>
+      <div className="border-t border-[var(--color-border)]" />
+      <button
+        className={`w-full flex items-center gap-2 px-3 text-left text-[11px] transition-colors cursor-pointer no-drag ${
+          isSelected
+            ? 'bg-white/[0.06] text-[var(--color-text-primary)]'
+            : 'text-[var(--color-text-muted)] hover:bg-white/[0.04] hover:text-[var(--color-text-primary)]'
+        }`}
+        style={{
+          height: '32px',
+          borderLeft: isSelected ? `2px solid ${color}` : '2px solid transparent',
+        }}
+        onClick={() => setActiveWorkspace(projectId, worktreeId)}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+      >
+        <svg className={`w-3.5 h-3.5 flex-shrink-0 ${isSelected ? 'text-[var(--color-accent)] opacity-80' : 'opacity-50'}`} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="4" cy="4" r="1.5" />
+          <circle cx="12" cy="4" r="1.5" />
+          <circle cx="4" cy="12" r="1.5" />
+          <path d="M4 5.5v5M4 8h6c1.1 0 2-.9 2-2v-.5" />
+        </svg>
+        <span className="truncate flex-1">{branchName}</span>
+        {hovered && (
+          <div
+            className="flex-shrink-0 flex items-center justify-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
+            onClick={(e) => { e.stopPropagation(); onClose() }}
+            title="Hide from nav"
+          >
+            <svg width="7" height="7" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <line x1="1" y1="1" x2="7" y2="7" />
+              <line x1="7" y1="1" x2="1" y2="7" />
+            </svg>
+          </div>
+        )}
+      </button>
+    </>
+  )
+})
+
 function SingleProjectItem({
   project,
   isActive,
@@ -212,6 +284,18 @@ function SingleProjectItem({
 
   const firstWorkspace = project.workspaces[0]
   const isItemActive = isActive && firstWorkspace && activeWorkspaceId === firstWorkspace.id
+
+  // Worktrees visible in the nav for this project (DB-backed via navVisible field)
+  const visibleWorktrees = useMemo(() =>
+    project.workspaces.filter((ws) => ws.type === 'worktree' && ws.navVisible === 1),
+    [project.workspaces]
+  )
+
+  // Branch name for worktree-mode projects
+  const worktreeBranchName = useMemo(() => {
+    if (!project.worktreeMode) return null
+    return gitInfo?.isRepo ? gitInfo.currentBranch : null
+  }, [project.worktreeMode, gitInfo])
 
   const handleClick = useCallback(() => {
     if (firstWorkspace) {
@@ -267,6 +351,17 @@ function SingleProjectItem({
           </div>
         </div>
       </button>
+      {visibleWorktrees.map((ws) => (
+        <NavWorktreeRow
+          key={ws.id}
+          worktreeId={ws.id}
+          projectId={project.id}
+          branchName={(ws.name?.replace(/^agent\/[^/]+\//, '') || ws.branch || 'worktree')}
+          isSelected={isActive && activeWorkspaceId === ws.id}
+          color={project.color}
+          onClose={() => removeNavWorktree(ws.id)}
+        />
+      ))}
     </div>
   )
 }
@@ -943,11 +1038,7 @@ export default function Sidebar(): React.JSX.Element {
                 let flatIdx = 0
                 return agentProjects.map((project, idx) => {
                   const myStartIdx = flatIdx
-                  if (project.worktreeMode === 1 && project.workspaces.length > 0) {
-                    flatIdx += project.workspaces.length
-                  } else {
-                    flatIdx += 1
-                  }
+                  flatIdx += 1
                   return (
                     <div
                       key={project.id}
@@ -959,21 +1050,12 @@ export default function Sidebar(): React.JSX.Element {
                         <div className="h-[2px] bg-[var(--color-accent)] mx-3" />
                       )}
                       <div className="border-l-2 border-[var(--color-accent)]">
-                        {project.worktreeMode === 0 ? (
-                          <SingleProjectItem
-                            project={project}
-                            isActive={project.id === activeProjectId}
-                            onContextMenu={handleContextMenu}
-                            shortcutIndex={myStartIdx}
-                          />
-                        ) : (
-                          <ProjectItem
-                            project={project}
-                            isActive={project.id === activeProjectId}
-                            onContextMenu={handleContextMenu}
-                            shortcutIndex={myStartIdx}
-                          />
-                        )}
+                        <SingleProjectItem
+                          project={project}
+                          isActive={project.id === activeProjectId}
+                          onContextMenu={handleContextMenu}
+                          shortcutIndex={myStartIdx}
+                        />
                       </div>
                     </div>
                   )
@@ -993,15 +1075,10 @@ export default function Sidebar(): React.JSX.Element {
           {/* Pinned zone — reorderable independently */}
           <div ref={pinnedRef}>
             {(() => {
-              let flatIdx = agentProjects.reduce((acc, p) =>
-                acc + (p.worktreeMode === 1 && p.workspaces.length > 0 ? p.workspaces.length : 1), 0)
+              let flatIdx = agentProjects.length
               return regularPinned.map((project, idx) => {
                 const myStartIdx = flatIdx
-                if (project.worktreeMode === 1 && project.workspaces.length > 0) {
-                  flatIdx += project.workspaces.length
-                } else {
-                  flatIdx += 1
-                }
+                flatIdx += 1
                 return (
               <div
                 key={project.id}
@@ -1013,21 +1090,12 @@ export default function Sidebar(): React.JSX.Element {
                   <div className="h-[2px] bg-[var(--color-accent)] mx-3" />
                 )}
                 <div>
-                  {project.worktreeMode === 0 ? (
-                    <SingleProjectItem
-                      project={project}
-                      isActive={project.id === activeProjectId}
-                      onContextMenu={handleContextMenu}
-                      shortcutIndex={myStartIdx}
-                    />
-                  ) : (
-                    <ProjectItem
-                      project={project}
-                      isActive={project.id === activeProjectId}
-                      onContextMenu={handleContextMenu}
-                      shortcutIndex={myStartIdx}
-                    />
-                  )}
+                  <SingleProjectItem
+                    project={project}
+                    isActive={project.id === activeProjectId}
+                    onContextMenu={handleContextMenu}
+                    shortcutIndex={myStartIdx}
+                  />
                 </div>
               </div>
                 )
@@ -1056,19 +1124,11 @@ export default function Sidebar(): React.JSX.Element {
               {dragZone === 'unpinned' && dropIndex === idx && (
                 <div className="h-[2px] bg-[var(--color-accent)] mx-3" />
               )}
-              {project.worktreeMode === 0 ? (
-                <SingleProjectItem
-                  project={project}
-                  isActive={project.id === activeProjectId}
-                  onContextMenu={handleContextMenu}
-                />
-              ) : (
-                <ProjectItem
-                  project={project}
-                  isActive={project.id === activeProjectId}
-                  onContextMenu={handleContextMenu}
-                />
-              )}
+              <SingleProjectItem
+                project={project}
+                isActive={project.id === activeProjectId}
+                onContextMenu={handleContextMenu}
+              />
               {idx < filteredProjects.length - 1 && !(dragZone === 'unpinned' && dropIndex === idx + 1) && (
                 <div className="border-b border-[var(--color-border)]" />
               )}

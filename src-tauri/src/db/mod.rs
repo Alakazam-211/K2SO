@@ -54,6 +54,8 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         ("0015_workspace_tiers", include_str!("../../drizzle_sql/0015_workspace_tiers.sql")),
         ("0016_rename_tiers_to_states", include_str!("../../drizzle_sql/0016_rename_tiers_to_states.sql")),
         ("0017_fix_maintenance_state", include_str!("../../drizzle_sql/0017_fix_maintenance_state.sql")),
+        ("0018_rename_pod_to_coordinator", include_str!("../../drizzle_sql/0018_rename_pod_to_coordinator.sql")),
+        ("0019_workspace_nav_visible", include_str!("../../drizzle_sql/0019_workspace_nav_visible.sql")),
     ];
 
     for (name, sql) in migrations {

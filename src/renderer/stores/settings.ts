@@ -29,7 +29,7 @@ interface SettingsState {
   // AI Assistant
   aiAssistantEnabled: boolean
 
-  // Master switch for the entire agent system (agents, pods, heartbeat, reviews)
+  // Master switch for the entire agent system (agents, coordinator, heartbeat, reviews)
   agenticSystemsEnabled: boolean
 
   // Claude Auth auto-refresh (background scheduler)

@@ -24,7 +24,7 @@ interface EditorContext {
   agentName: string
   role: string
   agentType: string
-  isPodLeader: boolean
+  isCoordinator: boolean
   agentMd: string
   agentMdPath: string
   agentDir: string
@@ -171,9 +171,10 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
     if (!context) return ''
     const isCustom = context.agentType === 'custom'
     const isK2SO = context.agentType === 'k2so'
-    const isPod = context.agentType === 'pod-leader' || context.agentType === 'pod-member'
+    const isCoordMode = context.agentType === 'coordinator' || context.agentType === 'agent-template'
+      || context.agentType === 'pod-leader' || context.agentType === 'pod-member'
 
-    const typeLabel = isK2SO ? 'K2SO Agent' : isCustom ? 'Custom Agent' : context.isPodLeader ? 'Pod Leader' : 'Pod Member'
+    const typeLabel = isK2SO ? 'K2SO Agent' : isCustom ? 'Custom Agent' : context.isCoordinator ? 'Coordinator' : 'Agent Template'
 
     const typeGuidance = isK2SO
       ? [
@@ -220,11 +221,11 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
             `Focus agent.md body on what makes this agent unique beyond the standard K2SO setup.`,
           ].join('\n')
 
-    const projectMdNote = isPod
+    const projectMdNote = isCoordMode
       ? [
           ``,
           `• **PROJECT.md** — There is a shared project context file at \`.k2so/PROJECT.md\` that gets`,
-          `  injected into every pod agent's context at launch. If the user mentions project-wide info`,
+          `  injected into every agent's context at launch. If the user mentions project-wide info`,
           `  (tech stack, conventions, key directories), suggest putting it in PROJECT.md instead of`,
           `  duplicating it in each agent's file. You can read it: \`cat .k2so/PROJECT.md\``,
         ].join('\n')

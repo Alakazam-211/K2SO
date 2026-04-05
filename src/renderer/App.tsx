@@ -5,8 +5,7 @@ import Sidebar from './components/Sidebar/Sidebar'
 import FileTree from './components/FileTree/FileTree'
 import ChangesPanel from './components/ChangesPanel/ChangesPanel'
 import ChatHistory from './components/ChatHistory/ChatHistory'
-import ReviewPanel from './components/ReviewPanel/ReviewPanel'
-import AgentsPanel from './components/AgentsPanel/AgentsPanel'
+import WorkspacePanel from './components/WorkspacePanel/WorkspacePanel'
 import ReviewQueueModal from './components/ReviewQueueModal/ReviewQueueModal'
 import { useReviewQueueStore, startReviewQueuePolling, stopReviewQueuePolling } from './stores/review-queue'
 import TabbedPanel from './components/TabbedPanel/TabbedPanel'
@@ -71,8 +70,7 @@ function LeftPanelContent({ rootPath, header }: { rootPath?: string; header?: Re
       {activeTab === 'files' && rootPath && <FileTree rootPath={rootPath} />}
       {activeTab === 'changes' && <ChangesPanel />}
       {activeTab === 'history' && <ChatHistory />}
-      {activeTab === 'reviews' && <ReviewPanel />}
-      {activeTab === 'agents' && <AgentsPanel />}
+      {activeTab === 'workspace' && <WorkspacePanel />}
     </TabbedPanel>
   )
 }
@@ -99,8 +97,7 @@ function RightPanelContent({ rootPath, header }: { rootPath?: string; header?: R
       {activeTab === 'files' && rootPath && <FileTree rootPath={rootPath} />}
       {activeTab === 'changes' && <ChangesPanel />}
       {activeTab === 'history' && <ChatHistory />}
-      {activeTab === 'reviews' && <ReviewPanel />}
-      {activeTab === 'agents' && <AgentsPanel />}
+      {activeTab === 'workspace' && <WorkspacePanel />}
     </TabbedPanel>
   )
 }

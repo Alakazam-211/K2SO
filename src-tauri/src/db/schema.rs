@@ -385,13 +385,14 @@ pub struct Workspace {
     pub name: String,
     pub tab_order: i64,
     pub worktree_path: Option<String>,
+    pub nav_visible: i64,
     pub created_at: i64,
 }
 
 impl Workspace {
     pub fn list(conn: &Connection, project_id: &str) -> Result<Vec<Workspace>> {
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, section_id, type, branch, name, tab_order, worktree_path, created_at \
+            "SELECT id, project_id, section_id, type, branch, name, tab_order, worktree_path, nav_visible, created_at \
              FROM workspaces WHERE project_id = ?1 ORDER BY tab_order",
         )?;
         let rows = stmt.query_map(params![project_id], |row| {
@@ -404,7 +405,8 @@ impl Workspace {
                 name: row.get(5)?,
                 tab_order: row.get(6)?,
                 worktree_path: row.get(7)?,
-                created_at: row.get(8)?,
+                nav_visible: row.get(8)?,
+                created_at: row.get(9)?,
             })
         })?;
         rows.collect()
@@ -412,7 +414,7 @@ impl Workspace {
 
     pub fn get(conn: &Connection, id: &str) -> Result<Workspace> {
         conn.query_row(
-            "SELECT id, project_id, section_id, type, branch, name, tab_order, worktree_path, created_at \
+            "SELECT id, project_id, section_id, type, branch, name, tab_order, worktree_path, nav_visible, created_at \
              FROM workspaces WHERE id = ?1",
             params![id],
             |row| {
@@ -425,7 +427,8 @@ impl Workspace {
                     name: row.get(5)?,
                     tab_order: row.get(6)?,
                     worktree_path: row.get(7)?,
-                    created_at: row.get(8)?,
+                    nav_visible: row.get(8)?,
+                    created_at: row.get(9)?,
                 })
             },
         )

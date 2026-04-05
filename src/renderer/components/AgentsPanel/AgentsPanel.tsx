@@ -11,8 +11,8 @@ interface K2soAgentInfo {
   inboxCount: number
   activeCount: number
   doneCount: number
-  podLeader: boolean
-  agentType: string // "k2so" | "custom" | "pod-leader" | "pod-member"
+  isCoordinator: boolean
+  agentType: string // "k2so" | "custom" | "coordinator" | "agent-template"
 }
 
 export default function AgentsPanel(): React.JSX.Element {
@@ -23,7 +23,7 @@ export default function AgentsPanel(): React.JSX.Element {
   const [newName, setNewName] = useState('')
   const [newRole, setNewRole] = useState('')
   const [creating, setCreating] = useState(false)
-  const [createType, setCreateType] = useState<string>('pod-member')
+  const [createType, setCreateType] = useState<string>('agent-template')
   const nameInputRef = useRef<HTMLInputElement>(null)
 
   const activeProject = useProjectsStore((s) => {
@@ -188,7 +188,7 @@ export default function AgentsPanel(): React.JSX.Element {
         <div className="flex-1 min-w-0">
           <div className="text-xs text-[var(--color-text-primary)] truncate">
             {agent.name}
-            {agent.podLeader && (
+            {agent.isCoordinator && (
               <span className="ml-1.5 text-[9px] text-[var(--color-accent)] font-medium">LEADER</span>
             )}
           </div>
@@ -212,7 +212,7 @@ export default function AgentsPanel(): React.JSX.Element {
           No agent mode enabled for this workspace
         </p>
         <p className="text-[9px] text-[var(--color-text-muted)] text-center">
-          Enable Agent or Pod mode in workspace settings
+          Enable Agent or Coordinator mode in workspace settings
         </p>
       </div>
     )
@@ -278,36 +278,36 @@ export default function AgentsPanel(): React.JSX.Element {
     )
   }
 
-  // Pod mode — show pod leader + pod members
+  // Coordinator mode — show coordinator + agent templates
 
-  const podLeader = agents.find((a) => a.podLeader)
-  const podMembers = agents.filter((a) => !a.podLeader && a.agentType !== 'custom' && a.agentType !== 'k2so')
-  const totalDelegated = podMembers.reduce((sum, a) => sum + a.inboxCount + a.activeCount, 0)
-  const totalDone = podMembers.reduce((sum, a) => sum + a.doneCount, 0)
+  const coordinator = agents.find((a) => a.isCoordinator)
+  const agentTemplates = agents.filter((a) => !a.isCoordinator && a.agentType !== 'custom' && a.agentType !== 'k2so')
+  const totalDelegated = agentTemplates.reduce((sum, a) => sum + a.inboxCount + a.activeCount, 0)
+  const totalDone = agentTemplates.reduce((sum, a) => sum + a.doneCount, 0)
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
-      {/* Pod Leader section */}
-      {podLeader && (
+      {/* Coordinator section */}
+      {coordinator && (
         <div className="border-b border-[var(--color-border)]">
           <div className="px-3 py-1.5">
-            <span className="text-[9px] font-medium text-[var(--color-accent)] uppercase tracking-wider">Pod Leader</span>
+            <span className="text-[9px] font-medium text-[var(--color-accent)] uppercase tracking-wider">Coordinator</span>
           </div>
           <div
             className="px-3 py-2 border-b border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] transition-colors cursor-pointer"
-            onClick={() => openAgentPane(podLeader.name)}
+            onClick={() => openAgentPane(coordinator.name)}
           >
             <div className="flex items-center gap-2">
               <span
                 className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-                style={{ backgroundColor: statusColor(podLeader) }}
+                style={{ backgroundColor: statusColor(coordinator) }}
               />
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-1.5">
-                  <span className="text-xs text-[var(--color-text-primary)] truncate">{podLeader.name}</span>
-                  <span className="text-[9px] font-medium text-[var(--color-accent)]">LEADER</span>
+                  <span className="text-xs text-[var(--color-text-primary)] truncate">{coordinator.name}</span>
+                  <span className="text-[9px] font-medium text-[var(--color-accent)]">COORDINATOR</span>
                 </div>
-                <div className="text-[10px] text-[var(--color-text-muted)] truncate">{podLeader.role}</div>
+                <div className="text-[10px] text-[var(--color-text-muted)] truncate">{coordinator.role}</div>
               </div>
               <div className="flex items-center gap-1 text-[9px] text-[var(--color-text-muted)] flex-shrink-0">
                 {wsInboxCount > 0 && <span className="text-[var(--color-accent)]" title="Undelegated">{wsInboxCount}u</span>}
@@ -315,9 +315,9 @@ export default function AgentsPanel(): React.JSX.Element {
                 {totalDone > 0 && <span className="text-green-400" title="Done">{totalDone}✓</span>}
               </div>
               <button
-                onClick={(e) => { e.stopPropagation(); handleLaunch(podLeader.name) }}
+                onClick={(e) => { e.stopPropagation(); handleLaunch(coordinator.name) }}
                 className="px-2 py-0.5 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer flex-shrink-0"
-                title="Launch pod leader session"
+                title="Launch coordinator session"
               >
                 Launch
               </button>
@@ -326,30 +326,30 @@ export default function AgentsPanel(): React.JSX.Element {
         </div>
       )}
 
-      {/* Pod Members header */}
+      {/* Agent Templates header */}
       <div className="flex items-center px-3 py-2 border-b border-[var(--color-border)]">
         <span className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider flex items-center gap-1.5">
-          Pod Members
-          {podMembers.length > 0 && (
-            <span className="text-[9px] tabular-nums font-medium px-1 py-0.5 bg-white/5 text-[var(--color-text-muted)]">{podMembers.length}</span>
+          Agent Templates
+          {agentTemplates.length > 0 && (
+            <span className="text-[9px] tabular-nums font-medium px-1 py-0.5 bg-white/5 text-[var(--color-text-muted)]">{agentTemplates.length}</span>
           )}
         </span>
       </div>
 
-      {/* Pod member list */}
+      {/* Agent template list */}
       <div className="flex-1 overflow-y-auto">
         {loading ? (
           <div className="p-3">
             <p className="text-[10px] text-[var(--color-text-muted)]">Loading...</p>
           </div>
-        ) : podMembers.length === 0 ? (
+        ) : agentTemplates.length === 0 ? (
           <div className="p-3">
             <p className="text-[10px] text-[var(--color-text-muted)]">
-              No pod members yet. Click + to create one.
+              No agent templates yet. Click + to create one.
             </p>
           </div>
         ) : (
-          podMembers.map((agent) => <AgentRow key={agent.name} agent={agent} />)
+          agentTemplates.map((agent) => <AgentRow key={agent.name} agent={agent} />)
         )}
       </div>
 

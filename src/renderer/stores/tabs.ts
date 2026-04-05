@@ -172,9 +172,10 @@ interface TabsState {
   reorderTabs: (fromIndex: number, toIndex: number, groupIndex?: number) => void
   addPaneToTab: (tabId: string, paneId: string, pane: PaneData) => void
   removePaneFromTab: (tabId: string, paneGroupId: string) => void
+  moveItemBetweenPanes: (fromTabId: string, fromPaneGroupId: string, itemId: string, toTabId: string, toPaneGroupId: string) => void
   getActiveTab: () => Tab | undefined
   openFileInPane: (tabId: string, filePath: string) => void
-  openAgentPane: (agentName: string, projectPath: string) => void
+  openAgentPane: (agentName: string, projectPath: string, title?: string) => void
   openFileAsTab: (filePath: string) => void
   openFileInPaneGroup: (tabId: string, paneGroupId: string, filePath: string) => void
   openDiffInPane: (tabId: string, filePath: string) => void
@@ -737,6 +738,53 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     }))
   },
 
+  moveItemBetweenPanes: (fromTabId, fromPaneGroupId, itemId, toTabId, toPaneGroupId) => {
+    set((state) => {
+      // Find the source item
+      const allTabs = [...state.tabs, ...state.extraGroups.flatMap((g) => g.tabs)]
+      const fromTab = allTabs.find((t) => t.id === fromTabId)
+      const fromPg = fromTab?.paneGroups.get(fromPaneGroupId)
+      if (!fromPg) return state
+
+      const itemIdx = fromPg.items.findIndex((i) => i.id === itemId)
+      if (itemIdx < 0) return state
+      const item = fromPg.items[itemIdx]
+
+      // Remove from source
+      const newFromItems = fromPg.items.filter((_, i) => i !== itemIdx)
+      const newFromActiveIdx = Math.min(fromPg.activeItemIndex, Math.max(0, newFromItems.length - 1))
+
+      // Add to target
+      const toTab = allTabs.find((t) => t.id === toTabId)
+      const toPg = toTab?.paneGroups.get(toPaneGroupId)
+      if (!toPg) return state
+
+      const newToItems = [...toPg.items, item]
+
+      const updateTab = (tab: Tab): Tab => {
+        if (tab.id === fromTabId) {
+          const newPg = new Map(tab.paneGroups)
+          newPg.set(fromPaneGroupId, { ...fromPg, items: newFromItems, activeItemIndex: newFromActiveIdx })
+          return { ...tab, paneGroups: newPg }
+        }
+        if (tab.id === toTabId) {
+          const newPg = new Map(tab.paneGroups)
+          newPg.set(toPaneGroupId, { ...toPg, items: newToItems, activeItemIndex: newToItems.length - 1 })
+          return { ...tab, paneGroups: newPg }
+        }
+        return tab
+      }
+
+      return {
+        tabs: state.tabs.map(updateTab),
+        extraGroups: state.extraGroups.map((g) => ({
+          ...g,
+          tabs: g.tabs.map(updateTab),
+        })),
+      }
+    })
+  },
+
   getActiveTab: () => {
     const state = get()
     return state.tabs.find((t) => t.id === state.activeTabId)
@@ -796,7 +844,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     })
   },
 
-  openAgentPane: (agentName: string, projectPath: string) => {
+  openAgentPane: (agentName: string, projectPath: string, title?: string) => {
     const state = get()
 
     // Check if a tab for this agent already exists — switch to it
@@ -826,9 +874,10 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       items: [agentItem],
       activeItemIndex: 0,
     }
+    const tabTitle = title ?? (agentName === '__workspace__' ? 'Work Board' : `Agent: ${agentName}`)
     const tab: Tab = {
       id: tabId,
-      title: agentName === '__workspace__' ? 'Work Board' : `Agent: ${agentName}`,
+      title: tabTitle,
       mosaicTree: pgId,
       paneGroups: new Map([[pgId, pg]]),
     }

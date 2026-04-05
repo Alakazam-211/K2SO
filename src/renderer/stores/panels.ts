@@ -7,7 +7,7 @@ import {
 import { invoke } from '@tauri-apps/api/core'
 import type { AppSettingsResponse } from '@shared/types'
 
-type PanelTab = 'files' | 'changes' | 'history' | 'reviews' | 'agents'
+type PanelTab = 'files' | 'changes' | 'history' | 'workspace'
 
 interface PanelsState {
   // Left auxiliary panel (between projects sidebar and terminal)
@@ -50,12 +50,12 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
   leftPanelOpen: false,
   leftPanelWidth: SIDEBAR_DEFAULT_WIDTH,
   leftPanelActiveTab: 'files',
-  leftPanelTabs: ['files', 'agents'],
+  leftPanelTabs: ['files', 'workspace'],
 
   rightPanelOpen: false,
   rightPanelWidth: SIDEBAR_DEFAULT_WIDTH,
   rightPanelActiveTab: 'history',
-  rightPanelTabs: ['history', 'changes', 'reviews'],
+  rightPanelTabs: ['history', 'changes'],
 
   focusWorkspaceHeaderSide: 'left',
 
@@ -151,14 +151,61 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
   initFromSettings: async () => {
     try {
       const settings = await invoke<AppSettingsResponse>('settings_get')
+
+      // Migrate old tab names to new ones
+      const VALID_TABS: PanelTab[] = ['files', 'changes', 'history', 'workspace']
+      const migrateTab = (t: string): PanelTab | null => {
+        if (t === 'agents' || t === 'reviews') return 'workspace'
+        if (VALID_TABS.includes(t as PanelTab)) return t as PanelTab
+        return null
+      }
+      const migrateTabs = (tabs: string[]): PanelTab[] => {
+        const mapped = tabs.map(migrateTab).filter((t): t is PanelTab => t !== null)
+        // Deduplicate while preserving order
+        return [...new Set(mapped)]
+      }
+
+      let leftTabs = settings.leftPanelTabs?.length
+        ? migrateTabs(settings.leftPanelTabs as string[])
+        : ['files', 'workspace'] as PanelTab[]
+      let rightTabs = settings.rightPanelTabs?.length
+        ? migrateTabs(settings.rightPanelTabs as string[])
+        : ['history', 'changes'] as PanelTab[]
+
+      // Ensure 'workspace' only appears on one side — prefer left
+      if (leftTabs.includes('workspace') && rightTabs.includes('workspace')) {
+        rightTabs = rightTabs.filter((t) => t !== 'workspace')
+      }
+
+      let leftActive = settings.leftPanelActiveTab
+        ? (migrateTab(settings.leftPanelActiveTab as string) ?? leftTabs[0])
+        : leftTabs[0]
+      let rightActive = settings.rightPanelActiveTab
+        ? (migrateTab(settings.rightPanelActiveTab as string) ?? rightTabs[0])
+        : rightTabs[0]
+
+      // Ensure active tabs are valid for their side
+      if (!leftTabs.includes(leftActive)) leftActive = leftTabs[0]
+      if (!rightTabs.includes(rightActive)) rightActive = rightTabs[0]
+
       set({
         leftPanelOpen: settings.leftPanelOpen,
         rightPanelOpen: settings.rightPanelOpen,
-        ...(settings.leftPanelActiveTab && { leftPanelActiveTab: settings.leftPanelActiveTab as PanelTab }),
-        ...(settings.rightPanelActiveTab && { rightPanelActiveTab: settings.rightPanelActiveTab as PanelTab }),
-        ...(settings.leftPanelTabs?.length && { leftPanelTabs: settings.leftPanelTabs as PanelTab[] }),
-        ...(settings.rightPanelTabs?.length && { rightPanelTabs: settings.rightPanelTabs as PanelTab[] }),
+        leftPanelActiveTab: leftActive,
+        rightPanelActiveTab: rightActive,
+        leftPanelTabs: leftTabs,
+        rightPanelTabs: rightTabs,
       })
+
+      // Persist migrated tabs after a short delay to avoid race with other init writes
+      setTimeout(() => {
+        invoke('settings_update', { updates: {
+          leftPanelTabs: leftTabs,
+          rightPanelTabs: rightTabs,
+          leftPanelActiveTab: leftActive,
+          rightPanelActiveTab: rightActive,
+        } }).catch((e: unknown) => console.error('[panels] migration persist failed:', e))
+      }, 2000)
     } catch {
       // ignore — use defaults
     }

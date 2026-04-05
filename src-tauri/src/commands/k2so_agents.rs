@@ -17,8 +17,8 @@ pub struct K2soAgentInfo {
     pub inbox_count: usize,
     pub active_count: usize,
     pub done_count: usize,
-    pub pod_leader: bool,
-    /// Agent type: "k2so", "custom", "pod-leader", "pod-member"
+    pub is_coordinator: bool,
+    /// Agent type: "k2so", "custom", "coordinator", "agent-template"
     pub agent_type: String,
 }
 
@@ -278,18 +278,26 @@ pub fn k2so_agents_list(project_path: String) -> Result<Vec<K2soAgentInfo>, Stri
         let name = entry.file_name().to_string_lossy().to_string();
         let agent_md = entry.path().join("agent.md");
 
-        let (role, is_pod_leader, agent_type) = if agent_md.exists() {
+        let (role, is_coordinator, agent_type) = if agent_md.exists() {
             let content = fs::read_to_string(&agent_md).unwrap_or_default();
             let fm = parse_frontmatter(&content);
             let role = fm.get("role").cloned().unwrap_or_default();
-            let is_leader = fm.get("pod_leader").map(|v| v == "true").unwrap_or(false);
-            let agent_type = fm.get("type").cloned().unwrap_or_else(|| {
-                // Infer type from existing agents that predate the type field
-                if is_leader { "pod-leader".to_string() } else { "pod-member".to_string() }
+            // Support both old ("pod_leader") and new ("coordinator") frontmatter keys
+            let is_coord = fm.get("pod_leader").map(|v| v == "true").unwrap_or(false)
+                || fm.get("coordinator").map(|v| v == "true").unwrap_or(false);
+            let agent_type = fm.get("type").cloned().map(|t| {
+                // Migrate old type values to new ones
+                match t.as_str() {
+                    "pod-leader" => "coordinator".to_string(),
+                    "pod-member" => "agent-template".to_string(),
+                    other => other.to_string(),
+                }
+            }).unwrap_or_else(|| {
+                if is_coord { "coordinator".to_string() } else { "agent-template".to_string() }
             });
-            (role, is_leader, agent_type)
+            (role, is_coord, agent_type)
         } else {
-            (String::new(), false, "pod-member".to_string())
+            (String::new(), false, "agent-template".to_string())
         };
 
         let inbox_count = count_md_files(&agent_work_dir(&project_path, &name, "inbox"));
@@ -302,7 +310,7 @@ pub fn k2so_agents_list(project_path: String) -> Result<Vec<K2soAgentInfo>, Stri
             inbox_count,
             active_count,
             done_count,
-            pod_leader: is_pod_leader,
+            is_coordinator,
             agent_type,
         });
     }
@@ -312,7 +320,7 @@ pub fn k2so_agents_list(project_path: String) -> Result<Vec<K2soAgentInfo>, Stri
 }
 
 /// Create a new K2SO agent with directory structure.
-/// `agent_type` can be: "k2so", "custom", "pod-leader", "pod-member" (defaults to "pod-member").
+/// `agent_type` can be: "k2so", "custom", "coordinator", "agent-template" (defaults to "agent-template").
 #[tauri::command]
 pub fn k2so_agents_create(
     project_path: String,
@@ -330,8 +338,8 @@ pub fn k2so_agents_create(
         return Err(format!("Agent '{}' already exists", name));
     }
 
-    let agent_type = agent_type.unwrap_or_else(|| "pod-member".to_string());
-    let is_pod_leader = agent_type == "pod-leader";
+    let agent_type = agent_type.unwrap_or_else(|| "agent-template".to_string());
+    let is_coordinator = agent_type == "coordinator";
 
     fs::create_dir_all(agent_work_dir(&project_path, &name, "inbox"))
         .map_err(|e| format!("Failed to create inbox: {}", e))?;
@@ -343,8 +351,8 @@ pub fn k2so_agents_create(
 
     let agent_md = dir.join("agent.md");
     let mut frontmatter = format!("name: {}\nrole: {}\ntype: {}", name, role, agent_type);
-    if is_pod_leader {
-        frontmatter.push_str("\npod_leader: true");
+    if is_coordinator {
+        frontmatter.push_str("\ncoordinator: true");
     }
 
     // Build type-appropriate default body if no custom prompt provided
@@ -363,7 +371,7 @@ pub fn k2so_agents_create(
         inbox_count: 0,
         active_count: 0,
         done_count: 0,
-        pod_leader: is_pod_leader,
+        is_coordinator,
         agent_type,
     })
 }
@@ -375,7 +383,7 @@ pub fn k2so_agents_delete(project_path: String, name: String) -> Result<(), Stri
 }
 
 /// Delete an agent with optional force flag.
-/// - Refuses to delete pod-leader (unless force)
+/// - Refuses to delete coordinator (unless force)
 /// - Refuses to delete if agent has active work (unless force)
 /// - Removes .k2so/agents/<name>/ directory
 pub fn k2so_agents_delete_inner(project_path: &str, name: &str, force: bool) -> Result<(), String> {
@@ -384,13 +392,13 @@ pub fn k2so_agents_delete_inner(project_path: &str, name: &str, force: bool) -> 
         return Err(format!("Agent '{}' does not exist", name));
     }
 
-    // Read agent type to check if it's a pod-leader
+    // Read agent type to check if it's a coordinator
     let agent_md = dir.join("agent.md");
     if agent_md.exists() {
         let content = fs::read_to_string(&agent_md).unwrap_or_default();
         let fm = parse_frontmatter(&content);
-        if fm.get("type").map_or(false, |t| t == "pod-leader") && !force {
-            return Err("Cannot delete pod-leader agent. Use --force to override.".to_string());
+        if fm.get("type").map_or(false, |t| t == "coordinator" || t == "pod-leader") && !force {
+            return Err("Cannot delete coordinator agent. Use --force to override.".to_string());
         }
     }
 
@@ -1072,8 +1080,8 @@ fn generate_default_agent_body(agent_type: &str, name: &str, role: &str, project
         .unwrap_or_else(|| "workspace".to_string());
 
     match agent_type {
-        "pod-leader" => {
-            // List existing pod members for the "Your Team" section
+        "coordinator" | "pod-leader" => {
+            // List existing agent templates for the "Your Team" section
             let mut team_lines = String::new();
             let agents_root = agents_dir(project_path);
             if agents_root.exists() {
@@ -1099,13 +1107,13 @@ fn generate_default_agent_body(agent_type: &str, name: &str, role: &str, project
                 }
             }
             let team_section = if team_lines.is_empty() {
-                "No pod members yet. Create agents based on the skills this project needs.".to_string()
+                "No agent templates yet. Create agents based on the skills this project needs.".to_string()
             } else {
                 format!("Read their agent.md profiles when delegating to match tasks to the right specialist.\n\n{}", team_lines)
             };
 
             format!(
-r#"You are the Pod Leader for the {project_name} workspace.
+r#"You are the Coordinator for the {project_name} workspace.
 
 ## Work Sources
 
@@ -1124,7 +1132,7 @@ External (scan these proactively when woken — customize for your project):
 
 ## Tools Available
 
-- `k2so agent create --name "new-agent" --role "Specialization description"` — create a new pod member
+- `k2so agent create --name "new-agent" --role "Specialization description"` — create a new agent template
 - `k2so agent update --name "agent-name" --field role --value "Updated role"` — update a member's profile
 - `k2so delegate <agent> <work-file>` — assign work (creates worktree + launches agent)
 - `k2so work create --agent <name> --title "..." --body "..."` — create a task for an agent
@@ -1146,14 +1154,14 @@ External (scan these proactively when woken — customize for your project):
 - An agent is a role template, not a person — the same agent can run in multiple worktrees simultaneously
 - You orchestrate and review — you do NOT implement code yourself
 - When you need a new skill, create a new agent with `k2so agent create`
-- Read pod members' agent.md files to understand their strengths before delegating
+- Read agent templates' agent.md files to understand their strengths before delegating
 "#,
                 project_name = project_name,
                 name = name,
                 team_section = team_section,
             )
         }
-        "pod-member" => {
+        "agent-template" | "pod-member" => {
             format!(
 r#"## Specialization
 
@@ -1173,7 +1181,7 @@ r#"## Specialization
 3. Implement the changes — all work happens in your worktree
 4. Commit to your branch as you go
 5. When done: `k2so work move --agent {name} --file <task>.md --from active --to done`
-6. Your work appears in the review queue for the Pod Leader to approve or reject
+6. Your work appears in the review queue for the Coordinator to approve or reject
 
 ## Standing Orders
 
@@ -1392,15 +1400,21 @@ fn generate_agent_claude_md_content(
     let agent_md = fs::read_to_string(&agent_md_path).unwrap_or_default();
     let fm = parse_frontmatter(&agent_md);
     let role = fm.get("role").cloned().unwrap_or("AI Agent".to_string());
-    let agent_type = fm.get("type").cloned().unwrap_or("pod-member".to_string());
+    let agent_type = fm.get("type").cloned().map(|t| {
+        match t.as_str() {
+            "pod-leader" => "coordinator".to_string(),
+            "pod-member" => "agent-template".to_string(),
+            other => other.to_string(),
+        }
+    }).unwrap_or("agent-template".to_string());
     let is_custom = agent_type == "custom";
 
     let agent_body = strip_frontmatter(&agent_md);
 
-    // Read shared project context (.k2so/PROJECT.md) — pods only
-    let is_pod_type = agent_type == "pod-leader" || agent_type == "pod-member";
+    // Read shared project context (.k2so/PROJECT.md) — coordinator mode agents
+    let is_coordinator_type = agent_type == "coordinator" || agent_type == "agent-template";
     let project_md_path = PathBuf::from(project_path).join(".k2so").join("PROJECT.md");
-    let project_context = if is_pod_type && project_md_path.exists() {
+    let project_context = if is_coordinator_type && project_md_path.exists() {
         let raw = safe_read_to_string(&project_md_path).unwrap_or_default();
         let stripped = strip_frontmatter(&raw);
         // Only include if it has real content (not just comments/empty sections)
@@ -1435,7 +1449,7 @@ fn generate_agent_claude_md_content(
         return Ok(md);
     }
 
-    // ── K2SO / Pod agents: full infrastructure CLAUDE.md ───────────────
+    // ── K2SO / Coordinator agents: full infrastructure CLAUDE.md ───────
 
     // List other agents for delegation awareness
     let mut other_agents = Vec::new();
@@ -1507,12 +1521,12 @@ fn generate_agent_claude_md_content(
     md.push_str(&format!("- `{}/active/` — items you're currently working on\n", work_dir_abs.to_string_lossy()));
     md.push_str(&format!("- `{}/done/` — move items here when complete\n\n", work_dir_abs.to_string_lossy()));
 
-    // Other agents — for pod leaders, include profile paths so they can read agent.md files
-    let is_pod_leader_type = agent_type == "pod-leader" || agent_type == "k2so";
+    // Other agents — for coordinators, include profile paths so they can read agent.md files
+    let is_coordinator_lead = agent_type == "coordinator" || agent_type == "k2so";
     if !other_agents.is_empty() {
-        if is_pod_leader_type {
+        if is_coordinator_lead {
             md.push_str("## Your Team\n\n");
-            md.push_str("These are your pod members. Read their `agent.md` profiles to understand their strengths before delegating:\n\n");
+            md.push_str("These are your agent templates. Read their `agent.md` profiles to understand their strengths before delegating:\n\n");
             for (name, their_role) in &other_agents {
                 md.push_str(&format!(
                     "- **{}** — {} (profile: `.k2so/agents/{}/agent.md`)\n",
@@ -1581,19 +1595,21 @@ pub fn k2so_agents_generate_workspace_claude_md(
     let _ = fs::create_dir_all(k2so_dir.join("work").join("inbox"));
     let _ = fs::create_dir_all(k2so_dir.join("prds"));
 
-    // Auto-create pod-leader agent if it doesn't exist (for pod mode)
-    let pod_leader_dir = k2so_dir.join("agents").join("pod-leader");
-    if !pod_leader_dir.exists() {
-        let _ = fs::create_dir_all(pod_leader_dir.join("work").join("inbox"));
-        let _ = fs::create_dir_all(pod_leader_dir.join("work").join("active"));
-        let _ = fs::create_dir_all(pod_leader_dir.join("work").join("done"));
-        let pod_leader_role = "Pod orchestrator — delegates work to agents, reviews completed branches, drives milestones";
-        let pod_leader_body = generate_default_agent_body("pod-leader", "pod-leader", pod_leader_role, &project_path);
-        let pod_leader_md = format!(
-            "---\nname: pod-leader\nrole: {}\ntype: pod-leader\npod_leader: true\n---\n\n{}\n",
-            pod_leader_role, pod_leader_body
+    // Auto-create coordinator agent if it doesn't exist (for coordinator mode)
+    // Check for both old "pod-leader" and new "coordinator" directory names
+    let coordinator_dir = k2so_dir.join("agents").join("coordinator");
+    let legacy_pod_leader_dir = k2so_dir.join("agents").join("pod-leader");
+    if !coordinator_dir.exists() && !legacy_pod_leader_dir.exists() {
+        let _ = fs::create_dir_all(coordinator_dir.join("work").join("inbox"));
+        let _ = fs::create_dir_all(coordinator_dir.join("work").join("active"));
+        let _ = fs::create_dir_all(coordinator_dir.join("work").join("done"));
+        let coordinator_role = "Coordinator — delegates work to agents, reviews completed branches, drives milestones";
+        let coordinator_body = generate_default_agent_body("coordinator", "coordinator", &coordinator_role, &project_path);
+        let coordinator_md = format!(
+            "---\nname: coordinator\nrole: {}\ntype: coordinator\ncoordinator: true\n---\n\n{}\n",
+            coordinator_role, coordinator_body
         );
-        let _ = fs::write(pod_leader_dir.join("agent.md"), &pod_leader_md);
+        let _ = fs::write(coordinator_dir.join("agent.md"), &coordinator_md);
     }
 
     // Auto-create K2SO agent if it doesn't exist (for agent mode)
@@ -1653,7 +1669,7 @@ pub fn k2so_agents_generate_workspace_claude_md(
     }
 
     // Detect mode — read from DB, fall back to filesystem
-    let is_pod_mode = {
+    let is_coordinator_mode = {
         // Try reading from DB first
         let db_mode = dirs::home_dir()
             .and_then(|h| {
@@ -1669,10 +1685,10 @@ pub fn k2so_agents_generate_workspace_claude_md(
             });
 
         match db_mode.as_deref() {
-            Some("pod") => true,
+            Some("coordinator") | Some("pod") => true,
             Some("agent") => false,
             _ => {
-                // Fallback: if agents dir has sub-agents, assume pod
+                // Fallback: if agents dir has sub-agents, assume coordinator
                 let agents_root = agents_dir(&project_path);
                 agents_root.exists() && fs::read_dir(&agents_root)
                     .map(|e| e.flatten().any(|e| e.file_type().map_or(false, |ft| ft.is_dir())))
@@ -1681,14 +1697,14 @@ pub fn k2so_agents_generate_workspace_claude_md(
         }
     };
 
-    // Scaffold PROJECT.md for pod mode — shared context across all pod agents
-    if is_pod_mode {
+    // Scaffold PROJECT.md for coordinator mode — shared context across all agents
+    if is_coordinator_mode {
         let project_md_path = k2so_dir.join("PROJECT.md");
         if !project_md_path.exists() {
             let project_md_content = format!(
 r#"# {project_name}
 
-<!-- This file is shared context injected into every pod agent's CLAUDE.md at launch. -->
+<!-- This file is shared context injected into every agent's CLAUDE.md at launch. -->
 <!-- Use it for project-wide knowledge that all agents need, regardless of their role. -->
 <!-- Edit this file via Settings > Manage Project Context, or directly. -->
 
@@ -1718,12 +1734,12 @@ r#"# {project_name}
         }
     }
 
-    let md = if is_pod_mode {
-        // ── Agent 2: Pod Leader CLAUDE.md ──────────────────────────────
+    let md = if is_coordinator_mode {
+        // ── Coordinator CLAUDE.md ──────────────────────────────────────
         format!(
-            r#"# K2SO Pod Leader: {project_name}
+            r#"# K2SO Coordinator: {project_name}
 
-You are the **pod leader** for the {project_name} workspace, operating inside K2SO.
+You are the **coordinator** for the {project_name} workspace, operating inside K2SO.
 
 ## Your Role
 
@@ -1821,9 +1837,9 @@ You are the **AI Planner** for the {project_name} workspace, operating inside K2
 You collaborate with the user to plan and orchestrate software projects. You:
 - **Talk with the user** to understand what they want to build
 - **Create PRDs** (product requirement documents), milestones, and technical specifications
-- **Set up workspaces** for each project — enable worktrees, pod mode, create agent teams
+- **Set up workspaces** for each project — enable worktrees, coordinator mode, create agent teams
 - **Coordinate across workspaces** — send work to different projects, check on progress
-- **You do NOT write code** — you plan, then hand off execution to pod leaders and their agent teams
+- **You do NOT write code** — you plan, then hand off execution to coordinators and their agent teams
 
 ## Setting Up a Project Workspace
 
@@ -1832,7 +1848,7 @@ When the user has a project they want to build or maintain with agents:
 ```bash
 # 1. Enable the workspace for autonomous work
 k2so worktree on                    # Agents work in isolated git branches
-k2so mode pod                       # Enable multi-agent orchestration
+k2so mode coordinator                # Enable multi-agent orchestration
 k2so heartbeat on                   # Agents wake up automatically on schedule
 
 # 2. Create the agent team based on the project's tech stack
@@ -1855,13 +1871,13 @@ k2so agents list                    # Shows agents with work counts
    ```
 3. **Break the PRD into milestones** — each milestone should be shippable
 4. **Break milestones into tasks** with clear acceptance criteria
-5. **Send tasks to the project workspace** for the pod leader to execute:
+5. **Send tasks to the project workspace** for the coordinator to execute:
    ```bash
    k2so work send --workspace /path/to/project \
      --title "Milestone 1: User Authentication" \
      --body "See PRD at .k2so/prds/auth.md. Tasks: ..."
    ```
-   The pod leader in that workspace picks it up and delegates to its agents.
+   The coordinator in that workspace picks it up and delegates to its agents.
 
 ## Cross-Workspace Coordination
 
@@ -1872,7 +1888,7 @@ k2so work send --workspace /path/to/frontend-app --title "..." --body "..."
 k2so work send --workspace /path/to/api-server --title "..." --body "..."
 
 # Set up a new workspace from scratch
-K2SO_PROJECT_PATH="/path/to/new-project" k2so mode pod
+K2SO_PROJECT_PATH="/path/to/new-project" k2so mode coordinator
 K2SO_PROJECT_PATH="/path/to/new-project" k2so worktree on
 K2SO_PROJECT_PATH="/path/to/new-project" k2so agents create backend-eng --role "..."
 ```
@@ -1901,7 +1917,7 @@ K2SO_PROJECT_PATH="/path/to/new-project" k2so agents create backend-eng --role "
     // by checking for our header pattern. If it was ours, regenerate it.
     let is_k2so_generated = if claude_md_path.exists() {
         let existing = fs::read_to_string(&claude_md_path).unwrap_or_default();
-        existing.starts_with("# K2SO ") // Our headers: "# K2SO Pod Leader:" or "# K2SO AI Planner:" or "# K2SO Lead Agent:"
+        existing.starts_with("# K2SO ") // Our headers: "# K2SO Coordinator:" or "# K2SO AI Planner:" or "# K2SO Lead Agent:"
     } else {
         false
     };
@@ -1995,7 +2011,7 @@ k2so commit-merge                    # AI commit then merge into main
 ### Workspace Setup
 ```
 k2so mode                               # Show current settings
-k2so mode <off|agent|pod>               # Set workspace agent mode
+k2so mode <off|agent|coordinator>        # Set workspace agent mode
 k2so worktree <on|off>                  # Enable/disable worktree mode
 k2so heartbeat <on|off>                 # Enable/disable automatic heartbeat
 k2so heartbeat                          # Trigger triage manually (no on/off)
@@ -2418,11 +2434,11 @@ pub fn k2so_agents_triage_summary(project_path: String) -> Result<String, String
             let content = fs::read_to_string(&agent_md_path).unwrap_or_default();
             let fm = parse_frontmatter(&content);
             (
-                fm.get("type").cloned().unwrap_or("pod-member".to_string()),
+                fm.get("type").cloned().unwrap_or("agent-template".to_string()),
                 fm.get("role").cloned().unwrap_or_default(),
             )
         } else {
-            ("pod-member".to_string(), String::new())
+            ("agent-template".to_string(), String::new())
         };
 
         summary.push_str(&format!("Agent: {} (type: {}, role: {})\n", name, agent_type, agent_role));
@@ -2464,9 +2480,9 @@ pub fn k2so_agents_triage_summary(project_path: String) -> Result<String, String
 
         if !ws_items.is_empty() {
             let lead_locked = is_agent_locked(&project_path, "__lead__");
-            summary.push_str("Workspace Inbox (unassigned — needs Pod Leader):\n");
+            summary.push_str("Workspace Inbox (unassigned — needs Coordinator):\n");
             if lead_locked {
-                summary.push_str("  Pod Leader: LOCKED (active session running)\n");
+                summary.push_str("  Coordinator: LOCKED (active session running)\n");
             }
             for item in &ws_items {
                 let cap_status = ws_state.as_ref()
@@ -2549,7 +2565,7 @@ Rules:
 2. Wake agents with "critical" or "high" priority inbox items first
 3. If an agent already has active items in progress, only wake it for critical new inbox items
 4. Consider dependencies: if one agent's work likely depends on another's output, wake the dependency first
-5. If the workspace inbox has unassigned items and the Pod Leader is not locked, wake __lead__
+5. If the workspace inbox has unassigned items and the Coordinator is not locked, wake __lead__
 6. For "low" priority items, only wake if the agent has no other work in progress
 7. Items marked [NEEDS APPROVAL] can be worked on but must be built as PRs (not auto-merged)
 8. Items with source type "off" in the workspace state are already filtered out — you won't see them
@@ -2724,7 +2740,7 @@ pub fn k2so_agents_set_heartbeat(
 
 /// Scheduler tick: check all agents in a project and return those ready to wake.
 /// Called by the heartbeat script (via /cli/scheduler-tick).
-/// Differentiates between pod agents (inbox-based) and custom agents (timing-based).
+/// Differentiates between coordinator agents (inbox-based) and custom agents (timing-based).
 #[tauri::command]
 pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, String> {
     // Check workspace state — if heartbeat is disabled (Locked state), skip entirely
@@ -2770,9 +2786,9 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
             let agent_type = if agent_md.exists() {
                 let content = fs::read_to_string(&agent_md).unwrap_or_default();
                 let fm = parse_frontmatter(&content);
-                fm.get("type").cloned().unwrap_or("pod-member".to_string())
+                fm.get("type").cloned().unwrap_or("agent-template".to_string())
             } else {
-                "pod-member".to_string()
+                "agent-template".to_string()
             };
 
             if agent_type == "custom" {
@@ -2812,7 +2828,7 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
                     launchable.push(name);
                 }
             } else {
-                // Pod agents (pod-leader, pod-member, k2so): inbox-based triage
+                // Coordinator agents (coordinator, agent-template, k2so): inbox-based triage
                 let inbox = agent_work_dir(&project_path, &name, "inbox");
                 let has_inbox = inbox.exists() && fs::read_dir(&inbox)
                     .map(|e| e.flatten().any(|e| e.path().extension().map_or(false, |ext| ext == "md")))
@@ -3382,15 +3398,22 @@ pub fn k2so_agents_get_editor_context(
 
     let agent_md = fs::read_to_string(dir.join("agent.md")).unwrap_or_default();
     let fm = parse_frontmatter(&agent_md);
-    let is_pod_leader = fm.get("pod_leader").map_or(false, |v| v == "true");
+    let is_coordinator = fm.get("pod_leader").map_or(false, |v| v == "true")
+        || fm.get("coordinator").map_or(false, |v| v == "true");
     let role = fm.get("role").cloned().unwrap_or_default();
-    let agent_type = fm.get("type").cloned().unwrap_or("pod-member".to_string());
+    let agent_type = fm.get("type").cloned().map(|t| {
+        match t.as_str() {
+            "pod-leader" => "coordinator".to_string(),
+            "pod-member" => "agent-template".to_string(),
+            other => other.to_string(),
+        }
+    }).unwrap_or("agent-template".to_string());
 
     Ok(serde_json::json!({
         "agentName": agent_name,
         "role": role,
         "agentType": agent_type,
-        "isPodLeader": is_pod_leader,
+        "isCoordinator": is_coordinator,
         "agentMd": agent_md,
         "agentMdPath": dir.join("agent.md").to_string_lossy(),
         "agentDir": dir.to_string_lossy(),

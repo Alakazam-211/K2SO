@@ -485,7 +485,7 @@ cmd_agents_delete() {
     if [ -z "$agent" ]; then
         echo "Usage: k2so agents delete <name> [--force]" >&2
         echo "  Removes agent and all its work directories." >&2
-        echo "  --force  Skip safety checks (active work, pod-leader)" >&2
+        echo "  --force  Skip safety checks (active work, coordinator)" >&2
         exit 1
     fi
     local params="agent=$(urlencode "$agent")"
@@ -776,7 +776,7 @@ cmd_help() {
 K2SO CLI — Agent interface to K2SO workspace orchestration
 
 COMMANDS:
-  agent create <name> --role "."  Create a new agent (pod-member, pod-leader, or custom)
+  agent create <name> --role "."  Create a new agent (agent-template, coordinator, or custom)
   agent update --name <n>         Update agent profile field or section
     --field <field> --value "."   Field: frontmatter key or ## section name
   agent list                      List all agents in this workspace
@@ -817,7 +817,7 @@ COMMANDS:
   commit-merge [-m "message"]     AI Commit & Merge — commit then merge into main
 
   mode                            Show current workspace settings
-  mode <off|agent|pod>            Set workspace agent mode
+  mode <off|agent|coordinator>     Set workspace agent mode
   worktree <on|off>               Enable/disable worktree mode
   heartbeat                       Manually trigger heartbeat triage
   heartbeat <on|off>              Enable/disable automatic heartbeat

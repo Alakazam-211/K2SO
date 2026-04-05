@@ -143,7 +143,7 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
 
   return (
     <>
-      <div className="flex h-full w-full flex-col">
+      <div className="flex h-full w-full flex-col" data-pane-group-id={paneGroupId} data-tab-id={tabId}>
         {showPaneTabBar && (
           <PaneTabBar
             items={paneGroup.items}
@@ -151,6 +151,8 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
             onActivate={handleActivate}
             onClose={handleClose}
             onClosePane={hasSplits ? handleClosePane : undefined}
+            tabId={tabId}
+            paneGroupId={paneGroupId}
           />
         )}
 
