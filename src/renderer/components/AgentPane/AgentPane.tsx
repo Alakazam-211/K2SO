@@ -161,17 +161,26 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
         return
       }
 
-      // Check if there's already a terminal running a CLI LLM in this directory
-      // Only connect to it if it has an active foreground command (not a fresh empty shell)
+      // Check if there's already a terminal with an active conversation in this directory.
+      // We verify by reading the terminal buffer — if it has more than 5 lines of content,
+      // it's a real active session, not just a freshly-restored empty Claude prompt.
       try {
         const running = await invoke<Array<{ terminalId: string; cwd: string; command: string | null }>>('terminal_list_running_agents')
         const match = running.find((t) => t.cwd === agentDir && t.command !== null)
         if (!cancelled && match) {
           const exists = await invoke<boolean>('terminal_exists', { id: match.terminalId })
           if (!cancelled && exists) {
-            setExistingTerminalId(match.terminalId)
-            setReady(true)
-            return
+            // Check if terminal has meaningful content (not just Claude banner)
+            try {
+              const lines = await invoke<string[]>('terminal_read_lines', { id: match.terminalId, count: 20 })
+              const nonEmpty = lines.filter((l: string) => l.trim().length > 0)
+              if (nonEmpty.length > 5) {
+                // Active conversation — connect to it
+                setExistingTerminalId(match.terminalId)
+                setReady(true)
+                return
+              }
+            } catch { /* fall through to session resume */ }
           }
         }
       } catch { /* fall through */ }
