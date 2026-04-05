@@ -161,10 +161,11 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
         return
       }
 
-      // Check if there's already a terminal running in this directory
+      // Check if there's already a terminal running a CLI LLM in this directory
+      // Only connect to it if it has an active foreground command (not a fresh empty shell)
       try {
         const running = await invoke<Array<{ terminalId: string; cwd: string; command: string | null }>>('terminal_list_running_agents')
-        const match = running.find((t) => t.cwd === agentDir)
+        const match = running.find((t) => t.cwd === agentDir && t.command !== null)
         if (!cancelled && match) {
           const exists = await invoke<boolean>('terminal_exists', { id: match.terminalId })
           if (!cancelled && exists) {
