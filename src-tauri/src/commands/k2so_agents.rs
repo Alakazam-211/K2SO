@@ -1047,10 +1047,19 @@ pub fn k2so_agents_build_launch(
     fs::write(&claude_md_path, &claude_md).ok();
 
     // Check for previous session to resume (avoids cold-start context reload)
-    let session_file = agent_dir(&project_path, &agent_name).join(".last_session");
+    // First check .last_session file, then fall back to Claude's history.jsonl
+    let agent_cwd = agent_dir(&project_path, &agent_name);
+    let session_file = agent_cwd.join(".last_session");
     let resume_session = fs::read_to_string(&session_file).ok()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            // Fall back to detecting from Claude's history
+            crate::commands::chat_history::chat_history_detect_active_session(
+                "claude".to_string(),
+                agent_cwd.to_string_lossy().to_string(),
+            ).ok().flatten()
+        });
 
     let mut args = vec!["--append-system-prompt".to_string(), claude_md];
     if let Some(ref session_id) = resume_session {
@@ -1058,10 +1067,13 @@ pub fn k2so_agents_build_launch(
         args.push(session_id.clone());
     }
 
+    // Use agent directory as CWD so sessions are stored there
+    let launch_cwd = agent_cwd.to_string_lossy().to_string();
+
     Ok(serde_json::json!({
         "command": command,
         "args": args,
-        "cwd": project_path,
+        "cwd": launch_cwd,
         "claudeMdPath": claude_md_path.to_string_lossy(),
         "agentName": agent_name,
         "worktreePath": null,
