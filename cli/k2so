@@ -654,18 +654,25 @@ cmd_heartbeat_wake() {
     # 1. Check if any agents have inbox work
     # 2. If coordinator is running → send triage message
     # 3. If coordinator is asleep → launch with triage prompt
-    local agents_json
+    # Check both agent inboxes and workspace inbox for work
+    local agents_json ws_inbox_json
     agents_json=$(cli_request "/cli/agents/list" 2>/dev/null)
+    ws_inbox_json=$(cli_request "/cli/work/inbox" 2>/dev/null)
 
     local has_work
-    has_work=$(echo "$agents_json" | python3 -c "
+    has_work=$(python3 -c "
 import json, sys
 try:
-    data = json.loads(sys.stdin.read())
-    has_inbox = any(a.get('inboxCount', 0) > 0 for a in data)
-    print('yes' if has_inbox else 'no')
+    agents = json.loads('''$agents_json''')
+    agent_inbox = any(a.get('inboxCount', 0) > 0 for a in agents)
 except:
-    print('no')
+    agent_inbox = False
+try:
+    ws_items = json.loads('''$ws_inbox_json''')
+    ws_inbox = len(ws_items) > 0 if isinstance(ws_items, list) else False
+except:
+    ws_inbox = False
+print('yes' if (agent_inbox or ws_inbox) else 'no')
 " 2>/dev/null || echo "no")
 
     if [ "$has_work" != "yes" ]; then
