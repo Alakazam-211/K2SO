@@ -874,7 +874,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       items: [agentItem],
       activeItemIndex: 0,
     }
-    const tabTitle = title ?? (agentName === '__workspace__' ? 'Work Board' : `Agent: ${agentName}`)
+    const tabTitle = title ?? (agentName === '__workspace__' ? 'Work Board' : agentName)
     const tab: Tab = {
       id: tabId,
       title: tabTitle,

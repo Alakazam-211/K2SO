@@ -14,19 +14,29 @@ PORT="${K2SO_PORT:-}"
 TOKEN="${K2SO_HOOK_TOKEN:-}"
 
 # Resolve project root: if K2SO_PROJECT_PATH is set, use it directly.
-# Otherwise walk up from CWD to find a .k2so/ directory, skipping $HOME/.k2so
-# (which is K2SO's app config, not a project).
+# Otherwise walk up from CWD to find a .k2so/ directory, skipping $HOME/.k2so.
+# Also handles git worktrees: if CWD is inside a worktree, resolve back to
+# the main repo root where .k2so/ lives.
 PROJECT="${K2SO_PROJECT_PATH:-$(pwd)}"
 if [ -z "${K2SO_PROJECT_PATH:-}" ]; then
     _dir="$(pwd)"
+    _found=""
     while [ "$_dir" != "/" ]; do
         if [ -d "$_dir/.k2so" ] && [ "$_dir" != "$HOME" ]; then
-            PROJECT="$_dir"
+            _found="$_dir"
             break
         fi
         _dir="$(dirname "$_dir")"
     done
-    unset _dir
+    if [ -z "$_found" ]; then
+        # May be inside a git worktree — resolve to main repo root
+        _main_root=$(git -C "$(pwd)" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/.git$||')
+        if [ -n "$_main_root" ] && [ -d "$_main_root/.k2so" ]; then
+            _found="$_main_root"
+        fi
+    fi
+    PROJECT="${_found:-$PROJECT}"
+    unset _dir _found _main_root
 fi
 
 # Auto-discover connection from ~/.k2so/ if not in a K2SO terminal

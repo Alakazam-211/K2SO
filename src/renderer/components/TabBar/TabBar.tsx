@@ -251,11 +251,15 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
           )
           // Detect CLI LLM command running in this tab's terminals
           let cliAgent: string | null = null
+          let isAgentPane = false
           for (const [, pg] of tab.paneGroups) {
             for (const item of pg.items) {
               if (item.type === 'terminal') {
                 const cmd = (item.data as TerminalItemData).command
                 if (cmd) { cliAgent = cmd; break }
+              }
+              if (item.type === 'agent') {
+                isAgentPane = true
               }
             }
             if (cliAgent) break
@@ -285,18 +289,27 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
                   <path d="M4 5.5v5M4 8h6c1.1 0 2-.9 2-2v-.5" />
                 </svg>
               )}
-              {cliAgent && !isWorktreeTab && (
+              {isAgentPane && !isWorktreeTab && (
+                <svg className="w-3 h-3 text-[var(--color-text-muted)] flex-shrink-0 mr-1 opacity-70" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="5" width="10" height="8" rx="1.5" />
+                  <circle cx="6" cy="9" r="1" />
+                  <circle cx="10" cy="9" r="1" />
+                  <path d="M8 2v3" />
+                  <circle cx="8" cy="1.5" r="0.8" />
+                </svg>
+              )}
+              {cliAgent && !isWorktreeTab && !isAgentPane && (
                 <span className="flex-shrink-0 mr-1">
                   <AgentIcon agent={cliAgent} size={12} />
                 </span>
               )}
-              {hasAgent && !isWorktreeTab && !cliAgent && (
+              {hasAgent && !isWorktreeTab && !cliAgent && !isAgentPane && (
                 <span
                   className={`flex-shrink-0 mr-1.5 rounded-full ${hasActiveAgent ? 'agent-active-dot' : ''}`}
                   style={{ width: 6, height: 6, backgroundColor: hasActiveAgent ? '#f97316' : '#22c55e' }}
                 />
               )}
-              {isDirty && !hasAgent && !isWorktreeTab && !cliAgent && (
+              {isDirty && !hasAgent && !isWorktreeTab && !cliAgent && !isAgentPane && (
                 <span className="w-1.5 h-1.5 bg-[var(--color-accent)] flex-shrink-0 mr-1.5" />
               )}
               <span className={`truncate flex-1 ${isDirty ? 'italic' : ''}`}>
