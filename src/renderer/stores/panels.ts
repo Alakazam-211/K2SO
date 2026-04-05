@@ -46,6 +46,8 @@ interface PanelsState {
   initFromSettings: () => Promise<void>
 }
 
+let panelsInitialized = false
+
 export const usePanelsStore = create<PanelsState>((set, get) => ({
   leftPanelOpen: true,
   leftPanelWidth: SIDEBAR_DEFAULT_WIDTH,
@@ -197,15 +199,18 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
         rightPanelTabs: rightTabs,
       })
 
-      // Persist migrated tabs after a short delay to avoid race with other init writes
-      setTimeout(() => {
-        invoke('settings_update', { updates: {
-          leftPanelTabs: leftTabs,
-          rightPanelTabs: rightTabs,
-          leftPanelActiveTab: leftActive,
-          rightPanelActiveTab: rightActive,
-        } }).catch((e: unknown) => console.error('[panels] migration persist failed:', e))
-      }, 2000)
+      // Only persist on first init to avoid sync:settings → initFromSettings → settings_update loop
+      if (!panelsInitialized) {
+        panelsInitialized = true
+        setTimeout(() => {
+          invoke('settings_update', { updates: {
+            leftPanelTabs: leftTabs,
+            rightPanelTabs: rightTabs,
+            leftPanelActiveTab: leftActive,
+            rightPanelActiveTab: rightActive,
+          } }).catch((e: unknown) => console.error('[panels] migration persist failed:', e))
+        }, 2000)
+      }
     } catch {
       // ignore — use defaults
     }
