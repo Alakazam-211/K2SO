@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Mutex, OnceLock};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 static HOOK_PORT: AtomicU16 = AtomicU16::new(0);
 static HOOK_TOKEN: OnceLock<String> = OnceLock::new();
@@ -854,6 +854,54 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             Err(format!("Directory not found: {}", target))
                         } else {
                             cli_register_workspace(&target, &app_handle)
+                        }
+                    }
+                    "/cli/agents/running" => {
+                        // List all terminals with running CLI LLM agents
+                        if let Some(state) = app_handle.try_state::<crate::state::AppState>() {
+                            let manager = state.terminal_manager.lock();
+                            let terminal_ids = manager.list_terminal_ids();
+                            let mut agents = Vec::new();
+                            for (id, cwd) in &terminal_ids {
+                                let command = manager.get_foreground_command(id).ok().flatten();
+                                agents.push(serde_json::json!({
+                                    "terminalId": id,
+                                    "cwd": cwd,
+                                    "command": command,
+                                }));
+                            }
+                            Ok(serde_json::to_string(&agents).unwrap_or("[]".to_string()))
+                        } else {
+                            Ok("[]".to_string())
+                        }
+                    }
+                    "/cli/terminal/write" => {
+                        // Write text to a running terminal (virtual input)
+                        let terminal_id = params.get("id").cloned().unwrap_or_default();
+                        let message = params.get("message").cloned().unwrap_or_default();
+                        if terminal_id.is_empty() || message.is_empty() {
+                            Err("Missing 'id' or 'message' parameter".to_string())
+                        } else if let Some(state) = app_handle.try_state::<crate::state::AppState>() {
+                            let data = format!("{}\r", message); // Append carriage return to submit
+                            state.terminal_manager.lock().write(&terminal_id, &data)
+                                .map(|_| r#"{"success":true}"#.to_string())
+                        } else {
+                            Err("AppState not available".to_string())
+                        }
+                    }
+                    "/cli/terminal/read" => {
+                        // Read last N lines from a terminal buffer
+                        let terminal_id = params.get("id").cloned().unwrap_or_default();
+                        let count: usize = params.get("lines").and_then(|s| s.parse().ok()).unwrap_or(50);
+                        if terminal_id.is_empty() {
+                            Err("Missing 'id' parameter".to_string())
+                        } else if let Some(state) = app_handle.try_state::<crate::state::AppState>() {
+                            match state.terminal_manager.lock().read_lines(&terminal_id, count) {
+                                Ok(lines) => Ok(serde_json::json!({ "lines": lines }).to_string()),
+                                Err(e) => Err(e),
+                            }
+                        } else {
+                            Err("AppState not available".to_string())
                         }
                     }
                     _ => Err("Unknown CLI endpoint".to_string()),

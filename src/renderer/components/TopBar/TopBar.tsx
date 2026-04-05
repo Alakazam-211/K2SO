@@ -5,6 +5,8 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
 import { useReviewQueueStore } from '@/stores/review-queue'
+import { useRunningAgentsStore } from '@/stores/running-agents'
+import { useActiveAgentsStore } from '@/stores/active-agents'
 import TimerButton from '@/components/Timer/TimerButton'
 
 interface TopBarProps {
@@ -133,6 +135,8 @@ export default function TopBar({
         </button>
         {/* Review Queue */}
         <ReviewQueueTopBarButton />
+        {/* Running Agents */}
+        <RunningAgentsTopBarButton />
         {/* Back / Forward navigation */}
         <NavButtons />
       </div>
@@ -282,6 +286,31 @@ function ReviewQueueTopBarButton(): React.JSX.Element | null {
       {pendingCount > 0 && (
         <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] flex items-center justify-center text-[8px] font-bold text-white bg-[var(--color-accent)] rounded-full px-0.5">
           {pendingCount > 99 ? '99+' : pendingCount}
+        </span>
+      )}
+    </button>
+  )
+}
+
+function RunningAgentsTopBarButton(): React.JSX.Element {
+  const agentCount = useActiveAgentsStore((s) => s.getActiveAgentsList().length)
+  return (
+    <button
+      onClick={() => useRunningAgentsStore.getState().toggle()}
+      className="relative flex h-6 w-6 items-center justify-center text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)] transition-colors"
+      style={{
+        // @ts-expect-error -- Electron-specific CSS property
+        WebkitAppRegion: 'no-drag'
+      }}
+      title="Running Agents (⌘J)"
+    >
+      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M7 8L12 12L7 16" />
+        <path d="M13 17H18" />
+      </svg>
+      {agentCount > 0 && (
+        <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] flex items-center justify-center text-[8px] font-bold text-white bg-green-500 rounded-full px-0.5">
+          {agentCount > 99 ? '99+' : agentCount}
         </span>
       )}
     </button>

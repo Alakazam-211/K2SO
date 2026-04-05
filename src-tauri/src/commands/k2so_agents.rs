@@ -2033,6 +2033,13 @@ k2so work send --workspace <path> --title "..." --body "..."
 k2so work move --agent <name> --file <f> --from inbox --to active
 ```
 
+### Running Agents & Terminal I/O
+```
+k2so agents running                 # List all active CLI LLM sessions
+k2so terminal write <id> "message"  # Send text to a running terminal
+k2so terminal read <id> --lines 50  # Read last N lines from terminal buffer
+```
+
 "#;
 
 const WORKFLOW_DOCS: &str = r#"## Workflow

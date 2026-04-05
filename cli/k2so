@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.23.5"
+K2SO_CLI_VERSION="0.24.0"
 
 set -euo pipefail
 
@@ -591,6 +591,54 @@ cmd_review_feedback() {
     cli_request "/cli/review/feedback" "agent=$(urlencode "$agent")&feedback=$(urlencode "$feedback")"
 }
 
+cmd_agents_running() {
+    cli_request "/cli/agents/running" | python3 -c "
+import json, sys
+data = json.loads(sys.stdin.read())
+if not data:
+    print('No running agents.')
+    sys.exit(0)
+for a in data:
+    cmd = a.get('command') or 'shell'
+    tid = a.get('terminalId', '?')
+    cwd = a.get('cwd', '')
+    print(f'  {cmd:<12} {tid}  {cwd}')
+" 2>/dev/null || cli_request "/cli/agents/running"
+}
+
+cmd_terminal_write() {
+    local terminal_id="${1:-}"
+    shift || true
+    local message="$*"
+    if [ -z "$terminal_id" ] || [ -z "$message" ]; then
+        echo "Usage: k2so terminal write <terminal-id> \"message\"" >&2
+        exit 1
+    fi
+    cli_request "/cli/terminal/write" "id=$(urlencode "$terminal_id")&message=$(urlencode "$message")"
+}
+
+cmd_terminal_read() {
+    local terminal_id="${1:-}"
+    local lines=50
+    shift || true
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --lines) lines="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    if [ -z "$terminal_id" ]; then
+        echo "Usage: k2so terminal read <terminal-id> [--lines N]" >&2
+        exit 1
+    fi
+    cli_request "/cli/terminal/read" "id=$(urlencode "$terminal_id")&lines=$lines" | python3 -c "
+import json, sys
+data = json.loads(sys.stdin.read())
+for line in data.get('lines', []):
+    print(line)
+" 2>/dev/null || cli_request "/cli/terminal/read" "id=$(urlencode "$terminal_id")&lines=$lines"
+}
+
 cmd_workspace_create() {
     local target_path="${1:-}"
     if [ -z "$target_path" ]; then
@@ -798,6 +846,7 @@ COMMANDS:
   agents lock <name>              Mark agent as busy (active session)
   agents unlock <name>            Mark agent as available
   agents triage                   Show triage summary (what needs work)
+  agents running                  List all active CLI LLM sessions
 
   work create --title "." --body "."  Create a work item
     [--agent <name>]              Assign to agent (omit for workspace inbox)
@@ -824,6 +873,10 @@ COMMANDS:
   workspace create <path>         Create a new folder + register as workspace
   workspace open <path>           Register an existing folder as workspace
   workspace remove <path>         Deregister workspace (keeps files on disk)
+
+  terminal spawn --command "..."  Spawn a sub-terminal in current workspace
+  terminal write <id> "message"   Send text to a running terminal (virtual input)
+  terminal read <id> [--lines N]  Read last N lines from terminal buffer (default: 50)
 
   mode                            Show current workspace settings
   mode <off|agent|coordinator>     Set workspace agent mode
@@ -961,6 +1014,7 @@ case "${1:-help}" in
             lock) shift 2; cmd_agents_lock "$@" ;;
             unlock) shift 2; cmd_agents_unlock "$@" ;;
             triage) shift 2; cmd_agents_triage "$@" ;;
+            running) cmd_agents_running ;;
             *)      echo "Unknown agents subcommand: $2" >&2; cmd_help; exit 1 ;;
         esac
         ;;
@@ -976,7 +1030,9 @@ case "${1:-help}" in
     terminal)
         case "${2:-}" in
             spawn) shift 2; cmd_terminal_spawn "$@" ;;
-            *)     echo "Usage: k2so terminal spawn --command \"...\" [--title \"...\"]" >&2; exit 1 ;;
+            write) shift 2; cmd_terminal_write "$@" ;;
+            read)  shift 2; cmd_terminal_read "$@" ;;
+            *)     echo "Usage: k2so terminal <spawn|write|read> ..." >&2; exit 1 ;;
         esac
         ;;
     agentic)

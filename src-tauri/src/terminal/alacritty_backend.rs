@@ -701,6 +701,50 @@ impl TerminalManager {
         Ok(String::new())
     }
 
+    /// Read the last N lines of text from the terminal buffer (screen + scrollback).
+    pub fn read_lines(&self, id: &str, count: usize) -> Result<Vec<String>, String> {
+        let instance = self.terminals.get(id)
+            .ok_or_else(|| format!("Terminal {} not found", id))?;
+        let term = instance.term.lock_unfair();
+        let grid = term.grid();
+        let screen_lines = grid.screen_lines();
+        let history_len = grid.history_size();
+        let total = screen_lines + history_len;
+        let cols = grid.columns();
+
+        // Collect lines from bottom up
+        let mut lines = Vec::with_capacity(count.min(total));
+        // Row 0 is the topmost visible line, screen_lines-1 is the bottom.
+        // Negative Line values go into scrollback history.
+        // We want the last N lines: start from screen bottom and go up.
+        for i in 0..total.min(count) {
+            let row_idx = (screen_lines as i32 - 1) - i as i32;
+            let line = alacritty_terminal::index::Line(row_idx);
+            if line.0 < -(history_len as i32) {
+                break;
+            }
+            let row = &grid[line];
+            let mut text = String::with_capacity(cols);
+            for col in 0..cols {
+                let cell = &row[alacritty_terminal::index::Column(col)];
+                text.push(cell.c);
+            }
+            let trimmed = text.trim_end().to_string();
+            lines.push(trimmed);
+        }
+        lines.reverse(); // oldest first
+        // Remove leading empty lines
+        while lines.first().map_or(false, |l| l.is_empty()) {
+            lines.remove(0);
+        }
+        Ok(lines)
+    }
+
+    /// List all terminal IDs and their CWD.
+    pub fn list_terminal_ids(&self) -> Vec<(String, String)> {
+        self.terminals.iter().map(|(id, inst)| (id.clone(), inst.cwd.clone())).collect()
+    }
+
     /// Get a full grid snapshot for the terminal.
     pub fn get_grid(&self, id: &str) -> Result<GridUpdate, String> {
         let instance = self

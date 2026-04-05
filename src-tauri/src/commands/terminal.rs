@@ -199,3 +199,37 @@ pub fn terminal_get_selection_text(
         .lock()
         .get_selection_text(&id, start_col, start_row, end_col, end_row)
 }
+
+/// Read the last N lines of text from the terminal buffer.
+#[tauri::command]
+pub fn terminal_read_lines(
+    state: State<'_, AppState>,
+    id: String,
+    count: Option<usize>,
+) -> Result<Vec<String>, String> {
+    state
+        .terminal_manager
+        .lock()
+        .read_lines(&id, count.unwrap_or(50))
+}
+
+/// List all running terminals with their foreground command (if a CLI LLM).
+#[tauri::command]
+pub fn terminal_list_running_agents(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let manager = state.terminal_manager.lock();
+    let terminal_ids = manager.list_terminal_ids();
+    let mut agents = Vec::new();
+
+    for (id, cwd) in &terminal_ids {
+        let command = manager.get_foreground_command(id).ok().flatten();
+        agents.push(serde_json::json!({
+            "terminalId": id,
+            "cwd": cwd,
+            "command": command,
+        }));
+    }
+
+    Ok(serde_json::json!(agents))
+}

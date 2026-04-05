@@ -23,6 +23,8 @@ import { useProjectsStore } from './stores/projects'
 import { usePanelsStore } from './stores/panels'
 import { useSettingsStore } from './stores/settings'
 import { useCommandPaletteStore } from './stores/command-palette'
+import { useRunningAgentsStore } from './stores/running-agents'
+import RunningAgentsPanel from './components/RunningAgentsPanel/RunningAgentsPanel'
 import { useTerminalSettingsStore } from './stores/terminal-settings'
 import { useAssistantStore } from './stores/assistant'
 import { useTabsStore } from './stores/tabs'
@@ -156,6 +158,7 @@ function FocusModeContent({ activeProject, cwd }: { activeProject: any; cwd: str
       <GitInitDialog />
       <CommandPalette />
       <ReviewQueueModal />
+      <RunningAgentsPanel />
       <ContextMenu />
       <ConfirmDialog />
       <MergeDialog />
@@ -202,6 +205,7 @@ export default function App(): React.JSX.Element {
 
   const toggleAssistant = useAssistantStore((s) => s.toggle)
   const toggleReviewQueue = useReviewQueueStore((s) => s.toggle)
+  const toggleRunningAgents = useRunningAgentsStore((s) => s.toggle)
 
   // Cmd+, settings, Cmd+K command palette, Cmd+L assistant, Cmd+P review queue
   useEffect(() => {
@@ -221,6 +225,10 @@ export default function App(): React.JSX.Element {
       if (e.metaKey && e.key === 'p') {
         e.preventDefault()
         toggleReviewQueue()
+      }
+      if (e.metaKey && e.key === 'j') {
+        e.preventDefault()
+        toggleRunningAgents()
       }
       // Cmd+[ to go back, Cmd+] to go forward
       if (e.metaKey && !e.shiftKey && e.key === '[') {
@@ -260,7 +268,7 @@ export default function App(): React.JSX.Element {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [openSettings, toggleCommandPalette, toggleAssistant, toggleReviewQueue])
+  }, [openSettings, toggleCommandPalette, toggleAssistant, toggleReviewQueue, toggleRunningAgents])
 
   // Listen for menu events from Tauri backend
   useEffect(() => {
@@ -554,6 +562,7 @@ export default function App(): React.JSX.Element {
       <GitInitDialog />
       <CommandPalette />
       <ReviewQueueModal />
+      <RunningAgentsPanel />
       <ContextMenu />
       <ConfirmDialog />
       <MergeDialog />

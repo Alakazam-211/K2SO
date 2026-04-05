@@ -500,6 +500,8 @@ pub fn run() {
             commands::terminal::terminal_get_cell_metrics,
             commands::terminal::terminal_set_focus,
             commands::terminal::terminal_get_selection_text,
+            commands::terminal::terminal_read_lines,
+            commands::terminal::terminal_list_running_agents,
             // Git
             commands::git::git_info,
             commands::git::git_branches,

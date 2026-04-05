@@ -795,6 +795,34 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════
+section "13. Running Agents & Terminal I/O"
+# ═══════════════════════════════════════════════════════════════════════
+
+# Test agents running (list)
+OUTPUT=$(run agents running)
+if echo "$OUTPUT" | grep -q "running\|shell\|claude\|No running\|\[\]"; then
+    pass "agents running returns results"
+else
+    fail "agents running" "Output: $OUTPUT"
+fi
+
+# Test terminal read — verify the endpoint exists and responds
+OUTPUT=$(run terminal read "nonexistent-id" --lines 10 2>&1 || true)
+if echo "$OUTPUT" | grep -q "not found\|error\|lines" || [ -z "$OUTPUT" ]; then
+    pass "terminal read endpoint responds"
+else
+    fail "terminal read" "Output: $OUTPUT"
+fi
+
+# Test terminal write (verify endpoint responds to nonexistent ID)
+OUTPUT=$(run terminal write "nonexistent-id" "test message" 2>&1 || true)
+if echo "$OUTPUT" | grep -q "not found\|error\|success"; then
+    pass "terminal write handles missing terminal gracefully"
+else
+    fail "terminal write" "Output: $OUTPUT"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
 section "CLEANUP"
 # ═══════════════════════════════════════════════════════════════════════
 
