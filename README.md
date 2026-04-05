@@ -45,21 +45,21 @@ K2SO includes a closed-loop agent orchestration system where agents at every lev
 
 **Agent Hierarchy:**
 - **K2SO Agent** -- Top-level planner that coordinates across workspaces, creates PRDs and milestones
-- **Pod Leaders** -- Per-workspace orchestrators that delegate work to pod members, review completed branches
-- **Pod Members** -- Specialized agents (backend-eng, frontend-eng, qa-tester) that work in isolated worktrees
+- **Coordinator** -- Per-workspace orchestrator that delegates work to agent templates, reviews completed branches
+- **Agent Templates** -- Specialized agents (backend-eng, frontend-eng, qa-tester) that work in isolated worktrees
 - **Custom Agents** -- User-defined agents with adaptive heartbeat timing
 
 **Adaptive Heartbeat with Local LLM Triage:**
 The heartbeat system uses a two-tier cost model. A local LLM (Qwen 1.5B, running on-device via llama.cpp with Metal acceleration) evaluates whether expensive cloud sessions should be launched. The flow: filesystem check ($0) -> lock check ($0) -> quality gate ($0) -> local LLM decision ($0) -> cloud model session (only if the LLM approves). Agents self-adjust their check-in frequency (1 min during active work, 1 hour when idle). Auto-backoff increases the interval by 1.5x after 3 consecutive idle wakes. Active hours windows prevent overnight cost waste.
 
 **Event-Driven via Claude Code Channels:**
-Pod Leaders can run as persistent Claude sessions with MCP channel integration (`--channels`). K2SO implements an MCP channel server that pushes events (new work items, git changes, CI results, agent lifecycle events) directly into the running session. No polling delay, no context reload -- the agent maintains full session context across events.
+Coordinators can run as persistent Claude sessions with MCP channel integration (`--channels`). K2SO implements an MCP channel server that pushes events (new work items, git changes, CI results, agent lifecycle events) directly into the running session. No polling delay, no context reload -- the agent maintains full session context across events.
 
 **Self-Configuring Agents:**
-Pod Leaders create and configure Pod Members via CLI (`k2so agent create`, `k2so agent update`). Agent profiles (`agent.md`) are editable with AI assistance via the built-in AIFileEditor. Each Pod Leader knows its team members' strengths by reading their `agent.md` files before delegating.
+Coordinators create and configure Agent Templates via CLI (`k2so agent create`, `k2so agent update`). Agent profiles (`agent.md`) are editable with AI assistance via the built-in AIFileEditor. Each Coordinator knows its team members' strengths by reading their `agent.md` files before delegating.
 
 **Decentralized Work Discovery:**
-Each Pod Leader knows where to find work (GitHub Issues, Linear, PRDs) via its `agent.md`. No central scanner or integration layer needed -- agents use CLI tools (`gh`, `git`, `curl`) already available in the terminal. The filesystem work queue (`.k2so/agents/{name}/work/{inbox,active,done}/`) is the always-on mechanism, scanned by the local LLM triage at near-zero cost.
+Each Coordinator knows where to find work (GitHub Issues, Linear, PRDs) via its `agent.md`. No central scanner or integration layer needed -- agents use CLI tools (`gh`, `git`, `curl`) already available in the terminal. The filesystem work queue (`.k2so/agents/{name}/work/{inbox,active,done}/`) is the always-on mechanism, scanned by the local LLM triage at near-zero cost.
 
 **Multi-Terminal Execution:**
 Agents can spawn parallel sub-terminals for concurrent tasks (`k2so terminal spawn`). Sub-terminals appear as pane splits within the agent's tab.
@@ -109,8 +109,16 @@ View Claude and Cursor chat history in the sidebar. Click a session to resume it
 ### Terminal Persistence
 Terminal PTYs survive tab switches via a scrollback buffer architecture. Switch tabs freely without losing terminal state -- output is buffered and replayed on reattach.
 
+### Workspace Tab
+A unified **Workspace** panel (replacing the old Agents + Review tabs) shows three sections:
+- **Status** -- current mode (Off/Custom/K2SO Agent/Coordinator), heartbeat indicator
+- **Coordinator** -- the primary agent with Work/Chat/Profile tabs
+- **Worktrees** -- all open worktrees with Task/Chat/Review tabs
+
+Click a worktree to view its assigned task, chat with the running agent, or review completed work. Click **Open Full Workspace** to promote it to a full nav entry with file tree and changes panel. Worktree nav entries persist across app restarts (DB-backed) and can be dismissed with the hover close button.
+
 ### Git Worktree Management
-First-class support for git worktrees. Create worktrees from new or existing branches. Automatic workspace record creation. Projects can run in worktree mode or standard mode.
+First-class support for git worktrees. Create worktrees from new or existing branches via the "+" button in the Workspace panel. Projects can run in worktree mode or standard mode.
 
 ### Focus Groups & Pinned Workspaces
 Group related projects together with focus groups. Pin specific workspaces above the focus group filter so they're always accessible regardless of which group is active. Cmd+Shift+1-9 switches between pinned workspaces (swappable with active shortcuts in settings).
@@ -120,7 +128,7 @@ Workspace layouts (tab groups, open documents, terminal sessions) save and resto
 
 ### Keyboard Shortcuts
 - **Cmd+1-9** -- Switch active workspaces
-- **Cmd+Shift+1-9** -- Switch pinned workspaces
+- **Cmd+Option+1-9** -- Switch agents/pinned workspaces
 - **Cmd+Shift+T** -- Launch default AI agent
 - **Cmd+T** -- New terminal tab
 - **Cmd+D** -- Split pane

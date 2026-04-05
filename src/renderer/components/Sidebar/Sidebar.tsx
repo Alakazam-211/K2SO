@@ -23,15 +23,26 @@ import { KeyCombo } from '@/components/KeySymbol'
 
 // ── Nav-visible worktrees (DB-backed via workspace.navVisible field) ─────────
 
+function patchWorkspaceNavVisible(worktreeId: string, visible: boolean): void {
+  // Optimistically update the local store without a full refetch
+  const state = useProjectsStore.getState()
+  const updated = state.projects.map((p) => ({
+    ...p,
+    workspaces: p.workspaces.map((ws) =>
+      ws.id === worktreeId ? { ...ws, navVisible: visible ? 1 : 0 } : ws
+    ),
+  }))
+  useProjectsStore.setState({ projects: updated })
+  // Persist to DB asynchronously
+  invoke('workspace_set_nav_visible', { id: worktreeId, visible }).catch(() => {})
+}
+
 export function addNavWorktree(worktreeId: string): void {
-  invoke('workspace_set_nav_visible', { id: worktreeId, visible: true }).catch(() => {})
-  // Refresh projects so the sidebar picks up the change
-  useProjectsStore.getState().fetchProjects()
+  patchWorkspaceNavVisible(worktreeId, true)
 }
 
 export function removeNavWorktree(worktreeId: string): void {
-  invoke('workspace_set_nav_visible', { id: worktreeId, visible: false }).catch(() => {})
-  useProjectsStore.getState().fetchProjects()
+  patchWorkspaceNavVisible(worktreeId, false)
 }
 
 // ── Worktree git badge (shows changed files count) ──────────────────────────
