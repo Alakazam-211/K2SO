@@ -1831,6 +1831,26 @@ k2so agents create devops-eng --role "DevOps — CI/CD, Docker, deployment, infr
 k2so agents create docs-writer --role "Documentation — README, API docs, user guides"
 ```
 
+## Communicating with Running Agents
+
+You can see and message any running agent session:
+```bash
+k2so agents running                            # List all active sessions with terminal IDs
+k2so terminal read <terminal-id> --lines 30    # See what an agent is doing
+k2so terminal write <terminal-id> "message"    # Send instructions to a running agent
+```
+
+**Auto-merge (Build state):** When all capabilities are "auto", tell the sub-agent to self-merge:
+```bash
+k2so terminal write <id> "Your work is approved. Run: k2so agent complete --agent <name> --file <filename>"
+```
+
+**Gated (Managed Service state):** The agent moves work to done and you review:
+```bash
+k2so reviews                                   # Check pending reviews
+k2so review approve <agent> <branch>           # Merge after reviewing
+```
+
 ## Planning
 
 Store plans as markdown files:
@@ -1878,7 +1898,6 @@ When the user has a project they want to build or maintain with agents:
 
 ```bash
 # 1. Enable the workspace for autonomous work
-k2so worktree on                    # Agents work in isolated git branches
 k2so mode coordinator                # Enable multi-agent orchestration
 k2so heartbeat on                   # Agents wake up automatically on schedule
 

@@ -290,7 +290,7 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
                 </svg>
               )}
               {isAgentPane && !isWorktreeTab && (
-                <svg className="w-3 h-3 text-[var(--color-text-muted)] flex-shrink-0 mr-1 opacity-70" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+                <svg className="w-3 h-3 text-[var(--color-accent)] flex-shrink-0 mr-1" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
                   <rect x="3" y="5" width="10" height="8" rx="1.5" />
                   <circle cx="6" cy="9" r="1" />
                   <circle cx="10" cy="9" r="1" />
