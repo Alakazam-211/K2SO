@@ -466,29 +466,24 @@ export function startAgentPolling(): void {
       const tabOpts = { title: `Agent: ${agentName}`, command, args }
 
       // If this launch is for a worktree, create the PTY in the background.
-      // The Chat tab discovers it when the user navigates to the worktree.
-      // Note: sync:projects event from Rust refreshes the project list automatically.
+      // The Chat tab discovers it via terminal_list_running_agents CWD match.
       if (worktreePath) {
-        // Create PTY in background with deterministic ID based on workspace
-        const projectsStore = useProjectsStore.getState()
-        for (const project of projectsStore.projects) {
-          const ws = project.workspaces.find((w) => w.worktreePath === worktreePath)
-          if (ws) {
-            const bgTerminalId = `agent-chat-wt-${ws.id}`
-            try {
-              const exists = await invoke<boolean>('terminal_exists', { id: bgTerminalId })
-              if (!exists) {
-                await invoke('terminal_create', {
-                  cwd,
-                  command,
-                  args,
-                  id: bgTerminalId,
-                })
-              }
-            } catch { /* will be created when user navigates */ }
-            return
+        // Use a deterministic ID based on the worktree path so the Chat tab
+        // can find it. We can't use ws.id because the workspace record may
+        // not exist in the store yet (sync:projects hasn't fired).
+        const bgTerminalId = `agent-chat-${agentName}`
+        try {
+          const exists = await invoke<boolean>('terminal_exists', { id: bgTerminalId })
+          if (!exists) {
+            await invoke('terminal_create', {
+              cwd,
+              command,
+              args,
+              id: bgTerminalId,
+            })
           }
-        }
+        } catch { /* will be created when user navigates */ }
+        return
       }
 
       // For agent launches without a worktree (e.g. coordinator), create the PTY
