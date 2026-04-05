@@ -1061,7 +1061,7 @@ pub fn k2so_agents_build_launch(
             ).ok().flatten()
         });
 
-    let mut args = vec!["--append-system-prompt".to_string(), claude_md];
+    let mut args = vec!["--dangerously-skip-permissions".to_string(), "--append-system-prompt".to_string(), claude_md];
     if let Some(ref session_id) = resume_session {
         args.push("--resume".to_string());
         args.push(session_id.clone());
