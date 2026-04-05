@@ -847,34 +847,7 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                     }
                     "/cli/workspace/cleanup" => {
                         // Remove workspace DB records for worktrees that no longer exist on disk
-                        if let Some(state) = app_handle.try_state::<crate::state::AppState>() {
-                            let db_path = dirs::home_dir()
-                                .ok_or("No home dir".to_string())?
-                                .join(".k2so").join("k2so.db");
-                            let conn = rusqlite::Connection::open(&db_path)
-                                .map_err(|e| format!("Failed to open DB: {}", e))?;
-                            let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
-
-                            // Find all worktree workspaces and check if their paths still exist
-                            let mut stmt = conn.prepare(
-                                "SELECT id, worktree_path FROM workspaces WHERE worktree_path IS NOT NULL AND worktree_path != ''"
-                            ).map_err(|e| e.to_string())?;
-                            let stale: Vec<(String, String)> = stmt.query_map([], |row| {
-                                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                            }).map_err(|e| e.to_string())?
-                            .filter_map(|r| r.ok())
-                            .filter(|(_, path)| !std::path::Path::new(path).exists())
-                            .collect();
-
-                            let removed = stale.len();
-                            for (id, _) in &stale {
-                                let _ = conn.execute("DELETE FROM workspaces WHERE id = ?1", rusqlite::params![id]);
-                            }
-                            let _ = app_handle.emit("sync:projects", ());
-                            Ok(serde_json::json!({ "removed": removed, "stale": stale.iter().map(|(_, p)| p.clone()).collect::<Vec<_>>() }).to_string())
-                        } else {
-                            Err("AppState not available".to_string())
-                        }
+                        cli_cleanup_stale_workspaces(&app_handle)
                     }
                     "/cli/workspace/open" => {
                         // Register an existing folder as workspace
@@ -1122,6 +1095,35 @@ fn cli_remove_workspace(path: &str, app_handle: &tauri::AppHandle) -> Result<Str
 
     let _ = app_handle.emit("sync:projects", ());
     Ok(serde_json::json!({ "success": true, "removed": path }).to_string())
+}
+
+fn cli_cleanup_stale_workspaces(app_handle: &tauri::AppHandle) -> Result<String, String> {
+    let db_path = dirs::home_dir()
+        .ok_or("No home dir")?
+        .join(".k2so").join("k2so.db");
+    let conn = rusqlite::Connection::open(&db_path)
+        .map_err(|e| format!("Failed to open DB: {}", e))?;
+    let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+
+    let mut stmt = conn.prepare(
+        "SELECT id, worktree_path FROM workspaces WHERE worktree_path IS NOT NULL AND worktree_path != ''"
+    ).map_err(|e| e.to_string())?;
+    let stale: Vec<(String, String)> = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .filter(|(_, path)| !std::path::Path::new(path).exists())
+    .collect();
+
+    let removed = stale.len();
+    for (id, _) in &stale {
+        let _ = conn.execute("DELETE FROM workspaces WHERE id = ?1", rusqlite::params![id]);
+    }
+    let _ = app_handle.emit("sync:projects", ());
+    Ok(serde_json::json!({
+        "removed": removed,
+        "stale": stale.iter().map(|(_, p)| p.clone()).collect::<Vec<_>>()
+    }).to_string())
 }
 
 fn cli_get_project_settings(project_path: &str) -> Result<serde_json::Value, String> {
