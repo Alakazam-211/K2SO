@@ -510,7 +510,10 @@ fn detect_claude_session(project_path: &str) -> Option<String> {
     let mut buf = String::new();
     file.read_to_string(&mut buf).ok()?;
 
-    // Find the most recent sessionId matching this project (or any of its worktrees)
+    // Find the most recent sessionId matching this exact path first.
+    // Only fall back to project-family matching if the input is the root project
+    // (not a worktree or agent subdirectory).
+    let is_subpath = project_path.contains("/.worktrees/") || project_path.contains("/.k2so/");
     let root = resolve_root_project_path(project_path);
     let mut best_session: Option<(i64, String)> = None;
 
@@ -521,8 +524,12 @@ fn detect_claude_session(project_path: &str) -> Option<String> {
         };
 
         let project = parsed.get("project").and_then(|v| v.as_str()).unwrap_or("");
-        if !matches_project_family(project, root) {
-            continue;
+        // For subpaths (worktrees, agent dirs), require exact match
+        // For root projects, allow any worktree under it
+        if is_subpath {
+            if project != project_path { continue; }
+        } else {
+            if !matches_project_family(project, root) { continue; }
         }
 
         let session_id = match parsed.get("sessionId").and_then(|v| v.as_str()) {
