@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.24.1"
+K2SO_CLI_VERSION="0.24.2"
 
 set -euo pipefail
 
@@ -639,6 +639,80 @@ for line in data.get('lines', []):
 " 2>/dev/null || cli_request "/cli/terminal/read" "id=$(urlencode "$terminal_id")&lines=$lines"
 }
 
+cmd_heartbeat_wake() {
+    # Automated coordinator wake cycle:
+    # 1. Check if any agents have inbox work
+    # 2. If coordinator is running → send triage message
+    # 3. If coordinator is asleep → launch with triage prompt
+    local triage
+    triage=$(cli_request "/cli/agents/triage" 2>/dev/null)
+
+    local has_work
+    has_work=$(echo "$triage" | python3 -c "
+import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+    agents = [a for a in data if isinstance(a, dict)]
+    has_inbox = any(a.get('inboxCount', 0) > 0 for a in agents)
+    print('yes' if has_inbox else 'no')
+except:
+    print('no')
+" 2>/dev/null || echo "no")
+
+    if [ "$has_work" != "yes" ]; then
+        echo '{"status":"noop","reason":"no inbox work found"}'
+        return
+    fi
+
+    # Check if coordinator terminal is already running
+    local running
+    running=$(cli_request "/cli/agents/running" 2>/dev/null)
+    local coord_id
+    coord_id=$(echo "$running" | python3 -c "
+import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+    for t in data:
+        cwd = t.get('cwd', '')
+        if '.k2so/agents/coordinator' in cwd or t.get('terminalId', '').startswith('agent-chat-coordinator'):
+            print(t['terminalId'])
+            break
+except:
+    pass
+" 2>/dev/null)
+
+    if [ -n "$coord_id" ]; then
+        # Coordinator is awake — send triage message
+        local msg="New work detected. Run k2so agents list and delegate any inbox items."
+        cli_request "/cli/terminal/write" "id=$(urlencode "$coord_id")&message=$(urlencode "$msg")"
+        echo "{\"status\":\"notified\",\"terminalId\":\"$coord_id\"}"
+    else
+        # Coordinator is asleep — launch it
+        cli_request "/cli/agents/launch" "agent=coordinator"
+        echo '{"status":"launched","agent":"coordinator"}'
+    fi
+}
+
+cmd_agent_complete() {
+    # Sub-agent completion command:
+    # Reads workspace state capability for the work item's source type
+    # Auto mode: commit, merge, clean up, notify coordinator
+    # Gated mode: commit, move to done, notify coordinator for review
+    local agent="" file=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --agent) agent="$2"; shift 2 ;;
+            --file)  file="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    if [ -z "$agent" ] || [ -z "$file" ]; then
+        echo "Usage: k2so agent complete --agent <name> --file <filename>" >&2
+        exit 1
+    fi
+    cli_request "/cli/agent/complete" "agent=$(urlencode "$agent")&file=$(urlencode "$file")"
+}
+
 cmd_workspace_create() {
     local target_path="${1:-}"
     if [ -z "$target_path" ]; then
@@ -859,6 +933,8 @@ COMMANDS:
   work move --agent <name> --file <f> --from inbox --to active
 
   delegate <agent> <file>         Assign work: creates worktree + launches agent
+  agent complete --agent <n>      Complete work: auto-merge or submit for review
+    --file <filename>             Based on workspace state capability mode
 
   reviews                         List all pending reviews
   review approve <agent> <branch> Approve: merge + cleanup worktree + delete branch
@@ -881,6 +957,7 @@ COMMANDS:
   mode                            Show current workspace settings
   mode <off|agent|coordinator>     Set workspace agent mode
   heartbeat                       Manually trigger heartbeat triage
+  heartbeat wake                  Auto-wake coordinator if inbox work exists
   heartbeat <on|off>              Enable/disable automatic heartbeat
   heartbeat set --agent <n>        Set adaptive heartbeat config
     [--interval N] [--phase ".."]   Interval in seconds, work phase
@@ -996,6 +1073,7 @@ case "${1:-help}" in
             create) shift 2; cmd_agents_create "$@" ;;
             delete|remove) shift 2; cmd_agents_delete "$@" ;;
             update) shift 2; cmd_agent_update "$@" ;;
+            complete) shift 2; cmd_agent_complete "$@" ;;
             list)   cmd_agents_list ;;
             profile) shift 2; cmd_agents_profile "$@" ;;
             *)      echo "Unknown agent subcommand: ${2:-}" >&2; cmd_help; exit 1 ;;
@@ -1073,7 +1151,11 @@ case "${1:-help}" in
         shift; cmd_mode "$@"
         ;;
     heartbeat)
-        shift; cmd_heartbeat_toggle "$@"
+        if [ "${2:-}" = "wake" ]; then
+            shift 2; cmd_heartbeat_wake "$@"
+        else
+            shift; cmd_heartbeat_toggle "$@"
+        fi
         ;;
     settings)
         shift; cmd_settings "$@"

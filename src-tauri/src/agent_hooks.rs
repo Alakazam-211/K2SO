@@ -856,6 +856,16 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             cli_register_workspace(&target, &app_handle)
                         }
                     }
+                    "/cli/agent/complete" => {
+                        // Sub-agent completion: reads workspace state, auto-merges or moves to done
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        let file = params.get("file").cloned().unwrap_or_default();
+                        if agent.is_empty() || file.is_empty() {
+                            Err("Missing 'agent' or 'file' parameter".to_string())
+                        } else {
+                            crate::commands::k2so_agents::k2so_agent_complete(project_path, agent, file)
+                        }
+                    }
                     "/cli/agents/running" => {
                         // List all terminals with running CLI LLM agents
                         if let Some(state) = app_handle.try_state::<crate::state::AppState>() {
