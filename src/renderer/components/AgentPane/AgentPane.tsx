@@ -195,27 +195,21 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
             provider: toolConfig.provider,
             projectPath: agentDir,
           })
-          console.log('[agent-chat] Session detection:', { agentDir, sessionId, command })
           if (!cancelled && sessionId) {
             // Kill any stale terminal that was restored from layout without --resume
             // so AlacrittyTerminalView recreates it with the correct args
             const staleId = terminalIdRef.current
             try {
               const staleExists = await invoke<boolean>('terminal_exists', { id: staleId })
-              console.log('[agent-chat] Killing stale terminal:', staleId, 'exists:', staleExists)
               if (staleExists) {
                 await invoke('terminal_kill', { id: staleId })
               }
             } catch { /* ignore */ }
-
-            console.log('[agent-chat] Resuming with:', toolConfig.resumeFlag, sessionId)
             setResolvedArgs([...baseArgs, toolConfig.resumeFlag, sessionId])
             setReady(true)
             return
           }
-        } catch (err) {
-          console.log('[agent-chat] Session detection error:', err)
-        }
+        } catch { /* fall through to fresh session */ }
       }
 
       if (!cancelled) {
