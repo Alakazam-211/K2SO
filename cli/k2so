@@ -703,9 +703,38 @@ except:
         cli_request "/cli/terminal/write" "id=$(urlencode "$coord_id")&message=$(urlencode "$msg")"
         echo "{\"status\":\"notified\",\"terminalId\":\"$coord_id\"}"
     else
-        # Coordinator is asleep — launch it
+        # Coordinator is asleep — launch it, then send triage message after startup
         cli_request "/cli/agents/launch" "agent=coordinator"
-        echo '{"status":"launched","agent":"coordinator"}'
+        # Wait for the terminal to be created and Claude to initialize
+        local attempts=0
+        while [ $attempts -lt 12 ]; do
+            sleep 5
+            attempts=$((attempts + 1))
+            # Check if coordinator terminal now exists
+            local check
+            check=$(cli_request "/cli/agents/running" 2>/dev/null)
+            local new_coord_id
+            new_coord_id=$(echo "$check" | python3 -c "
+import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+    for t in data:
+        cwd = t.get('cwd', '')
+        if '.k2so/agents/coordinator' in cwd or t.get('terminalId', '').startswith('agent-chat-coordinator'):
+            print(t['terminalId'])
+            break
+except:
+    pass
+" 2>/dev/null)
+            if [ -n "$new_coord_id" ]; then
+                # Terminal exists — send triage message
+                local msg="New work detected. Run k2so agents list and delegate any inbox items."
+                cli_request "/cli/terminal/write" "id=$(urlencode "$new_coord_id")&message=$(urlencode "$msg")"
+                echo "{\"status\":\"launched_and_notified\",\"terminalId\":\"$new_coord_id\"}"
+                return
+            fi
+        done
+        echo '{"status":"launched","agent":"coordinator","note":"triage message not sent - terminal not ready"}'
     fi
 }
 
