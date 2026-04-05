@@ -2345,10 +2345,23 @@ pub fn k2so_agents_review_approve(
         return Err(format!("Merge conflicts: {}", result.conflicts.join(", ")));
     }
 
-    // 2. Remove the worktree (find it by branch name)
+    // 2. Remove the worktree (find it by branch name) + cleanup DB workspace record
     let worktrees = crate::git::list_worktrees(&project_path);
     if let Some(wt) = worktrees.iter().find(|wt| wt.branch == branch) {
-        let _ = crate::git::remove_worktree(&project_path, &wt.path, true);
+        let wt_path = wt.path.clone();
+        let _ = crate::git::remove_worktree(&project_path, &wt_path, true);
+
+        // Remove the workspace DB record so it disappears from the UI
+        if let Some(home) = dirs::home_dir() {
+            let db_path = home.join(".k2so").join("k2so.db");
+            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+                let _ = conn.execute(
+                    "DELETE FROM workspaces WHERE worktree_path = ?1",
+                    rusqlite::params![wt_path],
+                );
+            }
+        }
     }
 
     // 3. Delete the branch (now merged)
@@ -2394,14 +2407,26 @@ pub fn k2so_agents_review_reject(
         return Ok(());
     }
 
-    // 1. Find and remove the worktree + branch for this agent
+    // 1. Find and remove the worktree + branch + DB record for this agent
     let worktrees = crate::git::list_worktrees(&project_path);
     for wt in worktrees.iter().filter(|wt| wt.branch.starts_with(&format!("agent/{}/", agent_name))) {
-        if let Err(e) = crate::git::remove_worktree(&project_path, &wt.path, true) {
-            log_debug!("[review-reject] Failed to remove worktree {}: {}", wt.path, e);
+        let wt_path = wt.path.clone();
+        if let Err(e) = crate::git::remove_worktree(&project_path, &wt_path, true) {
+            log_debug!("[review-reject] Failed to remove worktree {}: {}", wt_path, e);
         }
         if let Err(e) = crate::git::delete_branch(&project_path, &wt.branch) {
             log_debug!("[review-reject] Failed to delete branch {}: {}", wt.branch, e);
+        }
+        // Remove workspace DB record
+        if let Some(home) = dirs::home_dir() {
+            let db_path = home.join(".k2so").join("k2so.db");
+            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+                let _ = conn.execute(
+                    "DELETE FROM workspaces WHERE worktree_path = ?1",
+                    rusqlite::params![wt_path],
+                );
+            }
         }
     }
 
