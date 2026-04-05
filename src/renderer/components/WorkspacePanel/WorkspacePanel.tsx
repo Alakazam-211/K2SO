@@ -9,6 +9,20 @@ import WorktreeDialog from '@/components/Sidebar/WorktreeDialog'
 
 // ── Types ────────────────────────────────────────────────────────────────
 
+interface StateData {
+  id: string
+  name: string
+  description: string | null
+  isBuiltIn: number
+  capFeatures: string
+  capIssues: string
+  capCrashes: string
+  capSecurity: string
+  capAudits: string
+  heartbeat: number
+  sortOrder: number
+}
+
 interface K2soAgentInfo {
   name: string
   role: string
@@ -65,6 +79,12 @@ export default function WorkspacePanel(): React.JSX.Element {
   const [agents, setAgents] = useState<K2soAgentInfo[]>([])
   const [wsInboxCount, setWsInboxCount] = useState(0)
   const [showWorktreeDialog, setShowWorktreeDialog] = useState(false)
+  const [states, setStates] = useState<StateData[]>([])
+
+  // Fetch workspace states once
+  useEffect(() => {
+    invoke<StateData[]>('states_list').then(setStates).catch(() => {})
+  }, [])
 
   // Use stable selectors — avoid creating new references on every store change
   const activeProjectId = useProjectsStore((s) => s.activeProjectId)
@@ -122,34 +142,102 @@ export default function WorkspacePanel(): React.JSX.Element {
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {/* ── Section 1: Status ── */}
-      <div className="px-3 py-2 border-b border-[var(--color-border)]">
+      <div className="px-3 py-3 border-b border-[var(--color-border)]">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span
-              className="w-2 h-2 rounded-full flex-shrink-0"
+              className="w-2.5 h-2.5 rounded-full flex-shrink-0"
               style={{ backgroundColor: statusColor(projectStatus) }}
             />
-            <span className="text-[10px] font-medium text-[var(--color-text-primary)]">
+            <span className="text-xs font-medium text-[var(--color-text-primary)]">
               {modeLabels[agentMode] || agentMode}
             </span>
-          </div>
-          <div className="flex items-center gap-2">
-            {activeProject.heartbeatEnabled === 1 && (
-              <span className="text-[9px] text-red-400 animate-pulse" title="Heartbeat active">♥</span>
-            )}
             {projectStatus !== 'idle' && (
-              <span className="text-[9px] text-[var(--color-text-muted)]">
-                {statusLabel(projectStatus)}
+              <span className="text-[11px] text-[var(--color-text-muted)]">
+                — {statusLabel(projectStatus)}
               </span>
             )}
           </div>
-        </div>
-        {wsInboxCount > 0 && (
-          <div className="mt-1">
-            <span className="text-[9px] text-[var(--color-accent)]">
-              {wsInboxCount} item{wsInboxCount !== 1 ? 's' : ''} in inbox
+          {wsInboxCount > 0 && (
+            <span className="text-[11px] text-[var(--color-accent)]">
+              {wsInboxCount} inbox
             </span>
-          </div>
+          )}
+        </div>
+
+        {/* Heartbeat & State — only for AI-assisted modes */}
+        {agentMode !== 'off' && (
+          <>
+            {/* Heartbeat toggle */}
+            <div className="flex items-center justify-between mt-3.5">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-[var(--color-text-secondary)]">Heartbeat</span>
+                {activeProject.heartbeatEnabled === 1 && (
+                  <span className="text-[11px] text-red-400 animate-pulse">♥</span>
+                )}
+              </div>
+              <button
+                onClick={async () => {
+                  const newVal = activeProject.heartbeatEnabled ? 0 : 1
+                  const store = useProjectsStore.getState()
+                  const updated = store.projects.map((p) =>
+                    p.id === activeProject.id ? { ...p, heartbeatEnabled: newVal } : p
+                  )
+                  useProjectsStore.setState({ projects: updated })
+                  await invoke('projects_update', { id: activeProject.id, heartbeatEnabled: newVal })
+                  await invoke('k2so_agents_update_heartbeat_projects').catch(console.error)
+                  if (newVal === 1) {
+                    await invoke('k2so_agents_install_heartbeat').catch(console.error)
+                  }
+                }}
+                className={`w-7 h-3.5 flex items-center transition-colors no-drag cursor-pointer ${
+                  activeProject.heartbeatEnabled ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
+                }`}
+              >
+                <span
+                  className={`w-2.5 h-2.5 bg-white block transition-transform ${
+                    activeProject.heartbeatEnabled ? 'translate-x-3.5' : 'translate-x-0.5'
+                  }`}
+                />
+              </button>
+            </div>
+
+            {/* State selector */}
+            {states.length > 0 && (
+              <div className="flex items-center justify-between mt-3.5">
+                <span className="text-[11px] text-[var(--color-text-secondary)]">State</span>
+                <button
+                  onClick={async (e) => {
+                    // Position menu near the button
+                    const menuItems = [
+                      { id: '__none__', label: 'No state' },
+                      { id: '__sep__', label: '', type: 'separator' as const },
+                      ...states.map((s) => ({ id: s.id, label: s.name })),
+                    ]
+                    const clickedId = await showContextMenu(menuItems)
+                    if (clickedId === null) return
+                    const stateId = clickedId === '__none__' ? '' : clickedId
+                    try {
+                      await invoke('projects_update', { id: activeProject.id, stateId: stateId || '' })
+                      const store = useProjectsStore.getState()
+                      const updated = store.projects.map((p) =>
+                        p.id === activeProject.id ? { ...p, stateId: stateId || null } : p
+                      )
+                      useProjectsStore.setState({ projects: updated })
+                    } catch (err) {
+                      console.error('[workspace-panel] State update failed:', err)
+                    }
+                  }}
+                  className="text-[11px] text-[var(--color-text-primary)] hover:text-[var(--color-accent)] transition-colors cursor-pointer no-drag flex items-center gap-1 border border-[var(--color-border)] px-2 py-0.5"
+                >
+                  <span>{states.find((s) => s.id === activeProject.stateId)?.name || 'No state'}</span>
+                  <svg className="w-2.5 h-2.5 text-[var(--color-text-muted)]" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path d="M2.5 4L5 6.5L7.5 4" />
+                  </svg>
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
 
