@@ -659,14 +659,12 @@ pub struct ChatStoragePaths {
 /// Convert a project path to Claude's project hash format.
 /// Same as Cursor: strip leading `/`, replace `/` with `-`.
 fn claude_project_hash(project_path: &str) -> String {
-    // Claude Code converts project paths to directory names by:
-    // 1. Stripping leading /
-    // 2. Replacing / with -
-    // 3. Stripping leading dots from path components (e.g. .k2so → k2so)
-    // This produces paths like: Users-z3thon-DevProjects-TestingK2SO--k2so-agents-coordinator
-    // (the double hyphen comes from /.k2so → /-k2so → --k2so after dot removal)
+    // Claude Code converts project paths to directory names by replacing / with -
+    // and stripping leading dots from path components (e.g. /.k2so → /-k2so → --k2so).
+    // The leading / becomes a leading -, so the directory starts with -.
+    // Example: /Users/z3thon/DevProjects/TestingK2SO/.k2so/agents/coordinator
+    //       → -Users-z3thon-DevProjects-TestingK2SO--k2so-agents-coordinator
     project_path
-        .trim_start_matches('/')
         .replace("/.", "/-")  // /.hidden → /-hidden (strip dot, keep separator)
         .replace('/', "-")
 }
