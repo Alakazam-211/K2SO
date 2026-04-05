@@ -14,7 +14,6 @@ import { showContextMenu } from '@/lib/context-menu'
 import { useGitInfo, useGitChanges } from '@/hooks/useGit'
 import ResizeHandle from './ResizeHandle'
 import WorktreeDialog from './WorktreeDialog'
-import DisableWorktreesDialog from '../Settings/DisableWorktreesDialog'
 import ProjectAvatar from './ProjectAvatar'
 import SectionItem from './SectionItem'
 import FocusGroupDropdown from './FocusGroupDropdown'
@@ -903,8 +902,6 @@ export default function Sidebar(): React.JSX.Element {
     projectPath: string
   } | null>(null)
 
-  // Disable worktrees dialog state
-  const [disableWorktreeProject, setDisableWorktreeProject] = useState<typeof projects[number] | null>(null)
 
   const handleAddProject = useCallback(async () => {
     const folderPath = await invoke<string | null>('projects_pick_folder')
@@ -948,21 +945,10 @@ export default function Sidebar(): React.JSX.Element {
         }
       }
 
-      if (project.worktreeMode) {
-        menuItems.push(
-          { id: 'separator-wt', label: '', type: 'separator' },
-          { id: 'new-worktree', label: 'New Workspace...' },
-          { id: 'new-section', label: 'New Section...' }
-        )
-      }
-
-      // Worktree mode toggle
       menuItems.push(
-        { id: 'separator-toggle', label: '', type: 'separator' },
-        {
-          id: 'toggle-worktree-mode',
-          label: project.worktreeMode ? 'Disable Worktrees' : 'Enable Worktrees'
-        }
+        { id: 'separator-wt', label: '', type: 'separator' },
+        { id: 'new-worktree', label: 'New Worktree...' },
+        { id: 'new-section', label: 'New Section...' }
       )
 
       menuItems.push(
@@ -998,21 +984,6 @@ export default function Sidebar(): React.JSX.Element {
         const sectionName = window.prompt('Section name:')
         if (sectionName && sectionName.trim()) {
           await createSection(project.id, sectionName.trim())
-        }
-      } else if (clickedId === 'toggle-worktree-mode') {
-        if (project.worktreeMode) {
-          // Disabling — check if worktrees exist and show dialog
-          const worktrees = project.workspaces.filter((ws) => ws.type === 'worktree')
-          if (worktrees.length > 0) {
-            setDisableWorktreeProject(project)
-          } else {
-            await invoke('projects_update', { id: projectId, worktreeMode: 0 })
-            await fetchProjects()
-          }
-        } else {
-          // Enabling — reconcile existing worktrees
-          await invoke('projects_enable_worktrees', { projectId })
-          await fetchProjects()
         }
       } else if (clickedId === 'toggle-pin') {
         await invoke('projects_update', { id: projectId, pinned: project.pinned ? 0 : 1 })
@@ -1224,14 +1195,6 @@ export default function Sidebar(): React.JSX.Element {
         />
       )}
 
-      {/* Disable worktrees dialog */}
-      {disableWorktreeProject && (
-        <DisableWorktreesDialog
-          project={disableWorktreeProject}
-          open={true}
-          onClose={() => setDisableWorktreeProject(null)}
-        />
-      )}
     </div>
   )
 }

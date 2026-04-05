@@ -543,7 +543,30 @@ fn detect_claude_session(project_path: &str) -> Option<String> {
         }
     }
 
-    best_session.map(|(_, id)| id)
+    // Verify the session file actually exists on disk before returning.
+    // A session ID appears in history.jsonl when Claude launches, but the
+    // session .jsonl file is only written once a prompt is sent. If the user
+    // opened a session but never typed anything, the file won't exist and
+    // --resume would fail with "No conversation found".
+    best_session.and_then(|(_, id)| {
+        let home = dirs::home_dir()?;
+        let project_hash = claude_project_hash(&resolve_root_project_path(project_path));
+        let projects_dir = home.join(".claude").join("projects");
+
+        // Check all matching project dirs (root + worktree variants)
+        if let Ok(entries) = fs::read_dir(&projects_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name == project_hash || name.starts_with(&format!("{}-", project_hash)) {
+                    let session_file = entry.path().join(format!("{}.jsonl", id));
+                    if session_file.exists() {
+                        return Some(id);
+                    }
+                }
+            }
+        }
+        None
+    })
 }
 
 fn detect_cursor_session(project_path: &str) -> Option<String> {

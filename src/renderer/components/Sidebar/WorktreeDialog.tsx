@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useProjectsStore } from '@/stores/projects'
+import { useTabsStore } from '@/stores/tabs'
 
 /** Sanitize a string into a valid git branch name */
 function sanitizeBranchName(input: string): string {
@@ -42,8 +43,7 @@ export default function WorktreeDialog({
   const [error, setError] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const fetchProjects = useProjectsStore((s) => s.fetchProjects)
-  const setActiveWorkspace = useProjectsStore((s) => s.setActiveWorkspace)
+  const openAgentPane = useTabsStore((s) => s.openAgentPane)
 
   // Reset state and auto-focus when dialog opens
   useEffect(() => {
@@ -96,8 +96,28 @@ export default function WorktreeDialog({
         }
       )
 
-      await fetchProjects()
-      setActiveWorkspace(projectId, result.workspaceId)
+      // Optimistic local update — never call fetchProjects() in render-adjacent code
+      const state = useProjectsStore.getState()
+      const updated = state.projects.map((p) => {
+        if (p.id !== projectId) return p
+        return {
+          ...p,
+          workspaces: [...p.workspaces, {
+            id: result.workspaceId,
+            projectId,
+            name: result.branch,
+            type: 'worktree' as const,
+            branch: result.branch,
+            worktreePath: result.path,
+            tabOrder: p.workspaces.length,
+            navVisible: 0,
+            createdAt: Date.now(),
+          }]
+        }
+      })
+      useProjectsStore.setState({ projects: updated })
+      // Open the worktree detail pane (Task/Chat/Review) without switching workspaces
+      openAgentPane(`__wt:${result.workspaceId}`, result.path, result.branch)
       onClose()
     } catch (e) {
       const msg = typeof e === 'string' ? e : (e instanceof Error ? e.message : 'Failed to create workspace')
@@ -105,7 +125,7 @@ export default function WorktreeDialog({
     } finally {
       setCreating(false)
     }
-  }, [sanitizedName, selectedBranch, mode, projectPath, projectId, fetchProjects, setActiveWorkspace, onClose])
+  }, [sanitizedName, selectedBranch, mode, projectPath, projectId, openAgentPane, onClose])
 
   if (!open) return null
 
@@ -124,11 +144,11 @@ export default function WorktreeDialog({
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
 
       {/* Dialog */}
-      <div className="relative w-[350px] flex flex-col bg-[var(--color-bg-secondary)]/95 backdrop-blur-xl border border-[var(--color-border)] shadow-2xl overflow-hidden">
+      <div className="relative w-[350px] flex flex-col bg-[var(--color-bg-elevated)] border border-[var(--color-border)] shadow-2xl overflow-hidden">
         {/* Header */}
         <div className="px-4 py-3 border-b border-[var(--color-border)] flex items-center justify-between">
           <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">
-            New Workspace
+            New Worktree
           </h2>
           <button
             className="text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
@@ -243,7 +263,7 @@ export default function WorktreeDialog({
           >
             {creating ? (
               <span className="flex items-center gap-2">
-                <div className="w-3 h-3 border-2 border-white/40 border-t-white animate-spin" />
+                <div className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />
                 Creating...
               </span>
             ) : (

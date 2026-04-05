@@ -21,7 +21,6 @@ import {
   isReservedKey
 } from '@shared/hotkeys'
 import type { HotkeyDefinition } from '@shared/hotkeys'
-import DisableWorktreesDialog from './DisableWorktreesDialog'
 import { showContextMenu } from '@/lib/context-menu'
 import AgentIcon from '@/components/AgentIcon/AgentIcon'
 import { EDITOR_THEMES, EDITOR_FONTS, CodeEditor } from '@/components/FileViewerPane/CodeEditor'
@@ -3038,68 +3037,6 @@ function ProjectsSection(): React.JSX.Element {
     document.addEventListener('mouseup', handleMouseUp)
   }, [reorderProjects, assignProjectToGroup, fetchProjects])
 
-  const [disableWorktreeProject, setDisableWorktreeProject] = useState<typeof projects[number] | null>(null)
-
-  // State for git init when enabling worktrees on non-git workspace
-  const [gitInitForWorktree, setGitInitForWorktree] = useState<{ projectId: string; projectPath: string; projectName: string } | null>(null)
-  const [gitInitBranch, setGitInitBranch] = useState('main')
-  const [gitInitPending, setGitInitPending] = useState(false)
-  const [gitInitError, setGitInitError] = useState<string | null>(null)
-
-  const handleToggleWorktree = useCallback(async (projectId: string, currentMode: number) => {
-    if (currentMode === 1) {
-      // Disabling worktrees — check if worktrees exist
-      const project = projects.find((p) => p.id === projectId)
-      if (project) {
-        const worktrees = project.workspaces.filter((ws) => ws.type === 'worktree')
-        if (worktrees.length > 0) {
-          setDisableWorktreeProject(project)
-          return
-        }
-      }
-    } else {
-      // Enabling worktrees — check if git is initialized
-      const project = projects.find((p) => p.id === projectId)
-      if (project) {
-        try {
-          const gitInfo = await invoke<{ isRepo: boolean; currentBranch?: string }>('git_info', { path: project.path })
-          if (!gitInfo.isRepo) {
-            // Not a git repo — need to initialize first
-            setGitInitForWorktree({ projectId: project.id, projectPath: project.path, projectName: project.name })
-            setGitInitBranch('main')
-            setGitInitError(null)
-            return
-          }
-        } catch {
-          // If we can't check, assume it's fine and proceed
-        }
-      }
-    }
-    // Enable/disable normally
-    const newMode = currentMode ? 0 : 1
-    await invoke('projects_update', { id: projectId, worktreeMode: newMode })
-    await fetchProjects()
-  }, [fetchProjects, projects])
-
-  const handleGitInitForWorktree = useCallback(async () => {
-    if (!gitInitForWorktree) return
-    setGitInitPending(true)
-    setGitInitError(null)
-    try {
-      await invoke('projects_init_git_and_open', {
-        path: gitInitForWorktree.projectPath,
-        branch: gitInitBranch
-      })
-      // Git initialized — now enable worktrees
-      await invoke('projects_update', { id: gitInitForWorktree.projectId, worktreeMode: 1 })
-      await fetchProjects()
-      setGitInitForWorktree(null)
-    } catch (err) {
-      setGitInitError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setGitInitPending(false)
-    }
-  }, [gitInitForWorktree, gitInitBranch, fetchProjects])
 
   // Build flat list of all visible projects for keyboard navigation
   const allVisibleProjects = useMemo(() => {
@@ -3547,7 +3484,6 @@ function ProjectsSection(): React.JSX.Element {
             editors={editors}
             focusGroups={focusGroups}
             focusGroupsEnabled={focusGroupsEnabled}
-            handleToggleWorktree={handleToggleWorktree}
             projectSettings={projectSettings}
             updateProjectSetting={updateProjectSetting}
             removeProject={removeProject}
@@ -3563,86 +3499,6 @@ function ProjectsSection(): React.JSX.Element {
         )}
       </div>
 
-      {/* Disable worktrees dialog */}
-      {disableWorktreeProject && (
-        <DisableWorktreesDialog
-          project={disableWorktreeProject}
-          open={true}
-          onClose={() => setDisableWorktreeProject(null)}
-        />
-      )}
-
-      {/* Git init dialog for enabling worktrees on non-git workspace */}
-      {gitInitForWorktree && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center no-drag"
-          style={{ backgroundColor: 'rgba(0, 0, 0, 0.6)', backdropFilter: 'blur(4px)' }}
-          onClick={gitInitPending ? undefined : () => setGitInitForWorktree(null)}
-        >
-          <div
-            className="w-[440px] border border-[var(--color-border)] bg-[var(--color-bg-surface)] shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="px-5 pt-5 pb-2">
-              <h2 className="text-sm font-medium text-[var(--color-text-primary)]">
-                Initialize Git to Enable Worktrees
-              </h2>
-            </div>
-
-            <div className="px-5 pb-4">
-              <p className="text-xs text-[var(--color-text-secondary)] leading-relaxed">
-                <span className="text-[var(--color-text-primary)] font-medium">{gitInitForWorktree.projectName}</span>{' '}
-                doesn't have git initialized. Worktrees require a git repository. Would you like to initialize one?
-              </p>
-              <p className="text-[10px] text-[var(--color-text-muted)] mt-1.5 break-all">
-                {gitInitForWorktree.projectPath}
-              </p>
-            </div>
-
-            <div className="px-5 pb-4">
-              <label className="text-[10px] text-[var(--color-text-muted)] block mb-1">
-                Initial branch name
-              </label>
-              <input
-                type="text"
-                value={gitInitBranch}
-                onChange={(e) => setGitInitBranch(e.target.value)}
-                placeholder="main"
-                className="w-full px-2 py-1.5 text-xs bg-[var(--color-bg)] border border-[var(--color-border)] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
-                disabled={gitInitPending}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !gitInitPending) handleGitInitForWorktree()
-                }}
-              />
-            </div>
-
-            {gitInitError && (
-              <div className="px-5 pb-4">
-                <div className="border border-red-500/30 bg-red-500/10 px-3 py-2">
-                  <p className="text-[11px] text-red-400 whitespace-pre-wrap">{gitInitError}</p>
-                </div>
-              </div>
-            )}
-
-            <div className="px-5 pb-5 flex items-center justify-end gap-2">
-              <button
-                className="px-3 py-1.5 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] bg-white/[0.04] hover:bg-white/[0.08] border border-[var(--color-border)] transition-colors disabled:opacity-40 no-drag cursor-pointer"
-                onClick={() => setGitInitForWorktree(null)}
-                disabled={gitInitPending}
-              >
-                Cancel
-              </button>
-              <button
-                className="px-3 py-1.5 text-xs text-[var(--color-bg)] bg-[var(--color-text-primary)] hover:bg-[var(--color-text-secondary)] border border-transparent transition-colors disabled:opacity-40 no-drag cursor-pointer"
-                onClick={handleGitInitForWorktree}
-                disabled={gitInitPending || !gitInitBranch.trim()}
-              >
-                {gitInitPending ? 'Initializing...' : 'Initialize Git & Enable Worktrees'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }
@@ -3785,7 +3641,6 @@ function ProjectDetail({
   editors,
   focusGroups,
   focusGroupsEnabled,
-  handleToggleWorktree,
   projectSettings,
   updateProjectSetting,
   removeProject,
@@ -3796,7 +3651,6 @@ function ProjectDetail({
   editors: string[]
   focusGroups: ReturnType<typeof useFocusGroupsStore.getState>['focusGroups']
   focusGroupsEnabled: boolean
-  handleToggleWorktree: (projectId: string, currentMode: number) => Promise<void>
   projectSettings: Record<string, Record<string, any>>
   updateProjectSetting: (projectId: string, key: string, value: string) => void
   removeProject: (id: string) => Promise<void>
@@ -4254,33 +4108,10 @@ function ProjectDetail({
         </div>
       </SettingsGroup>}
 
-      {/* ── Group 3: Worktree Settings — hidden in agent/custom mode (no worktrees needed) ── */}
-      {(project.agentMode || 'off') !== 'agent' && (project.agentMode || 'off') !== 'custom' && (
-      <SettingsGroup title="Worktree Settings">
-        {/* Worktrees toggle */}
-        <div className="flex items-center justify-between py-2">
-          <div>
-            <span className="text-xs text-[var(--color-text-secondary)]">Enable Worktrees</span>
-            <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
-              {project.worktreeMode ? 'Worktrees use isolated git worktrees' : 'Single worktree using main folder'}
-            </p>
-          </div>
-          <button
-            onClick={() => handleToggleWorktree(project.id, project.worktreeMode)}
-            className={`w-8 h-4 flex items-center transition-colors no-drag cursor-pointer ${
-              project.worktreeMode ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
-            }`}
-          >
-            <span
-              className={`w-3 h-3 bg-white block transition-transform ${
-                project.worktreeMode ? 'translate-x-4.5' : 'translate-x-0.5'
-              }`}
-            />
-          </button>
-        </div>
-
-        {/* Worktrees table — uses stableWorktreeMode to prevent layout jiggle */}
-        <div className={project.worktreeMode === 1 && project.workspaces.length > 0 ? '' : 'hidden'}>
+      {/* ── Group 3: Worktree Management ── */}
+      <SettingsGroup title="Worktrees">
+        {/* Worktrees table */}
+        <div className={project.workspaces.length > 0 ? '' : 'hidden'}>
           <div className="border border-[var(--color-border)]">
             {project.workspaces.map((ws, i) => (
               <div
@@ -4302,12 +4133,9 @@ function ProjectDetail({
           </div>
         </div>
 
-        {/* Worktree Folders on Disk — uses stableWorktreeMode to prevent layout jiggle */}
-        <div className={project.worktreeMode === 1 ? '' : 'hidden'}>
-          <WorktreeFoldersOnDisk project={project} fetchProjects={fetchProjects} />
-        </div>
+        {/* Worktree Folders on Disk */}
+        <WorktreeFoldersOnDisk project={project} fetchProjects={fetchProjects} />
       </SettingsGroup>
-      )}
 
       {/* ── Group 4: Chat Migrations ── */}
       <SettingsGroup title="Chat Migrations">

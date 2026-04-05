@@ -4,6 +4,7 @@ import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
 import { useSettingsStore } from '@/stores/settings'
 import { useActiveAgentsStore, type PaneStatus } from '@/stores/active-agents'
+import { showContextMenu } from '@/lib/context-menu'
 import WorktreeDialog from '@/components/Sidebar/WorktreeDialog'
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -215,18 +216,16 @@ export default function WorkspacePanel(): React.JSX.Element {
             </span>
           )}
         </span>
-        {activeProject.worktreeMode === 1 && (
-          <button
-            onClick={() => setShowWorktreeDialog(true)}
-            className="w-5 h-5 flex items-center justify-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-white/10 transition-colors no-drag cursor-pointer"
-            title="New worktree"
-          >
-            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5">
-              <line x1="5" y1="1" x2="5" y2="9" />
-              <line x1="1" y1="5" x2="9" y2="5" />
-            </svg>
-          </button>
-        )}
+        <button
+          onClick={() => setShowWorktreeDialog(true)}
+          className="w-5 h-5 flex items-center justify-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-white/10 transition-colors no-drag cursor-pointer"
+          title="New worktree"
+        >
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <line x1="5" y1="1" x2="5" y2="9" />
+            <line x1="1" y1="5" x2="9" y2="5" />
+          </svg>
+        </button>
       </div>
 
       {showWorktreeDialog && (
@@ -242,9 +241,7 @@ export default function WorkspacePanel(): React.JSX.Element {
         {worktrees.length === 0 ? (
           <div className="p-3">
             <p className="text-[10px] text-[var(--color-text-muted)]">
-              {activeProject.worktreeMode === 1
-                ? 'No worktrees open. Create one from the sidebar or let the coordinator delegate work.'
-                : 'Enable worktrees in workspace settings to use parallel branches.'}
+              No worktrees open. Click + to create one or let the coordinator delegate work.
             </p>
           </div>
         ) : (
@@ -261,6 +258,7 @@ export default function WorkspacePanel(): React.JSX.Element {
                 workspaceId={ws.id}
                 projectId={activeProject.id}
                 projectPath={activeProject.path}
+                worktreePath={ws.worktreePath}
                 displayName={displayName}
                 branch={ws.branch}
                 agentTemplate={agentTemplate}
@@ -279,6 +277,7 @@ function WorktreeRow({
   workspaceId,
   projectId,
   projectPath,
+  worktreePath,
   displayName,
   branch,
   agentTemplate,
@@ -286,6 +285,7 @@ function WorktreeRow({
   workspaceId: string
   projectId: string
   projectPath: string
+  worktreePath: string | null
   displayName: string
   branch: string | null
   agentTemplate?: string
@@ -293,10 +293,65 @@ function WorktreeRow({
   const openAgentPane = useTabsStore((s) => s.openAgentPane)
   const tabTitle = displayName || branch || 'Worktree'
 
+  const handleContextMenu = useCallback(async (e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+
+    const menuItems = [
+      { id: 'open', label: 'Open' },
+      { id: 'open-finder', label: 'Show in Finder' },
+      { id: 'separator-1', label: '', type: 'separator' },
+      { id: 'close', label: 'Close Worktree' },
+      { id: 'recycle', label: 'Recycle Worktree' },
+    ]
+
+    const clickedId = await showContextMenu(menuItems)
+
+    if (clickedId === 'open') {
+      openAgentPane(`__wt:${workspaceId}`, projectPath, tabTitle)
+    } else if (clickedId === 'open-finder' && worktreePath) {
+      await invoke('projects_open_in_finder', { path: worktreePath })
+    } else if (clickedId === 'close') {
+      // Remove from DB, keep files on disk
+      await invoke('workspaces_delete', { id: workspaceId })
+      // Optimistic removal from store
+      const state = useProjectsStore.getState()
+      const updated = state.projects.map((p) => {
+        if (p.id !== projectId) return p
+        return { ...p, workspaces: p.workspaces.filter((ws) => ws.id !== workspaceId) }
+      })
+      useProjectsStore.setState({ projects: updated })
+    } else if (clickedId === 'recycle') {
+      // Remove git worktree from disk + remove from DB
+      try {
+        if (worktreePath) {
+          await invoke('git_remove_worktree', {
+            projectPath,
+            worktreePath,
+            workspaceId,
+          })
+        } else {
+          await invoke('workspaces_delete', { id: workspaceId })
+        }
+      } catch {
+        // If git remove fails, just delete the record
+        await invoke('workspaces_delete', { id: workspaceId })
+      }
+      // Optimistic removal from store
+      const state = useProjectsStore.getState()
+      const updated = state.projects.map((p) => {
+        if (p.id !== projectId) return p
+        return { ...p, workspaces: p.workspaces.filter((ws) => ws.id !== workspaceId) }
+      })
+      useProjectsStore.setState({ projects: updated })
+    }
+  }, [workspaceId, projectId, projectPath, worktreePath, openAgentPane, tabTitle])
+
   return (
     <div
       className="px-3 py-2 border-b border-[var(--color-border)] last:border-b-0 hover:bg-[var(--color-bg-elevated)] transition-colors cursor-pointer"
       onClick={() => openAgentPane(`__wt:${workspaceId}`, projectPath, tabTitle)}
+      onContextMenu={handleContextMenu}
     >
       <div className="flex items-center gap-2">
         <svg className="w-3.5 h-3.5 text-[var(--color-text-muted)] flex-shrink-0 opacity-60" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">

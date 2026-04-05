@@ -41,10 +41,20 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
     if (e.button !== 0) return
     if ((e.target as HTMLElement).closest('button')) return
 
+    e.preventDefault() // Prevent text selection from starting
+
     const startX = e.clientX
     const startY = e.clientY
     let started = false
     let mode: 'reorder' | 'cross-group' | null = null
+
+    // Block all selection during drag
+    const blockSelect = (ev: Event): void => ev.preventDefault()
+    document.addEventListener('selectstart', blockSelect)
+
+    // Get the column bounds so we can detect when cursor leaves
+    const columnEl = (e.currentTarget as HTMLElement).closest('[data-tab-group-index]') as HTMLElement | null
+    const columnRect = columnEl?.getBoundingClientRect()
 
     const handleMouseMove = (ev: MouseEvent): void => {
       const dx = ev.clientX - startX
@@ -53,9 +63,10 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
       if (!started && (Math.abs(dx) > 3 || Math.abs(dy) > 5)) {
         started = true
 
-        // If multiple columns and dragging vertically, do cross-group
+        // If multiple columns and dragging vertically, go straight to cross-group
         if (splitCount > 1 && Math.abs(dy) > Math.abs(dx) * 1.5) {
           mode = 'cross-group'
+          document.removeEventListener('selectstart', blockSelect)
           startTabDrag({ groupIndex, tabId, tabTitle, mouseX: ev.clientX, mouseY: ev.clientY })
           document.removeEventListener('mousemove', handleMouseMove)
           document.removeEventListener('mouseup', handleMouseUp)
@@ -70,6 +81,25 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
       }
 
       if (!started || mode !== 'reorder') return
+
+      // If cursor leaves the column bounds, switch to cross-group drag
+      if (splitCount > 1 && columnRect) {
+        if (ev.clientX < columnRect.left - 10 || ev.clientX > columnRect.right + 10 ||
+            ev.clientY < columnRect.top - 30 || ev.clientY > columnRect.bottom + 30) {
+          mode = 'cross-group'
+          setReorderDragIndex(null)
+          setReorderDropIndex(null)
+          reorderDropRef.current = null
+          reorderFromRef.current = null
+          document.body.style.cursor = ''
+          document.body.style.userSelect = ''
+          document.removeEventListener('selectstart', blockSelect)
+          startTabDrag({ groupIndex, tabId, tabTitle, mouseX: ev.clientX, mouseY: ev.clientY })
+          document.removeEventListener('mousemove', handleMouseMove)
+          document.removeEventListener('mouseup', handleMouseUp)
+          return
+        }
+      }
 
       // Find which tab slot the cursor is over
       if (!tabBarRef.current) return
@@ -86,6 +116,7 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
     const handleMouseUp = (): void => {
       document.removeEventListener('mousemove', handleMouseMove)
       document.removeEventListener('mouseup', handleMouseUp)
+      document.removeEventListener('selectstart', blockSelect)
       document.body.style.cursor = ''
       document.body.style.userSelect = ''
 
