@@ -758,6 +758,10 @@ cmd_agent_complete() {
     cli_request "/cli/agent/complete" "agent=$(urlencode "$agent")&file=$(urlencode "$file")"
 }
 
+cmd_workspace_cleanup() {
+    cli_request "/cli/workspace/cleanup"
+}
+
 cmd_workspace_create() {
     local target_path="${1:-}"
     if [ -z "$target_path" ]; then
@@ -994,6 +998,7 @@ COMMANDS:
   workspace create <path>         Create a new folder + register as workspace
   workspace open <path>           Register an existing folder as workspace
   workspace remove <path>         Deregister workspace (keeps files on disk)
+  workspace cleanup               Remove stale worktree records (disk deleted)
 
   terminal spawn --command "..."  Spawn a sub-terminal in current workspace
   terminal write <id> "message"   Send text to a running terminal (virtual input)
@@ -1189,7 +1194,8 @@ case "${1:-help}" in
             create) shift 2; cmd_workspace_create "$@" ;;
             open)   shift 2; cmd_workspace_open "$@" ;;
             remove) shift 2; cmd_workspace_remove "$@" ;;
-            *)      echo "Usage: k2so workspace <create|open|remove> <path>" >&2; exit 1 ;;
+            cleanup) cmd_workspace_cleanup ;;
+            *)      echo "Usage: k2so workspace <create|open|remove|cleanup> <path>" >&2; exit 1 ;;
         esac
         ;;
     mode)
