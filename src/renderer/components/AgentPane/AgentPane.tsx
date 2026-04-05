@@ -140,6 +140,7 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
   const terminalIdRef = useRef(`agent-chat-${agentName}`)
   const [resolvedArgs, setResolvedArgs] = useState<string[] | undefined>(undefined)
   const [ready, setReady] = useState(false)
+  const [existingTerminalId, setExistingTerminalId] = useState<string | null>(null)
 
   // Resolve the user's default AI agent command
   const defaultAgent = useSettingsStore((s) => s.defaultAgent)
@@ -150,7 +151,7 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
     return parseCommand(preset.command)
   }, [defaultAgent, presets])
 
-  // Detect previous session and build args
+  // Detect previous session and build args — also check for existing terminal in this directory
   useEffect(() => {
     let cancelled = false
     const resolve = async () => {
@@ -159,6 +160,21 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
         setReady(true)
         return
       }
+
+      // Check if there's already a terminal running in this directory
+      try {
+        const running = await invoke<Array<{ terminalId: string; cwd: string; command: string | null }>>('terminal_list_running_agents')
+        const match = running.find((t) => t.cwd === agentDir)
+        if (!cancelled && match) {
+          // Also check if it still exists (might be stale)
+          const exists = await invoke<boolean>('terminal_exists', { id: match.terminalId })
+          if (!cancelled && exists) {
+            setExistingTerminalId(match.terminalId)
+            setReady(true)
+            return
+          }
+        }
+      } catch { /* fall through */ }
 
       const baseArgs = [...(agentCommand?.args ?? [])]
 
@@ -210,13 +226,16 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
     )
   }
 
+  // If an existing terminal was found running in this directory, connect to it
+  const activeTerminalId = existingTerminalId || terminalIdRef.current
+
   return (
     <div ref={containerRef} className="h-full">
       <AlacrittyTerminalView
-        terminalId={terminalIdRef.current}
+        terminalId={activeTerminalId}
         cwd={agentDir}
-        command={agentCommand.command}
-        args={resolvedArgs}
+        command={existingTerminalId ? undefined : agentCommand.command}
+        args={existingTerminalId ? undefined : resolvedArgs}
       />
     </div>
   )

@@ -1777,9 +1777,20 @@ function CLIVersionRow(): React.JSX.Element {
     }
   }, [checkStatus])
 
-  // Determine if update is available: bundled version is newer than installed
+  // Compare versions properly — only show update if bundled is actually newer
+  const compareVersions = (a: string, b: string): number => {
+    const pa = a.split('.').map(Number)
+    const pb = b.split('.').map(Number)
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const va = pa[i] || 0
+      const vb = pb[i] || 0
+      if (va > vb) return 1
+      if (va < vb) return -1
+    }
+    return 0
+  }
   const updateAvailable = status?.installed && status.bundledVersion && status.installedVersion
-    && status.bundledVersion !== status.installedVersion
+    && compareVersions(status.bundledVersion, status.installedVersion) > 0
 
   return (
     <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">

@@ -421,9 +421,13 @@ pub fn cli_install_status() -> Result<serde_json::Value, String> {
         None
     };
 
-    // Determine if an update is available
+    // Determine if an update is available (bundled must be strictly newer)
     let update_available = match (&bundled_version, &installed_version) {
-        (Some(bundled_v), Some(installed_v)) => bundled_v != installed_v,
+        (Some(bundled_v), Some(installed_v)) => {
+            let bv: Vec<u32> = bundled_v.split('.').filter_map(|s| s.parse().ok()).collect();
+            let iv: Vec<u32> = installed_v.split('.').filter_map(|s| s.parse().ok()).collect();
+            bv > iv
+        }
         _ => false,
     };
 
