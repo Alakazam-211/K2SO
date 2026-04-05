@@ -47,12 +47,12 @@ interface PanelsState {
 }
 
 export const usePanelsStore = create<PanelsState>((set, get) => ({
-  leftPanelOpen: false,
+  leftPanelOpen: true,
   leftPanelWidth: SIDEBAR_DEFAULT_WIDTH,
   leftPanelActiveTab: 'files',
   leftPanelTabs: ['files', 'workspace'],
 
-  rightPanelOpen: false,
+  rightPanelOpen: true,
   rightPanelWidth: SIDEBAR_DEFAULT_WIDTH,
   rightPanelActiveTab: 'history',
   rightPanelTabs: ['history', 'changes'],
