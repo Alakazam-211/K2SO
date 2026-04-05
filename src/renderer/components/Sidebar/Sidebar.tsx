@@ -239,7 +239,7 @@ const NavWorktreeRow = React.memo(function NavWorktreeRow({
     <>
       <div className="border-t border-[var(--color-border)]" />
       <button
-        className={`w-full flex items-center gap-2 px-3 text-left text-[11px] transition-colors cursor-pointer no-drag ${
+        className={`w-full flex items-center gap-2 px-3 text-left text-[11px] transition-colors cursor-default no-drag ${
           isSelected
             ? 'bg-white/[0.06] text-[var(--color-text-primary)]'
             : 'text-[var(--color-text-muted)] hover:bg-white/[0.04] hover:text-[var(--color-text-primary)]'
@@ -260,16 +260,16 @@ const NavWorktreeRow = React.memo(function NavWorktreeRow({
         </svg>
         <span className="truncate flex-1">{branchName}</span>
         {hovered && (
-          <div
-            className="flex-shrink-0 flex items-center justify-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
+          <button
+            className="flex-shrink-0 flex h-4 w-4 items-center justify-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-white/10 transition-colors"
             onClick={(e) => { e.stopPropagation(); onClose() }}
             title="Hide from nav"
           >
-            <svg width="7" height="7" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5">
               <line x1="1" y1="1" x2="7" y2="7" />
               <line x1="7" y1="1" x2="1" y2="7" />
             </svg>
-          </div>
+          </button>
         )}
       </button>
     </>

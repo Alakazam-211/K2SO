@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.22.23"
+K2SO_CLI_VERSION="0.23.4"
 
 set -euo pipefail
 
@@ -13,33 +13,21 @@ set -euo pipefail
 PORT="${K2SO_PORT:-}"
 TOKEN="${K2SO_HOOK_TOKEN:-}"
 
-# Resolve project root: walk up from CWD (or K2SO_PROJECT_PATH) to find
-# the directory containing .k2so/ — like how git finds .git/ regardless
-# of where you invoke it. Always walk up even if K2SO_PROJECT_PATH is set,
-# because it may point to a subdirectory (worktree, agent dir).
-PROJECT="$(pwd)"
-_dir="${K2SO_PROJECT_PATH:-$PROJECT}"
-_found=""
-while [ "$_dir" != "/" ]; do
-    if [ -d "$_dir/.k2so" ]; then
-        _found="$_dir"
-        break
-    fi
-    _dir="$(dirname "$_dir")"
-done
-# If walk-up from K2SO_PROJECT_PATH failed, try from CWD
-if [ -z "$_found" ] && [ -n "${K2SO_PROJECT_PATH:-}" ]; then
-    _dir="$PROJECT"
+# Resolve project root: if K2SO_PROJECT_PATH is set, use it directly.
+# Otherwise walk up from CWD to find a .k2so/ directory, skipping $HOME/.k2so
+# (which is K2SO's app config, not a project).
+PROJECT="${K2SO_PROJECT_PATH:-$(pwd)}"
+if [ -z "${K2SO_PROJECT_PATH:-}" ]; then
+    _dir="$(pwd)"
     while [ "$_dir" != "/" ]; do
-        if [ -d "$_dir/.k2so" ]; then
-            _found="$_dir"
+        if [ -d "$_dir/.k2so" ] && [ "$_dir" != "$HOME" ]; then
+            PROJECT="$_dir"
             break
         fi
         _dir="$(dirname "$_dir")"
     done
+    unset _dir
 fi
-PROJECT="${_found:-$PROJECT}"
-unset _dir _found
 
 # Auto-discover connection from ~/.k2so/ if not in a K2SO terminal
 if [ -z "$PORT" ] || [ -z "$TOKEN" ]; then
@@ -603,6 +591,43 @@ cmd_review_feedback() {
     cli_request "/cli/review/feedback" "agent=$(urlencode "$agent")&feedback=$(urlencode "$feedback")"
 }
 
+cmd_workspace_create() {
+    local target_path="${1:-}"
+    if [ -z "$target_path" ]; then
+        echo "Usage: k2so workspace create <path>" >&2
+        exit 1
+    fi
+    # Resolve to absolute path
+    target_path="$(cd "$(dirname "$target_path")" 2>/dev/null && pwd)/$(basename "$target_path")" 2>/dev/null || target_path="$1"
+    cli_request "/cli/workspace/create" "path=$(urlencode "$target_path")"
+}
+
+cmd_workspace_remove() {
+    local target_path="${1:-}"
+    if [ -z "$target_path" ]; then
+        echo "Usage: k2so workspace remove <path>" >&2
+        exit 1
+    fi
+    # Resolve to absolute path
+    if [ -d "$target_path" ]; then
+        target_path="$(cd "$target_path" && pwd)"
+    fi
+    cli_request "/cli/workspace/remove" "path=$(urlencode "$target_path")"
+}
+
+cmd_workspace_open() {
+    local target_path="${1:-}"
+    if [ -z "$target_path" ]; then
+        echo "Usage: k2so workspace open <path>" >&2
+        exit 1
+    fi
+    # Resolve to absolute path
+    if [ -d "$target_path" ]; then
+        target_path="$(cd "$target_path" && pwd)"
+    fi
+    cli_request "/cli/workspace/open" "path=$(urlencode "$target_path")"
+}
+
 cmd_mode() {
     local new_mode="${1:-}"
     if [ -z "$new_mode" ]; then
@@ -611,7 +636,6 @@ cmd_mode() {
 import json, sys
 d = json.loads(sys.stdin.read())
 print(f\"  Mode:      {d.get('mode', '?')}\")
-print(f\"  Worktrees: {'on' if d.get('worktreeMode') else 'off'}\")
 print(f\"  Heartbeat: {'on' if d.get('heartbeatEnabled') else 'off'}\")
 print(f\"  Pinned:    {'yes' if d.get('pinned') else 'no'}\")
 " 2>/dev/null || cli_request "/cli/mode"
@@ -619,24 +643,6 @@ print(f\"  Pinned:    {'yes' if d.get('pinned') else 'no'}\")
         # Set mode
         cli_request "/cli/mode" "set=$(urlencode "$new_mode")"
     fi
-}
-
-cmd_worktree() {
-    local action="${1:-}"
-    case "$action" in
-        on|enable|1|true)
-            cli_request "/cli/worktree" "enable=on"
-            echo "Worktrees enabled."
-            ;;
-        off|disable|0|false)
-            cli_request "/cli/worktree" "enable=off"
-            echo "Worktrees disabled."
-            ;;
-        *)
-            echo "Usage: k2so worktree <on|off>" >&2
-            exit 1
-            ;;
-    esac
 }
 
 cmd_heartbeat_toggle() {
@@ -764,7 +770,6 @@ d = json.loads(sys.stdin.read())
 print('Workspace Settings:')
 print(f\"  Name:      {d.get('name', '?')}\")
 print(f\"  Mode:      {d.get('mode', 'off')}\")
-print(f\"  Worktrees: {'on' if d.get('worktreeMode') else 'off'}\")
 print(f\"  Heartbeat: {'on' if d.get('heartbeatEnabled') else 'off'}\")
 print(f\"  State:     {d.get('stateId', '(none)')}\")
 print(f\"  Pinned:    {'yes' if d.get('pinned') else 'no'}\")
@@ -816,9 +821,12 @@ COMMANDS:
   commit [-m "message"]           AI Commit — launch Claude to review & commit
   commit-merge [-m "message"]     AI Commit & Merge — commit then merge into main
 
+  workspace create <path>         Create a new folder + register as workspace
+  workspace open <path>           Register an existing folder as workspace
+  workspace remove <path>         Deregister workspace (keeps files on disk)
+
   mode                            Show current workspace settings
   mode <off|agent|coordinator>     Set workspace agent mode
-  worktree <on|off>               Enable/disable worktree mode
   heartbeat                       Manually trigger heartbeat triage
   heartbeat <on|off>              Enable/disable automatic heartbeat
   heartbeat set --agent <n>        Set adaptive heartbeat config
@@ -997,11 +1005,16 @@ case "${1:-help}" in
             *)        echo "Unknown review subcommand: ${2:-}" >&2; cmd_help; exit 1 ;;
         esac
         ;;
+    workspace)
+        case "${2:-}" in
+            create) shift 2; cmd_workspace_create "$@" ;;
+            open)   shift 2; cmd_workspace_open "$@" ;;
+            remove) shift 2; cmd_workspace_remove "$@" ;;
+            *)      echo "Usage: k2so workspace <create|open|remove> <path>" >&2; exit 1 ;;
+        esac
+        ;;
     mode)
         shift; cmd_mode "$@"
-        ;;
-    worktree)
-        shift; cmd_worktree "$@"
         ;;
     heartbeat)
         shift; cmd_heartbeat_toggle "$@"

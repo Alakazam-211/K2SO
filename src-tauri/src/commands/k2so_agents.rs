@@ -2012,7 +2012,6 @@ k2so commit-merge                    # AI commit then merge into main
 ```
 k2so mode                               # Show current settings
 k2so mode <off|agent|coordinator>        # Set workspace agent mode
-k2so worktree <on|off>                  # Enable/disable worktree mode
 k2so heartbeat <on|off>                 # Enable/disable automatic heartbeat
 k2so heartbeat                          # Trigger triage manually (no on/off)
 k2so settings                           # Show all workspace settings

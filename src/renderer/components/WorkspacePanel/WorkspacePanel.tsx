@@ -121,7 +121,11 @@ export default function WorkspacePanel(): React.JSX.Element {
 
   const agentMode = activeProject?.agentMode || 'off'
   const isCoordinatorMode = agentMode === 'coordinator' || agentMode === 'pod'
-  const coordinator = useMemo(() => agents.find((a) => a.isCoordinator), [agents])
+  // Primary agent for any mode: coordinator for coordinator mode, first agent for custom/k2so
+  const primaryAgent = useMemo(() => {
+    if (isCoordinatorMode) return agents.find((a) => a.isCoordinator) ?? null
+    return agents.length > 0 ? agents[0] : null
+  }, [agents, isCoordinatorMode])
   const workspaces = activeProject?.workspaces ?? []
   // Filter to only worktree workspaces (not the main workspace)
   const worktrees = useMemo(() =>
@@ -141,8 +145,9 @@ export default function WorkspacePanel(): React.JSX.Element {
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
-      {/* ── Section 1: Status ── */}
+      {/* ── Status ── */}
       <div className="px-3 py-3 border-b border-[var(--color-border)]">
+        {/* Mode + status */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span
@@ -165,10 +170,44 @@ export default function WorkspacePanel(): React.JSX.Element {
           )}
         </div>
 
+        {/* Agent row — clickable to open agent pane */}
+        {agentMode !== 'off' && primaryAgent && (
+          <div
+            className="mt-2.5 px-2 py-1.5 hover:bg-[var(--color-bg-elevated)] transition-colors cursor-pointer -mx-1"
+            onClick={() => openAgentPane(primaryAgent.name, activeProject.path)}
+          >
+            <div className="flex items-center gap-2">
+              <span
+                className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                style={{ backgroundColor: statusColor(projectStatus) }}
+              />
+              <div className="flex-1 min-w-0">
+                <span className="text-[11px] text-[var(--color-text-primary)] truncate block">{primaryAgent.name}</span>
+                <span className="text-[10px] text-[var(--color-text-muted)] truncate block">{primaryAgent.role}</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Off mode inbox shortcut */}
+        {agentMode === 'off' && wsInboxCount > 0 && (
+          <div
+            className="mt-2.5 px-2 py-1.5 hover:bg-[var(--color-bg-elevated)] transition-colors cursor-pointer -mx-1"
+            onClick={() => openAgentPane('__workspace__', activeProject.path)}
+          >
+            <div className="flex items-center gap-2">
+              <svg className="w-3 h-3 text-[var(--color-accent)] flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <path d="M3 9h18" />
+              </svg>
+              <span className="text-[11px] text-[var(--color-text-primary)]">View Inbox</span>
+            </div>
+          </div>
+        )}
+
         {/* Heartbeat & State — only for AI-assisted modes */}
         {agentMode !== 'off' && (
           <>
-            {/* Heartbeat toggle */}
             <div className="flex items-center justify-between mt-3.5">
               <div className="flex items-center gap-2">
                 <span className="text-[11px] text-[var(--color-text-secondary)]">Heartbeat</span>
@@ -202,13 +241,11 @@ export default function WorkspacePanel(): React.JSX.Element {
               </button>
             </div>
 
-            {/* State selector */}
             {states.length > 0 && (
               <div className="flex items-center justify-between mt-3.5">
                 <span className="text-[11px] text-[var(--color-text-secondary)]">State</span>
                 <button
-                  onClick={async (e) => {
-                    // Position menu near the button
+                  onClick={async () => {
                     const menuItems = [
                       { id: '__none__', label: 'No state' },
                       { id: '__sep__', label: '', type: 'separator' as const },
@@ -241,60 +278,7 @@ export default function WorkspacePanel(): React.JSX.Element {
         )}
       </div>
 
-      {/* ── Section 2: Coordinator (hidden in Off mode) ── */}
-      {agenticEnabled && agentMode !== 'off' && isCoordinatorMode && coordinator && (
-        <div className="border-b border-[var(--color-border)]">
-          <div className="px-3 py-1.5">
-            <span className="text-[9px] font-medium text-[var(--color-accent)] uppercase tracking-wider">
-              Coordinator
-            </span>
-          </div>
-          <div
-            className="px-3 py-2 hover:bg-[var(--color-bg-elevated)] transition-colors cursor-pointer"
-            onClick={() => openAgentPane(coordinator.name, activeProject.path)}
-          >
-            <div className="flex items-center gap-2">
-              <span
-                className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-                style={{ backgroundColor: statusColor(projectStatus) }}
-              />
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-xs text-[var(--color-text-primary)] truncate">{coordinator.name}</span>
-                  <span className="text-[9px] font-medium text-[var(--color-accent)]">COORDINATOR</span>
-                </div>
-                <div className="text-[10px] text-[var(--color-text-muted)] truncate">{coordinator.role}</div>
-              </div>
-              <div className="flex items-center gap-1 text-[9px] text-[var(--color-text-muted)] flex-shrink-0">
-                {wsInboxCount > 0 && <span className="text-[var(--color-accent)]" title="Inbox">{wsInboxCount}u</span>}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Off mode: show inbox directly (user = coordinator) ── */}
-      {agentMode === 'off' && wsInboxCount > 0 && (
-        <div className="border-b border-[var(--color-border)]">
-          <div
-            className="px-3 py-2 hover:bg-[var(--color-bg-elevated)] transition-colors cursor-pointer"
-            onClick={() => openAgentPane('__workspace__', activeProject.path)}
-          >
-            <div className="flex items-center gap-2">
-              <svg className="w-3 h-3 text-[var(--color-accent)] flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                <rect x="3" y="3" width="18" height="18" rx="2" />
-                <path d="M3 9h18" />
-              </svg>
-              <span className="text-xs text-[var(--color-text-primary)]">Inbox</span>
-              <span className="text-[9px] tabular-nums font-medium px-1.5 py-0.5 bg-[var(--color-accent)]/10 text-[var(--color-accent)]">
-                {wsInboxCount}
-              </span>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Section 3: Worktrees ── */}
+      {/* ── Worktrees ── */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)]">
         <span className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider flex items-center gap-1.5">
           Worktrees

@@ -6,6 +6,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { startTabDrag } from '@/components/Terminal/TerminalArea'
 import { showContextMenu } from '@/lib/context-menu'
 import AgentCloseDialog from '@/components/AgentCloseDialog/AgentCloseDialog'
+import AgentIcon from '@/components/AgentIcon/AgentIcon'
 
 interface TabBarProps {
   cwd: string
@@ -244,6 +245,21 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
           const isDragged = reorderDragIndex === index
           const showDropBefore = reorderDropIndex === index
           const showDropAfter = reorderDropIndex === tabs.length && index === tabs.length - 1
+          // Check if this tab contains a worktree detail pane
+          const isWorktreeTab = Array.from(tab.paneGroups.values()).some(
+            (pg) => pg.items.some((item) => item.type === 'agent' && (item.data as TerminalItemData & { agentName?: string }).agentName?.startsWith('__wt:'))
+          )
+          // Detect CLI LLM command running in this tab's terminals
+          let cliAgent: string | null = null
+          for (const [, pg] of tab.paneGroups) {
+            for (const item of pg.items) {
+              if (item.type === 'terminal') {
+                const cmd = (item.data as TerminalItemData).command
+                if (cmd) { cliAgent = cmd; break }
+              }
+            }
+            if (cliAgent) break
+          }
 
           return (
             <div
@@ -261,13 +277,26 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
             >
               {showDropBefore && <div className="absolute left-0 top-1 bottom-1 w-[2px] bg-[var(--color-accent)] z-10" />}
               {showDropAfter && <div className="absolute right-0 top-1 bottom-1 w-[2px] bg-[var(--color-accent)] z-10" />}
-              {hasAgent && (
+              {isWorktreeTab && (
+                <svg className="w-3 h-3 text-[var(--color-text-muted)] flex-shrink-0 mr-1 opacity-70" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="4" cy="4" r="1.5" />
+                  <circle cx="12" cy="4" r="1.5" />
+                  <circle cx="4" cy="12" r="1.5" />
+                  <path d="M4 5.5v5M4 8h6c1.1 0 2-.9 2-2v-.5" />
+                </svg>
+              )}
+              {cliAgent && !isWorktreeTab && (
+                <span className="flex-shrink-0 mr-1">
+                  <AgentIcon agent={cliAgent} size={12} />
+                </span>
+              )}
+              {hasAgent && !isWorktreeTab && !cliAgent && (
                 <span
                   className={`flex-shrink-0 mr-1.5 rounded-full ${hasActiveAgent ? 'agent-active-dot' : ''}`}
                   style={{ width: 6, height: 6, backgroundColor: hasActiveAgent ? '#f97316' : '#22c55e' }}
                 />
               )}
-              {isDirty && !hasAgent && (
+              {isDirty && !hasAgent && !isWorktreeTab && !cliAgent && (
                 <span className="w-1.5 h-1.5 bg-[var(--color-accent)] flex-shrink-0 mr-1.5" />
               )}
               <span className={`truncate flex-1 ${isDirty ? 'italic' : ''}`}>

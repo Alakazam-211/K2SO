@@ -2,7 +2,7 @@ import React from 'react'
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useSettingsStore, getEffectiveKeybinding } from '@/stores/settings'
 import type { SettingsSection, TerminalSettings } from '@/stores/settings'
-import { useProjectsStore } from '@/stores/projects'
+import { useProjectsStore, type ProjectWithWorkspaces } from '@/stores/projects'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
 import { usePresetsStore, parseCommand } from '@/stores/presets'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
@@ -3115,12 +3115,8 @@ function ProjectsSection(): React.JSX.Element {
     }
   }, [focusGroupsEnabled, focusGroups, fetchProjects, assignProjectToGroup])
 
-  // Workspace row component (reused in groups and ungrouped)
-  const ProjectRow = useCallback(({ project: p, zone, containerSelector }: {
-    project: typeof projects[number]
-    zone: string
-    containerSelector: string
-  }) => {
+  // Workspace row renderer (called as function, NOT as <Component/>, to avoid unmount/remount flicker)
+  const renderProjectRow = (p: typeof projects[number], zone: string, containerSelector: string) => {
     const isSelected = selectedProjectId === p.id
     const isDragged = reorderDragId === p.id
     const kbIdx = allVisibleProjects.findIndex((vp) => vp.id === p.id)
@@ -3151,8 +3147,14 @@ function ProjectsSection(): React.JSX.Element {
         <button
           onClick={async (e) => {
             e.stopPropagation()
-            await invoke('projects_update', { id: p.id, pinned: p.pinned ? 0 : 1 })
-            await fetchProjects()
+            const newPinned = p.pinned ? 0 : 1
+            await invoke('projects_update', { id: p.id, pinned: newPinned })
+            const store = useProjectsStore.getState()
+            useProjectsStore.setState({
+              projects: store.projects.map((proj) =>
+                proj.id === p.id ? { ...proj, pinned: newPinned } : proj
+              )
+            })
           }}
           className={`flex-shrink-0 p-0.5 transition-colors ${
             p.pinned
@@ -3167,7 +3169,7 @@ function ProjectsSection(): React.JSX.Element {
         </button>
       </div>
     )
-  }, [selectedProjectId, reorderDragId, handleReorderMouseDown, fetchProjects, allVisibleProjects, keyboardIndex, handleProjectContextMenu])
+  }
 
   return (
     <div className="flex h-full min-h-0">
@@ -3250,7 +3252,7 @@ function ProjectsSection(): React.JSX.Element {
                     {reorderZone === 'agents' && reorderDropIndex === idx && (
                       <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
                     )}
-                    <ProjectRow project={p} zone="agents" containerSelector="[data-reorder-zone='agents']" />
+                    {renderProjectRow(p, 'agents', "[data-reorder-zone='agents']")}
                   </div>
                 ))}
                 {reorderZone === 'agents' && reorderDropIndex === agentPinnedProjects.length && (
@@ -3274,7 +3276,7 @@ function ProjectsSection(): React.JSX.Element {
                     {reorderZone === 'pinned' && reorderDropIndex === idx && (
                       <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
                     )}
-                    <ProjectRow project={p} zone="pinned" containerSelector="[data-reorder-zone='pinned']" />
+                    {renderProjectRow(p, 'pinned', "[data-reorder-zone='pinned']")}
                   </div>
                 ))}
                 {reorderZone === 'pinned' && reorderDropIndex === regularPinnedProjects.length && (
@@ -3363,7 +3365,7 @@ function ProjectsSection(): React.JSX.Element {
                             {reorderZone === zoneId && reorderDropIndex === idx && (
                               <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
                             )}
-                            <ProjectRow project={p} zone={zoneId} containerSelector={`[data-reorder-zone='${zoneId}']`} />
+                            {renderProjectRow(p, zoneId, `[data-reorder-zone='${zoneId}']`)}
                           </div>
                         ))}
                         {reorderZone === zoneId && reorderDropIndex === groupProjects.length && (
@@ -3405,7 +3407,7 @@ function ProjectsSection(): React.JSX.Element {
                         {reorderZone === 'ungrouped' && reorderDropIndex === idx && (
                           <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
                         )}
-                        <ProjectRow project={p} zone="ungrouped" containerSelector="[data-reorder-zone='ungrouped']" />
+                        {renderProjectRow(p, 'ungrouped', "[data-reorder-zone='ungrouped']")}
                       </div>
                     ))}
                     {reorderZone === 'ungrouped' && reorderDropIndex === ungroupedProjects.length && (
@@ -3443,7 +3445,7 @@ function ProjectsSection(): React.JSX.Element {
                     {reorderZone === 'flat' && reorderDropIndex === idx && (
                       <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
                     )}
-                    <ProjectRow project={p} zone="flat" containerSelector="[data-reorder-zone='flat']" />
+                    {renderProjectRow(p, 'flat', "[data-reorder-zone='flat']")}
                   </div>
                 ))}
               </div>
@@ -3661,7 +3663,31 @@ function ProjectDetail({
   const [cropImage, setCropImage] = useState<string | null>(null)
   const [agentEditorOpen, setAgentEditorOpen] = useState(false)
   const [agentEditorName, setAgentEditorName] = useState('')
+  const [claudeMdHasK2so, setClaudeMdHasK2so] = useState(true) // assume true to avoid flash
+  const [claudeMdAppending, setClaudeMdAppending] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Close editor when project changes (user navigated away without using back button)
+  useEffect(() => {
+    setAgentEditorOpen(false)
+    setAgentEditorName('')
+  }, [project.id])
+
+  // Check if CLAUDE.md has k2so context
+  useEffect(() => {
+    let cancelled = false
+    const claudeMdPath = `${project.path}/CLAUDE.md`
+    invoke<{ content: string }>('fs_read_file', { path: claudeMdPath })
+      .then((result) => {
+        if (!cancelled) {
+          setClaudeMdHasK2so(result.content.includes('.k2so') || result.content.includes('k2so'))
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setClaudeMdHasK2so(false) // file doesn't exist
+      })
+    return () => { cancelled = true }
+  }, [project.path, project.id])
 
 
   const handleDetectIcon = async (): Promise<void> => {
@@ -3728,6 +3754,12 @@ function ProjectDetail({
         <div className="absolute inset-0 overflow-hidden bg-[var(--color-bg)]">
           {agentEditorName === '__project_context__' ? (
             <ProjectContextEditor
+              projectPath={project.path}
+              projectName={project.name}
+              onClose={() => setAgentEditorOpen(false)}
+            />
+          ) : agentEditorName === '__claude_md__' ? (
+            <ClaudeMdEditor
               projectPath={project.path}
               projectName={project.name}
               onClose={() => setAgentEditorOpen(false)}
@@ -3873,6 +3905,56 @@ function ProjectDetail({
             />
           </div>
         )}
+
+        {/* CLAUDE.md */}
+        <div className="pt-3 border-t border-[var(--color-border)]">
+          <div className="flex items-center justify-between">
+            <div>
+              <span className="text-xs text-[var(--color-text-secondary)]">CLAUDE.md</span>
+              <p className="text-[9px] text-[var(--color-text-muted)] mt-0.5">
+                Instructions that every Claude session reads on launch.
+              </p>
+            </div>
+            <button
+              onClick={() => { setAgentEditorName('__claude_md__'); setAgentEditorOpen(true) }}
+              className="px-2.5 py-1 text-[11px] text-[var(--color-accent)] border border-[var(--color-accent)]/30 hover:bg-[var(--color-accent)]/10 transition-colors no-drag cursor-pointer"
+            >
+              Manage CLAUDE.md
+            </button>
+          </div>
+          {!claudeMdHasK2so && (
+            <button
+              onClick={async () => {
+                setClaudeMdAppending(true)
+                try {
+                  const claudeMdPath = `${project.path}/CLAUDE.md`
+                  let existing = ''
+                  try {
+                    const result = await invoke<{ content: string }>('fs_read_file', { path: claudeMdPath })
+                    existing = result.content
+                  } catch { /* file doesn't exist */ }
+
+                  const k2soSection = `\n\n<!-- K2SO Context -->\n## K2SO Workspace\n\nThis project is managed by [K2SO](https://k2so.sh), an AI workspace IDE.\n\n### Directory Structure\n- \`.k2so/\` — K2SO workspace configuration\n  - \`.k2so/agents/\` — Agent profiles and work queues\n  - \`.k2so/work/inbox/\` — Workspace-level work inbox\n  - \`.k2so/prds/\` — Product requirement documents\n  - \`.k2so/PROJECT.md\` — Shared project context for agents\n\n### K2SO CLI\nThe \`k2so\` command is available in your terminal for workspace operations:\n\`\`\`\nk2so work inbox              # View workspace inbox\nk2so work create --title "..." --body "..."  # Create work items\nk2so agents list             # List agents with work counts\nk2so commit                  # AI-assisted commit review\nk2so settings                # Show workspace settings\n\`\`\`\n\nRun \`k2so --help\` for all available commands.\n<!-- End K2SO Context -->\n`
+
+                  const newContent = existing + k2soSection
+                  await invoke('fs_write_file', { path: claudeMdPath, content: newContent })
+                  setClaudeMdHasK2so(true)
+                } catch (err) {
+                  console.error('[settings] Failed to append k2so context:', err)
+                } finally {
+                  setClaudeMdAppending(false)
+                }
+              }}
+              disabled={claudeMdAppending}
+              className="mt-2 w-full px-2.5 py-1.5 text-[11px] text-[var(--color-text-secondary)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-40"
+            >
+              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              {claudeMdAppending ? 'Adding...' : 'Add K2SO Context to CLAUDE.md'}
+            </button>
+          )}
+        </div>
       </SettingsGroup>
 
       {/* ── Group 2: Agent Settings — Mode tabs, Heartbeat, Agents list ── */}
@@ -4583,6 +4665,149 @@ function ProjectContextEditor({ projectPath, projectName, onClose }: { projectPa
   )
 }
 
+// ── CLAUDE.md Editor (AIFileEditor for workspace root CLAUDE.md) ──────
+
+function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: string; projectName: string; onClose: () => void }): React.JSX.Element {
+  const [content, setContent] = useState('')
+  const [previewMode, setPreviewMode] = useState<'preview' | 'edit'>('preview')
+  const [previewScale, setPreviewScale] = useState(100)
+  const cssScale = Math.round(previewScale * 0.7)
+
+  const filePath = `${projectPath}/CLAUDE.md`
+  const watchDir = projectPath
+
+  const defaultAgent = useSettingsStore((s) => s.defaultAgent)
+  const presets = usePresetsStore((s) => s.presets)
+  const agentCommand = useMemo(() => {
+    const preset = presets.find((p) => p.id === defaultAgent) || presets.find((p) => p.enabled)
+    if (!preset) return null
+    return parseCommand(preset.command)
+  }, [defaultAgent, presets])
+
+  useEffect(() => {
+    invoke<{ content: string }>('fs_read_file', { path: filePath })
+      .then((r) => setContent(r.content))
+      .catch(() => setContent(''))
+  }, [filePath])
+
+  const handleFileChange = useCallback((c: string) => setContent(c), [])
+
+  const systemPrompt = useMemo(() => [
+    `You're helping the user write their CLAUDE.md file for the "${projectName}" workspace.`,
+    ``,
+    `File: CLAUDE.md (project root)`,
+    ``,
+    `This file is automatically read by Claude Code at the start of every session.`,
+    `It should contain project-specific instructions, conventions, and context:`,
+    ``,
+    `• Project overview — what this codebase does`,
+    `• Tech stack — languages, frameworks, key dependencies`,
+    `• Key directories — important paths and what lives in them`,
+    `• Conventions — code style, commit format, branch naming, PR process`,
+    `• Build & test — how to build, run tests, deploy`,
+    `• Important notes — gotchas, known issues, things to watch out for`,
+    ``,
+    `Edit CLAUDE.md in the current directory. The user sees a live preview on the right.`,
+    ``,
+    `Current contents:`,
+    content,
+  ].join('\n'), [projectName, content])
+
+  const terminalCommand = agentCommand?.command
+  const terminalArgs = useMemo(() => {
+    if (!agentCommand) return undefined
+    const baseArgs = [...agentCommand.args]
+    if (agentCommand.command === 'claude') {
+      return [
+        ...baseArgs,
+        '--append-system-prompt', systemPrompt,
+        `Open and read CLAUDE.md in the current directory. Help the user define their project context for "${projectName}". Start by asking about their tech stack and project structure.`,
+      ]
+    }
+    return baseArgs
+  }, [agentCommand, systemPrompt, projectName])
+
+  return (
+    <AIFileEditor
+      filePath={filePath}
+      watchDir={watchDir}
+      cwd={watchDir}
+      command={terminalCommand}
+      args={terminalArgs}
+      title={`CLAUDE.md: ${projectName}`}
+      instructions="Editing CLAUDE.md — read by Claude Code at the start of every session."
+      warningText="This file is shared across all Claude sessions in this workspace."
+      onFileChange={handleFileChange}
+      onClose={onClose}
+      preview={
+        <div className="h-full flex flex-col">
+          <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--color-border)] flex-shrink-0">
+            <div className="text-xs text-[var(--color-text-muted)]">
+              <span className="font-medium text-[var(--color-text-primary)]">CLAUDE.md</span>
+              <span className="mx-2">&middot;</span>
+              <span>Session context</span>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              {previewMode === 'preview' && (
+                <div className="flex items-center gap-0.5">
+                  <button
+                    onClick={() => setPreviewScale((s) => Math.max(50, s - 10))}
+                    className="w-5 h-5 flex items-center justify-center text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] bg-[var(--color-bg-elevated)] border border-[var(--color-border)] no-drag cursor-pointer"
+                  >
+                    −
+                  </button>
+                  <span className="text-[9px] tabular-nums text-[var(--color-text-muted)] w-7 text-center">{previewScale}%</span>
+                  <button
+                    onClick={() => setPreviewScale((s) => Math.min(200, s + 10))}
+                    className="w-5 h-5 flex items-center justify-center text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] bg-[var(--color-bg-elevated)] border border-[var(--color-border)] no-drag cursor-pointer"
+                  >
+                    +
+                  </button>
+                </div>
+              )}
+              <div className="flex gap-0.5">
+                {(['preview', 'edit'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    onClick={() => setPreviewMode(mode)}
+                    className={`px-2 py-1 text-[10px] font-medium transition-colors no-drag cursor-pointer ${
+                      previewMode === mode
+                        ? 'bg-[var(--color-accent)] text-white'
+                        : 'bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] border border-[var(--color-border)]'
+                    }`}
+                  >
+                    {mode === 'preview' ? 'Preview' : 'Edit'}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          {previewMode === 'preview' ? (
+            <div className="flex-1 overflow-auto p-4">
+              <div className="markdown-content" style={{ fontSize: `${cssScale}%` }}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {content || '*No CLAUDE.md yet. Use the AI assistant to set up your project context, or click Edit to write it manually.*'}
+                </ReactMarkdown>
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 overflow-hidden">
+              <CodeEditor
+                code={content}
+                filePath={filePath}
+                onSave={async (c) => {
+                  try { await invoke('fs_write_file', { path: filePath, content: c }) } catch {}
+                }}
+                onChange={(c) => setContent(c)}
+              />
+            </div>
+          )}
+        </div>
+      }
+    />
+  )
+}
+
 // ── Custom Agent Persona Button ──────────────────────────────────────
 
 function CustomAgentPersonaButton({ projectPath, projectName, onOpenEditor }: { projectPath: string; projectName: string; onOpenEditor: (agentName: string) => void }): React.JSX.Element {
@@ -4809,7 +5034,7 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
             className="px-2 py-0.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer"
             title="Manage agent persona"
           >
-            ✎ Manage Persona
+            Manage Persona
           </button>
           <button
             onClick={() => handleDelete(agent.name)}
@@ -4863,7 +5088,7 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
                     className="px-2 py-0.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer"
                     title="Manage coordinator persona"
                   >
-                    ✎ Manage Persona
+                    Manage Persona
                   </button>
                 </div>
               </div>
@@ -4889,7 +5114,7 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
               className="px-2 py-0.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer flex-shrink-0"
               title="Edit shared project context"
             >
-              ✎ Manage Project Context
+              Manage Project Context
             </button>
           </div>
         </div>

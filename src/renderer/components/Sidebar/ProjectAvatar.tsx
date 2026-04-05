@@ -21,8 +21,15 @@ export default function ProjectAvatar({
   iconUrl: iconUrlProp,
   size = 28
 }: ProjectAvatarProps): React.JSX.Element {
-  const [iconUrl, setIconUrl] = useState<string | null>(iconUrlProp ?? null)
-  const [loaded, setLoaded] = useState(!!iconUrlProp)
+  const [iconUrl, setIconUrl] = useState<string | null>(() => {
+    if (iconUrlProp) return iconUrlProp
+    // Check cache synchronously to avoid flash
+    const cached = iconCache.get(projectPath)
+    return cached?.found && cached.dataUrl ? cached.dataUrl : null
+  })
+  const [loaded, setLoaded] = useState(() => {
+    return !!iconUrlProp || iconCache.has(projectPath)
+  })
 
   // Sync prop changes
   useEffect(() => {

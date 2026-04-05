@@ -217,7 +217,7 @@ fi
 section "1.5: CLAUDE.md Content Validation"
 # ═══════════════════════════════════════════════════════════════════════
 
-run agent create claude-leader --role "Pod leader for CLAUDE.md test" > /dev/null
+run agent create claude-leader --role "Coordinator for CLAUDE.md test" > /dev/null
 run agent create claude-member --role "Backend engineer for CLAUDE.md test" > /dev/null
 
 # Generate CLAUDE.md for leader

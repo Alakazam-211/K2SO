@@ -39,7 +39,7 @@ PORT=$(cat "$HOME/.k2so/heartbeat.port" 2>/dev/null || echo "")
 if [ -z "$PORT" ]; then echo -e "${RED}K2SO is not running.${NC}"; exit 1; fi
 
 # Check workspace is registered
-OUTPUT=$(run mode pod 2>&1 || true)
+OUTPUT=$(run mode coordinator 2>&1 || true)
 if echo "$OUTPUT" | grep -q "Project not found\|error"; then
     echo -e "${RED}ERROR: Test workspace is not registered in K2SO.${NC}"
     echo -e "${RED}Add $TEST_WORKSPACE as a project in the K2SO UI first.${NC}"
@@ -59,7 +59,7 @@ section "2.1: Source Gating by Workspace State"
 
 # Set to Maintenance (features=off, issues=gated, crashes=auto, security=auto)
 run state set state-maintenance > /dev/null
-run mode custom > /dev/null 2>&1 || run mode pod > /dev/null 2>&1 || true
+run mode custom > /dev/null 2>&1 || run mode coordinator > /dev/null 2>&1 || true
 
 # Create agent and work items with different sources
 run agent create gating-test --role "Source gating test" > /dev/null
