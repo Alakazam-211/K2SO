@@ -465,42 +465,53 @@ export function startAgentPolling(): void {
       const { command, args, cwd, agentName, worktreePath } = event.payload
       const tabOpts = { title: `Agent: ${agentName}`, command, args }
 
-      // If this launch is for a worktree, add the tab to that workspace
-      // WITHOUT switching the user's focus (no jarring workspace switch)
+      // If this launch is for a worktree, create the PTY in the background.
+      // The Chat tab discovers it when the user navigates to the worktree.
       if (worktreePath) {
-        // Refresh projects first — the worktree was just registered in DB
+        // Refresh projects so the new worktree appears in the Workspace panel
         await useProjectsStore.getState().fetchProjects()
 
+        // Create PTY in background with deterministic ID based on workspace
         const projectsStore = useProjectsStore.getState()
         for (const project of projectsStore.projects) {
           const ws = project.workspaces.find((w) => w.worktreePath === worktreePath)
           if (ws) {
-            const workspaceKey = `${project.id}:${ws.id}`
-            const terminalId = useTabsStore.getState().addTabToWorkspace(workspaceKey, cwd, tabOpts)
-
-            // Spawn the PTY immediately via terminal_create backend call.
-            // Uses the same terminal ID as the saved layout so when the user
-            // navigates to the workspace, restoreLayout finds the existing PTY.
-            if (terminalId) {
-              try {
+            const bgTerminalId = `agent-chat-wt-${ws.id}`
+            try {
+              const exists = await invoke<boolean>('terminal_exists', { id: bgTerminalId })
+              if (!exists) {
                 await invoke('terminal_create', {
                   cwd,
                   command,
-                  args: args,
-                  id: terminalId,
+                  args,
+                  id: bgTerminalId,
                 })
-              } catch {
-                // Terminal creation failed — will be created when user navigates
               }
-            }
+            } catch { /* will be created when user navigates */ }
             return
           }
         }
       }
 
-      // Fallback: add tab to current workspace
-      const tabsStore = useTabsStore.getState()
-      tabsStore.addTabToGroup(tabsStore.activeGroupIndex, cwd, tabOpts)
+      // For agent launches without a worktree (e.g. coordinator), create the PTY
+      // in the background with a deterministic ID. The Chat tab discovers it via
+      // terminal_list_running_agents when the user navigates there.
+      const bgTerminalId = `agent-chat-${agentName}`
+      try {
+        const exists = await invoke<boolean>('terminal_exists', { id: bgTerminalId })
+        if (!exists) {
+          await invoke('terminal_create', {
+            cwd,
+            command,
+            args,
+            id: bgTerminalId,
+          })
+        }
+      } catch {
+        // Fallback: add tab to current workspace if background creation fails
+        const tabsStore = useTabsStore.getState()
+        tabsStore.addTabToGroup(tabsStore.activeGroupIndex, cwd, tabOpts)
+      }
     })
 
     // Listen for CLI-triggered sub-terminal spawn requests (multi-terminal execution)
