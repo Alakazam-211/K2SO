@@ -142,8 +142,8 @@ function FocusModeContent({ activeProject, cwd }: { activeProject: any; cwd: str
       <FocusLayout
         projectName={activeProject?.name}
         branchName={gitInfo?.isRepo ? gitInfo.currentBranch : undefined}
-        leftPanel={<LeftPanelContent rootPath={activeProject?.path} header={leftHeader} />}
-        rightPanel={<RightPanelContent rootPath={activeProject?.path} header={rightHeader} />}
+        leftPanel={<LeftPanelContent rootPath={cwd} header={leftHeader} />}
+        rightPanel={<RightPanelContent rootPath={cwd} header={rightHeader} />}
       >
         {activeProject ? (
           <TerminalArea cwd={cwd} />
@@ -541,8 +541,8 @@ export default function App(): React.JSX.Element {
     <>
       <Layout
         sidebar={<Sidebar />}
-        leftPanel={<LeftPanelContent rootPath={activeProject?.path} />}
-        rightPanel={<RightPanelContent rootPath={activeProject?.path} />}
+        leftPanel={<LeftPanelContent rootPath={activeWorkspace?.worktreePath ?? activeProject?.path} />}
+        rightPanel={<RightPanelContent rootPath={activeWorkspace?.worktreePath ?? activeProject?.path} />}
         projectName={activeProject?.name}
         workspaceName={activeWorkspace?.name}
       >
