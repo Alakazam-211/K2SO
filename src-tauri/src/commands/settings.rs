@@ -537,6 +537,31 @@ pub fn set_relaunch_mode() {
     crate::RELAUNCH_MODE.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Relaunch the app via macOS `open -n -a` (spawns under launchd, survives _exit).
+/// This bypasses Tauri's built-in relaunch which spawns a bare binary that macOS
+/// doesn't register as a GUI app.
+#[tauri::command]
+pub fn relaunch_via_open(app: AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        // Get the .app bundle path: binary is at K2SO.app/Contents/MacOS/k2so
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(app_bundle) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+                let bundle_path = app_bundle.to_path_buf();
+                log_debug!("[relaunch] Spawning: open -n -a {:?}", bundle_path);
+                let _ = std::process::Command::new("/usr/bin/open")
+                    .arg("-n")
+                    .arg("-a")
+                    .arg(&bundle_path)
+                    .spawn();
+            }
+        }
+    }
+    crate::RELAUNCH_MODE.store(true, std::sync::atomic::Ordering::Relaxed);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    app.exit(0);
+}
+
 /// Set the macOS window close button dot (document edited indicator).
 #[tauri::command]
 pub fn set_document_edited(app: AppHandle, edited: bool) -> Result<(), String> {

@@ -496,6 +496,7 @@ pub fn run() {
             commands::settings::cli_uninstall,
             commands::settings::set_document_edited,
             commands::settings::set_relaunch_mode,
+            commands::settings::relaunch_via_open,
             // Project Config
             commands::project_config::project_config_get,
             commands::project_config::project_config_has_run_command,
@@ -653,11 +654,15 @@ pub fn run() {
         .expect("error while building K2SO")
         .run(|_app, event| {
             if let tauri::RunEvent::Exit = event {
-                // Use _exit() to skip C++ static destructors (ggml_metal).
-                // This handles Cmd+Q (NSApplication terminate:) which bypasses
-                // the window CloseRequested event and goes straight to exit().
-                // Without this, __cxa_finalize_ranges races against Metal teardown → SIGABRT.
-                unsafe { libc::_exit(0); }
+                if RELAUNCH_MODE.load(std::sync::atomic::Ordering::Relaxed) {
+                    // Relaunch mode — use normal exit so the spawned process survives
+                    std::process::exit(0);
+                } else {
+                    // Use _exit() to skip C++ static destructors (ggml_metal).
+                    // This handles Cmd+Q (NSApplication terminate:) which bypasses
+                    // the window CloseRequested event and goes straight to exit().
+                    unsafe { libc::_exit(0); }
+                }
             }
         });
 }

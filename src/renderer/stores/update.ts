@@ -73,11 +73,10 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
 
   installAndRelaunch: async () => {
     try {
-      // Tell Rust to use normal exit instead of _exit(0) during close
-      // so the process plugin can spawn the new process before exiting
-      await invoke('set_relaunch_mode')
-      await new Promise((r) => setTimeout(r, 500))
-      await relaunch()
+      // Use macOS `open -n -a` to relaunch the .app bundle via launchd.
+      // This bypasses Tauri's built-in relaunch which spawns a bare binary
+      // that macOS doesn't register as a GUI app, and survives _exit(0).
+      await invoke('relaunch_via_open')
     } catch (err) {
       // If relaunch fails, the update was still installed — tell the user
       console.error('[updater] Relaunch failed:', err)
