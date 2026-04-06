@@ -1046,6 +1046,10 @@ pub fn k2so_agents_build_launch(
     let claude_md_path = agent_dir(&project_path, &agent_name).join("CLAUDE.md");
     fs::write(&claude_md_path, &claude_md).ok();
 
+    // Also regenerate the workspace root CLAUDE.md so the user's Claude session
+    // (which launches from the workspace root) has the latest CLI tools and docs
+    let _ = k2so_agents_generate_workspace_claude_md(project_path.clone());
+
     // Check for previous session to resume (avoids cold-start context reload)
     // First check .last_session file, then fall back to Claude's history.jsonl
     let agent_cwd = agent_dir(&project_path, &agent_name);
