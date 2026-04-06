@@ -15,9 +15,13 @@
 set -euo pipefail
 
 VERSION="${1:-}"
+NOTES_FILE="${2:-}"
 if [ -z "$VERSION" ]; then
-    echo "Usage: ./scripts/release.sh <version>" >&2
-    echo "Example: ./scripts/release.sh 0.25.0" >&2
+    echo "Usage: ./scripts/release.sh <version> [notes-file]" >&2
+    echo "Example: ./scripts/release.sh 0.25.0 release-notes.md" >&2
+    echo "" >&2
+    echo "If notes-file is provided, its contents are used as GitHub release notes." >&2
+    echo "Otherwise, a placeholder is used (edit on GitHub after release)." >&2
     exit 1
 fi
 
@@ -166,9 +170,16 @@ ASSETS=(
 [ -f "$SIG_FILE" ] && ASSETS+=("$SIG_FILE")
 ASSETS+=("/tmp/latest.json")
 
-gh release create "$TAG" "${ASSETS[@]}" \
-    --title "$TAG" \
-    --notes "K2SO ${TAG} — see release notes on GitHub."
+if [ -n "$NOTES_FILE" ] && [ -f "$NOTES_FILE" ]; then
+    gh release create "$TAG" "${ASSETS[@]}" \
+        --title "$TAG" \
+        --notes-file "$NOTES_FILE"
+else
+    gh release create "$TAG" "${ASSETS[@]}" \
+        --title "$TAG" \
+        --notes "K2SO ${TAG} — release notes pending."
+    echo "  NOTE: No notes file provided. Edit release notes on GitHub."
+fi
 
 echo ""
 echo "═══════════════════════════════════════════════════"
