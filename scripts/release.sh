@@ -103,7 +103,7 @@ echo "  App notarized and stapled."
 echo ""
 echo "Step 5: Creating and signing update bundle..."
 cd "$PROJECT_DIR"
-tar -czf "src-tauri/target/release/bundle/macos/K2SO.app.tar.gz" \
+COPYFILE_DISABLE=1 tar -czf "src-tauri/target/release/bundle/macos/K2SO.app.tar.gz" \
     -C "src-tauri/target/release/bundle/macos" "K2SO.app"
 
 # Sign the update bundle with Tauri updater key
