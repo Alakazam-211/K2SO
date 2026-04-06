@@ -72,10 +72,13 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
 
   installAndRelaunch: async () => {
     try {
+      // Small delay to ensure the binary replacement is fully complete
+      await new Promise((r) => setTimeout(r, 1000))
       await relaunch()
     } catch (err) {
+      // If relaunch fails, the update was still installed — tell the user
       console.error('[updater] Relaunch failed:', err)
-      set({ status: 'error', error: String(err) })
+      set({ status: 'error', error: 'Update installed successfully. Please reopen K2SO to use the new version.' })
     }
   },
 }))
