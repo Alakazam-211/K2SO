@@ -149,7 +149,14 @@ export default function WorkspacePanel(): React.JSX.Element {
       <div className="px-3 py-3 border-b border-[var(--color-border)]">
         {/* Mode + status + launch button */}
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
+          <div
+            className={`flex items-center gap-2 ${agentMode !== 'off' && primaryAgent ? 'cursor-pointer hover:opacity-80 transition-opacity' : ''}`}
+            onClick={() => {
+              if (agentMode !== 'off' && primaryAgent) {
+                openAgentPane(primaryAgent.name, activeProject.path)
+              }
+            }}
+          >
             <span
               className="w-2.5 h-2.5 flex-shrink-0"
               style={{ backgroundColor: statusColor(projectStatus) }}

@@ -281,37 +281,53 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
             >
               {showDropBefore && <div className="absolute left-0 top-1 bottom-1 w-[2px] bg-[var(--color-accent)] z-10" />}
               {showDropAfter && <div className="absolute right-0 top-1 bottom-1 w-[2px] bg-[var(--color-accent)] z-10" />}
-              {isWorktreeTab && (
-                <svg className="w-3 h-3 text-[var(--color-text-muted)] flex-shrink-0 mr-1 opacity-70" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="4" cy="4" r="1.5" />
-                  <circle cx="12" cy="4" r="1.5" />
-                  <circle cx="4" cy="12" r="1.5" />
-                  <path d="M4 5.5v5M4 8h6c1.1 0 2-.9 2-2v-.5" />
-                </svg>
-              )}
-              {isAgentPane && !isWorktreeTab && (
-                <svg className="w-3 h-3 text-[var(--color-accent)] flex-shrink-0 mr-1" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="3" y="5" width="10" height="8" rx="1.5" />
-                  <circle cx="6" cy="9" r="1" />
-                  <circle cx="10" cy="9" r="1" />
-                  <path d="M8 2v3" />
-                  <circle cx="8" cy="1.5" r="0.8" />
-                </svg>
-              )}
-              {cliAgent && !isWorktreeTab && !isAgentPane && (
-                <span className="flex-shrink-0 mr-1">
-                  <AgentIcon agent={cliAgent} size={12} />
-                </span>
-              )}
-              {hasAgent && !isWorktreeTab && !cliAgent && !isAgentPane && (
-                <span
-                  className={`flex-shrink-0 mr-1.5 rounded-full ${hasActiveAgent ? 'agent-active-dot' : ''}`}
-                  style={{ width: 6, height: 6, backgroundColor: hasActiveAgent ? '#f97316' : '#22c55e' }}
-                />
-              )}
-              {isDirty && !hasAgent && !isWorktreeTab && !cliAgent && !isAgentPane && (
-                <span className="w-1.5 h-1.5 bg-[var(--color-accent)] flex-shrink-0 mr-1.5" />
-              )}
+              {/* Tab icon — single icon with activity indicator beneath */}
+              {(() => {
+                // Determine which icon to show
+                let icon: React.ReactNode = null
+                if (isWorktreeTab) {
+                  icon = (
+                    <svg className="w-3 h-3 text-[var(--color-text-muted)] opacity-70" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="4" cy="4" r="1.5" /><circle cx="12" cy="4" r="1.5" /><circle cx="4" cy="12" r="1.5" />
+                      <path d="M4 5.5v5M4 8h6c1.1 0 2-.9 2-2v-.5" />
+                    </svg>
+                  )
+                } else if (isAgentPane) {
+                  icon = (
+                    <svg className="w-3 h-3 text-[var(--color-accent)]" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="5" width="10" height="8" rx="1.5" /><circle cx="6" cy="9" r="1" /><circle cx="10" cy="9" r="1" />
+                      <path d="M8 2v3" /><circle cx="8" cy="1.5" r="0.8" />
+                    </svg>
+                  )
+                } else if (cliAgent) {
+                  icon = <AgentIcon agent={cliAgent} size={12} />
+                }
+
+                // Activity state
+                const isActive = hasAgent && hasActiveAgent
+
+                if (icon) {
+                  return (
+                    <span className="flex-shrink-0 mr-1.5 flex flex-col items-center gap-0.5">
+                      {icon}
+                      {isActive && (
+                        <span className="w-2 h-[2px] bg-[var(--color-accent)] animate-pulse" />
+                      )}
+                    </span>
+                  )
+                }
+
+                // No icon — show minimal status dot only if needed
+                if (hasAgent) {
+                  return (
+                    <span
+                      className={`w-1.5 h-1.5 flex-shrink-0 mr-1.5 ${isActive ? 'bg-[var(--color-accent)] animate-pulse' : 'bg-green-500'}`}
+                    />
+                  )
+                }
+
+                return null
+              })()}
               <span className={`truncate flex-1 ${isDirty ? 'italic' : ''}`}>
                 {tab.title}
               </span>
