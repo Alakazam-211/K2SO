@@ -415,10 +415,10 @@ export default function App(): React.JSX.Element {
     return count
   })
   const hasDirtyTabs = useTabsStore((s) => s.tabs.some((t) => t.isDirty))
-  const hasActiveSessions = agentCount > 0 || workingPanes > 0
   useEffect(() => {
-    invoke('set_document_edited', { edited: hasActiveSessions || hasDirtyTabs }).catch(() => {})
-  }, [hasActiveSessions, hasDirtyTabs])
+    const edited = agentCount > 0 || workingPanes > 0 || hasDirtyTabs
+    invoke('set_document_edited', { edited }).catch(() => {})
+  }, [agentCount, workingPanes, hasDirtyTabs])
 
   // Check for unmigrated Cursor IDE conversations
   useCursorMigrationCheck()
