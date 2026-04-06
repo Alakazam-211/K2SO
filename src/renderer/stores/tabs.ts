@@ -1725,8 +1725,6 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   loadLayoutForWorkspace: (projectId: string, workspaceId: string, cwd: string) => {
     const key = `${projectId}:${workspaceId}`
     const savedLayout = get().workspaceLayouts[key]
-    console.log('[tabs] loadLayoutForWorkspace key=%s hasSavedLayout=%s cwd=%s', key, !!savedLayout, cwd)
-
     // Kill any existing PTYs in the active view before restoring
     get().clearAllTabs()
 
@@ -1976,11 +1974,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   restoreWorkspace: (key: string, cwd: string) => {
     const state = get()
     const live = state.backgroundWorkspaces[key]
-    console.log('[tabs] restoreWorkspace key=%s cwd=%s live=%s tabs=%d bgKeys=%s',
-      key, cwd, !!live, state.tabs.length, Object.keys(state.backgroundWorkspaces).join(','))
-
     if (live && (live.tabs.length > 0 || live.extraGroups.length > 0)) {
-      console.log('[tabs] restoreWorkspace: swapping in %d live tabs', live.tabs.length)
       // Live tabs with running PTYs — swap them in
       const { [key]: _, ...remaining } = state.backgroundWorkspaces
       set({
@@ -1999,7 +1993,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     // tabs might still be in the active view. Clear them before restoring so
     // the new workspace doesn't inherit the previous workspace's tabs.
     if (state.tabs.length > 0 || state.extraGroups.length > 0) {
-      console.warn('[tabs] restoreWorkspace: lingering tabs detected (%d) — clearing before restore', state.tabs.length)
+      console.warn('[tabs] restoreWorkspace: clearing %d lingering tabs', state.tabs.length)
       get().clearAllTabs()
     }
 

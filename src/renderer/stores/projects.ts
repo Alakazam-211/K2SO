@@ -176,7 +176,6 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
       // Capture the new project's ID from the backend result (untagged enum:
       // NeedsGitInit has needsGitInit field, Project has id field)
       const result = await invoke<Record<string, unknown>>('projects_add_from_path', { path })
-      console.log('[projects] addFromPath result:', JSON.stringify(result))
 
       // Check if the folder needs git initialization
       if (result && 'needsGitInit' in result) {
@@ -187,43 +186,32 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
       // The result IS the Project object — extract its ID for reliable lookup
       const newProjectId = (result as any)?.id as string | undefined
-      console.log('[projects] New project ID from result:', newProjectId)
 
       // Stash the workspace we're leaving BEFORE fetchProjects changes active IDs
       const preState = get()
       const tabsStore = useTabsStore.getState()
-      console.log('[projects] Pre-stash: activeProject=%s, activeWorkspace=%s, tabs=%d',
-        preState.activeProjectId, preState.activeWorkspaceId, tabsStore.tabs.length)
 
       if (preState.activeProjectId && preState.activeWorkspaceId) {
         tabsStore.stashWorkspace(`${preState.activeProjectId}:${preState.activeWorkspaceId}`)
       } else if (useTabsStore.getState().tabs.length > 0) {
         tabsStore.clearAllTabs()
       }
-      console.log('[projects] Post-stash: tabs=%d', useTabsStore.getState().tabs.length)
 
       await get().fetchProjects()
-      console.log('[projects] Post-fetch: tabs=%d, activeWorkspaceKey=%s',
-        useTabsStore.getState().tabs.length, useTabsStore.getState().activeWorkspaceKey)
 
       const state = get()
       // Find the new project by its ID from the backend result
       const newProject = newProjectId
         ? state.projects.find((p) => p.id === newProjectId)
         : state.projects[state.projects.length - 1]
-      console.log('[projects] Found new project: %s (%s)', newProject?.name, newProject?.id)
 
       if (newProject) {
         // Assign to the active focus group so it's visible in the current view
         const focusState = useFocusGroupsStore.getState()
         const targetGroupId = focusState.focusGroupsEnabled ? focusState.activeFocusGroupId : null
-        console.log('[projects] Focus group assignment: enabled=%s, activeGroupId=%s, targetGroupId=%s',
-          focusState.focusGroupsEnabled, focusState.activeFocusGroupId, targetGroupId)
         if (targetGroupId) {
           try {
-            // Invoke directly to avoid the wrapper swallowing errors
             await invoke('focus_groups_assign_project', { projectId: newProject.id, focusGroupId: targetGroupId })
-            console.log('[projects] Focus group assigned successfully')
             // Optimistic local update so sidebar shows it immediately
             set({
               projects: get().projects.map((p) =>
