@@ -147,7 +147,7 @@ export default function WorkspacePanel(): React.JSX.Element {
     <div className="h-full flex flex-col overflow-hidden">
       {/* ── Status ── */}
       <div className="px-3 py-3 border-b border-[var(--color-border)]">
-        {/* Mode + status */}
+        {/* Mode + status + launch button */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span
@@ -163,31 +163,49 @@ export default function WorkspacePanel(): React.JSX.Element {
               </span>
             )}
           </div>
-          {wsInboxCount > 0 && (
-            <span className="text-[11px] text-[var(--color-accent)]">
-              {wsInboxCount} inbox
-            </span>
+          {agentMode !== 'off' && (
+            <button
+              onClick={async () => {
+                try {
+                  await invoke('k2so_agents_build_launch', {
+                    projectPath: activeProject.path,
+                    agentName: primaryAgent?.name || 'coordinator',
+                    agentCliCommand: null,
+                  })
+                } catch (err) {
+                  console.error('[workspace-panel] Launch failed:', err)
+                }
+              }}
+              className="px-2 py-0.5 text-[10px] text-[var(--color-accent)] border border-[var(--color-accent)]/30 hover:bg-[var(--color-accent)]/10 transition-colors no-drag cursor-pointer"
+            >
+              Launch
+            </button>
           )}
         </div>
 
-        {/* Agent row — clickable to open agent pane */}
-        {agentMode !== 'off' && primaryAgent && (
-          <div
-            className="mt-2.5 px-2 py-1.5 hover:bg-[var(--color-bg-elevated)] transition-colors cursor-pointer -mx-1"
-            onClick={() => openAgentPane(primaryAgent.name, activeProject.path)}
-          >
-            <div className="flex items-center gap-2">
-              <span
-                className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-                style={{ backgroundColor: statusColor(projectStatus) }}
-              />
-              <div className="flex-1 min-w-0">
-                <span className="text-[11px] text-[var(--color-text-primary)] truncate block">{primaryAgent.name}</span>
-                <span className="text-[10px] text-[var(--color-text-muted)] truncate block">{primaryAgent.role}</span>
+        {/* Work summary — inbox / delegated / review */}
+        {agentMode !== 'off' && (() => {
+          const totalInbox = wsInboxCount + agents.reduce((sum, a) => sum + a.inboxCount, 0)
+          const totalActive = agents.reduce((sum, a) => sum + a.activeCount, 0)
+          const totalDone = agents.reduce((sum, a) => sum + a.doneCount, 0)
+          if (totalInbox === 0 && totalActive === 0 && totalDone === 0) return null
+          return (
+            <div className="flex items-center gap-4 mt-2.5">
+              <div className="text-center">
+                <div className={`text-sm font-semibold tabular-nums ${totalInbox > 0 ? 'text-[var(--color-accent)]' : 'text-[var(--color-text-muted)]'}`}>{totalInbox}</div>
+                <div className="text-[9px] text-[var(--color-text-muted)] uppercase tracking-wider">Inbox</div>
+              </div>
+              <div className="text-center">
+                <div className={`text-sm font-semibold tabular-nums ${totalActive > 0 ? 'text-yellow-400' : 'text-[var(--color-text-muted)]'}`}>{totalActive}</div>
+                <div className="text-[9px] text-[var(--color-text-muted)] uppercase tracking-wider">Active</div>
+              </div>
+              <div className="text-center">
+                <div className={`text-sm font-semibold tabular-nums ${totalDone > 0 ? 'text-green-400' : 'text-[var(--color-text-muted)]'}`}>{totalDone}</div>
+                <div className="text-[9px] text-[var(--color-text-muted)] uppercase tracking-wider">Review</div>
               </div>
             </div>
-          </div>
-        )}
+          )
+        })()}
 
         {/* Off mode inbox shortcut */}
         {agentMode === 'off' && wsInboxCount > 0 && (
