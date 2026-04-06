@@ -140,6 +140,7 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
   const terminalIdRef = useRef(`agent-chat-${agentName}`)
   const [resolvedArgs, setResolvedArgs] = useState<string[] | undefined>(undefined)
   const [ready, setReady] = useState(false)
+  const [terminalKey, setTerminalKey] = useState(0) // increment to force AlacrittyTerminalView remount
 
   // Resolve the user's default AI agent command
   const defaultAgent = useSettingsStore((s) => s.defaultAgent)
@@ -172,12 +173,14 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
           })
           if (!cancelled && sessionId) {
             // Kill any stale terminal that was restored from layout without --resume
-            // so AlacrittyTerminalView recreates it with the correct args
+            // so AlacrittyTerminalView recreates it with the correct args.
+            // Increment terminalKey to force remount so the listener resubscribes.
             const staleId = terminalIdRef.current
             try {
               const staleExists = await invoke<boolean>('terminal_exists', { id: staleId })
               if (staleExists) {
                 await invoke('terminal_kill', { id: staleId })
+                setTerminalKey((k) => k + 1)
               }
             } catch { /* ignore */ }
             setResolvedArgs([...baseArgs, toolConfig.resumeFlag, sessionId])
@@ -222,6 +225,7 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
   return (
     <div ref={containerRef} className="h-full">
       <AlacrittyTerminalView
+        key={terminalKey}
         terminalId={terminalIdRef.current}
         cwd={agentDir}
         command={agentCommand.command}
