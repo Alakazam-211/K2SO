@@ -329,13 +329,13 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
 
   return (
     <AIFileEditor
-      filePath={agentMdPath}
+      filePath={currentPath || agentMdPath}
       watchDir={watchDir}
       cwd={watchDir}
       command={terminalCommand}
       args={terminalArgs}
       title={`Agent: ${agentName}`}
-      instructions={`Editing ${activeTab === 'profile' ? 'agent.md' : activeTab === 'claude-md' ? 'Agent CLAUDE.md' : 'Workspace CLAUDE.md'} — ${currentPath || ''}`}
+      instructions={undefined}
       warningText="This agent has full system access when running."
       onFileChange={handleFileChange}
       onClose={handleClose}

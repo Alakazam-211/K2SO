@@ -89,6 +89,9 @@ export function AIFileEditor({
   const terminalIdRef = useRef(`ai-editor-${crypto.randomUUID()}`)
   const [terminalReady, setTerminalReady] = useState(false)
   const [activeFilePath, setActiveFilePath] = useState(filePath)
+
+  // Sync with prop changes (e.g. persona editor tab switches)
+  useEffect(() => { setActiveFilePath(filePath) }, [filePath])
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // ── Session resume: detect previous editor session ────────────────
