@@ -121,7 +121,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
     }
   }, [agentMdPath, handleFileChange])
 
-  // On close: backup agent.md, regenerate both CLAUDE.md files, then close
+  // On close: backup agent.md, then close
   const handleClose = useCallback(async () => {
     try {
       if (agentMdPath) {
@@ -132,10 +132,6 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
           content: result.content,
         })
       }
-      // Regenerate agent-specific CLAUDE.md from updated agent.md
-      await invoke('k2so_agents_generate_claude_md', { projectPath, agentName }).catch(() => {})
-      // Regenerate workspace root CLAUDE.md so manual Claude sessions get the update
-      await invoke('k2so_agents_generate_workspace_claude_md', { projectPath }).catch(() => {})
     } catch (err) {
       console.error('[agent-editor] Failed to save on close:', err)
     }
@@ -247,13 +243,24 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
       `• Frontmatter (between --- delimiters): name, role, type — these are read by the system`,
       `• Body (below frontmatter): all instructions, behavior, personality, tools, integrations`,
       ``,
-      `## How This File Is Used`,
+      `## Three Files You Should Keep In Sync`,
       ``,
-      `When you save agent.md, K2SO automatically regenerates TWO CLAUDE.md files:`,
-      `• \`.k2so/agents/${context.agentName}/CLAUDE.md\` — used by heartbeat/automated launches`,
-      `• Workspace root \`CLAUDE.md\` — used by manual Claude sessions the user launches`,
-      `Both files are derived from agent.md + K2SO's CLI tools docs. The user can further`,
-      `customize the root CLAUDE.md separately if they want different behavior for manual sessions.`,
+      `There are THREE files that define this agent's behavior. You have access to all of them:`,
+      ``,
+      `1. **agent.md** (in current directory) — the agent's core identity, role, standing orders, and personality.`,
+      `   Path: \`${projectPath}/.k2so/agents/${context.agentName}/agent.md\``,
+      ``,
+      `2. **Agent CLAUDE.md** — read by the agent during heartbeat/automated launches.`,
+      `   Path: \`${projectPath}/.k2so/agents/${context.agentName}/CLAUDE.md\``,
+      `   Should contain the agent identity + K2SO CLI tools + work queue info.`,
+      ``,
+      `3. **Workspace CLAUDE.md** — read by the user's manual Claude sessions launched from the workspace.`,
+      `   Path: \`${projectPath}/CLAUDE.md\``,
+      `   Should contain project context + CLI tools so manual sessions understand the workspace.`,
+      ``,
+      `When the user asks you to update the agent's behavior, update agent.md AND the relevant CLAUDE.md file(s).`,
+      `Don't just copy-paste — tailor each file for its audience (automated heartbeat vs manual user session).`,
+      `You can read and write all three files directly using their full paths above.`,
       ``,
       `## Key Sections to Help Configure:`,
       ``,
@@ -281,7 +288,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
       return [
         ...baseArgs,
         '--append-system-prompt', agentPrompt,
-        `Open and read agent.md in the current directory. This defines the agent "${context.agentName}" (${context.role}). The user sees a tabbed preview on the right (Profile + CLAUDE.md). Start by asking what they want this agent to do.`,
+        `Open and read all three files: agent.md (current dir), CLAUDE.md (current dir), and ${projectPath}/CLAUDE.md (workspace root). This defines the agent "${context.agentName}" (${context.role}). The user sees all three files in the preview tabs. Start by asking what they want this agent to do.`,
       ]
     }
     return baseArgs
