@@ -67,6 +67,26 @@ Agents can spawn parallel sub-terminals for concurrent tasks (`k2so terminal spa
 **Session Resume & Transcript Pruning:**
 Heartbeat agents use Claude Code's `--resume` flag to continue from their last session, avoiding full context reload on each wake. No-op sessions (agent woke up, found nothing to do) are pruned automatically -- the session ID is cleared so the next launch starts fresh.
 
+**Virtual Terminal I/O:**
+The `k2so` CLI can read from and write to any running terminal session. Agents can communicate with each other across workspaces:
+- `k2so agents running` -- list all active CLI LLM sessions
+- `k2so terminal write <id> "message"` -- send text to a running terminal (raw PTY keystrokes)
+- `k2so terminal read <id> --lines 50` -- read the last N lines from a terminal buffer
+
+**Running Agents Panel (Cmd+J):**
+A searchable overlay showing all active CLI LLM sessions across workspaces. Click to navigate, copy terminal ID for CLI reference, or send messages directly to running agents. TopBar button shows active agent count.
+
+**Coordinator Automation:**
+- `k2so heartbeat wake` -- detects inbox work, wakes the coordinator (resumes previous session), and sends a triage message
+- `k2so agent complete` -- sub-agent completion that auto-merges (Build state) or submits for review (Managed Service) based on workspace state capabilities
+- Delegates include a completion protocol in CLAUDE.md so sub-agents know how to finish their work
+
+**Chat Tab Live Terminal Connection:**
+The Chat tab for Coordinators and Worktrees follows a three-step lifecycle:
+1. **Attach** -- if a terminal is already running, connect to it with real-time grid updates
+2. **Resume** -- if no terminal but a previous session exists, launch with `--resume`
+3. **Fresh** -- if no terminal and no session, start a new Claude session
+
 **Launch Failure Detection:**
 If an agent's terminal exits within 5 seconds of starting, K2SO treats it as a launch failure, notifies the user, and retries once after 30 seconds.
 
@@ -110,12 +130,11 @@ View Claude and Cursor chat history in the sidebar. Click a session to resume it
 Terminal PTYs survive tab switches via a scrollback buffer architecture. Switch tabs freely without losing terminal state -- output is buffered and replayed on reattach.
 
 ### Workspace Tab
-A unified **Workspace** panel (replacing the old Agents + Review tabs) shows three sections:
-- **Status** -- current mode (Off/Custom/K2SO Agent/Coordinator), heartbeat indicator
-- **Coordinator** -- the primary agent with Work/Chat/Profile tabs
+A unified **Workspace** panel (replacing the old Agents + Review tabs) shows two sections:
+- **Status** -- current mode, work summary counters (Inbox/Active/Review), Launch button, heartbeat toggle, workspace state selector
 - **Worktrees** -- all open worktrees with Task/Chat/Review tabs
 
-Click a worktree to view its assigned task, chat with the running agent, or review completed work. Click **Open Full Workspace** to promote it to a full nav entry with file tree and changes panel. Worktree nav entries persist across app restarts (DB-backed) and can be dismissed with the hover close button.
+The status section shows color-coded work counts across all agents. The Launch button triggers `k2so heartbeat wake` to wake the coordinator. Click a worktree to view its assigned task, chat with the running agent, or review completed work. Click **Open Full Workspace** to promote it to a full nav entry with file tree and changes panel.
 
 ### Git Worktree Management
 First-class support for git worktrees. Create worktrees from new or existing branches via the "+" button in the Workspace panel. Projects can run in worktree mode or standard mode.
@@ -134,6 +153,8 @@ Workspace layouts (tab groups, open documents, terminal sessions) save and resto
 - **Cmd+D** -- Split pane
 - **Cmd+L** -- AI Workspace Assistant
 - **Cmd+K** -- Quick switcher
+- **Cmd+J** -- Running Agents panel
+- **Cmd+P** -- Review queue
 
 ### Icon Cropping
 Upload custom workspace icons with a built-in crop dialog -- drag to position, scroll to zoom, apply to save.
@@ -207,10 +228,12 @@ Tests live in the `tests/` directory. Run them against a running K2SO instance.
 
 | Suite | Tests | Prerequisites | What it validates |
 |-------|-------|--------------|-------------------|
-| `cli-integration-test.sh` | 38 pass, 18 skip | Running K2SO | Every CLI command returns expected output |
+| `cli-integration-test.sh` | 69 pass, 0 skip | Running K2SO | Every CLI command, delegate, review approve/reject, cross-workspace work, heartbeat, terminal I/O |
 | `behavior-test-tier1.sh` | 25 pass | Running K2SO | Auto-backoff math, lock prevention, priority ordering, session resume, CLAUDE.md content, event queue flow, transcript pruning |
 | `behavior-test-tier2.sh` | 8+ pass | Running K2SO + registered workspace | Source gating by state, locked state blocking, state persistence |
 | `behavior-test-tier3.sh` | 22 pass | sqlite3 only | Migration safety, heartbeat script correctness, agent templates, LLM triage prompt validation |
+
+Tests auto-register workspaces via `k2so workspace open` -- no manual UI setup required. Total: **116+ tests, 0 failures, 0 skipped**.
 
 ### Running Tests
 
@@ -218,15 +241,12 @@ Tests live in the `tests/` directory. Run them against a running K2SO instance.
 # 1. Start K2SO
 cargo tauri dev
 
-# 2. Create a test workspace (one-time setup)
-mkdir -p ~/DevProjects/k2so-cli-test && cd ~/DevProjects/k2so-cli-test && git init
-
-# 3. Run all test suites
-./tests/cli-integration-test.sh    # CLI command I/O
-./tests/behavior-test-tier1.sh     # Behavioral (no DB needed)
+# 2. Run all test suites (workspaces auto-register)
+./tests/cli-integration-test.sh    # Full CLI + agent orchestration
+./tests/behavior-test-tier1.sh     # Behavioral (filesystem-based)
 ./tests/behavior-test-tier3.sh     # Unit-style (no K2SO needed)
 
-# 4. For DB-dependent tests, register the workspace in K2SO UI first:
+# 3. For DB-dependent tests:
 ./tests/behavior-test-tier2.sh
 ```
 

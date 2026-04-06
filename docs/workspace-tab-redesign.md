@@ -120,4 +120,12 @@ function patchWorkspaceNavVisible(worktreeId: string, visible: boolean): void {
 ### Known Dev-Mode Limitations
 
 - The `FileTree` component has a `clearSelection()` call during render (setState during render) that React dev mode warns about. This is a pre-existing pattern that works correctly but generates console warnings.
-- Rapid workspace switching in dev mode (10+ switches in quick succession) will eventually degrade due to accumulated Tauri listener leaks from the double-mount cycle. This does not occur in production builds.
+- React strict mode is disabled in dev (v0.23.2+) to prevent double-mount listener leaks that caused IPC degradation after 10+ workspace switches.
+
+### v0.24.x Updates
+
+- **Workspace panel redesigned again** (v0.24.3): merged coordinator sections into single status row with Inbox/Active/Review counters and Launch button
+- **Chat tab connects to live terminals**: delegate-launched terminals use deterministic IDs matching the Chat tab, enabling real-time grid updates
+- **Panel tab cycling fix**: `initFromSettings` guard prevents `sync:settings` → `initFromSettings` → `settings_update` infinite loop
+- **File tree uses worktree path**: when viewing a worktree workspace, the file tree shows worktree files, not main repo
+- See [docs/agent-orchestration.md](agent-orchestration.md) for the full agent automation system documentation
