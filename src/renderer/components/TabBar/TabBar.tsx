@@ -308,21 +308,9 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
 
                 if (icon) {
                   return (
-                    <span className="flex-shrink-0 mr-1.5 flex flex-col items-center gap-0.5">
+                    <span className="flex-shrink-0 mr-1.5">
                       {icon}
-                      {isActive && (
-                        <span className="w-2 h-[2px] bg-[var(--color-accent)] animate-pulse" />
-                      )}
                     </span>
-                  )
-                }
-
-                // No icon — show minimal status dot only if needed
-                if (hasAgent) {
-                  return (
-                    <span
-                      className={`w-1.5 h-1.5 flex-shrink-0 mr-1.5 ${isActive ? 'bg-[var(--color-accent)] animate-pulse' : 'bg-green-500'}`}
-                    />
                   )
                 }
 
@@ -332,21 +320,22 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
                 {tab.title}
               </span>
               <button
-                className="ml-2 flex h-4 w-4 flex-shrink-0 items-center justify-center hover:bg-white/10"
+                className="ml-2 flex h-4 w-4 flex-shrink-0 items-center justify-center hover:bg-white/10 group/close"
                 onClick={(e) => handleCloseTab(e, tab.id)}
-                title="Close tab"
+                title={hasAgent && hasActiveAgent ? 'Agent is active — close anyway' : 'Close tab'}
               >
-                <svg
-                  width="8"
-                  height="8"
-                  viewBox="0 0 8 8"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                >
-                  <line x1="1" y1="1" x2="7" y2="7" />
-                  <line x1="7" y1="1" x2="1" y2="7" />
-                </svg>
+                {hasAgent && hasActiveAgent ? (
+                  <>
+                    <span className="braille-spinner text-[10px] text-[var(--color-accent)] group-hover/close:hidden" />
+                    <svg className="hidden group-hover/close:block" width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5">
+                      <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
+                    </svg>
+                  </>
+                ) : (
+                  <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
+                  </svg>
+                )}
               </button>
             </div>
           )
