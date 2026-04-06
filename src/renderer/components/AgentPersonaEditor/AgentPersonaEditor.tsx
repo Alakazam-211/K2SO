@@ -117,8 +117,15 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
   }, [projectPath, agentName])
 
   const handleFileChange = useCallback((content: string) => {
-    setAgentContent(content)
-  }, [])
+    // Route file change to the correct state based on active tab
+    if (activeTab === 'profile') {
+      setAgentContent(content)
+    } else if (activeTab === 'claude-md') {
+      setClaudeMdContent(content)
+    } else {
+      setWsClaudeMdContent(content)
+    }
+  }, [activeTab])
 
   // Manual refresh: re-read agent.md directly
   const handleManualRefresh = useCallback(async () => {
@@ -326,7 +333,6 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
   // The content/path for the current tab
   const currentContent = activeTab === 'profile' ? agentContent : activeTab === 'claude-md' ? claudeMdContent : wsClaudeMdContent
   const currentPath = activeTab === 'profile' ? agentMdPath : activeTab === 'claude-md' ? claudeMdPath : wsClaudeMdPath
-
   return (
     <AIFileEditor
       filePath={currentPath || agentMdPath}

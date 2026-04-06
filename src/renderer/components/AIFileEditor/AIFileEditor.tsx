@@ -68,6 +68,8 @@ interface AIFileEditorProps {
   title?: string
   /** Optional manual refresh callback */
   onManualRefresh?: () => void
+  /** Enable file rename detection — watcher scans watchDir for renamed files (default: false) */
+  trackFileRename?: boolean
 }
 
 // ── Component ────────────────────────────────────────────────────────
@@ -85,13 +87,17 @@ export function AIFileEditor({
   onClose,
   title = 'AI File Editor',
   onManualRefresh,
+  trackFileRename = false,
 }: AIFileEditorProps): React.JSX.Element {
   const terminalIdRef = useRef(`ai-editor-${crypto.randomUUID()}`)
   const [terminalReady, setTerminalReady] = useState(false)
   const [activeFilePath, setActiveFilePath] = useState(filePath)
 
   // Sync with prop changes (e.g. persona editor tab switches)
-  useEffect(() => { setActiveFilePath(filePath) }, [filePath])
+  useEffect(() => {
+    setActiveFilePath(filePath)
+    lastContentRef.current = '' // Reset so new file content triggers onFileChange
+  }, [filePath])
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // ── Session resume: detect previous editor session ────────────────
@@ -140,26 +146,38 @@ export function AIFileEditor({
 
     const findAndRead = async () => {
       try {
-        const entries = await invoke<{ name: string; path: string; isDirectory: boolean; modifiedAt: number }[]>(
-          'fs_read_dir', { path: watchDir }
-        )
-        const matching = entries
-          .filter((e) => !e.isDirectory && e.name.endsWith(`.${fileExtension}`) && !e.name.startsWith('.'))
-          .sort((a, b) => b.modifiedAt - a.modifiedAt)
+        if (trackFileRename) {
+          // Scan directory for renamed files — used by theme editor etc.
+          const entries = await invoke<{ name: string; path: string; isDirectory: boolean; modifiedAt: number }[]>(
+            'fs_read_dir', { path: watchDir }
+          )
+          const matching = entries
+            .filter((e) => !e.isDirectory && e.name.endsWith(`.${fileExtension}`) && !e.name.startsWith('.'))
+            .sort((a, b) => b.modifiedAt - a.modifiedAt)
 
-        const target = matching[0]
-        if (!target) return
+          const target = matching[0]
+          if (!target) return
 
-        setActiveFilePath((prev) => {
-          if (prev !== target.path) return target.path
-          return prev
-        })
+          // Only update activeFilePath if the original was renamed (no longer in directory)
+          const originalStillExists = entries.some((e) => e.path === filePath)
+          if (!originalStillExists && target.path !== filePath) {
+            setActiveFilePath(target.path)
+          }
 
-        const result = await invoke<{ content: string; path: string; name: string }>('fs_read_file', { path: target.path })
-        const content = result.content
-        if (content !== lastContentRef.current) {
-          lastContentRef.current = content
-          onFileChange(content)
+          const result = await invoke<{ content: string; path: string; name: string }>('fs_read_file', { path: target.path })
+          const content = result.content
+          if (content !== lastContentRef.current) {
+            lastContentRef.current = content
+            onFileChange(content)
+          }
+        } else {
+          // Direct file read — no directory scanning, no rename detection
+          const result = await invoke<{ content: string; path: string; name: string }>('fs_read_file', { path: filePath })
+          const content = result.content
+          if (content !== lastContentRef.current) {
+            lastContentRef.current = content
+            onFileChange(content)
+          }
         }
       } catch {
         // Directory might not exist yet or file mid-write — ignore
@@ -183,7 +201,7 @@ export function AIFileEditor({
       if (debounceRef.current) clearTimeout(debounceRef.current)
       invoke('fs_unwatch_dir', { path: watchDir }).catch((e) => console.warn('[ai-editor]', e))
     }
-  }, [watchDir, fileExtension, onFileChange])
+  }, [watchDir, filePath, fileExtension, trackFileRename, onFileChange])
 
   // ── Terminal cleanup on unmount ────────────────────────────────────
   const cwdRef = useRef(cwd)

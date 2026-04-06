@@ -273,6 +273,7 @@ export function CustomThemeCreator({ onClose, currentThemeId, existingThemePath 
       onFileChange={handleFileChange}
       onClose={handleClose}
       onManualRefresh={handleManualRefresh}
+      trackFileRename
       preview={
         <div className="h-full">
           <CodeEditor
