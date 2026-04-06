@@ -1951,9 +1951,54 @@ k2so work send --workspace /path/to/api-server --title "..." --body "..."
 
 # Set up a new workspace from scratch
 K2SO_PROJECT_PATH="/path/to/new-project" k2so mode coordinator
-K2SO_PROJECT_PATH="/path/to/new-project" k2so worktree on
+K2SO_PROJECT_PATH="/path/to/new-project" k2so heartbeat on
 K2SO_PROJECT_PATH="/path/to/new-project" k2so agents create backend-eng --role "..."
+
+# Register a new workspace via CLI
+k2so workspace create /path/to/new-project   # Create folder + register
+k2so workspace open /path/to/existing        # Register existing folder
 ```
+
+## Testing Coordinator Workflows
+
+To wake a coordinator and have it process inbox work:
+```bash
+# Add work to the workspace inbox
+k2so work create --title "..." --body "..." --priority high --type task --source feature
+
+# Wake the coordinator (resumes previous session, sends triage message)
+k2so heartbeat wake
+```
+
+The coordinator will check inbox, delegate to agents, and track progress.
+
+## Monitoring Running Agents
+
+```bash
+# See all active CLI LLM sessions across workspaces
+k2so agents running
+
+# Read what an agent is doing
+k2so terminal read <terminal-id> --lines 30
+
+# Send a message to a running agent
+k2so terminal write <terminal-id> "message"
+
+# Check agent work status
+k2so agents list
+k2so reviews                    # See pending reviews
+```
+
+## Workspace States
+
+Workspaces operate under states that control agent autonomy:
+- **Build** — agents auto-merge everything
+- **Managed Service** — features are gated (need human approval), bugs/security auto-merge
+- **Maintenance** — everything gated
+- **Locked** — no agent activity
+
+The coordinator and sub-agents adapt their completion behavior based on the state.
+Sub-agents use `k2so agent complete` which auto-merges or submits for review accordingly.
 
 ## Current Context
 
