@@ -30,6 +30,14 @@ echo "════════════════════════�
 echo "  K2SO Release: ${TAG}"
 echo "═══════════════════════════════════════════════════"
 
+# Load .env file if present (contains TAURI_SIGNING_PRIVATE_KEY_PASSWORD)
+if [ -f "$PROJECT_DIR/.env" ]; then
+    set -a
+    source "$PROJECT_DIR/.env"
+    set +a
+    echo "Loaded .env"
+fi
+
 # Load signing key from file if env var not set
 if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
     KEY_FILE="$HOME/.tauri/k2so-updater.key"

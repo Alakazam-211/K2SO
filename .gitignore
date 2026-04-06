@@ -11,3 +11,7 @@ src-tauri/target/
 *.db-wal
 drizzle/meta/
 .claude/
+.env
+.env.*
+*.key
+*.key.pub
