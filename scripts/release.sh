@@ -99,21 +99,19 @@ xcrun notarytool submit "/tmp/K2SO_${VERSION}.zip" \
 xcrun stapler staple "K2SO.app"
 echo "  App notarized and stapled."
 
-# ── Step 5: Create update bundle (tar.gz) from notarized app ──
+# ── Step 5: Create update bundle (tar.gz) from notarized app + sign it ──
 echo ""
-echo "Step 5: Creating update bundle..."
+echo "Step 5: Creating and signing update bundle..."
 cd "$PROJECT_DIR"
 tar -czf "src-tauri/target/release/bundle/macos/K2SO.app.tar.gz" \
     -C "src-tauri/target/release/bundle/macos" "K2SO.app"
 
-# Sign the update bundle with Tauri key
-# The sig file should already exist from tauri build, but recreate from our tarball
-if [ -f "src-tauri/target/release/bundle/macos/K2SO.app.tar.gz.sig" ]; then
-    echo "  Signature file exists from build."
-else
-    echo "  WARNING: No signature file found. The updater may not work."
-fi
-echo "  Update bundle ready."
+# Sign the update bundle with Tauri updater key
+bunx @tauri-apps/cli@2 signer sign \
+    "src-tauri/target/release/bundle/macos/K2SO.app.tar.gz" \
+    --private-key "$TAURI_SIGNING_PRIVATE_KEY" \
+    --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+echo "  Update bundle signed."
 
 # ── Step 6: Create DMG from notarized app ──
 echo ""
