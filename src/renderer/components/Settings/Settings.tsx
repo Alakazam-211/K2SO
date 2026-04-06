@@ -35,7 +35,7 @@ import { useClaudeAuthStore } from '@/stores/claude-auth'
 import type { ClaudeAuthState } from '@/stores/claude-auth'
 import { useConfirmDialogStore } from '@/stores/confirm-dialog'
 import { checkForUpdate } from '@/hooks/useUpdateChecker'
-import type { UpdateInfo } from '@/hooks/useUpdateChecker'
+import { useUpdateStore } from '@/stores/update'
 import {
   useTimerStore,
   formatTimestamp,
@@ -507,8 +507,10 @@ function GeneralSection(): React.JSX.Element {
   const resetAllSettings = useSettingsStore((s) => s.resetAllSettings)
   const [confirming, setConfirming] = useState(false)
   const [currentVersion, setCurrentVersion] = useState<string>('')
-  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
-  const [checking, setChecking] = useState(false)
+  const updateStatus = useUpdateStore((s) => s.status)
+  const updateVersion = useUpdateStore((s) => s.version)
+  const updateProgress = useUpdateStore((s) => s.progress)
+  const updateError = useUpdateStore((s) => s.error)
 
   // Load current version on mount
   useEffect(() => {
@@ -516,13 +518,7 @@ function GeneralSection(): React.JSX.Element {
   }, [])
 
   const handleCheckUpdate = useCallback(async () => {
-    setChecking(true)
-    try {
-      const info = await checkForUpdate(true)
-      setUpdateInfo(info)
-    } finally {
-      setChecking(false)
-    }
+    await checkForUpdate(true)
   }, [])
 
   // Auto-check for updates when navigated here from the update toast
@@ -545,33 +541,80 @@ function GeneralSection(): React.JSX.Element {
             <span className="text-xs text-[var(--color-text-muted)]">
               v{currentVersion || '...'}
             </span>
-            <button
-              onClick={handleCheckUpdate}
-              disabled={checking}
-              className="px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer disabled:opacity-50"
-            >
-              {checking ? 'Checking...' : 'Check for Updates'}
-            </button>
+            {updateStatus === 'idle' && (
+              <button
+                onClick={handleCheckUpdate}
+                className="px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer"
+              >
+                Check for Updates
+              </button>
+            )}
+            {updateStatus === 'checking' && (
+              <span className="text-[10px] text-[var(--color-text-muted)]">Checking...</span>
+            )}
           </div>
         </div>
 
-        {/* Update available banner */}
-        {updateInfo?.has_update && (
+        {/* Update available */}
+        {updateStatus === 'available' && updateVersion && (
           <div className="flex items-center justify-between p-3 bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/30">
             <div>
-              <p className="text-xs text-[var(--color-text-primary)]">
-                K2SO v{updateInfo.latest_version} is available
-              </p>
-              <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
-                You&apos;re on v{updateInfo.current_version}
-              </p>
+              <p className="text-xs text-[var(--color-text-primary)]">K2SO v{updateVersion} is available</p>
+              <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">You&apos;re on v{currentVersion}</p>
             </div>
             <button
               className="px-3 py-1 text-xs font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
-              onClick={() => invoke('open_external', { url: updateInfo!.download_url }).catch((e) => console.warn('[settings]', e))}
+              onClick={() => useUpdateStore.getState().startDownload()}
             >
-              Download
+              Download & Install
             </button>
+          </div>
+        )}
+
+        {/* Downloading */}
+        {updateStatus === 'downloading' && (
+          <div className="p-3 border border-[var(--color-border)]">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs text-[var(--color-text-primary)]">Downloading v{updateVersion}...</span>
+              <span className="text-[10px] tabular-nums text-[var(--color-text-muted)]">{updateProgress}%</span>
+            </div>
+            <div className="h-1.5 bg-[var(--color-border)] overflow-hidden">
+              <div
+                className="h-full bg-[var(--color-accent)] transition-all duration-300"
+                style={{ width: `${updateProgress}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Ready to install */}
+        {updateStatus === 'ready' && (
+          <div className="flex items-center justify-between p-3 bg-green-500/10 border border-green-500/30">
+            <div>
+              <p className="text-xs text-[var(--color-text-primary)]">v{updateVersion} is ready to install</p>
+              <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">The app will restart after installation</p>
+            </div>
+            <button
+              className="px-3 py-1 text-xs font-medium bg-green-500 text-white hover:bg-green-600 transition-colors no-drag cursor-pointer"
+              onClick={() => useUpdateStore.getState().installAndRelaunch()}
+            >
+              Install & Relaunch
+            </button>
+          </div>
+        )}
+
+        {/* Error */}
+        {updateStatus === 'error' && (
+          <div className="p-3 border border-red-500/30 bg-red-500/5">
+            <p className="text-[10px] text-red-400">{updateError}</p>
+            <div className="flex items-center gap-2 mt-2">
+              <button
+                className="px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] transition-colors no-drag cursor-pointer"
+                onClick={handleCheckUpdate}
+              >
+                Retry
+              </button>
+            </div>
           </div>
         )}
 

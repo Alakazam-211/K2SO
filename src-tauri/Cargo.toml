@@ -21,6 +21,8 @@ tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-deep-link = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 portable-pty = "0.8"
 rusqlite = { version = "0.31", features = ["bundled"] }
 git2 = { version = "0.19", features = ["vendored-openssl"] }

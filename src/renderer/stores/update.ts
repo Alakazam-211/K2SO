@@ -1,0 +1,81 @@
+import { create } from 'zustand'
+import { check, type Update } from '@tauri-apps/plugin-updater'
+import { relaunch } from '@tauri-apps/plugin-process'
+
+type UpdateStatus = 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'error'
+
+interface UpdateState {
+  status: UpdateStatus
+  version: string | null
+  notes: string | null
+  progress: number
+  error: string | null
+  checkForUpdate: () => Promise<boolean>
+  startDownload: () => Promise<void>
+  installAndRelaunch: () => Promise<void>
+}
+
+let pendingUpdate: Update | null = null
+
+export const useUpdateStore = create<UpdateState>((set, get) => ({
+  status: 'idle',
+  version: null,
+  notes: null,
+  progress: 0,
+  error: null,
+
+  checkForUpdate: async () => {
+    set({ status: 'checking', error: null })
+    try {
+      const update = await check()
+      if (update) {
+        pendingUpdate = update
+        set({
+          status: 'available',
+          version: update.version,
+          notes: update.body ?? null,
+        })
+        return true
+      }
+      set({ status: 'idle' })
+      return false
+    } catch (err) {
+      console.error('[updater] Check failed:', err)
+      set({ status: 'error', error: String(err) })
+      return false
+    }
+  },
+
+  startDownload: async () => {
+    if (!pendingUpdate) return
+    set({ status: 'downloading', progress: 0 })
+    try {
+      let contentLength = 0
+      let downloaded = 0
+      await pendingUpdate.downloadAndInstall((event) => {
+        if (event.event === 'Started') {
+          contentLength = (event.data as any).contentLength ?? 0
+        } else if (event.event === 'Progress') {
+          downloaded += (event.data as any).chunkLength ?? 0
+          const pct = contentLength > 0 ? Math.round((downloaded / contentLength) * 100) : 0
+          set({ progress: pct })
+        } else if (event.event === 'Finished') {
+          set({ status: 'ready', progress: 100 })
+        }
+      })
+      set({ status: 'ready', progress: 100 })
+    } catch (err) {
+      console.error('[updater] Download failed:', err)
+      set({ status: 'error', error: String(err) })
+    }
+  },
+
+  installAndRelaunch: async () => {
+    try {
+      await relaunch()
+    } catch (err) {
+      console.error('[updater] Relaunch failed:', err)
+      set({ status: 'error', error: String(err) })
+    }
+  },
+}))
