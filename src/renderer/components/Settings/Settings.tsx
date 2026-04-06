@@ -620,6 +620,17 @@ function GeneralSection(): React.JSX.Element {
               >
                 Retry
               </button>
+              <button
+                className="px-2 py-0.5 text-[10px] text-[var(--color-accent)] border border-[var(--color-accent)]/30 hover:bg-[var(--color-accent)]/10 transition-colors no-drag cursor-pointer"
+                onClick={() => {
+                  const tag = updateVersion ? `v${updateVersion}` : 'latest'
+                  invoke('plugin:opener|open_url', { url: `https://github.com/Alakazam-211/K2SO/releases/tag/${tag}` }).catch(() => {
+                    window.open(`https://github.com/Alakazam-211/K2SO/releases/tag/${tag}`)
+                  })
+                }}
+              >
+                Download
+              </button>
             </div>
           </div>
         )}
