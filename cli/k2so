@@ -655,23 +655,38 @@ cmd_heartbeat_wake() {
     # 2. If coordinator is running → send triage message
     # 3. If coordinator is asleep → launch with triage prompt
     # Check both agent inboxes and workspace inbox for work
-    local agents_json ws_inbox_json
-    agents_json=$(cli_request "/cli/agents/list" 2>/dev/null)
-    ws_inbox_json=$(cli_request "/cli/work/inbox" 2>/dev/null)
-
     local has_work
     has_work=$(python3 -c "
-import json, sys
+import json, sys, subprocess, os
+
+port = os.environ.get('K2SO_PORT', '')
+token = os.environ.get('K2SO_HOOK_TOKEN', '')
+if not port:
+    try: port = open(os.path.expanduser('~/.k2so/heartbeat.port')).read().strip()
+    except: pass
+if not token:
+    try: token = open(os.path.expanduser('~/.k2so/heartbeat.token')).read().strip()
+    except: pass
+
+project = '$PROJECT'
+base = f'http://127.0.0.1:{port}'
+
+agent_inbox = False
+ws_inbox = False
 try:
-    agents = json.loads('''$agents_json''')
-    agent_inbox = any(a.get('inboxCount', 0) > 0 for a in agents)
-except:
-    agent_inbox = False
+    import urllib.request
+    req = urllib.request.Request(f'{base}/cli/agents/list?token={token}&project={urllib.parse.quote(project)}')
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        agents = json.loads(resp.read())
+        agent_inbox = any(a.get('inboxCount', 0) > 0 for a in agents)
+except: pass
 try:
-    ws_items = json.loads('''$ws_inbox_json''')
-    ws_inbox = len(ws_items) > 0 if isinstance(ws_items, list) else False
-except:
-    ws_inbox = False
+    req = urllib.request.Request(f'{base}/cli/work/inbox?token={token}&project={urllib.parse.quote(project)}')
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        items = json.loads(resp.read())
+        ws_inbox = len(items) > 0 if isinstance(items, list) else False
+except: pass
+
 print('yes' if (agent_inbox or ws_inbox) else 'no')
 " 2>/dev/null || echo "no")
 
