@@ -4,8 +4,49 @@ import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
 import { useSettingsStore } from '@/stores/settings'
 import { useActiveAgentsStore, type PaneStatus } from '@/stores/active-agents'
+import { useHeartbeatScheduleStore } from '@/stores/heartbeat-schedule'
 import { showContextMenu } from '@/lib/context-menu'
 import WorktreeDialog from '@/components/Sidebar/WorktreeDialog'
+
+/** Convert "HH:MM" to "h:MM AM/PM" */
+function fmt12h(time: string): string {
+  const [hStr, mStr] = time.split(':')
+  let h = parseInt(hStr, 10)
+  const m = mStr ?? '00'
+  const ampm = h >= 12 ? 'PM' : 'AM'
+  if (h === 0) h = 12
+  else if (h > 12) h -= 12
+  return m === '00' ? `${h} ${ampm}` : `${h}:${m} ${ampm}`
+}
+
+/** Human-readable summary of a heartbeat schedule */
+function formatScheduleSummary(mode: string, scheduleJson: string | null): string {
+  if (mode === 'off' || !scheduleJson) return 'Off'
+  try {
+    const v = JSON.parse(scheduleJson)
+    if (mode === 'hourly') {
+      const secs = v.every_seconds ?? 300
+      const freq = secs >= 3600 ? `${Math.round(secs / 3600)}h` : `${Math.round(secs / 60)}m`
+      const start = v.start ?? '00:00'
+      const end = v.end ?? '23:59'
+      if (start === '00:00' && (end === '23:59' || end === '24:00')) return `Every ${freq}`
+      return `Every ${freq}, ${fmt12h(start)}–${fmt12h(end)}`
+    }
+    // scheduled
+    const freq = v.frequency ?? 'daily'
+    const time = fmt12h(v.time ?? '09:00')
+    if (freq === 'daily') return v.interval > 1 ? `Every ${v.interval} days, ${time}` : `Daily ${time}`
+    if (freq === 'weekly') {
+      const days = (v.days ?? []).map((d: string) => d.charAt(0).toUpperCase() + d.slice(1, 3)).join('/')
+      return days ? `${days} ${time}` : `Weekly ${time}`
+    }
+    if (freq === 'monthly') return `Monthly ${time}`
+    if (freq === 'yearly') return `Yearly ${time}`
+    return mode
+  } catch {
+    return mode
+  }
+}
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -232,33 +273,15 @@ export default function WorkspacePanel(): React.JSX.Element {
             <div className="flex items-center justify-between mt-3">
               <div className="flex items-center gap-2">
                 <span className="text-[11px] text-[var(--color-text-secondary)]">Heartbeat</span>
-                {activeProject.heartbeatEnabled === 1 && (
+                {activeProject.heartbeatMode !== 'off' && (
                   <span className="text-[11px] text-red-400 animate-pulse">♥</span>
                 )}
               </div>
               <button
-                onClick={async () => {
-                  const newVal = activeProject.heartbeatEnabled ? 0 : 1
-                  const store = useProjectsStore.getState()
-                  const updated = store.projects.map((p) =>
-                    p.id === activeProject.id ? { ...p, heartbeatEnabled: newVal } : p
-                  )
-                  useProjectsStore.setState({ projects: updated })
-                  await invoke('projects_update', { id: activeProject.id, heartbeatEnabled: newVal })
-                  await invoke('k2so_agents_update_heartbeat_projects').catch(console.error)
-                  if (newVal === 1) {
-                    await invoke('k2so_agents_install_heartbeat').catch(console.error)
-                  }
-                }}
-                className={`w-7 h-3.5 flex items-center transition-colors no-drag cursor-pointer ${
-                  activeProject.heartbeatEnabled ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
-                }`}
+                onClick={() => useHeartbeatScheduleStore.getState().open(activeProject.id)}
+                className="text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] border border-[var(--color-border)] px-2 py-0.5 transition-colors no-drag cursor-pointer truncate max-w-[160px]"
               >
-                <span
-                  className={`w-2.5 h-2.5 bg-white block transition-transform ${
-                    activeProject.heartbeatEnabled ? 'translate-x-3.5' : 'translate-x-0.5'
-                  }`}
-                />
+                {formatScheduleSummary(activeProject.heartbeatMode, activeProject.heartbeatSchedule)}
               </button>
             </div>
 

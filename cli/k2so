@@ -941,6 +941,118 @@ except:
     print('Error: failed to parse response', file=sys.stderr)
 " 2>/dev/null
             ;;
+        schedule)
+            # Project-level schedule management
+            # k2so heartbeat schedule              → show current schedule
+            # k2so heartbeat schedule off          → disable schedule
+            # k2so heartbeat schedule hourly --start 09:00 --end 17:00 --every 30 --unit minutes
+            # k2so heartbeat schedule daily --time 09:00
+            # k2so heartbeat schedule weekly --days mon,wed,fri --time 09:00
+            # k2so heartbeat schedule monthly --days 1,15 --time 09:00
+            # k2so heartbeat schedule yearly --months jan,jul --time 09:00
+            shift
+            local sched_mode="${1:-}"
+            if [ -z "$sched_mode" ]; then
+                # Show current schedule
+                cli_request "/cli/heartbeat/schedule" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    mode = d.get('mode', 'off')
+    schedule = d.get('schedule')
+    last_fire = d.get('lastFire', '')
+    print(f'Heartbeat schedule:')
+    print(f'  Mode: {mode}')
+    if mode == 'off':
+        print('  (disabled)')
+    elif schedule:
+        s = json.loads(schedule) if isinstance(schedule, str) else schedule
+        if mode == 'hourly':
+            secs = s.get('every_seconds', 300)
+            freq = f'{secs // 3600}h' if secs >= 3600 else f'{secs // 60}m'
+            print(f'  Window:    {s.get(\"start\", \"00:00\")} – {s.get(\"end\", \"23:59\")}')
+            print(f'  Frequency: every {freq}')
+        else:
+            freq = s.get('frequency', '?')
+            print(f'  Frequency: {freq}')
+            print(f'  Time:      {s.get(\"time\", \"?\")}')
+            if freq == 'weekly':
+                print(f'  Days:      {\", \".join(s.get(\"days\", []))}')
+            elif freq == 'monthly':
+                dom = s.get('days_of_month', [])
+                if dom:
+                    print(f'  Days:      {\", \".join(str(d) for d in dom)}')
+                else:
+                    print(f'  Pattern:   {s.get(\"ordinal\", \"\")} {s.get(\"ordinal_day\", \"\")}')
+            elif freq == 'yearly':
+                print(f'  Months:    {\", \".join(s.get(\"months\", []))}')
+    if last_fire:
+        print(f'  Last fire: {last_fire[:19]}')
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr)
+" 2>/dev/null
+            elif [ "$sched_mode" = "off" ]; then
+                cli_request "/cli/heartbeat/schedule" "mode=off"
+                echo "Heartbeat schedule disabled."
+            elif [ "$sched_mode" = "hourly" ]; then
+                shift
+                local start="09:00" end="17:00" every="30" unit="minutes"
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        --start) start="$2"; shift 2 ;;
+                        --end) end="$2"; shift 2 ;;
+                        --every) every="$2"; shift 2 ;;
+                        --unit) unit="$2"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                local secs
+                if [ "$unit" = "hours" ]; then
+                    secs=$((every * 3600))
+                else
+                    secs=$((every * 60))
+                fi
+                local schedule_json="{\"start\":\"${start}\",\"end\":\"${end}\",\"every_seconds\":${secs}}"
+                cli_request "/cli/heartbeat/schedule" "mode=hourly&schedule=$(urlencode "$schedule_json")"
+                echo "Heartbeat set: hourly, every ${every} ${unit}, ${start}–${end}"
+            else
+                # Scheduled mode: daily|weekly|monthly|yearly
+                local freq="$sched_mode"
+                shift
+                local time="09:00" days="" months="" interval="1"
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        --time) time="$2"; shift 2 ;;
+                        --days) days="$2"; shift 2 ;;
+                        --months) months="$2"; shift 2 ;;
+                        --interval) interval="$2"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                # Build schedule JSON via Python for proper escaping
+                local schedule_json
+                schedule_json=$(python3 -c "
+import json, sys
+freq = '$freq'
+time_str = '$time'
+days_str = '$days'
+months_str = '$months'
+interval = int('$interval')
+sched = {'frequency': freq, 'interval': interval, 'time': time_str}
+if freq == 'weekly' and days_str:
+    sched['days'] = [d.strip() for d in days_str.split(',')]
+elif freq == 'monthly' and days_str:
+    sched['days_of_month'] = [int(d.strip()) for d in days_str.split(',')]
+elif freq == 'yearly' and months_str:
+    sched['months'] = [m.strip() for m in months_str.split(',')]
+print(json.dumps(sched))
+" 2>/dev/null)
+                cli_request "/cli/heartbeat/schedule" "mode=scheduled&schedule=$(urlencode "$schedule_json")"
+                echo "Heartbeat set: ${freq}, at ${time}"
+                [ -n "$days" ] && echo "  Days: ${days}"
+                [ -n "$months" ] && echo "  Months: ${months}"
+            fi
+            ;;
         *)
             # No on/off/set/get → trigger triage (original behavior)
             echo "Triggering heartbeat triage..."
@@ -1024,6 +1136,19 @@ COMMANDS:
   heartbeat                       Manually trigger heartbeat triage
   heartbeat wake                  Auto-wake coordinator if inbox work exists
   heartbeat <on|off>              Enable/disable automatic heartbeat
+  heartbeat schedule              Show current project schedule
+  heartbeat schedule off          Disable scheduled heartbeat
+  heartbeat schedule hourly       Set hourly mode (repeating within work hours)
+    --start 09:00 --end 17:00     Work hours window
+    --every 30 --unit minutes     Wake frequency (minutes or hours)
+  heartbeat schedule daily        Set daily schedule
+    --time 09:00                  Time to wake
+  heartbeat schedule weekly       Set weekly schedule
+    --days mon,wed,fri --time 09:00
+  heartbeat schedule monthly      Set monthly schedule
+    --days 1,15 --time 09:00      Specific days of month
+  heartbeat schedule yearly       Set yearly schedule
+    --months jan,jul --time 09:00
   heartbeat set --agent <n>        Set adaptive heartbeat config
     [--interval N] [--phase ".."]   Interval in seconds, work phase
     [--mode heartbeat|persistent]   Execution mode

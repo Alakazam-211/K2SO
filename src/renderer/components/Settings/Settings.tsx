@@ -4174,69 +4174,40 @@ function ProjectDetail({
                   }`} />
                 </div>
                 <div>
-                  <span className={`text-xs ${project.heartbeatEnabled ? 'text-[var(--color-text-primary)]' : 'text-[var(--color-text-secondary)]'}`}>Heartbeat</span>
-                  <p className={`text-[9px] ${project.heartbeatEnabled ? 'text-[var(--color-text-secondary)]' : 'text-[var(--color-text-muted)]'}`}>
-                    {project.heartbeatEnabled ? 'Wakes up automatically to work' : 'Only works when manually launched'}
+                  <span className={`text-xs ${project.heartbeatMode !== 'off' ? 'text-[var(--color-text-primary)]' : 'text-[var(--color-text-secondary)]'}`}>Heartbeat</span>
+                  <p className={`text-[9px] ${project.heartbeatMode !== 'off' ? 'text-[var(--color-text-secondary)]' : 'text-[var(--color-text-muted)]'}`}>
+                    {project.heartbeatMode !== 'off' ? 'Wakes up automatically to work' : 'Only works when manually launched'}
                   </p>
                 </div>
               </div>
               <button
-                onClick={async () => {
-                  const newVal = project.heartbeatEnabled ? 0 : 1
-
-                  // If enabling heartbeat on a K2SO Agent, check for conflicts
-                  if (newVal === 1 && (project.agentMode || 'off') === 'agent') {
-                    const allProjects = useProjectsStore.getState().projects
-                    const otherK2so = allProjects.find(
-                      (p) => p.id !== project.id && p.agentMode === 'agent' && p.heartbeatEnabled
-                    )
-                    if (otherK2so) {
-                      const confirmed = await useConfirmDialogStore.getState().confirm({
-                        title: 'Move K2SO Heartbeat?',
-                        message: `The K2SO Agent heartbeat is currently active in "${otherK2so.name}". Only one K2SO Agent can have an active heartbeat to avoid conflicting autonomous decisions.\n\nMove the heartbeat from "${otherK2so.name}" to "${project.name}"?`,
-                        confirmLabel: 'Move Heartbeat',
-                      })
-                      if (!confirmed) return
-
-                      // Disable heartbeat on the other workspace
-                      const store = useProjectsStore.getState()
-                      const updated = store.projects.map((p) =>
-                        p.id === otherK2so.id ? { ...p, heartbeatEnabled: 0 } : p
-                      )
-                      useProjectsStore.setState({ projects: updated })
-                      await invoke('projects_update', { id: otherK2so.id, heartbeatEnabled: 0 })
-                    }
-                  }
-
-                  // Update store in-place to avoid full re-render jiggle
-                  const store = useProjectsStore.getState()
-                  const updatedProjects = store.projects.map((p) =>
-                    p.id === project.id ? { ...p, heartbeatEnabled: newVal } : p
-                  )
-                  useProjectsStore.setState({ projects: updatedProjects })
-                  await invoke('projects_update', { id: project.id, heartbeatEnabled: newVal })
-                  await invoke('k2so_agents_update_heartbeat_projects').catch(console.error)
-                  if (newVal === 1) {
-                    await invoke('k2so_agents_install_heartbeat').catch(console.error)
-                  }
+                onClick={() => {
+                  import('@/stores/heartbeat-schedule').then(({ useHeartbeatScheduleStore }) => {
+                    useHeartbeatScheduleStore.getState().open(project.id)
+                  })
                 }}
-                className={`w-8 h-4 flex items-center transition-colors no-drag cursor-pointer ${
-                  project.heartbeatEnabled ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
-                }`}
+                className="text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] border border-[var(--color-border)] px-2 py-0.5 transition-colors no-drag cursor-pointer"
               >
-                <span
-                  className={`w-3 h-3 bg-white block transition-transform ${
-                    project.heartbeatEnabled ? 'translate-x-4.5' : 'translate-x-0.5'
-                  }`}
-                />
+                {project.heartbeatMode !== 'off'
+                  ? (() => {
+                      try {
+                        const s = project.heartbeatSchedule ? JSON.parse(project.heartbeatSchedule) : null
+                        const to12h = (t: string) => { const [hh, mm] = t.split(':'); let h = parseInt(hh); const ap = h >= 12 ? 'PM' : 'AM'; if (h === 0) h = 12; else if (h > 12) h -= 12; return mm === '00' ? `${h} ${ap}` : `${h}:${mm} ${ap}` }
+                        if (project.heartbeatMode === 'hourly' && s) {
+                          const secs = s.every_seconds ?? 300
+                          const freq = secs >= 3600 ? `${Math.round(secs / 3600)}h` : `${Math.round(secs / 60)}m`
+                          return `Every ${freq}`
+                        }
+                        if (s?.frequency) return `${s.frequency.charAt(0).toUpperCase() + s.frequency.slice(1)} ${to12h(s.time ?? '09:00')}`
+                      } catch {}
+                      return project.heartbeatMode
+                    })()
+                  : 'Configure'}
               </button>
             </div>
           )}
 
-          {/* Adaptive Heartbeat Config — only for custom agents with heartbeat enabled */}
-          {(project.agentMode || 'off') === 'custom' && project.heartbeatEnabled ? (
-            <AdaptiveHeartbeatConfig projectPath={project.path} />
-          ) : null}
+          {/* Adaptive Heartbeat Config — removed, now handled by HeartbeatScheduleDialog */}
 
           {/* Custom Agent persona — only in Custom Agent mode */}
           {(project.agentMode || 'off') === 'custom' && (
@@ -4560,12 +4531,7 @@ function StateSelector({ projectId, currentStateId }: { projectId: string; curre
   return (
     <div className="pt-3 pb-1 border-t border-[var(--color-border)]">
       <div className="flex items-center justify-between">
-        <div>
-          <span className="text-xs text-[var(--color-text-primary)]">State</span>
-          {activeState?.description && (
-            <p className="text-[9px] text-[var(--color-text-muted)] mt-0.5">{activeState.description}</p>
-          )}
-        </div>
+        <span className="text-xs text-[var(--color-text-primary)]">State</span>
         <SettingDropdown
           value={selectedId || ''}
           options={[
@@ -4575,13 +4541,20 @@ function StateSelector({ projectId, currentStateId }: { projectId: string; curre
           onChange={handleChange}
         />
       </div>
+      {activeState?.description && (
+        <p className="text-[10px] text-[var(--color-text-muted)] mt-1.5 leading-relaxed">{activeState.description}</p>
+      )}
       {activeState && (
-        <div className="flex gap-3 mt-1.5 text-[9px]">
+        <div className="flex flex-wrap gap-x-1.5 gap-y-1 mt-2">
           {CAPABILITIES.map((cap) => {
-            const state = activeState[cap.key] as string
+            const val = activeState[cap.key] as string
             return (
-              <span key={cap.key} className={CAP_COLORS[state] || ''}>
-                {cap.label}: {CAP_LABELS[state]}
+              <span
+                key={cap.key}
+                className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[9px] border border-[var(--color-border)] bg-[var(--color-bg)]`}
+              >
+                <span className="text-[var(--color-text-muted)]">{cap.label}</span>
+                <span className={CAP_COLORS[val] || 'text-[var(--color-text-muted)]'}>{CAP_LABELS[val]}</span>
               </span>
             )
           })}

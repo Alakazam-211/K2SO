@@ -587,6 +587,48 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             }
                         }
                     }
+                    "/cli/heartbeat/schedule" => {
+                        // Get or set project heartbeat schedule
+                        (|| -> Result<String, String> {
+                            let db_path = dirs::home_dir()
+                                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                                .join(".k2so/k2so.db");
+                            let conn = rusqlite::Connection::open(&db_path)
+                                .map_err(|e| format!("DB open failed: {}", e))?;
+
+                            if let Some(mode) = params.get("mode").cloned() {
+                                let schedule = params.get("schedule").cloned();
+                                let hb_enabled = if mode == "off" { "0" } else { "1" };
+
+                                conn.execute(
+                                    "UPDATE projects SET heartbeat_mode = ?1, heartbeat_schedule = ?2, heartbeat_enabled = ?3 WHERE path = ?4",
+                                    rusqlite::params![mode, schedule, hb_enabled, project_path],
+                                ).map_err(|e| format!("DB update failed: {}", e))?;
+
+                                let _ = app_handle.emit("sync:projects", ());
+                                let state = app_handle.state::<crate::state::AppState>();
+                                let _ = crate::commands::k2so_agents::k2so_agents_update_heartbeat_projects(state);
+
+                                Ok(serde_json::json!({
+                                    "success": true,
+                                    "mode": mode,
+                                    "schedule": params.get("schedule").cloned(),
+                                }).to_string())
+                            } else {
+                                let (mode, schedule, last_fire) = conn.query_row(
+                                    "SELECT heartbeat_mode, heartbeat_schedule, heartbeat_last_fire FROM projects WHERE path = ?1",
+                                    rusqlite::params![project_path],
+                                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?)),
+                                ).map_err(|e| format!("Project not found: {}", e))?;
+
+                                Ok(serde_json::json!({
+                                    "mode": mode,
+                                    "schedule": schedule,
+                                    "lastFire": last_fire,
+                                }).to_string())
+                            }
+                        })()
+                    }
                     "/cli/terminal/spawn" => {
                         // Spawn a sub-terminal for an agent (pane split within agent's tab)
                         let agent = params.get("agent").cloned().unwrap_or_default();

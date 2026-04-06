@@ -1,6 +1,8 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useGitInitDialogStore } from '../../stores/git-init-dialog'
 import { useProjectsStore } from '../../stores/projects'
+import { useTabsStore } from '../../stores/tabs'
+import { useFocusGroupsStore } from '../../stores/focus-groups'
 import { invoke } from '@tauri-apps/api/core'
 
 export default function GitInitDialog(): React.JSX.Element | null {
@@ -16,21 +18,62 @@ export default function GitInitDialog(): React.JSX.Element | null {
   const fetchProjects = useProjectsStore((s) => s.fetchProjects)
 
   const [branchName, setBranchName] = useState('main')
+  // Capture project IDs before the dialog action so we can find the new one
+  const prevIdsRef = useRef<Set<string>>(new Set())
 
-  // Reset branch name when dialog opens
+  // Reset branch name and capture current project IDs when dialog opens
   useEffect(() => {
-    if (isOpen) setBranchName('main')
+    if (isOpen) {
+      setBranchName('main')
+      prevIdsRef.current = new Set(useProjectsStore.getState().projects.map((p) => p.id))
+    }
   }, [isOpen])
 
   const selectNewProject = useCallback(async () => {
+    // Stash current workspace before switching
+    const preState = useProjectsStore.getState()
+    const tabsStore = useTabsStore.getState()
+    if (preState.activeProjectId && preState.activeWorkspaceId) {
+      tabsStore.stashWorkspace(`${preState.activeProjectId}:${preState.activeWorkspaceId}`)
+    } else if (useTabsStore.getState().tabs.length > 0) {
+      tabsStore.clearAllTabs()
+    }
+
     await fetchProjects()
+
     const state = useProjectsStore.getState()
-    const newProject = state.projects[state.projects.length - 1]
+    // Find the new project by comparing before/after IDs
+    const newProject = state.projects.find((p) => !prevIdsRef.current.has(p.id))
+      ?? state.projects[state.projects.length - 1]
+
     if (newProject) {
+      // Assign to active focus group
+      const focusState = useFocusGroupsStore.getState()
+      const targetGroupId = focusState.focusGroupsEnabled ? focusState.activeFocusGroupId : null
+      if (targetGroupId) {
+        try {
+          await invoke('focus_groups_assign_project', { projectId: newProject.id, focusGroupId: targetGroupId })
+          useProjectsStore.setState({
+            projects: useProjectsStore.getState().projects.map((p) =>
+              p.id === newProject.id ? { ...p, focusGroupId: targetGroupId } : p
+            )
+          })
+        } catch { /* non-fatal */ }
+      }
+
+      const newWorkspaceId = newProject.workspaces[0]?.id ?? null
       useProjectsStore.setState({
         activeProjectId: newProject.id,
-        activeWorkspaceId: newProject.workspaces[0]?.id ?? null
+        activeWorkspaceId: newWorkspaceId
       })
+
+      if (newWorkspaceId) {
+        const cwd = newProject.workspaces[0]?.worktreePath ?? newProject.path ?? '~'
+        const newKey = `${newProject.id}:${newWorkspaceId}`
+        useTabsStore.getState().restoreWorkspace(newKey, cwd)
+      } else {
+        useTabsStore.getState().clearAllTabs()
+      }
     }
   }, [fetchProjects])
 

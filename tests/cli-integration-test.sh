@@ -485,6 +485,92 @@ fi
 # Disable heartbeat
 run heartbeat off > /dev/null
 
+# ── Heartbeat Schedule ──
+
+# Show schedule (should be off)
+if [ "$PROJECT_REGISTERED" = true ]; then
+    OUTPUT=$(run heartbeat schedule)
+    if echo "$OUTPUT" | grep -q "Mode: off\|mode.*off"; then
+        pass "heartbeat schedule shows off"
+    else
+        fail "heartbeat schedule show" "Output: $OUTPUT"
+    fi
+
+    # Set hourly schedule
+    OUTPUT=$(run heartbeat schedule hourly --start 09:00 --end 17:00 --every 30 --unit minutes)
+    if echo "$OUTPUT" | grep -q "hourly\|every 30"; then
+        pass "heartbeat schedule set hourly"
+    else
+        fail "heartbeat schedule hourly" "Output: $OUTPUT"
+    fi
+
+    # Verify schedule persisted
+    OUTPUT=$(run heartbeat schedule)
+    if echo "$OUTPUT" | grep -q "hourly\|every 30m\|09:00"; then
+        pass "heartbeat schedule hourly persisted"
+    else
+        fail "heartbeat schedule hourly persist" "Output: $OUTPUT"
+    fi
+
+    # Set daily schedule
+    OUTPUT=$(run heartbeat schedule daily --time 06:00)
+    if echo "$OUTPUT" | grep -q "daily\|06:00"; then
+        pass "heartbeat schedule set daily"
+    else
+        fail "heartbeat schedule daily" "Output: $OUTPUT"
+    fi
+
+    # Set weekly schedule
+    OUTPUT=$(run heartbeat schedule weekly --days mon,wed,fri --time 09:00)
+    if echo "$OUTPUT" | grep -q "weekly\|09:00"; then
+        pass "heartbeat schedule set weekly"
+    else
+        fail "heartbeat schedule weekly" "Output: $OUTPUT"
+    fi
+
+    # Verify weekly persisted
+    OUTPUT=$(run heartbeat schedule)
+    if echo "$OUTPUT" | grep -q "weekly\|mon.*wed.*fri\|Days:"; then
+        pass "heartbeat schedule weekly persisted"
+    else
+        fail "heartbeat schedule weekly persist" "Output: $OUTPUT"
+    fi
+
+    # Set monthly schedule
+    OUTPUT=$(run heartbeat schedule monthly --days 1,15 --time 08:00)
+    if echo "$OUTPUT" | grep -q "monthly\|08:00"; then
+        pass "heartbeat schedule set monthly"
+    else
+        fail "heartbeat schedule monthly" "Output: $OUTPUT"
+    fi
+
+    # Set yearly schedule
+    OUTPUT=$(run heartbeat schedule yearly --months jan,jul --time 10:00)
+    if echo "$OUTPUT" | grep -q "yearly\|10:00"; then
+        pass "heartbeat schedule set yearly"
+    else
+        fail "heartbeat schedule yearly" "Output: $OUTPUT"
+    fi
+
+    # Turn schedule off
+    OUTPUT=$(run heartbeat schedule off)
+    if echo "$OUTPUT" | grep -q "disabled\|off"; then
+        pass "heartbeat schedule off"
+    else
+        fail "heartbeat schedule off" "Output: $OUTPUT"
+    fi
+
+    # Verify off
+    OUTPUT=$(run heartbeat schedule)
+    if echo "$OUTPUT" | grep -q "Mode: off\|mode.*off\|disabled"; then
+        pass "heartbeat schedule off persisted"
+    else
+        fail "heartbeat schedule off persist" "Output: $OUTPUT"
+    fi
+else
+    skip "heartbeat schedule tests (project not in DB)"
+fi
+
 # Manual heartbeat trigger
 if [ "$PROJECT_REGISTERED" = true ]; then
     OUTPUT=$(run heartbeat)

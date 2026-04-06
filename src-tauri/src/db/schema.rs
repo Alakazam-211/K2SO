@@ -95,12 +95,15 @@ pub struct Project {
     pub heartbeat_enabled: i64,
     pub agent_mode: String,
     pub state_id: Option<String>,
+    pub heartbeat_mode: String,
+    pub heartbeat_schedule: Option<String>,
+    pub heartbeat_last_fire: Option<String>,
 }
 
 impl Project {
     pub fn list(conn: &Connection) -> Result<Vec<Project>> {
         let mut stmt = conn.prepare(
-            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at, agent_enabled, heartbeat_enabled, agent_mode, tier_id \
+            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at, agent_enabled, heartbeat_enabled, agent_mode, tier_id, heartbeat_mode, heartbeat_schedule, heartbeat_last_fire \
              FROM projects ORDER BY tab_order",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -122,6 +125,9 @@ impl Project {
                 heartbeat_enabled: row.get(14)?,
                 agent_mode: row.get::<_, String>(15).unwrap_or_else(|_| "off".to_string()),
                 state_id: row.get(16).ok(),
+                heartbeat_mode: row.get::<_, String>(17).unwrap_or_else(|_| "off".to_string()),
+                heartbeat_schedule: row.get(18).ok().flatten(),
+                heartbeat_last_fire: row.get(19).ok().flatten(),
             })
         })?;
         rows.collect()
@@ -129,7 +135,7 @@ impl Project {
 
     pub fn get(conn: &Connection, id: &str) -> Result<Project> {
         conn.query_row(
-            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at, agent_enabled, heartbeat_enabled, agent_mode, tier_id \
+            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at, agent_enabled, heartbeat_enabled, agent_mode, tier_id, heartbeat_mode, heartbeat_schedule, heartbeat_last_fire \
              FROM projects WHERE id = ?1",
             params![id],
             |row| {
@@ -151,6 +157,9 @@ impl Project {
                     heartbeat_enabled: row.get(14)?,
                     agent_mode: row.get::<_, String>(15).unwrap_or_else(|_| "off".to_string()),
                     state_id: row.get(16).ok(),
+                    heartbeat_mode: row.get::<_, String>(17).unwrap_or_else(|_| "off".to_string()),
+                    heartbeat_schedule: row.get(18).ok().flatten(),
+                    heartbeat_last_fire: row.get(19).ok().flatten(),
                 })
             },
         )
@@ -191,6 +200,8 @@ impl Project {
         heartbeat_enabled: Option<i64>,
         agent_mode: Option<String>,
         state_id: Option<Option<&str>>,
+        heartbeat_mode: Option<String>,
+        heartbeat_schedule: Option<Option<&str>>,
     ) -> Result<()> {
         // Wrap in transaction so all field updates succeed or fail atomically.
         // Without this, agent_mode and agent_enabled can diverge if the process crashes mid-update.
@@ -239,6 +250,15 @@ impl Project {
                 Some(sid) => tx.execute("UPDATE projects SET tier_id = ?1 WHERE id = ?2", params![sid, id])?,
                 None => tx.execute("UPDATE projects SET tier_id = NULL WHERE id = ?1", params![id])?,
             };
+        }
+        if let Some(ref v) = heartbeat_mode {
+            tx.execute("UPDATE projects SET heartbeat_mode = ?1 WHERE id = ?2", params![v, id])?;
+            // Keep heartbeat_enabled in sync for backward compat
+            let enabled = if v == "off" { 0i64 } else { 1i64 };
+            tx.execute("UPDATE projects SET heartbeat_enabled = ?1 WHERE id = ?2", params![enabled, id])?;
+        }
+        if let Some(v) = heartbeat_schedule {
+            tx.execute("UPDATE projects SET heartbeat_schedule = ?1 WHERE id = ?2", params![v, id])?;
         }
         tx.commit()?;
         Ok(())

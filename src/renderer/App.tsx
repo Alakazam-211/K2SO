@@ -17,6 +17,7 @@ import WorktreeBar from './components/FocusWindow/WorktreeBar'
 import CommandPalette from './components/CommandPalette/CommandPalette'
 import ContextMenu from './components/ContextMenu/ContextMenu'
 import ConfirmDialog from './components/ConfirmDialog/ConfirmDialog'
+import HeartbeatScheduleDialog from './components/HeartbeatScheduleDialog/HeartbeatScheduleDialog'
 import MergeDialog from './components/MergeDialog/MergeDialog'
 import Toast from './components/Toast/Toast'
 import AssistantBar from './components/WorkspaceAssistant/AssistantBar'
@@ -162,6 +163,7 @@ function FocusModeContent({ activeProject, cwd }: { activeProject: any; cwd: str
       <RunningAgentsPanel />
       <ContextMenu />
       <ConfirmDialog />
+      <HeartbeatScheduleDialog />
       <MergeDialog />
       <Toast />
       <AssistantBar />
@@ -536,6 +538,7 @@ export default function App(): React.JSX.Element {
         <CommandPalette />
         <ContextMenu />
         <ConfirmDialog />
+        <HeartbeatScheduleDialog />
       <MergeDialog />
         <Toast />
         <AssistantBar />
@@ -581,6 +584,7 @@ export default function App(): React.JSX.Element {
       <RunningAgentsPanel />
       <ContextMenu />
       <ConfirmDialog />
+      <HeartbeatScheduleDialog />
       <MergeDialog />
       <Toast />
       <AssistantBar />

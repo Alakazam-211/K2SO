@@ -2963,6 +2963,35 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
         }
     }
 
+    // Project-level schedule gate: check if the schedule says "fire now"
+    // Look up project from DB by path
+    let db_path = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".k2so/k2so.db");
+    if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+        let project_row: Option<(String, String, Option<String>, Option<String>)> = conn.query_row(
+            "SELECT id, heartbeat_mode, heartbeat_schedule, heartbeat_last_fire FROM projects WHERE path = ?1",
+            rusqlite::params![project_path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).ok();
+
+        if let Some((project_id, mode, schedule, last_fire)) = project_row {
+            if mode == "off" {
+                return Ok(vec![]);
+            }
+            if mode == "scheduled" || mode == "hourly" {
+                if !should_project_fire(&mode, schedule.as_deref(), last_fire.as_deref()) {
+                    return Ok(vec![]); // Schedule says "not now"
+                }
+                // Update last_fire timestamp
+                let _ = conn.execute(
+                    "UPDATE projects SET heartbeat_last_fire = ?1 WHERE id = ?2",
+                    rusqlite::params![chrono::Local::now().to_rfc3339(), project_id],
+                );
+            }
+        }
+    }
+
     let mut launchable = Vec::new();
     let now = chrono::Utc::now();
 
@@ -3224,6 +3253,246 @@ fn is_within_active_hours(hours: &ActiveHours, _now: &chrono::DateTime<chrono::U
     }
 }
 
+// ── Project-Level Schedule Evaluation ─────────────────────────────────────
+
+/// Evaluate whether a project's schedule says "fire now".
+/// Returns true if the project should trigger agent evaluation this tick.
+fn should_project_fire(mode: &str, schedule_json: Option<&str>, last_fire: Option<&str>) -> bool {
+    let local_now = chrono::Local::now();
+
+    let parse_hhmm_mins = |s: &str| -> Option<u32> {
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() == 2 {
+            let h: u32 = parts[0].parse().ok()?;
+            let m: u32 = parts[1].parse().ok()?;
+            Some(h * 60 + m)
+        } else {
+            None
+        }
+    };
+
+    let last_fire_time = last_fire.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
+
+    match mode {
+        "hourly" => {
+            // Parse: {"start":"09:00","end":"17:00","every_seconds":1800}
+            let json_str = match schedule_json {
+                Some(s) => s,
+                None => return false,
+            };
+            let v: serde_json::Value = match serde_json::from_str(json_str) {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+
+            let start = v.get("start").and_then(|s| s.as_str()).unwrap_or("00:00");
+            let end = v.get("end").and_then(|s| s.as_str()).unwrap_or("23:59");
+            let every_secs = v.get("every_seconds").and_then(|s| s.as_u64()).unwrap_or(300);
+
+            // Check time window
+            let now_mins = local_now.format("%H").to_string().parse::<u32>().unwrap_or(0) * 60
+                + local_now.format("%M").to_string().parse::<u32>().unwrap_or(0);
+            let start_mins = parse_hhmm_mins(start).unwrap_or(0);
+            let end_mins = parse_hhmm_mins(end).unwrap_or(1439);
+
+            let in_window = if start_mins <= end_mins {
+                now_mins >= start_mins && now_mins < end_mins
+            } else {
+                now_mins >= start_mins || now_mins < end_mins
+            };
+            if !in_window { return false; }
+
+            // Check elapsed time since last fire
+            match last_fire_time {
+                Some(lf) => {
+                    let elapsed = (local_now.timestamp() - lf.timestamp()) as u64;
+                    elapsed >= every_secs
+                }
+                None => true, // Never fired — fire now
+            }
+        }
+        "scheduled" => {
+            // Parse structured schedule JSON
+            let json_str = match schedule_json {
+                Some(s) => s,
+                None => return false,
+            };
+            let v: serde_json::Value = match serde_json::from_str(json_str) {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+
+            let frequency = v.get("frequency").and_then(|s| s.as_str()).unwrap_or("daily");
+            let time_str = v.get("time").and_then(|s| s.as_str()).unwrap_or("09:00");
+            let schedule_mins = parse_hhmm_mins(time_str).unwrap_or(540); // default 9:00
+            let now_mins = local_now.format("%H").to_string().parse::<u32>().unwrap_or(0) * 60
+                + local_now.format("%M").to_string().parse::<u32>().unwrap_or(0);
+
+            // Must be at or past the scheduled time
+            if now_mins < schedule_mins { return false; }
+
+            // Don't fire again if already fired in this window
+            if let Some(lf) = &last_fire_time {
+                let lf_local = lf.with_timezone(&chrono::Local);
+                if lf_local.date_naive() == local_now.date_naive() && frequency == "daily" {
+                    return false; // Already fired today
+                }
+                // For weekly/monthly/yearly — already fired today is enough to skip
+                if lf_local.date_naive() == local_now.date_naive() {
+                    return false;
+                }
+            }
+
+            use chrono::Datelike;
+            match frequency {
+                "daily" => {
+                    let _interval = v.get("interval").and_then(|s| s.as_u64()).unwrap_or(1);
+                    // For interval > 1, check day-of-year mod interval
+                    if _interval > 1 {
+                        let day_of_year = local_now.ordinal() as u64;
+                        if day_of_year % _interval != 0 { return false; }
+                    }
+                    true
+                }
+                "weekly" => {
+                    let days = v.get("days").and_then(|d| d.as_array());
+                    let weekday = match local_now.weekday() {
+                        chrono::Weekday::Mon => "mon",
+                        chrono::Weekday::Tue => "tue",
+                        chrono::Weekday::Wed => "wed",
+                        chrono::Weekday::Thu => "thu",
+                        chrono::Weekday::Fri => "fri",
+                        chrono::Weekday::Sat => "sat",
+                        chrono::Weekday::Sun => "sun",
+                    };
+                    match days {
+                        Some(day_arr) => day_arr.iter().any(|d| d.as_str() == Some(weekday)),
+                        None => true, // No days specified — fire any day
+                    }
+                }
+                "monthly" => {
+                    let day_of_month = local_now.day();
+                    // Check specific days
+                    if let Some(days_arr) = v.get("days_of_month").and_then(|d| d.as_array()) {
+                        return days_arr.iter().any(|d| d.as_u64() == Some(day_of_month as u64));
+                    }
+                    // Check ordinal (first/second/third/fourth/last + day type)
+                    if let Some(ordinal) = v.get("ordinal").and_then(|s| s.as_str()) {
+                        let ordinal_day = v.get("ordinal_day").and_then(|s| s.as_str()).unwrap_or("day");
+                        return matches_ordinal_day(local_now.date_naive(), ordinal, ordinal_day);
+                    }
+                    true
+                }
+                "yearly" => {
+                    let month_name = match local_now.month() {
+                        1 => "jan", 2 => "feb", 3 => "mar", 4 => "apr",
+                        5 => "may", 6 => "jun", 7 => "jul", 8 => "aug",
+                        9 => "sep", 10 => "oct", 11 => "nov", 12 => "dec",
+                        _ => return false,
+                    };
+                    let months = v.get("months").and_then(|d| d.as_array());
+                    match months {
+                        Some(m_arr) => m_arr.iter().any(|m| m.as_str() == Some(month_name)),
+                        None => true,
+                    }
+                    // Also check ordinal if specified
+                    // (simplified: just check month match for now)
+                }
+                _ => false,
+            }
+        }
+        _ => false, // "off" or unknown
+    }
+}
+
+/// Check if a date matches an ordinal day pattern like "first monday" or "last weekday".
+fn matches_ordinal_day(date: chrono::NaiveDate, ordinal: &str, day_type: &str) -> bool {
+    use chrono::Datelike;
+    let dom = date.day();
+    let weekday = date.weekday();
+
+    // Check day type match
+    let day_matches = match day_type {
+        "day" => true,
+        "weekday" => weekday != chrono::Weekday::Sat && weekday != chrono::Weekday::Sun,
+        "mon" | "monday" => weekday == chrono::Weekday::Mon,
+        "tue" | "tuesday" => weekday == chrono::Weekday::Tue,
+        "wed" | "wednesday" => weekday == chrono::Weekday::Wed,
+        "thu" | "thursday" => weekday == chrono::Weekday::Thu,
+        "fri" | "friday" => weekday == chrono::Weekday::Fri,
+        "sat" | "saturday" => weekday == chrono::Weekday::Sat,
+        "sun" | "sunday" => weekday == chrono::Weekday::Sun,
+        _ => true,
+    };
+    if !day_matches { return false; }
+
+    // Check ordinal position
+    match ordinal {
+        "first" => dom <= 7,
+        "second" => dom > 7 && dom <= 14,
+        "third" => dom > 14 && dom <= 21,
+        "fourth" => dom > 21 && dom <= 28,
+        "last" => {
+            // Last occurrence: no more matching days this month
+            let days_in_month = if date.month() == 12 {
+                chrono::NaiveDate::from_ymd_opt(date.year() + 1, 1, 1)
+            } else {
+                chrono::NaiveDate::from_ymd_opt(date.year(), date.month() + 1, 1)
+            }.map(|d| d.pred_opt().map(|p| p.day()).unwrap_or(28)).unwrap_or(28);
+            dom + 7 > days_in_month
+        }
+        _ => true,
+    }
+}
+
+/// Compute the next N fire times for a schedule (for UI preview).
+#[tauri::command]
+pub fn k2so_agents_preview_schedule(
+    mode: String,
+    schedule_json: String,
+    count: u32,
+) -> Result<Vec<String>, String> {
+    let mut results = Vec::new();
+    let mut cursor = chrono::Local::now();
+
+    // Step forward in 1-minute increments, checking up to 366 days ahead
+    let max_steps = 366 * 24 * 60; // 1 year of minutes
+    let mut steps = 0u64;
+
+    while results.len() < count as usize && steps < max_steps {
+        if should_project_fire(&mode, Some(&schedule_json), Some(&cursor.to_rfc3339())) {
+            // This would fire — but we need to check if it's a NEW fire, not a repeat
+            // For scheduled mode, each matching day/time is one fire
+            results.push(cursor.format("%Y-%m-%d %H:%M").to_string());
+            // Skip ahead past this fire window
+            if mode == "hourly" {
+                let v: serde_json::Value = serde_json::from_str(&schedule_json).unwrap_or_default();
+                let every = v.get("every_seconds").and_then(|s| s.as_u64()).unwrap_or(300);
+                cursor = cursor + chrono::Duration::seconds(every as i64);
+                steps += every / 60;
+                continue;
+            } else {
+                // Skip to next day for scheduled mode
+                cursor = cursor + chrono::Duration::days(1);
+                // Reset to start of day
+                let next_date = cursor.date_naive();
+                if let Some(dt) = next_date.and_hms_opt(0, 0, 0) {
+                    use chrono::TimeZone;
+                    if let Some(local_dt) = chrono::Local.from_local_datetime(&dt).single() {
+                        cursor = local_dt;
+                    }
+                }
+                steps += 24 * 60;
+                continue;
+            }
+        }
+        cursor = cursor + chrono::Duration::minutes(1);
+        steps += 1;
+    }
+
+    Ok(results)
+}
+
 // ── Heartbeat Scheduler ─────────────────────────────────────────────────
 
 /// Install the heartbeat scheduler (launchd on macOS, cron on Linux).
@@ -3243,7 +3512,7 @@ pub fn k2so_agents_install_heartbeat(
     let projects = crate::db::schema::Project::list(&conn).map_err(|e| e.to_string())?;
     let heartbeat_paths: Vec<String> = projects
         .iter()
-        .filter(|p| p.heartbeat_enabled != 0)
+        .filter(|p| p.heartbeat_mode != "off")
         .map(|p| p.path.clone())
         .collect();
     drop(conn);
@@ -3306,7 +3575,7 @@ pub fn k2so_agents_update_heartbeat_projects(
     let projects = crate::db::schema::Project::list(&conn).map_err(|e| e.to_string())?;
     let heartbeat_paths: Vec<String> = projects
         .iter()
-        .filter(|p| p.heartbeat_enabled != 0)
+        .filter(|p| p.heartbeat_mode != "off")
         .map(|p| p.path.clone())
         .collect();
     drop(conn);
@@ -3452,7 +3721,7 @@ fn install_heartbeat_launchd(script_path: &Path) -> Result<(), String> {
         <string>{script}</string>
     </array>
     <key>StartInterval</key>
-    <integer>300</integer>
+    <integer>60</integer>
     <key>RunAtLoad</key>
     <false/>
     <key>StandardErrorPath</key>
@@ -3493,7 +3762,7 @@ fn uninstall_heartbeat_launchd() -> Result<(), String> {
 #[cfg(target_os = "linux")]
 fn install_heartbeat_cron(script_path: &Path) -> Result<(), String> {
     let marker = "# k2so-agent-heartbeat";
-    let entry = format!("*/5 * * * * {} {}", script_path.to_string_lossy(), marker);
+    let entry = format!("* * * * * {} {}", script_path.to_string_lossy(), marker);
 
     let existing = std::process::Command::new("crontab")
         .args(["-l"])

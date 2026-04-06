@@ -50,6 +50,9 @@ interface Project {
   heartbeatEnabled: number
   agentMode: string // 'off' | 'agent' | 'pod'
   stateId: string | null
+  heartbeatMode: string // 'off' | 'scheduled' | 'hourly'
+  heartbeatSchedule: string | null // JSON
+  heartbeatLastFire: string | null // ISO8601
 }
 
 export interface ProjectWithWorkspaces extends Project {
@@ -218,8 +221,8 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
                 p.id === newProject.id ? { ...p, focusGroupId: targetGroupId } : p
               )
             })
-          } catch (err) {
-            console.error('[projects] Focus group assignment failed:', err)
+          } catch {
+            // Non-fatal — project was still added
           }
         }
 
