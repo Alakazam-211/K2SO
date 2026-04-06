@@ -151,7 +151,7 @@ export default function WorkspacePanel(): React.JSX.Element {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span
-              className="w-2.5 h-2.5 rounded-full flex-shrink-0"
+              className="w-2.5 h-2.5 flex-shrink-0"
               style={{ backgroundColor: statusColor(projectStatus) }}
             />
             <span className="text-xs font-medium text-[var(--color-text-primary)]">
