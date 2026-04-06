@@ -288,6 +288,7 @@ export function AlacrittyTerminalView({
   useEffect(() => {
     let unlistenGrid: (() => void) | undefined
     let unlistenExit: (() => void) | undefined
+    let unlistenTitle: (() => void) | undefined
     let unlistenDrop: (() => void) | undefined
     let mounted = true
 
@@ -336,6 +337,14 @@ export function AlacrittyTerminalView({
         onExit?.(event.payload.exitCode)
       })
 
+      // Listen for terminal title changes (e.g. Claude chat names)
+      unlistenTitle = await listen<string>(`terminal:title:${terminalId}`, (event) => {
+        const newTitle = event.payload
+        if (newTitle && tabId) {
+          useTabsStore.getState().setTabTitle(tabId, newTitle)
+        }
+      })
+
       unlistenDrop = await listen<{ paths: string[]; position: { x: number; y: number } }>(
         'tauri://drag-drop',
         (event) => {
@@ -361,6 +370,7 @@ export function AlacrittyTerminalView({
       mounted = false
       unlistenGrid?.()
       unlistenExit?.()
+      unlistenTitle?.()
       unlistenDrop?.()
     }
   }, [terminalId, cwd, command]) // eslint-disable-line react-hooks/exhaustive-deps
