@@ -24,6 +24,7 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
   const unsplitTerminalArea = useTabsStore((s) => s.unsplitTerminalArea)
   const reorderTabs = useTabsStore((s) => s.reorderTabs)
   const agentMap = useActiveAgentsStore((s) => s.agents)
+  const paneStatusMap = useActiveAgentsStore((s) => s.paneStatuses)
 
   const handleAddTab = useCallback(() => {
     addTabToGroup(groupIndex, cwd)
@@ -242,6 +243,14 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
           const agentsInTab = Array.from(agentMap.values()).filter(a => a.tabId === tab.id)
           const hasAgent = agentsInTab.length > 0
           const hasActiveAgent = agentsInTab.some(a => a.status === 'active')
+          // Also check hook-based pane statuses (more reliable than polling)
+          const terminalIds = Array.from(tab.paneGroups.values())
+            .flatMap(pg => pg.items.filter(i => i.type === 'terminal').map(i => (i.data as TerminalItemData).terminalId))
+          const hasWorkingHook = terminalIds.some(id => {
+            const s = paneStatusMap.get(id)
+            return s === 'working' || s === 'permission'
+          })
+          const isAgentActive = hasActiveAgent || hasWorkingHook
           const isDragged = reorderDragIndex === index
           const showDropBefore = reorderDropIndex === index
           const showDropAfter = reorderDropIndex === tabs.length && index === tabs.length - 1
@@ -322,9 +331,9 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
               <button
                 className="ml-2 flex h-4 w-4 flex-shrink-0 items-center justify-center hover:bg-white/10 group/close"
                 onClick={(e) => handleCloseTab(e, tab.id)}
-                title={hasAgent && hasActiveAgent ? 'Agent is active — close anyway' : 'Close tab'}
+                title={isAgentActive ? 'Agent is active — close anyway' : 'Close tab'}
               >
-                {hasAgent && hasActiveAgent ? (
+                {isAgentActive ? (
                   <>
                     <span className="w-2 h-2 rounded-full bg-[var(--color-accent)] animate-pulse group-hover/close:hidden" />
                     <svg className="hidden group-hover/close:block" width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5">
