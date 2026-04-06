@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import Layout from './components/Layout/Layout'
 import FocusLayout from './components/Layout/FocusLayout'
 import Sidebar from './components/Sidebar/Sidebar'
@@ -401,6 +402,21 @@ export default function App(): React.JSX.Element {
 
   // Sync state across all windows (main, focus, new)
   useWindowSync()
+
+  // macOS close button dot — show when active agents or dirty tabs
+  const agentCount = useActiveAgentsStore((s) => s.agents.size)
+  const workingPanes = useActiveAgentsStore((s) => {
+    let count = 0
+    for (const status of s.paneStatuses.values()) {
+      if (status === 'working' || status === 'permission') count++
+    }
+    return count
+  })
+  const hasDirtyTabs = useTabsStore((s) => s.tabs.some((t) => t.isDirty))
+  const hasActiveSessions = agentCount > 0 || workingPanes > 0
+  useEffect(() => {
+    invoke('set_document_edited', { edited: hasActiveSessions || hasDirtyTabs }).catch(() => {})
+  }, [hasActiveSessions, hasDirtyTabs])
 
   // Check for unmigrated Cursor IDE conversations
   useCursorMigrationCheck()

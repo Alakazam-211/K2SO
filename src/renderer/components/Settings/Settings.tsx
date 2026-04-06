@@ -538,9 +538,15 @@ function GeneralSection(): React.JSX.Element {
         <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
           <span className="text-xs text-[var(--color-text-secondary)]">App Version</span>
           <div className="flex items-center gap-3">
-            <span className="text-xs text-[var(--color-text-muted)]">
-              v{currentVersion || '...'}
-            </span>
+            <div className="flex items-center gap-1.5">
+              <span
+                className="w-1.5 h-1.5 flex-shrink-0"
+                style={{ backgroundColor: updateStatus === 'available' ? '#eab308' : '#4ade80' }}
+              />
+              <span className="text-xs text-[var(--color-text-muted)]">
+                v{currentVersion || '...'}
+              </span>
+            </div>
             {updateStatus === 'idle' && (
               <button
                 onClick={handleCheckUpdate}
@@ -5590,7 +5596,7 @@ function ClaudeAuthRefreshRow(): React.JSX.Element {
 
   // Status display
   const statusDot = (color: string) => (
-    <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: color }} />
+    <span className="w-1.5 h-1.5 flex-shrink-0" style={{ backgroundColor: color }} />
   )
 
   let statusIndicator: React.ReactNode = null

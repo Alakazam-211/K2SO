@@ -23,6 +23,9 @@ tauri-plugin-fs = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
 portable-pty = "0.8"
 rusqlite = { version = "0.31", features = ["bundled"] }
 git2 = { version = "0.19", features = ["vendored-openssl"] }

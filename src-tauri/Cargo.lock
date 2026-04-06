@@ -2470,6 +2470,7 @@ dependencies = [
  "mio",
  "notify",
  "notify-debouncer-mini",
+ "objc",
  "parking_lot",
  "polling",
  "portable-pty",

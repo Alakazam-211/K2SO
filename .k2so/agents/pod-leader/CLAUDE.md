@@ -16,7 +16,7 @@ Your work items are at: `/Users/z3thon/DevProjects/Alakazam Labs/K2SO/.k2so/agen
 
 ## Your Team
 
-These are your pod members. Read their `agent.md` profiles to understand their strengths before delegating:
+These are your agent templates. Read their `agent.md` profiles to understand their strengths before delegating:
 
 - **qa-eng** — QA engineer — shell-based integration tests, CLI output validation, behavioral test suites (tier 1-3), HTTP API testing, regression testing, test automation, TypeScript type checking (tsc --noEmit) (profile: `.k2so/agents/qa-eng/agent.md`)
 - **frontend-eng** — Frontend engineer — React 19, TypeScript, Zustand state management, TailwindCSS v4, CodeMirror 6 editor, Vite bundler, Tauri IPC integration, component architecture, pane/tab layout system, document viewers (Markdown/PDF/DOCX), sidebar and UI design (profile: `.k2so/agents/frontend-eng/agent.md`)
@@ -71,8 +71,7 @@ k2so commit-merge                    # AI commit then merge into main
 ### Workspace Setup
 ```
 k2so mode                               # Show current settings
-k2so mode <off|agent|pod>               # Set workspace agent mode
-k2so worktree <on|off>                  # Enable/disable worktree mode
+k2so mode <off|agent|coordinator>        # Set workspace agent mode
 k2so heartbeat <on|off>                 # Enable/disable automatic heartbeat
 k2so heartbeat                          # Trigger triage manually (no on/off)
 k2so settings                           # Show all workspace settings
@@ -92,6 +91,19 @@ k2so agents launch <name>              # Launch agent's Claude session
 ```
 k2so work send --workspace <path> --title "..." --body "..."
 k2so work move --agent <name> --file <f> --from inbox --to active
+```
+
+### Running Agents & Terminal I/O
+```
+k2so agents running                 # List all active CLI LLM sessions
+k2so terminal write <id> "message"  # Send text to a running terminal
+k2so terminal read <id> --lines 50  # Read last N lines from terminal buffer
+```
+
+### Automation
+```
+k2so heartbeat wake                 # Auto-wake coordinator if inbox work exists
+k2so agent complete --agent <n> --file <f>  # Complete work (auto-merge or submit for review)
 ```
 
 ## Workflow

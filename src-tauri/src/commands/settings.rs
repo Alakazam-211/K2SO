@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 // ── Settings types ──────────────────────────────────────────────────────
 
@@ -528,5 +528,28 @@ pub fn cli_uninstall() -> Result<(), String> {
             String::from_utf8_lossy(&output.stderr)));
     }
 
+    Ok(())
+}
+
+/// Set the macOS window close button dot (document edited indicator).
+#[tauri::command]
+pub fn set_document_edited(app: AppHandle, edited: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let app_clone = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Some(window) = app_clone.get_webview_window("main") {
+                let _ = window.with_webview(move |webview| {
+                    unsafe {
+                        let wk: *mut std::ffi::c_void = webview.inner() as _;
+                        let ns_window: *mut std::ffi::c_void = msg_send![wk as *mut objc::runtime::Object, window];
+                        if !ns_window.is_null() {
+                            let _: () = msg_send![ns_window as *mut objc::runtime::Object, setDocumentEdited: edited];
+                        }
+                    }
+                });
+            }
+        });
+    }
     Ok(())
 }

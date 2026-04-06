@@ -1,3 +1,7 @@
+#[cfg(target_os = "macos")]
+#[macro_use]
+extern crate objc;
+
 /// Safe eprintln that silently ignores write failures.
 /// When launched from Finder (no tty), stderr writes can fail and the default
 /// `eprintln!` panics, which cascades into abort(). This macro catches that.
@@ -482,6 +486,7 @@ pub fn run() {
             commands::settings::cli_install_status,
             commands::settings::cli_install,
             commands::settings::cli_uninstall,
+            commands::settings::set_document_edited,
             // Project Config
             commands::project_config::project_config_get,
             commands::project_config::project_config_has_run_command,
