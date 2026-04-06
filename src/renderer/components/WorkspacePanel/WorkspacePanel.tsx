@@ -157,11 +157,6 @@ export default function WorkspacePanel(): React.JSX.Element {
             <span className="text-xs font-medium text-[var(--color-text-primary)]">
               {modeLabels[agentMode] || agentMode}
             </span>
-            {projectStatus !== 'idle' && (
-              <span className="text-[11px] text-[var(--color-text-muted)]">
-                — {statusLabel(projectStatus)}
-              </span>
-            )}
           </div>
           {agentMode !== 'off' && (
             <button
@@ -176,7 +171,7 @@ export default function WorkspacePanel(): React.JSX.Element {
                   console.error('[workspace-panel] Launch failed:', err)
                 }
               }}
-              className="px-2 py-0.5 text-[10px] text-[var(--color-accent)] border border-[var(--color-accent)]/30 hover:bg-[var(--color-accent)]/10 transition-colors no-drag cursor-pointer"
+              className="px-2.5 py-0.5 text-[10px] font-medium text-white bg-[var(--color-accent)] hover:opacity-90 transition-opacity no-drag cursor-pointer"
             >
               Launch
             </button>
@@ -190,7 +185,7 @@ export default function WorkspacePanel(): React.JSX.Element {
           const totalDone = agents.reduce((sum, a) => sum + a.doneCount, 0)
           if (totalInbox === 0 && totalActive === 0 && totalDone === 0) return null
           return (
-            <div className="flex items-center gap-4 mt-2.5">
+            <div className="flex items-center justify-evenly mt-4">
               <div className="text-center">
                 <div className={`text-sm font-semibold tabular-nums ${totalInbox > 0 ? 'text-[var(--color-accent)]' : 'text-[var(--color-text-muted)]'}`}>{totalInbox}</div>
                 <div className="text-[9px] text-[var(--color-text-muted)] uppercase tracking-wider">Inbox</div>
@@ -226,7 +221,8 @@ export default function WorkspacePanel(): React.JSX.Element {
         {/* Heartbeat & State — only for AI-assisted modes */}
         {agentMode !== 'off' && (
           <>
-            <div className="flex items-center justify-between mt-3.5">
+            <div className="border-t border-[var(--color-border)] mt-3" />
+            <div className="flex items-center justify-between mt-3">
               <div className="flex items-center gap-2">
                 <span className="text-[11px] text-[var(--color-text-secondary)]">Heartbeat</span>
                 {activeProject.heartbeatEnabled === 1 && (

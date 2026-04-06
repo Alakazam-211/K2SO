@@ -1,6 +1,6 @@
 {
   "name": "k2so",
-  "version": "0.24.2",
+  "version": "0.24.3",
   "description": "Developer workspace with terminal panes, git worktrees, and agent presets",
   "author": "Alakazam Labs",
   "license": "MIT",
