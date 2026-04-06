@@ -2,6 +2,9 @@
 #[macro_use]
 extern crate objc;
 
+/// Flag to skip _exit(0) during relaunch (set by the frontend before process::relaunch)
+static RELAUNCH_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Safe eprintln that silently ignores write failures.
 /// When launched from Finder (no tty), stderr writes can fail and the default
 /// `eprintln!` panics, which cascades into abort(). This macro catches that.
@@ -228,9 +231,14 @@ pub fn run() {
                         // Use _exit() to skip C++ static destructors (ggml_metal).
                         // Without this, __cxa_finalize_ranges runs ggml's Metal cleanup
                         // which races against macOS Metal device teardown → SIGABRT.
-                        // All important cleanup (window state, terminals, LLM, port file)
-                        // is already done above.
-                        unsafe { libc::_exit(0); }
+                        // Skip _exit during relaunch so the process plugin can spawn
+                        // the new process before this one exits.
+                        if RELAUNCH_MODE.load(std::sync::atomic::Ordering::Relaxed) {
+                            log_debug!("[shutdown] Relaunch mode — using normal exit");
+                            std::process::exit(0);
+                        } else {
+                            unsafe { libc::_exit(0); }
+                        }
                     }
                 });
             }
@@ -487,6 +495,7 @@ pub fn run() {
             commands::settings::cli_install,
             commands::settings::cli_uninstall,
             commands::settings::set_document_edited,
+            commands::settings::set_relaunch_mode,
             // Project Config
             commands::project_config::project_config_get,
             commands::project_config::project_config_has_run_command,

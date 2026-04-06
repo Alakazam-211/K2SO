@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { invoke } from '@tauri-apps/api/core'
 import { check, type Update } from '@tauri-apps/plugin-updater'
 import { relaunch } from '@tauri-apps/plugin-process'
 
@@ -72,8 +73,10 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
 
   installAndRelaunch: async () => {
     try {
-      // Small delay to ensure the binary replacement is fully complete
-      await new Promise((r) => setTimeout(r, 1000))
+      // Tell Rust to use normal exit instead of _exit(0) during close
+      // so the process plugin can spawn the new process before exiting
+      await invoke('set_relaunch_mode')
+      await new Promise((r) => setTimeout(r, 500))
       await relaunch()
     } catch (err) {
       // If relaunch fails, the update was still installed — tell the user

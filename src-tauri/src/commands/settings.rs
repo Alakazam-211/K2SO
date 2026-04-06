@@ -531,6 +531,12 @@ pub fn cli_uninstall() -> Result<(), String> {
     Ok(())
 }
 
+/// Signal that the app is about to relaunch (skip _exit in close handler).
+#[tauri::command]
+pub fn set_relaunch_mode() {
+    crate::RELAUNCH_MODE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Set the macOS window close button dot (document edited indicator).
 #[tauri::command]
 pub fn set_document_edited(app: AppHandle, edited: bool) -> Result<(), String> {
