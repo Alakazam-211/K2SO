@@ -335,7 +335,7 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
               >
                 {isAgentActive ? (
                   <>
-                    <span className="braille-spinner text-[10px] text-[var(--color-accent)] group-hover/close:hidden" />
+                    <span className="braille-spinner text-[10px] text-[var(--color-text-muted)] group-hover/close:hidden" />
                     <svg className="hidden group-hover/close:block" width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5">
                       <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
                     </svg>
