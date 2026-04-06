@@ -2115,12 +2115,19 @@ k2so commit                          # AI-assisted commit review
 k2so commit-merge                    # AI commit then merge into main
 ```
 
+### Waking the Coordinator (USE THIS — not `k2so heartbeat`)
+```
+k2so heartbeat wake                     # THE RIGHT WAY: resumes coordinator session, sends triage message
+```
+**IMPORTANT:** Always use `k2so heartbeat wake` to wake a coordinator, NOT `k2so heartbeat`.
+- `heartbeat wake` → resumes the coordinator's previous session, detects inbox work, sends delegation instructions
+- `heartbeat` (without "wake") → raw triage that launches `__lead__`, does NOT resume sessions or send messages
+
 ### Workspace Setup
 ```
 k2so mode                               # Show current settings
 k2so mode <off|agent|coordinator>        # Set workspace agent mode
 k2so heartbeat <on|off>                 # Enable/disable automatic heartbeat
-k2so heartbeat                          # Trigger triage manually (no on/off)
 k2so settings                           # Show all workspace settings
 ```
 
@@ -2134,11 +2141,14 @@ k2so agents work <name>                 # Show agent's work items
 k2so agents launch <name>              # Launch agent's Claude session
 ```
 
-### Cross-Workspace
+### Cross-Workspace (use K2SO_PROJECT_PATH, not cd)
 ```
-k2so work send --workspace <path> --title "..." --body "..."
+K2SO_PROJECT_PATH=/path/to/workspace k2so work send --title "..." --body "..."
+K2SO_PROJECT_PATH=/path/to/workspace k2so heartbeat wake
 k2so work move --agent <name> --file <f> --from inbox --to active
 ```
+**IMPORTANT:** When targeting a different workspace, use `K2SO_PROJECT_PATH=/path k2so ...`
+Do NOT use `cd /path && k2so ...` — the cd resets your shell and may cause path resolution issues.
 
 ### Running Agents & Terminal I/O
 ```
@@ -2147,9 +2157,8 @@ k2so terminal write <id> "message"  # Send text to a running terminal
 k2so terminal read <id> --lines 50  # Read last N lines from terminal buffer
 ```
 
-### Automation
+### Completion
 ```
-k2so heartbeat wake                 # Auto-wake coordinator if inbox work exists
 k2so agent complete --agent <n> --file <f>  # Complete work (auto-merge or submit for review)
 ```
 
