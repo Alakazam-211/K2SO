@@ -339,7 +339,7 @@ export function AlacrittyTerminalView({
 
       // Listen for terminal title changes (e.g. Claude chat names)
       unlistenTitle = await listen<string>(`terminal:title:${terminalId}`, (event) => {
-        const newTitle = event.payload?.replace(/^\*\s*/, '').trim() // Strip leading * dirty indicator
+        const newTitle = event.payload?.replace(/^[*✱✲✳✴✵✶✷✸✹⚹⁎∗※]\s*/g, '').trim() // Strip leading asterisk variants
         if (newTitle && tabId) {
           useTabsStore.getState().setTabTitle(tabId, newTitle)
         }
