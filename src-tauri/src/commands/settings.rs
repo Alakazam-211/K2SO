@@ -537,29 +537,49 @@ pub fn set_relaunch_mode() {
     crate::RELAUNCH_MODE.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Relaunch the app via macOS `open -n -a` (spawns under launchd, survives _exit).
-/// This bypasses Tauri's built-in relaunch which spawns a bare binary that macOS
-/// doesn't register as a GUI app.
+/// Relaunch the app via a helper script that waits for this process to die,
+/// then opens the .app bundle cleanly. This avoids:
+/// 1. Two dock icons (old process still alive when new one launches)
+/// 2. Metal SIGABRT from std::process::exit() running __cxa_finalize_ranges
+/// 3. Tauri's built-in relaunch spawning a bare binary (not a .app bundle)
 #[tauri::command]
 pub fn relaunch_via_open(app: AppHandle) {
     #[cfg(target_os = "macos")]
     {
+        let pid = std::process::id();
         // Get the .app bundle path: binary is at K2SO.app/Contents/MacOS/k2so
         if let Ok(exe) = std::env::current_exe() {
             if let Some(app_bundle) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
-                let bundle_path = app_bundle.to_path_buf();
-                log_debug!("[relaunch] Spawning: open -n -a {:?}", bundle_path);
-                let _ = std::process::Command::new("/usr/bin/open")
-                    .arg("-n")
-                    .arg("-a")
-                    .arg(&bundle_path)
-                    .spawn();
+                let bundle_path = app_bundle.display().to_string();
+                let script = format!(
+                    "#!/bin/bash\n\
+                     # K2SO relaunch helper — waits for old process to exit, then reopens\n\
+                     while kill -0 {pid} 2>/dev/null; do sleep 0.2; done\n\
+                     sleep 0.5\n\
+                     open -a \"{bundle_path}\"\n\
+                     rm -f \"$0\"\n"
+                );
+
+                let script_path = format!("/tmp/k2so-relaunch-{pid}.sh");
+                if std::fs::write(&script_path, &script).is_ok() {
+                    let _ = std::fs::set_permissions(
+                        &script_path,
+                        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+                    );
+                    log_debug!("[relaunch] Helper script: {script_path}, waiting for PID {pid}");
+                    // Spawn detached — inherits no stdin/stdout, won't be killed with us
+                    let _ = std::process::Command::new("/bin/bash")
+                        .arg(&script_path)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }
             }
         }
     }
-    crate::RELAUNCH_MODE.store(true, std::sync::atomic::Ordering::Relaxed);
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    app.exit(0);
+    // Now exit hard — _exit skips Metal destructor crash, helper script handles relaunch
+    unsafe { libc::_exit(0); }
 }
 
 /// Set the macOS window close button dot (document edited indicator).
