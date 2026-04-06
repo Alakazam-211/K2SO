@@ -151,7 +151,7 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
     return parseCommand(preset.command)
   }, [defaultAgent, presets])
 
-  // Detect previous session and build args
+  // Resolve terminal: check for live terminal first, then resume, then fresh
   useEffect(() => {
     let cancelled = false
     const resolve = async () => {
@@ -161,9 +161,22 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
         return
       }
 
+      // Step 1: Check if our terminal already exists and is LIVE (has a running process).
+      // If so, just attach to it — don't kill it or create a new one.
+      const myTerminalId = terminalIdRef.current
+      try {
+        const exists = await invoke<boolean>('terminal_exists', { id: myTerminalId })
+        if (!cancelled && exists) {
+          // Terminal exists — just use it as-is (AlacrittyTerminalView will reattach)
+          setResolvedArgs(undefined) // no args needed, terminal already running
+          setReady(true)
+          return
+        }
+      } catch { /* fall through */ }
+
       const baseArgs = [...(agentCommand?.args ?? [])]
 
-      // Check for a previous chat session to resume
+      // Step 2: No live terminal — check for a previous session to resume
       const toolConfig = RESUMABLE_CLI_TOOLS[command]
       if (toolConfig) {
         try {
@@ -172,17 +185,6 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
             projectPath: agentDir,
           })
           if (!cancelled && sessionId) {
-            // Kill any stale terminal that was restored from layout without --resume
-            // so AlacrittyTerminalView recreates it with the correct args.
-            // Increment terminalKey to force remount so the listener resubscribes.
-            const staleId = terminalIdRef.current
-            try {
-              const staleExists = await invoke<boolean>('terminal_exists', { id: staleId })
-              if (staleExists) {
-                await invoke('terminal_kill', { id: staleId })
-                setTerminalKey((k) => k + 1)
-              }
-            } catch { /* ignore */ }
             setResolvedArgs([...baseArgs, toolConfig.resumeFlag, sessionId])
             setReady(true)
             return
@@ -190,6 +192,7 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
         } catch { /* fall through to fresh session */ }
       }
 
+      // Step 3: No live terminal, no previous session — start fresh
       if (!cancelled) {
         setResolvedArgs(baseArgs)
         setReady(true)
@@ -228,7 +231,7 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
         key={terminalKey}
         terminalId={terminalIdRef.current}
         cwd={agentDir}
-        command={agentCommand.command}
+        command={resolvedArgs !== undefined ? agentCommand.command : undefined}
         args={resolvedArgs}
       />
     </div>
