@@ -954,7 +954,8 @@ export default function Sidebar(): React.JSX.Element {
       menuItems.push(
         { id: 'separator-pin', label: '', type: 'separator' },
         { id: 'toggle-pin', label: project.pinned ? 'Unpin' : 'Pin to Top' },
-        { id: 'toggle-active', label: project.manuallyActive ? 'Remove from Active Bar' : 'Add to Active Bar' }
+        { id: 'toggle-active', label: project.manuallyActive ? 'Remove from Active Bar' : 'Add to Active Bar' },
+        ...(!project.manuallyActive ? [{ id: 'active-24h', label: 'Active for 24hrs' }] : [])
       )
 
       menuItems.push(
@@ -991,6 +992,14 @@ export default function Sidebar(): React.JSX.Element {
       } else if (clickedId === 'toggle-active') {
         await invoke('projects_update', { id: projectId, manuallyActive: project.manuallyActive ? 0 : 1 })
         await fetchProjects()
+      } else if (clickedId === 'active-24h') {
+        // Set lastInteractionAt to now — the Active Bar keeps projects with interaction < 24hrs
+        await invoke('projects_touch_interaction', { id: projectId })
+        const store = useProjectsStore.getState()
+        const updated = store.projects.map((p) =>
+          p.id === projectId ? { ...p, lastInteractionAt: Math.floor(Date.now() / 1000) } : p
+        )
+        useProjectsStore.setState({ projects: updated })
       } else if (clickedId === 'remove') {
         await removeProject(projectId)
       }
