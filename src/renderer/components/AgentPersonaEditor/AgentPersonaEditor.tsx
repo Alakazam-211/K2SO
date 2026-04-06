@@ -36,7 +36,7 @@ interface ClaudeMdPreview {
   claudeMdPath: string
 }
 
-type PreviewTab = 'profile' | 'claude-md'
+type PreviewTab = 'profile' | 'claude-md' | 'workspace-claude-md'
 
 interface AgentPersonaEditorProps {
   agentName: string
@@ -61,6 +61,8 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
   const [claudeMdContent, setClaudeMdContent] = useState<string>('')
   const [claudeMdPath, setClaudeMdPath] = useState<string>('')
   const [claudeMdGenerated, setClaudeMdGenerated] = useState<string>('')
+  const [wsClaudeMdContent, setWsClaudeMdContent] = useState<string>('')
+  const wsClaudeMdPath = `${projectPath}/CLAUDE.md`
   const [regenerating, setRegenerating] = useState(false)
 
   // Resolve the user's default AI agent command
@@ -96,6 +98,14 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
           setClaudeMdPath(preview.claudeMdPath)
         } catch {
           // CLAUDE.md preview not available — non-fatal
+        }
+
+        // Load workspace root CLAUDE.md
+        try {
+          const result = await invoke<{ content: string }>('fs_read_file', { path: `${projectPath}/CLAUDE.md` })
+          setWsClaudeMdContent(result.content)
+        } catch {
+          setWsClaudeMdContent('')
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -314,8 +324,8 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
   }
 
   // The content/path for the current tab
-  const currentContent = activeTab === 'profile' ? agentContent : claudeMdContent
-  const currentPath = activeTab === 'profile' ? agentMdPath : claudeMdPath
+  const currentContent = activeTab === 'profile' ? agentContent : activeTab === 'claude-md' ? claudeMdContent : wsClaudeMdContent
+  const currentPath = activeTab === 'profile' ? agentMdPath : activeTab === 'claude-md' ? claudeMdPath : wsClaudeMdPath
 
   return (
     <AIFileEditor
@@ -325,7 +335,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
       command={terminalCommand}
       args={terminalArgs}
       title={`Agent: ${agentName}`}
-      instructions={`Editing agent.md for "${agentName}". This file defines the agent's identity, role, and all instructions.`}
+      instructions={`Editing ${activeTab === 'profile' ? 'agent.md' : activeTab === 'claude-md' ? 'Agent CLAUDE.md' : 'Workspace CLAUDE.md'} — ${currentPath || ''}`}
       warningText="This agent has full system access when running."
       onFileChange={handleFileChange}
       onClose={handleClose}
@@ -335,7 +345,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
           {/* Tab bar */}
           <div className="flex items-center justify-between px-3 py-1.5 border-b border-[var(--color-border)] flex-shrink-0">
             <div className="flex items-center gap-1">
-              {(['profile', 'claude-md'] as const).map((tab) => (
+              {(['profile', 'claude-md', 'workspace-claude-md'] as const).map((tab) => (
                 <button
                   key={tab}
                   onClick={() => { setActiveTab(tab); setPreviewMode('preview') }}
@@ -345,7 +355,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
                       : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]'
                   }`}
                 >
-                  {tab === 'profile' ? 'Profile' : 'CLAUDE.md'}
+                  {tab === 'profile' ? 'Profile' : tab === 'claude-md' ? 'Agent CLAUDE.md' : 'Workspace CLAUDE.md'}
                 </button>
               ))}
             </div>
@@ -400,14 +410,20 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
             </div>
           </div>
 
-          {/* CLAUDE.md warning banner */}
+          {/* CLAUDE.md info banner */}
           {activeTab === 'claude-md' && (
             <div className="px-3 py-2 bg-yellow-500/5 border-b border-yellow-500/20 flex-shrink-0">
               <p className="text-[10px] text-yellow-500/80 leading-relaxed">
-                This file is auto-generated at launch from your Profile, Standing Orders, and infrastructure docs.
-                Edits here will persist but may be overwritten when you click Regenerate or when K2SO updates
-                the agent context (e.g., mode change, new team members). To make lasting changes, edit the
-                Profile tab instead.
+                Used by heartbeat/automated launches. Auto-generated from Profile + CLI tools.
+                Edits persist but may be overwritten on Regenerate or mode changes.
+              </p>
+            </div>
+          )}
+          {activeTab === 'workspace-claude-md' && (
+            <div className="px-3 py-2 bg-blue-500/5 border-b border-blue-500/20 flex-shrink-0">
+              <p className="text-[10px] text-blue-400/80 leading-relaxed">
+                Used by manual Claude sessions launched from the workspace root.
+                Customize this for the user's interactive experience.
               </p>
             </div>
           )}
@@ -419,7 +435,9 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
                   {activeTab === 'profile'
                     ? (stripFrontmatter(agentContent) || '*No content yet*')
-                    : (claudeMdContent || '*CLAUDE.md not yet generated. Click Regenerate to create it.*')
+                    : activeTab === 'claude-md'
+                      ? (claudeMdContent || '*CLAUDE.md not yet generated. Click Regenerate to create it.*')
+                      : (wsClaudeMdContent || '*No workspace CLAUDE.md yet.*')
                   }
                 </ReactMarkdown>
               </div>
@@ -431,20 +449,20 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
                 filePath={currentPath}
                 onSave={async (content) => {
                   if (activeTab === 'profile') {
-                    try {
-                      await invoke('fs_write_file', { path: agentMdPath, content })
-                    } catch (err) {
-                      console.error('[agent-editor] Save failed:', err)
-                    }
-                  } else {
+                    try { await invoke('fs_write_file', { path: agentMdPath, content }) } catch (err) { console.error('[agent-editor] Save failed:', err) }
+                  } else if (activeTab === 'claude-md') {
                     await handleSaveClaudeMd(content)
+                  } else {
+                    try { await invoke('fs_write_file', { path: wsClaudeMdPath, content }) } catch (err) { console.error('[agent-editor] Workspace CLAUDE.md save failed:', err) }
                   }
                 }}
                 onChange={(content) => {
                   if (activeTab === 'profile') {
                     setAgentContent(content)
-                  } else {
+                  } else if (activeTab === 'claude-md') {
                     setClaudeMdContent(content)
+                  } else {
+                    setWsClaudeMdContent(content)
                   }
                 }}
               />
