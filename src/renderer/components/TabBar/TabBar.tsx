@@ -165,41 +165,25 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
     const allTabs = groupIndex === 0 ? useTabsStore.getState().tabs : useTabsStore.getState().extraGroups[groupIndex - 1]?.tabs ?? []
     const hasOtherTabs = allTabs.length > 1
 
-    // Check if this tab has a resumable CLI tool — detect session ID live if needed
+    // Check if this tab has a running CLI tool — get the terminal ID for copy
     const tab = allTabs.find((t) => t.id === tabId)
-    let tabSessionId: string | null = null
-    let tabCommand: string | undefined
-    let tabCwd: string | undefined
+    let tabTerminalId: string | null = null
     if (tab) {
       for (const [, pg] of tab.paneGroups) {
         for (const item of pg.items) {
           if (item.type === 'terminal') {
             const d = item.data as TerminalItemData
-            tabCommand = d.command
-            tabCwd = d.cwd
-            if (d.sessionId) { tabSessionId = d.sessionId; break }
+            if (d.command) { tabTerminalId = d.terminalId; break }
           }
         }
-        if (tabSessionId) break
-      }
-    }
-    // Live detect if no cached session ID but command is a resumable CLI tool
-    if (!tabSessionId && tabCommand && tabCwd) {
-      const { RESUMABLE_CLI_TOOLS } = await import('@shared/constants')
-      const toolConfig = RESUMABLE_CLI_TOOLS[tabCommand]
-      if (toolConfig) {
-        try {
-          tabSessionId = await invoke<string | null>('chat_history_detect_active_session', {
-            provider: toolConfig.provider, projectPath: tabCwd,
-          })
-        } catch { /* detection failed */ }
+        if (tabTerminalId) break
       }
     }
 
     const menuItems = [
       { id: 'open-terminal', label: `Open in ${defaultTerminal}` },
-      ...(tabSessionId ? [
-        { id: 'copy-session-id', label: 'Copy Session ID' },
+      ...(tabTerminalId ? [
+        { id: 'copy-terminal-id', label: 'Copy Terminal ID' },
       ] : []),
       { id: 'separator', label: '', type: 'separator' as const },
       { id: 'close', label: 'Close Tab' },
@@ -228,8 +212,8 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
       for (const tab of allTabs) {
         removeTabFromGroup(groupIndex, tab.id)
       }
-    } else if (clickedId === 'copy-session-id' && tabSessionId) {
-      navigator.clipboard.writeText(tabSessionId).catch(() => {})
+    } else if (clickedId === 'copy-terminal-id' && tabTerminalId) {
+      navigator.clipboard.writeText(tabTerminalId).catch(() => {})
     } else if (clickedId === 'open-terminal') {
       // Find the cwd from the tab's first terminal pane
       const tabsState = useTabsStore.getState()
