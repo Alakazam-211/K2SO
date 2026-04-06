@@ -465,24 +465,30 @@ export function startAgentPolling(): void {
       const { command, args, cwd, agentName, worktreePath } = event.payload
       const tabOpts = { title: `Agent: ${agentName}`, command, args }
 
-      // If this launch is for a worktree, create the PTY in the background.
-      // The Chat tab discovers it via terminal_list_running_agents CWD match.
+      // If this launch is for a worktree, create the PTY in the background
+      // with the same terminal ID the Chat tab will use (agent-chat-wt-{wsId}).
       if (worktreePath) {
-        // Use a deterministic ID based on the worktree path so the Chat tab
-        // can find it. We can't use ws.id because the workspace record may
-        // not exist in the store yet (sync:projects hasn't fired).
-        const bgTerminalId = `agent-chat-${agentName}`
-        try {
-          const exists = await invoke<boolean>('terminal_exists', { id: bgTerminalId })
-          if (!exists) {
-            await invoke('terminal_create', {
-              cwd,
-              command,
-              args,
-              id: bgTerminalId,
-            })
+        // Wait briefly for sync:projects to register the new workspace
+        let wsId: string | null = null
+        for (let attempt = 0; attempt < 10; attempt++) {
+          const projectsStore = useProjectsStore.getState()
+          for (const project of projectsStore.projects) {
+            const ws = project.workspaces.find((w) => w.worktreePath === worktreePath)
+            if (ws) { wsId = ws.id; break }
           }
-        } catch { /* will be created when user navigates */ }
+          if (wsId) break
+          await new Promise((r) => setTimeout(r, 500))
+        }
+
+        if (wsId) {
+          const bgTerminalId = `agent-chat-wt-${wsId}`
+          try {
+            const exists = await invoke<boolean>('terminal_exists', { id: bgTerminalId })
+            if (!exists) {
+              await invoke('terminal_create', { cwd, command, args, id: bgTerminalId })
+            }
+          } catch { /* will be created when user navigates */ }
+        }
         return
       }
 
