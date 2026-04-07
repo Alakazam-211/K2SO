@@ -1144,10 +1144,17 @@ pub fn k2so_agents_build_launch(
             .filter(|s| !s.is_empty())
     })
     .or_else(|| {
-        // Fall back to detecting from Claude's history
+        // Fall back to detecting from Claude's history (agent dir)
         crate::commands::chat_history::chat_history_detect_active_session(
             "claude".to_string(),
             agent_cwd.to_string_lossy().to_string(),
+        ).ok().flatten()
+    })
+    .or_else(|| {
+        // Also try project root — older sessions may be stored under project path
+        crate::commands::chat_history::chat_history_detect_active_session(
+            "claude".to_string(),
+            project_path.clone(),
         ).ok().flatten()
     });
 
@@ -1157,8 +1164,8 @@ pub fn k2so_agents_build_launch(
         args.push(session_id.clone());
     }
 
-    // Use agent directory as CWD so sessions are stored there
-    let launch_cwd = agent_cwd.to_string_lossy().to_string();
+    // Use project root as CWD so the agent has access to the codebase
+    let launch_cwd = project_path.clone();
 
     Ok(serde_json::json!({
         "command": command,

@@ -352,8 +352,8 @@ function AgentPaneInner({ agentName, projectPath }: AgentPaneProps): React.JSX.E
     )
   }
 
-  // Determine which tabs to show
-  const showWork = profile ? (profile.agentType !== 'k2so' && profile.agentType !== 'custom') : false
+  // All agent types get Work + Chat tabs (K2SO and Custom agents have inboxes for external work)
+  const showWork = !isWorkspaceBoard
   const showChat = !isWorkspaceBoard
 
   return (
