@@ -4469,18 +4469,40 @@ pub fn k2so_agents_regenerate_skills(
                 _ => generate_template_skill_content(&project_name, &name),
             };
 
+            // Write to agent dir
             let skill_path = path.join("SKILL.md");
             if fs::write(&skill_path, &skill_content).is_ok() {
                 updated += 1;
             }
+
+            // Write to Claude Code skills dir
+            let description = match agent_type.as_str() {
+                "manager" => format!("K2SO Workspace Manager commands for {}", name),
+                "custom" | "k2so" => format!("K2SO agent commands for {}", name),
+                _ => format!("K2SO agent template commands for {}", name),
+            };
+            write_claude_skill(&project_path, &format!("k2so-{}", name), &description, &skill_content);
         }
     }
 
     Ok(serde_json::json!({"updated": updated}))
 }
 
-/// Write the workspace-level SKILL.md at the project root.
-/// This is the user-facing skill for when humans work directly with an LLM.
+/// Write a skill to Claude Code's `.claude/skills/` directory so it's auto-discovered.
+/// Also writes to `.k2so/agents/{name}/SKILL.md` for other harnesses.
+fn write_claude_skill(project_path: &str, skill_name: &str, description: &str, content: &str) {
+    // Claude Code: .claude/skills/{name}/SKILL.md (with frontmatter)
+    let claude_skills_dir = PathBuf::from(project_path).join(".claude/skills").join(skill_name);
+    let _ = fs::create_dir_all(&claude_skills_dir);
+    let claude_content = format!(
+        "---\nname: {}\ndescription: {}\n---\n\n{}",
+        skill_name, description, content
+    );
+    let _ = fs::write(claude_skills_dir.join("SKILL.md"), &claude_content);
+}
+
+/// Write the workspace-level K2SO skill.
+/// Available to any LLM session in the project root.
 pub fn write_workspace_skill_file(project_path: &str) {
     let project_name = std::path::Path::new(project_path)
         .file_name()
@@ -4488,8 +4510,18 @@ pub fn write_workspace_skill_file(project_path: &str) {
         .unwrap_or_else(|| "workspace".to_string());
 
     let content = generate_workspace_skill_content(&project_name);
+
+    // Write to project root (generic harnesses)
     let skill_path = PathBuf::from(project_path).join("SKILL.md");
     let _ = fs::write(&skill_path, &content);
+
+    // Write to Claude Code skills dir
+    write_claude_skill(
+        project_path,
+        "k2so",
+        "K2SO workspace commands — send work to agents, view activity, manage connections",
+        &content,
+    );
 }
 
 /// Write a single agent's SKILL.md. Used internally during launch.
@@ -4505,6 +4537,15 @@ pub fn write_agent_skill_file(project_path: &str, agent_name: &str, agent_type: 
         _ => generate_template_skill_content(&project_name, agent_name),
     };
 
+    // Write to agent dir (for other harnesses)
     let skill_path = agent_dir(project_path, agent_name).join("SKILL.md");
     let _ = fs::write(&skill_path, &skill_content);
+
+    // Write to Claude Code skills dir
+    let description = match agent_type {
+        "manager" | "coordinator" | "pod-leader" => format!("K2SO Workspace Manager commands for {} — checkin, delegate, message, reserve files", agent_name),
+        "custom" | "k2so" => format!("K2SO agent commands for {} — checkin, message connected workspaces, reserve files", agent_name),
+        _ => format!("K2SO agent template commands for {} — checkin, status, done, reserve files", agent_name),
+    };
+    write_claude_skill(project_path, &format!("k2so-{}", agent_name), &description, &skill_content);
 }
