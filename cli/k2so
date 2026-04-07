@@ -823,7 +823,91 @@ cmd_checkin() {
         esac
     done
     [[ -z "$agent" ]] && { echo "Error: --agent required (or set K2SO_AGENT_NAME)" >&2; exit 1; }
-    cli_request "/cli/checkin" "agent=$agent"
+    cli_request "/cli/checkin" "agent=$agent" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    if 'error' in d:
+        print('Error: %s' % d['error'])
+        sys.exit(1)
+
+    print('== Agent Check-in ==')
+    print('Agent: %s' % d.get('agent', '?'))
+    print('Project: %s' % d.get('project', '?'))
+    print()
+
+    # Current task
+    task = d.get('task')
+    if task and task is not None:
+        if isinstance(task, dict):
+            print('Current Task:')
+            print('  Title: %s' % task.get('title', '(untitled)'))
+            print('  Priority: %s' % task.get('priority', 'normal'))
+            if task.get('from'): print('  From: %s' % task['from'])
+            if task.get('body'): print('  %s' % task['body'][:200])
+        else:
+            print('Current Task: (active)')
+    else:
+        print('Current Task: None')
+    print()
+
+    # Inbox
+    inbox = d.get('inbox', [])
+    if inbox:
+        print('Inbox (%d items):' % len(inbox))
+        for item in inbox:
+            if isinstance(item, dict):
+                pri = item.get('priority', 'normal')
+                title = item.get('title', item.get('file', '?'))
+                frm = item.get('from')
+                src = ' (from %s)' % frm if frm and frm != 'null' else ''
+                print('  [%s] %s%s' % (pri, title, src))
+            else:
+                print('  - %s' % item)
+    else:
+        print('Inbox: Empty')
+    print()
+
+    # Peers
+    peers = d.get('peers', [])
+    if peers:
+        print('Peers (%d):' % len(peers))
+        for p in peers:
+            status = p.get('status', '?')
+            msg = p.get('statusMessage', '')
+            proj = p.get('project', '')
+            detail = ' - %s' % msg if msg else ''
+            loc = ' (%s)' % proj if proj else ''
+            print('  %s: %s%s%s' % (p.get('agent', '?'), status, detail, loc))
+    else:
+        print('Peers: None')
+    print()
+
+    # Reservations
+    res = d.get('reservations', {})
+    if res and isinstance(res, dict) and len(res) > 0:
+        print('File Reservations:')
+        for path, info in res.items():
+            agent_name = info.get('agent', '?') if isinstance(info, dict) else '?'
+            print('  %s (held by %s)' % (path, agent_name))
+    else:
+        print('File Reservations: None')
+    print()
+
+    # Feed
+    feed = d.get('feed', [])
+    if feed:
+        print('Recent Activity:')
+        for e in feed[:5]:
+            etype = e.get('eventType', e.get('type', '?'))
+            agent_name = e.get('agent', '')
+            summary = e.get('summary', '')
+            print('  %s: %s %s' % (agent_name or '-', etype, summary or ''))
+    else:
+        print('Recent Activity: None')
+except Exception as e:
+    sys.stderr.write('Error: %s\n' % e)
+" 2>/dev/null
 }
 
 cmd_status() {
