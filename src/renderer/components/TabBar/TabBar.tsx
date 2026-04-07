@@ -312,17 +312,18 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
                   <span className="braille-spinner text-[11px]" />
                 ) : (
                   <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round">
-                    {/* K2SO — near-perfect sphere, brow ridge, recessed eyes, rough jaw with horizontal grille */}
-                    <circle cx="8" cy="7" r="6.5" />
-                    {/* Brow ridge across the eyes */}
-                    <path d="M4 6.5 L6 5.8 L10 5.8 L12 6.5" />
-                    {/* Two recessed round eyes */}
-                    <circle cx="6.2" cy="7.2" r="1.3" />
-                    <circle cx="9.8" cy="7.2" r="1.3" />
-                    {/* Rough jaw / chin grille — horizontal slats */}
-                    <line x1="5.5" y1="10.2" x2="10.5" y2="10.2" />
-                    <line x1="5.8" y1="11.2" x2="10.2" y2="11.2" />
-                    <line x1="6.2" y1="12.2" x2="9.8" y2="12.2" />
+                    {/* K2SO — round cranium, wide-set eyes, protruding jaw with grille */}
+                    {/* Round cranium — top 2/3 of head */}
+                    <path d="M2 8 C2 2.5 4 0.5 8 0.5 C12 0.5 14 2.5 14 8 L13 9.5 L3 9.5 Z" />
+                    {/* Protruding jaw/chin plate below the cranium */}
+                    <path d="M4 9.5 L3.5 11 L5 13.5 L11 13.5 L12.5 11 L12 9.5" />
+                    {/* Wide-set eyes — pushed to edges */}
+                    <circle cx="4.8" cy="5.8" r="1.5" />
+                    <circle cx="11.2" cy="5.8" r="1.5" />
+                    {/* Horizontal grille slats on jaw */}
+                    <line x1="5.5" y1="10.8" x2="10.5" y2="10.8" />
+                    <line x1="5.2" y1="11.8" x2="10.8" y2="11.8" />
+                    <line x1="5.8" y1="12.8" x2="10.2" y2="12.8" />
                   </svg>
                 )}
                 {/* Activity underline */}
