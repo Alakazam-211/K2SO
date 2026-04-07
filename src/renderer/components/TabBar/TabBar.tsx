@@ -213,7 +213,21 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
         removeTabFromGroup(groupIndex, tab.id)
       }
     } else if (clickedId === 'copy-terminal-id' && tabTerminalId) {
-      navigator.clipboard.writeText(tabTerminalId).catch(() => {})
+      // Copy workspace:agent qualified identifier
+      const agName = tabTerminalId.replace(/^agent-chat-(?:wt-)?/, '')
+      // Resolve workspace name from tab title or CWD
+      const tabForCopy = allTabs.find((t) => t.id === tabId)
+      let wsName = tabForCopy?.title || ''
+      // Try to find workspace name from projects store
+      try {
+        const { useProjectsStore } = await import('@/stores/projects')
+        const activeProject = useProjectsStore.getState().projects.find(
+          (p) => useProjectsStore.getState().activeProjectId === p.id
+        )
+        if (activeProject) wsName = activeProject.name
+      } catch { /* use tab title */ }
+      const qualified = wsName ? `${wsName}:${agName}` : tabTerminalId
+      navigator.clipboard.writeText(qualified).catch(() => {})
     } else if (clickedId === 'open-terminal') {
       // Find the cwd from the tab's first terminal pane
       const tabsState = useTabsStore.getState()

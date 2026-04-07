@@ -355,7 +355,7 @@ export default function RunningAgentsPanel(): React.JSX.Element | null {
                       </span>
                     </div>
 
-                    {/* Copy terminal ID */}
+                    {/* Copy workspace:agent identifier */}
                     <button
                       className={`flex h-6 w-6 items-center justify-center transition-colors flex-shrink-0 ${
                         copiedId === agent.terminalId
@@ -364,12 +364,13 @@ export default function RunningAgentsPanel(): React.JSX.Element | null {
                       }`}
                       onClick={(e) => {
                         e.stopPropagation()
-                        // Copy the terminal ID (used for k2so terminal write and debugging)
-                        navigator.clipboard.writeText(agent.terminalId)
+                        const wsName = agent.workspaceName || workspaceName(agent.cwd)
+                        const agName = agent.terminalId.replace(/^agent-chat-(?:wt-)?/, '') || agent.terminalId
+                        navigator.clipboard.writeText(`${wsName}:${agName}`)
                         setCopiedId(agent.terminalId)
                         setTimeout(() => setCopiedId((prev) => prev === agent.terminalId ? null : prev), 1500)
                       }}
-                      title={`Copy terminal ID: ${agent.terminalId}`}
+                      title={`Copy: ${agent.workspaceName || workspaceName(agent.cwd)}:${agent.terminalId.replace(/^agent-chat-(?:wt-)?/, '')}`}
                     >
                       {copiedId === agent.terminalId ? (
                         <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
