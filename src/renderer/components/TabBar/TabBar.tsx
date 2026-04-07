@@ -311,14 +311,18 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
                 {isAgentActive ? (
                   <span className="braille-spinner text-[11px]" />
                 ) : (
-                  <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                    {/* K2SO droid head — wide round dome, big eyes, vertical chin speaker */}
-                    <path d="M3 8 C3 3 4.5 1 8 1 C11.5 1 13 3 13 8 L12.5 11 C12.5 13 11 14.5 8 14.5 C5 14.5 3.5 13 3.5 11 Z" />
-                    <circle cx="5.8" cy="6.5" r="1.6" />
-                    <circle cx="10.2" cy="6.5" r="1.6" />
-                    <line x1="8" y1="10.5" x2="8" y2="13" />
-                    <line x1="7" y1="11" x2="7" y2="12.5" />
-                    <line x1="9" y1="11" x2="9" y2="12.5" />
+                  <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round">
+                    {/* K2SO — near-perfect sphere, brow ridge, recessed eyes, rough jaw with horizontal grille */}
+                    <circle cx="8" cy="7" r="6.5" />
+                    {/* Brow ridge across the eyes */}
+                    <path d="M4 6.5 L6 5.8 L10 5.8 L12 6.5" />
+                    {/* Two recessed round eyes */}
+                    <circle cx="6.2" cy="7.2" r="1.3" />
+                    <circle cx="9.8" cy="7.2" r="1.3" />
+                    {/* Rough jaw / chin grille — horizontal slats */}
+                    <line x1="5.5" y1="10.2" x2="10.5" y2="10.2" />
+                    <line x1="5.8" y1="11.2" x2="10.2" y2="11.2" />
+                    <line x1="6.2" y1="12.2" x2="9.8" y2="12.2" />
                   </svg>
                 )}
                 {/* Activity underline */}
