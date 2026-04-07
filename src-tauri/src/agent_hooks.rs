@@ -1584,6 +1584,13 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             }
                         })()
                     }
+                    "/cli/skills/regenerate" => {
+                        // Regenerate SKILL.md files for all agents in this workspace
+                        match crate::commands::k2so_agents::k2so_agents_regenerate_skills(project_path.to_string()) {
+                            Ok(result) => Ok(result.to_string()),
+                            Err(e) => Err(e),
+                        }
+                    }
                     "/cli/feed" => {
                         // Query the activity feed
                         let limit = params.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(20);

@@ -1054,6 +1054,31 @@ except: pass
     esac
 }
 
+cmd_skills() {
+    local subcmd="${1:-regenerate}"
+    case "$subcmd" in
+        regenerate)
+            cli_request "/cli/skills/regenerate" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    if 'error' in d:
+        sys.stderr.write('Error: %s\n' % d['error'])
+        sys.exit(1)
+    count = d.get('updated', 0)
+    print('Regenerated SKILL.md for %d agent(s).' % count)
+except Exception as e:
+    sys.stderr.write('Error: %s\n' % e)
+" 2>/dev/null
+            ;;
+        *)
+            echo "Usage: k2so skills [regenerate]" >&2
+            echo "  regenerate    Regenerate SKILL.md for all agents in this workspace" >&2
+            exit 1
+            ;;
+    esac
+}
+
 cmd_feed() {
     local limit="${1:-20}"
     local agent=""
@@ -1749,6 +1774,9 @@ case "${1:-help}" in
         ;;
     connections)
         shift; cmd_connections "$@"
+        ;;
+    skills)
+        shift; cmd_skills "$@"
         ;;
     feed)
         shift; cmd_feed "$@"

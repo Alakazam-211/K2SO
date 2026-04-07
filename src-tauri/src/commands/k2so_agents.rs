@@ -1700,21 +1700,28 @@ fn generate_agent_claude_md_content(
         md.push_str("\n**auto** = build and merge automatically. **gated** = build PR but wait for human approval. **off** = do not act.\n\n");
     }
 
-    // Insert the universal skill protocol based on agent type
+    // Write the SKILL.md file alongside the CLAUDE.md.
+    // SKILL.md is harness-agnostic — works with Claude Code, Pi, Aider, etc.
+    // CLAUDE.md contains identity + task context only. SKILL.md has the CLI protocol.
     let project_name = std::path::Path::new(project_path)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "workspace".to_string());
 
-    if is_manager_lead {
-        md.push_str(&generate_manager_skill_content(project_path, &project_name));
+    let skill_content = if is_manager_lead {
+        generate_manager_skill_content(project_path, &project_name)
+    } else if agent_type == "custom" {
+        generate_custom_agent_skill_content(&project_name, agent_name)
     } else {
-        md.push_str(&generate_template_skill_content(&project_name, agent_name));
-    }
+        generate_template_skill_content(&project_name, agent_name)
+    };
 
-    // NOTE: CLI_TOOLS_DOCS and WORKFLOW_DOCS intentionally omitted.
-    // The skill protocol above is the canonical agent-facing surface.
-    // Old docs duplicated and added noise. Agents only need the 6 skill commands.
+    // Write SKILL.md to agent directory
+    let skill_path = agent_dir(project_path, agent_name).join("SKILL.md");
+    let _ = fs::write(&skill_path, &skill_content);
+
+    // Reference the SKILL.md from CLAUDE.md so Claude Code picks it up
+    md.push_str("\n## Tools\n\nSee `SKILL.md` in this directory for your available CLI commands.\n");
 
     Ok(md)
 }
@@ -1723,7 +1730,7 @@ fn generate_agent_claude_md_content(
 /// Includes delegation, cross-workspace messaging, and full orchestration commands.
 fn generate_manager_skill_content(project_path: &str, project_name: &str) -> String {
     format!(
-r#"## K2SO Workspace Manager Protocol
+r#"# K2SO Workspace Manager Skill
 
 You are the Workspace Manager for {project_name}. Check in first, then triage work.
 
@@ -1774,11 +1781,61 @@ k2so release
     )
 }
 
+/// Generate the skill protocol for custom agents.
+/// Has checkin, status, done, msg (to connected workspaces), reserve/release.
+/// No delegation — custom agents send work to workspace inboxes.
+fn generate_custom_agent_skill_content(project_name: &str, agent_name: &str) -> String {
+    format!(
+r#"# K2SO Agent Skill
+
+You are {agent_name}, a custom agent for {project_name}.
+
+## Check In (do this first on every wake)
+
+```
+k2so checkin
+```
+
+Returns your current task, inbox messages, peer status, file reservations, and recent activity.
+
+## Report Status
+
+```
+k2so status "reviewing security audit"
+```
+
+## Complete Task
+
+```
+k2so done
+k2so done --blocked "waiting for API access"
+```
+
+## Send Work to a Connected Workspace
+
+```
+k2so msg <workspace-name>:inbox "description of work needed"
+```
+
+Only works for workspaces connected via `k2so connections`.
+
+## Claim Files
+
+```
+k2so reserve src/auth/ src/config.ts
+k2so release
+```
+"#,
+        agent_name = agent_name,
+        project_name = project_name,
+    )
+}
+
 /// Generate the universal skill protocol for agent templates (delegates).
 /// Focused protocol — NO delegate, NO cross-workspace messaging.
 fn generate_template_skill_content(project_name: &str, agent_name: &str) -> String {
     format!(
-r#"## K2SO Agent Protocol
+r#"# K2SO Agent Skill
 
 You are {agent_name}, a specialist agent working in a dedicated worktree for {project_name}.
 
@@ -4308,4 +4365,85 @@ pub fn workspace_relations_delete(
     let conn = state.db.lock();
     WorkspaceRelation::delete(&conn, &id).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+// ── Skill File Generation ────────────────────────────────────────────
+
+/// Regenerate SKILL.md files for all agents in a workspace.
+/// Called on app startup (migration) and via CLI `k2so skills regenerate`.
+#[tauri::command]
+pub fn k2so_agents_regenerate_skills(
+    project_path: String,
+) -> Result<serde_json::Value, String> {
+    let agents_dir = PathBuf::from(&project_path).join(".k2so/agents");
+    if !agents_dir.exists() {
+        return Ok(serde_json::json!({"updated": 0}));
+    }
+
+    let project_name = std::path::Path::new(&project_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".to_string());
+
+    let mut updated = 0;
+    if let Ok(entries) = fs::read_dir(&agents_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() { continue; }
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+
+            // Determine agent type from agent.md frontmatter
+            let agent_md = path.join("agent.md");
+            let agent_type = if agent_md.exists() {
+                let content = fs::read_to_string(&agent_md).unwrap_or_default();
+                let fm = parse_frontmatter(&content);
+                let raw = fm.get("type").cloned().unwrap_or_default();
+                match raw.as_str() {
+                    "pod-leader" | "coordinator" | "manager" => "manager".to_string(),
+                    "custom" => "custom".to_string(),
+                    "k2so" => "k2so".to_string(),
+                    "agent-template" => "agent-template".to_string(),
+                    _ => {
+                        // Check for manager/coordinator boolean flags
+                        let is_mgr = fm.get("manager").map(|v| v == "true").unwrap_or(false)
+                            || fm.get("coordinator").map(|v| v == "true").unwrap_or(false)
+                            || fm.get("pod_leader").map(|v| v == "true").unwrap_or(false);
+                        if is_mgr { "manager".to_string() } else { "agent-template".to_string() }
+                    }
+                }
+            } else {
+                "agent-template".to_string()
+            };
+
+            let skill_content = match agent_type.as_str() {
+                "manager" => generate_manager_skill_content(&project_path, &project_name),
+                "custom" | "k2so" => generate_custom_agent_skill_content(&project_name, &name),
+                _ => generate_template_skill_content(&project_name, &name),
+            };
+
+            let skill_path = path.join("SKILL.md");
+            if fs::write(&skill_path, &skill_content).is_ok() {
+                updated += 1;
+            }
+        }
+    }
+
+    Ok(serde_json::json!({"updated": updated}))
+}
+
+/// Write a single agent's SKILL.md. Used internally during launch.
+pub fn write_agent_skill_file(project_path: &str, agent_name: &str, agent_type: &str) {
+    let project_name = std::path::Path::new(project_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".to_string());
+
+    let skill_content = match agent_type {
+        "manager" | "coordinator" | "pod-leader" => generate_manager_skill_content(project_path, &project_name),
+        "custom" | "k2so" => generate_custom_agent_skill_content(&project_name, agent_name),
+        _ => generate_template_skill_content(&project_name, agent_name),
+    };
+
+    let skill_path = agent_dir(project_path, agent_name).join("SKILL.md");
+    let _ = fs::write(&skill_path, &skill_content);
 }

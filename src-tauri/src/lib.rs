@@ -120,6 +120,26 @@ pub fn run() {
             // Migrate workspace_layouts from settings.json → SQLite (one-time)
             migrate_workspace_layouts_to_db(app.handle());
 
+            // Regenerate SKILL.md files for all agent-enabled workspaces (v0.26 migration)
+            {
+                let paths: Vec<String> = {
+                    let state = app.state::<AppState>();
+                    let db = state.db.lock();
+                    let mut paths = Vec::new();
+                    if let Ok(mut stmt) = db.prepare("SELECT path FROM projects WHERE agent_mode != 'off'") {
+                        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                            for row in rows.flatten() {
+                                paths.push(row);
+                            }
+                        }
+                    }
+                    paths
+                };
+                for path in paths {
+                    let _ = commands::k2so_agents::k2so_agents_regenerate_skills(path);
+                }
+            }
+
             // Apply saved window state on startup
             if let Some(saved) = window::load_window_state(app.handle()) {
                 if let Some(win) = app.get_webview_window("main") {
@@ -640,6 +660,8 @@ pub fn run() {
             commands::k2so_agents::workspace_relations_list_incoming,
             commands::k2so_agents::workspace_relations_create,
             commands::k2so_agents::workspace_relations_delete,
+            // Agent Skills
+            commands::k2so_agents::k2so_agents_regenerate_skills,
             // Agent Editor
             commands::k2so_agents::k2so_agents_get_editor_context,
             commands::k2so_agents::k2so_agents_preview_claude_md,
