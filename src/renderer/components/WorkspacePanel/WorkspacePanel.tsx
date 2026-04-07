@@ -211,10 +211,29 @@ export default function WorkspacePanel(): React.JSX.Element {
           </div>
           {agentMode !== 'off' && (
             <button
-              onClick={() => {
-                // Redirect to the pinned system agent tab (which handles launch + resume)
+              onClick={async () => {
+                // Activate the pinned system agent tab
                 const tabsStore = useTabsStore.getState()
                 tabsStore.activateSystemAgentTab()
+
+                // If the agent terminal exists but is idle, inject a checkin
+                const sysTab = tabsStore.getSystemAgentTab()
+                if (sysTab) {
+                  const agentItem = Array.from(sysTab.paneGroups.values())[0]?.items[0]
+                  if (agentItem?.type === 'agent') {
+                    const terminalId = `agent-chat-${(agentItem.data as { agentName: string }).agentName}`
+                    try {
+                      const exists = await invoke<boolean>('terminal_exists', { id: terminalId })
+                      if (exists) {
+                        // Terminal exists — send checkin if idle
+                        await invoke('terminal_write', {
+                          id: terminalId,
+                          data: 'k2so checkin\r',
+                        })
+                      }
+                    } catch { /* terminal may not exist yet — Chat tab will handle launch */ }
+                  }
+                }
               }}
               className="px-2.5 py-0.5 text-[10px] font-medium text-white bg-[var(--color-accent)] hover:opacity-90 transition-opacity no-drag cursor-pointer"
             >
