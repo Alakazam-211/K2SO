@@ -48,7 +48,7 @@ interface Project {
   createdAt: number
   agentEnabled: number
   heartbeatEnabled: number
-  agentMode: string // 'off' | 'agent' | 'pod'
+  agentMode: string // 'off' | 'agent' | 'manager' | 'coordinator' | 'pod'
   stateId: string | null
   heartbeatMode: string // 'off' | 'scheduled' | 'hourly'
   heartbeatSchedule: string | null // JSON

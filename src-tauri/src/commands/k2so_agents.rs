@@ -7,6 +7,25 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::db::schema::{AgentSession, WorkspaceRelation};
+
+// ── DB helpers (standalone connection, no AppState needed) ──────────────
+
+fn k2so_db_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".k2so/k2so.db")
+}
+
+fn resolve_project_id(conn: &rusqlite::Connection, path: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT id FROM projects WHERE path = ?1",
+        rusqlite::params![path],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
 // ── Types ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,8 +36,8 @@ pub struct K2soAgentInfo {
     pub inbox_count: usize,
     pub active_count: usize,
     pub done_count: usize,
-    pub is_coordinator: bool,
-    /// Agent type: "k2so", "custom", "coordinator", "agent-template"
+    pub is_manager: bool,
+    /// Agent type: "k2so", "custom", "manager", "agent-template"
     pub agent_type: String,
 }
 
@@ -278,24 +297,25 @@ pub fn k2so_agents_list(project_path: String) -> Result<Vec<K2soAgentInfo>, Stri
         let name = entry.file_name().to_string_lossy().to_string();
         let agent_md = entry.path().join("agent.md");
 
-        let (role, is_coordinator, agent_type) = if agent_md.exists() {
+        let (role, is_manager, agent_type) = if agent_md.exists() {
             let content = fs::read_to_string(&agent_md).unwrap_or_default();
             let fm = parse_frontmatter(&content);
             let role = fm.get("role").cloned().unwrap_or_default();
-            // Support both old ("pod_leader") and new ("coordinator") frontmatter keys
-            let is_coord = fm.get("pod_leader").map(|v| v == "true").unwrap_or(false)
-                || fm.get("coordinator").map(|v| v == "true").unwrap_or(false);
+            // Support old ("pod_leader", "coordinator") and new ("manager") frontmatter keys
+            let is_mgr = fm.get("pod_leader").map(|v| v == "true").unwrap_or(false)
+                || fm.get("coordinator").map(|v| v == "true").unwrap_or(false)
+                || fm.get("manager").map(|v| v == "true").unwrap_or(false);
             let agent_type = fm.get("type").cloned().map(|t| {
                 // Migrate old type values to new ones
                 match t.as_str() {
-                    "pod-leader" => "coordinator".to_string(),
+                    "pod-leader" | "coordinator" => "manager".to_string(),
                     "pod-member" => "agent-template".to_string(),
                     other => other.to_string(),
                 }
             }).unwrap_or_else(|| {
-                if is_coord { "coordinator".to_string() } else { "agent-template".to_string() }
+                if is_mgr { "manager".to_string() } else { "agent-template".to_string() }
             });
-            (role, is_coord, agent_type)
+            (role, is_mgr, agent_type)
         } else {
             (String::new(), false, "agent-template".to_string())
         };
@@ -310,7 +330,7 @@ pub fn k2so_agents_list(project_path: String) -> Result<Vec<K2soAgentInfo>, Stri
             inbox_count,
             active_count,
             done_count,
-            is_coordinator,
+            is_manager,
             agent_type,
         });
     }
@@ -320,7 +340,7 @@ pub fn k2so_agents_list(project_path: String) -> Result<Vec<K2soAgentInfo>, Stri
 }
 
 /// Create a new K2SO agent with directory structure.
-/// `agent_type` can be: "k2so", "custom", "coordinator", "agent-template" (defaults to "agent-template").
+/// `agent_type` can be: "k2so", "custom", "manager", "agent-template" (defaults to "agent-template").
 #[tauri::command]
 pub fn k2so_agents_create(
     project_path: String,
@@ -339,7 +359,7 @@ pub fn k2so_agents_create(
     }
 
     let agent_type = agent_type.unwrap_or_else(|| "agent-template".to_string());
-    let is_coordinator = agent_type == "coordinator";
+    let is_manager = agent_type == "manager" || agent_type == "coordinator";
 
     fs::create_dir_all(agent_work_dir(&project_path, &name, "inbox"))
         .map_err(|e| format!("Failed to create inbox: {}", e))?;
@@ -351,8 +371,8 @@ pub fn k2so_agents_create(
 
     let agent_md = dir.join("agent.md");
     let mut frontmatter = format!("name: {}\nrole: {}\ntype: {}", name, role, agent_type);
-    if is_coordinator {
-        frontmatter.push_str("\ncoordinator: true");
+    if is_manager {
+        frontmatter.push_str("\nmanager: true");
     }
 
     // Build type-appropriate default body if no custom prompt provided
@@ -371,7 +391,7 @@ pub fn k2so_agents_create(
         inbox_count: 0,
         active_count: 0,
         done_count: 0,
-        is_coordinator,
+        is_manager,
         agent_type,
     })
 }
@@ -383,7 +403,7 @@ pub fn k2so_agents_delete(project_path: String, name: String) -> Result<(), Stri
 }
 
 /// Delete an agent with optional force flag.
-/// - Refuses to delete coordinator (unless force)
+/// - Refuses to delete manager/coordinator (unless force)
 /// - Refuses to delete if agent has active work (unless force)
 /// - Removes .k2so/agents/<name>/ directory
 pub fn k2so_agents_delete_inner(project_path: &str, name: &str, force: bool) -> Result<(), String> {
@@ -392,13 +412,13 @@ pub fn k2so_agents_delete_inner(project_path: &str, name: &str, force: bool) -> 
         return Err(format!("Agent '{}' does not exist", name));
     }
 
-    // Read agent type to check if it's a coordinator
+    // Read agent type to check if it's a manager/coordinator
     let agent_md = dir.join("agent.md");
     if agent_md.exists() {
         let content = fs::read_to_string(&agent_md).unwrap_or_default();
         let fm = parse_frontmatter(&content);
-        if fm.get("type").map_or(false, |t| t == "coordinator" || t == "pod-leader") && !force {
-            return Err("Cannot delete coordinator agent. Use --force to override.".to_string());
+        if fm.get("type").map_or(false, |t| t == "manager" || t == "coordinator" || t == "pod-leader") && !force {
+            return Err("Cannot delete manager agent. Use --force to override.".to_string());
         }
     }
 
@@ -728,9 +748,9 @@ pub fn k2so_agents_delegate(
             1. Commit all your changes to branch `{branch}`\n\
             2. Run: `k2so agent complete --agent {agent} --file {filename}`\n\
             This will automatically merge your branch into main and clean up the worktree.\n\
-            3. Notify the coordinator that you're done:\n\
-            Run `k2so agents running` to find the coordinator's terminal ID (look for `.k2so/agents/coordinator` in the CWD),\n\
-            then run: `k2so terminal write <coordinator-terminal-id> \"Completed: {title}. Branch {branch} merged.\"`",
+            3. Notify the workspace manager that you're done:\n\
+            Run `k2so agents running` to find the manager's terminal ID (look for `.k2so/agents/manager` in the CWD),\n\
+            then run: `k2so terminal write <manager-terminal-id> \"Completed: {title}. Branch {branch} merged.\"`",
             agent = target_agent, branch = worktree.branch, filename = item.filename, title = item.title,
         )
     } else {
@@ -739,9 +759,9 @@ pub fn k2so_agents_delegate(
             1. Commit all your changes to branch `{branch}`\n\
             2. Run: `k2so agent complete --agent {agent} --file {filename}`\n\
             This will move your work to done and flag it for human review.\n\
-            3. Notify the coordinator that your work is ready for review:\n\
-            Run `k2so agents running` to find the coordinator's terminal ID (look for `.k2so/agents/coordinator` in the CWD),\n\
-            then run: `k2so terminal write <coordinator-terminal-id> \"Ready for review: {title}. Branch: {branch}\"`",
+            3. Notify the workspace manager that your work is ready for review:\n\
+            Run `k2so agents running` to find the manager's terminal ID (look for `.k2so/agents/manager` in the CWD),\n\
+            then run: `k2so terminal write <manager-terminal-id> \"Ready for review: {title}. Branch: {branch}\"`",
             agent = target_agent, branch = worktree.branch, filename = item.filename, title = item.title,
         )
     };
@@ -911,8 +931,34 @@ pub fn k2so_agents_workspace_inbox_create(
 // ── Lock Files ──────────────────────────────────────────────────────────
 
 /// Create a lock file for an agent (called when a Claude session starts).
+/// Also upserts an AgentSession row in the DB for richer tracking.
 #[tauri::command]
-pub fn k2so_agents_lock(project_path: String, agent_name: String) -> Result<(), String> {
+pub fn k2so_agents_lock(
+    project_path: String,
+    agent_name: String,
+    terminal_id: Option<String>,
+    owner: Option<String>,
+) -> Result<(), String> {
+    // DB tracking (best-effort)
+    if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
+        if let Some(project_id) = resolve_project_id(&conn, &project_path) {
+            let session_uuid = uuid::Uuid::new_v4().to_string();
+            let owner_val = owner.as_deref().unwrap_or("system");
+            let _ = AgentSession::upsert(
+                &conn,
+                &session_uuid,
+                &project_id,
+                &agent_name,
+                terminal_id.as_deref(),
+                None,
+                "claude",
+                owner_val,
+                "running",
+            );
+        }
+    }
+
+    // Legacy .lock file (backward compat)
     let lock_path = agent_work_dir(&project_path, &agent_name, "").join(".lock");
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent).ok();
@@ -921,8 +967,17 @@ pub fn k2so_agents_lock(project_path: String, agent_name: String) -> Result<(), 
 }
 
 /// Remove a lock file for an agent (called when a Claude session ends).
+/// Also updates the DB session status to "sleeping".
 #[tauri::command]
 pub fn k2so_agents_unlock(project_path: String, agent_name: String) -> Result<(), String> {
+    // DB tracking (best-effort)
+    if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
+        if let Some(project_id) = resolve_project_id(&conn, &project_path) {
+            let _ = AgentSession::update_status(&conn, &project_id, &agent_name, "sleeping");
+        }
+    }
+
+    // Legacy .lock file removal
     let lock_path = agent_work_dir(&project_path, &agent_name, "").join(".lock");
     if lock_path.exists() {
         fs::remove_file(&lock_path).map_err(|e| e.to_string())?;
@@ -931,7 +986,20 @@ pub fn k2so_agents_unlock(project_path: String, agent_name: String) -> Result<()
 }
 
 /// Check if an agent is locked (has an active session).
+/// Tries DB first, falls back to .lock file.
 pub fn is_agent_locked(project_path: &str, agent_name: &str) -> bool {
+    // Try DB first
+    if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
+        if let Some(project_id) = resolve_project_id(&conn, project_path) {
+            if let Ok(Some(session)) = AgentSession::get_by_agent(&conn, &project_id, agent_name) {
+                if session.status == "running" {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Fall back to .lock file
     let lock_path = agent_work_dir(project_path, agent_name, "").join(".lock");
     lock_path.exists()
 }
@@ -1051,19 +1119,37 @@ pub fn k2so_agents_build_launch(
     let _ = k2so_agents_generate_workspace_claude_md(project_path.clone());
 
     // Check for previous session to resume (avoids cold-start context reload)
-    // First check .last_session file, then fall back to Claude's history.jsonl
+    // Priority: DB → .last_session file → Claude's history.jsonl
     let agent_cwd = agent_dir(&project_path, &agent_name);
-    let session_file = agent_cwd.join(".last_session");
-    let resume_session = fs::read_to_string(&session_file).ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            // Fall back to detecting from Claude's history
-            crate::commands::chat_history::chat_history_detect_active_session(
-                "claude".to_string(),
-                agent_cwd.to_string_lossy().to_string(),
-            ).ok().flatten()
-        });
+    let resume_session = (|| -> Option<String> {
+        // Try DB first
+        if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
+            if let Some(project_id) = resolve_project_id(&conn, &project_path) {
+                if let Ok(Some(session)) = AgentSession::get_by_agent(&conn, &project_id, &agent_name) {
+                    if let Some(sid) = session.session_id {
+                        if !sid.is_empty() {
+                            return Some(sid);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    })()
+    .or_else(|| {
+        // Fall back to .last_session file
+        let session_file = agent_cwd.join(".last_session");
+        fs::read_to_string(&session_file).ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    })
+    .or_else(|| {
+        // Fall back to detecting from Claude's history
+        crate::commands::chat_history::chat_history_detect_active_session(
+            "claude".to_string(),
+            agent_cwd.to_string_lossy().to_string(),
+        ).ok().flatten()
+    });
 
     let mut args = vec!["--dangerously-skip-permissions".to_string(), "--append-system-prompt".to_string(), claude_md];
     if let Some(ref session_id) = resume_session {
@@ -1127,7 +1213,7 @@ fn generate_default_agent_body(agent_type: &str, name: &str, role: &str, project
         .unwrap_or_else(|| "workspace".to_string());
 
     match agent_type {
-        "coordinator" | "pod-leader" => {
+        "manager" | "coordinator" | "pod-leader" => {
             // List existing agent templates for the "Your Team" section
             let mut team_lines = String::new();
             let agents_root = agents_dir(project_path);
@@ -1160,7 +1246,7 @@ fn generate_default_agent_body(agent_type: &str, name: &str, role: &str, project
             };
 
             format!(
-r#"You are the Coordinator for the {project_name} workspace.
+r#"You are the Workspace Manager for the {project_name} workspace.
 
 ## Work Sources
 
@@ -1228,7 +1314,7 @@ r#"## Specialization
 3. Implement the changes — all work happens in your worktree
 4. Commit to your branch as you go
 5. When done: `k2so work move --agent {name} --file <task>.md --from active --to done`
-6. Your work appears in the review queue for the Coordinator to approve or reject
+6. Your work appears in the review queue for the Workspace Manager to approve or reject
 
 ## Standing Orders
 
@@ -1449,7 +1535,7 @@ fn generate_agent_claude_md_content(
     let role = fm.get("role").cloned().unwrap_or("AI Agent".to_string());
     let agent_type = fm.get("type").cloned().map(|t| {
         match t.as_str() {
-            "pod-leader" => "coordinator".to_string(),
+            "pod-leader" | "coordinator" => "manager".to_string(),
             "pod-member" => "agent-template".to_string(),
             other => other.to_string(),
         }
@@ -1458,10 +1544,10 @@ fn generate_agent_claude_md_content(
 
     let agent_body = strip_frontmatter(&agent_md);
 
-    // Read shared project context (.k2so/PROJECT.md) — coordinator mode agents
-    let is_coordinator_type = agent_type == "coordinator" || agent_type == "agent-template";
+    // Read shared project context (.k2so/PROJECT.md) — manager mode agents
+    let is_manager_type = agent_type == "manager" || agent_type == "agent-template";
     let project_md_path = PathBuf::from(project_path).join(".k2so").join("PROJECT.md");
-    let project_context = if is_coordinator_type && project_md_path.exists() {
+    let project_context = if is_manager_type && project_md_path.exists() {
         let raw = safe_read_to_string(&project_md_path).unwrap_or_default();
         let stripped = strip_frontmatter(&raw);
         // Only include if it has real content (not just comments/empty sections)
@@ -1568,10 +1654,10 @@ fn generate_agent_claude_md_content(
     md.push_str(&format!("- `{}/active/` — items you're currently working on\n", work_dir_abs.to_string_lossy()));
     md.push_str(&format!("- `{}/done/` — move items here when complete\n\n", work_dir_abs.to_string_lossy()));
 
-    // Other agents — for coordinators, include profile paths so they can read agent.md files
-    let is_coordinator_lead = agent_type == "coordinator" || agent_type == "k2so";
+    // Other agents — for managers, include profile paths so they can read agent.md files
+    let is_manager_lead = agent_type == "manager" || agent_type == "k2so";
     if !other_agents.is_empty() {
-        if is_coordinator_lead {
+        if is_manager_lead {
             md.push_str("## Your Team\n\n");
             md.push_str("These are your agent templates. Read their `agent.md` profiles to understand their strengths before delegating:\n\n");
             for (name, their_role) in &other_agents {
@@ -1607,10 +1693,126 @@ fn generate_agent_claude_md_content(
         md.push_str("\n**auto** = build and merge automatically. **gated** = build PR but wait for human approval. **off** = do not act.\n\n");
     }
 
-    md.push_str(CLI_TOOLS_DOCS);
-    md.push_str(WORKFLOW_DOCS);
+    // Insert the universal skill protocol based on agent type
+    let project_name = std::path::Path::new(project_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".to_string());
+
+    if is_manager_lead {
+        md.push_str(&generate_manager_skill_content(project_path, &project_name));
+    } else {
+        md.push_str(&generate_template_skill_content(&project_name, agent_name));
+    }
+
+    // NOTE: CLI_TOOLS_DOCS and WORKFLOW_DOCS intentionally omitted.
+    // The skill protocol above is the canonical agent-facing surface.
+    // Old docs duplicated and added noise. Agents only need the 6 skill commands.
 
     Ok(md)
+}
+
+/// Generate the universal skill protocol for the Workspace Manager.
+/// Includes delegation, cross-workspace messaging, and full orchestration commands.
+fn generate_manager_skill_content(project_path: &str, project_name: &str) -> String {
+    format!(
+r#"## K2SO Workspace Manager Protocol
+
+You are the Workspace Manager for {project_name}. Check in first, then triage work.
+
+### Check In (do this first on every wake)
+
+```
+k2so checkin
+```
+
+This returns your current task, inbox messages, peer agent status, file reservations, and recent activity. Always start here.
+
+### Decision Framework
+
+When a task arrives in the workspace inbox:
+1. **Simple tasks** (typo fixes, config changes, single-file edits): Work directly in the main branch. No delegation needed.
+2. **Complex tasks** (multi-file features, refactors, new systems): Delegate to a specialist agent template using `k2so delegate <agent-name> <work-item-file>`.
+
+### Report Status
+
+```
+k2so status "triaging inbox"
+k2so status "working on config update"
+```
+
+### Complete Task
+
+```
+k2so done
+k2so done --blocked "waiting for API spec from upstream"
+```
+
+### Send Message
+
+Send work to another workspace's inbox (cross-workspace, requires a connection):
+```
+k2so msg <workspace-name>:inbox "description of the work needed"
+```
+
+### Claim Files (prevent conflicts with other agents)
+
+```
+k2so reserve src/auth/ src/middleware/jwt.ts
+k2so release
+```
+
+"#,
+        project_name = project_name,
+    )
+}
+
+/// Generate the universal skill protocol for agent templates (delegates).
+/// Focused protocol — NO delegate, NO cross-workspace messaging.
+fn generate_template_skill_content(project_name: &str, agent_name: &str) -> String {
+    format!(
+r#"## K2SO Agent Protocol
+
+You are {agent_name}, a specialist agent working in a dedicated worktree for {project_name}.
+
+### Check In (do this first)
+
+```
+k2so checkin
+```
+
+This returns your assigned task and any file reservations from other active agents.
+
+### Report Status
+
+```
+k2so status "implementing JWT validation"
+```
+
+### Complete Task
+
+When you have finished your assigned work:
+```
+k2so done
+```
+
+If you are blocked and cannot proceed:
+```
+k2so done --blocked "need clarification on auth flow"
+```
+
+### Claim Files (coordinate with other active agents)
+
+Before editing shared paths, check reservations and claim what you need:
+```
+k2so reserve src/auth/ src/middleware/jwt.ts
+k2so release
+```
+
+"#,
+        agent_name = agent_name,
+        project_name = project_name,
+    )
 }
 
 /// Priority rank for sorting (lower = higher priority).
@@ -1642,21 +1844,22 @@ pub fn k2so_agents_generate_workspace_claude_md(
     let _ = fs::create_dir_all(k2so_dir.join("work").join("inbox"));
     let _ = fs::create_dir_all(k2so_dir.join("prds"));
 
-    // Auto-create coordinator agent if it doesn't exist (for coordinator mode)
-    // Check for both old "pod-leader" and new "coordinator" directory names
-    let coordinator_dir = k2so_dir.join("agents").join("coordinator");
+    // Auto-create manager agent if it doesn't exist
+    // Check for old "pod-leader" and "coordinator" directory names as fallback
+    let manager_dir = k2so_dir.join("agents").join("manager");
+    let legacy_coordinator_dir = k2so_dir.join("agents").join("coordinator");
     let legacy_pod_leader_dir = k2so_dir.join("agents").join("pod-leader");
-    if !coordinator_dir.exists() && !legacy_pod_leader_dir.exists() {
-        let _ = fs::create_dir_all(coordinator_dir.join("work").join("inbox"));
-        let _ = fs::create_dir_all(coordinator_dir.join("work").join("active"));
-        let _ = fs::create_dir_all(coordinator_dir.join("work").join("done"));
-        let coordinator_role = "Coordinator — delegates work to agents, reviews completed branches, drives milestones";
-        let coordinator_body = generate_default_agent_body("coordinator", "coordinator", &coordinator_role, &project_path);
-        let coordinator_md = format!(
-            "---\nname: coordinator\nrole: {}\ntype: coordinator\ncoordinator: true\n---\n\n{}\n",
-            coordinator_role, coordinator_body
+    if !manager_dir.exists() && !legacy_coordinator_dir.exists() && !legacy_pod_leader_dir.exists() {
+        let _ = fs::create_dir_all(manager_dir.join("work").join("inbox"));
+        let _ = fs::create_dir_all(manager_dir.join("work").join("active"));
+        let _ = fs::create_dir_all(manager_dir.join("work").join("done"));
+        let manager_role = "Workspace Manager — delegates work to agents, reviews completed branches, drives milestones";
+        let manager_body = generate_default_agent_body("manager", "manager", &manager_role, &project_path);
+        let manager_md = format!(
+            "---\nname: manager\nrole: {}\ntype: manager\nmanager: true\n---\n\n{}\n",
+            manager_role, manager_body
         );
-        let _ = fs::write(coordinator_dir.join("agent.md"), &coordinator_md);
+        let _ = fs::write(manager_dir.join("agent.md"), &manager_md);
     }
 
     // Auto-create K2SO agent if it doesn't exist (for agent mode)
@@ -1716,7 +1919,7 @@ pub fn k2so_agents_generate_workspace_claude_md(
     }
 
     // Detect mode — read from DB, fall back to filesystem
-    let is_coordinator_mode = {
+    let is_manager_mode = {
         // Try reading from DB first
         let db_mode = dirs::home_dir()
             .and_then(|h| {
@@ -1732,10 +1935,10 @@ pub fn k2so_agents_generate_workspace_claude_md(
             });
 
         match db_mode.as_deref() {
-            Some("coordinator") | Some("pod") => true,
+            Some("manager") | Some("coordinator") | Some("pod") => true,
             Some("agent") => false,
             _ => {
-                // Fallback: if agents dir has sub-agents, assume coordinator
+                // Fallback: if agents dir has sub-agents, assume manager mode
                 let agents_root = agents_dir(&project_path);
                 agents_root.exists() && fs::read_dir(&agents_root)
                     .map(|e| e.flatten().any(|e| e.file_type().map_or(false, |ft| ft.is_dir())))
@@ -1744,8 +1947,8 @@ pub fn k2so_agents_generate_workspace_claude_md(
         }
     };
 
-    // Scaffold PROJECT.md for coordinator mode — shared context across all agents
-    if is_coordinator_mode {
+    // Scaffold PROJECT.md for manager mode — shared context across all agents
+    if is_manager_mode {
         let project_md_path = k2so_dir.join("PROJECT.md");
         if !project_md_path.exists() {
             let project_md_content = format!(
@@ -1781,12 +1984,12 @@ r#"# {project_name}
         }
     }
 
-    let md = if is_coordinator_mode {
-        // ── Coordinator CLAUDE.md ──────────────────────────────────────
+    let md = if is_manager_mode {
+        // ── Workspace Manager CLAUDE.md ──────────────────────────────────────
         format!(
-            r#"# K2SO Coordinator: {project_name}
+            r#"# K2SO Workspace Manager: {project_name}
 
-You are the **coordinator** for the {project_name} workspace, operating inside K2SO.
+You are the **workspace manager** for the {project_name} workspace, operating inside K2SO.
 
 ## Your Role
 
@@ -1904,9 +2107,9 @@ You are the **AI Planner** for the {project_name} workspace, operating inside K2
 You collaborate with the user to plan and orchestrate software projects. You:
 - **Talk with the user** to understand what they want to build
 - **Create PRDs** (product requirement documents), milestones, and technical specifications
-- **Set up workspaces** for each project — enable worktrees, coordinator mode, create agent teams
+- **Set up workspaces** for each project — enable worktrees, manager mode, create agent teams
 - **Coordinate across workspaces** — send work to different projects, check on progress
-- **You do NOT write code** — you plan, then hand off execution to coordinators and their agent teams
+- **You do NOT write code** — you plan, then hand off execution to workspace managers and their agent teams
 
 ## Setting Up a Project Workspace
 
@@ -1914,7 +2117,7 @@ When the user has a project they want to build or maintain with agents:
 
 ```bash
 # 1. Enable the workspace for autonomous work
-k2so mode coordinator                # Enable multi-agent orchestration
+k2so mode manager                    # Enable multi-agent orchestration
 k2so heartbeat on                   # Agents wake up automatically on schedule
 
 # 2. Create the agent team based on the project's tech stack
@@ -1937,13 +2140,13 @@ k2so agents list                    # Shows agents with work counts
    ```
 3. **Break the PRD into milestones** — each milestone should be shippable
 4. **Break milestones into tasks** with clear acceptance criteria
-5. **Send tasks to the project workspace** for the coordinator to execute:
+5. **Send tasks to the project workspace** for the workspace manager to execute:
    ```bash
    k2so work send --workspace /path/to/project \
      --title "Milestone 1: User Authentication" \
      --body "See PRD at .k2so/prds/auth.md. Tasks: ..."
    ```
-   The coordinator in that workspace picks it up and delegates to its agents.
+   The workspace manager picks it up and delegates to its agents.
 
 ## Cross-Workspace Coordination
 
@@ -1954,7 +2157,7 @@ k2so work send --workspace /path/to/frontend-app --title "..." --body "..."
 k2so work send --workspace /path/to/api-server --title "..." --body "..."
 
 # Set up a new workspace from scratch
-K2SO_PROJECT_PATH="/path/to/new-project" k2so mode coordinator
+K2SO_PROJECT_PATH="/path/to/new-project" k2so mode manager
 K2SO_PROJECT_PATH="/path/to/new-project" k2so heartbeat on
 K2SO_PROJECT_PATH="/path/to/new-project" k2so agents create backend-eng --role "..."
 
@@ -1963,18 +2166,18 @@ k2so workspace create /path/to/new-project   # Create folder + register
 k2so workspace open /path/to/existing        # Register existing folder
 ```
 
-## Testing Coordinator Workflows
+## Testing Workspace Manager Workflows
 
-To wake a coordinator and have it process inbox work:
+To wake the workspace manager and have it process inbox work:
 ```bash
 # Add work to the workspace inbox
 k2so work create --title "..." --body "..." --priority high --type task --source feature
 
-# Wake the coordinator (resumes previous session, sends triage message)
+# Wake the workspace manager (resumes previous session, sends triage message)
 k2so heartbeat wake
 ```
 
-The coordinator will check inbox, delegate to agents, and track progress.
+The workspace manager will check inbox, delegate to agents, and track progress.
 
 ## Monitoring Running Agents
 
@@ -2001,7 +2204,7 @@ Workspaces operate under states that control agent autonomy:
 - **Maintenance** — everything gated
 - **Locked** — no agent activity
 
-The coordinator and sub-agents adapt their completion behavior based on the state.
+The workspace manager and sub-agents adapt their completion behavior based on the state.
 Sub-agents use `k2so agent complete` which auto-merges or submits for review accordingly.
 
 ## Current Context
@@ -2119,18 +2322,18 @@ k2so commit                          # AI-assisted commit review
 k2so commit-merge                    # AI commit then merge into main
 ```
 
-### Waking the Coordinator (USE THIS — not `k2so heartbeat`)
+### Waking the Workspace Manager (USE THIS — not `k2so heartbeat`)
 ```
-k2so heartbeat wake                     # THE RIGHT WAY: resumes coordinator session, sends triage message
+k2so heartbeat wake                     # THE RIGHT WAY: resumes manager session, sends triage message
 ```
-**IMPORTANT:** Always use `k2so heartbeat wake` to wake a coordinator, NOT `k2so heartbeat`.
-- `heartbeat wake` → resumes the coordinator's previous session, detects inbox work, sends delegation instructions
+**IMPORTANT:** Always use `k2so heartbeat wake` to wake the workspace manager, NOT `k2so heartbeat`.
+- `heartbeat wake` → resumes the manager's previous session, detects inbox work, sends delegation instructions
 - `heartbeat` (without "wake") → raw triage that launches `__lead__`, does NOT resume sessions or send messages
 
 ### Workspace Setup
 ```
 k2so mode                               # Show current settings
-k2so mode <off|agent|coordinator>        # Set workspace agent mode
+k2so mode <off|agent|manager>            # Set workspace agent mode
 k2so heartbeat <on|off>                 # Enable/disable automatic heartbeat
 k2so settings                           # Show all workspace settings
 ```
@@ -2953,7 +3156,7 @@ pub fn k2so_agents_set_heartbeat(
 
 /// Scheduler tick: check all agents in a project and return those ready to wake.
 /// Called by the heartbeat script (via /cli/scheduler-tick).
-/// Differentiates between coordinator agents (inbox-based) and custom agents (timing-based).
+/// Differentiates between manager agents (inbox-based) and custom agents (timing-based).
 #[tauri::command]
 pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, String> {
     // Check workspace state — if heartbeat is disabled (Locked state), skip entirely
@@ -2968,6 +3171,7 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
     let db_path = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".k2so/k2so.db");
+    let mut resolved_project_id: Option<String> = None;
     if let Ok(conn) = rusqlite::Connection::open(&db_path) {
         let project_row: Option<(String, String, Option<String>, Option<String>)> = conn.query_row(
             "SELECT id, heartbeat_mode, heartbeat_schedule, heartbeat_last_fire FROM projects WHERE path = ?1",
@@ -2976,6 +3180,7 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
         ).ok();
 
         if let Some((project_id, mode, schedule, last_fire)) = project_row {
+            resolved_project_id = Some(project_id.clone());
             if mode == "off" {
                 return Ok(vec![]);
             }
@@ -3021,6 +3226,17 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
             // Skip agents that already have an active session (lock file exists)
             if is_agent_locked(&project_path, &name) {
                 continue;
+            }
+
+            // Safety: skip agents whose terminal is being used interactively by the user
+            if let Some(ref pid) = resolved_project_id {
+                if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                    if let Ok(Some(session)) = AgentSession::get_by_agent(&conn, pid, &name) {
+                        if session.owner == "user" && session.status == "running" {
+                            continue;
+                        }
+                    }
+                }
             }
 
             // Read agent type
@@ -3070,7 +3286,7 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
                     launchable.push(name);
                 }
             } else {
-                // Coordinator agents (coordinator, agent-template, k2so): inbox-based triage
+                // Manager agents (manager, coordinator, agent-template, k2so): inbox-based triage
                 let inbox = agent_work_dir(&project_path, &name, "inbox");
                 let has_inbox = inbox.exists() && fs::read_dir(&inbox)
                     .map(|e| e.flatten().any(|e| e.path().extension().map_or(false, |ext| ext == "md")))
@@ -3125,6 +3341,7 @@ fn get_highest_inbox_priority(project_path: &str, agent_name: &str) -> u8 {
 }
 
 /// Save the last Claude session ID for an agent (enables --resume on next launch).
+/// Also updates the DB session row.
 #[tauri::command]
 pub fn k2so_agents_save_session_id(
     project_path: String,
@@ -3135,17 +3352,35 @@ pub fn k2so_agents_save_session_id(
     if !dir.exists() {
         return Err(format!("Agent '{}' does not exist", agent_name));
     }
+
+    // DB tracking (best-effort)
+    if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
+        if let Some(project_id) = resolve_project_id(&conn, &project_path) {
+            let _ = AgentSession::update_session_id(&conn, &project_id, &agent_name, &session_id);
+        }
+    }
+
+    // Legacy .last_session file
     let session_file = dir.join(".last_session");
     fs::write(&session_file, &session_id)
         .map_err(|e| format!("Failed to save session ID: {}", e))
 }
 
 /// Clear the saved session ID for an agent (called on no-op or when session should be fresh).
+/// Also clears the session_id in the DB.
 #[tauri::command]
 pub fn k2so_agents_clear_session_id(
     project_path: String,
     agent_name: String,
 ) -> Result<(), String> {
+    // DB tracking (best-effort)
+    if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
+        if let Some(project_id) = resolve_project_id(&conn, &project_path) {
+            let _ = AgentSession::clear_session_id(&conn, &project_id, &agent_name);
+        }
+    }
+
+    // Legacy .last_session file
     let session_file = agent_dir(&project_path, &agent_name).join(".last_session");
     if session_file.exists() {
         let _ = fs::remove_file(&session_file);
@@ -3880,12 +4115,13 @@ pub fn k2so_agents_get_editor_context(
 
     let agent_md = fs::read_to_string(dir.join("agent.md")).unwrap_or_default();
     let fm = parse_frontmatter(&agent_md);
-    let is_coordinator = fm.get("pod_leader").map_or(false, |v| v == "true")
-        || fm.get("coordinator").map_or(false, |v| v == "true");
+    let is_manager = fm.get("pod_leader").map_or(false, |v| v == "true")
+        || fm.get("coordinator").map_or(false, |v| v == "true")
+        || fm.get("manager").map_or(false, |v| v == "true");
     let role = fm.get("role").cloned().unwrap_or_default();
     let agent_type = fm.get("type").cloned().map(|t| {
         match t.as_str() {
-            "pod-leader" => "coordinator".to_string(),
+            "pod-leader" | "coordinator" => "manager".to_string(),
             "pod-member" => "agent-template".to_string(),
             other => other.to_string(),
         }
@@ -3895,7 +4131,7 @@ pub fn k2so_agents_get_editor_context(
         "agentName": agent_name,
         "role": role,
         "agentType": agent_type,
-        "isCoordinator": is_coordinator,
+        "isManager": is_manager,
         "agentMd": agent_md,
         "agentMdPath": dir.join("agent.md").to_string_lossy(),
         "agentDir": dir.to_string_lossy(),
@@ -3989,4 +4225,80 @@ fn cleanup_agent_backups(backup_dir: &std::path::Path, keep: usize) {
             }
         }
     }
+}
+
+// ── Agent Sessions (DB-tracked) ──────────────────────────────────────────
+
+#[tauri::command]
+pub fn agent_sessions_list(
+    state: tauri::State<'_, crate::state::AppState>,
+    project_id: String,
+) -> Result<Vec<AgentSession>, String> {
+    let conn = state.db.lock();
+    AgentSession::list_by_project(&conn, &project_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn agent_sessions_get(
+    state: tauri::State<'_, crate::state::AppState>,
+    project_id: String,
+    agent_name: String,
+) -> Result<Option<AgentSession>, String> {
+    let conn = state.db.lock();
+    AgentSession::get_by_agent(&conn, &project_id, &agent_name).map_err(|e| e.to_string())
+}
+
+// ── Workspace Relations ─────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn workspace_relations_list(
+    state: tauri::State<'_, crate::state::AppState>,
+    project_id: String,
+) -> Result<Vec<WorkspaceRelation>, String> {
+    let conn = state.db.lock();
+    WorkspaceRelation::list_for_source(&conn, &project_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn workspace_relations_list_incoming(
+    state: tauri::State<'_, crate::state::AppState>,
+    project_id: String,
+) -> Result<Vec<WorkspaceRelation>, String> {
+    let conn = state.db.lock();
+    WorkspaceRelation::list_for_target(&conn, &project_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn workspace_relations_create(
+    state: tauri::State<'_, crate::state::AppState>,
+    source_project_id: String,
+    target_project_id: String,
+    relation_type: Option<String>,
+) -> Result<WorkspaceRelation, String> {
+    let conn = state.db.lock();
+    let id = uuid::Uuid::new_v4().to_string();
+    let rel_type = relation_type.unwrap_or_else(|| "oversees".to_string());
+    WorkspaceRelation::create(&conn, &id, &source_project_id, &target_project_id, &rel_type)
+        .map_err(|e| e.to_string())?;
+    // Return the created relation
+    Ok(WorkspaceRelation {
+        id,
+        source_project_id,
+        target_project_id,
+        relation_type: rel_type,
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64,
+    })
+}
+
+#[tauri::command]
+pub fn workspace_relations_delete(
+    state: tauri::State<'_, crate::state::AppState>,
+    id: String,
+) -> Result<(), String> {
+    let conn = state.db.lock();
+    WorkspaceRelation::delete(&conn, &id).map_err(|e| e.to_string())?;
+    Ok(())
 }

@@ -4033,9 +4033,9 @@ function ProjectDetail({
         <div className="space-y-2">
           {/* Mode selector */}
           <div className="flex gap-1">
-            {(['off', 'custom', 'agent', 'coordinator'] as const).map((mode) => {
-              const isActive = (project.agentMode || 'off') === mode || (mode === 'coordinator' && project.agentMode === 'pod')
-              const labels = { off: 'Off', custom: 'Custom Agent', agent: 'K2SO Agent', coordinator: 'Coordinator' }
+            {(['off', 'custom', 'agent', 'manager'] as const).map((mode) => {
+              const isActive = (project.agentMode || 'off') === mode || (mode === 'manager' && (project.agentMode === 'coordinator' || project.agentMode === 'pod'))
+              const labels = { off: 'Off', custom: 'Custom Agent', agent: 'K2SO Agent', manager: 'Workspace Manager' }
               return (
                 <button
                   key={mode}
@@ -4096,13 +4096,13 @@ function ProjectDetail({
                         confirmLabel: `Enable ${toLabel} Mode`,
                       })
                       if (!confirmed) return
-                    } else if (mode === 'coordinator') {
+                    } else if (mode === 'manager') {
                       const lines = [
-                        'A coordinator delegates work to agent templates that execute in parallel worktrees.',
+                        'A workspace manager delegates work to agent templates that execute in parallel worktrees.',
                         '',
                         'What happens:',
-                        '• Generates a CLAUDE.md with coordinator instructions',
-                        '• A coordinator agent is created automatically',
+                        '• Generates a CLAUDE.md with manager instructions',
+                        '• A manager agent is created automatically',
                         '• If a user-written CLAUDE.md exists, it won\'t be overwritten',
                         '  (the generated version is saved to .k2so/CLAUDE.md.generated)',
                       ]
@@ -4125,7 +4125,7 @@ function ProjectDetail({
 
                     await invoke('projects_update', { id: project.id, agentMode: mode })
 
-                    if (mode === 'agent' || mode === 'coordinator') {
+                    if (mode === 'agent' || mode === 'manager') {
                       await invoke('k2so_agents_generate_workspace_claude_md', {
                         projectPath: project.path,
                       }).catch(console.error)
@@ -4153,7 +4153,7 @@ function ProjectDetail({
             {(project.agentMode || 'off') === 'off' && 'No agent features enabled for this workspace.'}
             {(project.agentMode || 'off') === 'custom' && 'Custom Agent — train agents to operate any software via the heartbeat. Customize each agent\'s behavior with the AI persona editor.'}
             {(project.agentMode || 'off') === 'agent' && 'K2SO Agent — a planner that helps you build PRDs, milestones, and technical plans for this workspace.'}
-            {((project.agentMode || 'off') === 'coordinator' || project.agentMode === 'pod') && 'Coordinator — delegates work to agent templates that execute in parallel worktrees.'}
+            {((project.agentMode || 'off') === 'manager' || project.agentMode === 'coordinator' || project.agentMode === 'pod') && 'Workspace Manager — delegates work to agent templates that execute in parallel worktrees.'}
           </p>
 
           {/* State selector — only when a mode is active */}
@@ -4223,10 +4223,17 @@ function ProjectDetail({
             </div>
           )}
 
-          {/* Agent templates list — only in Coordinator mode */}
-          {((project.agentMode || 'off') === 'coordinator' || project.agentMode === 'pod') && (
+          {/* Agent templates list — only in Manager mode */}
+          {((project.agentMode || 'off') === 'manager' || project.agentMode === 'coordinator' || project.agentMode === 'pod') && (
             <div className="pt-2 border-t border-[var(--color-border)]">
               <ProjectAgentsPanel projectPath={project.path} onOpenEditor={(name) => { setAgentEditorName(name); setAgentEditorOpen(true) }} />
+            </div>
+          )}
+
+          {/* Connected Workspaces — for manager, coordinator, and custom modes */}
+          {((project.agentMode || 'off') === 'manager' || project.agentMode === 'coordinator' || (project.agentMode || 'off') === 'custom') && (
+            <div className="pt-2 border-t border-[var(--color-border)]">
+              <ConnectedWorkspacesPanel projectId={project.id} />
             </div>
           )}
         </div>
@@ -4288,7 +4295,7 @@ interface K2soAgentInfo {
   inboxCount: number
   activeCount: number
   doneCount: number
-  isCoordinator: boolean
+  isCoordinator: boolean // legacy field name from backend; true = manager agent
 }
 
 function AgentKebabMenu({ onSettings, onDelete }: { onSettings: () => void; onDelete?: () => void }): React.JSX.Element {
@@ -4948,6 +4955,239 @@ function K2SOAgentPersonaButton({ projectPath, projectName, onOpenEditor }: { pr
   )
 }
 
+// ── Connected Workspaces Panel ──────────────────────────────────────
+
+interface WorkspaceRelation {
+  id: string
+  sourceProjectId: string
+  targetProjectId: string
+  relationType: string
+  createdAt: string
+}
+
+function ConnectedWorkspacesPanel({ projectId }: { projectId: string }): React.JSX.Element {
+  const [relations, setRelations] = useState<WorkspaceRelation[]>([])
+  const [incoming, setIncoming] = useState<WorkspaceRelation[]>([])
+  const [loading, setLoading] = useState(true)
+  const [showAdd, setShowAdd] = useState(false)
+  const [adding, setAdding] = useState(false)
+  const [search, setSearch] = useState('')
+  const projects = useProjectsStore((s) => s.projects)
+
+  const fetchRelations = useCallback(async () => {
+    try {
+      const [outgoing, inc] = await Promise.all([
+        invoke<WorkspaceRelation[]>('workspace_relations_list', { projectId }),
+        invoke<WorkspaceRelation[]>('workspace_relations_list_incoming', { projectId }),
+      ])
+      setRelations(outgoing)
+      setIncoming(inc)
+    } catch {
+      setRelations([])
+      setIncoming([])
+    } finally {
+      setLoading(false)
+    }
+  }, [projectId])
+
+  useEffect(() => {
+    fetchRelations()
+  }, [fetchRelations])
+
+  // Projects available for connecting (exclude self and already-connected, sorted alphabetically)
+  const connectedIds = useMemo(() => new Set(relations.map((r) => r.targetProjectId)), [relations])
+  const availableProjects = useMemo(
+    () => projects
+      .filter((p) => p.id !== projectId && !connectedIds.has(p.id))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    [projects, projectId, connectedIds]
+  )
+  const filteredProjects = useMemo(
+    () => search.trim()
+      ? availableProjects.filter((p) => p.name.toLowerCase().includes(search.toLowerCase()))
+      : availableProjects,
+    [availableProjects, search]
+  )
+
+  const handleAdd = useCallback(async (targetProjectId: string) => {
+    setAdding(true)
+    try {
+      await invoke('workspace_relations_create', { sourceProjectId: projectId, targetProjectId })
+      setShowAdd(false)
+      await fetchRelations()
+    } catch (e) {
+      console.error('[connected-workspaces] Create failed:', e)
+    } finally {
+      setAdding(false)
+    }
+  }, [projectId, fetchRelations])
+
+  const handleRemove = useCallback(async (id: string) => {
+    try {
+      await invoke('workspace_relations_delete', { id })
+      await fetchRelations()
+    } catch (e) {
+      console.error('[connected-workspaces] Delete failed:', e)
+    }
+  }, [fetchRelations])
+
+  // Resolve target project details
+  const projectsById = useMemo(() => {
+    const map = new Map<string, typeof projects[number]>()
+    for (const p of projects) map.set(p.id, p)
+    return map
+  }, [projects])
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
+          Connected Workspaces
+        </h3>
+        {availableProjects.length > 0 && (
+          <button
+            onClick={() => { setShowAdd(!showAdd); setSearch('') }}
+            className="w-5 h-5 flex items-center justify-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-white/10 transition-colors no-drag cursor-pointer"
+            title="Add connection"
+          >
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <line x1="5" y1="1" x2="5" y2="9" />
+              <line x1="1" y1="5" x2="9" y2="5" />
+            </svg>
+          </button>
+        )}
+      </div>
+
+      <p className="text-[10px] text-[var(--color-text-muted)]">
+        Connect other workspaces so this agent can oversee or interact with them.
+      </p>
+
+      {/* Add connection dropdown with search */}
+      {showAdd && (
+        <div className="border border-[var(--color-border)] bg-[var(--color-bg-elevated)]">
+          <div className="px-3 py-1.5 border-b border-[var(--color-border)]">
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search workspaces..."
+              autoFocus
+              className="w-full bg-transparent text-xs text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none"
+            />
+          </div>
+          <div className="max-h-[200px] overflow-y-auto">
+            {filteredProjects.length === 0 ? (
+              <div className="px-3 py-2 text-[10px] text-[var(--color-text-muted)]">
+                {search.trim() ? 'No matching workspaces.' : 'No more workspaces available to connect.'}
+              </div>
+            ) : (
+              filteredProjects.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => { handleAdd(p.id); setSearch('') }}
+                  disabled={adding}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-white/[0.06] transition-colors no-drag cursor-pointer disabled:opacity-50 border-b border-[var(--color-border)] last:border-b-0"
+                >
+                  <span
+                    className="w-2 h-2 flex-shrink-0 rounded-full"
+                    style={{ backgroundColor: p.color || '#6b7280' }}
+                  />
+                  <span className="text-xs text-[var(--color-text-primary)] truncate">{p.name}</span>
+                  {p.agentMode && p.agentMode !== 'off' && (
+                    <span className="text-[9px] text-[var(--color-text-muted)] ml-auto flex-shrink-0">
+                      {p.agentMode === 'custom' ? 'Custom' : p.agentMode === 'agent' ? 'K2SO' : 'Manager'}
+                    </span>
+                  )}
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Connected workspaces list */}
+      {loading ? (
+        <div className="text-[10px] text-[var(--color-text-muted)]">Loading...</div>
+      ) : relations.length === 0 ? (
+        <div className="text-[10px] text-[var(--color-text-muted)]">
+          No connected workspaces yet.
+        </div>
+      ) : (
+        <div className="border border-[var(--color-border)]">
+          {relations.map((rel) => {
+            const target = projectsById.get(rel.targetProjectId)
+            return (
+              <div
+                key={rel.id}
+                className="flex items-center gap-2 px-3 py-1.5 border-b border-[var(--color-border)] last:border-b-0"
+              >
+                <span
+                  className="w-2 h-2 flex-shrink-0 rounded-full"
+                  style={{ backgroundColor: target?.color || '#6b7280' }}
+                />
+                <span className="text-xs text-[var(--color-text-primary)] flex-1 truncate">
+                  {target?.name || 'Unknown workspace'}
+                </span>
+                {target?.agentMode && target.agentMode !== 'off' && (
+                  <span className="text-[9px] text-[var(--color-text-muted)]">
+                    {target.agentMode === 'custom' ? 'Custom' : target.agentMode === 'agent' ? 'K2SO' : 'Manager'}
+                  </span>
+                )}
+                <button
+                  onClick={() => handleRemove(rel.id)}
+                  className="w-5 h-5 flex items-center justify-center text-[var(--color-text-muted)] hover:text-red-400 transition-colors no-drag cursor-pointer flex-shrink-0"
+                  title="Remove connection"
+                >
+                  <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <line x1="1" y1="1" x2="7" y2="7" />
+                    <line x1="7" y1="1" x2="1" y2="7" />
+                  </svg>
+                </button>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Incoming connections (workspaces that connect TO this one) */}
+      {!loading && incoming.length > 0 && (
+        <>
+          <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mt-4">
+            Connected Agents
+          </h3>
+          <p className="text-[10px] text-[var(--color-text-muted)]">
+            These agent workspaces have access to communicate with this workspace.
+          </p>
+          <div className="border border-[var(--color-border)]">
+            {incoming.map((rel) => {
+              const source = projectsById.get(rel.sourceProjectId)
+              return (
+                <div
+                  key={rel.id}
+                  className="flex items-center gap-2 px-3 py-1.5 border-b border-[var(--color-border)] last:border-b-0"
+                >
+                  <span
+                    className="w-2 h-2 flex-shrink-0 rounded-full"
+                    style={{ backgroundColor: source?.color || '#6b7280' }}
+                  />
+                  <span className="text-xs text-[var(--color-text-primary)] flex-1 truncate">
+                    {source?.name || 'Unknown workspace'}
+                  </span>
+                  {source?.agentMode && source.agentMode !== 'off' && (
+                    <span className="text-[9px] text-[var(--color-text-muted)]">
+                      {source.agentMode === 'custom' ? 'Custom' : source.agentMode === 'agent' ? 'K2SO' : 'Manager'}
+                    </span>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string; onOpenEditor: (agentName: string) => void }): React.JSX.Element {
   const [agents, setAgents] = useState<K2soAgentInfo[]>([])
   const [wsInboxCount, setWsInboxCount] = useState(0)
@@ -5048,7 +5288,7 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
     }
   }, [projectPath])
 
-  const coordinator = agents.find((a) => a.isCoordinator)
+  const manager = agents.find((a) => a.isCoordinator)
   const agentTemplates = agents.filter((a) => !a.isCoordinator)
   const totalDelegated = agentTemplates.reduce((sum, a) => sum + a.inboxCount + a.activeCount, 0)
   const totalDone = agentTemplates.reduce((sum, a) => sum + a.doneCount, 0)
@@ -5097,20 +5337,20 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
 
   return (
     <div className="space-y-3">
-      {/* Coordinator section */}
-      {coordinator && (
+      {/* Manager section */}
+      {manager && (
         <div>
           <h3 className="text-[10px] font-semibold text-[var(--color-accent)] uppercase tracking-wider mb-1">
-            Coordinator
+            Workspace Manager
           </h3>
           <div className="border border-[var(--color-accent)]/30">
             <div className="px-3 py-2">
               <div className="flex items-center justify-between">
                 <div className="flex-1 min-w-0 mr-3">
                   <div className="flex items-center">
-                    <span className="text-xs font-medium text-[var(--color-text-primary)] flex-shrink-0">{coordinator.name}</span>
+                    <span className="text-xs font-medium text-[var(--color-text-primary)] flex-shrink-0">{manager.name}</span>
                     <span className="text-[9px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 px-1.5 py-0.5 ml-1.5 flex-shrink-0">
-                      COORDINATOR
+                      MANAGER
                     </span>
                     <div className="flex items-center justify-end gap-1.5 text-[10px] flex-1 ml-2">
                       {wsInboxCount > 0 && (
@@ -5124,13 +5364,13 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
                       )}
                     </div>
                   </div>
-                  <p className="text-[10px] text-[var(--color-text-muted)] truncate mt-0.5">{coordinator.role}</p>
+                  <p className="text-[10px] text-[var(--color-text-muted)] truncate mt-0.5">{manager.role}</p>
                 </div>
                 <div className="flex items-center gap-1 flex-shrink-0">
                   <button
-                    onClick={() => onOpenEditor(coordinator.name)}
+                    onClick={() => onOpenEditor(manager.name)}
                     className="px-2 py-0.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer"
-                    title="Manage coordinator persona"
+                    title="Manage workspace manager persona"
                   >
                     Manage Persona
                   </button>
@@ -5492,7 +5732,7 @@ function AgenticSystemsToggle(): React.JSX.Element {
         <span className="text-xs text-[var(--color-text-secondary)]">Agentic Systems <span className="text-[9px] text-[var(--color-text-muted)]">(BETA)</span></span>
         <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
           {enabled
-            ? 'AI agents, coordinator, heartbeat, and review queue are active'
+            ? 'AI agents, workspace manager, heartbeat, and review queue are active'
             : 'Enable to unlock AI agent orchestration across workspaces'}
         </p>
       </div>

@@ -188,10 +188,10 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
     if (!context) return ''
     const isCustom = context.agentType === 'custom'
     const isK2SO = context.agentType === 'k2so'
-    const isCoordMode = context.agentType === 'coordinator' || context.agentType === 'agent-template'
+    const isCoordMode = context.agentType === 'manager' || context.agentType === 'coordinator' || context.agentType === 'agent-template'
       || context.agentType === 'pod-leader' || context.agentType === 'pod-member'
 
-    const typeLabel = isK2SO ? 'K2SO Agent' : isCustom ? 'Custom Agent' : context.isCoordinator ? 'Coordinator' : 'Agent Template'
+    const typeLabel = isK2SO ? 'K2SO Agent' : isCustom ? 'Custom Agent' : context.isCoordinator ? 'Workspace Manager' : 'Agent Template'
 
     const typeGuidance = isK2SO
       ? [

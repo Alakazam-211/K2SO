@@ -11,8 +11,8 @@ interface K2soAgentInfo {
   inboxCount: number
   activeCount: number
   doneCount: number
-  isCoordinator: boolean
-  agentType: string // "k2so" | "custom" | "coordinator" | "agent-template"
+  isCoordinator: boolean // legacy field name from backend; true = manager agent
+  agentType: string // "k2so" | "custom" | "manager" | "coordinator" | "agent-template"
 }
 
 export default function AgentsPanel(): React.JSX.Element {
@@ -189,7 +189,7 @@ export default function AgentsPanel(): React.JSX.Element {
           <div className="text-xs text-[var(--color-text-primary)] truncate">
             {agent.name}
             {agent.isCoordinator && (
-              <span className="ml-1.5 text-[9px] text-[var(--color-accent)] font-medium">LEADER</span>
+              <span className="ml-1.5 text-[9px] text-[var(--color-accent)] font-medium">MANAGER</span>
             )}
           </div>
           <div className="text-[10px] text-[var(--color-text-muted)] truncate">{agent.role}</div>
@@ -212,7 +212,7 @@ export default function AgentsPanel(): React.JSX.Element {
           No agent mode enabled for this workspace
         </p>
         <p className="text-[9px] text-[var(--color-text-muted)] text-center">
-          Enable Agent or Coordinator mode in workspace settings
+          Enable Agent or Workspace Manager mode in workspace settings
         </p>
       </div>
     )
@@ -278,36 +278,36 @@ export default function AgentsPanel(): React.JSX.Element {
     )
   }
 
-  // Coordinator mode — show coordinator + agent templates
+  // Manager mode — show manager + agent templates
 
-  const coordinator = agents.find((a) => a.isCoordinator)
+  const manager = agents.find((a) => a.isCoordinator)
   const agentTemplates = agents.filter((a) => !a.isCoordinator && a.agentType !== 'custom' && a.agentType !== 'k2so')
   const totalDelegated = agentTemplates.reduce((sum, a) => sum + a.inboxCount + a.activeCount, 0)
   const totalDone = agentTemplates.reduce((sum, a) => sum + a.doneCount, 0)
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
-      {/* Coordinator section */}
-      {coordinator && (
+      {/* Manager section */}
+      {manager && (
         <div className="border-b border-[var(--color-border)]">
           <div className="px-3 py-1.5">
-            <span className="text-[9px] font-medium text-[var(--color-accent)] uppercase tracking-wider">Coordinator</span>
+            <span className="text-[9px] font-medium text-[var(--color-accent)] uppercase tracking-wider">Workspace Manager</span>
           </div>
           <div
             className="px-3 py-2 border-b border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] transition-colors cursor-pointer"
-            onClick={() => openAgentPane(coordinator.name)}
+            onClick={() => openAgentPane(manager.name)}
           >
             <div className="flex items-center gap-2">
               <span
                 className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-                style={{ backgroundColor: statusColor(coordinator) }}
+                style={{ backgroundColor: statusColor(manager) }}
               />
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-1.5">
-                  <span className="text-xs text-[var(--color-text-primary)] truncate">{coordinator.name}</span>
-                  <span className="text-[9px] font-medium text-[var(--color-accent)]">COORDINATOR</span>
+                  <span className="text-xs text-[var(--color-text-primary)] truncate">{manager.name}</span>
+                  <span className="text-[9px] font-medium text-[var(--color-accent)]">MANAGER</span>
                 </div>
-                <div className="text-[10px] text-[var(--color-text-muted)] truncate">{coordinator.role}</div>
+                <div className="text-[10px] text-[var(--color-text-muted)] truncate">{manager.role}</div>
               </div>
               <div className="flex items-center gap-1 text-[9px] text-[var(--color-text-muted)] flex-shrink-0">
                 {wsInboxCount > 0 && <span className="text-[var(--color-accent)]" title="Undelegated">{wsInboxCount}u</span>}
@@ -315,9 +315,9 @@ export default function AgentsPanel(): React.JSX.Element {
                 {totalDone > 0 && <span className="text-green-400" title="Done">{totalDone}✓</span>}
               </div>
               <button
-                onClick={(e) => { e.stopPropagation(); handleLaunch(coordinator.name) }}
+                onClick={(e) => { e.stopPropagation(); handleLaunch(manager.name) }}
                 className="px-2 py-0.5 text-[10px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer flex-shrink-0"
-                title="Launch coordinator session"
+                title="Launch manager session"
               >
                 Launch
               </button>

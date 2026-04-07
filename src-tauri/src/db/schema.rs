@@ -883,3 +883,304 @@ impl WorkspaceState {
         }
     }
 }
+
+// ── Agent Sessions ──────────────────────────────────────────────────────
+
+/// DB-tracked agent session. Replaces .lock/.last_session filesystem tracking.
+/// `owner` distinguishes system-managed sessions (safe to inject) from user
+/// interactive sessions (never inject).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSession {
+    pub id: String,
+    pub project_id: String,
+    pub agent_name: String,
+    pub terminal_id: Option<String>,
+    pub session_id: Option<String>,
+    pub harness: String,
+    pub owner: String,
+    pub status: String,
+    pub status_message: Option<String>,
+    pub last_activity_at: Option<i64>,
+    pub created_at: i64,
+}
+
+impl AgentSession {
+    /// Insert or replace session keyed on (project_id, agent_name).
+    pub fn upsert(
+        conn: &Connection,
+        id: &str,
+        project_id: &str,
+        agent_name: &str,
+        terminal_id: Option<&str>,
+        session_id: Option<&str>,
+        harness: &str,
+        owner: &str,
+        status: &str,
+    ) -> Result<()> {
+        conn.execute(
+            "INSERT INTO agent_sessions (id, project_id, agent_name, terminal_id, session_id, harness, owner, status, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch()) \
+             ON CONFLICT(project_id, agent_name) DO UPDATE SET \
+               terminal_id = ?4, session_id = COALESCE(?5, agent_sessions.session_id), \
+               harness = ?6, owner = ?7, status = ?8, last_activity_at = unixepoch()",
+            params![id, project_id, agent_name, terminal_id, session_id, harness, owner, status],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_by_agent(conn: &Connection, project_id: &str, agent_name: &str) -> Result<Option<AgentSession>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, agent_name, terminal_id, session_id, harness, owner, status, status_message, last_activity_at, created_at \
+             FROM agent_sessions WHERE project_id = ?1 AND agent_name = ?2"
+        )?;
+        let mut rows = stmt.query_map(params![project_id, agent_name], |row| {
+            Ok(AgentSession {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                agent_name: row.get(2)?,
+                terminal_id: row.get(3)?,
+                session_id: row.get(4)?,
+                harness: row.get(5)?,
+                owner: row.get(6)?,
+                status: row.get(7)?,
+                status_message: row.get(8)?,
+                last_activity_at: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        })?;
+        match rows.next() {
+            Some(Ok(s)) => Ok(Some(s)),
+            Some(Err(e)) => Err(e),
+            None => Ok(None),
+        }
+    }
+
+    pub fn list_by_project(conn: &Connection, project_id: &str) -> Result<Vec<AgentSession>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, agent_name, terminal_id, session_id, harness, owner, status, status_message, last_activity_at, created_at \
+             FROM agent_sessions WHERE project_id = ?1 ORDER BY agent_name"
+        )?;
+        let rows = stmt.query_map(params![project_id], |row| {
+            Ok(AgentSession {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                agent_name: row.get(2)?,
+                terminal_id: row.get(3)?,
+                session_id: row.get(4)?,
+                harness: row.get(5)?,
+                owner: row.get(6)?,
+                status: row.get(7)?,
+                status_message: row.get(8)?,
+                last_activity_at: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn update_status(conn: &Connection, project_id: &str, agent_name: &str, status: &str) -> Result<usize> {
+        conn.execute(
+            "UPDATE agent_sessions SET status = ?1, last_activity_at = unixepoch() WHERE project_id = ?2 AND agent_name = ?3",
+            params![status, project_id, agent_name],
+        )
+    }
+
+    pub fn update_status_message(conn: &Connection, project_id: &str, agent_name: &str, message: &str) -> Result<usize> {
+        conn.execute(
+            "UPDATE agent_sessions SET status_message = ?1, last_activity_at = unixepoch() WHERE project_id = ?2 AND agent_name = ?3",
+            params![message, project_id, agent_name],
+        )
+    }
+
+    pub fn update_session_id(conn: &Connection, project_id: &str, agent_name: &str, session_id: &str) -> Result<usize> {
+        conn.execute(
+            "UPDATE agent_sessions SET session_id = ?1, last_activity_at = unixepoch() WHERE project_id = ?2 AND agent_name = ?3",
+            params![session_id, project_id, agent_name],
+        )
+    }
+
+    pub fn clear_session_id(conn: &Connection, project_id: &str, agent_name: &str) -> Result<usize> {
+        conn.execute(
+            "UPDATE agent_sessions SET session_id = NULL WHERE project_id = ?1 AND agent_name = ?2",
+            params![project_id, agent_name],
+        )
+    }
+
+    pub fn delete(conn: &Connection, project_id: &str, agent_name: &str) -> Result<usize> {
+        conn.execute(
+            "DELETE FROM agent_sessions WHERE project_id = ?1 AND agent_name = ?2",
+            params![project_id, agent_name],
+        )
+    }
+}
+
+// ── Workspace Relations ─────────────────────────────────────────────────
+
+/// Cross-workspace relationship. A custom agent workspace can oversee
+/// one or more workspace manager workspaces.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRelation {
+    pub id: String,
+    pub source_project_id: String,
+    pub target_project_id: String,
+    pub relation_type: String,
+    pub created_at: i64,
+}
+
+impl WorkspaceRelation {
+    pub fn create(
+        conn: &Connection,
+        id: &str,
+        source_project_id: &str,
+        target_project_id: &str,
+        relation_type: &str,
+    ) -> Result<()> {
+        conn.execute(
+            "INSERT INTO workspace_relations (id, source_project_id, target_project_id, relation_type, created_at) \
+             VALUES (?1, ?2, ?3, ?4, unixepoch())",
+            params![id, source_project_id, target_project_id, relation_type],
+        )?;
+        Ok(())
+    }
+
+    /// Workspaces that this project oversees (source → targets).
+    pub fn list_for_source(conn: &Connection, project_id: &str) -> Result<Vec<WorkspaceRelation>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, source_project_id, target_project_id, relation_type, created_at \
+             FROM workspace_relations WHERE source_project_id = ?1 ORDER BY created_at"
+        )?;
+        let rows = stmt.query_map(params![project_id], |row| {
+            Ok(WorkspaceRelation {
+                id: row.get(0)?,
+                source_project_id: row.get(1)?,
+                target_project_id: row.get(2)?,
+                relation_type: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Custom agents that oversee this project (target ← sources).
+    pub fn list_for_target(conn: &Connection, project_id: &str) -> Result<Vec<WorkspaceRelation>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, source_project_id, target_project_id, relation_type, created_at \
+             FROM workspace_relations WHERE target_project_id = ?1 ORDER BY created_at"
+        )?;
+        let rows = stmt.query_map(params![project_id], |row| {
+            Ok(WorkspaceRelation {
+                id: row.get(0)?,
+                source_project_id: row.get(1)?,
+                target_project_id: row.get(2)?,
+                relation_type: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn delete(conn: &Connection, id: &str) -> Result<usize> {
+        conn.execute("DELETE FROM workspace_relations WHERE id = ?1", params![id])
+    }
+}
+
+// ── Activity Feed ───────────────────────────────────────────────────────
+
+/// Audit trail entry for agent communications and lifecycle events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityFeedEntry {
+    pub id: i64,
+    pub project_id: String,
+    pub agent_name: Option<String>,
+    pub event_type: String,
+    pub from_agent: Option<String>,
+    pub to_agent: Option<String>,
+    pub to_project_id: Option<String>,
+    pub summary: Option<String>,
+    pub metadata: Option<String>,
+    pub created_at: i64,
+}
+
+impl ActivityFeedEntry {
+    pub fn insert(
+        conn: &Connection,
+        project_id: &str,
+        agent_name: Option<&str>,
+        event_type: &str,
+        from_agent: Option<&str>,
+        to_agent: Option<&str>,
+        to_project_id: Option<&str>,
+        summary: Option<&str>,
+        metadata: Option<&str>,
+    ) -> Result<i64> {
+        conn.execute(
+            "INSERT INTO activity_feed (project_id, agent_name, event_type, from_agent, to_agent, to_project_id, summary, metadata, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch())",
+            params![project_id, agent_name, event_type, from_agent, to_agent, to_project_id, summary, metadata],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn list_by_project(conn: &Connection, project_id: &str, limit: i64, offset: i64) -> Result<Vec<ActivityFeedEntry>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, agent_name, event_type, from_agent, to_agent, to_project_id, summary, metadata, created_at \
+             FROM activity_feed WHERE project_id = ?1 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3"
+        )?;
+        let rows = stmt.query_map(params![project_id, limit, offset], |row| {
+            Ok(ActivityFeedEntry {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                agent_name: row.get(2)?,
+                event_type: row.get(3)?,
+                from_agent: row.get(4)?,
+                to_agent: row.get(5)?,
+                to_project_id: row.get(6)?,
+                summary: row.get(7)?,
+                metadata: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn list_by_agent(conn: &Connection, project_id: &str, agent_name: &str, limit: i64) -> Result<Vec<ActivityFeedEntry>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, agent_name, event_type, from_agent, to_agent, to_project_id, summary, metadata, created_at \
+             FROM activity_feed WHERE project_id = ?1 AND (agent_name = ?2 OR from_agent = ?2 OR to_agent = ?2) \
+             ORDER BY created_at DESC LIMIT ?3"
+        )?;
+        let rows = stmt.query_map(params![project_id, agent_name, limit], |row| {
+            Ok(ActivityFeedEntry {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                agent_name: row.get(2)?,
+                event_type: row.get(3)?,
+                from_agent: row.get(4)?,
+                to_agent: row.get(5)?,
+                to_project_id: row.get(6)?,
+                summary: row.get(7)?,
+                metadata: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
+}
+
+/// Convenience function to log an activity feed entry.
+/// Used by CLI route handlers in agent_hooks.rs.
+pub fn log_activity(
+    conn: &Connection,
+    project_id: &str,
+    agent_name: Option<&str>,
+    event_type: &str,
+    from_agent: Option<&str>,
+    to_agent: Option<&str>,
+    to_project_id: Option<&str>,
+    summary: Option<&str>,
+) {
+    let _ = ActivityFeedEntry::insert(conn, project_id, agent_name, event_type, from_agent, to_agent, to_project_id, summary, None);
+}

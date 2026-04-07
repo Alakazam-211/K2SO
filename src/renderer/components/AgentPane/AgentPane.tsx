@@ -27,7 +27,7 @@ interface WorkItem {
 interface AgentProfile {
   name: string
   role: string
-  isCoordinator: boolean
+  isCoordinator: boolean // legacy field name from backend; true = manager agent
   agentType: string
   raw: string
 }
@@ -282,8 +282,9 @@ function AgentPaneInner({ agentName, projectPath }: AgentPaneProps): React.JSX.E
         role = fm.match(/^role:\s*(.+)$/m)?.[1]?.trim() || ''
         isCoordinator = fm.match(/^pod_leader:\s*(.+)$/m)?.[1]?.trim() === 'true'
           || fm.match(/^coordinator:\s*(.+)$/m)?.[1]?.trim() === 'true'
+          || fm.match(/^manager:\s*(.+)$/m)?.[1]?.trim() === 'true'
         const rawType = fm.match(/^type:\s*(.+)$/m)?.[1]?.trim() || 'agent-template'
-        agentType = rawType === 'pod-leader' ? 'coordinator' : rawType === 'pod-member' ? 'agent-template' : rawType
+        agentType = rawType === 'pod-leader' || rawType === 'manager' ? 'coordinator' : rawType === 'pod-member' ? 'agent-template' : rawType
       }
       setProfile({ name, role, isCoordinator, agentType, raw })
     } catch { setProfile(null) }
@@ -296,11 +297,11 @@ function AgentPaneInner({ agentName, projectPath }: AgentPaneProps): React.JSX.E
     } catch { setClaudeMd('') }
   }, [projectPath, agentName, isWorkspaceBoard])
 
-  const isCoordinator = profile?.isCoordinator || profile?.agentType === 'coordinator'
+  const isManager = profile?.isCoordinator || profile?.agentType === 'coordinator' || profile?.agentType === 'manager'
 
   const fetchWork = useCallback(async () => {
-    if (isWorkspaceBoard || isCoordinator) {
-      // Coordinator and workspace board both see the full picture:
+    if (isWorkspaceBoard || isManager) {
+      // Manager and workspace board both see the full picture:
       // workspace inbox (unassigned) + all agents' work (delegated + review)
       try {
         const wsItems = await invoke<WorkItem[]>('k2so_agents_workspace_inbox_list', { projectPath })
@@ -310,7 +311,7 @@ function AgentPaneInner({ agentName, projectPath }: AgentPaneProps): React.JSX.E
         const agents = await invoke<{ name: string }[]>('k2so_agents_list', { projectPath })
         const all: WorkItem[] = []
         for (const agent of agents) {
-          if (agent.name === agentName) continue // skip coordinator's own empty queue
+          if (agent.name === agentName) continue // skip manager's own empty queue
           try {
             const items = await invoke<WorkItem[]>('k2so_agents_work_list', { projectPath, agentName: agent.name, folder: null })
             all.push(...items.map((i) => ({ ...i, assignedBy: agent.name })))
@@ -323,7 +324,7 @@ function AgentPaneInner({ agentName, projectPath }: AgentPaneProps): React.JSX.E
         setWorkItems(await invoke<WorkItem[]>('k2so_agents_work_list', { projectPath, agentName, folder: null }))
       } catch { setWorkItems([]) }
     }
-  }, [projectPath, agentName, isWorkspaceBoard, isCoordinator])
+  }, [projectPath, agentName, isWorkspaceBoard, isManager])
 
   useEffect(() => {
     fetchProfile(); fetchClaudeMd(); fetchWork()
@@ -405,7 +406,7 @@ function AgentPaneInner({ agentName, projectPath }: AgentPaneProps): React.JSX.E
           </span>
           {profile?.isCoordinator && (
             <span className="text-[9px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 px-1.5 py-0.5 flex-shrink-0">
-              COORDINATOR
+              MANAGER
             </span>
           )}
         </div>
@@ -457,8 +458,8 @@ function AgentPaneInner({ agentName, projectPath }: AgentPaneProps): React.JSX.E
 
         {/* ── Agent Work Queue (Kanban) ── */}
         {!isWorkspaceBoard && activeSection === 'work' && (
-          isCoordinator ? (
-            // Coordinator sees: Inbox (workspace unassigned), Delegated (agents' inbox+active), Review (agents' done)
+          isManager ? (
+            // Manager sees: Inbox (workspace unassigned), Delegated (agents' inbox+active), Review (agents' done)
             <div className="absolute inset-0 z-10 flex gap-3 p-3 overflow-y-auto bg-[var(--color-bg)]">
               <KanbanColumn title="Inbox" items={wsUnassigned} color="text-[var(--color-accent)]" projectPath={projectPath} onOpenFile={openFile} />
               <KanbanColumn title="Delegated" items={wsInProgress} color="text-yellow-400" projectPath={projectPath} onOpenFile={openFile} />

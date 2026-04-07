@@ -632,6 +632,14 @@ pub fn run() {
             commands::k2so_agents::k2so_agents_uninstall_heartbeat,
             commands::k2so_agents::k2so_agents_update_heartbeat_projects,
             commands::k2so_agents::k2so_agents_preview_schedule,
+            // Agent Sessions (DB-tracked)
+            commands::k2so_agents::agent_sessions_list,
+            commands::k2so_agents::agent_sessions_get,
+            // Workspace Relations
+            commands::k2so_agents::workspace_relations_list,
+            commands::k2so_agents::workspace_relations_list_incoming,
+            commands::k2so_agents::workspace_relations_create,
+            commands::k2so_agents::workspace_relations_delete,
             // Agent Editor
             commands::k2so_agents::k2so_agents_get_editor_context,
             commands::k2so_agents::k2so_agents_preview_claude_md,

@@ -483,7 +483,7 @@ cmd_agents_delete() {
     if [ -z "$agent" ]; then
         echo "Usage: k2so agents delete <name> [--force]" >&2
         echo "  Removes agent and all its work directories." >&2
-        echo "  --force  Skip safety checks (active work, coordinator)" >&2
+        echo "  --force  Skip safety checks (active work, manager)" >&2
         exit 1
     fi
     local params="agent=$(urlencode "$agent")"
@@ -650,10 +650,10 @@ for line in data.get('lines', []):
 }
 
 cmd_heartbeat_wake() {
-    # Automated coordinator wake cycle:
+    # Automated manager wake cycle:
     # 1. Check if any agents have inbox work
-    # 2. If coordinator is running → send triage message
-    # 3. If coordinator is asleep → launch with triage prompt
+    # 2. If manager is running → send triage message
+    # 3. If manager is asleep → launch with triage prompt
     # Check both agent inboxes and workspace inbox for work
     local has_work
     has_work=$(python3 -c "
@@ -695,7 +695,7 @@ print('yes' if (agent_inbox or ws_inbox) else 'no')
         return
     fi
 
-    # Check if coordinator terminal is already running
+    # Check if manager terminal is already running
     local running
     running=$(cli_request "/cli/agents/running" 2>/dev/null)
     local coord_id
@@ -705,7 +705,7 @@ try:
     data = json.loads(sys.stdin.read())
     for t in data:
         cwd = t.get('cwd', '')
-        if '.k2so/agents/coordinator' in cwd or t.get('terminalId', '').startswith('agent-chat-coordinator'):
+        if '.k2so/agents/manager' in cwd or '.k2so/agents/coordinator' in cwd or t.get('terminalId', '').startswith('agent-chat-manager') or t.get('terminalId', '').startswith('agent-chat-coordinator'):
             print(t['terminalId'])
             break
 except:
@@ -713,19 +713,19 @@ except:
 " 2>/dev/null)
 
     if [ -n "$coord_id" ]; then
-        # Coordinator is awake — send triage message
+        # Workspace Manager is awake — send triage message
         local msg="New work detected. Run k2so agents list and delegate any inbox items."
         cli_request "/cli/terminal/write" "id=$(urlencode "$coord_id")&message=$(urlencode "$msg")"
         echo "{\"status\":\"notified\",\"terminalId\":\"$coord_id\"}"
     else
-        # Coordinator is asleep — launch it, then send triage message after startup
-        cli_request "/cli/agents/launch" "agent=coordinator"
+        # Workspace Manager is asleep — launch it, then send triage message after startup
+        cli_request "/cli/agents/launch" "agent=manager"
         # Wait for the terminal to be created and Claude to initialize
         local attempts=0
         while [ $attempts -lt 12 ]; do
             sleep 5
             attempts=$((attempts + 1))
-            # Check if coordinator terminal now exists
+            # Check if manager terminal now exists
             local check
             check=$(cli_request "/cli/agents/running" 2>/dev/null)
             local new_coord_id
@@ -735,7 +735,7 @@ try:
     data = json.loads(sys.stdin.read())
     for t in data:
         cwd = t.get('cwd', '')
-        if '.k2so/agents/coordinator' in cwd or t.get('terminalId', '').startswith('agent-chat-coordinator'):
+        if '.k2so/agents/manager' in cwd or '.k2so/agents/coordinator' in cwd or t.get('terminalId', '').startswith('agent-chat-manager') or t.get('terminalId', '').startswith('agent-chat-coordinator'):
             print(t['terminalId'])
             break
 except:
@@ -749,15 +749,15 @@ except:
                 return
             fi
         done
-        echo '{"status":"launched","agent":"coordinator","note":"triage message not sent - terminal not ready"}'
+        echo '{"status":"launched","agent":"manager","note":"triage message not sent - terminal not ready"}'
     fi
 }
 
 cmd_agent_complete() {
     # Sub-agent completion command:
     # Reads workspace state capability for the work item's source type
-    # Auto mode: commit, merge, clean up, notify coordinator
-    # Gated mode: commit, move to done, notify coordinator for review
+    # Auto mode: commit, merge, clean up, notify manager
+    # Gated mode: commit, move to done, notify manager for review
     local agent="" file=""
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -775,6 +775,195 @@ cmd_agent_complete() {
 
 cmd_workspace_cleanup() {
     cli_request "/cli/workspace/cleanup"
+}
+
+# ── Agent Skill Surface ─────────────────────────────────────────────
+
+cmd_checkin() {
+    local agent="${K2SO_AGENT_NAME:-}"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --agent) agent="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    [[ -z "$agent" ]] && { echo "Error: --agent required (or set K2SO_AGENT_NAME)" >&2; exit 1; }
+    cli_request "/cli/checkin" "agent=$agent"
+}
+
+cmd_status() {
+    local agent="${K2SO_AGENT_NAME:-}"
+    local message=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --agent) agent="$2"; shift 2 ;;
+            *) message="$1"; shift ;;
+        esac
+    done
+    [[ -z "$agent" ]] && { echo "Error: --agent required (or set K2SO_AGENT_NAME)" >&2; exit 1; }
+    [[ -z "$message" ]] && { echo "Error: status message required" >&2; exit 1; }
+    cli_request "/cli/status" "agent=$agent&message=$(urlencode "$message")"
+}
+
+cmd_done() {
+    local agent="${K2SO_AGENT_NAME:-}"
+    local blocked=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --agent) agent="$2"; shift 2 ;;
+            --blocked) blocked="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    [[ -z "$agent" ]] && { echo "Error: --agent required (or set K2SO_AGENT_NAME)" >&2; exit 1; }
+    local params="agent=$agent"
+    [[ -n "$blocked" ]] && params="$params&blocked=$(urlencode "$blocked")"
+    cli_request "/cli/done" "$params"
+}
+
+cmd_msg() {
+    local agent="${K2SO_AGENT_NAME:-}"
+    local target=""
+    local text=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --agent) agent="$2"; shift 2 ;;
+            *)
+                if [[ -z "$target" ]]; then target="$1"
+                else text="$1"
+                fi
+                shift ;;
+        esac
+    done
+    [[ -z "$agent" ]] && { echo "Error: --agent required (or set K2SO_AGENT_NAME)" >&2; exit 1; }
+    [[ -z "$target" ]] && { echo "Error: target required" >&2; exit 1; }
+    [[ -z "$text" ]] && { echo "Error: message text required" >&2; exit 1; }
+    cli_request "/cli/msg" "agent=$agent&target=$(urlencode "$target")&text=$(urlencode "$text")"
+}
+
+cmd_reserve() {
+    local agent="${K2SO_AGENT_NAME:-}"
+    local paths=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --agent) agent="$2"; shift 2 ;;
+            *) paths+=("$1"); shift ;;
+        esac
+    done
+    [[ -z "$agent" ]] && { echo "Error: --agent required (or set K2SO_AGENT_NAME)" >&2; exit 1; }
+    [[ ${#paths[@]} -eq 0 ]] && { echo "Error: at least one path required" >&2; exit 1; }
+    local joined=$(IFS=,; echo "${paths[*]}")
+    cli_request "/cli/reserve" "agent=$agent&paths=$(urlencode "$joined")"
+}
+
+cmd_release() {
+    local agent="${K2SO_AGENT_NAME:-}"
+    local paths=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --agent) agent="$2"; shift 2 ;;
+            *) paths+=("$1"); shift ;;
+        esac
+    done
+    [[ -z "$agent" ]] && { echo "Error: --agent required (or set K2SO_AGENT_NAME)" >&2; exit 1; }
+    local params="agent=$agent"
+    if [[ ${#paths[@]} -gt 0 ]]; then
+        local joined=$(IFS=,; echo "${paths[*]}")
+        params="$params&paths=$(urlencode "$joined")"
+    fi
+    cli_request "/cli/release" "$params"
+}
+
+cmd_connections() {
+    local action="${1:-list}"
+    shift 2>/dev/null || true
+    case "$action" in
+        list)
+            cli_request "/cli/connections" "action=list" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    conns = d.get('connections', [])
+    if not conns:
+        print('No connections.')
+    else:
+        for c in conns:
+            arrow = '→' if c['direction'] == 'outgoing' else '←'
+            print(f\"  {arrow} {c['projectName']} ({c['type']}, {c['direction']})\")
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr)
+" 2>/dev/null
+            ;;
+        add)
+            local target="${1:-}"
+            [[ -z "$target" ]] && { echo "Usage: k2so connections add <workspace-name>" >&2; exit 1; }
+            cli_request "/cli/connections" "action=add&target=$(urlencode "$target")" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    if 'error' in d:
+        print(f\"Error: {d['error']}\", file=sys.stderr)
+        sys.exit(1)
+    print(f\"Connected to {d.get('target', '?')}\")
+except: pass
+" 2>/dev/null
+            ;;
+        remove)
+            local target="${1:-}"
+            [[ -z "$target" ]] && { echo "Usage: k2so connections remove <workspace-name>" >&2; exit 1; }
+            cli_request "/cli/connections" "action=remove&target=$(urlencode "$target")" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    if 'error' in d:
+        print(f\"Error: {d['error']}\", file=sys.stderr)
+        sys.exit(1)
+    print('Disconnected.')
+except: pass
+" 2>/dev/null
+            ;;
+        *)
+            echo "Usage: k2so connections [list|add|remove] [workspace-name]" >&2
+            echo "  list              List connections for this workspace" >&2
+            echo "  add <name>        Connect to another workspace" >&2
+            echo "  remove <name>     Disconnect from a workspace" >&2
+            exit 1
+            ;;
+    esac
+}
+
+cmd_feed() {
+    local limit="${1:-20}"
+    local agent=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --agent) agent="$2"; shift 2 ;;
+            --limit) limit="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    local params="limit=$limit"
+    [[ -n "$agent" ]] && params="$params&agent=$(urlencode "$agent")"
+    cli_request "/cli/feed" "$params" | python3 -c "
+import json, sys, time
+try:
+    d = json.loads(sys.stdin.read())
+    items = d.get('feed', [])
+    if not items:
+        print('No activity.')
+    else:
+        for e in items:
+            ts = time.strftime('%H:%M:%S', time.localtime(e.get('at', 0)))
+            agent = e.get('agent') or '-'
+            etype = e.get('type', '?')
+            summary = e.get('summary') or ''
+            frm = e.get('from') or ''
+            to = e.get('to') or ''
+            route = f' ({frm}→{to})' if frm and to else ''
+            print(f'  [{ts}] {agent}: {etype}{route} {summary}')
+except Exception as ex:
+    print(f'Error: {ex}', file=sys.stderr)
+" 2>/dev/null
 }
 
 cmd_workspace_create() {
@@ -1079,7 +1268,7 @@ cmd_help() {
 K2SO CLI — Agent interface to K2SO workspace orchestration
 
 COMMANDS:
-  agent create <name> --role "."  Create a new agent (agent-template, coordinator, or custom)
+  agent create <name> --role "."  Create a new agent (agent-template, manager, or custom)
   agent update --name <n>         Update agent profile field or section
     --field <field> --value "."   Field: frontmatter key or ## section name
   agent list                      List all agents in this workspace
@@ -1132,9 +1321,9 @@ COMMANDS:
   terminal read <id> [--lines N]  Read last N lines from terminal buffer (default: 50)
 
   mode                            Show current workspace settings
-  mode <off|agent|coordinator>     Set workspace agent mode
+  mode <off|agent|manager>          Set workspace agent mode
   heartbeat                       Manually trigger heartbeat triage
-  heartbeat wake                  Auto-wake coordinator if inbox work exists
+  heartbeat wake                  Auto-wake Workspace Manager if inbox work exists
   heartbeat <on|off>              Enable/disable automatic heartbeat
   heartbeat schedule              Show current project schedule
   heartbeat schedule off          Disable scheduled heartbeat
@@ -1166,6 +1355,13 @@ COMMANDS:
 
   settings                        Show all workspace settings
 
+  checkin [--agent <name>]        Agent check-in (heartbeat ping)
+  status "message" [--agent <n>]  Report agent status message
+  done [--blocked "reason"]       Signal task completion (or blocked)
+  msg <target> "text"             Send a message to another agent
+  reserve <paths...>              Reserve file paths for exclusive editing
+  release [paths...]              Release reserved paths (all if none given)
+
   app-update                      Check for app updates or download a version
   app-update --list               List available releases
   app-update <version>            Download and open a specific version
@@ -1179,6 +1375,7 @@ ENVIRONMENT:
   K2SO_PORT          Port of K2SO's HTTP server (set automatically)
   K2SO_HOOK_TOKEN    Auth token (set automatically)
   K2SO_PROJECT_PATH  Project root (defaults to $PWD)
+  K2SO_AGENT_NAME    Default agent name for skill commands
 EOF
 }
 
@@ -1409,6 +1606,30 @@ case "${1:-help}" in
         ;;
     settings)
         shift; cmd_settings "$@"
+        ;;
+    checkin)
+        shift; cmd_checkin "$@"
+        ;;
+    status)
+        shift; cmd_status "$@"
+        ;;
+    done)
+        shift; cmd_done "$@"
+        ;;
+    msg)
+        shift; cmd_msg "$@"
+        ;;
+    reserve)
+        shift; cmd_reserve "$@"
+        ;;
+    release)
+        shift; cmd_release "$@"
+        ;;
+    connections)
+        shift; cmd_connections "$@"
+        ;;
+    feed)
+        shift; cmd_feed "$@"
         ;;
     app-update)
         shift; cmd_app_update "$@"

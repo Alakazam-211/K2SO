@@ -423,7 +423,9 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                     }
                     "/cli/agents/lock" => {
                         let agent = params.get("agent").cloned().unwrap_or_default();
-                        crate::commands::k2so_agents::k2so_agents_lock(project_path, agent)
+                        let terminal_id = params.get("terminal_id").cloned();
+                        let owner = params.get("owner").cloned();
+                        crate::commands::k2so_agents::k2so_agents_lock(project_path, agent, terminal_id, owner)
                             .map(|_| r#"{"success":true}"#.to_string())
                     }
                     "/cli/agents/unlock" => {
@@ -508,7 +510,7 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                     let has_agents = agents_dir.exists() && std::fs::read_dir(&agents_dir)
                                         .map(|e| e.count() > 0).unwrap_or(false);
                                     let claude_md = std::path::PathBuf::from(&project_path).join("CLAUDE.md");
-                                    let mode = if !claude_md.exists() { "off" } else if has_agents { "coordinator" } else { "agent" };
+                                    let mode = if !claude_md.exists() { "off" } else if has_agents { "manager" } else { "agent" };
                                     Ok(serde_json::json!({"mode": mode}).to_string())
                                 }
                             }
@@ -959,6 +961,667 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                         } else {
                             Err("AppState not available".to_string())
                         }
+                    }
+                    "/cli/checkin" => {
+                        // Aggregated check-in: task + inbox + peers + reservations + feed
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        if agent.is_empty() {
+                            Err("Missing 'agent' parameter".to_string())
+                        } else {
+                            (|| -> Result<String, String> {
+                                let db_path = dirs::home_dir()
+                                    .ok_or("No home dir")?
+                                    .join(".k2so/k2so.db");
+                                let conn = rusqlite::Connection::open(&db_path)
+                                    .map_err(|e| format!("DB open failed: {}", e))?;
+                                let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+
+                                let project_id: String = conn.query_row(
+                                    "SELECT id FROM projects WHERE path = ?1",
+                                    rusqlite::params![project_path],
+                                    |row| row.get(0),
+                                ).map_err(|e| format!("Project not found: {}", e))?;
+
+                                // Helper: parse frontmatter from markdown content
+                                fn parse_work_item(filename: &str, content: &str) -> serde_json::Value {
+                                    let mut title = filename.trim_end_matches(".md").to_string();
+                                    let mut priority = "normal".to_string();
+                                    let mut item_type = "task".to_string();
+                                    let mut from = serde_json::Value::Null;
+                                    let mut body = content.to_string();
+
+                                    if content.starts_with("---\n") {
+                                        if let Some(end) = content[4..].find("\n---") {
+                                            let fm = &content[4..4+end];
+                                            body = content[4+end+4..].trim().to_string();
+                                            for line in fm.lines() {
+                                                let parts: Vec<&str> = line.splitn(2, ':').collect();
+                                                if parts.len() == 2 {
+                                                    let key = parts[0].trim();
+                                                    let val = parts[1].trim().trim_matches('"');
+                                                    match key {
+                                                        "title" => title = val.to_string(),
+                                                        "priority" => priority = val.to_string(),
+                                                        "type" => item_type = val.to_string(),
+                                                        "assigned_by" => from = serde_json::Value::String(val.to_string()),
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    serde_json::json!({
+                                        "file": filename,
+                                        "title": title,
+                                        "priority": priority,
+                                        "type": item_type,
+                                        "from": from,
+                                        "body": body,
+                                    })
+                                }
+
+                                // Current task: first file in active/ (structured)
+                                let active_dir = std::path::PathBuf::from(&project_path)
+                                    .join(".k2so/agents").join(&agent).join("work/active");
+                                let task: serde_json::Value = if active_dir.is_dir() {
+                                    std::fs::read_dir(&active_dir).ok()
+                                        .and_then(|mut entries| entries.next())
+                                        .and_then(|e| e.ok())
+                                        .map(|e| {
+                                            let fname = e.file_name().to_string_lossy().to_string();
+                                            let content = std::fs::read_to_string(e.path()).unwrap_or_default();
+                                            parse_work_item(&fname, &content)
+                                        })
+                                        .unwrap_or(serde_json::Value::Null)
+                                } else {
+                                    serde_json::Value::Null
+                                };
+
+                                // Inbox: structured list with title/priority/type
+                                let inbox_dir = std::path::PathBuf::from(&project_path)
+                                    .join(".k2so/agents").join(&agent).join("work/inbox");
+                                let inbox: Vec<serde_json::Value> = if inbox_dir.is_dir() {
+                                    std::fs::read_dir(&inbox_dir).ok()
+                                        .map(|entries| entries.filter_map(|e| e.ok())
+                                            .map(|e| {
+                                                let fname = e.file_name().to_string_lossy().to_string();
+                                                let content = std::fs::read_to_string(e.path()).unwrap_or_default();
+                                                parse_work_item(&fname, &content)
+                                            })
+                                            .collect())
+                                        .unwrap_or_default()
+                                } else {
+                                    vec![]
+                                };
+
+                                // Peers: all agent_sessions in this project + related projects
+                                let mut peer_project_ids = vec![project_id.clone()];
+                                if let Ok(rels) = crate::db::schema::WorkspaceRelation::list_for_source(&conn, &project_id) {
+                                    for r in &rels {
+                                        peer_project_ids.push(r.target_project_id.clone());
+                                    }
+                                }
+                                if let Ok(rels) = crate::db::schema::WorkspaceRelation::list_for_target(&conn, &project_id) {
+                                    for r in &rels {
+                                        peer_project_ids.push(r.source_project_id.clone());
+                                    }
+                                }
+                                // Build project name lookup for readable peer info
+                                let mut project_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+                                for pid in &peer_project_ids {
+                                    if let Ok(name) = conn.query_row(
+                                        "SELECT name FROM projects WHERE id = ?1",
+                                        rusqlite::params![pid],
+                                        |row| row.get::<_, String>(0),
+                                    ) {
+                                        project_names.insert(pid.clone(), name);
+                                    }
+                                }
+
+                                let mut peers = Vec::new();
+                                for pid in &peer_project_ids {
+                                    if let Ok(sessions) = crate::db::schema::AgentSession::list_by_project(&conn, pid) {
+                                        let pname = project_names.get(pid).cloned().unwrap_or_default();
+                                        for s in sessions {
+                                            if s.agent_name == agent && s.project_id == project_id {
+                                                continue; // skip self
+                                            }
+                                            peers.push(serde_json::json!({
+                                                "agent": s.agent_name,
+                                                "status": s.status,
+                                                "statusMessage": s.status_message,
+                                                "terminalId": s.terminal_id,
+                                                "project": pname,
+                                                "projectId": s.project_id,
+                                                "harness": s.harness,
+                                            }));
+                                        }
+                                    }
+                                }
+
+                                // Reservations
+                                let reservations_path = std::path::PathBuf::from(&project_path)
+                                    .join(".k2so/reservations.json");
+                                let reservations: serde_json::Value = if reservations_path.exists() {
+                                    std::fs::read_to_string(&reservations_path).ok()
+                                        .and_then(|s| serde_json::from_str(&s).ok())
+                                        .unwrap_or(serde_json::json!({}))
+                                } else {
+                                    serde_json::json!({})
+                                };
+
+                                // Recent feed: last 10
+                                let feed: Vec<serde_json::Value> = crate::db::schema::ActivityFeedEntry::list_by_project(&conn, &project_id, 10, 0)
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .map(|e| serde_json::json!({
+                                        "eventType": e.event_type,
+                                        "agent": e.agent_name,
+                                        "from": e.from_agent,
+                                        "to": e.to_agent,
+                                        "summary": e.summary,
+                                        "createdAt": e.created_at,
+                                    }))
+                                    .collect();
+
+                                // Log checkin
+                                crate::db::schema::log_activity(&conn, &project_id, Some(&agent), "checkin", Some(&agent), None, None, None);
+
+                                Ok(serde_json::json!({
+                                    "agent": agent,
+                                    "project": project_path,
+                                    "task": task,
+                                    "inbox": inbox,
+                                    "peers": peers,
+                                    "reservations": reservations,
+                                    "feed": feed,
+                                }).to_string())
+                            })()
+                        }
+                    }
+                    "/cli/status" => {
+                        // Update agent status message
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        let message = params.get("message").cloned().unwrap_or_default();
+                        if agent.is_empty() {
+                            Err("Missing 'agent' parameter".to_string())
+                        } else {
+                            (|| -> Result<String, String> {
+                                let db_path = dirs::home_dir()
+                                    .ok_or("No home dir")?
+                                    .join(".k2so/k2so.db");
+                                let conn = rusqlite::Connection::open(&db_path)
+                                    .map_err(|e| format!("DB open failed: {}", e))?;
+                                let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+
+                                let project_id: String = conn.query_row(
+                                    "SELECT id FROM projects WHERE path = ?1",
+                                    rusqlite::params![project_path],
+                                    |row| row.get(0),
+                                ).map_err(|e| format!("Project not found: {}", e))?;
+
+                                crate::db::schema::AgentSession::update_status_message(&conn, &project_id, &agent, &message)
+                                    .map_err(|e| format!("Failed to update status: {}", e))?;
+
+                                crate::db::schema::log_activity(&conn, &project_id, Some(&agent), "status", Some(&agent), None, None, Some(&message));
+
+                                Ok(serde_json::json!({"success": true}).to_string())
+                            })()
+                        }
+                    }
+                    "/cli/done" => {
+                        // Complete agent's current task
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        let blocked = params.get("blocked").cloned();
+                        if agent.is_empty() {
+                            Err("Missing 'agent' parameter".to_string())
+                        } else {
+                            (|| -> Result<String, String> {
+                                let db_path = dirs::home_dir()
+                                    .ok_or("No home dir")?
+                                    .join(".k2so/k2so.db");
+                                let conn = rusqlite::Connection::open(&db_path)
+                                    .map_err(|e| format!("DB open failed: {}", e))?;
+                                let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+
+                                let project_id: String = conn.query_row(
+                                    "SELECT id FROM projects WHERE path = ?1",
+                                    rusqlite::params![project_path],
+                                    |row| row.get(0),
+                                ).map_err(|e| format!("Project not found: {}", e))?;
+
+                                // Move first file from active/ to done/
+                                let active_dir = std::path::PathBuf::from(&project_path)
+                                    .join(".k2so/agents").join(&agent).join("work/active");
+                                let done_dir = std::path::PathBuf::from(&project_path)
+                                    .join(".k2so/agents").join(&agent).join("work/done");
+                                let mut moved_file = None;
+
+                                if active_dir.is_dir() {
+                                    if let Some(Ok(entry)) = std::fs::read_dir(&active_dir).ok().and_then(|mut d| d.next()) {
+                                        let _ = std::fs::create_dir_all(&done_dir);
+                                        let dest = done_dir.join(entry.file_name());
+                                        if std::fs::rename(entry.path(), &dest).is_ok() {
+                                            moved_file = Some(entry.file_name().to_string_lossy().to_string());
+                                        }
+                                    }
+                                }
+
+                                // Update agent status to sleeping
+                                let _ = crate::db::schema::AgentSession::update_status(&conn, &project_id, &agent, "sleeping");
+
+                                let event_type = if blocked.is_some() { "task.blocked" } else { "task.done" };
+                                let summary = moved_file.as_deref().unwrap_or("no active task");
+                                crate::db::schema::log_activity(&conn, &project_id, Some(&agent), event_type, Some(&agent), None, None, Some(summary));
+
+                                Ok(serde_json::json!({
+                                    "success": true,
+                                    "event": event_type,
+                                    "file": moved_file,
+                                }).to_string())
+                            })()
+                        }
+                    }
+                    "/cli/msg" => {
+                        // Send a message to another agent or workspace inbox
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        let target = params.get("target").cloned().unwrap_or_default();
+                        let text = params.get("text").cloned().unwrap_or_default();
+                        if agent.is_empty() || target.is_empty() || text.is_empty() {
+                            Err("Missing 'agent', 'target', or 'text' parameter".to_string())
+                        } else {
+                            (|| -> Result<String, String> {
+                                let db_path = dirs::home_dir()
+                                    .ok_or("No home dir")?
+                                    .join(".k2so/k2so.db");
+                                let conn = rusqlite::Connection::open(&db_path)
+                                    .map_err(|e| format!("DB open failed: {}", e))?;
+                                let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+
+                                let project_id: String = conn.query_row(
+                                    "SELECT id FROM projects WHERE path = ?1",
+                                    rusqlite::params![project_path],
+                                    |row| row.get(0),
+                                ).map_err(|e| format!("Project not found: {}", e))?;
+
+                                let now = chrono::Local::now().to_rfc3339();
+                                let filename = format!("msg-{}-{}.md", agent, chrono::Local::now().format("%Y%m%d-%H%M%S"));
+                                let content = format!(
+                                    "---\ntitle: Message from {}\ntype: message\npriority: normal\nassigned_by: {}\ncreated: {}\n---\n\n{}",
+                                    agent, agent, now, text
+                                );
+
+                                let (inbox_dir, to_agent_name, to_project_id) = if target.contains(":inbox") {
+                                    // Cross-workspace: resolve target workspace via workspace_relations
+                                    let target_workspace = target.split(":inbox").next().unwrap_or("");
+                                    // Find target project path via relations
+                                    let mut target_path: Option<String> = None;
+                                    let mut target_pid: Option<String> = None;
+
+                                    let rels = crate::db::schema::WorkspaceRelation::list_for_source(&conn, &project_id)
+                                        .unwrap_or_default();
+                                    for r in &rels {
+                                        if let Ok(path) = conn.query_row(
+                                            "SELECT path FROM projects WHERE id = ?1",
+                                            rusqlite::params![r.target_project_id],
+                                            |row| row.get::<_, String>(0),
+                                        ) {
+                                            let name = std::path::Path::new(&path)
+                                                .file_name()
+                                                .map(|n| n.to_string_lossy().to_string())
+                                                .unwrap_or_default();
+                                            if name == target_workspace || r.target_project_id == target_workspace {
+                                                target_pid = Some(r.target_project_id.clone());
+                                                target_path = Some(path);
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    let resolved_path = target_path.ok_or(format!("Workspace '{}' not found in relations", target_workspace))?;
+                                    let dir = std::path::PathBuf::from(&resolved_path).join(".k2so/work/inbox");
+                                    (dir, None, target_pid)
+                                } else {
+                                    // Same project: write to agent's inbox
+                                    let dir = std::path::PathBuf::from(&project_path)
+                                        .join(".k2so/agents").join(&target).join("work/inbox");
+                                    (dir, Some(target.clone()), None)
+                                };
+
+                                std::fs::create_dir_all(&inbox_dir)
+                                    .map_err(|e| format!("Failed to create inbox dir: {}", e))?;
+                                std::fs::write(inbox_dir.join(&filename), &content)
+                                    .map_err(|e| format!("Failed to write message: {}", e))?;
+
+                                // Log sent + delivered
+                                crate::db::schema::log_activity(
+                                    &conn, &project_id, Some(&agent), "message.sent",
+                                    Some(&agent), to_agent_name.as_deref(), to_project_id.as_deref(),
+                                    Some(&format!("To {}: {}", target, &text[..text.len().min(100)])),
+                                );
+                                crate::db::schema::log_activity(
+                                    &conn, &project_id, to_agent_name.as_deref(), "message.delivered",
+                                    Some(&agent), to_agent_name.as_deref(), to_project_id.as_deref(),
+                                    Some(&format!("From {}", agent)),
+                                );
+
+                                Ok(serde_json::json!({
+                                    "success": true,
+                                    "file": filename,
+                                    "target": target,
+                                }).to_string())
+                            })()
+                        }
+                    }
+                    "/cli/reserve" => {
+                        // Claim files for exclusive editing
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        let paths_str = params.get("paths").cloned().unwrap_or_default();
+                        if agent.is_empty() || paths_str.is_empty() {
+                            Err("Missing 'agent' or 'paths' parameter".to_string())
+                        } else {
+                            (|| -> Result<String, String> {
+                                let db_path = dirs::home_dir()
+                                    .ok_or("No home dir")?
+                                    .join(".k2so/k2so.db");
+                                let conn = rusqlite::Connection::open(&db_path)
+                                    .map_err(|e| format!("DB open failed: {}", e))?;
+                                let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+
+                                let project_id: String = conn.query_row(
+                                    "SELECT id FROM projects WHERE path = ?1",
+                                    rusqlite::params![project_path],
+                                    |row| row.get(0),
+                                ).map_err(|e| format!("Project not found: {}", e))?;
+
+                                let reservations_path = std::path::PathBuf::from(&project_path)
+                                    .join(".k2so/reservations.json");
+                                let _ = std::fs::create_dir_all(std::path::PathBuf::from(&project_path).join(".k2so"));
+
+                                let mut reservations: serde_json::Map<String, serde_json::Value> = if reservations_path.exists() {
+                                    std::fs::read_to_string(&reservations_path).ok()
+                                        .and_then(|s| serde_json::from_str(&s).ok())
+                                        .unwrap_or_default()
+                                } else {
+                                    serde_json::Map::new()
+                                };
+
+                                let now = chrono::Local::now().to_rfc3339();
+                                let paths: Vec<&str> = paths_str.split(',').map(|s| s.trim()).collect();
+                                let mut reserved = Vec::new();
+                                let mut conflicts = Vec::new();
+
+                                for p in &paths {
+                                    if let Some(existing) = reservations.get(*p) {
+                                        let existing_agent = existing.get("agent").and_then(|v| v.as_str()).unwrap_or("");
+                                        if existing_agent != agent {
+                                            conflicts.push(serde_json::json!({"path": p, "heldBy": existing_agent}));
+                                            continue;
+                                        }
+                                    }
+                                    reservations.insert(p.to_string(), serde_json::json!({
+                                        "agent": agent,
+                                        "reason": "",
+                                        "timestamp": now,
+                                    }));
+                                    reserved.push(p.to_string());
+                                }
+
+                                std::fs::write(&reservations_path, serde_json::to_string_pretty(&reservations).unwrap_or_default())
+                                    .map_err(|e| format!("Failed to write reservations: {}", e))?;
+
+                                crate::db::schema::log_activity(
+                                    &conn, &project_id, Some(&agent), "reserve",
+                                    Some(&agent), None, None,
+                                    Some(&format!("Reserved {} file(s)", reserved.len())),
+                                );
+
+                                Ok(serde_json::json!({
+                                    "success": true,
+                                    "reserved": reserved,
+                                    "conflicts": conflicts,
+                                }).to_string())
+                            })()
+                        }
+                    }
+                    "/cli/release" => {
+                        // Release file reservations
+                        let agent = params.get("agent").cloned().unwrap_or_default();
+                        let paths_str = params.get("paths").cloned().unwrap_or_default();
+                        if agent.is_empty() {
+                            Err("Missing 'agent' parameter".to_string())
+                        } else {
+                            (|| -> Result<String, String> {
+                                let db_path = dirs::home_dir()
+                                    .ok_or("No home dir")?
+                                    .join(".k2so/k2so.db");
+                                let conn = rusqlite::Connection::open(&db_path)
+                                    .map_err(|e| format!("DB open failed: {}", e))?;
+                                let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+
+                                let project_id: String = conn.query_row(
+                                    "SELECT id FROM projects WHERE path = ?1",
+                                    rusqlite::params![project_path],
+                                    |row| row.get(0),
+                                ).map_err(|e| format!("Project not found: {}", e))?;
+
+                                let reservations_path = std::path::PathBuf::from(&project_path)
+                                    .join(".k2so/reservations.json");
+
+                                if !reservations_path.exists() {
+                                    return Ok(serde_json::json!({"success": true, "released": 0}).to_string());
+                                }
+
+                                let mut reservations: serde_json::Map<String, serde_json::Value> =
+                                    std::fs::read_to_string(&reservations_path).ok()
+                                        .and_then(|s| serde_json::from_str(&s).ok())
+                                        .unwrap_or_default();
+
+                                let specific_paths: Vec<&str> = if paths_str.is_empty() {
+                                    vec![]
+                                } else {
+                                    paths_str.split(',').map(|s| s.trim()).collect()
+                                };
+
+                                let mut released = 0;
+                                let keys_to_remove: Vec<String> = reservations.iter()
+                                    .filter(|(key, val)| {
+                                        let held_by = val.get("agent").and_then(|v| v.as_str()).unwrap_or("");
+                                        if held_by != agent { return false; }
+                                        if specific_paths.is_empty() { return true; }
+                                        specific_paths.contains(&key.as_str())
+                                    })
+                                    .map(|(key, _)| key.clone())
+                                    .collect();
+
+                                for key in &keys_to_remove {
+                                    reservations.remove(key);
+                                    released += 1;
+                                }
+
+                                std::fs::write(&reservations_path, serde_json::to_string_pretty(&reservations).unwrap_or_default())
+                                    .map_err(|e| format!("Failed to write reservations: {}", e))?;
+
+                                crate::db::schema::log_activity(
+                                    &conn, &project_id, Some(&agent), "release",
+                                    Some(&agent), None, None,
+                                    Some(&format!("Released {} file(s)", released)),
+                                );
+
+                                Ok(serde_json::json!({
+                                    "success": true,
+                                    "released": released,
+                                }).to_string())
+                            })()
+                        }
+                    }
+                    "/cli/connections" => {
+                        // List, create, or delete workspace relations
+                        let action = params.get("action").cloned().unwrap_or_else(|| "list".to_string());
+                        (|| -> Result<String, String> {
+                            let db_path = dirs::home_dir()
+                                .ok_or("No home dir")?
+                                .join(".k2so/k2so.db");
+                            let conn = rusqlite::Connection::open(&db_path)
+                                .map_err(|e| format!("DB open failed: {}", e))?;
+                            let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+
+                            let project_id: String = conn.query_row(
+                                "SELECT id FROM projects WHERE path = ?1",
+                                rusqlite::params![project_path],
+                                |row| row.get(0),
+                            ).map_err(|e| format!("Project not found: {}", e))?;
+
+                            match action.as_str() {
+                                "list" => {
+                                    // List outgoing connections (this project oversees)
+                                    let outgoing = crate::db::schema::WorkspaceRelation::list_for_source(&conn, &project_id)
+                                        .map_err(|e| e.to_string())?;
+                                    // List incoming connections (overseen by)
+                                    let incoming = crate::db::schema::WorkspaceRelation::list_for_target(&conn, &project_id)
+                                        .map_err(|e| e.to_string())?;
+
+                                    // Resolve project names
+                                    let mut connections = Vec::new();
+                                    for rel in &outgoing {
+                                        let name: String = conn.query_row(
+                                            "SELECT name FROM projects WHERE id = ?1",
+                                            rusqlite::params![rel.target_project_id],
+                                            |row| row.get(0),
+                                        ).unwrap_or_else(|_| "Unknown".to_string());
+                                        connections.push(serde_json::json!({
+                                            "id": rel.id,
+                                            "direction": "outgoing",
+                                            "type": rel.relation_type,
+                                            "projectId": rel.target_project_id,
+                                            "projectName": name,
+                                        }));
+                                    }
+                                    for rel in &incoming {
+                                        let name: String = conn.query_row(
+                                            "SELECT name FROM projects WHERE id = ?1",
+                                            rusqlite::params![rel.source_project_id],
+                                            |row| row.get(0),
+                                        ).unwrap_or_else(|_| "Unknown".to_string());
+                                        connections.push(serde_json::json!({
+                                            "id": rel.id,
+                                            "direction": "incoming",
+                                            "type": rel.relation_type,
+                                            "projectId": rel.source_project_id,
+                                            "projectName": name,
+                                        }));
+                                    }
+                                    Ok(serde_json::json!({ "connections": connections }).to_string())
+                                }
+                                "add" => {
+                                    let target_name = params.get("target").cloned().unwrap_or_default();
+                                    if target_name.is_empty() {
+                                        return Err("Missing 'target' parameter (workspace name or path)".to_string());
+                                    }
+                                    // Resolve target by name or path
+                                    let target_id: String = conn.query_row(
+                                        "SELECT id FROM projects WHERE name = ?1 OR path = ?1",
+                                        rusqlite::params![target_name],
+                                        |row| row.get(0),
+                                    ).map_err(|_| format!("Workspace '{}' not found", target_name))?;
+
+                                    let id = uuid::Uuid::new_v4().to_string();
+                                    let rel_type = params.get("type").cloned().unwrap_or_else(|| "oversees".to_string());
+                                    crate::db::schema::WorkspaceRelation::create(&conn, &id, &project_id, &target_id, &rel_type)
+                                        .map_err(|e| e.to_string())?;
+
+                                    let target_display: String = conn.query_row(
+                                        "SELECT name FROM projects WHERE id = ?1",
+                                        rusqlite::params![target_id],
+                                        |row| row.get(0),
+                                    ).unwrap_or_else(|_| target_name.clone());
+
+                                    crate::db::schema::log_activity(
+                                        &conn, &project_id, None, "connection.created",
+                                        None, None, Some(&target_id),
+                                        Some(&format!("Connected to {}", target_display)),
+                                    );
+
+                                    Ok(serde_json::json!({
+                                        "success": true,
+                                        "id": id,
+                                        "target": target_display,
+                                    }).to_string())
+                                }
+                                "remove" => {
+                                    let target_name = params.get("target").cloned().unwrap_or_default();
+                                    if target_name.is_empty() {
+                                        return Err("Missing 'target' parameter".to_string());
+                                    }
+                                    // Resolve target
+                                    let target_id: String = conn.query_row(
+                                        "SELECT id FROM projects WHERE name = ?1 OR path = ?1",
+                                        rusqlite::params![target_name],
+                                        |row| row.get(0),
+                                    ).map_err(|_| format!("Workspace '{}' not found", target_name))?;
+
+                                    // Find and delete the relation
+                                    let rel_id: Result<String, _> = conn.query_row(
+                                        "SELECT id FROM workspace_relations WHERE source_project_id = ?1 AND target_project_id = ?2",
+                                        rusqlite::params![project_id, target_id],
+                                        |row| row.get(0),
+                                    );
+                                    match rel_id {
+                                        Ok(id) => {
+                                            crate::db::schema::WorkspaceRelation::delete(&conn, &id)
+                                                .map_err(|e| e.to_string())?;
+                                            crate::db::schema::log_activity(
+                                                &conn, &project_id, None, "connection.removed",
+                                                None, None, Some(&target_id),
+                                                Some(&format!("Disconnected from {}", target_name)),
+                                            );
+                                            Ok(serde_json::json!({"success": true}).to_string())
+                                        }
+                                        Err(_) => Err(format!("No connection to '{}' found", target_name)),
+                                    }
+                                }
+                                _ => Err(format!("Unknown action '{}'. Use: list, add, remove", action)),
+                            }
+                        })()
+                    }
+                    "/cli/feed" => {
+                        // Query the activity feed
+                        let limit = params.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(20);
+                        let agent = params.get("agent").cloned();
+                        (|| -> Result<String, String> {
+                            let db_path = dirs::home_dir()
+                                .ok_or("No home dir")?
+                                .join(".k2so/k2so.db");
+                            let conn = rusqlite::Connection::open(&db_path)
+                                .map_err(|e| format!("DB open failed: {}", e))?;
+                            let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+
+                            let project_id: String = conn.query_row(
+                                "SELECT id FROM projects WHERE path = ?1",
+                                rusqlite::params![project_path],
+                                |row| row.get(0),
+                            ).map_err(|e| format!("Project not found: {}", e))?;
+
+                            let entries = if let Some(agent_name) = agent {
+                                crate::db::schema::ActivityFeedEntry::list_by_agent(&conn, &project_id, &agent_name, limit)
+                            } else {
+                                crate::db::schema::ActivityFeedEntry::list_by_project(&conn, &project_id, limit, 0)
+                            }.map_err(|e| e.to_string())?;
+
+                            let items: Vec<serde_json::Value> = entries.iter().map(|e| {
+                                serde_json::json!({
+                                    "id": e.id,
+                                    "agent": e.agent_name,
+                                    "type": e.event_type,
+                                    "from": e.from_agent,
+                                    "to": e.to_agent,
+                                    "summary": e.summary,
+                                    "at": e.created_at,
+                                })
+                            }).collect();
+
+                            Ok(serde_json::json!({ "feed": items }).to_string())
+                        })()
                     }
                     _ => Err("Unknown CLI endpoint".to_string()),
                 };

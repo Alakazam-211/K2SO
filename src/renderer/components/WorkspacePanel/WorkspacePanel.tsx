@@ -110,8 +110,9 @@ const modeLabels: Record<string, string> = {
   off: 'Off',
   custom: 'Custom Agent',
   agent: 'K2SO Agent',
-  coordinator: 'Coordinator',
-  pod: 'Coordinator', // legacy
+  manager: 'Workspace Manager',
+  coordinator: 'Workspace Manager', // legacy
+  pod: 'Workspace Manager', // legacy
 }
 
 // ── Component ────────────────────────────────────────────────────────────
@@ -161,12 +162,12 @@ export default function WorkspacePanel(): React.JSX.Element {
   }, [activeProjectId, activeProjectPath])
 
   const agentMode = activeProject?.agentMode || 'off'
-  const isCoordinatorMode = agentMode === 'coordinator' || agentMode === 'pod'
-  // Primary agent for any mode: coordinator for coordinator mode, first agent for custom/k2so
+  const isManagerMode = agentMode === 'manager' || agentMode === 'coordinator' || agentMode === 'pod'
+  // Primary agent for any mode: manager for manager mode, first agent for custom/k2so
   const primaryAgent = useMemo(() => {
-    if (isCoordinatorMode) return agents.find((a) => a.isCoordinator) ?? null
+    if (isManagerMode) return agents.find((a) => a.isCoordinator) ?? null
     return agents.length > 0 ? agents[0] : null
-  }, [agents, isCoordinatorMode])
+  }, [agents, isManagerMode])
   const workspaces = activeProject?.workspaces ?? []
   // Filter to only worktree workspaces (not the main workspace)
   const worktrees = useMemo(() =>
@@ -212,7 +213,7 @@ export default function WorkspacePanel(): React.JSX.Element {
                 try {
                   await invoke('k2so_agents_build_launch', {
                     projectPath: activeProject.path,
-                    agentName: primaryAgent?.name || 'coordinator',
+                    agentName: primaryAgent?.name || 'manager',
                     agentCliCommand: null,
                   })
                 } catch (err) {
@@ -322,6 +323,9 @@ export default function WorkspacePanel(): React.JSX.Element {
         )}
       </div>
 
+      {/* ── Connected Agents (incoming) ── */}
+      <ConnectedAgentsSection projectId={activeProject.id} />
+
       {/* ── Worktrees ── */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)]">
         <span className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider flex items-center gap-1.5">
@@ -357,7 +361,7 @@ export default function WorkspacePanel(): React.JSX.Element {
         {worktrees.length === 0 ? (
           <div className="p-3">
             <p className="text-[10px] text-[var(--color-text-muted)]">
-              No worktrees open. Click + to create one or let the coordinator delegate work.
+              No worktrees open. Click + to create one or let the manager delegate work.
             </p>
           </div>
         ) : (
@@ -489,6 +493,64 @@ function WorktreeRow({
             <div className="text-[10px] text-[var(--color-text-muted)] truncate">{branch}</div>
           )}
         </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Connected Agents Section (incoming relations) ───────────────────────
+
+interface WorkspaceRelation {
+  id: string
+  sourceProjectId: string
+  targetProjectId: string
+  relationType: string
+  createdAt: string
+}
+
+function ConnectedAgentsSection({ projectId }: { projectId: string }): React.JSX.Element | null {
+  const [relations, setRelations] = useState<WorkspaceRelation[]>([])
+  const [loaded, setLoaded] = useState(false)
+  const projects = useProjectsStore((s) => s.projects)
+
+  useEffect(() => {
+    let cancelled = false
+    invoke<WorkspaceRelation[]>('workspace_relations_list_incoming', { projectId })
+      .then((result) => { if (!cancelled) { setRelations(result); setLoaded(true) } })
+      .catch(() => { if (!cancelled) { setRelations([]); setLoaded(true) } })
+    return () => { cancelled = true }
+  }, [projectId])
+
+  // Resolve source project details
+  const projectsById = useMemo(() => {
+    const map = new Map<string, typeof projects[number]>()
+    for (const p of projects) map.set(p.id, p)
+    return map
+  }, [projects])
+
+  // Don't render anything if no incoming connections
+  if (!loaded || relations.length === 0) return null
+
+  return (
+    <div className="px-3 py-2 border-b border-[var(--color-border)]">
+      <span className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider">
+        Connected Agents
+      </span>
+      <div className="mt-1.5 space-y-1">
+        {relations.map((rel) => {
+          const source = projectsById.get(rel.sourceProjectId)
+          return (
+            <div key={rel.id} className="flex items-center gap-2">
+              <span
+                className="w-2 h-2 flex-shrink-0 rounded-full"
+                style={{ backgroundColor: source?.color || '#6b7280' }}
+              />
+              <span className="text-[11px] text-[var(--color-text-secondary)] truncate">
+                {source?.name || 'Unknown'}
+              </span>
+            </div>
+          )
+        })}
       </div>
     </div>
   )

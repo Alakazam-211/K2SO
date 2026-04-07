@@ -168,17 +168,17 @@ section "3.4: Agent Template Validation"
 # We need K2SO running for agent creation, but we can check the template function in source
 AGENTS_SRC="$PROJECT_ROOT/src-tauri/src/commands/k2so_agents.rs"
 
-# Verify coordinator template has key sections (in raw string literals)
+# Verify manager template has key sections (in raw string literals)
 if grep -q 'Work Sources' "$AGENTS_SRC"; then
-    pass "template: coordinator has Work Sources section"
+    pass "template: manager has Work Sources section"
 else
-    fail "template: coordinator Work Sources" "Section not found in source"
+    fail "template: manager Work Sources" "Section not found in source"
 fi
 
 if grep -q 'Your Team' "$AGENTS_SRC"; then
-    pass "template: coordinator has Your Team section"
+    pass "template: manager has Your Team section"
 else
-    fail "template: coordinator Your Team" "Section not found"
+    fail "template: manager Your Team" "Section not found"
 fi
 
 if grep -q '"agent-template"\|"pod-member"' "$AGENTS_SRC" && grep -q 'Specialization' "$AGENTS_SRC"; then
