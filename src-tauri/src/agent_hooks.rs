@@ -1038,10 +1038,10 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                     serde_json::Value::Null
                                 };
 
-                                // Inbox: structured list with title/priority/type
+                                // Work items: from filesystem (.md files with detailed specs)
                                 let inbox_dir = std::path::PathBuf::from(&project_path)
                                     .join(".k2so/agents").join(&agent).join("work/inbox");
-                                let inbox: Vec<serde_json::Value> = if inbox_dir.is_dir() {
+                                let mut work_items: Vec<serde_json::Value> = if inbox_dir.is_dir() {
                                     std::fs::read_dir(&inbox_dir).ok()
                                         .map(|entries| entries.filter_map(|e| e.ok())
                                             .map(|e| {
@@ -1054,6 +1054,46 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                 } else {
                                     vec![]
                                 };
+
+                                // Also check workspace-level inbox for manager agents
+                                let ws_inbox_dir = std::path::PathBuf::from(&project_path).join(".k2so/work/inbox");
+                                if ws_inbox_dir.is_dir() {
+                                    if let Ok(entries) = std::fs::read_dir(&ws_inbox_dir) {
+                                        for e in entries.flatten() {
+                                            let fname = e.file_name().to_string_lossy().to_string();
+                                            let content = std::fs::read_to_string(e.path()).unwrap_or_default();
+                                            work_items.push(parse_work_item(&fname, &content));
+                                        }
+                                    }
+                                }
+
+                                // Messages: from DB (fast, indexed, scoped to this agent)
+                                let messages: Vec<serde_json::Value> = crate::db::schema::get_unread_messages(&conn, &project_id, &agent)
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .map(|m| {
+                                        let text = m.metadata.as_deref()
+                                            .and_then(|md| serde_json::from_str::<serde_json::Value>(md).ok())
+                                            .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                                            .unwrap_or_else(|| m.summary.clone().unwrap_or_default());
+                                        serde_json::json!({
+                                            "type": "message",
+                                            "from": m.from_agent,
+                                            "text": text,
+                                            "at": m.created_at,
+                                            "id": m.id,
+                                        })
+                                    })
+                                    .collect();
+
+                                // Mark messages as read after retrieval
+                                let _ = crate::db::schema::mark_messages_read(&conn, &project_id, &agent);
+
+                                // Combine into unified inbox
+                                let inbox = serde_json::json!({
+                                    "work": work_items,
+                                    "messages": messages,
+                                });
 
                                 // Peers: all agent_sessions in this project + related projects
                                 let mut peer_project_ids = vec![project_id.clone()];
@@ -1332,22 +1372,30 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                     (dir, Some(target.clone()), None)
                                 };
 
-                                std::fs::create_dir_all(&inbox_dir)
-                                    .map_err(|e| format!("Failed to create inbox dir: {}", e))?;
-                                std::fs::write(inbox_dir.join(&filename), &content)
-                                    .map_err(|e| format!("Failed to write message: {}", e))?;
+                                // Messages go to DB only (fast, indexed, queryable).
+                                // Work items (.md files) are for tasks with detailed specs.
+                                // Store full message text in metadata for retrieval.
+                                let msg_metadata = serde_json::json!({
+                                    "text": text,
+                                    "from_qualified": qualified_from,
+                                }).to_string();
 
-                                // Log sent + delivered
-                                crate::db::schema::log_activity(
+                                // Log to sender's project feed
+                                crate::db::schema::ActivityFeedEntry::insert(
                                     &conn, &project_id, Some(&agent), "message.sent",
-                                    Some(&agent), to_agent_name.as_deref(), to_project_id.as_deref(),
+                                    Some(&qualified_from), to_agent_name.as_deref(), to_project_id.as_deref(),
                                     Some(&format!("To {}: {}", target, &text[..text.len().min(100)])),
-                                );
-                                crate::db::schema::log_activity(
-                                    &conn, &project_id, to_agent_name.as_deref(), "message.delivered",
-                                    Some(&agent), to_agent_name.as_deref(), to_project_id.as_deref(),
-                                    Some(&format!("From {}", agent)),
-                                );
+                                    Some(&msg_metadata),
+                                ).ok();
+
+                                // Log to recipient's project feed (so they can query it)
+                                let recipient_project_id = to_project_id.as_deref().unwrap_or(&project_id);
+                                crate::db::schema::ActivityFeedEntry::insert(
+                                    &conn, recipient_project_id, to_agent_name.as_deref(), "message.received",
+                                    Some(&qualified_from), to_agent_name.as_deref(), Some(&project_id),
+                                    Some(&format!("{}: {}", qualified_from, &text[..text.len().min(200)])),
+                                    Some(&msg_metadata),
+                                ).ok();
 
                                 // Wake chain (only if --wake flag set)
                                 let mut wake_status = "inbox_only".to_string();

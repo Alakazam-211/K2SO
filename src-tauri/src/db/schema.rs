@@ -1184,3 +1184,51 @@ pub fn log_activity(
 ) {
     let _ = ActivityFeedEntry::insert(conn, project_id, agent_name, event_type, from_agent, to_agent, to_project_id, summary, None);
 }
+
+/// Get unread messages for a specific agent in a project.
+pub fn get_unread_messages(
+    conn: &Connection,
+    project_id: &str,
+    agent_name: &str,
+) -> Result<Vec<ActivityFeedEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, project_id, agent_name, event_type, from_agent, to_agent, to_project_id, summary, metadata, created_at \
+         FROM activity_feed \
+         WHERE (to_agent = ?1 OR (to_agent IS NULL AND ?1 = '__lead__')) \
+         AND (project_id = ?2 OR to_project_id = ?2) \
+         AND event_type IN ('message.sent', 'message.delivered') \
+         AND read = 0 \
+         ORDER BY created_at ASC"
+    )?;
+    let rows = stmt.query_map(params![agent_name, project_id], |row| {
+        Ok(ActivityFeedEntry {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            agent_name: row.get(2)?,
+            event_type: row.get(3)?,
+            from_agent: row.get(4)?,
+            to_agent: row.get(5)?,
+            to_project_id: row.get(6)?,
+            summary: row.get(7)?,
+            metadata: row.get(8)?,
+            created_at: row.get(9)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Mark messages as read for an agent.
+pub fn mark_messages_read(
+    conn: &Connection,
+    project_id: &str,
+    agent_name: &str,
+) -> Result<usize> {
+    conn.execute(
+        "UPDATE activity_feed SET read = 1 \
+         WHERE (to_agent = ?1 OR (to_agent IS NULL AND ?1 = '__lead__')) \
+         AND (project_id = ?2 OR to_project_id = ?2) \
+         AND event_type IN ('message.sent', 'message.delivered') \
+         AND read = 0",
+        params![agent_name, project_id],
+    )
+}

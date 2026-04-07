@@ -851,11 +851,29 @@ try:
         print('Current Task: None')
     print()
 
-    # Inbox
-    inbox = d.get('inbox', [])
-    if inbox:
-        print('Inbox (%d items):' % len(inbox))
-        for item in inbox:
+    # Inbox (unified: work items from filesystem + messages from DB)
+    inbox = d.get('inbox', {})
+    if isinstance(inbox, dict):
+        work = inbox.get('work', [])
+        messages = inbox.get('messages', [])
+    else:
+        # Legacy format (list)
+        work = inbox if isinstance(inbox, list) else []
+        messages = []
+
+    if messages:
+        print('Messages (%d):' % len(messages))
+        for msg in messages:
+            frm = msg.get('from', '?')
+            txt = msg.get('text', '')
+            print('  [%s] %s' % (frm, txt[:120]))
+    else:
+        print('Messages: None')
+    print()
+
+    if work:
+        print('Work Items (%d):' % len(work))
+        for item in work:
             if isinstance(item, dict):
                 pri = item.get('priority', 'normal')
                 title = item.get('title', item.get('file', '?'))
@@ -865,7 +883,7 @@ try:
             else:
                 print('  - %s' % item)
     else:
-        print('Inbox: Empty')
+        print('Work Items: None')
     print()
 
     # Peers
