@@ -1251,36 +1251,63 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                     agent, agent, now, text
                                 );
 
-                                let (inbox_dir, to_agent_name, to_project_id) = if target.contains(":inbox") {
-                                    // Cross-workspace: resolve target workspace via workspace_relations
-                                    let target_workspace = target.split(":inbox").next().unwrap_or("");
-                                    // Find target project path via relations
+                                // Resolve target — supports:
+                                //   "agent-name"           → same workspace, agent inbox
+                                //   "inbox"                → current workspace inbox
+                                //   "workspace:inbox"      → cross-workspace, workspace inbox
+                                //   "workspace:agent-name" → cross-workspace, agent inbox
+                                let (inbox_dir, to_agent_name, to_project_id) = if target.contains(':') {
+                                    // Cross-workspace target
+                                    let parts: Vec<&str> = target.splitn(2, ':').collect();
+                                    let target_workspace = parts[0];
+                                    let target_agent = parts.get(1).unwrap_or(&"inbox");
+
+                                    // Resolve workspace name → project path via DB
+                                    // First check workspace_relations, then try direct name lookup
                                     let mut target_path: Option<String> = None;
                                     let mut target_pid: Option<String> = None;
 
-                                    let rels = crate::db::schema::WorkspaceRelation::list_for_source(&conn, &project_id)
-                                        .unwrap_or_default();
-                                    for r in &rels {
-                                        if let Ok(path) = conn.query_row(
-                                            "SELECT path FROM projects WHERE id = ?1",
-                                            rusqlite::params![r.target_project_id],
-                                            |row| row.get::<_, String>(0),
-                                        ) {
-                                            let name = std::path::Path::new(&path)
-                                                .file_name()
-                                                .map(|n| n.to_string_lossy().to_string())
-                                                .unwrap_or_default();
-                                            if name == target_workspace || r.target_project_id == target_workspace {
-                                                target_pid = Some(r.target_project_id.clone());
-                                                target_path = Some(path);
-                                                break;
-                                            }
+                                    // Look up by project name (case-insensitive match on name)
+                                    if let Ok(row) = conn.query_row(
+                                        "SELECT id, path FROM projects WHERE name = ?1",
+                                        rusqlite::params![target_workspace],
+                                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                                    ) {
+                                        target_pid = Some(row.0);
+                                        target_path = Some(row.1);
+                                    }
+
+                                    // Verify there's a relation (connected workspaces only)
+                                    if let Some(ref tpid) = target_pid {
+                                        let has_relation = crate::db::schema::WorkspaceRelation::list_for_source(&conn, &project_id)
+                                            .unwrap_or_default()
+                                            .iter()
+                                            .any(|r| r.target_project_id == *tpid);
+                                        let has_incoming = crate::db::schema::WorkspaceRelation::list_for_target(&conn, &project_id)
+                                            .unwrap_or_default()
+                                            .iter()
+                                            .any(|r| r.source_project_id == *tpid);
+                                        if !has_relation && !has_incoming {
+                                            return Err(format!("Workspace '{}' is not connected. Use 'k2so connections add {}' first.", target_workspace, target_workspace));
                                         }
                                     }
 
-                                    let resolved_path = target_path.ok_or(format!("Workspace '{}' not found in relations", target_workspace))?;
-                                    let dir = std::path::PathBuf::from(&resolved_path).join(".k2so/work/inbox");
-                                    (dir, None, target_pid)
+                                    let resolved_path = target_path.ok_or(format!("Workspace '{}' not found", target_workspace))?;
+
+                                    if *target_agent == "inbox" {
+                                        // Workspace inbox (for manager triage)
+                                        let dir = std::path::PathBuf::from(&resolved_path).join(".k2so/work/inbox");
+                                        (dir, None, target_pid)
+                                    } else {
+                                        // Specific agent inbox in target workspace
+                                        let dir = std::path::PathBuf::from(&resolved_path)
+                                            .join(".k2so/agents").join(target_agent).join("work/inbox");
+                                        (dir, Some(target_agent.to_string()), target_pid)
+                                    }
+                                } else if target == "inbox" {
+                                    // Current workspace inbox
+                                    let dir = std::path::PathBuf::from(&project_path).join(".k2so/work/inbox");
+                                    (dir, None, None)
                                 } else {
                                     // Same project: write to agent's inbox
                                     let dir = std::path::PathBuf::from(&project_path)
