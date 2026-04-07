@@ -1723,8 +1723,10 @@ fn generate_agent_claude_md_content(
     let skill_path = agent_dir(project_path, agent_name).join("SKILL.md");
     let _ = fs::write(&skill_path, &skill_content);
 
-    // Reference the SKILL.md from CLAUDE.md so Claude Code picks it up
-    md.push_str("\n## Tools\n\nSee `SKILL.md` in this directory for your available CLI commands.\n");
+    // Inject skill content directly into the system prompt so it's always available
+    // (no extra tool call needed to read SKILL.md)
+    md.push_str("\n");
+    md.push_str(&skill_content);
 
     Ok(md)
 }
