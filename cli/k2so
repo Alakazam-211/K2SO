@@ -944,9 +944,11 @@ cmd_msg() {
     local agent="${K2SO_AGENT_NAME:-}"
     local target=""
     local text=""
+    local wake="false"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --agent) agent="$2"; shift 2 ;;
+            --wake) wake="true"; shift ;;
             *)
                 if [[ -z "$target" ]]; then target="$1"
                 else text="$1"
@@ -957,7 +959,9 @@ cmd_msg() {
     [[ -z "$agent" ]] && { echo "Error: --agent required (or set K2SO_AGENT_NAME)" >&2; exit 1; }
     [[ -z "$target" ]] && { echo "Error: target required" >&2; exit 1; }
     [[ -z "$text" ]] && { echo "Error: message text required" >&2; exit 1; }
-    cli_request "/cli/msg" "agent=$agent&target=$(urlencode "$target")&text=$(urlencode "$text")"
+    local params="agent=$agent&target=$(urlencode "$target")&text=$(urlencode "$text")"
+    [[ "$wake" == "true" ]] && params="$params&wake=true"
+    cli_request "/cli/msg" "$params"
 }
 
 cmd_reserve() {

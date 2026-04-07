@@ -1224,9 +1224,11 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                     }
                     "/cli/msg" => {
                         // Send a message to another agent or workspace inbox
+                        // --wake flag: also wake the target agent (PTY inject → resume → fresh)
                         let agent = params.get("agent").cloned().unwrap_or_default();
                         let target = params.get("target").cloned().unwrap_or_default();
                         let text = params.get("text").cloned().unwrap_or_default();
+                        let wake = params.get("wake").map(|v| v == "true" || v == "1").unwrap_or(false);
                         if agent.is_empty() || target.is_empty() || text.is_empty() {
                             Err("Missing 'agent', 'target', or 'text' parameter".to_string())
                         } else {
@@ -1332,10 +1334,89 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                     Some(&format!("From {}", agent)),
                                 );
 
+                                // Wake chain (only if --wake flag set)
+                                let mut wake_status = "inbox_only".to_string();
+                                if wake {
+                                    // Determine which agent to wake and in which project
+                                    let wake_project_path = if let Some(ref tpid) = to_project_id {
+                                        conn.query_row(
+                                            "SELECT path FROM projects WHERE id = ?1",
+                                            rusqlite::params![tpid],
+                                            |row| row.get::<_, String>(0),
+                                        ).ok()
+                                    } else {
+                                        Some(project_path.to_string())
+                                    };
+
+                                    // Resolve the agent name to wake — for :inbox targets, wake the manager (__lead__)
+                                    let wake_agent = to_agent_name.clone().unwrap_or_else(|| "__lead__".to_string());
+
+                                    if let Some(ref wp) = wake_project_path {
+                                        let terminal_id = format!("agent-chat-{}", wake_agent);
+
+                                        // Step 1: Try direct PTY injection
+                                        use tauri::Manager;
+                                        let injected = app_handle.try_state::<crate::state::AppState>()
+                                            .map(|state| {
+                                                let mgr = state.terminal_manager.lock();
+                                                if mgr.exists(&terminal_id) {
+                                                    mgr.write(&terminal_id, &format!("k2so checkin\r")).is_ok()
+                                                } else {
+                                                    false
+                                                }
+                                            })
+                                            .unwrap_or(false);
+
+                                        if injected {
+                                            wake_status = "injected".to_string();
+                                        } else {
+                                            // Step 2: Check DB for session to resume
+                                            let wake_project_id = to_project_id.clone()
+                                                .or_else(|| Some(project_id.clone()));
+
+                                            if let Some(ref wpid) = wake_project_id {
+                                                let session = crate::db::schema::AgentSession::get_by_agent(&conn, wpid, &wake_agent).ok().flatten();
+
+                                                if let Some(ref s) = session {
+                                                    if s.session_id.is_some() {
+                                                        // Has a previous session — emit launch event for frontend to resume
+                                                        let launch_info = crate::commands::k2so_agents::k2so_agents_build_launch(
+                                                            wp.clone(), wake_agent.clone(), None,
+                                                        );
+                                                        if let Ok(info) = launch_info {
+                                                            let _ = app_handle.emit("cli:agent-launch", info);
+                                                            wake_status = "resumed".to_string();
+                                                        }
+                                                    } else {
+                                                        // No session — launch fresh
+                                                        let launch_info = crate::commands::k2so_agents::k2so_agents_build_launch(
+                                                            wp.clone(), wake_agent.clone(), None,
+                                                        );
+                                                        if let Ok(info) = launch_info {
+                                                            let _ = app_handle.emit("cli:agent-launch", info);
+                                                            wake_status = "launched_fresh".to_string();
+                                                        }
+                                                    }
+                                                } else {
+                                                    // No session record — launch fresh
+                                                    let launch_info = crate::commands::k2so_agents::k2so_agents_build_launch(
+                                                        wp.clone(), wake_agent.clone(), None,
+                                                    );
+                                                    if let Ok(info) = launch_info {
+                                                        let _ = app_handle.emit("cli:agent-launch", info);
+                                                        wake_status = "launched_fresh".to_string();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 Ok(serde_json::json!({
                                     "success": true,
                                     "file": filename,
                                     "target": target,
+                                    "wake": wake_status,
                                 }).to_string())
                             })()
                         }

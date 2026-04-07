@@ -1770,6 +1770,7 @@ k2so done --blocked "waiting for API spec from upstream"
 Send work to another workspace's inbox (cross-workspace, requires a connection):
 ```
 k2so msg <workspace-name>:inbox "description of the work needed"
+k2so msg --wake <workspace-name>:inbox "urgent work — wake the agent"
 ```
 
 ### Claim Files (prevent conflicts with other agents)
@@ -1818,6 +1819,7 @@ k2so done --blocked "waiting for API access"
 
 ```
 k2so msg <workspace-name>:inbox "description of work needed"
+k2so msg --wake <workspace-name>:inbox "urgent — wake the agent"
 ```
 
 Only works for workspaces connected via `k2so connections`.
@@ -1895,6 +1897,7 @@ This workspace ({project_name}) is managed by K2SO. You can use these commands t
 Send a task to a workspace's manager for triage and execution:
 ```
 k2so msg <workspace-name>:inbox "description of work needed"
+k2so msg --wake <workspace-name>:inbox "urgent — wake the agent"
 ```
 
 ## View Activity Feed
