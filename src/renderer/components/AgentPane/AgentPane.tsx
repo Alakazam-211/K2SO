@@ -178,6 +178,15 @@ function AgentChatTerminal({ agentName, agentDir, projectPath, autoFocus }: { ag
             args: result.args,
             cwd: result.cwd,
           })
+
+          // Register this session in the DB so it can be resumed later
+          invoke('k2so_agents_lock', {
+            projectPath,
+            agentName,
+            terminalId: myTerminalId,
+            owner: 'user',
+          }).catch(() => {})
+
           setReady(true)
           return
         }
@@ -190,14 +199,45 @@ function AgentChatTerminal({ agentName, agentDir, projectPath, autoFocus }: { ag
         setLaunchConfig({
           command: 'claude',
           args: ['--dangerously-skip-permissions'],
-          cwd: agentDir,
+          cwd: projectPath,
         })
+
+        invoke('k2so_agents_lock', {
+          projectPath,
+          agentName,
+          terminalId: myTerminalId,
+          owner: 'user',
+        }).catch(() => {})
+
         setReady(true)
       }
     }
     resolve()
     return () => { cancelled = true }
-  }, [agentName, agentDir])
+  }, [agentName, agentDir, projectPath])
+
+  // Save session ID when the CLI tool reports it via Claude's history
+  // Polls periodically to detect session ID from the running terminal
+  useEffect(() => {
+    if (!ready) return
+    const interval = setInterval(async () => {
+      try {
+        const sessionId = await invoke<string | null>('chat_history_detect_active_session', {
+          provider: 'claude',
+          projectPath: projectPath,
+        })
+        if (sessionId) {
+          invoke('k2so_agents_save_session_id', {
+            projectPath,
+            agentName,
+            sessionId,
+          }).catch(() => {})
+          clearInterval(interval) // Found it, stop polling
+        }
+      } catch { /* ignore */ }
+    }, 5000) // Check every 5 seconds
+    return () => clearInterval(interval)
+  }, [ready, projectPath, agentName])
 
   // Auto-focus the terminal container when the chat tab becomes active
   useEffect(() => {
