@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { useGitInitDialogStore } from './git-init-dialog'
 import { useToastStore } from './toast'
-import { useTabsStore } from './tabs'
+import { useTabsStore, ensurePinnedAgentTabForMode } from './tabs'
 import { useFocusGroupsStore } from './focus-groups'
 
 // Debounce touchInteraction to avoid excessive DB writes (5 min per project)
@@ -236,6 +236,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
           const cwd = newProject.workspaces[0]?.worktreePath ?? newProject.path ?? '~'
           const newKey = `${newProject.id}:${newWorkspaceId}`
           tabsStore.restoreWorkspace(newKey, cwd)
+          ensurePinnedAgentTabForMode(newProject.agentMode, newProject.path)
         } else {
           tabsStore.clearAllTabs()
         }
@@ -285,6 +286,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
           const cwd = first.workspaces[0]?.worktreePath ?? first.path ?? '~'
           const newKey = `${first.id}:${firstWorkspaceId}`
           tabsStore.restoreWorkspace(newKey, cwd)
+          ensurePinnedAgentTabForMode(first.agentMode, first.path)
         }
       }
 
@@ -326,6 +328,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
         const cwd = project.workspaces[0]?.worktreePath ?? project.path ?? '~'
         const newKey = `${id}:${newWorkspaceId}`
         tabsStore.restoreWorkspace(newKey, cwd)
+        ensurePinnedAgentTabForMode(project.agentMode, project.path)
       }
     }
   },
@@ -358,6 +361,9 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     const cwd = workspace?.worktreePath ?? project?.path ?? '~'
     const newKey = `${projectId}:${workspaceId}`
     tabsStore.restoreWorkspace(newKey, cwd)
+    if (project) {
+      ensurePinnedAgentTabForMode(project.agentMode, project.path)
+    }
   },
 
   reorderProjects: async (ids: string[]) => {

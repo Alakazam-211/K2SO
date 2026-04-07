@@ -3,11 +3,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { useTabsStore } from '@/stores/tabs'
 import { useProjectsStore } from '@/stores/projects'
 import { addNavWorktree } from '@/components/Sidebar/Sidebar'
-import { useSettingsStore } from '@/stores/settings'
-import { usePresetsStore, parseCommand } from '@/stores/presets'
 import { AgentPersonaEditor } from '@/components/AgentPersonaEditor/AgentPersonaEditor'
 import { AlacrittyTerminalView } from '@/components/Terminal/AlacrittyTerminalView'
-import { RESUMABLE_CLI_TOOLS } from '@shared/constants'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -133,79 +130,74 @@ function KanbanColumn({ title, items, color, projectPath, agentDir, onOpenFile }
 
 // ── Agent Chat Terminal ─────────────────────────────────────────────────
 
-function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: string; agentDir: string; autoFocus?: boolean }): React.JSX.Element {
+function AgentChatTerminal({ agentName, agentDir, projectPath, autoFocus }: { agentName: string; agentDir: string; projectPath: string; autoFocus?: boolean }): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   // Stable terminal ID based on agent name — survives workspace stash/restore cycles
-  // so the same PTY is reused and conversations aren't lost on workspace switch
   const terminalIdRef = useRef(`agent-chat-${agentName}`)
-  const [resolvedArgs, setResolvedArgs] = useState<string[] | undefined>(undefined)
+  const [launchConfig, setLaunchConfig] = useState<{
+    command: string
+    args: string[]
+    cwd: string
+  } | null>(null)
   const [ready, setReady] = useState(false)
-  const [terminalKey, setTerminalKey] = useState(0) // increment to force AlacrittyTerminalView remount
+  const [terminalKey, setTerminalKey] = useState(0)
 
-  // Resolve the user's default AI agent command
-  const defaultAgent = useSettingsStore((s) => s.defaultAgent)
-  const presets = usePresetsStore((s) => s.presets)
-  const agentCommand = useMemo(() => {
-    const preset = presets.find((p) => p.id === defaultAgent) || presets.find((p) => p.enabled)
-    if (!preset) return null
-    return parseCommand(preset.command)
-  }, [defaultAgent, presets])
-
-  // Resolve terminal: check for live terminal first, then resume, then fresh
+  // Resolve terminal: check live PTY first, then use backend build_launch for resume/fresh
   useEffect(() => {
     let cancelled = false
     const resolve = async () => {
-      const command = agentCommand?.command
-      if (!command) {
-        setReady(true)
-        return
-      }
-
-      // Step 1: Check if our terminal already exists and is LIVE (has a running process).
-      // If so, just attach to it — don't kill it or create a new one.
       const myTerminalId = terminalIdRef.current
+
+      // Step 1: Check if our terminal already exists and is LIVE
       try {
         const exists = await invoke<boolean>('terminal_exists', { id: myTerminalId })
         if (!cancelled && exists) {
-          // Terminal exists — just use it as-is (AlacrittyTerminalView will reattach)
-          setResolvedArgs(undefined) // no args needed, terminal already running
+          // Terminal exists — reattach, don't create a new one
+          setLaunchConfig(null)
           setReady(true)
           return
         }
       } catch { /* fall through */ }
 
-      const baseArgs = [...(agentCommand?.args ?? [])]
-
-      // Step 2: No live terminal — check for a previous session to resume
-      const toolConfig = RESUMABLE_CLI_TOOLS[command]
-      if (toolConfig) {
-        try {
-          const sessionId = await invoke<string | null>('chat_history_detect_active_session', {
-            provider: toolConfig.provider,
-            projectPath: agentDir,
+      // Step 2: Ask the backend for full launch config
+      // k2so_agents_build_launch handles: DB session resume → .last_session → history.jsonl → fresh
+      // Always uses --dangerously-skip-permissions and includes CLAUDE.md via --append-system-prompt
+      try {
+        const result = await invoke<{
+          command: string
+          args: string[]
+          cwd: string
+          resumeSession?: string
+        }>('k2so_agents_build_launch', {
+          projectPath: projectPath,
+          agentName: agentName,
+        })
+        if (!cancelled && result) {
+          setLaunchConfig({
+            command: result.command,
+            args: result.args,
+            cwd: result.cwd,
           })
-          if (!cancelled && sessionId) {
-            setResolvedArgs([...baseArgs, toolConfig.resumeFlag, sessionId])
-            setReady(true)
-            return
-          }
-        } catch { /* fall through to fresh session */ }
+          setReady(true)
+          return
+        }
+      } catch (err) {
+        console.warn('[AgentChatTerminal] build_launch failed, falling back:', err)
       }
 
-      // Step 3: No live terminal, no previous session — start fresh
+      // Step 3: Fallback — fresh session with just --dangerously-skip-permissions
       if (!cancelled) {
-        setResolvedArgs(baseArgs)
+        setLaunchConfig({
+          command: 'claude',
+          args: ['--dangerously-skip-permissions'],
+          cwd: agentDir,
+        })
         setReady(true)
       }
     }
     resolve()
     return () => { cancelled = true }
-  }, [agentCommand, agentDir])
-
-  // NOTE: We intentionally do NOT kill the terminal on unmount.
-  // When workspaces are stashed, React unmounts but PTYs stay alive in the
-  // backend so conversations survive workspace switches. The terminal is
-  // cleaned up by the backend when the app shuts down or via terminal_kill_all.
+  }, [agentName, agentDir])
 
   // Auto-focus the terminal container when the chat tab becomes active
   useEffect(() => {
@@ -217,10 +209,10 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
     }
   }, [autoFocus, ready])
 
-  if (!agentCommand || !ready) {
+  if (!ready) {
     return (
       <div className="flex items-center justify-center h-full text-xs text-[var(--color-text-muted)]">
-        {!agentCommand ? 'No AI agent configured. Set a default in Settings.' : 'Loading session...'}
+        Loading session...
       </div>
     )
   }
@@ -230,9 +222,9 @@ function AgentChatTerminal({ agentName, agentDir, autoFocus }: { agentName: stri
       <AlacrittyTerminalView
         key={terminalKey}
         terminalId={terminalIdRef.current}
-        cwd={agentDir}
-        command={resolvedArgs !== undefined ? agentCommand.command : undefined}
-        args={resolvedArgs}
+        cwd={launchConfig?.cwd ?? agentDir}
+        command={launchConfig?.command}
+        args={launchConfig?.args}
       />
     </div>
   )
@@ -443,7 +435,7 @@ function AgentPaneInner({ agentName, projectPath }: AgentPaneProps): React.JSX.E
         {/* ── Chat Terminal — always mounted at full size, layered behind when inactive ── */}
         {showChat && chatMounted && (
           <div className={`absolute inset-0 ${activeSection === 'chat' ? 'z-10' : 'z-0 pointer-events-none'}`}>
-            <AgentChatTerminal agentName={agentName} agentDir={agentDir} autoFocus={activeSection === 'chat'} />
+            <AgentChatTerminal agentName={agentName} agentDir={agentDir} projectPath={projectPath} autoFocus={activeSection === 'chat'} />
           </div>
         )}
 
@@ -713,6 +705,7 @@ function WorktreeDetailPane({ worktreeId, projectPath }: { worktreeId: string; p
             <AgentChatTerminal
               agentName={`wt-${worktreeId}`}
               agentDir={worktreePath}
+              projectPath={projectPath}
               autoFocus={activeTab === 'chat'}
             />
           </div>

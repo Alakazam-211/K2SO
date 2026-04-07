@@ -194,8 +194,10 @@ export default function WorkspacePanel(): React.JSX.Element {
           <div
             className={`flex items-center gap-2 ${agentMode !== 'off' && primaryAgent ? 'cursor-pointer hover:opacity-80 transition-opacity' : ''}`}
             onClick={() => {
-              if (agentMode !== 'off' && primaryAgent) {
-                openAgentPane(primaryAgent.name, activeProject.path)
+              if (agentMode !== 'off') {
+                // Redirect to pinned system agent tab
+                const tabsStore = useTabsStore.getState()
+                tabsStore.activateSystemAgentTab()
               }
             }}
           >

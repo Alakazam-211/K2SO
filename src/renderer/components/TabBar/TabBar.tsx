@@ -294,6 +294,36 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
             if (cliAgent) break
           }
 
+          // Pinned system agent tab — compact with just icon
+          if (tab.isSystemAgent) {
+            return (
+              <div
+                key={tab.id}
+                data-tab-id={tab.id}
+                className={`group relative flex h-full w-9 flex-shrink-0 items-center justify-center border-r border-[var(--color-border)] transition-colors select-none cursor-pointer ${
+                  isActive
+                    ? 'bg-white/[0.08] text-[var(--color-accent)]'
+                    : 'text-[var(--color-text-muted)] hover:bg-white/[0.04] hover:text-[var(--color-text-secondary)]'
+                }`}
+                onClick={() => setActiveTabInGroup(groupIndex, tab.id)}
+                title={tab.title}
+              >
+                {isAgentActive ? (
+                  <span className="braille-spinner text-[11px]" />
+                ) : (
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="5" width="10" height="8" rx="1.5" /><circle cx="6" cy="9" r="1" /><circle cx="10" cy="9" r="1" />
+                    <path d="M8 2v3" /><circle cx="8" cy="1.5" r="0.8" />
+                  </svg>
+                )}
+                {/* Activity underline */}
+                {isAgentActive && (
+                  <div className="absolute bottom-0 left-1 right-1 h-[2px] bg-[var(--color-accent)] rounded-full" />
+                )}
+              </div>
+            )
+          }
+
           return (
             <div
               key={tab.id}

@@ -123,6 +123,7 @@ export interface SerializedTab {
   title: string
   mosaicTree: MosaicNode<string> | null
   paneGroups: Record<string, SerializedPaneGroup>
+  isSystemAgent?: boolean
 }
 
 export interface SerializedLayout {
@@ -151,6 +152,8 @@ export interface Tab {
   mosaicTree: MosaicNode<string> | null  // leaf strings = paneGroupIds
   paneGroups: Map<string, PaneGroup>
   isDirty?: boolean
+  /** System agent tab — pinned at start of tab bar, can't be closed or reordered */
+  isSystemAgent?: boolean
 }
 
 interface TabsState {
@@ -249,6 +252,17 @@ interface TabsState {
    *  Returns the terminal ID (paneGroupId) so the caller can spawn a background PTY. */
   addTabToWorkspace: (workspaceKey: string, cwd: string, options: { title: string; command: string; args: string[] }) => string | null
 
+  // Pinned system agent tab
+  /** Ensure a pinned agent tab exists for this workspace. Creates one if missing.
+   *  Returns the tab ID. No-op if tab already exists. */
+  ensureSystemAgentTab: (agentName: string, projectPath: string, title: string) => string
+  /** Remove the pinned system agent tab (when agent mode is turned off). */
+  removeSystemAgentTab: () => void
+  /** Activate the pinned system agent tab (switches to it). */
+  activateSystemAgentTab: () => void
+  /** Get the pinned system agent tab if it exists. */
+  getSystemAgentTab: () => Tab | undefined
+
   // Cross-window sync
   applyRemoteTabChange: (payload: TabSyncPayload) => void
   broadcastAllTabs: () => void
@@ -257,6 +271,31 @@ interface TabsState {
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 let tabCounter = 0
+
+/** Ensure the pinned system agent tab matches the given agent mode.
+ *  Called by the projects store after workspace restore/switch. */
+export function ensurePinnedAgentTabForMode(
+  agentMode: string,
+  projectPath: string,
+): void {
+  setTimeout(() => {
+    const tabsStore = useTabsStore.getState()
+    if (agentMode && agentMode !== 'off') {
+      let title = 'Agent'
+      const agentName = '__lead__'
+      if (agentMode === 'manager' || agentMode === 'coordinator') {
+        title = 'Manager'
+      } else if (agentMode === 'custom') {
+        title = 'Agent'
+      } else if (agentMode === 'agent') {
+        title = 'K2SO'
+      }
+      tabsStore.ensureSystemAgentTab(agentName, projectPath, title)
+    } else {
+      tabsStore.removeSystemAgentTab()
+    }
+  }, 0)
+}
 
 /** Serialize a single Tab to SerializedTab (used by serializeCurrentLayout and serializeAllWorkspaces). */
 function serializeTab(tab: Tab): SerializedTab {
@@ -302,6 +341,7 @@ function serializeTab(tab: Tab): SerializedTab {
     title: tab.title,
     mosaicTree: tab.mosaicTree,
     paneGroups: paneGroupsObj,
+    ...(tab.isSystemAgent ? { isSystemAgent: true } : {}),
   }
 }
 
@@ -586,8 +626,11 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   },
 
   removeTab: (tabId: string) => {
-    // Kill all PTYs in the removed tab (PTYs survive tab switches for persistence)
+    // Never close the pinned system agent tab
     const tab = get().tabs.find((t) => t.id === tabId)
+    if (tab?.isSystemAgent) return
+
+    // Kill all PTYs in the removed tab (PTYs survive tab switches for persistence)
     if (tab) {
       for (const [, pg] of tab.paneGroups) {
         for (const item of pg.items) {
@@ -682,6 +725,8 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     set((state) => {
       if (groupIndex === 0) {
         const tabs = [...state.tabs]
+        // Don't reorder the pinned system agent tab (always at index 0)
+        if (tabs[fromIndex]?.isSystemAgent || tabs[toIndex]?.isSystemAgent) return {}
         const [moved] = tabs.splice(fromIndex, 1)
         tabs.splice(toIndex, 0, moved)
         return { tabs }
@@ -847,6 +892,29 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   openAgentPane: (agentName: string, projectPath: string, title?: string) => {
     const state = get()
 
+    // If this is the primary agent (manager lead, k2so agent, or custom agent),
+    // redirect to the pinned system agent tab if it exists
+    const isPrimaryAgent = agentName === '__lead__' || agentName === '__workspace__'
+    if (!isPrimaryAgent) {
+      // Check if it matches the workspace's main custom agent by seeing if a system tab has this agent
+      const sysTab = state.tabs.find((t) => t.isSystemAgent)
+      if (sysTab) {
+        for (const [, pg] of sysTab.paneGroups) {
+          if (pg.items.some((item) => item.type === 'agent' && (item.data as AgentItemData).agentName === agentName)) {
+            set({ activeTabId: sysTab.id })
+            return
+          }
+        }
+      }
+    }
+    if (isPrimaryAgent) {
+      const sysTab = state.tabs.find((t) => t.isSystemAgent)
+      if (sysTab) {
+        set({ activeTabId: sysTab.id })
+        return
+      }
+    }
+
     // Check if a tab for this agent already exists — switch to it
     for (const tab of state.tabs) {
       for (const [, pg] of tab.paneGroups) {
@@ -882,6 +950,54 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       paneGroups: new Map([[pgId, pg]]),
     }
     set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tabId }))
+  },
+
+  ensureSystemAgentTab: (agentName: string, projectPath: string, title: string) => {
+    const state = get()
+
+    // Already exists? Return its ID
+    const existing = state.tabs.find((t) => t.isSystemAgent)
+    if (existing) return existing.id
+
+    // Create pinned agent tab at position 0
+    const tabId = crypto.randomUUID()
+    const pgId = crypto.randomUUID()
+    const agentItem: Item = {
+      id: crypto.randomUUID(),
+      type: 'agent',
+      data: { agentName, projectPath },
+    }
+    const pg: PaneGroup = {
+      id: pgId,
+      items: [agentItem],
+      activeItemIndex: 0,
+    }
+    const tab: Tab = {
+      id: tabId,
+      title: title,
+      mosaicTree: pgId,
+      paneGroups: new Map([[pgId, pg]]),
+      isSystemAgent: true,
+    }
+    // Insert at position 0 (pinned to left)
+    set((s) => ({ tabs: [tab, ...s.tabs] }))
+    return tabId
+  },
+
+  removeSystemAgentTab: () => {
+    set((s) => ({ tabs: s.tabs.filter((t) => !t.isSystemAgent) }))
+  },
+
+  activateSystemAgentTab: () => {
+    const state = get()
+    const sysTab = state.tabs.find((t) => t.isSystemAgent)
+    if (sysTab) {
+      set({ activeTabId: sysTab.id })
+    }
+  },
+
+  getSystemAgentTab: () => {
+    return get().tabs.find((t) => t.isSystemAgent)
   },
 
   openFileAsTab: (filePath: string) => {
@@ -1588,6 +1704,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         title: serializedTab.title,
         mosaicTree: remappedTree,
         paneGroups,
+        ...(serializedTab.isSystemAgent ? { isSystemAgent: true } : {}),
       }
     })
 
@@ -1986,6 +2103,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         backgroundWorkspaces: remaining,
         activeWorkspaceKey: key,
       })
+      // Pinned agent tab is ensured by the projects store after restoreWorkspace
       return
     }
 
@@ -2002,6 +2120,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     if (projectId && workspaceId) {
       get().loadLayoutForWorkspace(projectId, workspaceId, cwd)
     }
+    // Pinned agent tab is ensured by the projects store after restoreWorkspace
   },
 
   serializeAllWorkspaces: async (activeKey: string) => {
