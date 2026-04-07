@@ -120,23 +120,30 @@ pub fn run() {
             // Migrate workspace_layouts from settings.json → SQLite (one-time)
             migrate_workspace_layouts_to_db(app.handle());
 
-            // Regenerate SKILL.md files for all agent-enabled workspaces (v0.26 migration)
+            // Regenerate SKILL.md files for all workspaces (v0.26 migration)
             {
-                let paths: Vec<String> = {
+                let all_projects: Vec<(String, String)> = {
                     let state = app.state::<AppState>();
                     let db = state.db.lock();
-                    let mut paths = Vec::new();
-                    if let Ok(mut stmt) = db.prepare("SELECT path FROM projects WHERE agent_mode != 'off'") {
-                        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                    let mut projects = Vec::new();
+                    if let Ok(mut stmt) = db.prepare("SELECT path, agent_mode FROM projects") {
+                        if let Ok(rows) = stmt.query_map([], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                        }) {
                             for row in rows.flatten() {
-                                paths.push(row);
+                                projects.push(row);
                             }
                         }
                     }
-                    paths
+                    projects
                 };
-                for path in paths {
-                    let _ = commands::k2so_agents::k2so_agents_regenerate_skills(path);
+                for (path, mode) in &all_projects {
+                    // Agent-enabled workspaces: regenerate per-agent SKILL.md files
+                    if mode != "off" {
+                        let _ = commands::k2so_agents::k2so_agents_regenerate_skills(path.clone());
+                    }
+                    // All workspaces: write workspace-level SKILL.md at project root
+                    commands::k2so_agents::write_workspace_skill_file(path);
                 }
             }
 

@@ -385,6 +385,9 @@ pub fn k2so_agents_create(
     let content = format!("---\n{}\n---\n\n{}\n", frontmatter, body);
     atomic_write(&agent_md, &content)?;
 
+    // Generate SKILL.md for the new agent
+    write_agent_skill_file(&project_path, &name, &agent_type);
+
     Ok(K2soAgentInfo {
         name,
         role,
@@ -1879,6 +1882,46 @@ k2so release
     )
 }
 
+/// Generate the workspace-level skill for users working directly with an LLM.
+/// Lightweight — just the commands a human user would need when working alongside K2SO agents.
+fn generate_workspace_skill_content(project_name: &str) -> String {
+    format!(
+r#"# K2SO Skill
+
+This workspace ({project_name}) is managed by K2SO. You can use these commands to interact with the agent system.
+
+## Send Work to a Workspace
+
+Send a task to a workspace's manager for triage and execution:
+```
+k2so msg <workspace-name>:inbox "description of work needed"
+```
+
+## View Activity Feed
+
+See recent agent activity in this workspace:
+```
+k2so feed
+```
+
+## View Connections
+
+See which workspaces are connected:
+```
+k2so connections list
+```
+
+## Create a Work Item
+
+Add work to this workspace's inbox for the manager to triage:
+```
+k2so work create --title "Fix login bug" --body "Users can't log in after password reset" --source issue
+```
+"#,
+        project_name = project_name,
+    )
+}
+
 /// Priority rank for sorting (lower = higher priority).
 fn priority_rank(priority: &str) -> u8 {
     match priority {
@@ -1924,6 +1967,7 @@ pub fn k2so_agents_generate_workspace_claude_md(
             manager_role, manager_body
         );
         let _ = fs::write(manager_dir.join("agent.md"), &manager_md);
+        write_agent_skill_file(&project_path, "manager", "manager");
     }
 
     // Auto-create K2SO agent if it doesn't exist (for agent mode)
@@ -1939,6 +1983,7 @@ pub fn k2so_agents_generate_workspace_claude_md(
             k2so_role, k2so_body
         );
         let _ = fs::write(k2so_agent_dir.join("agent.md"), &k2so_md);
+        write_agent_skill_file(&project_path, "k2so-agent", "k2so");
     }
 
     // List existing agents
@@ -4429,6 +4474,19 @@ pub fn k2so_agents_regenerate_skills(
     }
 
     Ok(serde_json::json!({"updated": updated}))
+}
+
+/// Write the workspace-level SKILL.md at the project root.
+/// This is the user-facing skill for when humans work directly with an LLM.
+pub fn write_workspace_skill_file(project_path: &str) {
+    let project_name = std::path::Path::new(project_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".to_string());
+
+    let content = generate_workspace_skill_content(&project_name);
+    let skill_path = PathBuf::from(project_path).join("SKILL.md");
+    let _ = fs::write(&skill_path, &content);
 }
 
 /// Write a single agent's SKILL.md. Used internally during launch.
