@@ -311,9 +311,14 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
                 {isAgentActive ? (
                   <span className="braille-spinner text-[11px]" />
                 ) : (
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="3" y="5" width="10" height="8" rx="1.5" /><circle cx="6" cy="9" r="1" /><circle cx="10" cy="9" r="1" />
-                    <path d="M8 2v3" /><circle cx="8" cy="1.5" r="0.8" />
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
+                    {/* K2SO droid head silhouette */}
+                    <path d="M5 3.5 L5 1.5 L11 1.5 L11 3.5" />
+                    <path d="M4 3.5 Q4 3 5 3 L11 3 Q12 3 12 3.5 L12.5 8 Q12.5 9.5 11 10 L10 10.5 L10 12 L6 12 L6 10.5 L5 10 Q3.5 9.5 3.5 8 Z" />
+                    <circle cx="6.5" cy="6.5" r="1.3" />
+                    <circle cx="9.5" cy="6.5" r="1.3" />
+                    <line x1="6" y1="14.5" x2="10" y2="14.5" />
+                    <line x1="8" y1="12" x2="8" y2="14.5" />
                   </svg>
                 )}
                 {/* Activity underline */}
