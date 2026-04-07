@@ -1003,7 +1003,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                                         "title" => title = val.to_string(),
                                                         "priority" => priority = val.to_string(),
                                                         "type" => item_type = val.to_string(),
-                                                        "assigned_by" => from = serde_json::Value::String(val.to_string()),
+                                                        "from" => from = serde_json::Value::String(val.to_string()),
+                                                        "assigned_by" if from.is_null() => from = serde_json::Value::String(val.to_string()),
                                                         _ => {}
                                                     }
                                                 }
@@ -1248,9 +1249,23 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
 
                                 let now = chrono::Local::now().to_rfc3339();
                                 let filename = format!("msg-{}-{}.md", agent, chrono::Local::now().format("%Y%m%d-%H%M%S"));
+
+                                // Resolve sender's workspace name for qualified from field
+                                let sender_workspace: String = conn.query_row(
+                                    "SELECT name FROM projects WHERE path = ?1",
+                                    rusqlite::params![project_path],
+                                    |row| row.get(0),
+                                ).unwrap_or_else(|_| {
+                                    std::path::Path::new(&project_path)
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().to_string())
+                                        .unwrap_or_default()
+                                });
+                                let qualified_from = format!("{}:{}", sender_workspace, agent);
+
                                 let content = format!(
-                                    "---\ntitle: Message from {}\ntype: message\npriority: normal\nassigned_by: {}\ncreated: {}\n---\n\n{}",
-                                    agent, agent, now, text
+                                    "---\ntitle: Message from {}\ntype: message\npriority: normal\nassigned_by: {}\nfrom: {}\ncreated: {}\n---\n\n{}",
+                                    qualified_from, agent, qualified_from, now, text
                                 );
 
                                 // Resolve target — supports:
@@ -1354,13 +1369,18 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                     if let Some(ref wp) = wake_project_path {
                                         let terminal_id = format!("agent-chat-{}", wake_agent);
 
-                                        // Step 1: Try direct PTY injection
+                                        // Step 1: Try direct PTY injection — send the message inline
                                         use tauri::Manager;
+                                        let wake_msg = format!(
+                                            "[Message from {}]: {}\n\nRun `k2so checkin` to see your full inbox.\r",
+                                            qualified_from,
+                                            text.chars().take(500).collect::<String>(),
+                                        );
                                         let injected = app_handle.try_state::<crate::state::AppState>()
                                             .map(|state| {
                                                 let mgr = state.terminal_manager.lock();
                                                 if mgr.exists(&terminal_id) {
-                                                    mgr.write(&terminal_id, &format!("k2so checkin\r")).is_ok()
+                                                    mgr.write(&terminal_id, &wake_msg).is_ok()
                                                 } else {
                                                     false
                                                 }
