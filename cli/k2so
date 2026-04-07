@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.25.2"
+K2SO_CLI_VERSION="0.26.0"
 
 set -euo pipefail
 
@@ -888,10 +888,13 @@ try:
         print('No connections.')
     else:
         for c in conns:
-            arrow = '→' if c['direction'] == 'outgoing' else '←'
-            print(f\"  {arrow} {c['projectName']} ({c['type']}, {c['direction']})\")
+            arrow = chr(8594) if c['direction'] == 'outgoing' else chr(8592)
+            name = c['projectName']
+            rtype = c['type']
+            direction = c['direction']
+            print('  %s %s (%s, %s)' % (arrow, name, rtype, direction))
 except Exception as e:
-    print(f'Error: {e}', file=sys.stderr)
+    sys.stderr.write('Error: %s\n' % e)
 " 2>/dev/null
             ;;
         add)
@@ -902,9 +905,9 @@ import json, sys
 try:
     d = json.loads(sys.stdin.read())
     if 'error' in d:
-        print(f\"Error: {d['error']}\", file=sys.stderr)
+        sys.stderr.write('Error: %s\n' % d['error'])
         sys.exit(1)
-    print(f\"Connected to {d.get('target', '?')}\")
+    print('Connected to %s' % d.get('target', '?'))
 except: pass
 " 2>/dev/null
             ;;
@@ -916,7 +919,7 @@ import json, sys
 try:
     d = json.loads(sys.stdin.read())
     if 'error' in d:
-        print(f\"Error: {d['error']}\", file=sys.stderr)
+        sys.stderr.write('Error: %s\n' % d['error'])
         sys.exit(1)
     print('Disconnected.')
 except: pass
@@ -1460,7 +1463,7 @@ cmd_update() {
 
     # Extract the version from the remote script
     local remote_version
-    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.25.2"//')
+    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.26.0"//')
     if [ -z "$remote_version" ]; then
         echo "Error: Could not parse remote version." >&2
         exit 1
