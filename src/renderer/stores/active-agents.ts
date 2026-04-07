@@ -487,12 +487,19 @@ export function startAgentPolling(): void {
             if (!exists) {
               await invoke('terminal_create', { cwd, command, args, id: bgTerminalId })
             }
+            // Register system-managed worktree session
+            invoke('k2so_agents_lock', {
+              projectPath: cwd,
+              agentName,
+              terminalId: bgTerminalId,
+              owner: 'system',
+            }).catch(() => {})
           } catch { /* will be created when user navigates */ }
         }
         return
       }
 
-      // For agent launches without a worktree (e.g. coordinator), create the PTY
+      // For agent launches without a worktree (e.g. manager), create the PTY
       // in the background with a deterministic ID. The Chat tab discovers it via
       // terminal_list_running_agents when the user navigates there.
       const bgTerminalId = `agent-chat-${agentName}`
@@ -506,6 +513,29 @@ export function startAgentPolling(): void {
             id: bgTerminalId,
           })
         }
+        // Register system-managed session in DB (owner='system' so scheduler knows)
+        invoke('k2so_agents_lock', {
+          projectPath: cwd,
+          agentName,
+          terminalId: bgTerminalId,
+          owner: 'system',
+        }).catch(() => {})
+        // Detect and save session ID after a brief delay
+        setTimeout(async () => {
+          try {
+            const sessionId = await invoke<string | null>('chat_history_detect_active_session', {
+              provider: 'claude',
+              projectPath: cwd,
+            })
+            if (sessionId) {
+              invoke('k2so_agents_save_session_id', {
+                projectPath: cwd,
+                agentName,
+                sessionId,
+              }).catch(() => {})
+            }
+          } catch { /* ignore */ }
+        }, 5000)
       } catch {
         // Fallback: add tab to current workspace if background creation fails
         const tabsStore = useTabsStore.getState()

@@ -211,16 +211,10 @@ export default function WorkspacePanel(): React.JSX.Element {
           </div>
           {agentMode !== 'off' && (
             <button
-              onClick={async () => {
-                try {
-                  await invoke('k2so_agents_build_launch', {
-                    projectPath: activeProject.path,
-                    agentName: primaryAgent?.name || 'manager',
-                    agentCliCommand: null,
-                  })
-                } catch (err) {
-                  console.error('[workspace-panel] Launch failed:', err)
-                }
+              onClick={() => {
+                // Redirect to the pinned system agent tab (which handles launch + resume)
+                const tabsStore = useTabsStore.getState()
+                tabsStore.activateSystemAgentTab()
               }}
               className="px-2.5 py-0.5 text-[10px] font-medium text-white bg-[var(--color-accent)] hover:opacity-90 transition-opacity no-drag cursor-pointer"
             >
