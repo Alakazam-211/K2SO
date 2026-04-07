@@ -273,27 +273,51 @@ interface TabsState {
 let tabCounter = 0
 
 /** Ensure the pinned system agent tab matches the given agent mode.
- *  Called by the projects store after workspace restore/switch. */
+ *  Called by the projects store after workspace restore/switch.
+ *  Resolves the primary agent name from the backend asynchronously. */
 export function ensurePinnedAgentTabForMode(
   agentMode: string,
   projectPath: string,
 ): void {
-  setTimeout(() => {
+  setTimeout(async () => {
     const tabsStore = useTabsStore.getState()
-    if (agentMode && agentMode !== 'off') {
-      let title = 'Agent'
-      const agentName = '__lead__'
-      if (agentMode === 'manager' || agentMode === 'coordinator') {
-        title = 'Manager'
-      } else if (agentMode === 'custom') {
-        title = 'Agent'
-      } else if (agentMode === 'agent') {
-        title = 'K2SO'
-      }
-      tabsStore.ensureSystemAgentTab(agentName, projectPath, title)
-    } else {
+    if (!agentMode || agentMode === 'off') {
       tabsStore.removeSystemAgentTab()
+      return
     }
+
+    let title = 'Agent'
+    if (agentMode === 'manager' || agentMode === 'coordinator') {
+      title = 'Manager'
+    } else if (agentMode === 'custom') {
+      title = 'Agent'
+    } else if (agentMode === 'agent') {
+      title = 'K2SO'
+    }
+
+    // Resolve the actual primary agent name from the backend
+    let agentName = '__lead__'
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      const agents = await invoke<Array<{ name: string; isManager: boolean; agentType: string }>>('k2so_agents_list', { projectPath })
+      if (agents && agents.length > 0) {
+        // Find the primary agent: manager/coordinator first, then first custom, then first agent
+        const manager = agents.find((a) => a.isManager || a.agentType === 'manager' || a.agentType === 'coordinator')
+        const custom = agents.find((a) => a.agentType === 'custom')
+        const k2so = agents.find((a) => a.agentType === 'k2so')
+        if (agentMode === 'manager' || agentMode === 'coordinator') {
+          agentName = manager?.name ?? agents[0].name
+        } else if (agentMode === 'custom') {
+          agentName = custom?.name ?? agents[0].name
+        } else if (agentMode === 'agent') {
+          agentName = k2so?.name ?? agents[0].name
+        }
+      }
+    } catch {
+      // Fall back to __lead__ if agent list fails
+    }
+
+    tabsStore.ensureSystemAgentTab(agentName, projectPath, title)
   }, 0)
 }
 
@@ -894,22 +918,14 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
     // If this is the primary agent (manager lead, k2so agent, or custom agent),
     // redirect to the pinned system agent tab if it exists
-    const isPrimaryAgent = agentName === '__lead__' || agentName === '__workspace__'
-    if (!isPrimaryAgent) {
-      // Check if it matches the workspace's main custom agent by seeing if a system tab has this agent
-      const sysTab = state.tabs.find((t) => t.isSystemAgent)
-      if (sysTab) {
-        for (const [, pg] of sysTab.paneGroups) {
-          if (pg.items.some((item) => item.type === 'agent' && (item.data as AgentItemData).agentName === agentName)) {
-            set({ activeTabId: sysTab.id })
-            return
-          }
-        }
-      }
-    }
-    if (isPrimaryAgent) {
-      const sysTab = state.tabs.find((t) => t.isSystemAgent)
-      if (sysTab) {
+    // If a pinned system agent tab exists, redirect to it for the primary agent
+    const sysTab = state.tabs.find((t) => t.isSystemAgent)
+    if (sysTab) {
+      // Check if this is the agent in the system tab, or a known primary name
+      const sysAgentName = Array.from(sysTab.paneGroups.values())[0]?.items[0]?.type === 'agent'
+        ? (Array.from(sysTab.paneGroups.values())[0].items[0].data as AgentItemData).agentName
+        : null
+      if (agentName === sysAgentName || agentName === '__lead__' || agentName === '__workspace__') {
         set({ activeTabId: sysTab.id })
         return
       }
