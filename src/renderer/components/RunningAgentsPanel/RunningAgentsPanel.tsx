@@ -364,11 +364,12 @@ export default function RunningAgentsPanel(): React.JSX.Element | null {
                       }`}
                       onClick={(e) => {
                         e.stopPropagation()
+                        // Copy the terminal ID (used for k2so terminal write and debugging)
                         navigator.clipboard.writeText(agent.terminalId)
                         setCopiedId(agent.terminalId)
                         setTimeout(() => setCopiedId((prev) => prev === agent.terminalId ? null : prev), 1500)
                       }}
-                      title="Copy terminal ID for CLI usage"
+                      title={`Copy terminal ID: ${agent.terminalId}`}
                     >
                       {copiedId === agent.terminalId ? (
                         <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">

@@ -11,6 +11,7 @@ src-tauri/target/
 *.db-wal
 drizzle/meta/
 .claude/
+SKILL.md
 .env
 .env.*
 *.key
