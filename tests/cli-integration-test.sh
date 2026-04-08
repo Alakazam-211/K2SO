@@ -130,6 +130,16 @@ else
     fi
 fi
 
+# Clean up stale worktrees and branches from previous test runs
+for wt in $(git -C "$TEST_WORKSPACE" worktree list 2>/dev/null | grep "agent/test-" | awk '{print $1}'); do
+    git -C "$TEST_WORKSPACE" worktree remove --force "$wt" > /dev/null 2>&1 || true
+done
+for branch in $(git -C "$TEST_WORKSPACE" branch --list 'agent/test-*' 2>/dev/null | sed 's/^[* +]*//'); do
+    git -C "$TEST_WORKSPACE" branch -D "$branch" > /dev/null 2>&1 || true
+done
+# Remove leftover worktree directories
+rm -rf "$TEST_WORKSPACE/.worktrees/agent-test-"* 2>/dev/null || true
+
 # Ensure test workspace is a git repo (needed for worktree/delegate/review tests)
 if ! git -C "$TEST_WORKSPACE" rev-parse --git-dir > /dev/null 2>&1; then
     echo -e "${YELLOW}Initializing git in test workspace...${NC}"
