@@ -330,12 +330,11 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
     )
   }
 
-  // The content/path for the current tab
-  const currentContent = activeTab === 'profile' ? agentContent : activeTab === 'claude-md' ? claudeMdContent : wsClaudeMdContent
-  const currentPath = activeTab === 'profile' ? agentMdPath : activeTab === 'claude-md' ? claudeMdPath : wsClaudeMdPath
+  // AI always edits agent.md (the source of truth).
+  // CLAUDE.md tabs are read-only previews — they're generated from agent.md.
   return (
     <AIFileEditor
-      filePath={currentPath || agentMdPath}
+      filePath={agentMdPath}
       watchDir={watchDir}
       cwd={watchDir}
       command={terminalCommand}
