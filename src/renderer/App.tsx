@@ -302,8 +302,27 @@ export default function App(): React.JSX.Element {
       })
     }
 
+    // Also refocus terminal when focus falls to document.body (after modal/overlay close)
+    const handleFocusIn = (e: FocusEvent) => {
+      if (e.target === document.body) {
+        requestAnimationFrame(() => {
+          // Double-check nothing interactive grabbed focus in the meantime
+          if (document.activeElement === document.body) {
+            const terminalContainer = document.querySelector('[data-terminal-container][data-terminal-visible="true"]') as HTMLElement
+            if (terminalContainer) {
+              terminalContainer.focus()
+            }
+          }
+        })
+      }
+    }
+
     document.addEventListener('click', handleGlobalClick, true) // capture phase
-    return () => document.removeEventListener('click', handleGlobalClick, true)
+    document.addEventListener('focusin', handleFocusIn)
+    return () => {
+      document.removeEventListener('click', handleGlobalClick, true)
+      document.removeEventListener('focusin', handleFocusIn)
+    }
   }, [])
 
   // Listen for menu events from Tauri backend
