@@ -471,11 +471,37 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
 
   const loadEnvFiles = useCallback(async () => {
     try {
-      const entries = await invoke<FileEntry[]>('fs_read_dir', {
-        path: rootPath,
-        showHidden: true,
+      // Search root + common subdirectories for .env* files
+      const searchPaths = [rootPath]
+      // Also check common config locations
+      const rootEntries = await invoke<FileEntry[]>('fs_read_dir', { path: rootPath, showHidden: true })
+      for (const e of rootEntries) {
+        if (e.isDirectory && !e.name.startsWith('.') && !['node_modules', 'target', 'dist', 'build', '.git', 'vendor'].includes(e.name)) {
+          searchPaths.push(e.path)
+        }
+      }
+
+      const allEnvFiles: FileEntry[] = []
+      for (const dir of searchPaths) {
+        try {
+          const entries = await invoke<FileEntry[]>('fs_read_dir', { path: dir, showHidden: true })
+          for (const e of entries) {
+            if (!e.isDirectory && (e.name.startsWith('.env') || e.name === 'env' || e.name.endsWith('.env'))) {
+              allEnvFiles.push(e)
+            }
+          }
+        } catch { /* skip inaccessible dirs */ }
+      }
+
+      // Deduplicate by path and sort
+      const seen = new Set<string>()
+      const unique = allEnvFiles.filter((e) => {
+        if (seen.has(e.path)) return false
+        seen.add(e.path)
+        return true
       })
-      setEnvFiles(entries.filter((e) => !e.isDirectory && e.name.startsWith('.env')))
+      unique.sort((a, b) => a.path.localeCompare(b.path))
+      setEnvFiles(unique)
     } catch {
       setEnvFiles([])
     }
@@ -1222,13 +1248,13 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
                     useFileSelectionStore.getState().select(entry.path)
                     useTabsStore.getState().openFileAsTab(entry.path)
                   }}
-                  title={entry.name}
+                  title={entry.path}
                 >
                   <svg className="w-3 h-3 text-yellow-500/80 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
                     <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
                     <path d="M7 11V7a5 5 0 0110 0v4" />
                   </svg>
-                  <span className="truncate">{entry.name}</span>
+                  <span className="truncate">{entry.path.startsWith(rootPath) ? entry.path.slice(rootPath.length + 1) : entry.name}</span>
                 </button>
               ))}
             </div>
