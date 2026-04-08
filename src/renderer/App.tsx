@@ -273,6 +273,39 @@ export default function App(): React.JSX.Element {
     return () => window.removeEventListener('keydown', handler)
   }, [openSettings, toggleCommandPalette, toggleAssistant, toggleReviewQueue, toggleRunningAgents])
 
+  // Refocus last active terminal when clicking dead space (navbar, sidebar padding, etc.)
+  // Interactive elements (inputs, textareas, buttons, contenteditable, select) keep their own focus.
+  useEffect(() => {
+    const handleGlobalClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement
+      if (!target) return
+
+      // Don't steal focus from interactive elements
+      const tag = target.tagName.toLowerCase()
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || tag === 'button') return
+      if (target.isContentEditable) return
+      if (target.closest('input, textarea, select, button, [contenteditable="true"], [role="textbox"]')) return
+      // Don't steal from elements with tabindex (custom interactive components)
+      if (target.tabIndex >= 0 && target.dataset.terminalContainer === undefined) return
+
+      // Find the last focused terminal container and refocus it
+      requestAnimationFrame(() => {
+        const activeEl = document.activeElement
+        // If something interactive already grabbed focus, leave it
+        if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || (activeEl as HTMLElement).isContentEditable)) return
+
+        // Find the visible terminal container in the active tab
+        const terminalContainer = document.querySelector('[data-terminal-container][data-terminal-visible="true"]') as HTMLElement
+        if (terminalContainer) {
+          terminalContainer.focus()
+        }
+      })
+    }
+
+    document.addEventListener('click', handleGlobalClick, true) // capture phase
+    return () => document.removeEventListener('click', handleGlobalClick, true)
+  }, [])
+
   // Listen for menu events from Tauri backend
   useEffect(() => {
     const unlisteners: Array<() => void> = []

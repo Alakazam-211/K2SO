@@ -756,6 +756,8 @@ export function AlacrittyTerminalView({
       onDragOver={handleDragOver}
       onDrop={handleDrop}
       data-terminal-id={terminalId}
+      data-terminal-container=""
+      data-terminal-visible="true"
       style={{ cursor: isDragging ? 'default' : hoveredLink ? 'pointer' : 'text', position: 'relative' }}
     >
       <div
