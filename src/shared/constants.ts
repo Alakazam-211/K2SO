@@ -35,6 +35,7 @@ export const CONTEXT_MENU_DISMISS_DELAY = 50  // ms
 export const RESUMABLE_CLI_TOOLS: Record<string, { resumeFlag: string; provider: string }> = {
   'claude': { resumeFlag: '--resume', provider: 'claude' },
   'cursor-agent': { resumeFlag: '--resume', provider: 'cursor' },
+  'pi': { resumeFlag: '--resume', provider: 'pi' },
 }
 
 // ── Agent activity ────────────────────────────────────────────────
@@ -47,7 +48,7 @@ export const AGENT_IDLE_THRESHOLD_MS = 5000  // 5 seconds without grid output �
 export const KNOWN_AGENT_COMMANDS = new Set([
   // Cloud CLI agents
   'claude', 'cursor-agent', 'codex', 'gemini', 'copilot',
-  'aider', 'opencode', 'codepuppy', 'gpt', 'goose',
+  'aider', 'opencode', 'codepuppy', 'gpt', 'goose', 'pi',
   // Local/on-device LLM tools
   'ollama', 'llamafile', 'llama-cli', 'interpreter',
   'tenere', 'llm-tui-rs',

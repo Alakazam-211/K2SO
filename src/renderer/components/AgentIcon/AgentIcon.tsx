@@ -94,6 +94,25 @@ export default function AgentIcon({ agent, size = 14, className = '' }: AgentIco
         </svg>
       )
 
+    case 'goose':
+      // Goose (Block) — teal goose silhouette
+      return (
+        <svg width={s} height={s} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }}>
+          <path d="M8 4C6 4 5 6 5 8C5 10 6 11 8 11L10 11L10 16L8 20" stroke="#2DD4BF" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+          <path d="M10 11C12 11 16 10 18 8" stroke="#2DD4BF" strokeWidth="1.5" strokeLinecap="round"/>
+          <circle cx="7" cy="7" r="0.8" fill="#2DD4BF"/>
+          <path d="M5 9L3.5 8.5" stroke="#2DD4BF" strokeWidth="1" strokeLinecap="round"/>
+        </svg>
+      )
+
+    case 'pi':
+      // Pi (coding agent) — Greek letter π
+      return (
+        <svg width={s} height={s} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }}>
+          <text x="12" y="18" textAnchor="middle" fontFamily="serif" fontSize="18" fontWeight="bold" fill="#A78BFA">π</text>
+        </svg>
+      )
+
     default:
       // Generic terminal prompt
       return (

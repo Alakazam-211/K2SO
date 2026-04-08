@@ -80,5 +80,23 @@ export const builtInAgentPresets: BuiltInAgentPreset[] = [
     enabled: 1,
     isBuiltIn: 1,
     sortOrder: 7
+  },
+  {
+    id: 'b0a1c2d3-e4f5-6789-abcd-ef0123456009',
+    label: 'Goose',
+    command: 'goose',
+    icon: '\u{1FABF}',
+    enabled: 1,
+    isBuiltIn: 1,
+    sortOrder: 8
+  },
+  {
+    id: 'b0a1c2d3-e4f5-6789-abcd-ef0123456010',
+    label: 'Pi',
+    command: 'pi',
+    icon: '\u{03C0}',
+    enabled: 1,
+    isBuiltIn: 1,
+    sortOrder: 9
   }
 ]
