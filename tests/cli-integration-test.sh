@@ -989,18 +989,18 @@ section "15. Agent Check-in"
 run agent create test-backend --role "Backend engineer for testing" > /dev/null 2>&1 || true
 
 OUTPUT=$(run checkin --agent test-backend)
-if echo "$OUTPUT" | grep -q "agent\|project\|task\|inbox"; then
-    pass "checkin returns expected JSON fields"
+if echo "$OUTPUT" | grep -q "Agent Check-in\|Agent:\|Project:"; then
+    pass "checkin returns formatted output"
 else
-    fail "checkin" "Expected agent/project/task/inbox in output: $OUTPUT"
+    fail "checkin" "Expected formatted checkin output: $OUTPUT"
 fi
 
-# Verify specific fields in JSON response
-for FIELD in agent project task inbox peers reservations feed; do
-    if echo "$OUTPUT" | grep -q "\"$FIELD\""; then
-        pass "checkin response contains '$FIELD' field"
+# Verify key sections in human-readable checkin output
+for FIELD in "Agent:" "Project:" "Current Task:" "Messages" "Work Items" "Peers" "File Reservations"; do
+    if echo "$OUTPUT" | grep -q "$FIELD"; then
+        pass "checkin contains '$FIELD' section"
     else
-        fail "checkin field $FIELD" "Missing '$FIELD' in response: $OUTPUT"
+        fail "checkin section $FIELD" "Missing '$FIELD' in output: $OUTPUT"
     fi
 done
 
@@ -1071,19 +1071,12 @@ else
     fail "msg send" "Output: $OUTPUT"
 fi
 
-# Verify message file created in target's inbox
-if ls "$TEST_WORKSPACE/.k2so/agents/test-frontend/work/inbox/msg-"*.md > /dev/null 2>&1 || \
-   ls "$TEST_WORKSPACE/.k2so/agents/test-frontend/work/inbox/"*msg*.md > /dev/null 2>&1 || \
-   ls "$TEST_WORKSPACE/.k2so/agents/test-frontend/work/inbox/"*"test-backend"*.md > /dev/null 2>&1; then
-    pass "msg created file in target agent inbox"
+# Verify message stored in DB activity_feed (messages go to DB, not filesystem)
+MSG_COUNT=$(sqlite3 ~/.k2so/k2so.db "SELECT COUNT(*) FROM activity_feed WHERE event_type = 'message.received' AND to_agent = 'test-frontend';" 2>/dev/null || echo "0")
+if [ "$MSG_COUNT" -gt 0 ]; then
+    pass "msg stored in DB activity_feed ($MSG_COUNT messages)"
 else
-    # Check if any new file appeared in inbox
-    INBOX_COUNT=$(ls "$TEST_WORKSPACE/.k2so/agents/test-frontend/work/inbox/"*.md 2>/dev/null | wc -l)
-    if [ "$INBOX_COUNT" -gt 0 ]; then
-        pass "msg created file in target inbox ($INBOX_COUNT files)"
-    else
-        fail "msg file" "No message file found in test-frontend inbox"
-    fi
+    fail "msg db" "No message.received entries for test-frontend in activity_feed"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════
