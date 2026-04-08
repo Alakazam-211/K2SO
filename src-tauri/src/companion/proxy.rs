@@ -18,6 +18,7 @@ fn map_route(method: &str, path: &str) -> Option<&'static str> {
         ("GET",  "/companion/terminal/read")   => Some("/cli/terminal/read"),
         ("POST", "/companion/terminal/write")  => Some("/cli/terminal/write"),
         ("GET",  "/companion/status")          => Some("/cli/mode"),
+        ("POST", "/companion/agents/wake")     => Some("/cli/agents/launch"),
         _ => None,
     }
 }
