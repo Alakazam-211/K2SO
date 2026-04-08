@@ -265,7 +265,12 @@ export function PresetsBar({ cwd }: PresetsBarProps): React.JSX.Element | null {
         height: '32px',
         fontFamily: 'var(--font-mono, ui-monospace, monospace)',
         flexShrink: 0,
+        overflowX: 'auto',
+        overflowY: 'hidden',
+        scrollbarWidth: 'none',        // Firefox
+        msOverflowStyle: 'none',       // IE/Edge
       }}
+      className="hide-scrollbar"
     >
       {/* Preset buttons */}
       {enabledPresets.map((preset, idx) => {
@@ -300,6 +305,7 @@ export function PresetsBar({ cwd }: PresetsBarProps): React.JSX.Element | null {
               fontFamily: 'inherit',
               letterSpacing: '0.02em',
               whiteSpace: 'nowrap',
+              flexShrink: 0,
               transition: 'background-color 120ms ease, color 120ms ease',
               opacity: isDragged ? 0.3 : 1,
               backgroundColor: isRunning

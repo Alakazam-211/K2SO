@@ -837,7 +837,8 @@ a,
 }
 
 /* Tab bar horizontal scroll — hidden scrollbar, scroll via trackpad/wheel */
-.tabbar-scroll::-webkit-scrollbar {
+.tabbar-scroll::-webkit-scrollbar,
+.hide-scrollbar::-webkit-scrollbar {
   display: none;
 }
 
