@@ -491,6 +491,10 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
     { name: '.aider*', match: (e) => e.name.startsWith('.aider') },
     { name: '.continue', match: (e) => e.isDirectory && e.name === '.continue' },
     { name: 'CLAUDE.md', match: (e) => !e.isDirectory && e.name === 'CLAUDE.md' },
+    { name: 'SKILL.md', match: (e) => !e.isDirectory && e.name === 'SKILL.md' },
+    { name: 'AGENTS.md', match: (e) => !e.isDirectory && e.name === 'AGENTS.md' },
+    { name: '.opencode', match: (e) => e.isDirectory && e.name === '.opencode' },
+    { name: '.pi', match: (e) => e.isDirectory && e.name === '.pi' },
     { name: '.windsurfrules', match: (e) => !e.isDirectory && e.name === '.windsurfrules' },
   ]
 
