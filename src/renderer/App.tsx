@@ -278,6 +278,10 @@ export default function App(): React.JSX.Element {
     const unlisteners: Array<() => void> = []
     import('@tauri-apps/api/event').then(({ listen }) => {
       listen('menu:open-settings', () => openSettings()).then((fn) => unlisteners.push(fn))
+      listen('menu:check-for-updates', () => {
+        useSettingsStore.setState({ pendingUpdateCheck: true })
+        openSettings('general')
+      }).then((fn) => unlisteners.push(fn))
       listen('menu:new-document', () => {
         const ps = useProjectsStore.getState()
         const proj = ps.projects.find((p) => p.id === ps.activeProjectId)

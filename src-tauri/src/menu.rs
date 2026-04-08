@@ -13,6 +13,7 @@ pub fn create_menu(handle: &AppHandle) -> Result<Menu<tauri::Wry>, tauri::Error>
             &PredefinedMenuItem::about(handle, Some("About K2SO"), None)?,
             &PredefinedMenuItem::separator(handle)?,
             &MenuItem::with_id(handle, "settings", "Settings...", true, Some("CmdOrCtrl+,"))?,
+            &MenuItem::with_id(handle, "check-for-updates", "Check for Updates...", true, None::<&str>)?,
             &PredefinedMenuItem::separator(handle)?,
             &PredefinedMenuItem::services(handle, None)?,
             &PredefinedMenuItem::separator(handle)?,
@@ -111,6 +112,11 @@ pub fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
         "settings" => {
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.emit("menu:open-settings", ());
+            }
+        }
+        "check-for-updates" => {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.emit("menu:check-for-updates", ());
             }
         }
         "app-zoom-in" | "app-zoom-out" | "app-zoom-reset" => {
