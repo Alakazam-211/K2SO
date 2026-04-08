@@ -687,6 +687,35 @@ export function AlacrittyTerminalView({
 
   useEffect(() => { containerRef.current?.focus() }, [created])
 
+  // Re-focus terminal when window regains focus (e.g., switching back from Messages app).
+  // Only re-focuses if this terminal's container was the last focused element before blur.
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+
+    let wasFocused = false
+
+    const handleWindowBlur = () => {
+      wasFocused = document.activeElement === container || container.contains(document.activeElement)
+    }
+
+    const handleWindowFocus = () => {
+      if (wasFocused && ptyIdRef.current) {
+        // Small delay to let the window settle before grabbing focus
+        requestAnimationFrame(() => {
+          container.focus()
+        })
+      }
+    }
+
+    window.addEventListener('blur', handleWindowBlur)
+    window.addEventListener('focus', handleWindowFocus)
+    return () => {
+      window.removeEventListener('blur', handleWindowBlur)
+      window.removeEventListener('focus', handleWindowFocus)
+    }
+  }, [created])
+
   // ── Render ─────────────────────────────────────────────────────────
 
   const { width: cellW, height: cellH } = cellMetrics
