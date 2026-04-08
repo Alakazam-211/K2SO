@@ -302,26 +302,29 @@ export default function App(): React.JSX.Element {
       })
     }
 
-    // Also refocus terminal when focus falls to document.body (after modal/overlay close)
-    const handleFocusIn = (e: FocusEvent) => {
-      if (e.target === document.body) {
-        requestAnimationFrame(() => {
-          // Double-check nothing interactive grabbed focus in the meantime
-          if (document.activeElement === document.body) {
-            const terminalContainer = document.querySelector('[data-terminal-container][data-terminal-visible="true"]') as HTMLElement
-            if (terminalContainer) {
-              terminalContainer.focus()
-            }
-          }
-        })
+    // Refocus terminal when nothing has focus (after modal close, Esc, etc.)
+    // Polls every 200ms — if activeElement is body or null (nothing focused)
+    // and no overlay is open, refocus the terminal.
+    const refocusInterval = setInterval(() => {
+      const active = document.activeElement
+      // Only refocus if nothing meaningful has focus
+      if (active && active !== document.body) return
+      // Don't refocus if settings is open
+      if (useSettingsStore.getState().settingsOpen) return
+      // Don't refocus if any overlay is open (command palette, running agents, assistant)
+      if (useCommandPaletteStore.getState().isOpen) return
+      if (useRunningAgentsStore.getState().isOpen) return
+      // Find and focus the visible terminal
+      const terminalContainer = document.querySelector('[data-terminal-container][data-terminal-visible="true"]') as HTMLElement
+      if (terminalContainer) {
+        terminalContainer.focus()
       }
-    }
+    }, 200)
 
     document.addEventListener('click', handleGlobalClick, true) // capture phase
-    document.addEventListener('focusin', handleFocusIn)
     return () => {
       document.removeEventListener('click', handleGlobalClick, true)
-      document.removeEventListener('focusin', handleFocusIn)
+      clearInterval(refocusInterval)
     }
   }, [])
 

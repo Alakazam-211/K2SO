@@ -1733,6 +1733,41 @@ fn generate_agent_claude_md_content(
 
 /// Generate the universal skill protocol for the Workspace Manager.
 /// Includes delegation, cross-workspace messaging, and full orchestration commands.
+/// Load user-created custom layers from ~/.k2so/templates/{tier}/*.md.
+/// Returns concatenated markdown sections with titles derived from filenames.
+fn load_custom_layers(tier: &str) -> String {
+    let dir = match dirs::home_dir() {
+        Some(h) => h.join(".k2so/templates").join(tier),
+        None => return String::new(),
+    };
+    if !dir.exists() { return String::new(); }
+    let mut layers = Vec::new();
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map_or(false, |ext| ext == "md") {
+                if let Ok(content) = fs::read_to_string(&path) {
+                    if content.trim().is_empty() { continue; }
+                    let name = path.file_stem().unwrap_or_default().to_string_lossy().replace('-', " ");
+                    let title: String = name.split_whitespace()
+                        .map(|w| {
+                            let mut c = w.chars();
+                            match c.next() {
+                                Some(f) => f.to_uppercase().to_string() + c.as_str(),
+                                None => String::new(),
+                            }
+                        })
+                        .collect::<Vec<_>>().join(" ");
+                    layers.push(format!("## {}\n\n{}", title, content.trim()));
+                }
+            }
+        }
+    }
+    layers.sort(); // Alphabetical for consistency
+    if layers.is_empty() { return String::new(); }
+    layers.join("\n\n") + "\n\n"
+}
+
 fn generate_manager_skill_content(project_path: &str, project_name: &str) -> String {
     let mut skill = String::new();
 
@@ -1817,6 +1852,12 @@ fn generate_manager_skill_content(project_path: &str, project_name: &str) -> Str
             }
             skill.push('\n');
         }
+    }
+
+    // ── User Custom Layers (from ~/.k2so/templates/manager/) ──
+    let custom_layers = load_custom_layers("manager");
+    if !custom_layers.is_empty() {
+        skill.push_str(&custom_layers);
     }
 
     // ── 3. Standing Orders ──
@@ -1933,12 +1974,23 @@ k2so release
 /// Has checkin, status, done, msg (to connected workspaces), reserve/release.
 /// No delegation — custom agents send work to workspace inboxes.
 fn generate_custom_agent_skill_content(project_name: &str, agent_name: &str) -> String {
-    format!(
+    let mut skill = format!(
 r#"# K2SO Agent Skill
 
 You are {agent_name}, a custom agent for {project_name}.
 
-## Check In (do this first on every wake)
+"#,
+        agent_name = agent_name,
+        project_name = project_name,
+    );
+
+    // User custom layers
+    let custom_layers = load_custom_layers("custom-agent");
+    if !custom_layers.is_empty() {
+        skill.push_str(&custom_layers);
+    }
+
+    skill.push_str(r#"## Check In (do this first on every wake)
 
 ```
 k2so checkin
@@ -1974,21 +2026,30 @@ Only works for workspaces connected via `k2so connections`.
 k2so reserve src/auth/ src/config.ts
 k2so release
 ```
-"#,
-        agent_name = agent_name,
-        project_name = project_name,
-    )
+"#);
+    skill
 }
 
 /// Generate the universal skill protocol for agent templates (delegates).
 /// Focused protocol — NO delegate, NO cross-workspace messaging.
 fn generate_template_skill_content(project_name: &str, agent_name: &str) -> String {
-    format!(
+    let mut skill = format!(
 r#"# K2SO Agent Skill
 
 You are {agent_name}, a specialist agent working in a dedicated worktree for {project_name}.
 
-### Check In (do this first)
+"#,
+        agent_name = agent_name,
+        project_name = project_name,
+    );
+
+    // User custom layers
+    let custom_layers = load_custom_layers("agent-template");
+    if !custom_layers.is_empty() {
+        skill.push_str(&custom_layers);
+    }
+
+    skill.push_str(r#"### Check In (do this first)
 
 ```
 k2so checkin
@@ -2021,11 +2082,8 @@ Before editing shared paths, check reservations and claim what you need:
 k2so reserve src/auth/ src/middleware/jwt.ts
 k2so release
 ```
-
-"#,
-        agent_name = agent_name,
-        project_name = project_name,
-    )
+"#);
+    skill
 }
 
 /// Generate the workspace-level skill for users working directly with an LLM.

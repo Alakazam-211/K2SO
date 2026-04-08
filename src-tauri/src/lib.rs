@@ -121,6 +121,14 @@ pub fn run() {
             // Migrate workspace_layouts from settings.json → SQLite (one-time)
             migrate_workspace_layouts_to_db(app.handle());
 
+            // Create skill layer template directories if they don't exist
+            if let Some(home) = dirs::home_dir() {
+                let templates = home.join(".k2so/templates");
+                let _ = std::fs::create_dir_all(templates.join("manager"));
+                let _ = std::fs::create_dir_all(templates.join("agent-template"));
+                let _ = std::fs::create_dir_all(templates.join("custom-agent"));
+            }
+
             // Migrate legacy agent types in agent.md files (pod-member → agent-template, pod-leader → manager)
             {
                 let paths: Vec<String> = {
@@ -734,6 +742,11 @@ pub fn run() {
             commands::themes::themes_create_template,
             commands::themes::themes_list_custom,
             commands::themes::themes_delete,
+            // Skill Layers
+            commands::skill_layers::skill_layers_list,
+            commands::skill_layers::skill_layers_create,
+            commands::skill_layers::skill_layers_delete,
+            commands::skill_layers::skill_layers_get_content,
             // Companion API
             commands::companion::companion_start,
             commands::companion::companion_stop,

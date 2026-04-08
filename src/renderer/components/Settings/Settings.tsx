@@ -88,6 +88,7 @@ const SECTIONS: { id: SettingsSection; label: string; agenticOnly?: boolean }[] 
   { id: 'general', label: 'General' },
   { id: 'projects', label: 'Workspaces' },
   { id: 'workspace-states', label: 'Workspace States', agenticOnly: true },
+  { id: 'agent-skills', label: 'Agent Skills', agenticOnly: true },
   { id: 'terminal', label: 'Terminal' },
   { id: 'code-editor', label: 'Code Editor' },
   { id: 'editors-agents', label: 'Editors & Agents' },
@@ -173,6 +174,11 @@ export default function Settings(): React.JSX.Element {
         {activeSection === 'workspace-states' && (
           <SectionErrorBoundary>
             <WorkspaceStatesSection />
+          </SectionErrorBoundary>
+        )}
+        {activeSection === 'agent-skills' && (
+          <SectionErrorBoundary>
+            <AgentSkillsSection />
           </SectionErrorBoundary>
         )}
       </div>
@@ -6281,6 +6287,255 @@ function CompanionSection(): React.JSX.Element {
         <p>3. Enable the toggle — K2SO will create a secure tunnel and show you the URL.</p>
         <p>4. Enter the URL in the K2SO companion app on your phone.</p>
       </div>
+    </div>
+  )
+}
+
+// ── Agent Skills Section ─────────────────────────────────────────────
+
+type SkillTier = 'manager' | 'agent_template' | 'custom_agent'
+
+interface SkillLayerInfo {
+  filename: string
+  title: string
+  preview: string
+  path: string
+}
+
+const SKILL_TABS: { key: SkillTier; label: string }[] = [
+  { key: 'manager', label: 'Workspace Manager' },
+  { key: 'agent_template', label: 'Agent Template' },
+  { key: 'custom_agent', label: 'Custom Agent' },
+]
+
+const LOCKED_LAYERS: Record<SkillTier, string[]> = {
+  manager: [
+    'Identity + Workspace State',
+    'Connected Workspaces',
+    'Team Roster',
+    'Standing Orders',
+    'Decision Framework',
+    'Delegation + Review',
+    'Communication Commands',
+  ],
+  agent_template: [
+    'Identity',
+    'Check In + Status + Done',
+    'File Reservations',
+  ],
+  custom_agent: [
+    'Identity',
+    'Check In + Status + Done',
+    'Cross-Workspace Messaging',
+    'File Reservations',
+  ],
+}
+
+function AgentSkillsSection(): React.JSX.Element {
+  const [activeTier, setActiveTier] = useState<SkillTier>('manager')
+  const [layers, setLayers] = useState<SkillLayerInfo[]>([])
+  const [adding, setAdding] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+  const [toast, setToast] = useState<string | null>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const loadLayers = useCallback(async (tier: SkillTier) => {
+    try {
+      const list = await invoke<SkillLayerInfo[]>('skill_layers_list', { tier })
+      setLayers(list)
+    } catch (err) {
+      console.error('[agent-skills] Failed to load layers:', err)
+      setLayers([])
+    }
+  }, [])
+
+  useEffect(() => {
+    loadLayers(activeTier)
+  }, [activeTier, loadLayers])
+
+  useEffect(() => {
+    if (adding && inputRef.current) {
+      inputRef.current.focus()
+    }
+  }, [adding])
+
+  useEffect(() => {
+    if (toast) {
+      const t = setTimeout(() => setToast(null), 2000)
+      return () => clearTimeout(t)
+    }
+  }, [toast])
+
+  const handleCreate = useCallback(async () => {
+    const name = newName.trim()
+    if (!name) return
+    try {
+      await invoke<SkillLayerInfo>('skill_layers_create', { tier: activeTier, name })
+      setNewName('')
+      setAdding(false)
+      loadLayers(activeTier)
+    } catch (err) {
+      console.error('[agent-skills] Create failed:', err)
+    }
+  }, [newName, activeTier, loadLayers])
+
+  const handleDelete = useCallback(async (filename: string) => {
+    try {
+      await invoke('skill_layers_delete', { tier: activeTier, filename })
+      setConfirmDelete(null)
+      loadLayers(activeTier)
+    } catch (err) {
+      console.error('[agent-skills] Delete failed:', err)
+    }
+  }, [activeTier, loadLayers])
+
+  const handleEdit = useCallback((layer: SkillLayerInfo) => {
+    navigator.clipboard.writeText(layer.path).then(() => {
+      setToast('Copied path — open in your editor')
+    }).catch(() => {
+      setToast(layer.path)
+    })
+  }, [])
+
+  const locked = LOCKED_LAYERS[activeTier]
+
+  return (
+    <div className="max-w-xl">
+      <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-1">Agent Skills</h2>
+      <p className="text-xs text-[var(--color-text-muted)] mb-4">
+        Skill layers are injected into agent system prompts. Locked layers are auto-generated; custom layers are yours to edit.
+      </p>
+
+      {/* Tier tabs */}
+      <div className="flex gap-1 mb-4">
+        {SKILL_TABS.map(({ key, label }) => (
+          <button
+            key={key}
+            onClick={() => { setActiveTier(key); setAdding(false); setConfirmDelete(null) }}
+            className={`px-3 py-1 text-[10px] font-medium transition-colors no-drag cursor-pointer ${
+              activeTier === key
+                ? 'bg-[var(--color-accent)] text-white'
+                : 'bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* Hamburger layer list */}
+      <div className="border border-[var(--color-border)]">
+        {/* Locked layers */}
+        {locked.map((name, i) => (
+          <div
+            key={`locked-${i}`}
+            className="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)] last:border-b-0 text-[var(--color-text-muted)] opacity-50"
+          >
+            <div className="flex items-center gap-2">
+              <span className="w-1 h-4 bg-[var(--color-text-muted)]/30 rounded-sm flex-shrink-0" />
+              <span className="text-xs">{name}</span>
+            </div>
+            <span className="text-[10px] italic">auto</span>
+          </div>
+        ))}
+
+        {/* User layers */}
+        {layers.map((layer) => (
+          <div
+            key={layer.filename}
+            className="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)] last:border-b-0"
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="w-1 h-4 bg-[var(--color-accent)] rounded-sm flex-shrink-0" />
+              <div className="min-w-0">
+                <span className="text-xs text-[var(--color-text-primary)] block truncate">{layer.title}</span>
+                {layer.preview && (
+                  <span className="text-[10px] text-[var(--color-text-muted)] block truncate">{layer.preview}</span>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              {confirmDelete === layer.filename ? (
+                <>
+                  <span className="text-[10px] text-[var(--color-text-muted)]">Delete?</span>
+                  <button
+                    onClick={() => handleDelete(layer.filename)}
+                    className="text-[10px] text-red-400 hover:text-red-300 no-drag cursor-pointer"
+                  >
+                    Yes
+                  </button>
+                  <button
+                    onClick={() => setConfirmDelete(null)}
+                    className="text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] no-drag cursor-pointer"
+                  >
+                    No
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={() => handleEdit(layer)}
+                    className="text-[10px] text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] no-drag cursor-pointer"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    onClick={() => setConfirmDelete(layer.filename)}
+                    className="text-[10px] text-red-400 hover:text-red-300 no-drag cursor-pointer"
+                  >
+                    Delete
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        ))}
+
+        {/* Add layer inline input */}
+        {adding ? (
+          <div className="flex items-center gap-2 px-3 py-2 border-b border-[var(--color-border)] last:border-b-0">
+            <input
+              ref={inputRef}
+              type="text"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleCreate()
+                if (e.key === 'Escape') { setAdding(false); setNewName('') }
+              }}
+              placeholder="Layer name..."
+              className="flex-1 text-xs bg-transparent border border-[var(--color-border)] px-2 py-1 text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
+            />
+            <button
+              onClick={handleCreate}
+              className="text-[10px] text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] no-drag cursor-pointer"
+            >
+              Create
+            </button>
+            <button
+              onClick={() => { setAdding(false); setNewName('') }}
+              className="text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] no-drag cursor-pointer"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setAdding(true)}
+            className="w-full text-left px-3 py-2 text-[10px] text-[var(--color-accent)] hover:bg-[var(--color-bg-elevated)] no-drag cursor-pointer transition-colors"
+          >
+            + Add Layer
+          </button>
+        )}
+      </div>
+
+      {/* Toast */}
+      {toast && (
+        <div className="mt-3 px-3 py-1.5 text-[10px] text-[var(--color-text-primary)] bg-[var(--color-bg-elevated)] border border-[var(--color-border)] inline-block">
+          {toast}
+        </div>
+      )}
     </div>
   )
 }
