@@ -1734,57 +1734,199 @@ fn generate_agent_claude_md_content(
 /// Generate the universal skill protocol for the Workspace Manager.
 /// Includes delegation, cross-workspace messaging, and full orchestration commands.
 fn generate_manager_skill_content(project_path: &str, project_name: &str) -> String {
-    format!(
-r#"# K2SO Workspace Manager Skill
+    let mut skill = String::new();
 
-You are the Workspace Manager for {project_name}. Check in first, then triage work.
+    // ── 1. Identity + Workspace Context ──
+    skill.push_str(&format!("# K2SO Workspace Manager Skill\n\nYou are the Workspace Manager for **{}**.\n\n", project_name));
 
-### Check In (do this first on every wake)
+    // Read workspace state from DB
+    if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
+        if let Some(project_id) = resolve_project_id(&conn, project_path) {
+            // Get workspace state
+            let state_info: Option<(String, String)> = conn.query_row(
+                "SELECT ws.name, ws.description FROM workspace_states ws \
+                 JOIN projects p ON p.tier_id = ws.id WHERE p.id = ?1",
+                rusqlite::params![project_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).ok();
 
+            if let Some((state_name, state_desc)) = state_info {
+                skill.push_str(&format!("**Mode: {}** — {}\n\n", state_name, state_desc));
+            }
+
+            // Get connected workspaces
+            let mut connections = Vec::new();
+            if let Ok(rels) = crate::db::schema::WorkspaceRelation::list_for_source(&conn, &project_id) {
+                for r in &rels {
+                    if let Ok(name) = conn.query_row(
+                        "SELECT name FROM projects WHERE id = ?1",
+                        rusqlite::params![r.target_project_id],
+                        |row| row.get::<_, String>(0),
+                    ) {
+                        connections.push(format!("- **{}** (oversees)", name));
+                    }
+                }
+            }
+            if let Ok(rels) = crate::db::schema::WorkspaceRelation::list_for_target(&conn, &project_id) {
+                for r in &rels {
+                    if let Ok(name) = conn.query_row(
+                        "SELECT name FROM projects WHERE id = ?1",
+                        rusqlite::params![r.source_project_id],
+                        |row| row.get::<_, String>(0),
+                    ) {
+                        connections.push(format!("- **{}** (connected agent)", name));
+                    }
+                }
+            }
+            if !connections.is_empty() {
+                skill.push_str("## Connected Workspaces\n\n");
+                for c in &connections {
+                    skill.push_str(c);
+                    skill.push('\n');
+                }
+                skill.push('\n');
+            }
+        }
+    }
+
+    // ── 2. Team Roster (from agents directory) ──
+    let agents_root = agents_dir(project_path);
+    if agents_root.exists() {
+        let mut team = Vec::new();
+        if let Ok(entries) = fs::read_dir(&agents_root) {
+            for entry in entries.flatten() {
+                if !entry.file_type().map_or(false, |ft| ft.is_dir()) { continue; }
+                let name = entry.file_name().to_string_lossy().to_string();
+                let agent_md = entry.path().join("agent.md");
+                if agent_md.exists() {
+                    let content = fs::read_to_string(&agent_md).unwrap_or_default();
+                    let fm = parse_frontmatter(&content);
+                    let role = fm.get("role").cloned().unwrap_or_default();
+                    let agent_type = fm.get("type").cloned().unwrap_or_default();
+                    // Skip the manager itself and k2so-agent
+                    if agent_type == "manager" || agent_type == "coordinator" || agent_type == "k2so" { continue; }
+                    team.push(format!("- **{}** — {}", name, role));
+                }
+            }
+        }
+        if !team.is_empty() {
+            skill.push_str("## Your Team\n\nThese agent templates can be delegated work. Each runs in its own worktree branch.\n\n");
+            for t in &team {
+                skill.push_str(t);
+                skill.push('\n');
+            }
+            skill.push('\n');
+        }
+    }
+
+    // ── 3. Standing Orders ──
+    skill.push_str(r#"## Standing Orders (Every Wake Cycle)
+
+On each wake, run through this in order:
+
+1. `k2so checkin` — read your messages, work items, peer status, and activity feed
+2. **Triage messages** — respond to any messages from connected agents or the user
+3. **Triage work items** — sort by priority (critical > high > normal > low)
+4. **Simple tasks**: work directly in the main branch. No delegation needed.
+5. **Complex tasks**: delegate to the best-matched agent template (see Delegation below)
+6. **Check active agents** — are any blocked or waiting for review?
+7. **Review completed work** — approve (merge) or reject with feedback
+8. `k2so status "triaging 3 inbox items"` — keep your status updated
+9. When everything is handled: `k2so done` or `k2so done --blocked "reason"`
+
+"#);
+
+    // ── 4. Decision Framework by Mode ──
+    skill.push_str(r#"## Decision Framework
+
+### By Task Complexity
+- **Simple** (typo, config, single-file fix): Work directly. No worktree needed.
+- **Complex** (multi-file feature, refactor, new system): Delegate to agent template.
+
+### By Workspace Mode
+- **Build**: Full autonomy. Triage, delegate, merge, ship. No human sign-off needed.
+- **Managed**: Features and audits need human approval before merge. Crashes and security auto-ship.
+- **Maintenance**: No new features. Fix bugs and security only. Issues and audits need approval.
+- **Locked**: No agent activity. Do not act.
+
+"#);
+
+    // ── 5. Delegation Protocol ──
+    skill.push_str(r#"## Delegation
+
+When a task needs a specialist:
+
+1. Choose the best agent template based on the task domain
+2. If the work item doesn't exist as a .md file yet, create one:
+   ```
+   k2so work create --title "Fix auth module" --body "Detailed spec..." --agent backend-eng --priority high --source feature
+   ```
+3. Delegate the work item:
+   ```
+   k2so delegate <agent-name> <work-item-file>
+   ```
+   This creates a worktree branch, moves the work to active, generates the agent's CLAUDE.md with task context, and launches the agent.
+4. The agent works autonomously in its worktree
+5. When done, review their work (see Review below)
+
+"#);
+
+    // ── 6. Review Protocol ──
+    skill.push_str(r#"## Reviewing Agent Work
+
+When an agent completes work in a worktree:
+
+```
+k2so review approve <agent-name>
+```
+Merges the agent's branch to main, cleans up the worktree.
+
+```
+k2so review reject <agent-name> --reason "Tests not passing"
+```
+Sends feedback to the agent, moves work back to inbox for retry.
+
+```
+k2so review feedback <agent-name> --message "Add error handling for edge cases"
+```
+Request specific changes without rejecting.
+
+"#);
+
+    // ── 7. Communication ──
+    skill.push_str(r#"## Communication
+
+### Check In
 ```
 k2so checkin
 ```
 
-This returns your current task, inbox messages, peer agent status, file reservations, and recent activity. Always start here.
-
-### Decision Framework
-
-When a task arrives in the workspace inbox:
-1. **Simple tasks** (typo fixes, config changes, single-file edits): Work directly in the main branch. No delegation needed.
-2. **Complex tasks** (multi-file features, refactors, new systems): Delegate to a specialist agent template using `k2so delegate <agent-name> <work-item-file>`.
-
 ### Report Status
-
 ```
-k2so status "triaging inbox"
-k2so status "working on config update"
+k2so status "working on auth refactor"
 ```
 
 ### Complete Task
-
 ```
 k2so done
-k2so done --blocked "waiting for API spec from upstream"
+k2so done --blocked "waiting for API spec"
 ```
 
-### Send Message
-
-Send work to another workspace's inbox (cross-workspace, requires a connection):
+### Send Message (cross-workspace)
 ```
-k2so msg <workspace-name>:inbox "description of the work needed"
-k2so msg --wake <workspace-name>:inbox "urgent work — wake the agent"
+k2so msg <workspace>:inbox "description of work needed"
+k2so msg --wake <workspace>:inbox "urgent — wake the agent"
 ```
 
-### Claim Files (prevent conflicts with other agents)
-
+### Claim Files
 ```
 k2so reserve src/auth/ src/middleware/jwt.ts
 k2so release
 ```
 
-"#,
-        project_name = project_name,
-    )
+"#);
+
+    skill
 }
 
 /// Generate the skill protocol for custom agents.
