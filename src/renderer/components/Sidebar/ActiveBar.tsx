@@ -185,10 +185,17 @@ export default function ActiveBar(): React.JSX.Element | null {
     } else if (clickedId === 'add-active') {
       await setManuallyActive(project.id, true)
     } else if (clickedId === 'dismiss' && !hasRunningAgent) {
-      // Clear from memory, DB, and local state
+      // Clear from memory, DB, background workspaces, and local state
       _activeBarMemory.delete(project.id)
       await invoke('projects_update', { id: project.id, manuallyActive: 0 })
       await invoke('projects_touch_interaction_clear', { id: project.id }).catch((e) => console.warn('[active-bar]', e))
+      // Clear background workspaces for this project (stashed terminals keep it visible)
+      const tabsStore = useTabsStore.getState()
+      for (const key of Object.keys(tabsStore.backgroundWorkspaces)) {
+        if (key.startsWith(`${project.id}:`)) {
+          tabsStore.clearBackgroundWorkspace(key)
+        }
+      }
       await useProjectsStore.getState().fetchProjects()
     }
   }, [activeProjectId, agentMap, setManuallyActive])
