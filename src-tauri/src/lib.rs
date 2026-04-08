@@ -138,11 +138,13 @@ pub fn run() {
                     projects
                 };
                 for (path, mode) in &all_projects {
-                    // Agent-enabled workspaces: regenerate per-agent SKILL.md files
+                    // Agent-enabled workspaces: regenerate per-agent SKILL.md + CLAUDE.md
                     if mode != "off" {
                         let _ = commands::k2so_agents::k2so_agents_regenerate_skills(path.clone());
+                        // Regenerate workspace root CLAUDE.md with current skill protocol
+                        let _ = commands::k2so_agents::k2so_agents_generate_workspace_claude_md(path.clone());
                     }
-                    // All workspaces: write workspace-level SKILL.md at project root
+                    // All workspaces: write workspace-level skill to all harness locations
                     commands::k2so_agents::write_workspace_skill_file(path);
                 }
             }
