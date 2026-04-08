@@ -121,6 +121,50 @@ pub fn run() {
             // Migrate workspace_layouts from settings.json → SQLite (one-time)
             migrate_workspace_layouts_to_db(app.handle());
 
+            // Migrate legacy agent types in agent.md files (pod-member → agent-template, pod-leader → manager)
+            {
+                let paths: Vec<String> = {
+                    let state = app.state::<AppState>();
+                    let db = state.db.lock();
+                    let mut p = Vec::new();
+                    if let Ok(mut stmt) = db.prepare("SELECT path FROM projects") {
+                        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                            for row in rows.flatten() { p.push(row); }
+                        }
+                    }
+                    p
+                };
+                for path in &paths {
+                    let agents_dir = std::path::PathBuf::from(path).join(".k2so/agents");
+                    if !agents_dir.exists() { continue; }
+                    if let Ok(entries) = std::fs::read_dir(&agents_dir) {
+                        for entry in entries.flatten() {
+                            let agent_md = entry.path().join("agent.md");
+                            if !agent_md.exists() { continue; }
+                            if let Ok(content) = std::fs::read_to_string(&agent_md) {
+                                let mut updated = content.clone();
+                                let mut changed = false;
+                                if updated.contains("type: pod-member") {
+                                    updated = updated.replace("type: pod-member", "type: agent-template");
+                                    changed = true;
+                                }
+                                if updated.contains("type: pod-leader") {
+                                    updated = updated.replace("type: pod-leader", "type: manager");
+                                    changed = true;
+                                }
+                                if updated.contains("pod_leader: true") {
+                                    updated = updated.replace("pod_leader: true", "manager: true");
+                                    changed = true;
+                                }
+                                if changed {
+                                    let _ = std::fs::write(&agent_md, &updated);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Regenerate SKILL.md files for all workspaces (v0.26 migration)
             {
                 let all_projects: Vec<(String, String)> = {

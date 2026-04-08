@@ -4046,7 +4046,7 @@ function ProjectDetail({
         <div className="space-y-2">
           {/* Mode selector */}
           <div className="flex gap-1">
-            {(['off', 'custom', 'agent', 'manager'] as const).map((mode) => {
+            {(['off', 'agent', 'manager', 'custom'] as const).map((mode) => {
               const isActive = (project.agentMode || 'off') === mode || (mode === 'manager' && (project.agentMode === 'coordinator' || project.agentMode === 'pod'))
               const labels = { off: 'Off', custom: 'Custom Agent', agent: 'K2SO Agent', manager: 'Workspace Manager' }
               return (
