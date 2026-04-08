@@ -1736,14 +1736,14 @@ const CLI_INSTALL_ENTRIES: {
     name: 'Gemini CLI',
     command: 'gemini',
     installCommand: 'npm install -g @anthropic-ai/gemini-cli',
-    docs: 'https://github.com/google-gemini/gemini-cli',
+    docs: 'https://geminicli.com',
     notes: 'Requires Node.js 18+. Authenticate with your Google account on first run.'
   },
   {
     name: 'GitHub Copilot CLI',
     command: 'copilot',
     installCommand: 'npm install -g @anthropic-ai/copilot-cli',
-    docs: 'https://githubnext.com/projects/copilot-cli/',
+    docs: 'https://docs.github.com/en/copilot/how-tos/copilot-cli',
     notes: 'Requires an active GitHub Copilot subscription. Authenticate with "gh auth login" first.'
   },
   {
@@ -1780,6 +1780,13 @@ const CLI_INSTALL_ENTRIES: {
     installCommand: 'curl -fsSL https://github.com/block/goose/releases/latest/download/install.sh | bash',
     docs: 'https://github.com/block/goose',
     notes: 'An open-source AI developer agent from Block. Supports multiple model providers.'
+  },
+  {
+    name: 'Pi',
+    command: 'pi',
+    installCommand: 'npm install -g @mariozechner/pi-coding-agent',
+    docs: 'https://github.com/badlogic/pi-mono',
+    notes: 'Minimal coding agent with 15+ LLM providers. Supports OAuth login (/login) for Claude, Copilot, Gemini subscriptions, or use API keys directly.'
   },
   {
     name: 'Ollama',

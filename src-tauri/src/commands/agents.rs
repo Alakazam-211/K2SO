@@ -13,10 +13,11 @@ const BUILT_IN_PRESETS: &[(&str, &str, &str, &str, i64)] = &[
     ("b0a1c2d3-e4f5-6789-abcd-ef0123456006", "Cursor Agent", "cursor-agent", "", 5),
     ("b0a1c2d3-e4f5-6789-abcd-ef0123456007", "OpenCode", "opencode", "", 6),
     ("b0a1c2d3-e4f5-6789-abcd-ef0123456008", "Code Puppy", "codepuppy", "", 7),
+    ("b0a1c2d3-e4f5-6789-abcd-ef0123456009", "Goose", "goose", "", 8),
+    ("b0a1c2d3-e4f5-6789-abcd-ef0123456010", "Pi", "pi", "", 9),
     // Local/on-device LLM tools (keep emoji — no custom icon)
-    ("b0a1c2d3-e4f5-6789-abcd-ef0123456009", "Ollama", "ollama run llama3.2", "\u{1F999}", 8),
-    ("b0a1c2d3-e4f5-6789-abcd-ef0123456010", "Interpreter", "interpreter", "\u{1F310}", 9),
-    ("b0a1c2d3-e4f5-6789-abcd-ef0123456011", "Goose", "goose", "\u{1FABF}", 10),
+    ("b0a1c2d3-e4f5-6789-abcd-ef0123456011", "Ollama", "ollama run llama3.2", "\u{1F999}", 10),
+    ("b0a1c2d3-e4f5-6789-abcd-ef0123456012", "Interpreter", "interpreter", "\u{1F310}", 11),
 ];
 
 #[tauri::command]
