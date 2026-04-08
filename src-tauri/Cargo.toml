@@ -1,6 +1,6 @@
 [package]
 name = "k2so"
-version = "0.25.2"
+version = "0.26.3"
 edition = "2021"
 description = "Developer workspace with terminals, git worktrees, and agent presets"
 license = "MIT"
@@ -49,6 +49,11 @@ notify = { version = "7", features = ["macos_fsevent"] }
 notify-debouncer-mini = "0.5"
 trash = "5"
 getrandom = "0.2"
+
+# Companion API (ngrok tunnel + auth)
+ngrok = "0.14"
+argon2 = "0.5"
+tungstenite = "0.24"
 
 # Alacritty terminal backend
 alacritty_terminal = "0.26.0-rc1"

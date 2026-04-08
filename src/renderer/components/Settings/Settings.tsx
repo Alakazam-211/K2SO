@@ -93,6 +93,7 @@ const SECTIONS: { id: SettingsSection; label: string; agenticOnly?: boolean }[] 
   { id: 'editors-agents', label: 'Editors & Agents' },
   { id: 'keybindings', label: 'Keybindings' },
   { id: 'timer', label: 'Timer' },
+  { id: 'companion', label: 'Mobile Companion' },
 ]
 
 // ── Main Settings component ──────────────────────────────────────────
@@ -157,6 +158,11 @@ export default function Settings(): React.JSX.Element {
         {activeSection === 'timer' && (
           <SectionErrorBoundary>
             <TimerSection />
+          </SectionErrorBoundary>
+        )}
+        {activeSection === 'companion' && (
+          <SectionErrorBoundary>
+            <CompanionSection />
           </SectionErrorBoundary>
         )}
         {activeSection === 'projects' && (
@@ -6102,3 +6108,179 @@ function LocalLLMSettings(): React.JSX.Element {
   )
 }
 
+
+// ── Mobile Companion Section ────────────────────────────────────────
+
+function CompanionSection(): React.JSX.Element {
+  const [enabled, setEnabled] = useState(false)
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [passwordSet, setPasswordSet] = useState(false)
+  const [ngrokToken, setNgrokToken] = useState('')
+  const [tunnelUrl, setTunnelUrl] = useState<string | null>(null)
+  const [connectedClients, setConnectedClients] = useState(0)
+  const [sessions, setSessions] = useState<Array<{ token: string; remoteAddr: string; createdAt: string }>>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const settings = await invoke<any>('settings_get')
+        const c = settings?.companion || {}
+        setUsername(c.username || '')
+        setPasswordSet(!!(c.passwordHash))
+        setNgrokToken(c.ngrokAuthToken || '')
+        setEnabled(c.enabled || false)
+      } catch { /* ignore */ }
+      try {
+        const status = await invoke<any>('companion_status')
+        if (status.running) {
+          setEnabled(true)
+          setTunnelUrl(status.tunnelUrl)
+          setConnectedClients(status.connectedClients || 0)
+          setSessions(status.sessions || [])
+        }
+      } catch { /* ignore */ }
+    }
+    load()
+  }, [])
+
+  useEffect(() => {
+    if (!enabled) return
+    const interval = setInterval(async () => {
+      try {
+        const status = await invoke<any>('companion_status')
+        setTunnelUrl(status.tunnelUrl)
+        setConnectedClients(status.connectedClients || 0)
+        setSessions(status.sessions || [])
+      } catch { /* ignore */ }
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [enabled])
+
+  const handleToggle = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      if (enabled) {
+        await invoke('companion_stop')
+        setEnabled(false)
+        setTunnelUrl(null)
+        setConnectedClients(0)
+        setSessions([])
+        await invoke('settings_update', { updates: { companion: { enabled: false } } })
+      } else {
+        await invoke('settings_update', {
+          updates: { companion: { enabled: true, username, ngrokAuthToken: ngrokToken } }
+        })
+        const url = await invoke<string>('companion_start')
+        setEnabled(true)
+        setTunnelUrl(url)
+      }
+    } catch (err: any) {
+      setError(typeof err === 'string' ? err : err?.message || 'Failed')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleSetPassword = async () => {
+    if (!password) return
+    try {
+      await invoke('companion_set_password', { password })
+      setPasswordSet(true)
+      setPassword('')
+    } catch (err: any) {
+      setError(typeof err === 'string' ? err : 'Failed to set password')
+    }
+  }
+
+  const handleDisconnect = async (token: string) => {
+    try {
+      await invoke('companion_disconnect_session', { sessionToken: token })
+      setSessions((prev) => prev.filter((s) => s.token !== token))
+    } catch { /* ignore */ }
+  }
+
+  return (
+    <div className="max-w-xl">
+      <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-1">Mobile Companion</h2>
+      <p className="text-[10px] text-[var(--color-text-muted)] mb-4">
+        Access your K2SO agents remotely through the companion app. Requires an ngrok account.
+      </p>
+
+      <div className="flex items-center gap-2 mb-4 px-3 py-2 border border-[var(--color-border)]">
+        <span className="w-2 h-2 flex-shrink-0 rounded-full" style={{ backgroundColor: tunnelUrl ? '#22c55e' : '#6b7280' }} />
+        <span className="text-xs text-[var(--color-text-secondary)]">
+          {tunnelUrl ? `Connected (${connectedClients} client${connectedClients !== 1 ? 's' : ''})` : 'Not running'}
+        </span>
+        {tunnelUrl && (
+          <div className="flex items-center gap-1.5 ml-auto">
+            <span className="text-[10px] text-[var(--color-text-muted)] font-mono truncate max-w-[200px]">{tunnelUrl}</span>
+            <button onClick={() => navigator.clipboard.writeText(tunnelUrl).catch(() => {})} className="text-[10px] text-[var(--color-accent)] hover:underline no-drag cursor-pointer">Copy</button>
+          </div>
+        )}
+      </div>
+
+      {error && <div className="text-[10px] text-red-400 mb-3 px-3 py-1.5 border border-red-400/20 bg-red-400/5">{error}</div>}
+
+      <div className="space-y-0">
+        <div className="flex items-center justify-between py-2.5 border-b border-[var(--color-border)]">
+          <span className="text-xs text-[var(--color-text-secondary)]">Enable Companion</span>
+          <button onClick={handleToggle} disabled={loading} className={`w-7 h-3.5 flex items-center transition-colors no-drag cursor-pointer flex-shrink-0 ${enabled ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'} ${loading ? 'opacity-50' : ''}`}>
+            <span className={`w-2.5 h-2.5 bg-white block transition-transform ${enabled ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
+          </button>
+        </div>
+
+        <div className="flex items-center justify-between py-2.5 border-b border-[var(--color-border)]">
+          <span className="text-xs text-[var(--color-text-secondary)]">Username</span>
+          <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} onBlur={() => invoke('settings_update', { updates: { companion: { username } } }).catch(() => {})} placeholder="Enter username" className="w-48 px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag" />
+        </div>
+
+        <div className="flex items-center justify-between py-2.5 border-b border-[var(--color-border)]">
+          <div>
+            <span className="text-xs text-[var(--color-text-secondary)]">Password</span>
+            {passwordSet && <span className="ml-2 text-[10px] text-green-400">Set</span>}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleSetPassword() }} placeholder={passwordSet ? '••••••••' : 'Enter password'} className="w-36 px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag" />
+            {password && <button onClick={handleSetPassword} className="px-2 py-1 text-[10px] text-white bg-[var(--color-accent)] hover:opacity-90 no-drag cursor-pointer">Save</button>}
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between py-2.5 border-b border-[var(--color-border)]">
+          <span className="text-xs text-[var(--color-text-secondary)]">ngrok Auth Token</span>
+          <input type="password" value={ngrokToken} onChange={(e) => setNgrokToken(e.target.value)} onBlur={() => invoke('settings_update', { updates: { companion: { ngrokAuthToken: ngrokToken } } }).catch(() => {})} placeholder="Enter ngrok token" className="w-48 px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag" />
+        </div>
+      </div>
+
+      {sessions.length > 0 && (
+        <div className="mt-6">
+          <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mb-2">Active Sessions</h3>
+          <div className="border border-[var(--color-border)]">
+            {sessions.map((session) => (
+              <div key={session.token} className="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)] last:border-b-0">
+                <div className="flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 bg-green-400 rounded-full flex-shrink-0" />
+                  <span className="text-xs text-[var(--color-text-primary)] font-mono">{session.remoteAddr}</span>
+                  <span className="text-[10px] text-[var(--color-text-muted)]">
+                    {(() => { const ago = Math.floor((Date.now() - new Date(session.createdAt).getTime()) / 60000); return ago < 1 ? 'just now' : ago < 60 ? `${ago}m ago` : `${Math.floor(ago / 60)}h ago` })()}
+                  </span>
+                </div>
+                <button onClick={() => handleDisconnect(session.token)} className="text-[10px] text-red-400 hover:text-red-300 no-drag cursor-pointer">Disconnect</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-6 text-[10px] text-[var(--color-text-muted)] space-y-1">
+        <p>1. Create a free account at <span className="text-[var(--color-accent)]">ngrok.com</span> and copy your auth token.</p>
+        <p>2. Set a username and password for the companion app to authenticate.</p>
+        <p>3. Enable the toggle — K2SO will create a secure tunnel and show you the URL.</p>
+        <p>4. Enter the URL in the K2SO companion app on your phone.</p>
+      </div>
+    </div>
+  )
+}

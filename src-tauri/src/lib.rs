@@ -17,6 +17,7 @@ macro_rules! log_debug {
 
 mod agent_hooks;
 mod commands;
+mod companion;
 mod db;
 mod editors;
 mod git;
@@ -689,6 +690,12 @@ pub fn run() {
             commands::themes::themes_create_template,
             commands::themes::themes_list_custom,
             commands::themes::themes_delete,
+            // Companion API
+            commands::companion::companion_start,
+            commands::companion::companion_stop,
+            commands::companion::companion_status,
+            commands::companion::companion_set_password,
+            commands::companion::companion_disconnect_session,
         ])
         .build(tauri::generate_context!())
         .expect("error while building K2SO")

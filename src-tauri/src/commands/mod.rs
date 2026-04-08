@@ -20,3 +20,4 @@ pub mod review_checklist;
 pub mod format;
 pub mod themes;
 pub mod states;
+pub mod companion;

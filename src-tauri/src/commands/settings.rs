@@ -136,6 +136,22 @@ pub struct AppSettings {
     pub last_active_workspace_id: Option<String>,
     #[serde(default)]
     pub editor: EditorSettings,
+    #[serde(default)]
+    pub companion: CompanionSettings,
+}
+
+/// Mobile Companion API settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password_hash: String,
+    #[serde(default)]
+    pub ngrok_auth_token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,6 +265,7 @@ impl Default for AppSettings {
             last_active_project_id: None,
             last_active_workspace_id: None,
             editor: EditorSettings::default(),
+            companion: CompanionSettings::default(),
         }
     }
 }
@@ -289,7 +306,7 @@ fn deep_merge(base: &mut serde_json::Value, overlay: &serde_json::Value) {
     }
 }
 
-fn read_settings() -> AppSettings {
+pub(crate) fn read_settings() -> AppSettings {
     ensure_dir();
     let file = settings_file();
     if !file.exists() {
