@@ -12,6 +12,8 @@ src-tauri/target/
 drizzle/meta/
 .claude/
 SKILL.md
+.opencode/agent/k2so*.md
+.pi/skills/k2so/
 .env
 .env.*
 *.key
