@@ -4514,37 +4514,61 @@ fn upsert_k2so_section(file_path: &std::path::Path, content: &str) {
     }
 }
 
-/// Write a skill to all supported CLI LLM tool locations.
-/// Covers: Claude Code, Codex, Copilot CLI, Cursor, OpenCode, Pi, Goose, Code Puppy.
+/// Create a symlink, removing any existing file/link at the target first.
+fn force_symlink(source: &std::path::Path, target: &std::path::Path) {
+    // Remove existing file or symlink at target
+    if target.exists() || target.symlink_metadata().is_ok() {
+        let _ = fs::remove_file(target);
+    }
+    #[cfg(unix)]
+    {
+        let _ = std::os::unix::fs::symlink(source, target);
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows fallback: copy instead of symlink
+        let _ = fs::copy(source, target);
+    }
+}
+
+/// Write the canonical SKILL.md and symlink from all harness discovery paths.
+/// One source of truth — symlinks mean updates propagate instantly.
+///
+/// Canonical location: .k2so/skills/{name}/SKILL.md
+/// Symlinked to: Claude Code, OpenCode, Pi, Cursor (project root)
+/// Marker-injected into: AGENTS.md, .github/copilot-instructions.md
 fn write_skill_to_all_harnesses(project_path: &str, skill_name: &str, description: &str, content: &str) {
     let root = PathBuf::from(project_path);
 
-    // 1. Claude Code: .claude/skills/{name}/SKILL.md (with frontmatter)
+    // Write the canonical file with Claude Code frontmatter (superset format)
+    let canonical_dir = root.join(".k2so/skills").join(skill_name);
+    let _ = fs::create_dir_all(&canonical_dir);
+    let canonical_content = format!("---\nname: {}\ndescription: {}\n---\n\n{}", skill_name, description, content);
+    let canonical_path = canonical_dir.join("SKILL.md");
+    let _ = fs::write(&canonical_path, &canonical_content);
+
+    // 1. Claude Code: .claude/skills/{name}/SKILL.md → symlink
     let claude_dir = root.join(".claude/skills").join(skill_name);
     let _ = fs::create_dir_all(&claude_dir);
-    let claude_content = format!("---\nname: {}\ndescription: {}\n---\n\n{}", skill_name, description, content);
-    let _ = fs::write(claude_dir.join("SKILL.md"), &claude_content);
+    force_symlink(&canonical_path, &claude_dir.join("SKILL.md"));
 
-    // 2. Codex / Copilot CLI / Code Puppy: AGENTS.md (append with markers)
+    // 2. OpenCode: .opencode/agent/{name}.md → symlink
+    let opencode_dir = root.join(".opencode/agent");
+    let _ = fs::create_dir_all(&opencode_dir);
+    force_symlink(&canonical_path, &opencode_dir.join(&format!("{}.md", skill_name)));
+
+    // 3. Pi: .pi/skills/{name}/SKILL.md → symlink
+    let pi_dir = root.join(".pi/skills").join(skill_name);
+    let _ = fs::create_dir_all(&pi_dir);
+    force_symlink(&canonical_path, &pi_dir.join("SKILL.md"));
+
+    // 4. Codex / Copilot CLI / Code Puppy: AGENTS.md (marker-injected, can't symlink a section)
     upsert_k2so_section(&root.join("AGENTS.md"), content);
 
-    // 3. Copilot CLI: .github/copilot-instructions.md (append with markers)
+    // 5. Copilot CLI: .github/copilot-instructions.md (marker-injected)
     let github_dir = root.join(".github");
     let _ = fs::create_dir_all(&github_dir);
     upsert_k2so_section(&github_dir.join("copilot-instructions.md"), content);
-
-    // 4. OpenCode: .opencode/agent/k2so.md (dedicated file)
-    let opencode_dir = root.join(".opencode/agent");
-    let _ = fs::create_dir_all(&opencode_dir);
-    let _ = fs::write(opencode_dir.join("k2so.md"), content);
-
-    // 5. Cursor Agent: SKILL.md at project root (already written separately)
-    // (handled by write_workspace_skill_file — project root SKILL.md)
-
-    // 6. Pi: .pi/skills/k2so/SKILL.md
-    let pi_dir = root.join(".pi/skills/k2so");
-    let _ = fs::create_dir_all(&pi_dir);
-    let _ = fs::write(pi_dir.join("SKILL.md"), content);
 }
 
 /// Write the workspace-level K2SO skill to all harness locations.
@@ -4557,17 +4581,18 @@ pub fn write_workspace_skill_file(project_path: &str) {
 
     let content = generate_workspace_skill_content(&project_name);
 
-    // Write to project root (Cursor Agent, generic)
-    let skill_path = PathBuf::from(project_path).join("SKILL.md");
-    let _ = fs::write(&skill_path, &content);
-
-    // Write to all harness-specific locations
+    // Write canonical + symlink everywhere
     write_skill_to_all_harnesses(
         project_path,
         "k2so",
         "K2SO workspace commands — send work to agents, view activity, manage connections",
         &content,
     );
+
+    // Symlink project root SKILL.md → canonical (Cursor Agent, generic)
+    let canonical = PathBuf::from(project_path).join(".k2so/skills/k2so/SKILL.md");
+    let root_skill = PathBuf::from(project_path).join("SKILL.md");
+    force_symlink(&canonical, &root_skill);
 }
 
 /// Write a single agent's SKILL.md. Used internally during launch.
