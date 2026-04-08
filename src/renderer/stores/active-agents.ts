@@ -426,14 +426,28 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
       }
     }
 
-    // Clean up output timestamps for terminals no longer tracked
+    // Clean up output timestamps and pane statuses for terminals no longer running an agent.
+    // This handles the case where the user interrupts (Esc) and the hook 'stop' event never fires.
+    const cleanedStatuses = new Map(paneStatuses)
+    let statusesChanged = false
     for (const terminalId of outputTimestamps.keys()) {
       if (!newAgents.has(terminalId)) {
         outputTimestamps.delete(terminalId)
       }
     }
+    for (const [paneId, status] of paneStatuses) {
+      if ((status === 'working' || status === 'permission') && !newAgents.has(paneId)) {
+        // Agent was running but is no longer the foreground command — clear its status
+        cleanedStatuses.set(paneId, 'idle')
+        statusesChanged = true
+      }
+    }
 
-    set({ agents: newAgents })
+    if (statusesChanged) {
+      set({ agents: newAgents, paneStatuses: cleanedStatuses })
+    } else {
+      set({ agents: newAgents })
+    }
   },
 }))
 
