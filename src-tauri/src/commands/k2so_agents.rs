@@ -1804,7 +1804,7 @@ fn generate_manager_skill_content(project_path: &str, project_name: &str) -> Str
                     let role = fm.get("role").cloned().unwrap_or_default();
                     let agent_type = fm.get("type").cloned().unwrap_or_default();
                     // Skip the manager itself and k2so-agent
-                    if agent_type == "manager" || agent_type == "coordinator" || agent_type == "k2so" { continue; }
+                    if agent_type == "manager" || agent_type == "coordinator" || agent_type == "pod-leader" || agent_type == "k2so" { continue; }
                     team.push(format!("- **{}** — {}", name, role));
                 }
             }
