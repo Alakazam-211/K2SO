@@ -56,15 +56,39 @@ export default function CommandPalette(): React.JSX.Element | null {
     }
   }, [isOpen])
 
+  // Fuzzy match: each space-separated token must appear somewhere in the target.
+  // "k2 web" matches "k2so-website", "my proj" matches "my-cool-project".
+  // Also supports sequential character matching as fallback:
+  // "kweb" matches "k2so-website" (k...w...e...b in order).
+  const fuzzyMatch = useCallback((target: string, query: string): boolean => {
+    if (!query) return true
+    const t = target.toLowerCase()
+    const tokens = query.toLowerCase().split(/\s+/).filter(Boolean)
+
+    // Token match: every token must appear as a substring
+    const tokenMatch = tokens.every((tok) => t.includes(tok))
+    if (tokenMatch) return true
+
+    // Sequential character match: each char of query appears in order in target
+    const chars = query.toLowerCase().replace(/\s+/g, '')
+    let ti = 0
+    for (let ci = 0; ci < chars.length; ci++) {
+      const idx = t.indexOf(chars[ci], ti)
+      if (idx === -1) return false
+      ti = idx + 1
+    }
+    return true
+  }, [])
+
   // Build results list
   const results = useMemo((): Result[] => {
-    const q = query.toLowerCase().trim()
+    const q = query.trim()
     const items: Result[] = []
 
     // Focus groups (only if enabled)
     if (focusGroupsEnabled) {
       const matchingGroups = focusGroups.filter(
-        (g) => !q || g.name.toLowerCase().includes(q)
+        (g) => fuzzyMatch(g.name, q)
       )
       for (const g of matchingGroups) {
         const count = projects.filter((p) => p.focusGroupId === g.id).length
@@ -80,7 +104,7 @@ export default function CommandPalette(): React.JSX.Element | null {
 
     // Projects
     const matchingProjects = projects.filter(
-      (p) => !q || p.name.toLowerCase().includes(q) || p.path.toLowerCase().includes(q)
+      (p) => fuzzyMatch(p.name, q) || fuzzyMatch(p.path, q)
     )
     for (const p of matchingProjects) {
       items.push({
