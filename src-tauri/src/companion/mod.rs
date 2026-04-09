@@ -154,7 +154,7 @@ pub fn stop_companion() -> Result<(), String> {
     Ok(())
 }
 
-/// Get companion status.
+/// Get companion status. Non-blocking — uses try_lock to avoid blocking the main thread.
 pub fn companion_status() -> serde_json::Value {
     if !RUNNING.load(Ordering::Relaxed) {
         return serde_json::json!({
@@ -165,24 +165,38 @@ pub fn companion_status() -> serde_json::Value {
         });
     }
 
-    if let Some(ref state) = *STATE.lock().unwrap_or_else(|e| e.into_inner()) {
-        let url = state.tunnel_url.lock().unwrap().clone();
-        let sessions = state.sessions.lock().unwrap();
-        let ws_clients = state.ws_clients.lock().unwrap();
+    // Use try_lock to avoid blocking the UI thread if the companion thread holds the lock
+    let guard = match STATE.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            // Lock contended — return minimal status without blocking
+            return serde_json::json!({
+                "running": true,
+                "tunnelUrl": null,
+                "connectedClients": 0,
+                "sessions": [],
+            });
+        }
+    };
 
-        let session_list: Vec<serde_json::Value> = sessions.values().map(|s| {
-            serde_json::json!({
-                "token": format!("{}...", &s.token[..8.min(s.token.len())]),
-                "remoteAddr": s.remote_addr,
-                "createdAt": s.created_at.to_rfc3339(),
-                "expiresAt": s.expires_at.to_rfc3339(),
-            })
-        }).collect();
+    if let Some(ref state) = *guard {
+        let url = state.tunnel_url.try_lock().ok().and_then(|u| u.clone());
+        let session_list: Vec<serde_json::Value> = state.sessions.try_lock()
+            .map(|sessions| sessions.values().map(|s| {
+                serde_json::json!({
+                    "token": format!("{}...", &s.token[..8.min(s.token.len())]),
+                    "remoteAddr": s.remote_addr,
+                    "createdAt": s.created_at.to_rfc3339(),
+                    "expiresAt": s.expires_at.to_rfc3339(),
+                })
+            }).collect())
+            .unwrap_or_default();
+        let client_count = state.ws_clients.try_lock().map(|c| c.len()).unwrap_or(0);
 
         serde_json::json!({
             "running": true,
             "tunnelUrl": url,
-            "connectedClients": ws_clients.len(),
+            "connectedClients": client_count,
             "sessions": session_list,
         })
     } else {
