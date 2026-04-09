@@ -283,7 +283,12 @@ fn start_ngrok_tunnel(ngrok_token: &str, ngrok_domain: &str, local_port: u16) ->
             }
         };
 
-        let result = rt.block_on(async {
+        // Single block_on call — setup + keepalive in one async block.
+        // The forwarder's background task runs on this runtime. If we exit
+        // block_on and re-enter it, the task can get interrupted. Keeping
+        // everything in one block_on ensures the runtime event loop stays
+        // active for the forwarder's lifetime.
+        rt.block_on(async {
             // Close any existing session
             if let Some(mut old_session) = NGROK_SESSION.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 log_debug!("[companion] Closing previous ngrok session...");
@@ -292,45 +297,43 @@ fn start_ngrok_tunnel(ngrok_token: &str, ngrok_domain: &str, local_port: u16) ->
             }
 
             log_debug!("[companion] Creating new ngrok session");
-            let session = ngrok::Session::builder()
-                .authtoken(&token)
-                .connect()
-                .await
-                .map_err(|e| format!("ngrok connect failed: {}", e))?;
+            let connect_result: Result<String, String> = async {
+                let session = ngrok::Session::builder()
+                    .authtoken(&token)
+                    .connect()
+                    .await
+                    .map_err(|e| format!("ngrok connect failed: {}", e))?;
 
-            use ngrok::config::TunnelBuilder;
-            let forward_url = url::Url::parse(&format!("http://localhost:{}", local_port))
-                .map_err(|e| format!("Invalid forward URL: {}", e))?;
+                use ngrok::config::TunnelBuilder;
+                let forward_url = url::Url::parse(&format!("http://localhost:{}", local_port))
+                    .map_err(|e| format!("Invalid forward URL: {}", e))?;
 
-            let mut endpoint = session.http_endpoint();
-            if !domain.is_empty() {
-                endpoint.domain(&domain);
-            }
-            let listener = endpoint
-                .listen_and_forward(forward_url)
-                .await
-                .map_err(|e| format!("ngrok tunnel failed: {}", e))?;
-
-            let url = listener.url().to_string();
-            NGROK_SESSION.lock().unwrap_or_else(|e| e.into_inner()).replace(session);
-            NGROK_FORWARDER.lock().unwrap_or_else(|e| e.into_inner()).replace(listener);
-
-            Ok::<String, String>(url)
-        });
-
-        let _ = tx.send(result);
-
-        // Keep the runtime alive — the forwarder's background tasks need it.
-        // block_on a future that never completes (waits for shutdown signal).
-        if RUNNING.load(Ordering::Relaxed) || CANCEL_START.load(Ordering::Relaxed) == false {
-            rt.block_on(async {
-                // Park this thread until the companion is stopped
-                loop {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-                    if !RUNNING.load(Ordering::Relaxed) { break; }
+                let mut endpoint = session.http_endpoint();
+                if !domain.is_empty() {
+                    endpoint.domain(&domain);
                 }
-            });
-        }
+                let listener = endpoint
+                    .listen_and_forward(forward_url)
+                    .await
+                    .map_err(|e| format!("ngrok tunnel failed: {}", e))?;
+
+                let url = listener.url().to_string();
+                NGROK_SESSION.lock().unwrap_or_else(|e| e.into_inner()).replace(session);
+                NGROK_FORWARDER.lock().unwrap_or_else(|e| e.into_inner()).replace(listener);
+
+                Ok(url)
+            }.await;
+
+            // Send result back to caller
+            let _ = tx.send(connect_result);
+
+            // Park in the event loop — keeps the forwarder's async task alive.
+            // The forwarder proxies connections as long as this block_on is active.
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                if !RUNNING.load(Ordering::Relaxed) { break; }
+            }
+        });
         log_debug!("[companion] Tunnel runtime thread exiting");
     });
 
@@ -362,7 +365,10 @@ fn run_local_listener(listener: std::net::TcpListener) {
     // allows periodic shutdown checks even when no connections arrive.
     listener.set_nonblocking(false).ok();
 
+    log_debug!("[companion] Local listener started on port {}", listener.local_addr().map(|a| a.port()).unwrap_or(0));
+    let mut request_count = 0u64;
     for stream in listener.incoming() {
+        request_count += 1;
         // Wrap each connection in catch_unwind to prevent a single bad request
         // from killing the entire listener thread.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -374,7 +380,10 @@ fn run_local_listener(listener: std::net::TcpListener) {
                 }
             }
 
-            let Ok(mut stream) = stream else { return true };
+            let Ok(mut stream) = stream else {
+                log_debug!("[companion] Listener accept error — continuing");
+                return true;
+            };
             let remote_addr = stream.peer_addr()
                 .map(|a| a.to_string())
                 .unwrap_or_else(|_| "ngrok".to_string());
@@ -431,7 +440,7 @@ fn run_local_listener(listener: std::net::TcpListener) {
         }
     }
 
-    log_debug!("[companion] Local listener ended");
+    log_debug!("[companion] Local listener ended after {} requests", request_count);
     RUNNING.store(false, Ordering::Relaxed);
 }
 
