@@ -6233,7 +6233,7 @@ function CompanionSection(): React.JSX.Element {
 
   return (
     <div className="max-w-xl">
-      <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-1">Mobile Companion</h2>
+      <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-1">Mobile Companion <span className="text-[10px] text-[var(--color-text-muted)] font-normal">(BETA)</span></h2>
       <p className="text-[10px] text-[var(--color-text-muted)] mb-4">
         Access your K2SO agents remotely through the companion app. Requires an ngrok account.
       </p>

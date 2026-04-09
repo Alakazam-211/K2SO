@@ -221,29 +221,8 @@ pub fn companion_status() -> serde_json::Value {
 }
 
 /// Start the ngrok tunnel using listen_and_forward to proxy to a local port.
-/// Returns the public URL and the local port the companion HTTP server listens on.
+/// Returns the public URL and the tokio runtime (must be kept alive for the tunnel).
 fn start_ngrok_tunnel(ngrok_token: &str, local_port: u16) -> Result<(String, tokio::runtime::Runtime), String> {
-    // Run ngrok connect on a separate thread with a hard timeout.
-    // The ngrok SDK's connect future is not cancel-safe, so tokio::time::timeout
-    // can't abort it. Instead we race the blocking call against a deadline.
-    let token = ngrok_token.to_string();
-    let (tx, rx) = std::sync::mpsc::channel::<Result<(String, tokio::runtime::Runtime), String>>();
-
-    let thread_token = token.clone();
-    std::thread::spawn(move || {
-        let result = start_ngrok_tunnel_inner(&thread_token, local_port);
-        let _ = tx.send(result);
-    });
-
-    // Wait up to 20 seconds for the tunnel to connect
-    match rx.recv_timeout(std::time::Duration::from_secs(20)) {
-        Ok(result) => result,
-        Err(_) => Err("ngrok connect timed out (20s) — old session may still be active".to_string()),
-    }
-}
-
-/// Inner function that does the actual ngrok connect (runs on a dedicated thread).
-fn start_ngrok_tunnel_inner(ngrok_token: &str, local_port: u16) -> Result<(String, tokio::runtime::Runtime), String> {
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
 
@@ -257,22 +236,41 @@ fn start_ngrok_tunnel_inner(ngrok_token: &str, local_port: u16) -> Result<(Strin
         }
 
         log_debug!("[companion] Creating new ngrok session");
-        let session = ngrok::Session::builder()
-            .authtoken(&token)
-            .connect()
-            .await
-            .map_err(|e| format!("ngrok connect failed: {}", e))?;
+
+        // Race the connect against a 20s deadline.
+        let connect_fut = async {
+            ngrok::Session::builder()
+                .authtoken(&token)
+                .connect()
+                .await
+        };
+        let session = tokio::select! {
+            result = connect_fut => {
+                result.map_err(|e| format!("ngrok connect failed: {}", e))?
+            }
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(20)) => {
+                return Err("ngrok connect timed out (20s) — old session may still be active".to_string());
+            }
+        };
 
         // Use listen_and_forward — ngrok handles connection proxying to our local server
         use ngrok::config::TunnelBuilder;
         let forward_url = url::Url::parse(&format!("http://localhost:{}", local_port))
             .map_err(|e| format!("Invalid forward URL: {}", e))?;
 
-        let listener = session
-            .http_endpoint()
-            .listen_and_forward(forward_url)
-            .await
-            .map_err(|e| format!("ngrok tunnel failed: {}", e))?;
+        let tunnel_fut = async {
+            session.http_endpoint()
+                .listen_and_forward(forward_url)
+                .await
+        };
+        let listener = tokio::select! {
+            result = tunnel_fut => {
+                result.map_err(|e| format!("ngrok tunnel failed: {}", e))?
+            }
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(15)) => {
+                return Err("ngrok tunnel creation timed out (15s)".to_string());
+            }
+        };
 
         let url = listener.url().to_string();
         NGROK_SESSION.lock().unwrap_or_else(|e| e.into_inner()).replace(session);
