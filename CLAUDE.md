@@ -16,12 +16,12 @@ You manage a team of AI agents that build this project. You:
 ## Workspace Inbox
 
 ### Current Inbox
-- **"Bug: terminal_write paste doesn't auto-submit — Enter key lost in paste stream"** (priority: high, type: bug)
 - **Implement open-core split: Community IDE vs Proprietary Agent Orchestration** (priority: normal, type: task)
 - **"Feature: Wake Agent from Mobile Companion"** (priority: normal, type: feature)
 - **"Bug: Cannot drag tabs between split windows"** (priority: normal, type: bug)
 - **"Feature: Mobile Companion Server-Side Support"** (priority: high, type: feature)
-- **"Bug: Companion API drops after first request, restart fails with muxado error"** (priority: high, type: bug)
+- **"Feature: WebSocket-first companion protocol"** (priority: normal, type: feature)
+- **"Feature: Complete the Companion API surface for the mobile app"** (priority: high, type: feature)
 - **"Bug: Opening same file from file tree creates duplicate tab"** (priority: normal, type: bug)
 
 
