@@ -222,66 +222,80 @@ pub fn companion_status() -> serde_json::Value {
 
 /// Start the ngrok tunnel using listen_and_forward to proxy to a local port.
 /// Returns the public URL and the tokio runtime (must be kept alive for the tunnel).
+///
+/// The ngrok connect future never yields, so tokio timeouts can't cancel it.
+/// We run it on a dedicated thread and wait with recv_timeout. If it times out,
+/// the thread keeps running (the runtime stays alive there) — next call will
+/// find the session in the static and reuse it.
 fn start_ngrok_tunnel(ngrok_token: &str, local_port: u16) -> Result<(String, tokio::runtime::Runtime), String> {
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
-
     let token = ngrok_token.to_string();
-    let url = rt.block_on(async {
-        // Close any existing session
-        if let Some(mut old_session) = NGROK_SESSION.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            log_debug!("[companion] Closing previous ngrok session...");
-            let _ = old_session.close().await;
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        }
+    let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
 
-        log_debug!("[companion] Creating new ngrok session");
+    // The runtime lives on this thread for the tunnel's lifetime.
+    // It's stored in a static so the forwarder's background tasks keep running.
+    static TUNNEL_RT: Mutex<Option<tokio::runtime::Runtime>> = Mutex::new(None);
 
-        // Race the connect against a 20s deadline.
-        let connect_fut = async {
-            ngrok::Session::builder()
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                let _ = tx.send(Err(format!("Failed to create tokio runtime: {}", e)));
+                return;
+            }
+        };
+
+        let result = rt.block_on(async {
+            // Close any existing session
+            if let Some(mut old_session) = NGROK_SESSION.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                log_debug!("[companion] Closing previous ngrok session...");
+                let _ = old_session.close().await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+
+            log_debug!("[companion] Creating new ngrok session");
+            let session = ngrok::Session::builder()
                 .authtoken(&token)
                 .connect()
                 .await
-        };
-        let session = tokio::select! {
-            result = connect_fut => {
-                result.map_err(|e| format!("ngrok connect failed: {}", e))?
-            }
-            _ = tokio::time::sleep(tokio::time::Duration::from_secs(20)) => {
-                return Err("ngrok connect timed out (20s) — old session may still be active".to_string());
-            }
-        };
+                .map_err(|e| format!("ngrok connect failed: {}", e))?;
 
-        // Use listen_and_forward — ngrok handles connection proxying to our local server
-        use ngrok::config::TunnelBuilder;
-        let forward_url = url::Url::parse(&format!("http://localhost:{}", local_port))
-            .map_err(|e| format!("Invalid forward URL: {}", e))?;
+            use ngrok::config::TunnelBuilder;
+            let forward_url = url::Url::parse(&format!("http://localhost:{}", local_port))
+                .map_err(|e| format!("Invalid forward URL: {}", e))?;
 
-        let tunnel_fut = async {
-            session.http_endpoint()
+            let listener = session
+                .http_endpoint()
                 .listen_and_forward(forward_url)
                 .await
-        };
-        let listener = tokio::select! {
-            result = tunnel_fut => {
-                result.map_err(|e| format!("ngrok tunnel failed: {}", e))?
-            }
-            _ = tokio::time::sleep(tokio::time::Duration::from_secs(15)) => {
-                return Err("ngrok tunnel creation timed out (15s)".to_string());
-            }
-        };
+                .map_err(|e| format!("ngrok tunnel failed: {}", e))?;
 
-        let url = listener.url().to_string();
-        NGROK_SESSION.lock().unwrap_or_else(|e| e.into_inner()).replace(session);
+            let url = listener.url().to_string();
+            NGROK_SESSION.lock().unwrap_or_else(|e| e.into_inner()).replace(session);
+            NGROK_FORWARDER.lock().unwrap_or_else(|e| e.into_inner()).replace(listener);
 
-        // Store the forwarder — it must stay alive for ngrok to forward traffic
-        NGROK_FORWARDER.lock().unwrap_or_else(|e| e.into_inner()).replace(listener);
+            Ok::<String, String>(url)
+        });
 
-        Ok::<String, String>(url)
-    })?;
+        // Store the runtime so it stays alive (forwarder needs it)
+        if result.is_ok() {
+            *TUNNEL_RT.lock().unwrap_or_else(|e| e.into_inner()) = Some(rt);
+        }
 
-    Ok((url, rt))
+        let _ = tx.send(result);
+        // Thread exits but runtime lives in TUNNEL_RT static
+    });
+
+    // Wait up to 20 seconds
+    match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+        Ok(Ok(url)) => {
+            // Create a dummy runtime for the keepalive thread (the real one is in TUNNEL_RT)
+            let dummy_rt = tokio::runtime::Runtime::new()
+                .map_err(|e| format!("Failed to create keepalive runtime: {}", e))?;
+            Ok((url, dummy_rt))
+        }
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("ngrok connect timed out (20s) — old session may still be active".to_string()),
+    }
 }
 
 static NGROK_SESSION: Mutex<Option<ngrok::Session>> = Mutex::new(None);
