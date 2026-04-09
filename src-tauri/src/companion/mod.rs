@@ -143,10 +143,10 @@ pub fn stop_companion() -> Result<(), String> {
     // Clear the state entirely so a fresh one can be created on restart
     *STATE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
-    // Keep the ngrok session alive in NGROK_SESSION — closed on next start.
-    // Free tier allows only one session — closing and reconnecting causes auth failures.
-    // The tunnel listener thread has already exited (shutdown flag set), so the
-    // endpoint goes offline. On restart, we reuse the existing session.
+    // Drop the forwarder to stop ngrok from forwarding traffic
+    *NGROK_FORWARDER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+    // Session kept alive in NGROK_SESSION — closed on next start.
 
     RUNNING.store(false, Ordering::Relaxed);
     log_debug!("[companion] Stopped");
@@ -226,8 +226,8 @@ fn start_ngrok_tunnel(ngrok_token: &str, local_port: u16) -> Result<(String, tok
         let url = listener.url().to_string();
         NGROK_SESSION.lock().unwrap_or_else(|e| e.into_inner()).replace(session);
 
-        // The listener keeps running as long as the runtime is alive
-        // No need to store it — it runs in the background automatically
+        // Store the forwarder — it must stay alive for ngrok to forward traffic
+        NGROK_FORWARDER.lock().unwrap_or_else(|e| e.into_inner()).replace(listener);
 
         Ok::<String, String>(url)
     })?;
@@ -236,6 +236,7 @@ fn start_ngrok_tunnel(ngrok_token: &str, local_port: u16) -> Result<(String, tok
 }
 
 static NGROK_SESSION: Mutex<Option<ngrok::Session>> = Mutex::new(None);
+static NGROK_FORWARDER: Mutex<Option<ngrok::forwarder::Forwarder<ngrok::tunnel::HttpTunnel>>> = Mutex::new(None);
 
 /// Local companion HTTP server — accepts connections from ngrok (forwarded via listen_and_forward).
 /// Same blocking TCP pattern as agent_hooks.rs.
