@@ -193,36 +193,48 @@ pub struct NgrokTunnelListener {
 }
 
 /// Start the ngrok tunnel. Returns the URL and a runtime handle.
-/// The tunnel stays alive as long as the runtime exists.
+/// Retries up to 3 times with increasing delay if the endpoint is still releasing.
 fn start_ngrok_tunnel(ngrok_token: &str) -> Result<(String, tokio::runtime::Runtime), String> {
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
 
     let token = ngrok_token.to_string();
     let url = rt.block_on(async {
-        let session = ngrok::Session::builder()
-            .authtoken(&token)
-            .connect()
-            .await
-            .map_err(|e| format!("ngrok connect failed: {}", e))?;
+        let mut last_error = String::new();
 
-        use ngrok::config::TunnelBuilder;
-        let tunnel = session
-            .http_endpoint()
-            .listen()
-            .await
-            .map_err(|e| format!("ngrok tunnel failed: {}", e))?;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                log_debug!("[companion] Retry {} — waiting for endpoint release...", attempt);
+                tokio::time::sleep(tokio::time::Duration::from_secs(2 * attempt as u64)).await;
+            }
 
-        use ngrok::tunnel::EndpointInfo;
-        let url = tunnel.url().to_string();
+            let mut session = ngrok::Session::builder()
+                .authtoken(&token)
+                .connect()
+                .await
+                .map_err(|e| format!("ngrok connect failed: {}", e))?;
 
-        // Store the session and tunnel in globals so:
-        // - the accept loop can consume the tunnel
-        // - stop_companion can close the session to release the endpoint
-        NGROK_SESSION.lock().unwrap().replace(session);
-        NGROK_TUNNEL.lock().unwrap().replace(tunnel);
+            use ngrok::config::TunnelBuilder;
+            match session.http_endpoint().listen().await {
+                Ok(tunnel) => {
+                    use ngrok::tunnel::EndpointInfo;
+                    let url = tunnel.url().to_string();
 
-        Ok::<String, String>(url)
+                    // Store the session and tunnel in globals
+                    NGROK_SESSION.lock().unwrap().replace(session);
+                    NGROK_TUNNEL.lock().unwrap().replace(tunnel);
+
+                    return Ok::<String, String>(url);
+                }
+                Err(e) => {
+                    last_error = format!("ngrok tunnel failed: {}", e);
+                    // Close this session before retrying
+                    let _ = session.close().await;
+                }
+            }
+        }
+
+        Err(last_error)
     })?;
 
     Ok((url, rt))
