@@ -27,11 +27,16 @@ use types::CompanionState;
 pub(crate) static STATE: Mutex<Option<CompanionState>> = Mutex::new(None);
 /// Flag indicating the companion is running.
 static RUNNING: AtomicBool = AtomicBool::new(false);
+/// Flag to cancel a pending auto-start attempt.
+static CANCEL_START: AtomicBool = AtomicBool::new(false);
 
 /// Start the companion API proxy.
 /// Reads settings for credentials + ngrok token, starts tunnel, spawns listener.
 /// Returns the public tunnel URL.
 pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
+    // Clear any previous cancel signal
+    CANCEL_START.store(false, Ordering::Relaxed);
+
     if RUNNING.load(Ordering::Relaxed) {
         return Err("Companion is already running".to_string());
     }
@@ -65,6 +70,12 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
 
     // Start ngrok tunnel — forwards traffic to our local companion HTTP server
     let (tunnel_url, _rt) = start_ngrok_tunnel(&ngrok_token, local_port)?;
+
+    // Check if stop was requested while we were connecting
+    if CANCEL_START.load(Ordering::Relaxed) {
+        log_debug!("[companion] Start cancelled during tunnel connect");
+        return Err("Start cancelled".to_string());
+    }
 
     log_debug!("[companion] Tunnel: {} → localhost:{}", tunnel_url, local_port);
 
@@ -124,6 +135,9 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
 
 /// Stop the companion API proxy.
 pub fn stop_companion() -> Result<(), String> {
+    // Signal any in-flight start attempt to abort
+    CANCEL_START.store(true, Ordering::Relaxed);
+
     if !RUNNING.load(Ordering::Relaxed) {
         return Ok(());
     }
@@ -133,10 +147,10 @@ pub fn stop_companion() -> Result<(), String> {
         let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref state) = *guard {
             state.shutdown.store(true, Ordering::Relaxed);
-            *state._tunnel_keepalive.lock().unwrap() = None;
-            *state.tunnel_url.lock().unwrap() = None;
-            state.ws_clients.lock().unwrap().clear();
-            state.sessions.lock().unwrap().clear();
+            *state._tunnel_keepalive.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            *state.tunnel_url.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            state.ws_clients.lock().unwrap_or_else(|e| e.into_inner()).clear();
+            state.sessions.lock().unwrap_or_else(|e| e.into_inner()).clear();
         }
     }
 

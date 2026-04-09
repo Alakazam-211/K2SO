@@ -45,7 +45,7 @@ pub fn handle_ws_upgrade(
 
     // Register client
     {
-        let mut clients = state.ws_clients.lock().unwrap();
+        let mut clients = state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
         clients.push(WsClient {
             session_token: token.clone(),
             subscribed_terminals: HashSet::new(),
@@ -61,7 +61,7 @@ pub fn handle_ws_upgrade(
     let writer_token = token.clone();
     std::thread::spawn(move || {
         while let Ok(msg) = rx.recv() {
-            let mut ws = ws_writer.lock().unwrap();
+            let Ok(mut ws) = ws_writer.lock() else { break };
             if ws.send(Message::Text(msg)).is_err() {
                 break; // Connection closed
             }
@@ -78,31 +78,31 @@ pub fn handle_ws_upgrade(
     std::thread::spawn(move || {
         loop {
             let msg = {
-                let mut ws = ws_reader.lock().unwrap();
+                let Ok(mut ws) = ws_reader.lock() else { break };
                 ws.read()
             };
             match msg {
                 Ok(Message::Text(text)) => {
-                    if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&text) {
-                        let msg_type = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                        let terminal_id = msg.get("terminalId").and_then(|t| t.as_str()).unwrap_or("");
+                    // Ignore malformed JSON — don't crash on bad input
+                    let Ok(msg) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+                    let msg_type = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    let terminal_id = msg.get("terminalId").and_then(|t| t.as_str()).unwrap_or("");
 
-                        match msg_type {
-                            "subscribe" if !terminal_id.is_empty() => {
-                                let mut clients = reader_state.ws_clients.lock().unwrap();
-                                if let Some(client) = clients.iter_mut().find(|c| c.session_token == token) {
-                                    client.subscribed_terminals.insert(terminal_id.to_string());
-                                    log_debug!("[companion-ws] Subscribed to terminal: {}", terminal_id);
-                                }
+                    match msg_type {
+                        "subscribe" if !terminal_id.is_empty() => {
+                            let mut clients = reader_state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(client) = clients.iter_mut().find(|c| c.session_token == token) {
+                                client.subscribed_terminals.insert(terminal_id.to_string());
+                                log_debug!("[companion-ws] Subscribed to terminal: {}", terminal_id);
                             }
-                            "unsubscribe" if !terminal_id.is_empty() => {
-                                let mut clients = reader_state.ws_clients.lock().unwrap();
-                                if let Some(client) = clients.iter_mut().find(|c| c.session_token == token) {
-                                    client.subscribed_terminals.remove(terminal_id);
-                                }
-                            }
-                            _ => {}
                         }
+                        "unsubscribe" if !terminal_id.is_empty() => {
+                            let mut clients = reader_state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(client) = clients.iter_mut().find(|c| c.session_token == token) {
+                                client.subscribed_terminals.remove(terminal_id);
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Ok(Message::Close(_)) | Err(_) => break,
@@ -111,7 +111,7 @@ pub fn handle_ws_upgrade(
         }
 
         // Remove client on disconnect
-        let mut clients = reader_state.ws_clients.lock().unwrap();
+        let mut clients = reader_state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
         clients.retain(|c| c.session_token != token);
         log_debug!("[companion-ws] Client disconnected");
     });
@@ -119,7 +119,7 @@ pub fn handle_ws_upgrade(
 
 /// Broadcast an event to all connected WebSocket clients.
 pub fn broadcast_event(state: &CompanionState, event_json: &str) {
-    let clients = state.ws_clients.lock().unwrap();
+    let clients = state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
     for client in clients.iter() {
         let _ = client.sender.send(event_json.to_string());
     }
@@ -134,7 +134,7 @@ pub fn broadcast_terminal_output(state: &CompanionState, terminal_id: &str, line
     });
     let event_str = event.to_string();
 
-    let clients = state.ws_clients.lock().unwrap();
+    let clients = state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
     for client in clients.iter() {
         if client.subscribed_terminals.contains(terminal_id) {
             let _ = client.sender.send(event_str.clone());

@@ -6239,7 +6239,7 @@ function CompanionSection(): React.JSX.Element {
       </p>
 
       <div className="flex items-center gap-2 mb-4 px-3 py-2 border border-[var(--color-border)]">
-        <span className="w-2 h-2 flex-shrink-0 rounded-full" style={{ backgroundColor: tunnelUrl ? '#22c55e' : enabled ? '#eab308' : '#6b7280' }} />
+        <span className="w-2 h-2 flex-shrink-0" style={{ backgroundColor: tunnelUrl ? '#22c55e' : enabled ? '#eab308' : '#6b7280' }} />
         <span className="text-xs text-[var(--color-text-secondary)]">
           {tunnelUrl ? `Connected (${connectedClients} client${connectedClients !== 1 ? 's' : ''})` : enabled ? 'Connecting...' : 'Not running'}
         </span>
@@ -6317,7 +6317,7 @@ function CompanionSection(): React.JSX.Element {
             {sessions.map((session) => (
               <div key={session.token} className="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)] last:border-b-0">
                 <div className="flex items-center gap-2">
-                  <span className="w-1.5 h-1.5 bg-green-400 rounded-full flex-shrink-0" />
+                  <span className="w-1.5 h-1.5 bg-green-400 flex-shrink-0" />
                   <span className="text-xs text-[var(--color-text-primary)] font-mono">{session.remoteAddr}</span>
                   <span className="text-[10px] text-[var(--color-text-muted)]">
                     {(() => { const ago = Math.floor((Date.now() - new Date(session.createdAt).getTime()) / 60000); return ago < 1 ? 'just now' : ago < 60 ? `${ago}m ago` : `${Math.floor(ago / 60)}h ago` })()}

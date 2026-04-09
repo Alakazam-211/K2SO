@@ -475,8 +475,7 @@ pub fn run() {
                                 }
                                 Err(e) => {
                                     log_debug!("[companion] Auto-start attempt {} failed: {}", i + 1, e);
-                                    if e.contains("already running") {
-                                        // Someone manually started it — we're done
+                                    if e.contains("already running") || e.contains("cancelled") {
                                         return;
                                     }
                                 }
