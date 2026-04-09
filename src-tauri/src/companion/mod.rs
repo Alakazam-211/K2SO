@@ -18,7 +18,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Listener};
-use futures::TryStreamExt;
+use ngrok::config::ForwarderBuilder;
+use ngrok::tunnel::EndpointInfo;
 
 use types::CompanionState;
 
@@ -55,17 +56,20 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
         return Err("K2SO internal server not ready yet".to_string());
     }
 
-    // Start ngrok tunnel — runs on a background thread with its own tokio runtime.
-    // The tunnel accepts connections directly (no separate TcpListener needed).
     let ngrok_token = companion.ngrok_auth_token.clone();
 
-    // Channel to keep the tunnel thread alive
-    let (keepalive_tx, keepalive_rx) = std::sync::mpsc::channel::<()>();
+    // Bind a local TcpListener for the companion HTTP server
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("Failed to bind companion listener: {}", e))?;
+    let local_port = listener.local_addr().unwrap().port();
 
-    // Start the ngrok tunnel on a background thread with a persistent tokio runtime
-    let (tunnel_url, tunnel_listener) = start_ngrok_tunnel(&ngrok_token)?;
+    // Start ngrok tunnel — forwards traffic to our local companion HTTP server
+    let (tunnel_url, _rt) = start_ngrok_tunnel(&ngrok_token, local_port)?;
 
-    log_debug!("[companion] Tunnel: {}", tunnel_url);
+    log_debug!("[companion] Tunnel: {} → localhost:{}", tunnel_url, local_port);
+
+    // Channel to keep the tunnel runtime alive
+    let (keepalive_tx, _keepalive_rx) = std::sync::mpsc::channel::<()>();
 
     // Initialize state
     let state = CompanionState {
@@ -80,9 +84,18 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
     *STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(state);
     RUNNING.store(true, Ordering::Relaxed);
 
-    // Spawn the proxy thread — accepts connections from ngrok tunnel directly
+    // Spawn the local companion HTTP server (handles auth + proxying)
     std::thread::spawn(move || {
-        run_ngrok_listener(tunnel_listener, keepalive_rx);
+        run_local_listener(listener);
+    });
+
+    // Keep the tokio runtime alive on a background thread (ngrok tunnel needs it)
+    std::thread::spawn(move || {
+        // _rt stays alive as long as this thread runs
+        // _keepalive_rx blocks until the sender is dropped (on stop)
+        let _ = _keepalive_rx.recv();
+        log_debug!("[companion] Tunnel runtime shutting down");
+        drop(_rt);
     });
 
     // Spawn session cleanup thread (every 5 minutes, expire old sessions)
@@ -130,10 +143,7 @@ pub fn stop_companion() -> Result<(), String> {
     // Clear the state entirely so a fresh one can be created on restart
     *STATE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
-    // Clear tunnel handle
-    *NGROK_TUNNEL.lock().unwrap_or_else(|e| e.into_inner()) = None;
-
-    // Keep the ngrok session alive in NGROK_SESSION for reuse on restart.
+    // Keep the ngrok session alive in NGROK_SESSION — closed on next start.
     // Free tier allows only one session — closing and reconnecting causes auth failures.
     // The tunnel listener thread has already exited (shutdown flag set), so the
     // endpoint goes offline. On restart, we reuse the existing session.
@@ -180,26 +190,18 @@ pub fn companion_status() -> serde_json::Value {
     }
 }
 
-/// ngrok tunnel listener wrapper that can be sent between threads.
-pub struct NgrokTunnelListener {
-    rt: tokio::runtime::Runtime,
-    // The actual listener is consumed by the accept loop
-}
-
-/// Start the ngrok tunnel. Returns the URL and a runtime handle.
-/// Reuses existing ngrok session if available (avoids one-session-per-account limit on free tier).
-fn start_ngrok_tunnel(ngrok_token: &str) -> Result<(String, tokio::runtime::Runtime), String> {
+/// Start the ngrok tunnel using listen_and_forward to proxy to a local port.
+/// Returns the public URL and the local port the companion HTTP server listens on.
+fn start_ngrok_tunnel(ngrok_token: &str, local_port: u16) -> Result<(String, tokio::runtime::Runtime), String> {
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
 
     let token = ngrok_token.to_string();
     let url = rt.block_on(async {
-        // Close any existing session before creating a new one
-        // (ngrok free tier allows only 1 concurrent session)
+        // Close any existing session
         if let Some(mut old_session) = NGROK_SESSION.lock().unwrap_or_else(|e| e.into_inner()).take() {
             log_debug!("[companion] Closing previous ngrok session...");
             let _ = old_session.close().await;
-            // Brief delay for ngrok to release the session slot
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
 
@@ -210,18 +212,22 @@ fn start_ngrok_tunnel(ngrok_token: &str) -> Result<(String, tokio::runtime::Runt
             .await
             .map_err(|e| format!("ngrok connect failed: {}", e))?;
 
+        // Use listen_and_forward — ngrok handles connection proxying to our local server
         use ngrok::config::TunnelBuilder;
-        let tunnel = session
+        let forward_url = url::Url::parse(&format!("http://localhost:{}", local_port))
+            .map_err(|e| format!("Invalid forward URL: {}", e))?;
+
+        let listener = session
             .http_endpoint()
-            .listen()
+            .listen_and_forward(forward_url)
             .await
             .map_err(|e| format!("ngrok tunnel failed: {}", e))?;
 
-        use ngrok::tunnel::EndpointInfo;
-        let url = tunnel.url().to_string();
-
+        let url = listener.url().to_string();
         NGROK_SESSION.lock().unwrap_or_else(|e| e.into_inner()).replace(session);
-        NGROK_TUNNEL.lock().unwrap_or_else(|e| e.into_inner()).replace(tunnel);
+
+        // The listener keeps running as long as the runtime is alive
+        // No need to store it — it runs in the background automatically
 
         Ok::<String, String>(url)
     })?;
@@ -229,126 +235,61 @@ fn start_ngrok_tunnel(ngrok_token: &str) -> Result<(String, tokio::runtime::Runt
     Ok((url, rt))
 }
 
-/// Global storage for the ngrok tunnel (moved to listener thread)
-static NGROK_TUNNEL: Mutex<Option<ngrok::tunnel::HttpTunnel>> = Mutex::new(None);
 static NGROK_SESSION: Mutex<Option<ngrok::Session>> = Mutex::new(None);
 
-/// Accept connections from the ngrok tunnel and handle them as HTTP requests.
-/// The tokio runtime is kept alive by holding it in this thread.
-fn run_ngrok_listener(rt: tokio::runtime::Runtime, _keepalive: std::sync::mpsc::Receiver<()>) {
-    // Take the tunnel from global storage
-    let tunnel = NGROK_TUNNEL.lock().unwrap_or_else(|e| e.into_inner()).take();
-    let Some(mut tunnel) = tunnel else {
-        log_debug!("[companion] No tunnel available for listener");
-        return;
-    };
+/// Local companion HTTP server — accepts connections from ngrok (forwarded via listen_and_forward).
+/// Same blocking TCP pattern as agent_hooks.rs.
+fn run_local_listener(listener: std::net::TcpListener) {
+    use std::io::{Read, Write};
 
-    rt.block_on(async {
-        loop {
-            // Check shutdown
-            {
-                let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(ref state) = *guard {
-                    if state.shutdown.load(Ordering::Relaxed) { break; }
-                }
-            } // lock released before await
-
-            // Accept a connection from the ngrok tunnel
-            let conn = match tunnel.try_next().await {
-                Ok(Some(conn)) => conn,
-                Ok(None) => {
-                    log_debug!("[companion] Tunnel closed");
-                    break;
-                }
-                Err(e) => {
-                    log_debug!("[companion] Tunnel accept error: {}", e);
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    continue;
-                }
-            };
-
-            // Spawn each connection as a separate task so the accept loop keeps running
-            tokio::spawn(async move {
-                use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-                let mut stream = conn;
-                let mut buf = vec![0u8; 65536];
-                let n = match stream.read(&mut buf).await {
-                    Ok(0) => return,
-                    Ok(n) => n,
-                    Err(_) => return,
-                };
-
-                let request = String::from_utf8_lossy(&buf[..n]).to_string();
-                let first_line = request.lines().next().unwrap_or("");
-                let parts: Vec<&str> = first_line.split_whitespace().collect();
-                let (method, path) = match parts.as_slice() {
-                    [m, p, ..] => (*m, *p),
-                    _ => return,
-                };
-
-                let headers = proxy::parse_headers(&request);
-                let remote_addr = "ngrok".to_string();
-                let clean_path = path.split('?').next().unwrap_or("");
-
-                // Build response — lock STATE briefly, don't hold across proxy call
-                let response_body = {
-                    let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(ref state) = *guard {
-                        if clean_path == "/companion/auth" && method == "POST" {
-                            handle_auth_inline(state, &headers, &remote_addr)
-                        } else {
-                            let auth_header = headers.get("authorization").cloned().unwrap_or_default();
-                            match proxy::parse_query(path).get("token").cloned()
-                                .or_else(|| crate::companion::auth::parse_bearer(&auth_header))
-                            {
-                                Some(token) => {
-                                    match crate::companion::auth::validate_bearer(&token, state) {
-                                        Ok(_) => {
-                                            let query = proxy::parse_query(path);
-                                            let project = query.get("project").cloned().unwrap_or_default();
-                                            // Drop the lock before making the blocking proxy call
-                                            let hook_port = state.hook_port;
-                                            let hook_token = state.hook_token.clone();
-                                            drop(guard);
-                                            // Proxy without holding the lock
-                                            let proxy_state_stub = types::CompanionState {
-                                                tunnel_url: Mutex::new(None),
-                                                sessions: Mutex::new(HashMap::new()),
-                                                ws_clients: Mutex::new(Vec::new()),
-                                                shutdown: AtomicBool::new(false),
-                                                hook_port,
-                                                hook_token,
-                                                _tunnel_keepalive: Mutex::new(None),
-                                            };
-                                            match proxy::proxy_to_internal(&proxy_state_stub, method, path, &headers, &request, &project) {
-                                                Ok(data) => format_response(200, &data),
-                                                Err(e) => format_response(400, &serde_json::json!({"ok": false, "error": e})),
-                                            }
-                                        }
-                                        Err(msg) => {
-                                            let status = if msg.contains("Rate limit") { 429 } else { 401 };
-                                            format_response(status, &serde_json::json!({"ok": false, "error": msg}))
-                                        }
-                                    }
-                                }
-                                None => format_response(401, &serde_json::json!({"ok": false, "error": "Missing authorization"})),
-                            }
-                        }
-                    } else {
-                        format_response(503, &serde_json::json!({"ok": false, "error": "Companion not initialized"}))
-                    }
-                };
-
-                // Write response — don't call shutdown(), let the stream drop naturally
-                let _ = stream.write_all(response_body.as_bytes()).await;
-                let _ = stream.flush().await;
-                // Stream drops here, closing the connection cleanly
-            });
+    for stream in listener.incoming() {
+        // Check shutdown
+        {
+            let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(ref state) = *guard {
+                if state.shutdown.load(Ordering::Relaxed) { break; }
+            }
         }
-    });
 
-    log_debug!("[companion] Listener thread ended");
+        let Ok(mut stream) = stream else { continue };
+        let remote_addr = stream.peer_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|_| "ngrok".to_string());
+
+        // Read HTTP request
+        let mut buf = [0u8; 65536];
+        let n = match stream.read(&mut buf) {
+            Ok(0) => continue,
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let request = String::from_utf8_lossy(&buf[..n]).to_string();
+        let first_line = request.lines().next().unwrap_or("");
+        let parts: Vec<&str> = first_line.split_whitespace().collect();
+        let (method, path) = match parts.as_slice() {
+            [m, p, ..] => (*m, *p),
+            _ => continue,
+        };
+
+        let headers = proxy::parse_headers(&request);
+
+        let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref state) = *guard {
+            // Check for WebSocket upgrade
+            let upgrade = headers.get("upgrade").map(|v| v.to_lowercase());
+            if upgrade.as_deref() == Some("websocket") {
+                drop(guard);
+                websocket::handle_ws_upgrade(stream, path, unsafe {
+                    &*(STATE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().unwrap() as *const CompanionState)
+                });
+                continue;
+            }
+
+            proxy::handle_request(&mut stream, state, method, path, &headers, &request, &remote_addr);
+        }
+    }
+
+    log_debug!("[companion] Local listener ended");
     RUNNING.store(false, Ordering::Relaxed);
 }
 
