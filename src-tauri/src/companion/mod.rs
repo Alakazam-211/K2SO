@@ -130,14 +130,22 @@ pub fn stop_companion() -> Result<(), String> {
     // Clear the state entirely so a fresh one can be created on restart
     *STATE.lock().unwrap() = None;
 
-    // Clear any leftover tunnel handle
+    // Clear tunnel handle
     *NGROK_TUNNEL.lock().unwrap() = None;
+
+    // Explicitly close the ngrok session to release the endpoint immediately
+    // This prevents ERR_NGROK_334 ("endpoint already online") on restart
+    if let Some(mut session) = NGROK_SESSION.lock().unwrap().take() {
+        log_debug!("[companion] Closing ngrok session...");
+        if let Ok(rt) = tokio::runtime::Runtime::new() {
+            rt.block_on(async {
+                let _ = session.close().await;
+            });
+        }
+    }
 
     RUNNING.store(false, Ordering::Relaxed);
     log_debug!("[companion] Stopped");
-
-    // Give the tunnel thread time to shut down and release the ngrok endpoint
-    std::thread::sleep(std::time::Duration::from_secs(2));
 
     Ok(())
 }
@@ -208,8 +216,10 @@ fn start_ngrok_tunnel(ngrok_token: &str) -> Result<(String, tokio::runtime::Runt
         use ngrok::tunnel::EndpointInfo;
         let url = tunnel.url().to_string();
 
-        // Store the tunnel in a global so the accept loop can use it
-        // We'll move the tunnel to the listener thread
+        // Store the session and tunnel in globals so:
+        // - the accept loop can consume the tunnel
+        // - stop_companion can close the session to release the endpoint
+        NGROK_SESSION.lock().unwrap().replace(session);
         NGROK_TUNNEL.lock().unwrap().replace(tunnel);
 
         Ok::<String, String>(url)
@@ -220,6 +230,7 @@ fn start_ngrok_tunnel(ngrok_token: &str) -> Result<(String, tokio::runtime::Runt
 
 /// Global storage for the ngrok tunnel (moved to listener thread)
 static NGROK_TUNNEL: Mutex<Option<ngrok::tunnel::HttpTunnel>> = Mutex::new(None);
+static NGROK_SESSION: Mutex<Option<ngrok::Session>> = Mutex::new(None);
 
 /// Accept connections from the ngrok tunnel and handle them as HTTP requests.
 /// The tokio runtime is kept alive by holding it in this thread.
