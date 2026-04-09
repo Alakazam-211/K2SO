@@ -231,10 +231,6 @@ fn start_ngrok_tunnel(ngrok_token: &str, local_port: u16) -> Result<(String, tok
     let token = ngrok_token.to_string();
     let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
 
-    // The runtime lives on this thread for the tunnel's lifetime.
-    // It's stored in a static so the forwarder's background tasks keep running.
-    static TUNNEL_RT: Mutex<Option<tokio::runtime::Runtime>> = Mutex::new(None);
-
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
@@ -276,22 +272,32 @@ fn start_ngrok_tunnel(ngrok_token: &str, local_port: u16) -> Result<(String, tok
             Ok::<String, String>(url)
         });
 
-        // Store the runtime so it stays alive (forwarder needs it)
-        if result.is_ok() {
-            *TUNNEL_RT.lock().unwrap_or_else(|e| e.into_inner()) = Some(rt);
-        }
-
         let _ = tx.send(result);
-        // Thread exits but runtime lives in TUNNEL_RT static
+
+        // Keep the runtime alive — the forwarder's background tasks need it.
+        // block_on a future that never completes (waits for shutdown signal).
+        if RUNNING.load(Ordering::Relaxed) || CANCEL_START.load(Ordering::Relaxed) == false {
+            rt.block_on(async {
+                // Park this thread until the companion is stopped
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                    if !RUNNING.load(Ordering::Relaxed) { break; }
+                }
+            });
+        }
+        log_debug!("[companion] Tunnel runtime thread exiting");
     });
 
-    // Wait up to 20 seconds
+    // Wait up to 20 seconds for the tunnel URL
     match rx.recv_timeout(std::time::Duration::from_secs(20)) {
         Ok(Ok(url)) => {
-            // Create a dummy runtime for the keepalive thread (the real one is in TUNNEL_RT)
-            let dummy_rt = tokio::runtime::Runtime::new()
-                .map_err(|e| format!("Failed to create keepalive runtime: {}", e))?;
-            Ok((url, dummy_rt))
+            // The real runtime stays alive on the spawned thread (block_on loop).
+            // Create a lightweight runtime for the keepalive thread contract.
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .map_err(|e| format!("Failed to create runtime: {}", e))?;
+            Ok((url, rt))
         }
         Ok(Err(e)) => Err(e),
         Err(_) => Err("ngrok connect timed out (20s) — old session may still be active".to_string()),
