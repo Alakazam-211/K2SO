@@ -448,6 +448,26 @@ pub fn run() {
                 }
             }
 
+            // Auto-start companion API if configured
+            {
+                let settings = commands::settings::read_settings();
+                if settings.companion.auto_start
+                    && !settings.companion.username.is_empty()
+                    && !settings.companion.password_hash.is_empty()
+                    && !settings.companion.ngrok_auth_token.is_empty()
+                {
+                    let handle = app.handle().clone();
+                    std::thread::spawn(move || {
+                        // Brief delay to let the hook server fully initialize
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        match companion::start_companion(handle) {
+                            Ok(url) => log_debug!("[companion] Auto-started: {}", url),
+                            Err(e) => log_debug!("[companion] Auto-start failed: {}", e),
+                        }
+                    });
+                }
+            }
+
             // Clean up any stale .tmp files from interrupted model downloads
             llm::download::cleanup_stale_downloads();
 

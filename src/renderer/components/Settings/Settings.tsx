@@ -6119,6 +6119,7 @@ function LocalLLMSettings(): React.JSX.Element {
 
 function CompanionSection(): React.JSX.Element {
   const [enabled, setEnabled] = useState(false)
+  const [autoStart, setAutoStart] = useState(false)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [passwordSet, setPasswordSet] = useState(false)
@@ -6139,6 +6140,7 @@ function CompanionSection(): React.JSX.Element {
         setPasswordSet(!!(c.passwordHash))
         setNgrokToken(c.ngrokAuthToken || '')
         setEnabled(c.enabled || false)
+        setAutoStart(c.autoStart || false)
       } catch { /* ignore */ }
       try {
         const status = await invoke<any>('companion_status')
@@ -6259,6 +6261,23 @@ function CompanionSection(): React.JSX.Element {
           <span className="text-xs text-[var(--color-text-secondary)]">Enable Companion</span>
           <button onClick={handleToggle} disabled={loading} className={`w-7 h-3.5 flex items-center transition-colors no-drag cursor-pointer flex-shrink-0 ${enabled ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'} ${loading ? 'opacity-50' : ''}`}>
             <span className={`w-2.5 h-2.5 bg-white block transition-transform ${enabled ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
+          </button>
+        </div>
+
+        <div className="flex items-center justify-between py-2.5 border-b border-[var(--color-border)]">
+          <div>
+            <span className="text-xs text-[var(--color-text-secondary)]">Start on Launch</span>
+            <p className="text-[10px] text-[var(--color-text-muted)]">Automatically connect when K2SO opens</p>
+          </div>
+          <button
+            onClick={() => {
+              const next = !autoStart
+              setAutoStart(next)
+              invoke('settings_update', { updates: { companion: { autoStart: next } } }).catch(() => {})
+            }}
+            className={`w-7 h-3.5 flex items-center transition-colors no-drag cursor-pointer flex-shrink-0 ${autoStart ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'}`}
+          >
+            <span className={`w-2.5 h-2.5 bg-white block transition-transform ${autoStart ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
           </button>
         </div>
 

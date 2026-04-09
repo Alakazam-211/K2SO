@@ -147,6 +147,8 @@ pub struct CompanionSettings {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
+    pub auto_start: bool,
+    #[serde(default)]
     pub username: String,
     #[serde(default)]
     pub password_hash: String,
