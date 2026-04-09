@@ -80,6 +80,86 @@ fn urldecode(s: &str) -> String {
     String::from_utf8_lossy(&result).to_string()
 }
 
+/// Map a WebSocket method name to an internal route.
+/// Returns (internal_route, is_global) — global routes don't need a project param.
+pub fn map_ws_method(method: &str) -> Option<(&'static str, bool)> {
+    match method {
+        "projects.list"    => Some(("/cli/companion/projects", true)),
+        "projects.summary" => Some(("/cli/companion/projects-summary", true)),
+        "sessions.list"    => Some(("/cli/companion/sessions", true)),
+        "agents.list"      => Some(("/cli/agents/list", false)),
+        "agents.running"   => Some(("/cli/agents/running", false)),
+        "agents.work"      => Some(("/cli/agents/work", false)),
+        "agents.wake"      => Some(("/cli/agents/launch", false)),
+        "reviews.list"     => Some(("/cli/reviews", false)),
+        "review.approve"   => Some(("/cli/review/approve", false)),
+        "review.reject"    => Some(("/cli/review/reject", false)),
+        "review.feedback"  => Some(("/cli/review/feedback", false)),
+        "terminal.read"    => Some(("/cli/terminal/read", false)),
+        "terminal.write"   => Some(("/cli/terminal/write", false)),
+        "status"           => Some(("/cli/mode", false)),
+        _ => None,
+    }
+}
+
+/// Execute a WebSocket method by forwarding to the internal K2SO HTTP server.
+/// Converts method params to query params on the internal request.
+pub fn dispatch_ws_method(
+    state: &CompanionState,
+    method: &str,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let (internal_route, is_global) = map_ws_method(method)
+        .ok_or_else(|| format!("Unknown method: {}", method))?;
+
+    let project = params.get("project").and_then(|v| v.as_str()).unwrap_or("");
+    if !is_global && project.is_empty() {
+        return Err("Missing 'project' param".to_string());
+    }
+
+    // Build query params
+    let mut query = vec![
+        format!("token={}", urlencode(&state.hook_token)),
+    ];
+    if !project.is_empty() {
+        query.push(format!("project={}", urlencode(project)));
+    }
+
+    // Forward all params (except project/token which are already handled)
+    if let Some(obj) = params.as_object() {
+        for (k, v) in obj {
+            if k == "project" || k == "token" { continue; }
+            let val = match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            query.push(format!("{}={}", urlencode(k), urlencode(&val)));
+        }
+    }
+
+    let url = format!(
+        "http://127.0.0.1:{}{}?{}",
+        state.hook_port, internal_route, query.join("&")
+    );
+
+    let resp = reqwest::blocking::get(&url)
+        .map_err(|e| format!("Internal request failed: {}", e))?;
+
+    let status = resp.status();
+    let text = resp.text().unwrap_or_default();
+
+    if status.is_success() {
+        let data: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or(serde_json::Value::String(text));
+        Ok(serde_json::json!({"ok": true, "data": data}))
+    } else {
+        let error: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or(serde_json::json!({"error": text}));
+        let msg = error.get("error").and_then(|e| e.as_str()).unwrap_or("Internal error");
+        Err(msg.to_string())
+    }
+}
+
 /// URL-encode a string for query parameters.
 fn urlencode(s: &str) -> String {
     let mut result = String::new();

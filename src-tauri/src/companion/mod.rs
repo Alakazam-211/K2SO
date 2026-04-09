@@ -486,6 +486,7 @@ fn handle_auth_inline(state: &CompanionState, headers: &HashMap<String, String>,
 
 /// Register Tauri event listeners to broadcast to WebSocket clients.
 fn register_event_listeners(app_handle: &AppHandle) {
+    // Forward agent/project events to all WS clients
     let events = ["agent:lifecycle", "agent:reply", "sync:projects"];
     for event_name in &events {
         let name = event_name.to_string();
@@ -493,60 +494,89 @@ fn register_event_listeners(app_handle: &AppHandle) {
             if let Some(ref state) = *STATE.lock().unwrap_or_else(|e| e.into_inner()) {
                 let payload = event.payload();
                 let ws_event = serde_json::json!({
-                    "type": name,
+                    "event": name,
                     "data": payload,
                 });
                 websocket::broadcast_event(state, &ws_event.to_string());
             }
         });
     }
+
+    // Terminal grid updates are handled by run_terminal_polling() which reads
+    // CompactLine data directly from the terminal manager at 10fps and broadcasts
+    // to subscribed WS clients. No Tauri event listener needed.
 }
 
-/// Poll terminal output for subscribed WebSocket clients.
+/// Poll terminal grids for subscribed WebSocket clients.
+/// Reads CompactLine data directly from the terminal manager (no HTTP roundtrip).
+/// Broadcasts both legacy plain-text format and rich CompactLine grid updates.
 fn run_terminal_polling(app_handle: &AppHandle) {
-    let mut last_snapshots: HashMap<String, String> = HashMap::new();
+    use tauri::Manager;
+    let mut last_hashes: HashMap<String, u64> = HashMap::new();
 
     loop {
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // 100ms interval = ~10fps (throttled for mobile bandwidth)
+        std::thread::sleep(std::time::Duration::from_millis(100));
 
         if !RUNNING.load(Ordering::Relaxed) { break; }
 
-        let guard = STATE.lock().unwrap_or_else(|e| e.into_inner()); let state = match guard.as_ref() {
+        let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = match guard.as_ref() {
             Some(s) => s,
             None => break,
         };
 
         // Collect all subscribed terminal IDs
         let terminal_ids: Vec<String> = {
-            let clients = state.ws_clients.lock().unwrap();
+            let clients = state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
             let mut ids = std::collections::HashSet::new();
             for client in clients.iter() {
-                ids.extend(client.subscribed_terminals.iter().cloned());
+                if client.authenticated {
+                    ids.extend(client.subscribed_terminals.iter().cloned());
+                }
             }
             ids.into_iter().collect()
         };
 
         if terminal_ids.is_empty() { continue; }
 
-        // Poll each terminal
-        for tid in &terminal_ids {
-            let url = format!(
-                "http://127.0.0.1:{}/cli/terminal/read?token={}&id={}&lines=50",
-                state.hook_port,
-                crate::agent_hooks::get_token(),
-                tid
-            );
+        // Get grid snapshots directly from terminal manager
+        let app_state = match app_handle.try_state::<crate::state::AppState>() {
+            Some(s) => s,
+            None => continue,
+        };
 
-            if let Ok(resp) = reqwest::blocking::get(&url) {
-                if let Ok(text) = resp.text() {
-                    let prev = last_snapshots.get(tid).cloned().unwrap_or_default();
-                    if text != prev {
-                        // Content changed — broadcast diff
-                        let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
-                        websocket::broadcast_terminal_output(state, tid, &lines);
-                        last_snapshots.insert(tid.clone(), text);
+        let manager = app_state.terminal_manager.lock();
+
+        for tid in &terminal_ids {
+            if let Ok(grid) = manager.get_grid(tid) {
+                // Simple change detection: hash the grid text content
+                let hash = {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    for line in &grid.lines {
+                        line.text.hash(&mut hasher);
+                        line.row.hash(&mut hasher);
                     }
+                    grid.cursor_col.hash(&mut hasher);
+                    grid.cursor_row.hash(&mut hasher);
+                    hasher.finish()
+                };
+
+                let prev_hash = last_hashes.get(tid).copied().unwrap_or(0);
+                if hash == prev_hash { continue; }
+                last_hashes.insert(tid.clone(), hash);
+
+                // Broadcast rich CompactLine grid update
+                if let Ok(grid_json) = serde_json::to_string(&grid) {
+                    websocket::broadcast_terminal_grid(state, tid, &grid_json);
                 }
+
+                // Also broadcast legacy plain-text for backwards compat
+                let lines: Vec<String> = grid.lines.iter()
+                    .map(|l| l.text.clone())
+                    .collect();
+                websocket::broadcast_terminal_output(state, tid, &lines);
             }
         }
     }

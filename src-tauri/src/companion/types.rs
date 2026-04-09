@@ -6,7 +6,7 @@ use std::time::Instant;
 /// Core state for the companion API proxy.
 /// Stored in a module-level OnceLock, accessed by the proxy listener thread.
 pub struct CompanionState {
-    /// The public ngrok tunnel URL (e.g., "https://abc123.ngrok.io")
+    /// The public ngrok tunnel URL (e.g., "https://k2.ngrok.app")
     pub tunnel_url: Mutex<Option<String>>,
     /// Active authenticated sessions (token → session)
     pub sessions: Mutex<HashMap<String, Session>>,
@@ -63,8 +63,14 @@ impl Session {
 
 /// A connected WebSocket client.
 pub struct WsClient {
+    /// Unique client ID (UUID)
+    pub client_id: String,
     pub session_token: String,
+    /// Whether this client has authenticated via the WS auth message
+    pub authenticated: bool,
     pub subscribed_terminals: HashSet<String>,
     /// Channel to send messages to the WS writer thread
     pub sender: std::sync::mpsc::Sender<String>,
+    /// Last time we received any message from this client
+    pub last_seen: Instant,
 }
