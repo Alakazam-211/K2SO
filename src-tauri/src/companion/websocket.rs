@@ -1,5 +1,5 @@
 use std::net::TcpStream;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::mpsc;
 use std::collections::HashSet;
 use std::time::Instant;
 use tungstenite::{accept, Message};
@@ -61,48 +61,39 @@ pub fn handle_ws_upgrade(
         });
     }
 
-    // Wrap WebSocket in Arc<Mutex<>> so reader and writer threads can share it
-    let ws = Arc::new(Mutex::new(ws));
-
-    // Writer thread: receives events from channel, sends to WebSocket
-    let ws_writer = Arc::clone(&ws);
-    std::thread::spawn(move || {
-        while let Ok(msg) = rx.recv() {
-            let Ok(mut ws) = ws_writer.lock() else { break };
-            if ws.send(Message::Text(msg)).is_err() {
-                break;
-            }
-        }
-    });
-
-    // Heartbeat thread: send heartbeat every 30s to keep ngrok tunnel alive
-    let heartbeat_tx = tx.clone();
-    let heartbeat_state = unsafe { &*(state as *const CompanionState) };
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(30));
-            if heartbeat_state.shutdown.load(std::sync::atomic::Ordering::Relaxed) { break; }
-            let msg = serde_json::json!({"event": "heartbeat"}).to_string();
-            if heartbeat_tx.send(msg).is_err() { break; }
-        }
-    });
-
-    // Reader thread: processes incoming messages
-    let ws_reader = Arc::clone(&ws);
-    let reader_state = unsafe {
-        &*(state as *const CompanionState)
-    };
+    // Split WebSocket into read and write halves via the underlying TcpStream.
+    // tungstenite wraps a Read+Write stream — we can't split it directly.
+    // Instead, we run BOTH read and write on the SAME thread, using non-blocking
+    // channel receives between blocking reads.
+    let reader_state = unsafe { &*(state as *const CompanionState) };
     let reader_token = client_token.clone();
+
     std::thread::spawn(move || {
+        let mut ws = ws;
         let mut authenticated = pre_authenticated;
         let mut session_token = reader_token;
+        let mut last_heartbeat = Instant::now();
+
+        // Set a read timeout so we can interleave writes between reads
+        let _ = ws.get_ref().set_read_timeout(Some(std::time::Duration::from_millis(50)));
 
         loop {
-            let msg = {
-                let Ok(mut ws) = ws_reader.lock() else { break };
-                ws.read()
-            };
-            match msg {
+            // Phase 1: Try to send any pending outbound messages (non-blocking)
+            while let Ok(msg) = rx.try_recv() {
+                if ws.send(Message::Text(msg)).is_err() {
+                    return; // connection dead
+                }
+            }
+
+            // Send heartbeat every 30s
+            if last_heartbeat.elapsed() >= std::time::Duration::from_secs(30) {
+                let hb = serde_json::json!({"event": "heartbeat"}).to_string();
+                if ws.send(Message::Text(hb)).is_err() { return; }
+                last_heartbeat = Instant::now();
+            }
+
+            // Phase 2: Try to read one incoming message (with 50ms timeout)
+            match ws.read() {
                 Ok(Message::Text(text)) => {
                     let Ok(msg) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
 
@@ -207,10 +198,14 @@ pub fn handle_ws_upgrade(
                     }
                 }
                 Ok(Message::Ping(data)) => {
-                    let Ok(mut ws) = ws_reader.lock() else { break };
                     let _ = ws.send(Message::Pong(data));
                 }
-                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(Message::Close(_)) => break,
+                Err(tungstenite::Error::Io(ref e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Read timeout — loop back to send pending messages, then retry read
+                    continue;
+                }
+                Err(_) => break,
                 _ => {}
             }
         }
