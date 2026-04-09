@@ -1,6 +1,6 @@
 [package]
 name = "k2so"
-version = "0.28.1"
+version = "0.28.2"
 edition = "2021"
 description = "Developer workspace with terminals, git worktrees, and agent presets"
 license = "MIT"
@@ -52,7 +52,7 @@ getrandom = "0.2"
 
 # Companion API (ngrok tunnel + auth)
 futures = "0.3"
-ngrok = "0.14"
+ngrok = "0.18"
 argon2 = "0.5"
 tungstenite = "0.24"
 
