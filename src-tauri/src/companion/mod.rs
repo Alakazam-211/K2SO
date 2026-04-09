@@ -388,7 +388,34 @@ fn run_local_listener(listener: std::net::TcpListener) {
                 .map(|a| a.to_string())
                 .unwrap_or_else(|_| "ngrok".to_string());
 
-            // Read HTTP request
+            // Peek at the request to detect WebSocket upgrade without consuming data.
+            // tungstenite::accept() needs to read the upgrade request itself.
+            let mut peek_buf = [0u8; 4096];
+            let peek_n = match stream.peek(&mut peek_buf) {
+                Ok(0) => return true,
+                Ok(n) => n,
+                Err(_) => return true,
+            };
+            let peek_str = String::from_utf8_lossy(&peek_buf[..peek_n]);
+            let is_websocket = peek_str.to_lowercase().contains("upgrade: websocket");
+
+            if is_websocket {
+                // Extract path from the first line (before consuming)
+                let path = peek_str.lines().next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/companion/ws");
+                let path = path.to_string();
+                // Pass unread stream to tungstenite — it reads the upgrade request itself
+                let ws_guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(ref ws_state) = *ws_guard {
+                    let state_ptr = ws_state as *const CompanionState;
+                    drop(ws_guard);
+                    websocket::handle_ws_upgrade(stream, &path, unsafe { &*state_ptr });
+                }
+                return true;
+            }
+
+            // Not WebSocket — read the full request for HTTP handling
             let mut buf = [0u8; 65536];
             let n = match stream.read(&mut buf) {
                 Ok(0) => return true,
@@ -407,20 +434,6 @@ fn run_local_listener(listener: std::net::TcpListener) {
 
             let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref state) = *guard {
-                // Check for WebSocket upgrade
-                let upgrade = headers.get("upgrade").map(|v| v.to_lowercase());
-                if upgrade.as_deref() == Some("websocket") {
-                    drop(guard);
-                    // Safe state access for WebSocket — check STATE is still Some
-                    let ws_guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(ref ws_state) = *ws_guard {
-                        let state_ptr = ws_state as *const CompanionState;
-                        drop(ws_guard);
-                        websocket::handle_ws_upgrade(stream, path, unsafe { &*state_ptr });
-                    }
-                    return true;
-                }
-
                 proxy::handle_request(&mut stream, state, method, path, &headers, &request, &remote_addr);
             }
             true // continue loop

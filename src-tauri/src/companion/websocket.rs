@@ -22,7 +22,9 @@ pub fn handle_ws_upgrade(
     let query = parse_query(path);
     let initial_token = query.get("token").cloned();
 
-    // Upgrade to WebSocket
+    // Upgrade to WebSocket.
+    // The stream must NOT have been read yet — tungstenite::accept reads the
+    // HTTP upgrade request itself and sends the 101 Switching Protocols response.
     let ws = match accept(stream) {
         Ok(ws) => ws,
         Err(e) => {
