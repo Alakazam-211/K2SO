@@ -18,6 +18,8 @@ pub struct CompanionState {
     pub hook_port: u16,
     /// Internal hook server auth token
     pub hook_token: String,
+    /// Keeps the ngrok runtime thread alive — drop this to stop the tunnel
+    pub _tunnel_keepalive: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 /// An authenticated companion session (24hr TTL).

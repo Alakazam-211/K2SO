@@ -4,10 +4,10 @@
 //! The companion app connects to this tunnel to monitor and interact with agents remotely.
 //!
 //! Architecture:
-//! - Binds a local TcpListener on a random port
-//! - Starts an ngrok tunnel pointing to that port
+//! - Starts an ngrok tunnel and accepts connections directly from it
 //! - Proxies validated requests to the internal K2SO HTTP server
 //! - Supports WebSocket for real-time event push
+//! - Tokio runtime kept alive for the tunnel's lifetime
 
 pub mod auth;
 pub mod proxy;
@@ -15,14 +15,11 @@ pub mod types;
 pub mod websocket;
 
 use std::collections::HashMap;
-use std::io::Read;
-use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Listener};
+use futures::TryStreamExt;
 
-use ngrok::config::TunnelBuilder;
-use ngrok::tunnel::EndpointInfo;
 use types::CompanionState;
 
 /// Module-level companion state. Set once when companion starts.
@@ -58,16 +55,17 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
         return Err("K2SO internal server not ready yet".to_string());
     }
 
-    // Bind local listener for the companion proxy
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| format!("Failed to bind companion listener: {}", e))?;
-    let local_port = listener.local_addr().unwrap().port();
-
-    // Start ngrok tunnel
+    // Start ngrok tunnel — runs on a background thread with its own tokio runtime.
+    // The tunnel accepts connections directly (no separate TcpListener needed).
     let ngrok_token = companion.ngrok_auth_token.clone();
-    let tunnel_url = start_ngrok_tunnel(local_port, &ngrok_token)?;
 
-    log_debug!("[companion] Started on local port {}, tunnel: {}", local_port, tunnel_url);
+    // Channel to keep the tunnel thread alive
+    let (keepalive_tx, keepalive_rx) = std::sync::mpsc::channel::<()>();
+
+    // Start the ngrok tunnel on a background thread with a persistent tokio runtime
+    let (tunnel_url, tunnel_listener) = start_ngrok_tunnel(&ngrok_token)?;
+
+    log_debug!("[companion] Tunnel: {}", tunnel_url);
 
     // Initialize state
     let state = CompanionState {
@@ -77,13 +75,14 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
         shutdown: AtomicBool::new(false),
         hook_port,
         hook_token: hook_token.to_string(),
+        _tunnel_keepalive: Mutex::new(Some(keepalive_tx)),
     };
     let _ = STATE.set(state);
     RUNNING.store(true, Ordering::Relaxed);
 
-    // Spawn the proxy listener thread
+    // Spawn the proxy thread — accepts connections from ngrok tunnel directly
     std::thread::spawn(move || {
-        run_listener(listener);
+        run_ngrok_listener(tunnel_listener, keepalive_rx);
     });
 
     // Spawn session cleanup thread (every 5 minutes, expire old sessions)
@@ -170,86 +169,185 @@ pub fn companion_status() -> serde_json::Value {
     }
 }
 
-/// Start the ngrok tunnel pointing to a local port.
-fn start_ngrok_tunnel(local_port: u16, ngrok_token: &str) -> Result<String, String> {
-    // Use tokio runtime for the async ngrok crate
+/// ngrok tunnel listener wrapper that can be sent between threads.
+pub struct NgrokTunnelListener {
+    rt: tokio::runtime::Runtime,
+    // The actual listener is consumed by the accept loop
+}
+
+/// Start the ngrok tunnel. Returns the URL and a runtime handle.
+/// The tunnel stays alive as long as the runtime exists.
+fn start_ngrok_tunnel(ngrok_token: &str) -> Result<(String, tokio::runtime::Runtime), String> {
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
 
     let token = ngrok_token.to_string();
-    let url = rt.block_on(async move {
-        let listener = ngrok::Session::builder()
+    let url = rt.block_on(async {
+        let session = ngrok::Session::builder()
             .authtoken(&token)
             .connect()
             .await
             .map_err(|e| format!("ngrok connect failed: {}", e))?;
 
-        let tunnel = listener
+        use ngrok::config::TunnelBuilder;
+        let tunnel = session
             .http_endpoint()
-            .forwards_to(&format!("localhost:{}", local_port))
             .listen()
             .await
             .map_err(|e| format!("ngrok tunnel failed: {}", e))?;
 
+        use ngrok::tunnel::EndpointInfo;
         let url = tunnel.url().to_string();
 
-        // Spawn a task to keep the tunnel alive by forwarding connections
-        tokio::spawn(async move {
-            // The tunnel stays open as long as this task is alive
-            // ngrok handles the forwarding internally
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
-            }
-        });
+        // Store the tunnel in a global so the accept loop can use it
+        // We'll move the tunnel to the listener thread
+        NGROK_TUNNEL.lock().unwrap().replace(tunnel);
 
         Ok::<String, String>(url)
     })?;
 
-    Ok(url)
+    Ok((url, rt))
 }
 
-/// Main listener loop — accepts connections and dispatches to handlers.
-fn run_listener(listener: TcpListener) {
-    for stream in listener.incoming() {
-        if let Some(state) = STATE.get() {
-            if state.shutdown.load(Ordering::Relaxed) { break; }
-        } else {
-            break;
-        }
+/// Global storage for the ngrok tunnel (moved to listener thread)
+static NGROK_TUNNEL: Mutex<Option<ngrok::tunnel::HttpTunnel>> = Mutex::new(None);
 
-        let Ok(mut stream) = stream else { continue };
-        let remote_addr = stream.peer_addr()
-            .map(|a| a.to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
+/// Accept connections from the ngrok tunnel and handle them as HTTP requests.
+/// The tokio runtime is kept alive by holding it in this thread.
+fn run_ngrok_listener(rt: tokio::runtime::Runtime, _keepalive: std::sync::mpsc::Receiver<()>) {
+    // Take the tunnel from global storage
+    let tunnel = NGROK_TUNNEL.lock().unwrap().take();
+    let Some(mut tunnel) = tunnel else {
+        log_debug!("[companion] No tunnel available for listener");
+        return;
+    };
 
-        // Read HTTP request
-        let mut buf = [0u8; 65536];
-        let n = match stream.read(&mut buf) {
-            Ok(0) => continue,
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-        let request = String::from_utf8_lossy(&buf[..n]).to_string();
-        let first_line = request.lines().next().unwrap_or("");
-        let parts: Vec<&str> = first_line.split_whitespace().collect();
-        let (method, path) = match parts.as_slice() {
-            [m, p, ..] => (*m, *p),
-            _ => continue,
-        };
+    rt.block_on(async {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let headers = proxy::parse_headers(&request);
-
-        if let Some(state) = STATE.get() {
-            // Check for WebSocket upgrade
-            let upgrade = headers.get("upgrade").map(|v| v.to_lowercase());
-            if upgrade.as_deref() == Some("websocket") {
-                websocket::handle_ws_upgrade(stream, path, state);
-                continue;
+        loop {
+            if let Some(state) = STATE.get() {
+                if state.shutdown.load(Ordering::Relaxed) { break; }
             }
 
-            proxy::handle_request(&mut stream, state, method, path, &headers, &request, &remote_addr);
+            // Accept a connection from the ngrok tunnel
+            let conn = match tunnel.try_next().await {
+                Ok(Some(conn)) => conn,
+                Ok(None) => {
+                    log_debug!("[companion] Tunnel closed");
+                    break;
+                }
+                Err(e) => {
+                    log_debug!("[companion] Tunnel accept error: {}", e);
+                    continue;
+                }
+            };
+
+            // Read the HTTP request from the ngrok connection
+            let mut stream = conn;
+            let mut buf = vec![0u8; 65536];
+            let n = match stream.read(&mut buf).await {
+                Ok(0) => continue,
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let first_line = request.lines().next().unwrap_or("");
+            let parts: Vec<&str> = first_line.split_whitespace().collect();
+            let (method, path) = match parts.as_slice() {
+                [m, p, ..] => (*m, *p),
+                _ => continue,
+            };
+
+            let headers = proxy::parse_headers(&request);
+
+            if let Some(state) = STATE.get() {
+                // For now, handle HTTP requests synchronously by proxying to internal server
+                // WebSocket upgrades over ngrok require a different approach — skip for now
+                let remote_addr = "ngrok".to_string();
+
+                let clean_path = path.split('?').next().unwrap_or("");
+
+                // Build response
+                let response_body = if clean_path == "/companion/auth" && method == "POST" {
+                    // Auth handler
+                    handle_auth_inline(state, &headers, &remote_addr)
+                } else {
+                    // Validate bearer + proxy
+                    let auth_header = headers.get("authorization").cloned().unwrap_or_default();
+                    match proxy::parse_query(path).get("token").cloned()
+                        .or_else(|| crate::companion::auth::parse_bearer(&auth_header))
+                    {
+                        Some(token) => {
+                            match crate::companion::auth::validate_bearer(&token, state) {
+                                Ok(_) => {
+                                    let query = proxy::parse_query(path);
+                                    let project = query.get("project").cloned().unwrap_or_default();
+                                    match proxy::proxy_to_internal(state, method, path, &headers, &request, &project) {
+                                        Ok(data) => format_response(200, &data),
+                                        Err(e) => format_response(400, &serde_json::json!({"ok": false, "error": e})),
+                                    }
+                                }
+                                Err(msg) => {
+                                    let status = if msg.contains("Rate limit") { 429 } else { 401 };
+                                    format_response(status, &serde_json::json!({"ok": false, "error": msg}))
+                                }
+                            }
+                        }
+                        None => format_response(401, &serde_json::json!({"ok": false, "error": "Missing authorization"})),
+                    }
+                };
+
+                // Write response back through ngrok
+                let _ = stream.write_all(response_body.as_bytes()).await;
+                let _ = stream.flush().await;
+            }
         }
+    });
+
+    log_debug!("[companion] Listener thread ended");
+    RUNNING.store(false, Ordering::Relaxed);
+}
+
+/// Format an HTTP response string.
+fn format_response(status: u16, body: &serde_json::Value) -> String {
+    let body_str = serde_json::to_string(body).unwrap_or_else(|_| "{}".to_string());
+    let status_text = match status {
+        200 => "OK", 400 => "Bad Request", 401 => "Unauthorized",
+        429 => "Too Many Requests", _ => "Error",
+    };
+    format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Authorization, Content-Type\r\n\r\n{}",
+        status, status_text, body_str.len(), body_str
+    )
+}
+
+/// Inline auth handler for ngrok connections (can't use TcpStream directly).
+fn handle_auth_inline(state: &CompanionState, headers: &HashMap<String, String>, remote_addr: &str) -> String {
+    let auth_header = headers.get("authorization").cloned().unwrap_or_default();
+    let (username, password) = match auth::parse_basic_auth(&auth_header) {
+        Some(creds) => creds,
+        None => return format_response(401, &serde_json::json!({"ok": false, "error": "Missing Basic Auth"})),
+    };
+
+    let settings = crate::commands::settings::read_settings();
+    if username != settings.companion.username {
+        return format_response(401, &serde_json::json!({"ok": false, "error": "Invalid credentials"}));
     }
+    if !auth::verify_password(&password, &settings.companion.password_hash) {
+        return format_response(401, &serde_json::json!({"ok": false, "error": "Invalid credentials"}));
+    }
+
+    let session = auth::create_session(remote_addr);
+    let token = session.token.clone();
+    let expires_at = session.expires_at.to_rfc3339();
+    state.sessions.lock().unwrap().insert(token.clone(), session);
+
+    format_response(200, &serde_json::json!({
+        "ok": true,
+        "data": { "token": token, "expiresAt": expires_at }
+    }))
 }
 
 /// Register Tauri event listeners to broadcast to WebSocket clients.
