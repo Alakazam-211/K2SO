@@ -6139,7 +6139,6 @@ function CompanionSection(): React.JSX.Element {
         setUsername(c.username || '')
         setPasswordSet(!!(c.passwordHash))
         setNgrokToken(c.ngrokAuthToken || '')
-        setEnabled(c.enabled || false)
         setAutoStart(c.autoStart || false)
       } catch { /* ignore */ }
       try {
@@ -6151,6 +6150,8 @@ function CompanionSection(): React.JSX.Element {
             setConnectedClients(status.connectedClients || 0)
             setSessions(status.sessions || [])
           }
+        } else {
+          setEnabled(false)
         }
       } catch { /* ignore */ }
     }
