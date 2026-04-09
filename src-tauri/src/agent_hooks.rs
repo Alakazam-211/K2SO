@@ -935,14 +935,33 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                     }
                     "/cli/terminal/write" => {
                         // Write text to a running terminal (virtual input)
+                        // Two-phase write: paste text first, then send Enter separately
+                        // after a delay. CLI LLMs treat paste+Enter as one event and
+                        // swallow the trailing \r.
                         let terminal_id = params.get("id").cloned().unwrap_or_default();
                         let message = params.get("message").cloned().unwrap_or_default();
+                        let no_submit = params.get("no_submit").map(|v| v == "true" || v == "1").unwrap_or(false);
                         if terminal_id.is_empty() || message.is_empty() {
                             Err("Missing 'id' or 'message' parameter".to_string())
                         } else if let Some(state) = app_handle.try_state::<crate::state::AppState>() {
-                            let data = format!("{}\r", message); // Append carriage return to submit
-                            state.terminal_manager.lock().write(&terminal_id, &data)
-                                .map(|_| r#"{"success":true}"#.to_string())
+                            // Phase 1: write the message text (no \r)
+                            let write_result = state.terminal_manager.lock().write(&terminal_id, &message);
+                            if let Err(e) = write_result {
+                                Err(e)
+                            } else if no_submit {
+                                Ok(r#"{"success":true}"#.to_string())
+                            } else {
+                                // Phase 2: wait for paste to settle, then send Enter
+                                let tid = terminal_id.clone();
+                                let app = app_handle.clone();
+                                std::thread::spawn(move || {
+                                    std::thread::sleep(std::time::Duration::from_millis(150));
+                                    if let Some(s) = app.try_state::<crate::state::AppState>() {
+                                        let _ = s.terminal_manager.lock().write(&tid, "\r");
+                                    }
+                                });
+                                Ok(r#"{"success":true}"#.to_string())
+                            }
                         } else {
                             Err("AppState not available".to_string())
                         }
@@ -1420,7 +1439,7 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                         // Step 1: Try direct PTY injection — send the message inline
                                         use tauri::Manager;
                                         let wake_msg = format!(
-                                            "[Message from {}]: {}\n\nRun `k2so checkin` to see your full inbox.\r",
+                                            "[Message from {}]: {}\n\nRun `k2so checkin` to see your full inbox.",
                                             qualified_from,
                                             text.chars().take(500).collect::<String>(),
                                         );
@@ -1428,7 +1447,18 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                             .map(|state| {
                                                 let mgr = state.terminal_manager.lock();
                                                 if mgr.exists(&terminal_id) {
-                                                    mgr.write(&terminal_id, &wake_msg).is_ok()
+                                                    if mgr.write(&terminal_id, &wake_msg).is_ok() {
+                                                        // Two-phase write: send Enter separately after paste settles
+                                                        let tid = terminal_id.clone();
+                                                        let app = app_handle.clone();
+                                                        std::thread::spawn(move || {
+                                                            std::thread::sleep(std::time::Duration::from_millis(150));
+                                                            if let Some(s) = app.try_state::<crate::state::AppState>() {
+                                                                let _ = s.terminal_manager.lock().write(&tid, "\r");
+                                                            }
+                                                        });
+                                                        true
+                                                    } else { false }
                                                 } else {
                                                     false
                                                 }

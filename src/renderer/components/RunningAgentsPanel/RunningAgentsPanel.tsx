@@ -214,7 +214,11 @@ export default function RunningAgentsPanel(): React.JSX.Element | null {
   const handleSendMessage = async (terminalId: string) => {
     if (!message.trim()) return
     try {
-      await invoke('terminal_write', { id: terminalId, data: message + '\r' })
+      // Two-phase write: paste text first, then send Enter after delay
+      // CLI LLMs swallow \r when it arrives in the same paste event
+      await invoke('terminal_write', { id: terminalId, data: message })
+      await new Promise((r) => setTimeout(r, 150))
+      await invoke('terminal_write', { id: terminalId, data: '\r' })
       setSendingTo(null)
       setMessage('')
       requestAnimationFrame(() => inputRef.current?.focus())

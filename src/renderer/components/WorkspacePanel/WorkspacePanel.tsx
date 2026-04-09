@@ -226,10 +226,10 @@ export default function WorkspacePanel(): React.JSX.Element {
                       const exists = await invoke<boolean>('terminal_exists', { id: terminalId })
                       if (exists) {
                         // Terminal exists — send checkin if idle
-                        await invoke('terminal_write', {
-                          id: terminalId,
-                          data: 'k2so checkin\r',
-                        })
+                        // Two-phase write: paste then Enter separately
+                        await invoke('terminal_write', { id: terminalId, data: 'k2so checkin' })
+                        await new Promise((r) => setTimeout(r, 150))
+                        await invoke('terminal_write', { id: terminalId, data: '\r' })
                       }
                     } catch { /* terminal may not exist yet — Chat tab will handle launch */ }
                   }
