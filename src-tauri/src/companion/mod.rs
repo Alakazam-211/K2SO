@@ -77,7 +77,7 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
         hook_token: hook_token.to_string(),
         _tunnel_keepalive: Mutex::new(Some(keepalive_tx)),
     };
-    *STATE.lock().unwrap() = Some(state);
+    *STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(state);
     RUNNING.store(true, Ordering::Relaxed);
 
     // Spawn the proxy thread — accepts connections from ngrok tunnel directly
@@ -90,7 +90,7 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(300));
             if !RUNNING.load(Ordering::Relaxed) { break; }
-            if let Some(ref state) = *STATE.lock().unwrap() {
+            if let Some(ref state) = *STATE.lock().unwrap_or_else(|e| e.into_inner()) {
                 let mut sessions = state.sessions.lock().unwrap();
                 sessions.retain(|_, s| !s.is_expired());
             }
@@ -117,7 +117,7 @@ pub fn stop_companion() -> Result<(), String> {
 
     // Signal shutdown and drop keepalive
     {
-        let guard = STATE.lock().unwrap();
+        let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref state) = *guard {
             state.shutdown.store(true, Ordering::Relaxed);
             *state._tunnel_keepalive.lock().unwrap() = None;
@@ -128,10 +128,10 @@ pub fn stop_companion() -> Result<(), String> {
     }
 
     // Clear the state entirely so a fresh one can be created on restart
-    *STATE.lock().unwrap() = None;
+    *STATE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
     // Clear tunnel handle
-    *NGROK_TUNNEL.lock().unwrap() = None;
+    *NGROK_TUNNEL.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
     // Keep the ngrok session alive in NGROK_SESSION for reuse on restart.
     // Free tier allows only one session — closing and reconnecting causes auth failures.
@@ -155,7 +155,7 @@ pub fn companion_status() -> serde_json::Value {
         });
     }
 
-    if let Some(ref state) = *STATE.lock().unwrap() {
+    if let Some(ref state) = *STATE.lock().unwrap_or_else(|e| e.into_inner()) {
         let url = state.tunnel_url.lock().unwrap().clone();
         let sessions = state.sessions.lock().unwrap();
         let ws_clients = state.ws_clients.lock().unwrap();
@@ -196,7 +196,7 @@ fn start_ngrok_tunnel(ngrok_token: &str) -> Result<(String, tokio::runtime::Runt
     let url = rt.block_on(async {
         // Try to reuse existing session (avoids auth failure from one-session limit)
         let session = {
-            let existing = NGROK_SESSION.lock().unwrap().take();
+            let existing = NGROK_SESSION.lock().unwrap_or_else(|e| e.into_inner()).take();
             if let Some(s) = existing {
                 log_debug!("[companion] Reusing existing ngrok session");
                 s
@@ -220,8 +220,8 @@ fn start_ngrok_tunnel(ngrok_token: &str) -> Result<(String, tokio::runtime::Runt
         use ngrok::tunnel::EndpointInfo;
         let url = tunnel.url().to_string();
 
-        NGROK_SESSION.lock().unwrap().replace(session);
-        NGROK_TUNNEL.lock().unwrap().replace(tunnel);
+        NGROK_SESSION.lock().unwrap_or_else(|e| e.into_inner()).replace(session);
+        NGROK_TUNNEL.lock().unwrap_or_else(|e| e.into_inner()).replace(tunnel);
 
         Ok::<String, String>(url)
     })?;
@@ -237,7 +237,7 @@ static NGROK_SESSION: Mutex<Option<ngrok::Session>> = Mutex::new(None);
 /// The tokio runtime is kept alive by holding it in this thread.
 fn run_ngrok_listener(rt: tokio::runtime::Runtime, _keepalive: std::sync::mpsc::Receiver<()>) {
     // Take the tunnel from global storage
-    let tunnel = NGROK_TUNNEL.lock().unwrap().take();
+    let tunnel = NGROK_TUNNEL.lock().unwrap_or_else(|e| e.into_inner()).take();
     let Some(mut tunnel) = tunnel else {
         log_debug!("[companion] No tunnel available for listener");
         return;
@@ -247,7 +247,7 @@ fn run_ngrok_listener(rt: tokio::runtime::Runtime, _keepalive: std::sync::mpsc::
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         loop {
-            if let Some(ref state) = *STATE.lock().unwrap() {
+            if let Some(ref state) = *STATE.lock().unwrap_or_else(|e| e.into_inner()) {
                 if state.shutdown.load(Ordering::Relaxed) { break; }
             }
 
@@ -289,7 +289,7 @@ fn run_ngrok_listener(rt: tokio::runtime::Runtime, _keepalive: std::sync::mpsc::
 
             let headers = proxy::parse_headers(&request);
 
-            if let Some(ref state) = *STATE.lock().unwrap() {
+            if let Some(ref state) = *STATE.lock().unwrap_or_else(|e| e.into_inner()) {
                 // For now, handle HTTP requests synchronously by proxying to internal server
                 // WebSocket upgrades over ngrok require a different approach — skip for now
                 let remote_addr = "ngrok".to_string();
@@ -386,7 +386,7 @@ fn register_event_listeners(app_handle: &AppHandle) {
     for event_name in &events {
         let name = event_name.to_string();
         app_handle.listen(event_name.to_string(), move |event| {
-            if let Some(ref state) = *STATE.lock().unwrap() {
+            if let Some(ref state) = *STATE.lock().unwrap_or_else(|e| e.into_inner()) {
                 let payload = event.payload();
                 let ws_event = serde_json::json!({
                     "type": name,
@@ -407,7 +407,7 @@ fn run_terminal_polling(app_handle: &AppHandle) {
 
         if !RUNNING.load(Ordering::Relaxed) { break; }
 
-        let guard = STATE.lock().unwrap(); let state = match guard.as_ref() {
+        let guard = STATE.lock().unwrap_or_else(|e| e.into_inner()); let state = match guard.as_ref() {
             Some(s) => s,
             None => break,
         };
