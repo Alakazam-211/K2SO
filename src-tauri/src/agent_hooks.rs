@@ -1832,10 +1832,23 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
 
                             let mut stmt = conn.prepare(
-                                "SELECT id, name, path, color, icon_url, agent_mode, pinned FROM projects ORDER BY pinned DESC, tab_order ASC, name ASC"
+                                "SELECT p.id, p.name, p.path, p.color, p.icon_url, p.agent_mode, p.pinned, \
+                                 p.tab_order, p.focus_group_id, fg.name, fg.color \
+                                 FROM projects p \
+                                 LEFT JOIN focus_groups fg ON p.focus_group_id = fg.id \
+                                 ORDER BY p.pinned DESC, p.tab_order ASC, p.name ASC"
                             ).map_err(|e| e.to_string())?;
 
                             let projects: Vec<serde_json::Value> = stmt.query_map([], |row| {
+                                let fg_id: Option<String> = row.get(8)?;
+                                let fg_name: Option<String> = row.get(9)?;
+                                let fg_color: Option<String> = row.get(10)?;
+                                let focus_group = if let (Some(id), Some(name)) = (&fg_id, &fg_name) {
+                                    serde_json::json!({ "id": id, "name": name, "color": fg_color })
+                                } else {
+                                    serde_json::Value::Null
+                                };
+
                                 Ok(serde_json::json!({
                                     "id": row.get::<_, String>(0)?,
                                     "name": row.get::<_, String>(1)?,
@@ -1844,6 +1857,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                     "iconUrl": row.get::<_, Option<String>>(4)?,
                                     "agentMode": row.get::<_, String>(5)?,
                                     "pinned": row.get::<_, bool>(6)?,
+                                    "tabOrder": row.get::<_, i32>(7)?,
+                                    "focusGroup": focus_group,
                                 }))
                             }).map_err(|e| e.to_string())?
                             .filter_map(|r| r.ok())
