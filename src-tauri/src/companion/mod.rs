@@ -252,14 +252,20 @@ fn run_ngrok_listener(rt: tokio::runtime::Runtime, _keepalive: std::sync::mpsc::
             }
 
             // Accept a connection from the ngrok tunnel
+            log_debug!("[companion] Waiting for next connection...");
             let conn = match tunnel.try_next().await {
-                Ok(Some(conn)) => conn,
+                Ok(Some(conn)) => {
+                    log_debug!("[companion] Connection accepted");
+                    conn
+                }
                 Ok(None) => {
-                    log_debug!("[companion] Tunnel closed");
+                    log_debug!("[companion] Tunnel closed (try_next returned None)");
                     break;
                 }
                 Err(e) => {
                     log_debug!("[companion] Tunnel accept error: {}", e);
+                    // Don't break — try to accept next connection
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     continue;
                 }
             };
@@ -321,8 +327,11 @@ fn run_ngrok_listener(rt: tokio::runtime::Runtime, _keepalive: std::sync::mpsc::
                 };
 
                 // Write response back through ngrok
+                log_debug!("[companion] Sending response ({} bytes)", response_body.len());
                 let _ = stream.write_all(response_body.as_bytes()).await;
                 let _ = stream.flush().await;
+                let _ = stream.shutdown().await;
+                log_debug!("[companion] Response sent, connection closed");
             }
         }
     });
