@@ -1901,21 +1901,35 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
 
                                 for (tid, cwd) in &terminal_ids {
                                     let command = manager.get_foreground_command(tid).ok().flatten();
-                                    // Match terminal CWD to a workspace
-                                    if let Some((ws_id, ws_name, _, ws_color)) = workspaces.iter().find(|(_, _, path, _)| {
-                                        cwd.starts_with(path.as_str())
-                                    }) {
-                                        // Extract agent name from CWD if in a worktree
-                                        let agent_name = cwd.strip_prefix(&format!("{}/.k2so/worktrees/", workspaces.iter().find(|(id, _, _, _)| id == ws_id).map(|(_, _, p, _)| p.as_str()).unwrap_or("")))
-                                            .and_then(|rest| rest.split('/').next())
-                                            .unwrap_or("unknown")
-                                            .to_string();
+                                    // Match terminal CWD to a workspace (longest path match wins)
+                                    let matched_ws = workspaces.iter()
+                                        .filter(|(_, _, path, _)| cwd.starts_with(path.as_str()))
+                                        .max_by_key(|(_, _, path, _)| path.len());
+
+                                    if let Some((ws_id, ws_name, ws_path, ws_color)) = matched_ws {
+                                        // Determine session label:
+                                        // 1. Worktree agent: .k2so/worktrees/<agent-name>/...
+                                        // 2. Same as workspace root: use workspace name
+                                        // 3. Subfolder: use folder name
+                                        let worktree_prefix = format!("{}/.k2so/worktrees/", ws_path);
+                                        let (agent_name, label) = if let Some(rest) = cwd.strip_prefix(&worktree_prefix) {
+                                            let name = rest.split('/').next().unwrap_or("agent");
+                                            (name.to_string(), name.to_string())
+                                        } else {
+                                            // Use the last path component as the label
+                                            let folder = std::path::Path::new(cwd)
+                                                .file_name()
+                                                .map(|f| f.to_string_lossy().to_string())
+                                                .unwrap_or_else(|| ws_name.clone());
+                                            ("shell".to_string(), folder)
+                                        };
 
                                         sessions.push(serde_json::json!({
                                             "workspaceName": ws_name,
                                             "workspaceId": ws_id,
                                             "workspaceColor": ws_color,
                                             "agentName": agent_name,
+                                            "label": label,
                                             "terminalId": tid,
                                             "command": command,
                                             "cwd": cwd,
