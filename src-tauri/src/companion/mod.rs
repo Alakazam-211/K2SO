@@ -131,8 +131,8 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
         run_terminal_polling(&poll_handle);
     });
 
-    // Spawn tunnel health check — restarts companion if tunnel dies
-    let health_url = tunnel_url.clone();
+    // Spawn tunnel health check — restarts companion if local listener dies
+    let health_port = local_port;
     let health_handle = app_handle.clone();
     std::thread::spawn(move || {
         // Wait before first check to let everything settle
@@ -142,11 +142,11 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
             std::thread::sleep(std::time::Duration::from_secs(15));
             if !RUNNING.load(Ordering::Relaxed) { break; }
 
-            // Probe the tunnel with a lightweight request
+            // Probe the LOCAL listener — this is ground truth (ngrok URL can return
+            // HTML error pages that look like HTTP 200 even when the forwarder is dead)
             let probe = reqwest::blocking::Client::new()
-                .head(&health_url)
-                .header("ngrok-skip-browser-warning", "true")
-                .timeout(std::time::Duration::from_secs(5))
+                .get(&format!("http://127.0.0.1:{}/companion/auth", health_port))
+                .timeout(std::time::Duration::from_secs(3))
                 .send();
 
             match probe {
@@ -358,50 +358,76 @@ static NGROK_FORWARDER: Mutex<Option<ngrok::forwarder::Forwarder<ngrok::tunnel::
 fn run_local_listener(listener: std::net::TcpListener) {
     use std::io::{Read, Write};
 
+    // Set a timeout so the listener doesn't block forever on accept —
+    // allows periodic shutdown checks even when no connections arrive.
+    listener.set_nonblocking(false).ok();
+
     for stream in listener.incoming() {
-        // Check shutdown
-        {
+        // Wrap each connection in catch_unwind to prevent a single bad request
+        // from killing the entire listener thread.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Check shutdown
+            {
+                let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(ref state) = *guard {
+                    if state.shutdown.load(Ordering::Relaxed) { return false; }
+                }
+            }
+
+            let Ok(mut stream) = stream else { return true };
+            let remote_addr = stream.peer_addr()
+                .map(|a| a.to_string())
+                .unwrap_or_else(|_| "ngrok".to_string());
+
+            // Read HTTP request
+            let mut buf = [0u8; 65536];
+            let n = match stream.read(&mut buf) {
+                Ok(0) => return true,
+                Ok(n) => n,
+                Err(_) => return true,
+            };
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let first_line = request.lines().next().unwrap_or("");
+            let parts: Vec<&str> = first_line.split_whitespace().collect();
+            let (method, path) = match parts.as_slice() {
+                [m, p, ..] => (*m, *p),
+                _ => return true,
+            };
+
+            let headers = proxy::parse_headers(&request);
+
             let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref state) = *guard {
-                if state.shutdown.load(Ordering::Relaxed) { break; }
+                // Check for WebSocket upgrade
+                let upgrade = headers.get("upgrade").map(|v| v.to_lowercase());
+                if upgrade.as_deref() == Some("websocket") {
+                    drop(guard);
+                    // Safe state access for WebSocket — check STATE is still Some
+                    let ws_guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(ref ws_state) = *ws_guard {
+                        let state_ptr = ws_state as *const CompanionState;
+                        drop(ws_guard);
+                        websocket::handle_ws_upgrade(stream, path, unsafe { &*state_ptr });
+                    }
+                    return true;
+                }
+
+                proxy::handle_request(&mut stream, state, method, path, &headers, &request, &remote_addr);
             }
-        }
+            true // continue loop
+        }));
 
-        let Ok(mut stream) = stream else { continue };
-        let remote_addr = stream.peer_addr()
-            .map(|a| a.to_string())
-            .unwrap_or_else(|_| "ngrok".to_string());
-
-        // Read HTTP request
-        let mut buf = [0u8; 65536];
-        let n = match stream.read(&mut buf) {
-            Ok(0) => continue,
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-        let request = String::from_utf8_lossy(&buf[..n]).to_string();
-        let first_line = request.lines().next().unwrap_or("");
-        let parts: Vec<&str> = first_line.split_whitespace().collect();
-        let (method, path) = match parts.as_slice() {
-            [m, p, ..] => (*m, *p),
-            _ => continue,
-        };
-
-        let headers = proxy::parse_headers(&request);
-
-        let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref state) = *guard {
-            // Check for WebSocket upgrade
-            let upgrade = headers.get("upgrade").map(|v| v.to_lowercase());
-            if upgrade.as_deref() == Some("websocket") {
-                drop(guard);
-                websocket::handle_ws_upgrade(stream, path, unsafe {
-                    &*(STATE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().unwrap() as *const CompanionState)
-                });
-                continue;
+        match result {
+            Ok(false) => break, // shutdown requested
+            Ok(true) => continue,
+            Err(panic) => {
+                let msg = panic.downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| panic.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown panic");
+                log_debug!("[companion] Listener caught panic: {} — continuing", msg);
+                continue; // Don't let a panic kill the listener
             }
-
-            proxy::handle_request(&mut stream, state, method, path, &headers, &request, &remote_addr);
         }
     }
 
