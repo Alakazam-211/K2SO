@@ -16,14 +16,14 @@ pub mod websocket;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Listener};
 use futures::TryStreamExt;
 
 use types::CompanionState;
 
-/// Module-level companion state. Set once when companion starts.
-pub(crate) static STATE: OnceLock<CompanionState> = OnceLock::new();
+/// Module-level companion state. Mutex<Option> allows stop + restart (unlike OnceLock).
+pub(crate) static STATE: Mutex<Option<CompanionState>> = Mutex::new(None);
 /// Flag indicating the companion is running.
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -77,7 +77,7 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
         hook_token: hook_token.to_string(),
         _tunnel_keepalive: Mutex::new(Some(keepalive_tx)),
     };
-    let _ = STATE.set(state);
+    *STATE.lock().unwrap() = Some(state);
     RUNNING.store(true, Ordering::Relaxed);
 
     // Spawn the proxy thread — accepts connections from ngrok tunnel directly
@@ -90,7 +90,7 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(300));
             if !RUNNING.load(Ordering::Relaxed) { break; }
-            if let Some(state) = STATE.get() {
+            if let Some(ref state) = *STATE.lock().unwrap() {
                 let mut sessions = state.sessions.lock().unwrap();
                 sessions.retain(|_, s| !s.is_expired());
             }
@@ -115,21 +115,30 @@ pub fn stop_companion() -> Result<(), String> {
         return Ok(());
     }
 
-    if let Some(state) = STATE.get() {
-        state.shutdown.store(true, Ordering::Relaxed);
-
-        // Clear tunnel URL
-        *state.tunnel_url.lock().unwrap() = None;
-
-        // Close all WebSocket connections
-        state.ws_clients.lock().unwrap().clear();
-
-        // Clear sessions
-        state.sessions.lock().unwrap().clear();
+    // Signal shutdown and drop keepalive
+    {
+        let guard = STATE.lock().unwrap();
+        if let Some(ref state) = *guard {
+            state.shutdown.store(true, Ordering::Relaxed);
+            *state._tunnel_keepalive.lock().unwrap() = None;
+            *state.tunnel_url.lock().unwrap() = None;
+            state.ws_clients.lock().unwrap().clear();
+            state.sessions.lock().unwrap().clear();
+        }
     }
+
+    // Clear the state entirely so a fresh one can be created on restart
+    *STATE.lock().unwrap() = None;
+
+    // Clear any leftover tunnel handle
+    *NGROK_TUNNEL.lock().unwrap() = None;
 
     RUNNING.store(false, Ordering::Relaxed);
     log_debug!("[companion] Stopped");
+
+    // Give the tunnel thread time to shut down and release the ngrok endpoint
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
     Ok(())
 }
 
@@ -144,7 +153,7 @@ pub fn companion_status() -> serde_json::Value {
         });
     }
 
-    if let Some(state) = STATE.get() {
+    if let Some(ref state) = *STATE.lock().unwrap() {
         let url = state.tunnel_url.lock().unwrap().clone();
         let sessions = state.sessions.lock().unwrap();
         let ws_clients = state.ws_clients.lock().unwrap();
@@ -226,7 +235,7 @@ fn run_ngrok_listener(rt: tokio::runtime::Runtime, _keepalive: std::sync::mpsc::
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         loop {
-            if let Some(state) = STATE.get() {
+            if let Some(ref state) = *STATE.lock().unwrap() {
                 if state.shutdown.load(Ordering::Relaxed) { break; }
             }
 
@@ -262,7 +271,7 @@ fn run_ngrok_listener(rt: tokio::runtime::Runtime, _keepalive: std::sync::mpsc::
 
             let headers = proxy::parse_headers(&request);
 
-            if let Some(state) = STATE.get() {
+            if let Some(ref state) = *STATE.lock().unwrap() {
                 // For now, handle HTTP requests synchronously by proxying to internal server
                 // WebSocket upgrades over ngrok require a different approach — skip for now
                 let remote_addr = "ngrok".to_string();
@@ -356,7 +365,7 @@ fn register_event_listeners(app_handle: &AppHandle) {
     for event_name in &events {
         let name = event_name.to_string();
         app_handle.listen(event_name.to_string(), move |event| {
-            if let Some(state) = STATE.get() {
+            if let Some(ref state) = *STATE.lock().unwrap() {
                 let payload = event.payload();
                 let ws_event = serde_json::json!({
                     "type": name,
@@ -377,7 +386,7 @@ fn run_terminal_polling(app_handle: &AppHandle) {
 
         if !RUNNING.load(Ordering::Relaxed) { break; }
 
-        let state = match STATE.get() {
+        let guard = STATE.lock().unwrap(); let state = match guard.as_ref() {
             Some(s) => s,
             None => break,
         };
