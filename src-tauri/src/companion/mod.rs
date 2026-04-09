@@ -194,21 +194,21 @@ fn start_ngrok_tunnel(ngrok_token: &str) -> Result<(String, tokio::runtime::Runt
 
     let token = ngrok_token.to_string();
     let url = rt.block_on(async {
-        // Try to reuse existing session (avoids auth failure from one-session limit)
-        let session = {
-            let existing = NGROK_SESSION.lock().unwrap_or_else(|e| e.into_inner()).take();
-            if let Some(s) = existing {
-                log_debug!("[companion] Reusing existing ngrok session");
-                s
-            } else {
-                log_debug!("[companion] Creating new ngrok session");
-                ngrok::Session::builder()
-                    .authtoken(&token)
-                    .connect()
-                    .await
-                    .map_err(|e| format!("ngrok connect failed: {}", e))?
-            }
-        };
+        // Close any existing session before creating a new one
+        // (ngrok free tier allows only 1 concurrent session)
+        if let Some(mut old_session) = NGROK_SESSION.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            log_debug!("[companion] Closing previous ngrok session...");
+            let _ = old_session.close().await;
+            // Brief delay for ngrok to release the session slot
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+
+        log_debug!("[companion] Creating new ngrok session");
+        let session = ngrok::Session::builder()
+            .authtoken(&token)
+            .connect()
+            .await
+            .map_err(|e| format!("ngrok connect failed: {}", e))?;
 
         use ngrok::config::TunnelBuilder;
         let tunnel = session
@@ -244,95 +244,107 @@ fn run_ngrok_listener(rt: tokio::runtime::Runtime, _keepalive: std::sync::mpsc::
     };
 
     rt.block_on(async {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
         loop {
-            if let Some(ref state) = *STATE.lock().unwrap_or_else(|e| e.into_inner()) {
-                if state.shutdown.load(Ordering::Relaxed) { break; }
-            }
+            // Check shutdown
+            {
+                let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(ref state) = *guard {
+                    if state.shutdown.load(Ordering::Relaxed) { break; }
+                }
+            } // lock released before await
 
             // Accept a connection from the ngrok tunnel
-            log_debug!("[companion] Waiting for next connection...");
             let conn = match tunnel.try_next().await {
-                Ok(Some(conn)) => {
-                    log_debug!("[companion] Connection accepted");
-                    conn
-                }
+                Ok(Some(conn)) => conn,
                 Ok(None) => {
-                    log_debug!("[companion] Tunnel closed (try_next returned None)");
+                    log_debug!("[companion] Tunnel closed");
                     break;
                 }
                 Err(e) => {
                     log_debug!("[companion] Tunnel accept error: {}", e);
-                    // Don't break — try to accept next connection
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     continue;
                 }
             };
 
-            // Read the HTTP request from the ngrok connection
-            let mut stream = conn;
-            let mut buf = vec![0u8; 65536];
-            let n = match stream.read(&mut buf).await {
-                Ok(0) => continue,
-                Ok(n) => n,
-                Err(_) => continue,
-            };
+            // Spawn each connection as a separate task so the accept loop keeps running
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-            let request = String::from_utf8_lossy(&buf[..n]).to_string();
-            let first_line = request.lines().next().unwrap_or("");
-            let parts: Vec<&str> = first_line.split_whitespace().collect();
-            let (method, path) = match parts.as_slice() {
-                [m, p, ..] => (*m, *p),
-                _ => continue,
-            };
+                let mut stream = conn;
+                let mut buf = vec![0u8; 65536];
+                let n = match stream.read(&mut buf).await {
+                    Ok(0) => return,
+                    Ok(n) => n,
+                    Err(_) => return,
+                };
 
-            let headers = proxy::parse_headers(&request);
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let first_line = request.lines().next().unwrap_or("");
+                let parts: Vec<&str> = first_line.split_whitespace().collect();
+                let (method, path) = match parts.as_slice() {
+                    [m, p, ..] => (*m, *p),
+                    _ => return,
+                };
 
-            if let Some(ref state) = *STATE.lock().unwrap_or_else(|e| e.into_inner()) {
-                // For now, handle HTTP requests synchronously by proxying to internal server
-                // WebSocket upgrades over ngrok require a different approach — skip for now
+                let headers = proxy::parse_headers(&request);
                 let remote_addr = "ngrok".to_string();
-
                 let clean_path = path.split('?').next().unwrap_or("");
 
-                // Build response
-                let response_body = if clean_path == "/companion/auth" && method == "POST" {
-                    // Auth handler
-                    handle_auth_inline(state, &headers, &remote_addr)
-                } else {
-                    // Validate bearer + proxy
-                    let auth_header = headers.get("authorization").cloned().unwrap_or_default();
-                    match proxy::parse_query(path).get("token").cloned()
-                        .or_else(|| crate::companion::auth::parse_bearer(&auth_header))
-                    {
-                        Some(token) => {
-                            match crate::companion::auth::validate_bearer(&token, state) {
-                                Ok(_) => {
-                                    let query = proxy::parse_query(path);
-                                    let project = query.get("project").cloned().unwrap_or_default();
-                                    match proxy::proxy_to_internal(state, method, path, &headers, &request, &project) {
-                                        Ok(data) => format_response(200, &data),
-                                        Err(e) => format_response(400, &serde_json::json!({"ok": false, "error": e})),
+                // Build response — lock STATE briefly, don't hold across proxy call
+                let response_body = {
+                    let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(ref state) = *guard {
+                        if clean_path == "/companion/auth" && method == "POST" {
+                            handle_auth_inline(state, &headers, &remote_addr)
+                        } else {
+                            let auth_header = headers.get("authorization").cloned().unwrap_or_default();
+                            match proxy::parse_query(path).get("token").cloned()
+                                .or_else(|| crate::companion::auth::parse_bearer(&auth_header))
+                            {
+                                Some(token) => {
+                                    match crate::companion::auth::validate_bearer(&token, state) {
+                                        Ok(_) => {
+                                            let query = proxy::parse_query(path);
+                                            let project = query.get("project").cloned().unwrap_or_default();
+                                            // Drop the lock before making the blocking proxy call
+                                            let hook_port = state.hook_port;
+                                            let hook_token = state.hook_token.clone();
+                                            drop(guard);
+                                            // Proxy without holding the lock
+                                            let proxy_state_stub = types::CompanionState {
+                                                tunnel_url: Mutex::new(None),
+                                                sessions: Mutex::new(HashMap::new()),
+                                                ws_clients: Mutex::new(Vec::new()),
+                                                shutdown: AtomicBool::new(false),
+                                                hook_port,
+                                                hook_token,
+                                                _tunnel_keepalive: Mutex::new(None),
+                                            };
+                                            match proxy::proxy_to_internal(&proxy_state_stub, method, path, &headers, &request, &project) {
+                                                Ok(data) => format_response(200, &data),
+                                                Err(e) => format_response(400, &serde_json::json!({"ok": false, "error": e})),
+                                            }
+                                        }
+                                        Err(msg) => {
+                                            let status = if msg.contains("Rate limit") { 429 } else { 401 };
+                                            format_response(status, &serde_json::json!({"ok": false, "error": msg}))
+                                        }
                                     }
                                 }
-                                Err(msg) => {
-                                    let status = if msg.contains("Rate limit") { 429 } else { 401 };
-                                    format_response(status, &serde_json::json!({"ok": false, "error": msg}))
-                                }
+                                None => format_response(401, &serde_json::json!({"ok": false, "error": "Missing authorization"})),
                             }
                         }
-                        None => format_response(401, &serde_json::json!({"ok": false, "error": "Missing authorization"})),
+                    } else {
+                        format_response(503, &serde_json::json!({"ok": false, "error": "Companion not initialized"}))
                     }
                 };
 
-                // Write response back through ngrok
-                log_debug!("[companion] Sending response ({} bytes)", response_body.len());
+                // Write response — don't call shutdown(), let the stream drop naturally
                 let _ = stream.write_all(response_body.as_bytes()).await;
                 let _ = stream.flush().await;
-                let _ = stream.shutdown().await;
-                log_debug!("[companion] Response sent, connection closed");
-            }
+                // Stream drops here, closing the connection cleanly
+            });
         }
     });
 
