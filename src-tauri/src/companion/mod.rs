@@ -133,16 +133,10 @@ pub fn stop_companion() -> Result<(), String> {
     // Clear tunnel handle
     *NGROK_TUNNEL.lock().unwrap() = None;
 
-    // Explicitly close the ngrok session to release the endpoint immediately
-    // This prevents ERR_NGROK_334 ("endpoint already online") on restart
-    if let Some(mut session) = NGROK_SESSION.lock().unwrap().take() {
-        log_debug!("[companion] Closing ngrok session...");
-        if let Ok(rt) = tokio::runtime::Runtime::new() {
-            rt.block_on(async {
-                let _ = session.close().await;
-            });
-        }
-    }
+    // Keep the ngrok session alive in NGROK_SESSION for reuse on restart.
+    // Free tier allows only one session — closing and reconnecting causes auth failures.
+    // The tunnel listener thread has already exited (shutdown flag set), so the
+    // endpoint goes offline. On restart, we reuse the existing session.
 
     RUNNING.store(false, Ordering::Relaxed);
     log_debug!("[companion] Stopped");
@@ -193,48 +187,43 @@ pub struct NgrokTunnelListener {
 }
 
 /// Start the ngrok tunnel. Returns the URL and a runtime handle.
-/// Retries up to 3 times with increasing delay if the endpoint is still releasing.
+/// Reuses existing ngrok session if available (avoids one-session-per-account limit on free tier).
 fn start_ngrok_tunnel(ngrok_token: &str) -> Result<(String, tokio::runtime::Runtime), String> {
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
 
     let token = ngrok_token.to_string();
     let url = rt.block_on(async {
-        let mut last_error = String::new();
-
-        for attempt in 0..3 {
-            if attempt > 0 {
-                log_debug!("[companion] Retry {} — waiting for endpoint release...", attempt);
-                tokio::time::sleep(tokio::time::Duration::from_secs(2 * attempt as u64)).await;
+        // Try to reuse existing session (avoids auth failure from one-session limit)
+        let session = {
+            let existing = NGROK_SESSION.lock().unwrap().take();
+            if let Some(s) = existing {
+                log_debug!("[companion] Reusing existing ngrok session");
+                s
+            } else {
+                log_debug!("[companion] Creating new ngrok session");
+                ngrok::Session::builder()
+                    .authtoken(&token)
+                    .connect()
+                    .await
+                    .map_err(|e| format!("ngrok connect failed: {}", e))?
             }
+        };
 
-            let mut session = ngrok::Session::builder()
-                .authtoken(&token)
-                .connect()
-                .await
-                .map_err(|e| format!("ngrok connect failed: {}", e))?;
+        use ngrok::config::TunnelBuilder;
+        let tunnel = session
+            .http_endpoint()
+            .listen()
+            .await
+            .map_err(|e| format!("ngrok tunnel failed: {}", e))?;
 
-            use ngrok::config::TunnelBuilder;
-            match session.http_endpoint().listen().await {
-                Ok(tunnel) => {
-                    use ngrok::tunnel::EndpointInfo;
-                    let url = tunnel.url().to_string();
+        use ngrok::tunnel::EndpointInfo;
+        let url = tunnel.url().to_string();
 
-                    // Store the session and tunnel in globals
-                    NGROK_SESSION.lock().unwrap().replace(session);
-                    NGROK_TUNNEL.lock().unwrap().replace(tunnel);
+        NGROK_SESSION.lock().unwrap().replace(session);
+        NGROK_TUNNEL.lock().unwrap().replace(tunnel);
 
-                    return Ok::<String, String>(url);
-                }
-                Err(e) => {
-                    last_error = format!("ngrok tunnel failed: {}", e);
-                    // Close this session before retrying
-                    let _ = session.close().await;
-                }
-            }
-        }
-
-        Err(last_error)
+        Ok::<String, String>(url)
     })?;
 
     Ok((url, rt))
