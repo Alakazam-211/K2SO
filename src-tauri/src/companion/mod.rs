@@ -62,6 +62,7 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
     }
 
     let ngrok_token = companion.ngrok_auth_token.clone();
+    let ngrok_domain = companion.ngrok_domain.clone();
 
     // Bind a local TcpListener for the companion HTTP server
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
@@ -69,7 +70,7 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
     let local_port = listener.local_addr().unwrap().port();
 
     // Start ngrok tunnel — forwards traffic to our local companion HTTP server
-    let (tunnel_url, _rt) = start_ngrok_tunnel(&ngrok_token, local_port)?;
+    let (tunnel_url, _rt) = start_ngrok_tunnel(&ngrok_token, &ngrok_domain, local_port)?;
 
     // Check if stop was requested while we were connecting
     if CANCEL_START.load(Ordering::Relaxed) {
@@ -268,8 +269,9 @@ pub fn companion_status() -> serde_json::Value {
 /// We run it on a dedicated thread and wait with recv_timeout. If it times out,
 /// the thread keeps running (the runtime stays alive there) — next call will
 /// find the session in the static and reuse it.
-fn start_ngrok_tunnel(ngrok_token: &str, local_port: u16) -> Result<(String, tokio::runtime::Runtime), String> {
+fn start_ngrok_tunnel(ngrok_token: &str, ngrok_domain: &str, local_port: u16) -> Result<(String, tokio::runtime::Runtime), String> {
     let token = ngrok_token.to_string();
+    let domain = ngrok_domain.to_string();
     let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
 
     std::thread::spawn(move || {
@@ -300,8 +302,11 @@ fn start_ngrok_tunnel(ngrok_token: &str, local_port: u16) -> Result<(String, tok
             let forward_url = url::Url::parse(&format!("http://localhost:{}", local_port))
                 .map_err(|e| format!("Invalid forward URL: {}", e))?;
 
-            let listener = session
-                .http_endpoint()
+            let mut endpoint = session.http_endpoint();
+            if !domain.is_empty() {
+                endpoint.domain(&domain);
+            }
+            let listener = endpoint
                 .listen_and_forward(forward_url)
                 .await
                 .map_err(|e| format!("ngrok tunnel failed: {}", e))?;

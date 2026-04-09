@@ -6124,6 +6124,7 @@ function CompanionSection(): React.JSX.Element {
   const [password, setPassword] = useState('')
   const [passwordSet, setPasswordSet] = useState(false)
   const [ngrokToken, setNgrokToken] = useState('')
+  const [ngrokDomain, setNgrokDomain] = useState('')
   const [tunnelUrl, setTunnelUrl] = useState<string | null>(null)
   const [connectedClients, setConnectedClients] = useState(0)
   const [sessions, setSessions] = useState<Array<{ token: string; remoteAddr: string; createdAt: string }>>([])
@@ -6139,6 +6140,7 @@ function CompanionSection(): React.JSX.Element {
         setUsername(c.username || '')
         setPasswordSet(!!(c.passwordHash))
         setNgrokToken(c.ngrokAuthToken || '')
+        setNgrokDomain(c.ngrokDomain || '')
         setAutoStart(c.autoStart || false)
       } catch { /* ignore */ }
       try {
@@ -6307,6 +6309,14 @@ function CompanionSection(): React.JSX.Element {
         <div className="flex items-center justify-between py-2.5 border-b border-[var(--color-border)]">
           <span className="text-xs text-[var(--color-text-secondary)]">ngrok Auth Token</span>
           <input type="password" value={ngrokToken} onChange={(e) => setNgrokToken(e.target.value)} onBlur={() => invoke('settings_update', { updates: { companion: { ngrokAuthToken: ngrokToken } } }).catch(() => {})} placeholder="Enter ngrok token" className="w-48 px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag" />
+        </div>
+
+        <div className="flex items-center justify-between py-2.5 border-b border-[var(--color-border)]">
+          <div>
+            <span className="text-xs text-[var(--color-text-secondary)]">Custom Domain</span>
+            <p className="text-[10px] text-[var(--color-text-muted)]">Paid plans only (e.g. myapp.ngrok.app)</p>
+          </div>
+          <input type="text" value={ngrokDomain} onChange={(e) => setNgrokDomain(e.target.value)} onBlur={() => invoke('settings_update', { updates: { companion: { ngrokDomain: ngrokDomain } } }).catch(() => {})} placeholder="Optional" className="w-48 px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag" />
         </div>
       </div>
 

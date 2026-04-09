@@ -154,6 +154,8 @@ pub struct CompanionSettings {
     pub password_hash: String,
     #[serde(default)]
     pub ngrok_auth_token: String,
+    #[serde(default)]
+    pub ngrok_domain: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
