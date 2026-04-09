@@ -220,10 +220,16 @@ fn start_ngrok_tunnel(ngrok_token: &str, local_port: u16) -> Result<(String, tok
         }
 
         log_debug!("[companion] Creating new ngrok session");
-        let session = ngrok::Session::builder()
-            .authtoken(&token)
-            .connect()
-            .await
+        let session = tokio::time::timeout(
+            tokio::time::Duration::from_secs(15),
+            async {
+                ngrok::Session::builder()
+                    .authtoken(&token)
+                    .connect()
+                    .await
+            },
+        ).await
+            .map_err(|_| "ngrok connect timed out (15s) — old session may still be active".to_string())?
             .map_err(|e| format!("ngrok connect failed: {}", e))?;
 
         // Use listen_and_forward — ngrok handles connection proxying to our local server
@@ -231,10 +237,16 @@ fn start_ngrok_tunnel(ngrok_token: &str, local_port: u16) -> Result<(String, tok
         let forward_url = url::Url::parse(&format!("http://localhost:{}", local_port))
             .map_err(|e| format!("Invalid forward URL: {}", e))?;
 
-        let listener = session
-            .http_endpoint()
-            .listen_and_forward(forward_url)
-            .await
+        let listener = tokio::time::timeout(
+            tokio::time::Duration::from_secs(15),
+            async {
+                session
+                    .http_endpoint()
+                    .listen_and_forward(forward_url)
+                    .await
+            },
+        ).await
+            .map_err(|_| "ngrok tunnel timed out (15s)".to_string())?
             .map_err(|e| format!("ngrok tunnel failed: {}", e))?;
 
         let url = listener.url().to_string();
