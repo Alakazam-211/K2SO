@@ -1760,6 +1760,21 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             }
                         })()
                     }
+                    "/cli/companion/start" => {
+                        match crate::companion::start_companion(app_handle.clone()) {
+                            Ok(url) => Ok(serde_json::json!({"ok": true, "url": url}).to_string()),
+                            Err(e) => Err(e),
+                        }
+                    }
+                    "/cli/companion/stop" => {
+                        match crate::companion::stop_companion() {
+                            Ok(()) => Ok(serde_json::json!({"ok": true}).to_string()),
+                            Err(e) => Err(e),
+                        }
+                    }
+                    "/cli/companion/status" => {
+                        Ok(crate::companion::companion_status().to_string())
+                    }
                     "/cli/skills/regenerate" => {
                         // Regenerate SKILL.md files for all agents in this workspace
                         match crate::commands::k2so_agents::k2so_agents_regenerate_skills(project_path.to_string()) {

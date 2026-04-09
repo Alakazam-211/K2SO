@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.26.0"
+K2SO_CLI_VERSION="0.28.2"
 
 set -euo pipefail
 
@@ -1076,6 +1076,83 @@ except: pass
     esac
 }
 
+cmd_companion() {
+    local subcmd="${1:-status}"
+    shift 2>/dev/null || true
+    case "$subcmd" in
+        start|on)
+            local result
+            result=$(cli_request "/cli/companion/start" 2>&1)
+            if echo "$result" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    if d.get('ok'):
+        print('Companion started: %s' % d.get('url', '?'))
+    elif 'error' in d:
+        print('Error: %s' % d['error'], file=sys.stderr)
+        sys.exit(1)
+    else:
+        print(d)
+except Exception as e:
+    print('Error: %s' % e, file=sys.stderr)
+    sys.exit(1)
+" 2>&1; then true; else
+                echo "Failed to start companion" >&2
+            fi
+            ;;
+        stop|off)
+            local result
+            result=$(cli_request "/cli/companion/stop" 2>&1)
+            if echo "$result" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    if d.get('ok'):
+        print('Companion stopped.')
+    elif 'error' in d:
+        print('Error: %s' % d['error'], file=sys.stderr)
+        sys.exit(1)
+    else:
+        print(d)
+except Exception as e:
+    print('Error: %s' % e, file=sys.stderr)
+    sys.exit(1)
+" 2>&1; then true; else
+                echo "Failed to stop companion" >&2
+            fi
+            ;;
+        status)
+            cli_request "/cli/companion/status" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    running = d.get('running', False)
+    url = d.get('tunnelUrl', '')
+    clients = d.get('connectedClients', 0)
+    sessions = d.get('sessions', [])
+    if running:
+        print('Companion: running')
+        print('  URL: %s' % url)
+        print('  Clients: %d' % clients)
+        for s in sessions:
+            print('  Session: %s (%s)' % (s.get('remoteAddr','?'), s.get('token','?')))
+    else:
+        print('Companion: stopped')
+except Exception as e:
+    print('Error: %s' % e, file=sys.stderr)
+" 2>/dev/null
+            ;;
+        *)
+            echo "Usage: k2so companion [start|stop|status]" >&2
+            echo "  start (on)    Start the companion tunnel" >&2
+            echo "  stop (off)    Stop the companion tunnel" >&2
+            echo "  status        Show companion status" >&2
+            exit 1
+            ;;
+    esac
+}
+
 cmd_skills() {
     local subcmd="${1:-regenerate}"
     case "$subcmd" in
@@ -1629,7 +1706,7 @@ cmd_update() {
 
     # Extract the version from the remote script
     local remote_version
-    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.26.0"//')
+    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.28.2"//')
     if [ -z "$remote_version" ]; then
         echo "Error: Could not parse remote version." >&2
         exit 1
@@ -1796,6 +1873,9 @@ case "${1:-help}" in
         ;;
     connections)
         shift; cmd_connections "$@"
+        ;;
+    companion)
+        shift; cmd_companion "$@"
         ;;
     skills)
         shift; cmd_skills "$@"
