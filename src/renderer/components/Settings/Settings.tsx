@@ -6341,10 +6341,11 @@ function CompanionSection(): React.JSX.Element {
       )}
 
       <div className="mt-6 text-[10px] text-[var(--color-text-muted)] space-y-1">
-        <p>1. Create a free account at <span className="text-[var(--color-accent)]">ngrok.com</span> and copy your auth token.</p>
+        <p>1. Create a <span className="text-[var(--color-accent)]">paid</span> account at <span className="text-[var(--color-accent)]">ngrok.com</span> (Personal plan or higher) and copy your auth token.</p>
         <p>2. Set a username and password for the companion app to authenticate.</p>
         <p>3. Enable the toggle — K2SO will create a secure tunnel and show you the URL.</p>
         <p>4. Enter the URL in the K2SO companion app on your phone.</p>
+        <p className="text-[var(--color-text-muted)] opacity-70 mt-2">A paid ngrok account is required for a stable connection. Free tier tunnels disconnect after a short period of inactivity.</p>
       </div>
     </div>
   )
