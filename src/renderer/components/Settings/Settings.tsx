@@ -6128,6 +6128,7 @@ function CompanionSection(): React.JSX.Element {
   const [sessions, setSessions] = useState<Array<{ token: string; remoteAddr: string; createdAt: string }>>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [urlCopied, setUrlCopied] = useState(false)
 
   useEffect(() => {
     const load = async () => {
@@ -6224,7 +6225,17 @@ function CompanionSection(): React.JSX.Element {
         {tunnelUrl && (
           <div className="flex items-center gap-1.5 ml-auto">
             <span className="text-[10px] text-[var(--color-text-muted)] font-mono truncate max-w-[200px]">{tunnelUrl}</span>
-            <button onClick={() => navigator.clipboard.writeText(tunnelUrl).catch(() => {})} className="text-[10px] text-[var(--color-accent)] hover:underline no-drag cursor-pointer">Copy</button>
+            <button
+              onClick={() => {
+                navigator.clipboard.writeText(tunnelUrl).then(() => {
+                  setUrlCopied(true)
+                  setTimeout(() => setUrlCopied(false), 1500)
+                }).catch(() => {})
+              }}
+              className={`text-[10px] no-drag cursor-pointer ${urlCopied ? 'text-green-400' : 'text-[var(--color-accent)] hover:underline'}`}
+            >
+              {urlCopied ? 'Copied!' : 'Copy'}
+            </button>
           </div>
         )}
       </div>
