@@ -6159,27 +6159,33 @@ function CompanionSection(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
-    if (!enabled) return
+    // Poll companion status — runs always when autoStart is on (to detect auto-started companion)
+    // or when enabled (to track running companion)
+    if (!enabled && !autoStart) return
     const interval = setInterval(async () => {
       try {
         const status = await invoke<any>('companion_status')
         if (!status.running) {
-          // Tunnel genuinely stopped
-          setEnabled(false)
-          setTunnelUrl(null)
-          setConnectedClients(0)
-          setSessions([])
-        } else if (status.tunnelUrl) {
-          // Full status available — update everything
-          setTunnelUrl(status.tunnelUrl)
-          setConnectedClients(status.connectedClients || 0)
-          setSessions(status.sessions || [])
+          if (enabled) {
+            // Tunnel genuinely stopped
+            setEnabled(false)
+            setTunnelUrl(null)
+            setConnectedClients(0)
+            setSessions([])
+          }
+        } else {
+          // Companion is running — make sure UI reflects it
+          if (!enabled) setEnabled(true)
+          if (status.tunnelUrl) {
+            setTunnelUrl(status.tunnelUrl)
+            setConnectedClients(status.connectedClients || 0)
+            setSessions(status.sessions || [])
+          }
         }
-        // If running but tunnelUrl is null, lock was contended — skip update, keep last known values
       } catch { /* ignore */ }
     }, 5000)
     return () => clearInterval(interval)
-  }, [enabled])
+  }, [enabled, autoStart])
 
   const handleToggle = async () => {
     setLoading(true)

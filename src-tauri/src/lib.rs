@@ -458,12 +458,31 @@ pub fn run() {
                 {
                     let handle = app.handle().clone();
                     std::thread::spawn(move || {
-                        // Brief delay to let the hook server fully initialize
-                        std::thread::sleep(std::time::Duration::from_secs(2));
-                        match companion::start_companion(handle) {
-                            Ok(url) => log_debug!("[companion] Auto-started: {}", url),
-                            Err(e) => log_debug!("[companion] Auto-start failed: {}", e),
+                        // Wait for hook server to initialize
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        // Retry with backoff — ngrok free tier allows one session at a time.
+                        // If the app was killed, the old session lingers for ~30-60s on ngrok's side.
+                        let delays = [0, 5, 10, 20]; // seconds between retries
+                        for (i, delay) in delays.iter().enumerate() {
+                            if *delay > 0 {
+                                log_debug!("[companion] Auto-start retry {} in {}s...", i + 1, delay);
+                                std::thread::sleep(std::time::Duration::from_secs(*delay));
+                            }
+                            match companion::start_companion(handle.clone()) {
+                                Ok(url) => {
+                                    log_debug!("[companion] Auto-started: {}", url);
+                                    return;
+                                }
+                                Err(e) => {
+                                    log_debug!("[companion] Auto-start attempt {} failed: {}", i + 1, e);
+                                    if e.contains("already running") {
+                                        // Someone manually started it — we're done
+                                        return;
+                                    }
+                                }
+                            }
                         }
+                        log_debug!("[companion] Auto-start gave up after {} attempts", delays.len());
                     });
                 }
             }
