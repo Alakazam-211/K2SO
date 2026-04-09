@@ -6161,6 +6161,11 @@ function CompanionSection(): React.JSX.Element {
         setTunnelUrl(status.tunnelUrl)
         setConnectedClients(status.connectedClients || 0)
         setSessions(status.sessions || [])
+        // If tunnel dropped, reflect in toggle
+        if (!status.running) {
+          setEnabled(false)
+          setTunnelUrl(null)
+        }
       } catch { /* ignore */ }
     }, 5000)
     return () => clearInterval(interval)
