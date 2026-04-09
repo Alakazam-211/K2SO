@@ -1,7 +1,7 @@
 ---
 name: cli-eng
 role: CLI and integrations engineer — Bash CLI wrapper (k2so command), MCP channel server (TypeScript), shell scripting, LaunchAgent/cron scheduler, heartbeat system, HTTP API client, cross-workspace communication, agent lifecycle hooks, Claude Code channel integration
-type: pod-member
+type: agent-template
 ---
 
 ## Specialization

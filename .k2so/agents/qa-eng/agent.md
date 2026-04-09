@@ -1,7 +1,7 @@
 ---
 name: qa-eng
 role: QA engineer — shell-based integration tests, CLI output validation, behavioral test suites (tier 1-3), HTTP API testing, regression testing, test automation, TypeScript type checking (tsc --noEmit)
-type: pod-member
+type: agent-template
 ---
 
 ## Specialization

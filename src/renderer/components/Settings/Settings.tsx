@@ -6144,9 +6144,11 @@ function CompanionSection(): React.JSX.Element {
         const status = await invoke<any>('companion_status')
         if (status.running) {
           setEnabled(true)
-          setTunnelUrl(status.tunnelUrl)
-          setConnectedClients(status.connectedClients || 0)
-          setSessions(status.sessions || [])
+          if (status.tunnelUrl) {
+            setTunnelUrl(status.tunnelUrl)
+            setConnectedClients(status.connectedClients || 0)
+            setSessions(status.sessions || [])
+          }
         }
       } catch { /* ignore */ }
     }
@@ -6158,14 +6160,19 @@ function CompanionSection(): React.JSX.Element {
     const interval = setInterval(async () => {
       try {
         const status = await invoke<any>('companion_status')
-        setTunnelUrl(status.tunnelUrl)
-        setConnectedClients(status.connectedClients || 0)
-        setSessions(status.sessions || [])
-        // If tunnel dropped, reflect in toggle
         if (!status.running) {
+          // Tunnel genuinely stopped
           setEnabled(false)
           setTunnelUrl(null)
+          setConnectedClients(0)
+          setSessions([])
+        } else if (status.tunnelUrl) {
+          // Full status available — update everything
+          setTunnelUrl(status.tunnelUrl)
+          setConnectedClients(status.connectedClients || 0)
+          setSessions(status.sessions || [])
         }
+        // If running but tunnelUrl is null, lock was contended — skip update, keep last known values
       } catch { /* ignore */ }
     }, 5000)
     return () => clearInterval(interval)
@@ -6223,9 +6230,9 @@ function CompanionSection(): React.JSX.Element {
       </p>
 
       <div className="flex items-center gap-2 mb-4 px-3 py-2 border border-[var(--color-border)]">
-        <span className="w-2 h-2 flex-shrink-0 rounded-full" style={{ backgroundColor: tunnelUrl ? '#22c55e' : '#6b7280' }} />
+        <span className="w-2 h-2 flex-shrink-0 rounded-full" style={{ backgroundColor: tunnelUrl ? '#22c55e' : enabled ? '#eab308' : '#6b7280' }} />
         <span className="text-xs text-[var(--color-text-secondary)]">
-          {tunnelUrl ? `Connected (${connectedClients} client${connectedClients !== 1 ? 's' : ''})` : 'Not running'}
+          {tunnelUrl ? `Connected (${connectedClients} client${connectedClients !== 1 ? 's' : ''})` : enabled ? 'Connecting...' : 'Not running'}
         </span>
         {tunnelUrl && (
           <div className="flex items-center gap-1.5 ml-auto">

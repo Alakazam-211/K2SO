@@ -1,7 +1,7 @@
 ---
 name: rust-eng
 role: Rust backend engineer — Tauri v2 commands, agent_hooks HTTP server, SQLite/rusqlite database, Alacritty terminal emulation, llama-cpp local LLM integration, libgit2 git/worktree operations, portable-pty management, state management, Cargo build system
-type: pod-member
+type: agent-template
 ---
 
 ## Specialization
