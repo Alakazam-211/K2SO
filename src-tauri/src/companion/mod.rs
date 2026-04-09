@@ -205,12 +205,14 @@ pub fn companion_status() -> serde_json::Value {
                 })
             }).collect())
             .unwrap_or_default();
-        let client_count = state.ws_clients.try_lock().map(|c| c.len()).unwrap_or(0);
+        let session_count = session_list.len();
+        let ws_count = state.ws_clients.try_lock().map(|c| c.len()).unwrap_or(0);
 
         serde_json::json!({
             "running": true,
             "tunnelUrl": url,
-            "connectedClients": client_count,
+            "connectedClients": session_count,
+            "wsClients": ws_count,
             "sessions": session_list,
         })
     } else {
