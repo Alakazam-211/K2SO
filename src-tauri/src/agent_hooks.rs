@@ -1821,6 +1821,177 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             Ok(serde_json::json!({ "feed": items }).to_string())
                         })()
                     }
+                    "/cli/companion/projects" => {
+                        // List all registered workspaces (global — ignores project_path)
+                        (|| -> Result<String, String> {
+                            let db_path = dirs::home_dir()
+                                .ok_or("No home dir")?
+                                .join(".k2so/k2so.db");
+                            let conn = rusqlite::Connection::open(&db_path)
+                                .map_err(|e| format!("DB open failed: {}", e))?;
+                            let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+
+                            let mut stmt = conn.prepare(
+                                "SELECT id, name, path, color, icon_url, agent_mode, pinned FROM projects ORDER BY pinned DESC, tab_order ASC, name ASC"
+                            ).map_err(|e| e.to_string())?;
+
+                            let projects: Vec<serde_json::Value> = stmt.query_map([], |row| {
+                                Ok(serde_json::json!({
+                                    "id": row.get::<_, String>(0)?,
+                                    "name": row.get::<_, String>(1)?,
+                                    "path": row.get::<_, String>(2)?,
+                                    "color": row.get::<_, String>(3)?,
+                                    "iconUrl": row.get::<_, Option<String>>(4)?,
+                                    "agentMode": row.get::<_, String>(5)?,
+                                    "pinned": row.get::<_, bool>(6)?,
+                                }))
+                            }).map_err(|e| e.to_string())?
+                            .filter_map(|r| r.ok())
+                            .collect();
+
+                            Ok(serde_json::to_string(&projects).unwrap_or("[]".to_string()))
+                        })()
+                    }
+                    "/cli/companion/sessions" => {
+                        // All active agent sessions across ALL workspaces (global)
+                        (|| -> Result<String, String> {
+                            let db_path = dirs::home_dir()
+                                .ok_or("No home dir")?
+                                .join(".k2so/k2so.db");
+                            let conn = rusqlite::Connection::open(&db_path)
+                                .map_err(|e| format!("DB open failed: {}", e))?;
+                            let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+
+                            let mut stmt = conn.prepare(
+                                "SELECT id, name, path, color FROM projects ORDER BY name ASC"
+                            ).map_err(|e| e.to_string())?;
+
+                            let workspaces: Vec<(String, String, String, String)> = stmt.query_map([], |row| {
+                                Ok((
+                                    row.get::<_, String>(0)?,
+                                    row.get::<_, String>(1)?,
+                                    row.get::<_, String>(2)?,
+                                    row.get::<_, String>(3)?,
+                                ))
+                            }).map_err(|e| e.to_string())?
+                            .filter_map(|r| r.ok())
+                            .collect();
+
+                            let mut sessions = Vec::new();
+
+                            // Check each workspace for running terminals with CLI LLM agents
+                            if let Some(state) = app_handle.try_state::<crate::state::AppState>() {
+                                let manager = state.terminal_manager.lock();
+                                let terminal_ids = manager.list_terminal_ids();
+
+                                for (tid, cwd) in &terminal_ids {
+                                    let command = manager.get_foreground_command(tid).ok().flatten();
+                                    // Match terminal CWD to a workspace
+                                    if let Some((ws_id, ws_name, _, ws_color)) = workspaces.iter().find(|(_, _, path, _)| {
+                                        cwd.starts_with(path.as_str())
+                                    }) {
+                                        // Extract agent name from CWD if in a worktree
+                                        let agent_name = cwd.strip_prefix(&format!("{}/.k2so/worktrees/", workspaces.iter().find(|(id, _, _, _)| id == ws_id).map(|(_, _, p, _)| p.as_str()).unwrap_or("")))
+                                            .and_then(|rest| rest.split('/').next())
+                                            .unwrap_or("unknown")
+                                            .to_string();
+
+                                        sessions.push(serde_json::json!({
+                                            "workspaceName": ws_name,
+                                            "workspaceId": ws_id,
+                                            "workspaceColor": ws_color,
+                                            "agentName": agent_name,
+                                            "terminalId": tid,
+                                            "command": command,
+                                            "cwd": cwd,
+                                        }));
+                                    }
+                                }
+                            }
+
+                            Ok(serde_json::to_string(&sessions).unwrap_or("[]".to_string()))
+                        })()
+                    }
+                    "/cli/companion/projects-summary" => {
+                        // Projects with running agent + review counts (global)
+                        (|| -> Result<String, String> {
+                            let db_path = dirs::home_dir()
+                                .ok_or("No home dir")?
+                                .join(".k2so/k2so.db");
+                            let conn = rusqlite::Connection::open(&db_path)
+                                .map_err(|e| format!("DB open failed: {}", e))?;
+                            let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+
+                            let mut stmt = conn.prepare(
+                                "SELECT id, name, path, color, agent_mode FROM projects ORDER BY pinned DESC, tab_order ASC, name ASC"
+                            ).map_err(|e| e.to_string())?;
+
+                            let workspaces: Vec<(String, String, String, String, String)> = stmt.query_map([], |row| {
+                                Ok((
+                                    row.get::<_, String>(0)?,
+                                    row.get::<_, String>(1)?,
+                                    row.get::<_, String>(2)?,
+                                    row.get::<_, String>(3)?,
+                                    row.get::<_, String>(4)?,
+                                ))
+                            }).map_err(|e| e.to_string())?
+                            .filter_map(|r| r.ok())
+                            .collect();
+
+                            // Count running terminals per workspace
+                            let terminal_counts: HashMap<String, usize> = if let Some(state) = app_handle.try_state::<crate::state::AppState>() {
+                                let manager = state.terminal_manager.lock();
+                                let mut counts = HashMap::new();
+                                for (_, cwd) in manager.list_terminal_ids() {
+                                    for (ws_id, _, ws_path, _, _) in &workspaces {
+                                        if cwd.starts_with(ws_path.as_str()) {
+                                            *counts.entry(ws_id.clone()).or_insert(0) += 1;
+                                            break;
+                                        }
+                                    }
+                                }
+                                counts
+                            } else {
+                                HashMap::new()
+                            };
+
+                            let mut summaries = Vec::new();
+                            for (id, name, path, color, agent_mode) in &workspaces {
+                                // Count pending reviews (done/ items)
+                                let review_count = {
+                                    let agents_dir = std::path::Path::new(path).join(".k2so/agents");
+                                    let mut count = 0usize;
+                                    if agents_dir.exists() {
+                                        if let Ok(entries) = std::fs::read_dir(&agents_dir) {
+                                            for entry in entries.flatten() {
+                                                let done_dir = entry.path().join("work/done");
+                                                if done_dir.exists() {
+                                                    if let Ok(files) = std::fs::read_dir(&done_dir) {
+                                                        count += files.filter_map(|f| f.ok()).filter(|f| {
+                                                            f.path().extension().map_or(false, |ext| ext == "md")
+                                                        }).count();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    count
+                                };
+
+                                summaries.push(serde_json::json!({
+                                    "id": id,
+                                    "name": name,
+                                    "path": path,
+                                    "color": color,
+                                    "agentMode": agent_mode,
+                                    "agentsRunning": terminal_counts.get(id).copied().unwrap_or(0),
+                                    "reviewsPending": review_count,
+                                }));
+                            }
+
+                            Ok(serde_json::to_string(&summaries).unwrap_or("[]".to_string()))
+                        })()
+                    }
                     _ => Err("Unknown CLI endpoint".to_string()),
                 };
 
