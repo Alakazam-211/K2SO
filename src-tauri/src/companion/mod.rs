@@ -130,6 +130,47 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
         run_terminal_polling(&poll_handle);
     });
 
+    // Spawn tunnel health check — restarts companion if tunnel dies
+    let health_url = tunnel_url.clone();
+    let health_handle = app_handle.clone();
+    std::thread::spawn(move || {
+        // Wait before first check to let everything settle
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        let mut consecutive_failures = 0u32;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(15));
+            if !RUNNING.load(Ordering::Relaxed) { break; }
+
+            // Probe the tunnel with a lightweight request
+            let probe = reqwest::blocking::Client::new()
+                .head(&health_url)
+                .header("ngrok-skip-browser-warning", "true")
+                .timeout(std::time::Duration::from_secs(5))
+                .send();
+
+            match probe {
+                Ok(_) => {
+                    consecutive_failures = 0;
+                }
+                Err(_) => {
+                    consecutive_failures += 1;
+                    log_debug!("[companion] Tunnel health check failed ({}/3)", consecutive_failures);
+                    if consecutive_failures >= 3 {
+                        log_debug!("[companion] Tunnel dead — restarting companion");
+                        // Stop and restart
+                        let _ = stop_companion();
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        match start_companion(health_handle.clone()) {
+                            Ok(url) => log_debug!("[companion] Auto-restarted: {}", url),
+                            Err(e) => log_debug!("[companion] Auto-restart failed: {}", e),
+                        }
+                        break; // New health check thread spawned by the new start_companion
+                    }
+                }
+            }
+        }
+    });
+
     Ok(tunnel_url)
 }
 
