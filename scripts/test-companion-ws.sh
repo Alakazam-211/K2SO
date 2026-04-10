@@ -176,22 +176,32 @@ else
     echo ""
 fi
 
-# ── 9. Auth via WS ──────────────────────────────────────────────────────
-echo -e "${CYAN}9. method: auth (over WS)${NC}"
+# ── 9. Presets List (global) ─────────────────────────────────────────────
+echo -e "${CYAN}9. method: presets.list${NC}"
+ws_call "presets.list" "{}" "$TMPDIR/9.json"
+if has_result "$TMPDIR/9.json"; then
+    passed
+else
+    failed "Expected presets data"
+fi
+echo ""
+
+# ── 10. Auth via WS ──────────────────────────────────────────────────────
+echo -e "${CYAN}10. method: auth (over WS)${NC}"
 (echo "{\"id\":\"a1\",\"method\":\"auth\",\"params\":{\"token\":\"$TOKEN\"}}"; sleep 2) \
-    | websocat -B 65536 "$WS_URL/companion/ws" > "$TMPDIR/9.json" 2>/dev/null || true
-if grep -q '"authenticated"' "$TMPDIR/9.json" 2>/dev/null; then
+    | websocat -B 65536 "$WS_URL/companion/ws" > "$TMPDIR/10.json" 2>/dev/null || true
+if grep -q '"authenticated"' "$TMPDIR/10.json" 2>/dev/null; then
     passed
 else
     failed "Expected authenticated:true"
 fi
 echo ""
 
-# ── 10. Unauthenticated request ─────────────────────────────────────────
-echo -e "${CYAN}10. Unauthenticated WS request${NC}"
+# ── 11. Unauthenticated request ─────────────────────────────────────────
+echo -e "${CYAN}11. Unauthenticated WS request${NC}"
 (echo '{"id":"u1","method":"projects.list","params":{}}'; sleep 2) \
-    | websocat -B 65536 "$WS_URL/companion/ws" > "$TMPDIR/10.json" 2>/dev/null || true
-if has_error "$TMPDIR/10.json"; then
+    | websocat -B 65536 "$WS_URL/companion/ws" > "$TMPDIR/11.json" 2>/dev/null || true
+if has_error "$TMPDIR/11.json"; then
     passed
 else
     failed "Expected error for unauthenticated request"
@@ -199,9 +209,9 @@ fi
 echo ""
 
 # ── 11. Unknown method ──────────────────────────────────────────────────
-echo -e "${CYAN}11. Unknown method${NC}"
-ws_call "nonexistent.method" "{}" "$TMPDIR/11.json"
-if has_error "$TMPDIR/11.json"; then
+echo -e "${CYAN}12. Unknown method${NC}"
+ws_call "nonexistent.method" "{}" "$TMPDIR/12.json"
+if has_error "$TMPDIR/12.json"; then
     passed
 else
     failed "Expected error for unknown method"
@@ -209,9 +219,9 @@ fi
 echo ""
 
 # ── 12. Terminal subscribe ───────────────────────────────────────────────
-echo -e "${CYAN}12. method: terminal.subscribe${NC}"
-ws_call "terminal.subscribe" '{"terminalId":"test-terminal"}' "$TMPDIR/12.json"
-if grep -q '"subscribed"' "$TMPDIR/12.json" 2>/dev/null; then
+echo -e "${CYAN}13. method: terminal.subscribe${NC}"
+ws_call "terminal.subscribe" '{"terminalId":"test-terminal"}' "$TMPDIR/13.json"
+if grep -q '"subscribed"' "$TMPDIR/13.json" 2>/dev/null; then
     passed
 else
     failed "Expected subscribed confirmation"

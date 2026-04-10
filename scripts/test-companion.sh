@@ -207,8 +207,21 @@ print('')
     echo ""
 fi
 
-# ── 10. Auth failure (bad credentials) ──────────────────────────────────
-echo -e "${CYAN}10. POST /companion/auth (bad password)${NC} — Should return 401"
+# ── 10. Presets ──────────────────────────────────────────────────────────
+echo -e "${CYAN}10. GET /companion/presets${NC} — CLI LLM tool presets"
+RESP=$(api GET "/companion/presets" -H "$AUTH_HEADER")
+echo "   Response: $(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d,indent=2)[:500])" 2>/dev/null || echo "$RESP")"
+
+PRESETS_OK=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print('ok' if d.get('ok') and isinstance(d.get('data'), list) else 'fail')" 2>/dev/null || echo "fail")
+if [ "$PRESETS_OK" = "ok" ]; then
+    passed
+else
+    failed "Expected ok:true with data array"
+fi
+echo ""
+
+# ── 11. Auth failure (bad credentials) ──────────────────────────────────
+echo -e "${CYAN}11. POST /companion/auth (bad password)${NC} — Should return 401"
 RESP=$(api POST "/companion/auth" \
     -H "Authorization: Basic $(echo -n "$USERNAME:wrongpassword" | base64)")
 echo "   Response: $RESP"
@@ -221,8 +234,8 @@ else
 fi
 echo ""
 
-# ── 11. Missing Bearer token ────────────────────────────────────────────
-echo -e "${CYAN}11. GET /companion/projects (no auth)${NC} — Should return 401"
+# ── 12. Missing Bearer token ────────────────────────────────────────────
+echo -e "${CYAN}12. GET /companion/projects (no auth)${NC} — Should return 401"
 RESP=$(api GET "/companion/projects")
 echo "   Response: $RESP"
 
