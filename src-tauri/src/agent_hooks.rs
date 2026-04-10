@@ -2069,6 +2069,34 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             Ok(serde_json::to_string(&summaries).unwrap_or("[]".to_string()))
                         })()
                     }
+                    "/cli/companion/presets" => {
+                        // List available CLI LLM tool presets (global)
+                        (|| -> Result<String, String> {
+                            let db_path = dirs::home_dir()
+                                .ok_or("No home dir")?
+                                .join(".k2so/k2so.db");
+                            let conn = rusqlite::Connection::open(&db_path)
+                                .map_err(|e| format!("DB open failed: {}", e))?;
+                            let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+
+                            let mut stmt = conn.prepare(
+                                "SELECT id, label, command, icon FROM agent_presets WHERE enabled = 1 ORDER BY sort_order ASC, label ASC"
+                            ).map_err(|e| e.to_string())?;
+
+                            let presets: Vec<serde_json::Value> = stmt.query_map([], |row| {
+                                Ok(serde_json::json!({
+                                    "id": row.get::<_, String>(0)?,
+                                    "name": row.get::<_, String>(1)?,
+                                    "command": row.get::<_, String>(2)?,
+                                    "icon": row.get::<_, Option<String>>(3)?,
+                                }))
+                            }).map_err(|e| e.to_string())?
+                            .filter_map(|r| r.ok())
+                            .collect();
+
+                            Ok(serde_json::to_string(&presets).unwrap_or("[]".to_string()))
+                        })()
+                    }
                     _ => Err("Unknown CLI endpoint".to_string()),
                 };
 
