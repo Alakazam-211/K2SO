@@ -1982,17 +1982,26 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
 
                             let mut stmt = conn.prepare(
-                                "SELECT id, name, path, color, agent_mode FROM projects ORDER BY pinned DESC, tab_order ASC, name ASC"
+                                "SELECT p.id, p.name, p.path, p.color, p.agent_mode, p.pinned, p.tab_order, \
+                                 p.focus_group_id, fg.name, fg.color \
+                                 FROM projects p \
+                                 LEFT JOIN focus_groups fg ON p.focus_group_id = fg.id \
+                                 ORDER BY p.pinned DESC, p.tab_order ASC, p.name ASC"
                             ).map_err(|e| e.to_string())?;
 
-                            let workspaces: Vec<(String, String, String, String, String)> = stmt.query_map([], |row| {
-                                Ok((
-                                    row.get::<_, String>(0)?,
-                                    row.get::<_, String>(1)?,
-                                    row.get::<_, String>(2)?,
-                                    row.get::<_, String>(3)?,
-                                    row.get::<_, String>(4)?,
-                                ))
+                            struct WsRow {
+                                id: String, name: String, path: String, color: String,
+                                agent_mode: String, pinned: bool, tab_order: i32,
+                                fg_id: Option<String>, fg_name: Option<String>, fg_color: Option<String>,
+                            }
+
+                            let workspaces: Vec<WsRow> = stmt.query_map([], |row| {
+                                Ok(WsRow {
+                                    id: row.get(0)?, name: row.get(1)?, path: row.get(2)?,
+                                    color: row.get(3)?, agent_mode: row.get(4)?,
+                                    pinned: row.get(5)?, tab_order: row.get(6)?,
+                                    fg_id: row.get(7)?, fg_name: row.get(8)?, fg_color: row.get(9)?,
+                                })
                             }).map_err(|e| e.to_string())?
                             .filter_map(|r| r.ok())
                             .collect();
@@ -2002,9 +2011,9 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                 let manager = state.terminal_manager.lock();
                                 let mut counts = HashMap::new();
                                 for (_, cwd) in manager.list_terminal_ids() {
-                                    for (ws_id, _, ws_path, _, _) in &workspaces {
-                                        if cwd.starts_with(ws_path.as_str()) {
-                                            *counts.entry(ws_id.clone()).or_insert(0) += 1;
+                                    for ws in &workspaces {
+                                        if cwd.starts_with(ws.path.as_str()) {
+                                            *counts.entry(ws.id.clone()).or_insert(0) += 1;
                                             break;
                                         }
                                     }
@@ -2015,10 +2024,10 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             };
 
                             let mut summaries = Vec::new();
-                            for (id, name, path, color, agent_mode) in &workspaces {
+                            for ws in &workspaces {
                                 // Count pending reviews (done/ items)
                                 let review_count = {
-                                    let agents_dir = std::path::Path::new(path).join(".k2so/agents");
+                                    let agents_dir = std::path::Path::new(&ws.path).join(".k2so/agents");
                                     let mut count = 0usize;
                                     if agents_dir.exists() {
                                         if let Ok(entries) = std::fs::read_dir(&agents_dir) {
@@ -2037,13 +2046,22 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                     count
                                 };
 
+                                let focus_group = if let (Some(ref id), Some(ref name)) = (&ws.fg_id, &ws.fg_name) {
+                                    serde_json::json!({ "id": id, "name": name, "color": ws.fg_color })
+                                } else {
+                                    serde_json::Value::Null
+                                };
+
                                 summaries.push(serde_json::json!({
-                                    "id": id,
-                                    "name": name,
-                                    "path": path,
-                                    "color": color,
-                                    "agentMode": agent_mode,
-                                    "agentsRunning": terminal_counts.get(id).copied().unwrap_or(0),
+                                    "id": ws.id,
+                                    "name": ws.name,
+                                    "path": ws.path,
+                                    "color": ws.color,
+                                    "agentMode": ws.agent_mode,
+                                    "pinned": ws.pinned,
+                                    "tabOrder": ws.tab_order,
+                                    "focusGroup": focus_group,
+                                    "agentsRunning": terminal_counts.get(&ws.id).copied().unwrap_or(0),
                                     "reviewsPending": review_count,
                                 }));
                             }
