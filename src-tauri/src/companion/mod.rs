@@ -580,10 +580,8 @@ fn run_terminal_polling(app_handle: &AppHandle) {
                 if hash == prev_hash { continue; }
                 last_hashes.insert(tid.clone(), hash);
 
-                // Broadcast rich CompactLine grid update
-                if let Ok(grid_json) = serde_json::to_string(&grid) {
-                    websocket::broadcast_terminal_grid(state, tid, &grid_json);
-                }
+                // Broadcast rich CompactLine grid update (reflowed per-client if mobile dims set)
+                websocket::broadcast_terminal_grid(state, tid, &grid);
 
                 // Also broadcast legacy plain-text for backwards compat
                 let lines: Vec<String> = grid.lines.iter()

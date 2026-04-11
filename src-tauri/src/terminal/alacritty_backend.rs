@@ -1091,10 +1091,25 @@ fn row_to_compact_line(
         );
     }
 
+    // Check if the last non-spacer cell has the WRAPLINE flag (soft-wrap indicator).
+    // This means this row continues on the next row (the program didn't send a newline).
+    let wrapped = {
+        let mut is_wrapped = false;
+        for col in (0..cols).rev() {
+            let cell = &row[Column(col)];
+            if !cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+                is_wrapped = cell.flags.contains(CellFlags::WRAPLINE);
+                break;
+            }
+        }
+        is_wrapped
+    };
+
     CompactLine {
         row: row_idx as u16,
         text: trimmed,
         spans,
+        wrapped,
     }
 }
 

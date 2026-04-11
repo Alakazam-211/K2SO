@@ -2,6 +2,7 @@
 
 mod alacritty_backend;
 pub mod grid_types;
+pub mod reflow;
 mod font_renderer;
 mod bitmap_renderer;
 

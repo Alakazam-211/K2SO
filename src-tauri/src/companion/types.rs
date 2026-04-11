@@ -69,6 +69,9 @@ pub struct WsClient {
     /// Whether this client has authenticated via the WS auth message
     pub authenticated: bool,
     pub subscribed_terminals: HashSet<String>,
+    /// Mobile screen dimensions for shadow terminal reflow.
+    /// If set, grid updates are reflowed to these dimensions before sending.
+    pub mobile_dims: Option<(u16, u16)>, // (cols, rows)
     /// Channel to send messages to the WS writer thread
     pub sender: std::sync::mpsc::Sender<String>,
     /// Last time we received any message from this client

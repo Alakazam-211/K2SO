@@ -49,7 +49,13 @@ pub struct CompactLine {
     /// Style spans for non-default cells. Empty array = all default styling.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub spans: Vec<StyleSpan>,
+    /// True if this line is a soft-wrap continuation of the previous line.
+    /// Used by the reflow engine to reconstruct logical lines for mobile rendering.
+    #[serde(skip_serializing_if = "is_false")]
+    pub wrapped: bool,
 }
+
+fn is_false(v: &bool) -> bool { !v }
 
 /// A grid update sent from Rust → frontend via Tauri event.
 #[derive(Serialize, Clone, Debug)]

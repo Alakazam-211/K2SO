@@ -56,6 +56,7 @@ pub fn handle_ws_upgrade(
             session_token: client_token.clone(),
             authenticated: pre_authenticated,
             subscribed_terminals: HashSet::new(),
+            mobile_dims: None,
             sender: tx.clone(),
             last_seen: Instant::now(),
         });
@@ -144,19 +145,51 @@ pub fn handle_ws_upgrade(
                         continue;
                     }
 
-                    // Handle terminal subscribe/unsubscribe
+                    // Handle terminal subscribe/unsubscribe/resize
                     if method == "terminal.subscribe" {
                         let terminal_id = params.get("terminalId").and_then(|v| v.as_str()).unwrap_or("");
                         if terminal_id.is_empty() {
                             send_response(&tx, id.as_deref(), Err("Missing terminalId".to_string()));
                         } else {
+                            // Extract optional mobile dimensions for shadow terminal reflow
+                            let cols = params.get("cols").and_then(|v| v.as_u64()).map(|v| v as u16);
+                            let rows = params.get("rows").and_then(|v| v.as_u64()).map(|v| v as u16);
+                            let dims = match (cols, rows) {
+                                (Some(c), Some(r)) if c > 0 && r > 0 => Some((c, r)),
+                                _ => None,
+                            };
+
                             let mut clients = reader_state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
-                            if let Some(client) = clients.iter_mut().find(|c| c.session_token == session_token) {
+                            if let Some(client) = clients.iter_mut().find(|c| c.client_id == client_id) {
                                 client.subscribed_terminals.insert(terminal_id.to_string());
+                                if dims.is_some() {
+                                    client.mobile_dims = dims;
+                                }
                             }
                             drop(clients);
-                            log_debug!("[companion-ws] Subscribed to terminal: {}", terminal_id);
-                            send_response(&tx, id.as_deref(), Ok(serde_json::json!({"subscribed": terminal_id})));
+                            log_debug!("[companion-ws] Subscribed to terminal: {} (dims: {:?})", terminal_id, dims);
+                            send_response(&tx, id.as_deref(), Ok(serde_json::json!({
+                                "subscribed": terminal_id,
+                                "mobileDims": dims.map(|(c, r)| serde_json::json!({"cols": c, "rows": r})),
+                            })));
+                        }
+                        continue;
+                    }
+
+                    if method == "terminal.resize" {
+                        let terminal_id = params.get("terminalId").and_then(|v| v.as_str()).unwrap_or("");
+                        let cols = params.get("cols").and_then(|v| v.as_u64()).map(|v| v as u16).unwrap_or(0);
+                        let rows = params.get("rows").and_then(|v| v.as_u64()).map(|v| v as u16).unwrap_or(0);
+                        if terminal_id.is_empty() || cols == 0 || rows == 0 {
+                            send_response(&tx, id.as_deref(), Err("Missing terminalId, cols, or rows".to_string()));
+                        } else {
+                            let mut clients = reader_state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(client) = clients.iter_mut().find(|c| c.client_id == client_id) {
+                                client.mobile_dims = Some((cols, rows));
+                            }
+                            drop(clients);
+                            log_debug!("[companion-ws] Terminal resize: {} → {}x{}", terminal_id, cols, rows);
+                            send_response(&tx, id.as_deref(), Ok(serde_json::json!({"resized": true})));
                         }
                         continue;
                     }
@@ -269,16 +302,34 @@ pub fn broadcast_terminal_output(state: &CompanionState, terminal_id: &str, line
 }
 
 /// Broadcast a CompactLine grid update to subscribed clients.
-pub fn broadcast_terminal_grid(state: &CompanionState, terminal_id: &str, grid_json: &str) {
-    let event = format!(
-        r#"{{"event":"terminal:grid","data":{{"terminalId":"{}","grid":{}}}}}"#,
-        terminal_id, grid_json
-    );
-
+/// If a client has mobile_dims set, the grid is reflowed to those dimensions.
+pub fn broadcast_terminal_grid(state: &CompanionState, terminal_id: &str, grid: &crate::terminal::grid_types::GridUpdate) {
     let clients = state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Cache the desktop JSON (no reflow) — only computed if needed
+    let mut desktop_json: Option<String> = None;
+
     for client in clients.iter() {
-        if client.authenticated && client.subscribed_terminals.contains(terminal_id) {
-            let _ = client.sender.send(event.clone());
+        if !client.authenticated || !client.subscribed_terminals.contains(terminal_id) {
+            continue;
         }
+
+        let grid_json = if let Some((cols, rows)) = client.mobile_dims {
+            // Reflow the grid to mobile dimensions
+            let reflowed = crate::terminal::reflow::reflow_grid(grid, cols, rows);
+            serde_json::to_string(&reflowed).unwrap_or_default()
+        } else {
+            // Desktop dimensions — use original grid
+            if desktop_json.is_none() {
+                desktop_json = Some(serde_json::to_string(grid).unwrap_or_default());
+            }
+            desktop_json.clone().unwrap_or_default()
+        };
+
+        let event = format!(
+            r#"{{"event":"terminal:grid","data":{{"terminalId":"{}","grid":{}}}}}"#,
+            terminal_id, grid_json
+        );
+        let _ = client.sender.send(event);
     }
 }
