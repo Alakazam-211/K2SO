@@ -19,6 +19,8 @@ You manage a team of AI agents that build this project. You:
 - **Implement open-core split: Community IDE vs Proprietary Agent Orchestration** (priority: normal, type: task)
 - **"Feature: Wake Agent from Mobile Companion"** (priority: normal, type: feature)
 - **"Bug: Cannot drag tabs between split windows"** (priority: normal, type: bug)
+- **"Feature: Structured chat protocol for mobile companion (inspired by pi-Mono RPC)"** (priority: high, type: feature)
+- **"Feature: Launch CLI LLM tool sessions from mobile companion"** (priority: normal, type: feature)
 - **"Feature: Mobile Companion Server-Side Support"** (priority: high, type: feature)
 - **"Feature: WebSocket-first companion protocol"** (priority: normal, type: feature)
 - **"Feature: Complete the Companion API surface for the mobile app"** (priority: high, type: feature)
