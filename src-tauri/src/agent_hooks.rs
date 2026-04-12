@@ -672,10 +672,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             match manager.create(id.clone(), cwd.clone(), prog, args, Some(80), Some(24), app_handle.clone()) {
                                 Ok(()) => {
                                     log_debug!("[companion] Background terminal spawned: {} ({})", id, command);
-                                    // Emit lifecycle event so the active-agents polling
-                                    // picks up the new terminal in CMD+J
-                                    let _ = app_handle.emit("agent:lifecycle", serde_json::json!({
-                                        "type": "companion-spawn",
+                                    // Emit background spawn event for the frontend to create a tab
+                                    let _ = app_handle.emit("cli:terminal-spawn-background", serde_json::json!({
                                         "terminalId": &id,
                                         "command": &command,
                                         "cwd": &cwd,

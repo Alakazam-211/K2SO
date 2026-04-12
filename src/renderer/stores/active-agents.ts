@@ -465,6 +465,51 @@ export function startAgentPolling(): void {
     useActiveAgentsStore.getState().pollOnce()
   }, interval)
 
+  // Helper: create a tab for a companion-spawned terminal that's already running.
+  // Adds the tab to the current workspace without switching active tab.
+  function createCompanionTab(terminalId: string, command: string, cwd: string) {
+    const tabsStore = useTabsStore.getState()
+
+    // Check if a tab for this terminal already exists
+    const exists = tabsStore.tabs.some((t) =>
+      [...t.paneGroups.values()].some((pg) =>
+        pg.items.some((item) => item.type === 'terminal' && (item.data as any).terminalId === terminalId)
+      )
+    )
+    if (exists) return
+
+    // Save current active tab so we can restore it after addTab switches
+    const currentActiveTabId = tabsStore.activeTabId
+    const cmd = command.split(' ')[0] || 'shell'
+    tabsStore.addTab(cwd, {
+      title: `Companion: ${cmd}`,
+      command: cmd,
+      args: command.split(' ').slice(1),
+    })
+
+    // Override the new tab's terminal ID to connect to the existing PTY
+    const updatedStore = useTabsStore.getState()
+    const newTab = updatedStore.tabs[updatedStore.tabs.length - 1]
+    if (newTab) {
+      const pg = [...newTab.paneGroups.values()][0]
+      if (pg?.items[0]?.data) {
+        (pg.items[0].data as any).terminalId = terminalId
+      }
+      const oldPgId = pg?.id
+      if (oldPgId && oldPgId !== terminalId) {
+        newTab.paneGroups.delete(oldPgId)
+        pg.id = terminalId
+        newTab.paneGroups.set(terminalId, pg)
+        newTab.mosaicTree = terminalId
+      }
+    }
+
+    // Restore the previously active tab — don't switch to the new one
+    if (currentActiveTabId) {
+      useTabsStore.setState({ activeTabId: currentActiveTabId })
+    }
+  }
+
   // Listen for hook-based lifecycle events from the Rust notification server
   import('@tauri-apps/api/event').then(({ listen }) => {
     listen<{ paneId: string; tabId: string; eventType: string }>('agent:lifecycle', (event) => {
@@ -590,9 +635,55 @@ export function startAgentPolling(): void {
       }
     )
 
-    // Companion background terminal spawns are discovered via CMD+J (running agents panel)
-    // and the sessions list — no tab pre-creation needed. The terminal runs in the background
-    // and the user clicks it from CMD+J when they return to the desktop.
+    // Companion background terminal spawn — queue for tab creation.
+    // If the target workspace is active, create the tab immediately.
+    // If not, queue it and create when the user switches to that workspace.
+    const pendingCompanionTerminals: Array<{
+      terminalId: string
+      command: string
+      cwd: string
+      projectPath: string
+    }> = []
+
+    listen<{ terminalId: string; command: string; cwd: string; projectPath: string }>(
+      'cli:terminal-spawn-background', (event) => {
+        const { terminalId, command, cwd, projectPath } = event.payload
+
+        // Find which project this terminal belongs to
+        const projects = useProjectsStore.getState().projects
+        const project = projects.find((p) => cwd.startsWith(p.path))
+        const activeProjectId = useProjectsStore.getState().activeProjectId
+
+        if (project && project.id === activeProjectId) {
+          // Target workspace is active — create tab immediately (without switching to it)
+          createCompanionTab(terminalId, command, cwd)
+        } else {
+          // Queue for later — will be created when user switches to this workspace
+          pendingCompanionTerminals.push({ terminalId, command, cwd, projectPath })
+        }
+      }
+    )
+
+    // Watch for workspace switches — flush any pending companion terminals
+    useProjectsStore.subscribe((state, prevState) => {
+      if (state.activeProjectId && state.activeProjectId !== prevState.activeProjectId) {
+        const project = state.projects.find((p) => p.id === state.activeProjectId)
+        if (!project) return
+
+        // Find and create tabs for any pending terminals in this workspace
+        const toCreate = pendingCompanionTerminals.filter((t) => t.cwd.startsWith(project.path))
+        for (const t of toCreate) {
+          // Brief delay to let restoreWorkspace finish
+          setTimeout(() => createCompanionTab(t.terminalId, t.command, t.cwd), 300)
+        }
+        // Remove created terminals from pending list
+        for (let i = pendingCompanionTerminals.length - 1; i >= 0; i--) {
+          if (pendingCompanionTerminals[i].cwd.startsWith(project.path)) {
+            pendingCompanionTerminals.splice(i, 1)
+          }
+        }
+      }
+    })
 
     // Listen for CLI-triggered AI Commit requests
     listen<{
