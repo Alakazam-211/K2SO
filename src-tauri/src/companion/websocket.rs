@@ -151,8 +151,11 @@ pub fn handle_ws_upgrade(
                         if terminal_id.is_empty() {
                             send_response(&tx, id.as_deref(), Err("Missing terminalId".to_string()));
                         } else {
-                            // Extract optional mobile dimensions for shadow terminal reflow
-                            let cols = params.get("cols").and_then(|v| v.as_u64()).map(|v| v as u16);
+                            // Extract optional mobile dimensions for shadow terminal reflow.
+                            // Subtract 1 column as safety margin — mobile font metrics
+                            // (sub-pixel rounding, webview rendering) can differ slightly
+                            // from integer column math, causing the prompt line to wrap.
+                            let cols = params.get("cols").and_then(|v| v.as_u64()).map(|v| v.saturating_sub(1).max(10) as u16);
                             let rows = params.get("rows").and_then(|v| v.as_u64()).map(|v| v as u16);
                             let dims = match (cols, rows) {
                                 (Some(c), Some(r)) if c > 0 && r > 0 => Some((c, r)),
@@ -178,7 +181,8 @@ pub fn handle_ws_upgrade(
 
                     if method == "terminal.resize" {
                         let terminal_id = params.get("terminalId").and_then(|v| v.as_str()).unwrap_or("");
-                        let cols = params.get("cols").and_then(|v| v.as_u64()).map(|v| v as u16).unwrap_or(0);
+                        // Same 1-column safety margin as subscribe
+                        let cols = params.get("cols").and_then(|v| v.as_u64()).map(|v| v.saturating_sub(1).max(10) as u16).unwrap_or(0);
                         let rows = params.get("rows").and_then(|v| v.as_u64()).map(|v| v as u16).unwrap_or(0);
                         if terminal_id.is_empty() || cols == 0 || rows == 0 {
                             send_response(&tx, id.as_deref(), Err("Missing terminalId, cols, or rows".to_string()));
