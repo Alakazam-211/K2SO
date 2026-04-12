@@ -74,6 +74,20 @@ fn join_wrapped_lines(lines: &[CompactLine]) -> Vec<LogicalLine> {
 
     for line in lines {
         if let Some(ref mut cur) = current {
+            // Trim the previous row's trailing padding before appending.
+            // Desktop terminals pad rows with spaces to fill the full width;
+            // without trimming, padding ends up in the middle of the logical line.
+            let trimmed_prev = cur.text.trim_end().len();
+            if trimmed_prev < cur.text.len() {
+                cur.text.truncate(trimmed_prev);
+                // Clamp spans to trimmed length
+                let trimmed_chars = cur.text.chars().count() as u16;
+                cur.spans.retain(|s| s.s < trimmed_chars);
+                for span in &mut cur.spans {
+                    if span.e >= trimmed_chars { span.e = trimmed_chars.saturating_sub(1); }
+                }
+            }
+
             // Append this line to the current logical line
             let offset = cur.text.chars().count() as u16;
             cur.text.push_str(&line.text);
@@ -112,6 +126,26 @@ fn join_wrapped_lines(lines: &[CompactLine]) -> Vec<LogicalLine> {
     // Flush any remaining
     if let Some(cur) = current {
         logical_lines.push(cur);
+    }
+
+    // Trim trailing spaces from each logical line.
+    // Desktop terminals pad rows with spaces to fill the full width (e.g. status bars,
+    // prompt lines). Without trimming, a 120-col padded line wraps at 50 cols even
+    // though the actual content is much shorter.
+    for line in &mut logical_lines {
+        let trimmed = line.text.trim_end().to_string();
+        if trimmed.len() < line.text.len() {
+            let trimmed_chars = trimmed.chars().count() as u16;
+            // Remove spans that fall entirely in the trimmed region
+            line.spans.retain(|span| span.s < trimmed_chars);
+            // Clamp spans that extend past the trimmed end
+            for span in &mut line.spans {
+                if span.e >= trimmed_chars {
+                    span.e = trimmed_chars.saturating_sub(1);
+                }
+            }
+            line.text = trimmed;
+        }
     }
 
     logical_lines
@@ -267,6 +301,51 @@ mod tests {
         assert!(!result.lines[2].wrapped);
         assert_eq!(result.lines[3].text, "xyz");
         assert!(!result.lines[3].wrapped);
+    }
+
+    #[test]
+    fn test_padded_prompt_line_trimmed() {
+        // Desktop pads prompt lines with spaces to fill 120 cols.
+        // "$ hello          " (padded to 120 chars) should NOT wrap at 50 cols.
+        let padded = format!("{:<120}", "> bypass permissions on");
+        let grid = GridUpdate {
+            cols: 120, rows: 5,
+            cursor_col: 0, cursor_row: 0,
+            cursor_visible: true, cursor_shape: "block".into(),
+            lines: vec![line(0, &padded, false)],
+            full: true, mode: 0, display_offset: 0,
+            selection: None, perf: None,
+        };
+        let result = reflow_grid(&grid, 50, 20);
+        // Should fit in one line after trimming (23 chars < 50 cols)
+        assert_eq!(result.lines.len(), 1);
+        assert_eq!(result.lines[0].text, "> bypass permissions on");
+        assert!(!result.lines[0].wrapped);
+    }
+
+    #[test]
+    fn test_padded_wrapped_prompt_trimmed() {
+        // Desktop wraps a padded prompt across two rows at 60 cols.
+        // After joining + trimming, the content is ~30 chars and fits in one line at 50.
+        let row1 = format!("{:<60}", "bypass permissions on -");
+        let row2 = format!("{:<60}", " 1 monitor");
+        let grid = GridUpdate {
+            cols: 60, rows: 5,
+            cursor_col: 0, cursor_row: 0,
+            cursor_visible: true, cursor_shape: "block".into(),
+            lines: vec![
+                line(0, &row1, true),  // wrapped
+                line(1, &row2, false), // end
+            ],
+            full: true, mode: 0, display_offset: 0,
+            selection: None, perf: None,
+        };
+        let result = reflow_grid(&grid, 50, 20);
+        // Joined: "bypass permissions on - 1 monitor" (trimmed, ~33 chars)
+        // Should fit in one line at 50 cols
+        assert_eq!(result.lines.len(), 1);
+        assert!(result.lines[0].text.contains("monitor"));
+        assert!(!result.lines[0].wrapped);
     }
 
     #[test]
