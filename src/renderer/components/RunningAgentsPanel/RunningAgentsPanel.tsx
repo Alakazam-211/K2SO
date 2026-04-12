@@ -193,20 +193,56 @@ export default function RunningAgentsPanel(): React.JSX.Element | null {
       }
     }
 
-    // 4. Fallback: match by CWD to find the right workspace
+    // 4. Fallback: match by CWD to find the right workspace, create a tab for
+    //    the running terminal, and navigate to it. This handles companion-spawned
+    //    and other background terminals that don't have tabs yet.
     const projects = useProjectsStore.getState().projects
     for (const project of projects) {
       if (cwd.startsWith(project.path)) {
         const ws = project.workspaces.find((w) => cwd.startsWith(w.worktreePath || project.path))
         if (ws) {
           useProjectsStore.getState().setActiveWorkspace(project.id, ws.id)
-          return
-        }
-        // Default to first workspace
-        if (project.workspaces[0]) {
+        } else if (project.workspaces[0]) {
           useProjectsStore.getState().setActiveWorkspace(project.id, project.workspaces[0].id)
-          return
         }
+        // Create a tab for this running terminal so the user can see it
+        setTimeout(() => {
+          const store = useTabsStore.getState()
+          // Double-check: did workspace switch already create a tab for this terminal?
+          const alreadyExists = store.tabs.some((t) =>
+            [...t.paneGroups.values()].some((pg) =>
+              pg.items.some((item) => item.type === 'terminal' && (item.data as any).terminalId === terminalId)
+            )
+          )
+          if (!alreadyExists) {
+            // Determine the command from the agent info
+            const agent = agents.find((a) => a.terminalId === terminalId)
+            const cmd = agent?.command || 'shell'
+            store.addTab(cwd, {
+              title: cmd === 'shell' ? `Terminal` : cmd,
+              command: cmd !== 'shell' ? cmd : undefined,
+            })
+            // The new tab gets a NEW terminal ID — but we need to connect it to the
+            // EXISTING running terminal. Override the terminal ID in the new tab's data.
+            const updatedStore = useTabsStore.getState()
+            const newTab = updatedStore.tabs[updatedStore.tabs.length - 1]
+            if (newTab) {
+              const pg = [...newTab.paneGroups.values()][0]
+              if (pg?.items[0]?.data) {
+                (pg.items[0].data as any).terminalId = terminalId
+              }
+              // Update the pane group ID to match (terminal manager uses this)
+              const oldPgId = pg?.id
+              if (oldPgId && oldPgId !== terminalId) {
+                newTab.paneGroups.delete(oldPgId)
+                pg.id = terminalId
+                newTab.paneGroups.set(terminalId, pg)
+                newTab.mosaicTree = terminalId
+              }
+            }
+          }
+        }, 200) // brief delay for workspace switch to complete
+        return
       }
     }
   }
