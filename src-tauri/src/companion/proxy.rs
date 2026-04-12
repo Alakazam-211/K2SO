@@ -24,6 +24,7 @@ fn map_route(method: &str, path: &str) -> Option<&'static str> {
         ("GET",  "/companion/sessions")         => Some("/cli/companion/sessions"),
         ("GET",  "/companion/presets")          => Some("/cli/companion/presets"),
         ("POST", "/companion/terminal/spawn")   => Some("/cli/terminal/spawn"),
+        ("POST", "/companion/terminal/spawn-background") => Some("/cli/terminal/spawn-background"),
         _ => None,
     }
 }
@@ -100,6 +101,7 @@ pub fn map_ws_method(method: &str) -> Option<(&'static str, bool)> {
         "terminal.read"    => Some(("/cli/terminal/read", false)),
         "terminal.write"   => Some(("/cli/terminal/write", false)),
         "terminal.spawn"   => Some(("/cli/terminal/spawn", false)),
+        "terminal.spawn_background" => Some(("/cli/terminal/spawn-background", false)),
         "presets.list"     => Some(("/cli/companion/presets", true)),
         "status"           => Some(("/cli/mode", false)),
         _ => None,

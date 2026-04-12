@@ -649,6 +649,41 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                         }));
                         Ok(serde_json::json!({"success": true}).to_string())
                     }
+                    "/cli/terminal/spawn-background" => {
+                        // Spawn a background terminal via terminal_create() directly.
+                        // Does NOT emit cli:terminal-spawn — no desktop UI disruption.
+                        // The PTY runs in the background, accessible via terminal read/write/subscribe.
+                        let command = params.get("command").cloned().unwrap_or_default();
+                        let cwd = params.get("cwd").cloned().unwrap_or(project_path.clone());
+                        let id = params.get("id").cloned()
+                            .unwrap_or_else(|| format!("companion-{}", uuid::Uuid::new_v4()));
+
+                        if command.is_empty() {
+                            Err("Missing 'command' parameter".to_string())
+                        } else if let Some(state) = app_handle.try_state::<crate::state::AppState>() {
+                            let mut manager = state.terminal_manager.lock();
+                            // Split command into program + args
+                            let parts: Vec<&str> = command.split_whitespace().collect();
+                            let (prog, args) = if parts.len() > 1 {
+                                (Some(parts[0].to_string()), Some(parts[1..].iter().map(|s| s.to_string()).collect::<Vec<_>>()))
+                            } else {
+                                (Some(command.clone()), None)
+                            };
+                            match manager.create(id.clone(), cwd, prog, args, Some(80), Some(24), app_handle.clone()) {
+                                Ok(()) => {
+                                    log_debug!("[companion] Background terminal spawned: {} ({})", id, command);
+                                    Ok(serde_json::json!({
+                                        "success": true,
+                                        "terminalId": id,
+                                        "command": command,
+                                    }).to_string())
+                                }
+                                Err(e) => Err(format!("Failed to spawn terminal: {}", e)),
+                            }
+                        } else {
+                            Err("AppState not available".to_string())
+                        }
+                    }
                     "/cli/events" => {
                         // Drain pending events for a channel-based agent
                         let agent = params.get("agent").cloned().unwrap_or("__lead__".to_string());
