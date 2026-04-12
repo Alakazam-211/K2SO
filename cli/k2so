@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.28.10"
+K2SO_CLI_VERSION="0.29.0"
 
 set -euo pipefail
 
@@ -256,20 +256,29 @@ cmd_terminal_spawn() {
 }
 
 cmd_work_create() {
-    local agent="" title="" body="" priority="" item_type="" source=""
+    local agent="" title="" body="" priority="" item_type="" source="" body_file=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --agent) agent="$2"; shift 2 ;;
             --title) title="$2"; shift 2 ;;
             --body) body="$2"; shift 2 ;;
+            --body-file) body_file="$2"; shift 2 ;;
             --priority) priority="$2"; shift 2 ;;
             --type) item_type="$2"; shift 2 ;;
             --source) source="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
+    # --body-file reads body from a file (avoids shell quoting issues with special chars)
+    if [ -n "$body_file" ]; then
+        if [ ! -f "$body_file" ]; then
+            echo "Error: body file not found: $body_file" >&2
+            exit 1
+        fi
+        body=$(cat "$body_file")
+    fi
     if [ -z "$title" ]; then
-        echo "Usage: k2so work create --title \"...\" --body \"...\" [--agent <name>] [--priority high|normal|low] [--source feature|issue|crash|security|audit|manual]" >&2
+        echo "Usage: k2so work create --title \"...\" [--body \"...\"|--body-file <path>] [--agent <name>] [--priority high|normal|low]" >&2
         exit 1
     fi
     local params="title=$(urlencode "$title")&body=$(urlencode "$body")"
@@ -392,19 +401,27 @@ cmd_work_inbox() {
 }
 
 cmd_work_send() {
-    local workspace="" title="" body="" priority="" item_type=""
+    local workspace="" title="" body="" priority="" item_type="" body_file=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --workspace) workspace="$2"; shift 2 ;;
             --title) title="$2"; shift 2 ;;
             --body) body="$2"; shift 2 ;;
+            --body-file) body_file="$2"; shift 2 ;;
             --priority) priority="$2"; shift 2 ;;
             --type) item_type="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
+    if [ -n "$body_file" ]; then
+        if [ ! -f "$body_file" ]; then
+            echo "Error: body file not found: $body_file" >&2
+            exit 1
+        fi
+        body=$(cat "$body_file")
+    fi
     if [ -z "$title" ]; then
-        echo "Usage: k2so work send --workspace <path> --title \"...\" --body \"...\"" >&2
+        echo "Usage: k2so work send --workspace <path> --title \"...\" [--body \"...\"|--body-file <path>]" >&2
         exit 1
     fi
     local params="title=$(urlencode "$title")&body=$(urlencode "$body")"
@@ -1706,7 +1723,7 @@ cmd_update() {
 
     # Extract the version from the remote script
     local remote_version
-    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.28.10"//')
+    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.29.0"//')
     if [ -z "$remote_version" ]; then
         echo "Error: Could not parse remote version." >&2
         exit 1
