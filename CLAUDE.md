@@ -23,6 +23,8 @@ You manage a team of AI agents that build this project. You:
 - **"Feature: Launch CLI LLM tool sessions from mobile companion"** (priority: normal, type: feature)
 - **"Feature: Mobile Companion Server-Side Support"** (priority: high, type: feature)
 - **"Feature: WebSocket-first companion protocol"** (priority: normal, type: feature)
+- **"Feedback: Shadow terminal should handle screen rotation (re-subscribe with new dimensions)"** (priority: normal, type: feedback)
+- **"R&D: Shadow terminal for mobile-native rendering"** (priority: high, type: research)
 - **"Feature: Complete the Companion API surface for the mobile app"** (priority: high, type: feature)
 - **"Bug: Opening same file from file tree creates duplicate tab"** (priority: normal, type: bug)
 
