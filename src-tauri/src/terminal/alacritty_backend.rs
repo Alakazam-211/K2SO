@@ -704,6 +704,13 @@ impl TerminalManager {
     /// Read the last N lines of text from the terminal buffer (visible screen).
     /// Uses the same grid access pattern as snapshot_grid for correctness.
     pub fn read_lines(&self, id: &str, count: usize) -> Result<Vec<String>, String> {
+        self.read_lines_with_scrollback(id, count, false)
+    }
+
+    /// Read terminal lines, optionally including scrollback history.
+    /// When `scrollback` is true, reads from the scrollback buffer (up to `count` lines).
+    /// When false, reads only the visible screen (current behavior).
+    pub fn read_lines_with_scrollback(&self, id: &str, count: usize, scrollback: bool) -> Result<Vec<String>, String> {
         let instance = self.terminals.get(id)
             .ok_or_else(|| format!("Terminal {} not found", id))?;
         let term = instance.term.lock_unfair();
@@ -713,26 +720,53 @@ impl TerminalManager {
         let cols = grid.columns();
         let display_offset = content.display_offset;
 
-        // Read all visible screen lines (same indexing as snapshot_grid)
-        let mut all_lines = Vec::with_capacity(screen_lines);
-        for row_idx in 0..screen_lines {
-            let line = alacritty_terminal::index::Line(row_idx as i32 - display_offset as i32);
-            let row = &grid[line];
-            let mut text = String::with_capacity(cols);
-            for col in 0..cols {
-                let cell = &row[alacritty_terminal::index::Column(col)];
-                text.push(cell.c);
+        if scrollback {
+            // Read from scrollback history + visible screen
+            use alacritty_terminal::grid::Dimensions;
+            let history = grid.history_size();
+            let total = history + screen_lines;
+            let read_count = count.min(total);
+
+            let mut all_lines = Vec::with_capacity(read_count);
+            // Start from the scrollback, going from oldest to newest
+            let start_line = if total > read_count { total - read_count } else { 0 };
+            for i in start_line..total {
+                // Negative indices = scrollback, positive = visible screen
+                let line_idx = i as i32 - history as i32;
+                let line = alacritty_terminal::index::Line(line_idx);
+                let row = &grid[line];
+                let mut text = String::with_capacity(cols);
+                for col in 0..cols {
+                    let cell = &row[alacritty_terminal::index::Column(col)];
+                    text.push(cell.c);
+                }
+                all_lines.push(text.trim_end().to_string());
             }
-            all_lines.push(text.trim_end().to_string());
+
+            // Trim trailing empty lines
+            while all_lines.last().map_or(false, |l| l.is_empty()) {
+                all_lines.pop();
+            }
+            Ok(all_lines)
+        } else {
+            // Read only visible screen lines (original behavior)
+            let mut all_lines = Vec::with_capacity(screen_lines);
+            for row_idx in 0..screen_lines {
+                let line = alacritty_terminal::index::Line(row_idx as i32 - display_offset as i32);
+                let row = &grid[line];
+                let mut text = String::with_capacity(cols);
+                for col in 0..cols {
+                    let cell = &row[alacritty_terminal::index::Column(col)];
+                    text.push(cell.c);
+                }
+                all_lines.push(text.trim_end().to_string());
+            }
+
+            let last_non_empty = all_lines.iter().rposition(|l| !l.is_empty()).unwrap_or(0);
+            let start = if last_non_empty + 1 > count { last_non_empty + 1 - count } else { 0 };
+            let result: Vec<String> = all_lines[start..=last_non_empty].to_vec();
+            Ok(result)
         }
-
-        // Take last N non-empty lines
-        // First, find the last non-empty line
-        let last_non_empty = all_lines.iter().rposition(|l| !l.is_empty()).unwrap_or(0);
-        let start = if last_non_empty + 1 > count { last_non_empty + 1 - count } else { 0 };
-        let result: Vec<String> = all_lines[start..=last_non_empty].to_vec();
-
-        Ok(result)
     }
 
     /// List all terminal IDs and their CWD.

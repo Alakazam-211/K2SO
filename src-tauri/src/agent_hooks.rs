@@ -967,13 +967,15 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                         }
                     }
                     "/cli/terminal/read" => {
-                        // Read last N lines from a terminal buffer
+                        // Read last N lines from a terminal buffer.
+                        // With scrollback=true, reads from scrollback history (up to N lines).
                         let terminal_id = params.get("id").cloned().unwrap_or_default();
                         let count: usize = params.get("lines").and_then(|s| s.parse().ok()).unwrap_or(50);
+                        let scrollback = params.get("scrollback").map(|v| v == "true" || v == "1").unwrap_or(false);
                         if terminal_id.is_empty() {
                             Err("Missing 'id' parameter".to_string())
                         } else if let Some(state) = app_handle.try_state::<crate::state::AppState>() {
-                            match state.terminal_manager.lock().read_lines(&terminal_id, count) {
+                            match state.terminal_manager.lock().read_lines_with_scrollback(&terminal_id, count, scrollback) {
                                 Ok(lines) => Ok(serde_json::json!({ "lines": lines }).to_string()),
                                 Err(e) => Err(e),
                             }
