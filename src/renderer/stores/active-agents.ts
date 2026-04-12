@@ -590,6 +590,47 @@ export function startAgentPolling(): void {
       }
     )
 
+    // Listen for companion background terminal spawn — creates a tab without switching to it.
+    // The terminal already exists (PTY running); we just need a tab to make it visible
+    // when the user returns to the desktop.
+    listen<{ terminalId: string; command: string; cwd: string; title: string; projectPath: string }>(
+      'cli:terminal-spawn-background', (event) => {
+        const { terminalId, command, cwd, title, projectPath } = event.payload
+        const tabsStore = useTabsStore.getState()
+
+        // Create the tab with the existing terminal ID (not a new one)
+        const tabId = crypto.randomUUID()
+        const pg: any = {
+          id: terminalId, // use the existing terminal ID as the pane group ID
+          items: [{
+            id: crypto.randomUUID(),
+            type: 'terminal',
+            data: {
+              terminalId,
+              cwd,
+              command: command.split(' ')[0],
+              args: command.split(' ').slice(1),
+            },
+          }],
+          panes: [],
+        }
+
+        const tab = {
+          id: tabId,
+          title: title || `Companion: ${command}`,
+          mosaicTree: terminalId,
+          paneGroups: new Map([[terminalId, pg]]),
+        }
+
+        // Add the tab without switching to it — preserve the current active tab
+        const currentActiveTabId = tabsStore.activeTabId
+        useTabsStore.setState((state) => ({
+          tabs: [...state.tabs, tab as any],
+          activeTabId: currentActiveTabId,
+        }))
+      }
+    )
+
     // Listen for CLI-triggered AI Commit requests
     listen<{
       projectPath: string

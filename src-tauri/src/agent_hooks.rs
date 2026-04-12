@@ -669,9 +669,18 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             } else {
                                 (Some(command.clone()), None)
                             };
-                            match manager.create(id.clone(), cwd, prog, args, Some(80), Some(24), app_handle.clone()) {
+                            match manager.create(id.clone(), cwd.clone(), prog, args, Some(80), Some(24), app_handle.clone()) {
                                 Ok(()) => {
                                     log_debug!("[companion] Background terminal spawned: {} ({})", id, command);
+                                    // Emit background spawn event — frontend creates a tab
+                                    // without switching to it (no workspace/tab disruption)
+                                    let _ = app_handle.emit("cli:terminal-spawn-background", serde_json::json!({
+                                        "terminalId": &id,
+                                        "command": &command,
+                                        "cwd": &cwd,
+                                        "projectPath": &project_path,
+                                        "title": format!("Companion: {}", command),
+                                    }));
                                     Ok(serde_json::json!({
                                         "success": true,
                                         "terminalId": id,
