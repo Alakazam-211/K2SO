@@ -583,6 +583,14 @@ fn run_terminal_polling(app_handle: &AppHandle) {
                 // Broadcast rich CompactLine grid update (reflowed per-client if mobile dims set)
                 websocket::broadcast_terminal_grid(state, tid, &grid);
 
+                // Push full scrollback for subscribers that need smooth streaming.
+                // This fires at the same frequency as terminal:grid (~10fps during
+                // active output) so the mobile app gets real-time push delivery
+                // of the full conversation thread — no request-response round-trip.
+                if let Ok(scrollback_lines) = manager.read_lines_with_scrollback(tid, 500, true) {
+                    websocket::broadcast_terminal_scrollback(state, tid, &scrollback_lines);
+                }
+
                 // Also broadcast legacy plain-text for backwards compat
                 let lines: Vec<String> = grid.lines.iter()
                     .map(|l| l.text.clone())

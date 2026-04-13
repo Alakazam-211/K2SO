@@ -285,6 +285,28 @@ pub fn broadcast_event(state: &CompanionState, event_json: &str) {
     }
 }
 
+/// Broadcast full scrollback history to subscribed clients.
+/// Fires at the same frequency as terminal:grid (~10fps during active output).
+/// Enables smooth real-time streaming on mobile without request-response round-trips.
+pub fn broadcast_terminal_scrollback(state: &CompanionState, terminal_id: &str, lines: &[String]) {
+    let event = serde_json::json!({
+        "event": "terminal:scrollback",
+        "data": {
+            "terminalId": terminal_id,
+            "lines": lines,
+            "totalLines": lines.len(),
+        }
+    });
+    let event_str = event.to_string();
+
+    let clients = state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
+    for client in clients.iter() {
+        if client.authenticated && client.subscribed_terminals.contains(terminal_id) {
+            let _ = client.sender.send(event_str.clone());
+        }
+    }
+}
+
 /// Broadcast terminal output to clients subscribed to that terminal.
 /// Sends both legacy format (lines) and new CompactLine format.
 pub fn broadcast_terminal_output(state: &CompanionState, terminal_id: &str, lines: &[String]) {
