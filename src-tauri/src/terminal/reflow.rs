@@ -32,7 +32,11 @@ pub fn reflow_grid(grid: &GridUpdate, target_cols: u16, target_rows: u16) -> Gri
         reflowed.extend(wrapped_lines);
     }
 
-    // Assign row indices and trim to target_rows (show the last N rows, like a terminal)
+    // Assign row indices and trim to target_rows (show the last N rows, like a terminal).
+    // The number of lines trimmed off the top becomes the display_offset —
+    // this tells the mobile app that row 0 is actually absolute row `start`
+    // in the full reflowed history. The mobile app can use this to build a
+    // continuous scrollable buffer: absolute_row = display_offset + row.
     let total = reflowed.len();
     let start = if total > target_rows as usize { total - target_rows as usize } else { 0 };
     let visible: Vec<CompactLine> = reflowed[start..]
@@ -58,9 +62,9 @@ pub fn reflow_grid(grid: &GridUpdate, target_cols: u16, target_rows: u16) -> Gri
         cursor_visible: grid.cursor_visible,
         cursor_shape: grid.cursor_shape.clone(),
         lines: visible,
-        full: true, // reflowed updates are always full snapshots
+        full: true,
         mode: grid.mode,
-        display_offset: 0,
+        display_offset: start,
         selection: None,
         perf: None,
     }
