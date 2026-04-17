@@ -585,8 +585,24 @@ export function HistoryPanel({ projectPath, onEmptyChange }: HistoryPanelProps):
                   >
                     <div className="flex items-center gap-2">
                       <span className="text-[var(--color-text-muted)] font-mono tabular-nums">{fmtTime(f.firedAt)}</span>
-                      <span className="font-mono text-[var(--color-text-primary)] truncate">
-                        {f.scheduleName ?? f.agentName ?? '(workspace)'}
+                      {/* Show agent and schedule_name when both are present —
+                          scheduleName tells you WHICH heartbeat fired
+                          (daily-brief vs end-of-day) on that agent. For
+                          legacy fires without a schedule we fall back to
+                          the agent alone, and for workspace-level decisions
+                          neither is set. */}
+                      <span className="font-mono truncate">
+                        {f.agentName && f.scheduleName ? (
+                          <>
+                            <span className="text-[var(--color-text-primary)]">{f.agentName}</span>
+                            <span className="text-[var(--color-text-muted)]"> / </span>
+                            <span className="text-[var(--color-text-primary)]">{f.scheduleName}</span>
+                          </>
+                        ) : (
+                          <span className="text-[var(--color-text-primary)]">
+                            {f.scheduleName ?? f.agentName ?? '(workspace)'}
+                          </span>
+                        )}
                       </span>
                       <span className={`ml-auto ${decisionColor(f.decision)}`}>{shortDecision(f.decision)}</span>
                     </div>
