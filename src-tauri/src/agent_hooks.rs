@@ -125,6 +125,40 @@ fn spawn_wake_pty(
             "agentName": agent_name,
         }),
     );
+
+    // Save Claude's new session ID so the next wake can --resume it.
+    // This used to run in the frontend `cli:agent-launch` listener,
+    // but since backend-direct spawn bypasses the frontend entirely we
+    // have to do it here — otherwise every wake reads a stale
+    // `.last_session` and hits "No conversation found" on resume.
+    //
+    // Claude takes a moment to write the session JSONL file, so we
+    // wait a few seconds, scan the provider's history dir for the
+    // newest session, and persist it.
+    let agent_name_owned = agent_name.to_string();
+    let project_path_owned = project_path.to_string();
+    let cwd_owned = cwd.to_string();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        let detected = crate::commands::chat_history::chat_history_detect_active_session(
+            "claude".to_string(),
+            cwd_owned.clone(),
+        );
+        if let Ok(Some(session_id)) = detected {
+            if !session_id.is_empty() {
+                if let Err(e) = crate::commands::k2so_agents::k2so_agents_save_session_id(
+                    project_path_owned.clone(),
+                    agent_name_owned.clone(),
+                    session_id.clone(),
+                ) {
+                    log_debug!("[agent-hooks] Failed to save session ID for {}: {}", agent_name_owned, e);
+                } else {
+                    log_debug!("[agent-hooks] Saved session ID for {}: {}", agent_name_owned, session_id);
+                }
+            }
+        }
+    });
+
     Ok(terminal_id)
 }
 

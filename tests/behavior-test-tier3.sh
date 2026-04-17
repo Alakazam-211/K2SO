@@ -839,6 +839,21 @@ else
     fail "wake reliability: stale emit" "Expected 0 cli:agent-launch emits in agent_hooks.rs, got $LAUNCH_EMIT_HITS"
 fi
 
+# Backend-direct spawn must also persist the new Claude session ID so the
+# next wake can resume it. Without this save, every wake reads a stale
+# .last_session and hits "No conversation found" on --resume.
+if grep -q 'k2so_agents_save_session_id' "$HOOKS_SRC"; then
+    pass "wake reliability: spawn_wake_pty persists session ID post-spawn"
+else
+    fail "wake reliability: session save missing" "Expected k2so_agents_save_session_id call in spawn_wake_pty"
+fi
+
+if grep -q 'chat_history_detect_active_session' "$HOOKS_SRC"; then
+    pass "wake reliability: spawn_wake_pty detects Claude session via history scan"
+else
+    fail "wake reliability: session detect missing" "Expected chat_history_detect_active_session call in spawn_wake_pty"
+fi
+
 # ═══════════════════════════════════════════════════════════════════════
 section "3.9: Settings Search Palette"
 # ═══════════════════════════════════════════════════════════════════════
