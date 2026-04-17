@@ -63,6 +63,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         ("0024_activity_feed", include_str!("../../drizzle_sql/0024_activity_feed.sql")),
         ("0025_activity_feed_read", include_str!("../../drizzle_sql/0025_activity_feed_read.sql")),
         ("0026_heartbeat_fires", include_str!("../../drizzle_sql/0026_heartbeat_fires.sql")),
+        ("0027_wakes_since_compact", include_str!("../../drizzle_sql/0027_wakes_since_compact.sql")),
     ];
 
     for (name, sql) in migrations {

@@ -1332,10 +1332,48 @@ pub fn k2so_agents_build_launch(
     };
 
     let mut args = vec!["--dangerously-skip-permissions".to_string(), "--append-system-prompt".to_string(), prompt_body];
+    // --resume + --fork-session: restore the agent's conversation history
+    // but mint a new session ID so (a) the stale-session confirmation
+    // dialog added in Claude Code v2.1.90 doesn't block the wake, and
+    // (b) each wake's session file has age 0, avoiding the dialog's
+    // age-based trigger. Old session files are left on disk (deferred
+    // cleanup — prune later via a periodic job).
     if let Some(ref session_id) = resume_session {
         args.push("--resume".to_string());
         args.push(session_id.clone());
+        args.push("--fork-session".to_string());
     }
+
+    // Wakes-since-compact counter: prepend `/compact` to the wake
+    // message every WAKES_PER_COMPACT wakes so inherited conversation
+    // history doesn't grow unbounded across heartbeats. Claude's own
+    // autocompact still fires when context actually fills; this is a
+    // proactive lightweight trigger before that point.
+    const WAKES_PER_COMPACT: i64 = 20;
+    let should_compact = (|| -> Option<bool> {
+        let conn = rusqlite::Connection::open(k2so_db_path()).ok()?;
+        let pid = resolve_project_id(&conn, &project_path)?;
+        let n = AgentSession::bump_wake_counter(&conn, &pid, &agent_name).ok()?;
+        if n >= WAKES_PER_COMPACT {
+            let _ = AgentSession::reset_wake_counter(&conn, &pid, &agent_name);
+            Some(true)
+        } else {
+            Some(false)
+        }
+    })().unwrap_or(false);
+
+    // Positional user message triggers Claude to actually do work (the
+    // system prompt alone leaves Claude sitting at an idle TUI). The
+    // `/compact` prefix, when present, compacts the conversation before
+    // the wake runs — `/compact\n\n<message>` is processed as one user
+    // message where the slash command fires first, then the remaining
+    // text becomes the next user message.
+    let wake_trigger = if should_compact {
+        "/compact\n\nBegin your wake procedure now per the instructions in your system prompt.".to_string()
+    } else {
+        "Begin your wake procedure now per the instructions in your system prompt.".to_string()
+    };
+    args.push(wake_trigger);
 
     // Use project root as CWD so the agent has access to the codebase
     let launch_cwd = project_path.clone();
@@ -1349,6 +1387,7 @@ pub fn k2so_agents_build_launch(
         "worktreePath": null,
         "branch": null,
         "resumeSession": resume_session,
+        "didCompact": should_compact,
     }))
 }
 

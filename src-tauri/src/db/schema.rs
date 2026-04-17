@@ -1013,6 +1013,33 @@ impl AgentSession {
             params![project_id, agent_name],
         )
     }
+
+    /// Atomically increment the "wakes since last /compact" counter and
+    /// return the new value. Used by the heartbeat wake path to decide
+    /// whether to prepend `/compact` to the wake message every N wakes.
+    ///
+    /// Returns 1 on first wake after upsert, increments from there. Row
+    /// is auto-created with count=0 → increment → returns 1 if missing.
+    pub fn bump_wake_counter(conn: &Connection, project_id: &str, agent_name: &str) -> Result<i64> {
+        conn.execute(
+            "UPDATE agent_sessions SET wakes_since_compact = wakes_since_compact + 1 \
+             WHERE project_id = ?1 AND agent_name = ?2",
+            params![project_id, agent_name],
+        )?;
+        let val: i64 = conn.query_row(
+            "SELECT wakes_since_compact FROM agent_sessions WHERE project_id = ?1 AND agent_name = ?2",
+            params![project_id, agent_name],
+            |row| row.get(0),
+        ).unwrap_or(0);
+        Ok(val)
+    }
+
+    pub fn reset_wake_counter(conn: &Connection, project_id: &str, agent_name: &str) -> Result<usize> {
+        conn.execute(
+            "UPDATE agent_sessions SET wakes_since_compact = 0 WHERE project_id = ?1 AND agent_name = ?2",
+            params![project_id, agent_name],
+        )
+    }
 }
 
 // ── Workspace Relations ─────────────────────────────────────────────────

@@ -729,6 +729,84 @@ else
     fail "hardening: signature not updated" "Expected register_all_hooks(app_handle: &AppHandle, …) signature"
 fi
 
+# ──────────────────────────────────────────────────────────────────────
+# Heartbeat wake reliability: --fork-session + wake-trigger + compact-every-N
+# Addresses: stale-session dialog blocking wakes, Claude sitting idle at TUI
+# after spawn (no user message), unbounded history growth across wakes.
+# ──────────────────────────────────────────────────────────────────────
+
+AGENTS_SRC="$PROJECT_ROOT/src-tauri/src/commands/k2so_agents.rs"
+SCHEMA_SRC="$PROJECT_ROOT/src-tauri/src/db/schema.rs"
+DB_MOD_SRC="$PROJECT_ROOT/src-tauri/src/db/mod.rs"
+
+# Migration applied in mod.rs
+if grep -q '"0027_wakes_since_compact"' "$DB_MOD_SRC"; then
+    pass "wake reliability: migration 0027 registered in db/mod.rs"
+else
+    fail "wake reliability: migration missing" "Expected 0027_wakes_since_compact in migrations list"
+fi
+
+# Migration file exists with the expected ALTER TABLE
+if [ -f "$PROJECT_ROOT/src-tauri/drizzle_sql/0027_wakes_since_compact.sql" ]; then
+    pass "wake reliability: migration 0027 SQL file present"
+else
+    fail "wake reliability: SQL file missing" "Expected drizzle_sql/0027_wakes_since_compact.sql"
+fi
+
+# Schema methods for counter
+if grep -q 'pub fn bump_wake_counter' "$SCHEMA_SRC"; then
+    pass "wake reliability: AgentSession::bump_wake_counter defined"
+else
+    fail "wake reliability: bump fn missing" "Expected bump_wake_counter in schema.rs"
+fi
+
+if grep -q 'pub fn reset_wake_counter' "$SCHEMA_SRC"; then
+    pass "wake reliability: AgentSession::reset_wake_counter defined"
+else
+    fail "wake reliability: reset fn missing" "Expected reset_wake_counter in schema.rs"
+fi
+
+# --fork-session is added alongside --resume in build_launch
+if grep -q '"--fork-session"' "$AGENTS_SRC"; then
+    pass "wake reliability: --fork-session added to resume path"
+else
+    fail "wake reliability: --fork-session missing" "Expected --fork-session in k2so_agents.rs"
+fi
+
+# Compact-every-N constant + logic
+if grep -q 'const WAKES_PER_COMPACT: i64 = 20' "$AGENTS_SRC"; then
+    pass "wake reliability: WAKES_PER_COMPACT constant set to 20"
+else
+    fail "wake reliability: constant missing" "Expected const WAKES_PER_COMPACT: i64 = 20"
+fi
+
+if grep -q 'bump_wake_counter' "$AGENTS_SRC"; then
+    pass "wake reliability: build_launch bumps the wake counter"
+else
+    fail "wake reliability: counter not bumped" "Expected bump_wake_counter call in build_launch"
+fi
+
+if grep -q '"/compact' "$AGENTS_SRC"; then
+    pass "wake reliability: compact-prefixed wake trigger built for every-N wake"
+else
+    fail "wake reliability: compact wake message" "Expected /compact prefix in wake-trigger string"
+fi
+
+# Wake-trigger positional message added unconditionally for build_launch path
+if grep -q 'Begin your wake procedure now' "$AGENTS_SRC"; then
+    pass "wake reliability: positional wake-trigger message present in build_launch"
+else
+    fail "wake reliability: no wake trigger" "Claude would sit idle without a positional user message"
+fi
+
+# __lead__ spawn paths also get the wake trigger (2 sites in agent_hooks.rs)
+LEAD_TRIGGER_HITS=$(grep -c 'Begin your wake procedure now' "$HOOKS_SRC" || true)
+if [ "$LEAD_TRIGGER_HITS" -ge 2 ]; then
+    pass "wake reliability: __lead__ spawn sites include wake trigger ($LEAD_TRIGGER_HITS)"
+else
+    fail "wake reliability: __lead__ spawn missing trigger" "Expected >=2 wake-trigger strings in agent_hooks.rs, got $LEAD_TRIGGER_HITS"
+fi
+
 # ═══════════════════════════════════════════════════════════════════════
 section "3.9: Settings Search Palette"
 # ═══════════════════════════════════════════════════════════════════════

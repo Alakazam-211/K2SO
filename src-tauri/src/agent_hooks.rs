@@ -599,9 +599,11 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                             if agent_name == "__lead__" {
                                                 // Wake the lead agent — generate workspace CLAUDE.md and launch in project root
                                                 let _ = crate::commands::k2so_agents::k2so_agents_generate_workspace_claude_md(project_path.clone());
+                                                let wake_prompt = crate::commands::k2so_agents::compose_wake_prompt_for_lead(&project_path);
+                                                let wake_trigger = "Begin your wake procedure now per the instructions in your system prompt.";
                                                 let _ = app_handle.emit("cli:agent-launch", serde_json::json!({
                                                     "command": "claude",
-                                                    "args": ["--append-system-prompt", "Check the workspace inbox: `k2so work inbox` and triage any new items to the appropriate sub-agents using `k2so delegate`."],
+                                                    "args": ["--dangerously-skip-permissions", "--append-system-prompt", wake_prompt, wake_trigger],
                                                     "cwd": &project_path,
                                                     "agentName": "__lead__",
                                                 }));
@@ -874,9 +876,15 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                     // hard-coded "Check the workspace inbox..." string
                                     // so users can edit what the manager does at wake.
                                     let wake_prompt = crate::commands::k2so_agents::compose_wake_prompt_for_lead(&project_path);
+                                    // Positional user message — without this Claude
+                                    // spawns into an idle TUI and never acts on the
+                                    // wake instructions. (Workspace manager doesn't
+                                    // resume sessions today, so no --fork-session or
+                                    // compact logic needed here yet.)
+                                    let wake_trigger = "Begin your wake procedure now per the instructions in your system prompt.";
                                     let _ = app_handle.emit("cli:agent-launch", serde_json::json!({
                                         "command": "claude",
-                                        "args": ["--append-system-prompt", wake_prompt],
+                                        "args": ["--dangerously-skip-permissions", "--append-system-prompt", wake_prompt, wake_trigger],
                                         "cwd": &project_path,
                                         "agentName": "__lead__",
                                     }));
