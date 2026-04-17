@@ -5,6 +5,7 @@ import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import { useSettingsStore } from '@/stores/settings'
 import { keyEventToSequence, naturalTextEditingSequence } from '@/lib/key-mapping'
 import { isFileDragActive, markDropConsumed, isImagePath, quotePathForImageDrop, bracketPaste } from '@/lib/file-drag'
+import { detectWorkingSignal } from '@/lib/agent-signals'
 import { detectLinks, type DetectedLink } from './terminalLinkDetector'
 import { useTabsStore } from '@/stores/tabs'
 import { useActiveAgentsStore } from '@/stores/active-agents'
@@ -209,6 +210,12 @@ export function AlacrittyTerminalView({
   // Debug
   const frameCountRef = useRef(0)
   const wheelEventCountRef = useRef(0)
+
+  // Working-state detection — last time we saw an LLM "working" hint in
+  // the bottom rows of the grid. The idle-check interval (see effect
+  // below) flips the pane status to idle once the hint has been absent
+  // long enough to rule out a single-frame gap.
+  const lastSeenWorkingAtRef = useRef(0)
   const [debugInfo, setDebugInfo] = useState({ frames: 0, offset: 0, wheel: 0 })
 
   // ── Measure cell metrics from DOM ───────────────────────────────────
@@ -243,6 +250,16 @@ export function AlacrittyTerminalView({
     frameCountRef.current++
     termModeRef.current = update.mode
 
+    // Viewport working-state detection — gated on displayOffset === 0 so
+    // a scrolled-up user doesn't accidentally pin the pane in 'working'
+    // state by keeping the spinner-row off-screen.
+    if (update.display_offset === 0) {
+      if (detectWorkingSignal(map, update.rows)) {
+        lastSeenWorkingAtRef.current = Date.now()
+        useActiveAgentsStore.getState().recordTitleActivity(terminalId, true)
+      }
+    }
+
     setGridState({
       rows: update.rows,
       cols: update.cols,
@@ -259,11 +276,28 @@ export function AlacrittyTerminalView({
       offset: update.display_offset,
       wheel: wheelEventCountRef.current,
     })
-  }, [])
+  }, [terminalId])
 
   // ── rAF-batched rendering ──────────────────────────────────────────
   // Each GridUpdate is a full visible-grid snapshot, so only the latest
   // frame matters — intermediate ones are safely overwritten.
+
+  // ── Working-state idle watcher ─────────────────────────────────────
+  // Working → idle transitions happen when no hint has been seen for
+  // 1s. We check on a 500ms timer so the transition is at most ~1.5s
+  // after the real transition, but never flickers on single-frame gaps.
+  useEffect(() => {
+    const IDLE_GRACE_MS = 1000
+    const interval = setInterval(() => {
+      const last = lastSeenWorkingAtRef.current
+      if (last === 0) return // never seen working — don't touch state
+      if (Date.now() - last > IDLE_GRACE_MS) {
+        useActiveAgentsStore.getState().recordTitleActivity(terminalId, false)
+        lastSeenWorkingAtRef.current = 0
+      }
+    }, 500)
+    return () => clearInterval(interval)
+  }, [terminalId])
 
   const scheduleRender = useCallback((payload: GridUpdate) => {
     pendingFrameRef.current = payload
@@ -364,15 +398,19 @@ export function AlacrittyTerminalView({
       })
 
       // Listen for terminal title changes (e.g. Claude chat names).
-      // Claude Code prefixes the title with ⠋⠙⠚⠦⠴ etc. (U+2800–U+28FF braille)
-      // while working and ✳ (plus related asterisk/bullet glyphs) when idle.
-      // We consume that signal *before* stripping it so the tab spinner and
-      // close-button dot light up, then strip for display.
+      // Working-state detection now lives in the viewport scan inside
+      // applyGridUpdate; the title is only a fast-idle hint — when
+      // Claude / similar tools finish (or the user hits Esc) they
+      // restore the ✳-family idle prefix on the title, and we can clear
+      // the spinner immediately instead of waiting for the grid
+      // idle-grace window.
       unlistenTitle = await listen<string>(`terminal:title:${terminalId}`, (event) => {
         const raw = event.payload ?? ''
-        const firstChar = raw.charCodeAt(0)
-        const isWorking = firstChar >= 0x2800 && firstChar <= 0x28FF
-        useActiveAgentsStore.getState().recordTitleActivity(terminalId, isWorking)
+        const isIdleMarker = /^[*✱✲✳✴✵✶✷✸✹⚹⁎∗※]/.test(raw)
+        if (isIdleMarker) {
+          lastSeenWorkingAtRef.current = 0
+          useActiveAgentsStore.getState().recordTitleActivity(terminalId, false)
+        }
 
         const newTitle = raw.replace(/^[\u2800-\u28FF*✱✲✳✴✵✶✷✸✹⚹⁎∗※·•●◦‣⏺]\s*/g, '').trim()
         if (newTitle && tabId) {

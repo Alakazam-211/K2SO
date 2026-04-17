@@ -16,6 +16,41 @@ static HOOK_TOKEN: OnceLock<String> = OnceLock::new();
 /// Guard against concurrent triage runs for the same project path.
 static TRIAGE_IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
+/// Ring buffer of recent hook events for diagnostic purposes
+/// (surfaced via `k2so hooks status`). Capped at RECENT_EVENTS_CAP.
+static RECENT_EVENTS: OnceLock<Mutex<VecDeque<RecentEvent>>> = OnceLock::new();
+const RECENT_EVENTS_CAP: usize = 50;
+
+#[derive(Clone, serde::Serialize)]
+struct RecentEvent {
+    timestamp: String,
+    raw_event: String,
+    canonical: Option<String>,
+    pane_id: String,
+    tab_id: String,
+    matched: bool, // did the event produce a canonical type?
+}
+
+fn recent_events() -> &'static Mutex<VecDeque<RecentEvent>> {
+    RECENT_EVENTS.get_or_init(|| Mutex::new(VecDeque::with_capacity(RECENT_EVENTS_CAP)))
+}
+
+fn record_recent_event(raw: &str, canonical: Option<&str>, pane_id: &str, tab_id: &str) {
+    let event = RecentEvent {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        raw_event: raw.to_string(),
+        canonical: canonical.map(String::from),
+        pane_id: pane_id.to_string(),
+        tab_id: tab_id.to_string(),
+        matched: canonical.is_some(),
+    };
+    let mut buf = recent_events().lock().unwrap_or_else(|e| e.into_inner());
+    if buf.len() >= RECENT_EVENTS_CAP {
+        buf.pop_front();
+    }
+    buf.push_back(event);
+}
+
 /// Event queue for channel-based agents. Key: "project_path:agent_name"
 static EVENT_QUEUES: OnceLock<Mutex<HashMap<String, VecDeque<ChannelEvent>>>> = OnceLock::new();
 
@@ -292,7 +327,10 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                 let tab_id = params.get("tabId").cloned().unwrap_or_default();
                 let raw_event = params.get("eventType").cloned().unwrap_or_default();
 
-                if let Some(canonical) = map_event_type(&raw_event) {
+                let canonical_opt = map_event_type(&raw_event);
+                record_recent_event(&raw_event, canonical_opt, &pane_id, &tab_id);
+
+                if let Some(canonical) = canonical_opt {
                     let event = AgentLifecycleEvent {
                         pane_id: pane_id.clone(),
                         tab_id: tab_id.clone(),
@@ -739,6 +777,35 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             crate::commands::k2so_agents::k2so_agents_get_heartbeat(project_path, agent)
                                 .map(|config| serde_json::to_string(&config).unwrap_or_default())
                         }
+                    }
+                    "/cli/hooks/status" => {
+                        // Diagnostic endpoint: returns hook injection state across
+                        // supported LLM CLIs plus the last N hook events received.
+                        // Consumed by `k2so hooks status` to verify the pipeline
+                        // end-to-end without human interaction.
+                        let limit = params
+                            .get("limit")
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .unwrap_or(20)
+                            .min(RECENT_EVENTS_CAP);
+
+                        (|| -> Result<String, String> {
+                            let injections = check_hook_injections();
+                            let events: Vec<RecentEvent> = {
+                                let buf = recent_events().lock().unwrap_or_else(|e| e.into_inner());
+                                buf.iter().rev().take(limit).cloned().collect()
+                            };
+                            let payload = serde_json::json!({
+                                "port": get_port(),
+                                "notify_script": dirs::home_dir()
+                                    .map(|h| h.join(".k2so/hooks/notify.sh").to_string_lossy().to_string())
+                                    .unwrap_or_default(),
+                                "injections": injections,
+                                "recent_events": events,
+                                "recent_events_cap": RECENT_EVENTS_CAP,
+                            });
+                            Ok(payload.to_string())
+                        })()
                     }
                     "/cli/heartbeat-log" => {
                         // Return the most recent heartbeat fire rows for a project.
@@ -2645,6 +2712,56 @@ fn register_gemini_hooks(hook_script: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Check each supported CLI's config file for our notify.sh entries.
+/// Used by `/cli/hooks/status` to let users verify injection end-to-end.
+///
+/// An entry is "injected" when the config file exists and contains at least
+/// one command pointing at our notify.sh script. We don't validate the full
+/// hook list — partial injection is still reported as injected=true so users
+/// see events flow in `recent_events` while also noticing a mismatch.
+pub fn check_hook_injections() -> serde_json::Value {
+    let home = dirs::home_dir();
+    let notify_fragment = ".k2so/hooks/notify.sh";
+
+    let check = |relative: &str| -> serde_json::Value {
+        let path = match &home {
+            Some(h) => h.join(relative),
+            None => return serde_json::json!({ "path": null, "exists": false, "injected": false }),
+        };
+        let path_str = path.to_string_lossy().to_string();
+        if !path.exists() {
+            return serde_json::json!({
+                "path": path_str,
+                "exists": false,
+                "injected": false,
+            });
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let injected = content.contains(notify_fragment);
+        serde_json::json!({
+            "path": path_str,
+            "exists": true,
+            "injected": injected,
+        })
+    };
+
+    let script_path = home
+        .as_ref()
+        .map(|h| h.join(notify_fragment))
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    serde_json::json!({
+        "notify_script": {
+            "path": script_path,
+            "exists": home.as_ref().map(|h| h.join(notify_fragment).exists()).unwrap_or(false),
+        },
+        "claude": check(".claude/settings.json"),
+        "cursor": check(".cursor/hooks.json"),
+        "gemini": check(".config/gemini/hooks.json"),
+    })
+}
+
 /// Register hooks with all supported agents. Called on app startup.
 pub fn register_all_hooks(hook_script: &str) {
     if let Err(e) = register_claude_hooks(hook_script) {
@@ -2655,5 +2772,114 @@ pub fn register_all_hooks(hook_script: &str) {
     }
     if let Err(e) = register_gemini_hooks(hook_script) {
         log_debug!("[agent-hooks] Failed to register Gemini hooks: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Ring-buffer tests share global state — serialize them.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn reset_recent_events() {
+        let mut buf = recent_events().lock().unwrap_or_else(|e| e.into_inner());
+        buf.clear();
+    }
+
+    fn snapshot_recent_events() -> Vec<RecentEvent> {
+        let buf = recent_events().lock().unwrap_or_else(|e| e.into_inner());
+        buf.iter().cloned().collect()
+    }
+
+    #[test]
+    fn ring_buffer_records_matched_events() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_recent_events();
+        record_recent_event("UserPromptSubmit", Some("start"), "pane-1", "tab-1");
+        let events = snapshot_recent_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].raw_event, "UserPromptSubmit");
+        assert_eq!(events[0].canonical.as_deref(), Some("start"));
+        assert_eq!(events[0].pane_id, "pane-1");
+        assert_eq!(events[0].tab_id, "tab-1");
+        assert!(events[0].matched);
+    }
+
+    #[test]
+    fn ring_buffer_records_unmatched_events() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_recent_events();
+        record_recent_event("NoSuchEvent", None, "pane-2", "tab-2");
+        let events = snapshot_recent_events();
+        assert_eq!(events.len(), 1);
+        assert!(!events[0].matched);
+        assert!(events[0].canonical.is_none());
+    }
+
+    #[test]
+    fn ring_buffer_caps_at_limit() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_recent_events();
+        for i in 0..RECENT_EVENTS_CAP + 10 {
+            record_recent_event(
+                &format!("Event{}", i),
+                Some("start"),
+                "pane-cap",
+                "tab-cap",
+            );
+        }
+        let events = snapshot_recent_events();
+        assert_eq!(events.len(), RECENT_EVENTS_CAP);
+        // Oldest should have been dropped — first recorded was Event0
+        assert_eq!(events[0].raw_event, format!("Event{}", 10));
+        assert_eq!(
+            events.last().unwrap().raw_event,
+            format!("Event{}", RECENT_EVENTS_CAP + 9)
+        );
+    }
+
+    #[test]
+    fn map_event_type_covers_primary_lifecycle() {
+        // Claude Code
+        assert_eq!(map_event_type("UserPromptSubmit"), Some("start"));
+        assert_eq!(map_event_type("PostToolUse"), Some("start"));
+        assert_eq!(map_event_type("Stop"), Some("stop"));
+        assert_eq!(map_event_type("Notification"), Some("permission"));
+        // Codex
+        assert_eq!(map_event_type("agent-turn-complete"), Some("stop"));
+        // Cursor
+        assert_eq!(map_event_type("beforeSubmitPrompt"), Some("start"));
+        assert_eq!(map_event_type("beforeShellExecution"), Some("permission"));
+        // Unknown events must return None
+        assert_eq!(map_event_type("NoSuchEvent"), None);
+    }
+
+    #[test]
+    fn check_hook_injections_returns_expected_shape() {
+        let val = check_hook_injections();
+        // Top-level keys present
+        assert!(val.get("notify_script").is_some());
+        assert!(val.get("claude").is_some());
+        assert!(val.get("cursor").is_some());
+        assert!(val.get("gemini").is_some());
+        // Each CLI entry has path/exists/injected booleans
+        for key in &["claude", "cursor", "gemini"] {
+            let entry = val.get(*key).expect("cli entry");
+            assert!(entry.get("path").is_some(), "{} missing path", key);
+            assert!(entry.get("exists").is_some(), "{} missing exists", key);
+            assert!(entry.get("injected").is_some(), "{} missing injected", key);
+            assert!(
+                entry.get("exists").unwrap().is_boolean(),
+                "{}.exists must be bool",
+                key
+            );
+            assert!(
+                entry.get("injected").unwrap().is_boolean(),
+                "{}.injected must be bool",
+                key
+            );
+        }
     }
 }

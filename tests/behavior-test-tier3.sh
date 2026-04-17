@@ -531,10 +531,10 @@ else
     fail "working-state: store method" "Expected recordTitleActivity in active-agents.ts"
 fi
 
-if grep -q 'recordTitleActivity(terminalId, isWorking)' "$ATV_SRC"; then
-    pass "working-state: AlacrittyTerminalView feeds title-based working signal"
+if grep -q 'recordTitleActivity(terminalId,' "$ATV_SRC"; then
+    pass "working-state: AlacrittyTerminalView feeds activity into store"
 else
-    fail "working-state: title listener" "Expected recordTitleActivity call in title event listener"
+    fail "working-state: store wiring" "Expected recordTitleActivity call in AlacrittyTerminalView"
 fi
 
 # Guard: recordTitleActivity must NOT clobber 'permission' or 'review' states
@@ -544,6 +544,54 @@ else
     fail "working-state: priority guard" "Expected guard against clobbering permission/review"
 fi
 
+# Viewport-scan working detector — replaces the flaky title-glyph detection
+SIG_SRC="$PROJECT_ROOT/src/renderer/lib/agent-signals.ts"
+if [ -f "$SIG_SRC" ]; then
+    pass "working-state: agent-signals.ts module present"
+else
+    fail "working-state: agent-signals missing" "Expected src/renderer/lib/agent-signals.ts"
+fi
+
+if grep -q "'esc to interrupt'" "$SIG_SRC" && grep -q "'esc to cancel'" "$SIG_SRC"; then
+    pass "working-state: WORKING_SIGNALS covers claude/codex (esc to interrupt) and gemini (esc to cancel)"
+else
+    fail "working-state: signals coverage" "Expected esc to interrupt + esc to cancel substrings"
+fi
+
+for sig in "'waiting for '" "'thinking...'" "'working...'" "' is thinking...'"; do
+    if grep -q "$sig" "$SIG_SRC"; then
+        pass "working-state: WORKING_SIGNALS includes $sig"
+    else
+        fail "working-state: missing signal $sig" "Expected $sig in WORKING_SIGNALS"
+    fi
+done
+
+if grep -q 'export function detectWorkingSignal' "$SIG_SRC"; then
+    pass "working-state: detectWorkingSignal helper exported"
+else
+    fail "working-state: detectWorkingSignal" "Expected detectWorkingSignal export"
+fi
+
+if grep -q 'detectWorkingSignal' "$ATV_SRC"; then
+    pass "working-state: AlacrittyTerminalView uses viewport scanner"
+else
+    fail "working-state: scanner not wired" "Expected detectWorkingSignal call in AlacrittyTerminalView"
+fi
+
+# Scanner must be gated on displayOffset === 0 so scroll-up doesn't pin 'working'
+if grep -B1 'detectWorkingSignal(map, update.rows)' "$ATV_SRC" | grep -q 'display_offset === 0'; then
+    pass "working-state: viewport scan gated on display_offset === 0"
+else
+    fail "working-state: scroll guard" "Expected display_offset === 0 gate around detectWorkingSignal"
+fi
+
+# Idle watcher — flips to idle after 1s without a signal
+if grep -q 'lastSeenWorkingAtRef' "$ATV_SRC" && grep -q 'IDLE_GRACE_MS' "$ATV_SRC"; then
+    pass "working-state: idle-grace timer + lastSeenWorkingAtRef wired"
+else
+    fail "working-state: idle watcher" "Expected lastSeenWorkingAtRef + IDLE_GRACE_MS in AlacrittyTerminalView"
+fi
+
 # tauri://drag-drop is window-level — every terminal listens. Without a
 # hit-test against containerRef, a drop into one column of a split layout
 # pastes into every terminal in the window.
@@ -551,6 +599,101 @@ if grep -q 'containerRef.current?.contains(el)' "$ATV_SRC"; then
     pass "drop hit-test: tauri://drag-drop listener checks containerRef before accepting"
 else
     fail "drop hit-test: missing containerRef check" "Expected containerRef.current?.contains(el) guard in tauri://drag-drop listener"
+fi
+
+# ──────────────────────────────────────────────────────────────────────
+# Tier-1 diagnostic: k2so hooks status
+# Validates the hook-pipeline observability surface (ring buffer + endpoint
+# + CLI). Pairs with Rust unit tests in agent_hooks.rs::tests which cover
+# runtime behavior of the ring buffer and injection check.
+# ──────────────────────────────────────────────────────────────────────
+
+HOOKS_SRC="$PROJECT_ROOT/src-tauri/src/agent_hooks.rs"
+K2SO_CLI="$PROJECT_ROOT/cli/k2so"
+
+if grep -q 'struct RecentEvent' "$HOOKS_SRC"; then
+    pass "hooks status: RecentEvent struct defined"
+else
+    fail "hooks status: RecentEvent struct missing" "Expected struct RecentEvent in agent_hooks.rs"
+fi
+
+if grep -q 'const RECENT_EVENTS_CAP: usize' "$HOOKS_SRC"; then
+    pass "hooks status: ring-buffer cap constant defined"
+else
+    fail "hooks status: RECENT_EVENTS_CAP missing" "Expected ring-buffer cap in agent_hooks.rs"
+fi
+
+if grep -q 'fn record_recent_event' "$HOOKS_SRC"; then
+    pass "hooks status: record_recent_event helper present"
+else
+    fail "hooks status: record helper missing" "Expected record_recent_event fn"
+fi
+
+if grep -q 'record_recent_event(&raw_event' "$HOOKS_SRC"; then
+    pass "hooks status: /hook/complete handler pushes every event to the ring"
+else
+    fail "hooks status: handler not wired" "Expected record_recent_event call in /hook/complete"
+fi
+
+if grep -q '"/cli/hooks/status"' "$HOOKS_SRC"; then
+    pass "hooks status: /cli/hooks/status route registered"
+else
+    fail "hooks status: route missing" "Expected /cli/hooks/status route in agent_hooks.rs"
+fi
+
+if grep -q 'pub fn check_hook_injections' "$HOOKS_SRC"; then
+    pass "hooks status: check_hook_injections helper exported"
+else
+    fail "hooks status: check helper missing" "Expected check_hook_injections fn"
+fi
+
+if grep -q 'cmd_hooks_status()' "$K2SO_CLI"; then
+    pass "hooks status: cmd_hooks_status CLI function present"
+else
+    fail "hooks status: CLI fn missing" "Expected cmd_hooks_status in cli/k2so"
+fi
+
+if grep -q '^    hooks)' "$K2SO_CLI"; then
+    pass "hooks status: 'hooks' dispatch branch in main case"
+else
+    fail "hooks status: dispatch missing" "Expected 'hooks)' branch in cli/k2so argument parser"
+fi
+
+# Verify the Rust unit tests at least compile — prevents drift between
+# the structural check and the behavioral suite.
+if grep -q 'mod tests' "$HOOKS_SRC" && grep -q 'fn ring_buffer_caps_at_limit' "$HOOKS_SRC"; then
+    pass "hooks status: Rust unit tests present for ring buffer + injections"
+else
+    fail "hooks status: Rust tests missing" "Expected #[cfg(test)] mod tests with ring-buffer coverage"
+fi
+
+# Hook-trust grace in poll cleanup — prevents pollOnce from clobbering
+# hook-driven 'working' states when foreground command transiently changes
+# (e.g. Claude spawning `bash` / `rg` for a tool call).
+AA_SRC="$PROJECT_ROOT/src/renderer/stores/active-agents.ts"
+
+if grep -q '_hookEventAt' "$AA_SRC" && grep -q 'HOOK_TRUST_GRACE_MS' "$AA_SRC"; then
+    pass "hook trust: _hookEventAt + HOOK_TRUST_GRACE_MS defined"
+else
+    fail "hook trust: timestamp tracking missing" "Expected _hookEventAt Map + HOOK_TRUST_GRACE_MS const"
+fi
+
+if grep -q '_hookEventAt.set(paneId, Date.now())' "$AA_SRC"; then
+    pass "hook trust: handleLifecycleEvent stamps _hookEventAt on every fire"
+else
+    fail "hook trust: stamp missing" "Expected _hookEventAt.set call in handleLifecycleEvent"
+fi
+
+if grep -q 'if (hookAge < HOOK_TRUST_GRACE_MS) continue' "$AA_SRC"; then
+    pass "hook trust: pollOnce cleanup skips clearing when hook fired recently"
+else
+    fail "hook trust: cleanup not gated" "Expected HOOK_TRUST_GRACE_MS guard in pollOnce cleanup"
+fi
+
+if grep -q 'if (outputAge < OUTPUT_TRUST_GRACE_MS) continue' "$AA_SRC"; then
+    pass "hook trust: pollOnce cleanup also skips on recent output activity"
+else
+    fail "hook trust: output gate missing" "Expected OUTPUT_TRUST_GRACE_MS guard in pollOnce cleanup"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════

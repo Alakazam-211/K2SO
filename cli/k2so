@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.31.1"
+K2SO_CLI_VERSION="0.31.2"
 
 set -euo pipefail
 
@@ -593,6 +593,53 @@ except Exception as e:
     print(f'Error parsing response: {e}', file=sys.stderr)
     sys.exit(1)
 " 2>/dev/null || cat
+}
+
+cmd_hooks_status() {
+    local limit="20"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --limit|-n) limit="$2"; shift 2 ;;
+            --json) local as_json=1; shift ;;
+            *) shift ;;
+        esac
+    done
+    local raw
+    raw=$(cli_request "/cli/hooks/status" "limit=$limit")
+    if [ "${as_json:-0}" = "1" ]; then
+        echo "$raw"
+        return 0
+    fi
+    echo "$raw" | python3 -c "
+import json, sys
+data = json.loads(sys.stdin.read())
+inj = data.get('injections', {})
+script = inj.get('notify_script', {})
+print(f\"K2SO hook server port: {data.get('port')}\")
+print(f\"Notify script: {script.get('path','?')}  exists={script.get('exists',False)}\")
+print()
+print('Config injections:')
+for key in ('claude', 'cursor', 'gemini'):
+    c = inj.get(key, {})
+    tag = 'OK ' if c.get('injected') else ('NO ' if c.get('exists') else '-- ')
+    print(f\"  [{tag}] {key:<8} {c.get('path','?')}\")
+print()
+events = data.get('recent_events', [])
+cap = data.get('recent_events_cap', 50)
+if not events:
+    print(f'Recent events (0 of last {cap}): none received yet — launch a Claude session and run a prompt.')
+else:
+    print(f'Recent events (showing last {len(events)} of {cap}):')
+    print(f\"{'Time':<20} {'Canonical':<12} {'Raw':<28} {'Pane':<18} Tab\")
+    print('-' * 100)
+    for e in events:
+        ts = (e.get('timestamp') or '')[:19].replace('T',' ')
+        canon = e.get('canonical') or '(unmatched)'
+        raw = e.get('raw_event') or ''
+        pane = (e.get('pane_id') or '')[:17]
+        tab = (e.get('tab_id') or '')
+        print(f'{ts:<20} {canon:<12} {raw:<28} {pane:<18} {tab}')
+" 2>/dev/null || echo "$raw"
 }
 
 cmd_reviews() {
@@ -1769,7 +1816,7 @@ cmd_update() {
 
     # Extract the version from the remote script
     local remote_version
-    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.31.1"//')
+    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.31.2"//')
     if [ -z "$remote_version" ]; then
         echo "Error: Could not parse remote version." >&2
         exit 1
@@ -1913,6 +1960,14 @@ case "${1:-help}" in
             shift 2; cmd_heartbeat_log "$@"
         else
             shift; cmd_heartbeat_toggle "$@"
+        fi
+        ;;
+    hooks)
+        if [ "${2:-}" = "status" ]; then
+            shift 2; cmd_hooks_status "$@"
+        else
+            echo "Usage: k2so hooks status [--limit N] [--json]" >&2
+            exit 1
         fi
         ;;
     settings)

@@ -149,6 +149,125 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════
+section "Hook pipeline (k2so hooks status, end-to-end)"
+# ═══════════════════════════════════════════════════════════════════════
+
+# Status endpoint is reachable and returns the expected shape.
+STATUS_JSON=$(http_get "/cli/hooks/status" "limit=50")
+if echo "$STATUS_JSON" | python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+assert 'port' in d, 'port missing'
+assert 'notify_script' in d, 'notify_script missing'
+assert 'injections' in d, 'injections missing'
+assert 'recent_events' in d, 'recent_events missing'
+assert 'recent_events_cap' in d, 'recent_events_cap missing'
+inj = d['injections']
+for key in ('claude','cursor','gemini','notify_script'):
+    assert key in inj, f'injections.{key} missing'
+for cli in ('claude','cursor','gemini'):
+    entry = inj[cli]
+    assert 'path' in entry and 'exists' in entry and 'injected' in entry, f'{cli} shape wrong'
+" 2>/dev/null; then
+    pass "hook pipeline: /cli/hooks/status returns expected schema"
+else
+    fail "hook pipeline: status schema" "Endpoint response malformed: $STATUS_JSON"
+fi
+
+# Port in the response matches the running server.
+REPORTED_PORT=$(echo "$STATUS_JSON" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('port',0))" 2>/dev/null)
+if [ "$REPORTED_PORT" = "$PORT" ]; then
+    pass "hook pipeline: reported port matches running server ($PORT)"
+else
+    fail "hook pipeline: port mismatch" "reported=$REPORTED_PORT running=$PORT"
+fi
+
+# End-to-end: POST a fake event to /hook/complete, then confirm it appears
+# in recent_events. Uses a unique raw event name + pane id so we can grep
+# for it unambiguously in a shared test environment.
+TOKEN=$(cat "$HOME/.k2so/heartbeat.token" 2>/dev/null)
+UNIQUE_PANE="tier2-test-$(date +%s)-$$"
+UNIQUE_EVENT="UserPromptSubmit"
+curl -sG "http://127.0.0.1:${PORT}/hook/complete" \
+    --data-urlencode "paneId=${UNIQUE_PANE}" \
+    --data-urlencode "tabId=tier2-tab" \
+    --data-urlencode "eventType=${UNIQUE_EVENT}" \
+    --data-urlencode "token=${TOKEN}" \
+    --connect-timeout 2 --max-time 5 > /dev/null 2>&1
+sleep 0.2
+
+AFTER_JSON=$(http_get "/cli/hooks/status" "limit=50")
+if echo "$AFTER_JSON" | python3 -c "
+import json, sys
+events = json.loads(sys.stdin.read()).get('recent_events', [])
+for e in events:
+    if e.get('pane_id') == '${UNIQUE_PANE}' and e.get('canonical') == 'start':
+        print('OK'); sys.exit(0)
+sys.exit(1)
+" 2>/dev/null | grep -q OK; then
+    pass "hook pipeline: injected event appears in recent_events with canonical=start"
+else
+    fail "hook pipeline: event not recorded" "Expected pane=${UNIQUE_PANE} canonical=start in recent_events"
+fi
+
+# Unknown event types must still be recorded (matched=false) so users can
+# spot typos and missing hook coverage in `k2so hooks status` output.
+UNKNOWN_PANE="tier2-unknown-$(date +%s)-$$"
+curl -sG "http://127.0.0.1:${PORT}/hook/complete" \
+    --data-urlencode "paneId=${UNKNOWN_PANE}" \
+    --data-urlencode "tabId=tier2-tab" \
+    --data-urlencode "eventType=NoSuchEventType" \
+    --data-urlencode "token=${TOKEN}" \
+    --connect-timeout 2 --max-time 5 > /dev/null 2>&1
+sleep 0.2
+
+UNKNOWN_JSON=$(http_get "/cli/hooks/status" "limit=50")
+if echo "$UNKNOWN_JSON" | python3 -c "
+import json, sys
+events = json.loads(sys.stdin.read()).get('recent_events', [])
+for e in events:
+    if e.get('pane_id') == '${UNKNOWN_PANE}' and e.get('matched') is False:
+        print('OK'); sys.exit(0)
+sys.exit(1)
+" 2>/dev/null | grep -q OK; then
+    pass "hook pipeline: unknown event types land in ring with matched=false"
+else
+    fail "hook pipeline: unknown not recorded" "Expected NoSuchEventType entry with matched=false"
+fi
+
+# Bad token must be rejected (403), not silently accepted.
+BAD_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+    "http://127.0.0.1:${PORT}/hook/complete?paneId=x&tabId=y&eventType=Stop&token=bad-token" \
+    --connect-timeout 2 --max-time 5 2>/dev/null)
+if [ "$BAD_STATUS" = "403" ]; then
+    pass "hook pipeline: bad auth token returns 403"
+else
+    fail "hook pipeline: bad token accepted" "Expected 403, got $BAD_STATUS"
+fi
+
+# CLI command runs without error and produces output.
+CLI_OUTPUT=$(run hooks status 2>&1 || true)
+if echo "$CLI_OUTPUT" | grep -q "K2SO hook server port:"; then
+    pass "hook pipeline: 'k2so hooks status' CLI renders human-readable report"
+else
+    fail "hook pipeline: CLI output" "Missing 'K2SO hook server port:' header in: $CLI_OUTPUT"
+fi
+
+if echo "$CLI_OUTPUT" | grep -q "Config injections:"; then
+    pass "hook pipeline: 'k2so hooks status' shows Config injections block"
+else
+    fail "hook pipeline: CLI injections block" "Missing 'Config injections:' in CLI output"
+fi
+
+# --json flag returns raw JSON (verify with python parse).
+JSON_OUTPUT=$(run hooks status --json 2>&1 || true)
+if echo "$JSON_OUTPUT" | python3 -c "import json,sys; json.loads(sys.stdin.read())" > /dev/null 2>&1; then
+    pass "hook pipeline: 'k2so hooks status --json' emits valid JSON"
+else
+    fail "hook pipeline: --json invalid" "Output not valid JSON: $JSON_OUTPUT"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
 section "CLEANUP"
 # ═══════════════════════════════════════════════════════════════════════
 

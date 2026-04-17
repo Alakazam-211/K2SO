@@ -23,6 +23,14 @@ export interface ActiveAgent {
 /** Track in-flight triage calls per project to prevent duplicate launches */
 const _triageInFlight = new Set<string>()
 
+/** Last time the Tauri `agent:lifecycle` hook fired for a pane. Used by the
+ *  poll-based cleanup to avoid clobbering hook-driven 'working' states while
+ *  hooks are actively reporting. A long grace covers quiet Claude turns
+ *  (pure thinking, no tool calls) where no hook fires until Stop. */
+const _hookEventAt = new Map<string, number>()
+const HOOK_TRUST_GRACE_MS = 120_000
+const OUTPUT_TRUST_GRACE_MS = 3_000
+
 /** Track agent start times for launch failure detection (paneId → timestamp) */
 const _agentStartTimes = new Map<string, number>()
 /** Track failed launches to avoid infinite retry loops (paneId → retry count) */
@@ -167,6 +175,9 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
     const toast = useToastStore.getState()
     const { paneStatuses } = get()
     const newStatuses = new Map(paneStatuses)
+
+    // Record the hook fire so the poll-based cleanup doesn't race us.
+    _hookEventAt.set(paneId, Date.now())
 
     if (eventType === 'start') {
       newStatuses.set(paneId, 'working')
@@ -453,10 +464,20 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
         outputTimestamps.delete(terminalId)
       }
     }
+    const cleanupNow = Date.now()
     for (const [paneId, status] of paneStatuses) {
       if ((status === 'working' || status === 'permission') && !newAgents.has(paneId)) {
-        // Agent was running but is no longer the foreground command — clear its status
+        // The foreground command isn't a known agent — but that fires
+        // transiently during Claude's tool-use (child process briefly
+        // runs `bash`, `rg`, etc.). Only clear when *both* trust signals
+        // have gone quiet: hooks haven't fired in a long time AND output
+        // isn't flowing. Otherwise we clobber a legitimate working state.
+        const hookAge = cleanupNow - (_hookEventAt.get(paneId) ?? 0)
+        const outputAge = cleanupNow - (outputTimestamps.get(paneId) ?? 0)
+        if (hookAge < HOOK_TRUST_GRACE_MS) continue
+        if (outputAge < OUTPUT_TRUST_GRACE_MS) continue
         cleanedStatuses.set(paneId, 'idle')
+        _hookEventAt.delete(paneId)
         statusesChanged = true
       }
     }
