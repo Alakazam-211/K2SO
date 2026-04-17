@@ -469,6 +469,9 @@ pub fn run() {
                         };
                         for project in &projects {
                             crate::commands::k2so_agents::ensure_workspace_wakeups(&project.path);
+                            // One-time promote of legacy single-slot heartbeat_schedule
+                            // into the multi-heartbeat agent_heartbeats table. Idempotent.
+                            crate::commands::k2so_agents::promote_legacy_heartbeat(&project.path);
                         }
                     });
                 }
@@ -802,6 +805,12 @@ pub fn run() {
             commands::k2so_agents::k2so_agents_uninstall_heartbeat,
             commands::k2so_agents::k2so_agents_update_heartbeat_projects,
             commands::k2so_agents::k2so_agents_preview_schedule,
+            // Multi-heartbeat (agent_heartbeats table)
+            commands::k2so_agents::k2so_heartbeat_add,
+            commands::k2so_agents::k2so_heartbeat_list,
+            commands::k2so_agents::k2so_heartbeat_remove,
+            commands::k2so_agents::k2so_heartbeat_set_enabled,
+            commands::k2so_agents::k2so_heartbeat_edit,
             // Agent Sessions (DB-tracked)
             commands::k2so_agents::agent_sessions_list,
             commands::k2so_agents::agent_sessions_get,

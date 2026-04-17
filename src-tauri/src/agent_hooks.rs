@@ -936,6 +936,78 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                 .map(|config| serde_json::to_string(&config).unwrap_or_default())
                         }
                     }
+                    "/cli/heartbeat/add" => {
+                        // Multi-heartbeat CRUD. See .k2so/prds/multi-schedule-heartbeat.md
+                        let name = params.get("name").cloned().unwrap_or_default();
+                        let frequency = params.get("frequency").cloned().unwrap_or_default();
+                        let spec_json = params.get("spec").cloned().unwrap_or_else(|| "{}".to_string());
+                        if name.is_empty() || frequency.is_empty() {
+                            Err("Missing 'name' or 'frequency' parameter".to_string())
+                        } else {
+                            crate::commands::k2so_agents::k2so_heartbeat_add(
+                                project_path.clone(), name, frequency, spec_json,
+                            ).map(|v| v.to_string())
+                        }
+                    }
+                    "/cli/heartbeat/list" => {
+                        crate::commands::k2so_agents::k2so_heartbeat_list(project_path.clone())
+                            .map(|rows| serde_json::to_string(&rows).unwrap_or_default())
+                    }
+                    "/cli/heartbeat/remove" => {
+                        let name = params.get("name").cloned().unwrap_or_default();
+                        if name.is_empty() {
+                            Err("Missing 'name' parameter".to_string())
+                        } else {
+                            crate::commands::k2so_agents::k2so_heartbeat_remove(
+                                project_path.clone(), name,
+                            ).map(|_| r#"{"success":true}"#.to_string())
+                        }
+                    }
+                    "/cli/heartbeat/enable" => {
+                        let name = params.get("name").cloned().unwrap_or_default();
+                        let enabled = params.get("enabled").map(|v| v == "true" || v == "1").unwrap_or(true);
+                        if name.is_empty() {
+                            Err("Missing 'name' parameter".to_string())
+                        } else {
+                            crate::commands::k2so_agents::k2so_heartbeat_set_enabled(
+                                project_path.clone(), name, enabled,
+                            ).map(|_| r#"{"success":true}"#.to_string())
+                        }
+                    }
+                    "/cli/heartbeat/edit" => {
+                        let name = params.get("name").cloned().unwrap_or_default();
+                        let frequency = params.get("frequency").cloned().unwrap_or_default();
+                        let spec_json = params.get("spec").cloned().unwrap_or_default();
+                        if name.is_empty() || frequency.is_empty() {
+                            Err("Missing 'name' or 'frequency' parameter".to_string())
+                        } else {
+                            crate::commands::k2so_agents::k2so_heartbeat_edit(
+                                project_path.clone(), name, frequency, spec_json,
+                            ).map(|_| r#"{"success":true}"#.to_string())
+                        }
+                    }
+                    "/cli/heartbeat/status" => {
+                        // Last N fires for a specific heartbeat by name.
+                        let name = params.get("name").cloned().unwrap_or_default();
+                        let limit = params.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(10).clamp(1, 200);
+                        if name.is_empty() {
+                            Err("Missing 'name' parameter".to_string())
+                        } else {
+                            (|| -> Result<String, String> {
+                                let db_path = dirs::home_dir().map(|h| h.join(".k2so/k2so.db")).ok_or("No home dir")?;
+                                let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+                                let project_id: String = conn.query_row(
+                                    "SELECT id FROM projects WHERE path = ?1",
+                                    rusqlite::params![project_path], |row| row.get(0),
+                                ).map_err(|e| format!("Project not found: {}", e))?;
+                                // Filter heartbeat_fires by schedule_name (may be null for legacy fires)
+                                let rows = crate::db::schema::HeartbeatFire::list_by_schedule_name(
+                                    &conn, &project_id, &name, limit
+                                ).map_err(|e| e.to_string())?;
+                                Ok(serde_json::to_string(&rows).unwrap_or_default())
+                            })()
+                        }
+                    }
                     "/cli/hooks/status" => {
                         // Diagnostic endpoint: returns hook injection state across
                         // supported LLM CLIs plus the last N hook events received.
@@ -1052,6 +1124,43 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                 }
                             }
 
+                            // ── Multi-heartbeat tick ────────────────────────────
+                            // Iterate agent_heartbeats and spawn any whose schedules
+                            // are eligible. Each candidate carries its own wakeup_path
+                            // so different heartbeats can fire different workflows.
+                            let hb_candidates = crate::commands::k2so_agents::k2so_agents_heartbeat_tick(&project_path);
+                            let mut hb_fired: Vec<String> = Vec::new();
+                            for cand in &hb_candidates {
+                                if crate::commands::k2so_agents::is_agent_locked(&project_path, &cand.agent_name) {
+                                    // Lock-skip: DON'T stamp last_fired — stays eligible for next tick.
+                                    log_debug!(
+                                        "[heartbeat-tick] {} skipped_locked ({})",
+                                        cand.name, cand.agent_name
+                                    );
+                                    continue;
+                                }
+                                // Read wakeup content and build the user-message prompt.
+                                let wake_prompt = crate::commands::k2so_agents::compose_wake_prompt_from_path(
+                                    std::path::Path::new(&cand.wakeup_path_abs)
+                                ).unwrap_or_else(|| format!("Begin heartbeat '{}'.", cand.name));
+
+                                let args = vec![
+                                    "--dangerously-skip-permissions".to_string(),
+                                    wake_prompt,
+                                ];
+                                if spawn_wake_pty(
+                                    &app_handle,
+                                    &cand.agent_name,
+                                    &project_path,
+                                    "claude",
+                                    args,
+                                    &project_path,
+                                ).is_ok() {
+                                    crate::commands::k2so_agents::stamp_heartbeat_fired(&project_path, &cand.name);
+                                    hb_fired.push(cand.name.clone());
+                                }
+                            }
+
                             // Release triage lock
                             {
                                 let mut in_flight = triage_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -1059,10 +1168,15 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             }
 
                             match result {
-                                Ok(agents) => Ok(serde_json::json!({
-                                    "count": agents.len(),
-                                    "launched": agents,
-                                }).to_string()),
+                                Ok(agents) => {
+                                    let mut all = agents.clone();
+                                    all.extend(hb_fired.clone());
+                                    Ok(serde_json::json!({
+                                        "count": all.len(),
+                                        "launched": all,
+                                        "heartbeats": hb_fired,
+                                    }).to_string())
+                                }
                                 Err(e) => Err(e),
                             }
                         }

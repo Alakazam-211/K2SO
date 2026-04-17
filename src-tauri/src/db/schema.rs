@@ -1073,6 +1073,173 @@ impl AgentSession {
     }
 }
 
+// ── Agent Heartbeats (multi-heartbeat architecture) ────────────────────
+//
+// Replaces the legacy single-slot projects.heartbeat_schedule. Each row
+// is one named heartbeat with its own frequency + wakeup path. Scheduler
+// loop iterates enabled rows per workspace, evaluates fire eligibility,
+// spawns using the row's wakeup_path. See
+// .k2so/prds/multi-schedule-heartbeat.md for full design.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHeartbeat {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub frequency: String,
+    pub spec_json: String,
+    pub wakeup_path: String,
+    pub enabled: bool,
+    pub last_fired: Option<String>,
+    pub created_at: i64,
+}
+
+impl AgentHeartbeat {
+    /// Validate a heartbeat name. Enforced at every insert/write path so
+    /// users can't get into a weird state. See PRD § Name validation.
+    pub fn validate_name(name: &str) -> Result<()> {
+        if name.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "heartbeat name cannot be empty".into(),
+            ));
+        }
+        let reserved = ["default", "legacy"];
+        if reserved.contains(&name) {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "heartbeat name '{}' is reserved",
+                name
+            )));
+        }
+        if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "heartbeat name must be lowercase letters, digits, and hyphens only".into(),
+            ));
+        }
+        if name.starts_with('-') || name.ends_with('-') {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "heartbeat name cannot start or end with a hyphen".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn insert(
+        conn: &Connection,
+        id: &str,
+        project_id: &str,
+        name: &str,
+        frequency: &str,
+        spec_json: &str,
+        wakeup_path: &str,
+        enabled: bool,
+    ) -> Result<()> {
+        conn.execute(
+            "INSERT INTO agent_heartbeats \
+             (id, project_id, name, frequency, spec_json, wakeup_path, enabled, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, unixepoch())",
+            params![id, project_id, name, frequency, spec_json, wakeup_path, enabled as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_by_name(conn: &Connection, project_id: &str, name: &str) -> Result<Option<AgentHeartbeat>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, name, frequency, spec_json, wakeup_path, enabled, last_fired, created_at \
+             FROM agent_heartbeats WHERE project_id = ?1 AND name = ?2"
+        )?;
+        let mut rows = stmt.query_map(params![project_id, name], Self::from_row)?;
+        match rows.next() {
+            Some(Ok(h)) => Ok(Some(h)),
+            Some(Err(e)) => Err(e),
+            None => Ok(None),
+        }
+    }
+
+    pub fn list_by_project(conn: &Connection, project_id: &str) -> Result<Vec<AgentHeartbeat>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, name, frequency, spec_json, wakeup_path, enabled, last_fired, created_at \
+             FROM agent_heartbeats WHERE project_id = ?1 ORDER BY name"
+        )?;
+        let rows = stmt.query_map(params![project_id], Self::from_row)?;
+        rows.collect()
+    }
+
+    pub fn list_enabled(conn: &Connection, project_id: &str) -> Result<Vec<AgentHeartbeat>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, name, frequency, spec_json, wakeup_path, enabled, last_fired, created_at \
+             FROM agent_heartbeats WHERE project_id = ?1 AND enabled = 1 ORDER BY name"
+        )?;
+        let rows = stmt.query_map(params![project_id], Self::from_row)?;
+        rows.collect()
+    }
+
+    pub fn set_enabled(conn: &Connection, project_id: &str, name: &str, enabled: bool) -> Result<usize> {
+        conn.execute(
+            "UPDATE agent_heartbeats SET enabled = ?1 WHERE project_id = ?2 AND name = ?3",
+            params![enabled as i64, project_id, name],
+        )
+    }
+
+    pub fn update_schedule(
+        conn: &Connection,
+        project_id: &str,
+        name: &str,
+        frequency: &str,
+        spec_json: &str,
+    ) -> Result<usize> {
+        conn.execute(
+            "UPDATE agent_heartbeats SET frequency = ?1, spec_json = ?2 \
+             WHERE project_id = ?3 AND name = ?4",
+            params![frequency, spec_json, project_id, name],
+        )
+    }
+
+    pub fn update_wakeup_path(
+        conn: &Connection,
+        project_id: &str,
+        name: &str,
+        wakeup_path: &str,
+    ) -> Result<usize> {
+        conn.execute(
+            "UPDATE agent_heartbeats SET wakeup_path = ?1 WHERE project_id = ?2 AND name = ?3",
+            params![wakeup_path, project_id, name],
+        )
+    }
+
+    /// Stamp last_fired. Only called on *successful* spawn — lock-skips
+    /// deliberately do NOT stamp, so the heartbeat stays eligible for
+    /// the next tick. See PRD § last_fired semantics.
+    pub fn stamp_last_fired(conn: &Connection, project_id: &str, name: &str) -> Result<usize> {
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE agent_heartbeats SET last_fired = ?1 WHERE project_id = ?2 AND name = ?3",
+            params![now, project_id, name],
+        )
+    }
+
+    pub fn delete(conn: &Connection, project_id: &str, name: &str) -> Result<usize> {
+        conn.execute(
+            "DELETE FROM agent_heartbeats WHERE project_id = ?1 AND name = ?2",
+            params![project_id, name],
+        )
+    }
+
+    fn from_row(row: &rusqlite::Row<'_>) -> Result<AgentHeartbeat> {
+        Ok(AgentHeartbeat {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            name: row.get(2)?,
+            frequency: row.get(3)?,
+            spec_json: row.get(4)?,
+            wakeup_path: row.get(5)?,
+            enabled: row.get::<_, i64>(6)? == 1,
+            last_fired: row.get(7)?,
+            created_at: row.get(8)?,
+        })
+    }
+}
+
 // ── Workspace Relations ─────────────────────────────────────────────────
 
 /// Cross-workspace relationship. A custom agent workspace can oversee
@@ -1312,6 +1479,9 @@ pub struct HeartbeatFire {
 }
 
 impl HeartbeatFire {
+    /// Insert an audit row. `schedule_name` is the multi-heartbeat name
+    /// (the `agent_heartbeats.name`); None for legacy fires that predate
+    /// the multi-heartbeat system or aren't tied to a specific heartbeat.
     pub fn insert(
         conn: &Connection,
         project_id: &str,
@@ -1323,10 +1493,32 @@ impl HeartbeatFire {
         inbox_count: Option<i64>,
         duration_ms: Option<i64>,
     ) -> Result<i64> {
+        Self::insert_with_schedule(
+            conn, project_id, agent_name, None,
+            mode, decision, reason, inbox_priority, inbox_count, duration_ms,
+        )
+    }
+
+    /// Insert an audit row with an explicit schedule_name — used by the
+    /// multi-heartbeat tick so `k2so heartbeat status <name>` can filter
+    /// cleanly. schedule_name is denormalized TEXT (NOT a FK to
+    /// agent_heartbeats.name) so audit rows survive heartbeat deletion.
+    pub fn insert_with_schedule(
+        conn: &Connection,
+        project_id: &str,
+        agent_name: Option<&str>,
+        schedule_name: Option<&str>,
+        mode: &str,
+        decision: &str,
+        reason: Option<&str>,
+        inbox_priority: Option<&str>,
+        inbox_count: Option<i64>,
+        duration_ms: Option<i64>,
+    ) -> Result<i64> {
         conn.execute(
             "INSERT INTO heartbeat_fires \
-             (project_id, agent_name, fired_at, mode, decision, reason, inbox_priority, inbox_count, duration_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (project_id, agent_name, fired_at, mode, decision, reason, inbox_priority, inbox_count, duration_ms, schedule_name) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 project_id,
                 agent_name,
@@ -1337,6 +1529,7 @@ impl HeartbeatFire {
                 inbox_priority,
                 inbox_count,
                 duration_ms,
+                schedule_name,
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -1355,6 +1548,36 @@ impl HeartbeatFire {
              ORDER BY fired_at DESC LIMIT ?2"
         )?;
         let rows = stmt.query_map(params![project_id, limit], |row| {
+            Ok(HeartbeatFire {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                agent_name: row.get(2)?,
+                fired_at: row.get(3)?,
+                mode: row.get(4)?,
+                decision: row.get(5)?,
+                reason: row.get(6)?,
+                inbox_priority: row.get(7)?,
+                inbox_count: row.get(8)?,
+                duration_ms: row.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Filter fire rows by schedule_name — powers `k2so heartbeat status <name>`.
+    pub fn list_by_schedule_name(
+        conn: &Connection,
+        project_id: &str,
+        schedule_name: &str,
+        limit: i64,
+    ) -> Result<Vec<HeartbeatFire>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, agent_name, fired_at, mode, decision, reason, \
+                    inbox_priority, inbox_count, duration_ms \
+             FROM heartbeat_fires WHERE project_id = ?1 AND schedule_name = ?2 \
+             ORDER BY fired_at DESC LIMIT ?3"
+        )?;
+        let rows = stmt.query_map(params![project_id, schedule_name, limit], |row| {
             Ok(HeartbeatFire {
                 id: row.get(0)?,
                 project_id: row.get(1)?,

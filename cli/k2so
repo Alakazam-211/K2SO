@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.31.8"
+K2SO_CLI_VERSION="0.31.9"
 
 set -euo pipefail
 
@@ -557,6 +557,166 @@ cmd_work_move() {
 cmd_heartbeat() {
     echo "Triggering heartbeat triage..."
     cli_request "/cli/heartbeat"
+}
+
+# ── Multi-heartbeat (agent_heartbeats) CRUD ────────────────────────────
+# Parse frequency/day/time flags into spec JSON that matches the scheduler
+# logic in should_project_fire.
+#   --daily --time 07:00
+#   --weekly --days mon,tue --time 07:00
+#   --monthly --days 1,15 --time 07:00
+#   --yearly --months jan,apr --days 1 --time 07:00
+#   --hourly --every 30 --unit minutes --start 09:00 --end 17:00
+hb_parse_spec() {
+    local frequency=""
+    local time=""
+    local days=""
+    local months=""
+    local every=""
+    local unit="minutes"
+    local start=""
+    local end=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --daily)   frequency="daily"; shift ;;
+            --weekly)  frequency="weekly"; shift ;;
+            --monthly) frequency="monthly"; shift ;;
+            --yearly)  frequency="yearly"; shift ;;
+            --hourly)  frequency="hourly"; shift ;;
+            --time)    time="$2"; shift 2 ;;
+            --days)    days="$2"; shift 2 ;;
+            --months)  months="$2"; shift 2 ;;
+            --every)   every="$2"; shift 2 ;;
+            --unit)    unit="$2"; shift 2 ;;
+            --start)   start="$2"; shift 2 ;;
+            --end)     end="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    [ -z "$frequency" ] && { echo "Error: must specify one of --daily/--weekly/--monthly/--yearly/--hourly" >&2; exit 1; }
+    # Build JSON spec
+    python3 -c "
+import json
+spec = {'frequency': '$frequency'}
+if '$time': spec['time'] = '$time'
+if '$days':
+    d = '$days'.split(',')
+    if '$frequency' in ('monthly','yearly'):
+        spec['days_of_month'] = [int(x) for x in d if x.strip().isdigit()]
+    else:
+        spec['days'] = [x.strip().lower() for x in d]
+if '$months': spec['months'] = '$months'.split(',')
+if '$every': spec['every_seconds'] = int('$every') * (60 if '$unit' == 'minutes' else 3600 if '$unit' == 'hours' else 1)
+if '$start': spec['start'] = '$start'
+if '$end': spec['end'] = '$end'
+print(json.dumps(spec))
+print('FREQ:' + '$frequency')
+"
+}
+
+cmd_heartbeat_add() {
+    local name=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name) name="$2"; shift 2 ;;
+            *) break ;;
+        esac
+    done
+    [ -z "$name" ] && { echo "Usage: k2so heartbeat add --name <name> --daily|--weekly|... [--time HH:MM] [--days ...]" >&2; exit 1; }
+    local spec_output
+    spec_output=$(hb_parse_spec "$@")
+    local spec_json
+    spec_json=$(echo "$spec_output" | head -1)
+    local freq
+    freq=$(echo "$spec_output" | grep '^FREQ:' | sed 's/^FREQ://')
+    local params="name=$(urlencode "$name")&frequency=$freq&spec=$(urlencode "$spec_json")"
+    cli_request "/cli/heartbeat/add" "$params" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    if 'error' in d:
+        print(f'Error: {d[\"error\"]}', file=sys.stderr); sys.exit(1)
+    print(f'Created heartbeat: {d.get(\"name\")}')
+    print(f'Wakeup file: {d.get(\"wakeupAbs\")}')
+    print()
+    print('Edit the wakeup.md to define what runs on this schedule.')
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr); sys.exit(1)
+"
+}
+
+cmd_heartbeat_list() {
+    cli_request "/cli/heartbeat/list" | python3 -c "
+import json, sys
+try:
+    rows = json.loads(sys.stdin.read())
+    if not rows:
+        print('No heartbeats configured for this workspace.'); sys.exit(0)
+    print(f'{\"Name\":<20} {\"Frequency\":<10} {\"Schedule\":<30} {\"Last Fired\":<22} Enabled')
+    print('-' * 100)
+    for r in rows:
+        spec = json.loads(r.get('specJson', '{}'))
+        sched_parts = []
+        if 'time' in spec: sched_parts.append(f'at {spec[\"time\"]}')
+        if 'days' in spec: sched_parts.append(f'on {\", \".join(spec[\"days\"])}')
+        if 'days_of_month' in spec: sched_parts.append(f'day(s) {\",\".join(str(d) for d in spec[\"days_of_month\"])}')
+        if 'months' in spec: sched_parts.append(f'in {\",\".join(spec[\"months\"])}')
+        sched = ' '.join(sched_parts) or '-'
+        last = (r.get('lastFired') or 'never')[:19].replace('T', ' ')
+        en = 'yes' if r.get('enabled') else 'no'
+        print(f'{r.get(\"name\",\"?\"):<20} {r.get(\"frequency\",\"?\"):<10} {sched:<30} {last:<22} {en}')
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr); sys.exit(1)
+"
+}
+
+cmd_heartbeat_remove() {
+    local name="${1:-}"
+    [ -z "$name" ] && { echo "Usage: k2so heartbeat remove <name>" >&2; exit 1; }
+    cli_request "/cli/heartbeat/remove" "name=$(urlencode "$name")" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    if d.get('success'): print(f'Removed heartbeat: $name')
+    else: print(f'Error: {d.get(\"error\", \"unknown\")}', file=sys.stderr); sys.exit(1)
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr); sys.exit(1)
+"
+}
+
+cmd_heartbeat_enable_disable() {
+    local enabled="$1"; shift
+    local name="${1:-}"
+    [ -z "$name" ] && { echo "Usage: k2so heartbeat enable|disable <name>" >&2; exit 1; }
+    cli_request "/cli/heartbeat/enable" "name=$(urlencode "$name")&enabled=$enabled" > /dev/null
+    echo "Heartbeat '$name' ${enabled}d"
+}
+
+cmd_heartbeat_status() {
+    local name=""
+    local limit="10"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --limit|-n) limit="$2"; shift 2 ;;
+            *) if [ -z "$name" ]; then name="$1"; fi; shift ;;
+        esac
+    done
+    [ -z "$name" ] && { echo "Usage: k2so heartbeat status <name> [--limit N]" >&2; exit 1; }
+    cli_request "/cli/heartbeat/status" "name=$(urlencode "$name")&limit=$limit" | python3 -c "
+import json, sys
+try:
+    rows = json.loads(sys.stdin.read())
+    if not rows:
+        print(f'No fire history for heartbeat \"$name\" yet.'); sys.exit(0)
+    print(f'Last {len(rows)} fire(s) for heartbeat \"$name\":')
+    print(f'{\"Time\":<22} {\"Decision\":<22} Reason')
+    print('-' * 90)
+    for r in rows:
+        t = (r.get('firedAt') or '')[:19].replace('T', ' ')
+        print(f'{t:<22} {r.get(\"decision\",\"?\"):<22} {r.get(\"reason\",\"\") or \"\"}')
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr); sys.exit(1)
+"
 }
 
 # Show the recent heartbeat decision log for this workspace.
@@ -1816,7 +1976,7 @@ cmd_update() {
 
     # Extract the version from the remote script
     local remote_version
-    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.31.8"//')
+    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.31.9"//')
     if [ -z "$remote_version" ]; then
         echo "Error: Could not parse remote version." >&2
         exit 1
@@ -1954,13 +2114,17 @@ case "${1:-help}" in
         shift; cmd_mode "$@"
         ;;
     heartbeat)
-        if [ "${2:-}" = "wake" ]; then
-            shift 2; cmd_heartbeat_wake "$@"
-        elif [ "${2:-}" = "log" ]; then
-            shift 2; cmd_heartbeat_log "$@"
-        else
-            shift; cmd_heartbeat_toggle "$@"
-        fi
+        case "${2:-}" in
+            wake)    shift 2; cmd_heartbeat_wake "$@" ;;
+            log)     shift 2; cmd_heartbeat_log "$@" ;;
+            add)     shift 2; cmd_heartbeat_add "$@" ;;
+            list)    shift 2; cmd_heartbeat_list "$@" ;;
+            remove)  shift 2; cmd_heartbeat_remove "$@" ;;
+            enable)  shift 2; cmd_heartbeat_enable_disable true "$@" ;;
+            disable) shift 2; cmd_heartbeat_enable_disable false "$@" ;;
+            status)  shift 2; cmd_heartbeat_status "$@" ;;
+            *)       shift; cmd_heartbeat_toggle "$@" ;;
+        esac
         ;;
     hooks)
         if [ "${2:-}" = "status" ]; then

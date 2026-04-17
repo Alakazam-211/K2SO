@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::db::schema::{AgentSession, HeartbeatFire, WorkspaceRelation};
+use crate::db::schema::{AgentHeartbeat, AgentSession, HeartbeatFire, WorkspaceRelation};
 
 // ── DB helpers (standalone connection, no AppState needed) ──────────────
 
@@ -205,6 +205,355 @@ pub fn compose_wake_prompt_for_agent(project_path: &str, agent_name: &str) -> Op
          ----\n\n{}",
         wakeup.trim()
     ))
+}
+
+/// Compose the wake prompt from an explicit wakeup file path. Used by
+/// the multi-heartbeat scheduler — each heartbeat row stores the path
+/// it should read rather than relying on a naming convention.
+pub fn compose_wake_prompt_from_path(wakeup_path: &std::path::Path) -> Option<String> {
+    let content = std::fs::read_to_string(wakeup_path).ok()?;
+    Some(format!(
+        "# K2SO Heartbeat Wake\n\n\
+         The heartbeat scheduler woke you. Your wake-up instructions are below; \
+         follow them and exit when done.\n\n\
+         ----\n\n{}",
+        content.trim()
+    ))
+}
+
+/// Find the first top-tier scheduleable agent in a workspace.
+/// Mutually exclusive by design: Custom, __lead__, or k2so-agent.
+/// Agent-templates are never scheduleable and are skipped.
+pub fn find_primary_agent(project_path: &str) -> Option<String> {
+    let agents_root = agents_dir(project_path);
+    if !agents_root.exists() {
+        return None;
+    }
+    let Ok(entries) = fs::read_dir(&agents_root) else { return None };
+    for entry in entries.flatten() {
+        if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let agent_type = agent_type_for(project_path, &name);
+        if matches!(agent_type.as_str(), "custom" | "manager" | "k2so") {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// Multi-heartbeat architecture: CRUD for agent_heartbeats table.
+/// See .k2so/prds/multi-schedule-heartbeat.md.
+
+#[tauri::command]
+pub fn k2so_heartbeat_add(
+    project_path: String,
+    name: String,
+    frequency: String,
+    spec_json: String,
+) -> Result<serde_json::Value, String> {
+    AgentHeartbeat::validate_name(&name).map_err(|e| e.to_string())?;
+    let conn = rusqlite::Connection::open(k2so_db_path()).map_err(|e| e.to_string())?;
+    let project_id = resolve_project_id(&conn, &project_path)
+        .ok_or_else(|| format!("Project not found: {}", project_path))?;
+
+    let agent_name = find_primary_agent(&project_path)
+        .ok_or("No scheduleable agent found in this workspace. Enable heartbeat on a Custom, Workspace Manager, or K2SO Agent workspace first.")?;
+
+    // Create heartbeat folder and scaffold wakeup.md
+    let hb_dir = agent_dir(&project_path, &agent_name)
+        .join("heartbeats")
+        .join(&name);
+    fs::create_dir_all(&hb_dir).map_err(|e| format!("Failed to create heartbeat folder: {}", e))?;
+    let wakeup_file = hb_dir.join("wakeup.md");
+    if !wakeup_file.exists() {
+        let template = format!(
+            "---\ndescription: One-line summary of what this heartbeat does (shown in other wakeup's context)\n---\n\n\
+            # Wake procedure: {}\n\n\
+            Replace this with the operational instructions for this heartbeat.\n\
+            Keep it focused on what to do for this specific cadence — other heartbeats\n\
+            live in sibling folders and run on their own schedules.\n",
+            name
+        );
+        fs::write(&wakeup_file, template).map_err(|e| format!("Failed to write wakeup.md: {}", e))?;
+    }
+
+    // Store workspace-relative path so project moves don't break rows
+    let workspace_relative = wakeup_file
+        .strip_prefix(&project_path)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| wakeup_file.to_string_lossy().to_string());
+
+    let id = uuid::Uuid::new_v4().to_string();
+    AgentHeartbeat::insert(
+        &conn,
+        &id,
+        &project_id,
+        &name,
+        &frequency,
+        &spec_json,
+        &workspace_relative,
+        true,
+    )
+    .map_err(|e| format!("Failed to insert heartbeat: {}", e))?;
+
+    Ok(serde_json::json!({
+        "id": id,
+        "name": name,
+        "wakeupPath": workspace_relative,
+        "wakeupAbs": wakeup_file.to_string_lossy(),
+    }))
+}
+
+#[tauri::command]
+pub fn k2so_heartbeat_list(project_path: String) -> Result<Vec<AgentHeartbeat>, String> {
+    let conn = rusqlite::Connection::open(k2so_db_path()).map_err(|e| e.to_string())?;
+    let project_id = resolve_project_id(&conn, &project_path)
+        .ok_or_else(|| format!("Project not found: {}", project_path))?;
+    AgentHeartbeat::list_by_project(&conn, &project_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn k2so_heartbeat_remove(
+    project_path: String,
+    name: String,
+) -> Result<(), String> {
+    let conn = rusqlite::Connection::open(k2so_db_path()).map_err(|e| e.to_string())?;
+    let project_id = resolve_project_id(&conn, &project_path)
+        .ok_or_else(|| format!("Project not found: {}", project_path))?;
+    let agent_name = find_primary_agent(&project_path)
+        .ok_or("No scheduleable agent in this workspace")?;
+
+    // Delete row first; folder cleanup second (best-effort)
+    AgentHeartbeat::delete(&conn, &project_id, &name).map_err(|e| e.to_string())?;
+    let hb_dir = agent_dir(&project_path, &agent_name)
+        .join("heartbeats")
+        .join(&name);
+    if hb_dir.exists() {
+        let _ = fs::remove_dir_all(&hb_dir);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn k2so_heartbeat_set_enabled(
+    project_path: String,
+    name: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let conn = rusqlite::Connection::open(k2so_db_path()).map_err(|e| e.to_string())?;
+    let project_id = resolve_project_id(&conn, &project_path)
+        .ok_or_else(|| format!("Project not found: {}", project_path))?;
+    AgentHeartbeat::set_enabled(&conn, &project_id, &name, enabled)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn k2so_heartbeat_edit(
+    project_path: String,
+    name: String,
+    frequency: String,
+    spec_json: String,
+) -> Result<(), String> {
+    let conn = rusqlite::Connection::open(k2so_db_path()).map_err(|e| e.to_string())?;
+    let project_id = resolve_project_id(&conn, &project_path)
+        .ok_or_else(|| format!("Project not found: {}", project_path))?;
+    AgentHeartbeat::update_schedule(&conn, &project_id, &name, &frequency, &spec_json)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Result of a multi-heartbeat tick — one entry per heartbeat that's
+/// eligible to fire right now. Caller is responsible for locking,
+/// spawning, and stamping last_fired on success.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeartbeatFireCandidate {
+    pub name: String,
+    pub agent_name: String,
+    pub wakeup_path_abs: String, // absolute path ready for PTY
+    pub wakeup_path_rel: String, // workspace-relative (for DB)
+}
+
+/// Iterate enabled agent_heartbeats for this project and return the
+/// subset whose schedules are due to fire now. Does NOT lock, spawn,
+/// or stamp — those are the caller's responsibility. Writes audit rows
+/// into heartbeat_fires for each evaluated candidate (fired_multi or
+/// skipped_schedule) so `k2so heartbeat status <name>` can show what
+/// happened.
+pub fn k2so_agents_heartbeat_tick(project_path: &str) -> Vec<HeartbeatFireCandidate> {
+    let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) else { return vec![] };
+    let Some(project_id) = resolve_project_id(&conn, project_path) else { return vec![] };
+    let heartbeats = AgentHeartbeat::list_enabled(&conn, &project_id).unwrap_or_default();
+    if heartbeats.is_empty() {
+        return vec![];
+    }
+    let Some(agent_name) = find_primary_agent(project_path) else { return vec![] };
+
+    let tick_start = std::time::Instant::now();
+    let mut candidates = Vec::new();
+    for hb in heartbeats {
+        let eligible = should_project_fire(
+            &hb.frequency,
+            Some(&hb.spec_json),
+            hb.last_fired.as_deref(),
+        );
+        if !eligible {
+            let _ = HeartbeatFire::insert_with_schedule(
+                &conn, &project_id, Some(&agent_name), Some(&hb.name),
+                &hb.frequency, "skipped_schedule",
+                Some("window not open"), None, None,
+                Some(tick_start.elapsed().as_millis() as i64),
+            );
+            continue;
+        }
+
+        let wakeup_abs = std::path::Path::new(project_path).join(&hb.wakeup_path);
+        if !wakeup_abs.exists() {
+            // FS tampering recovery — auto-disable so user notices.
+            let _ = AgentHeartbeat::set_enabled(&conn, &project_id, &hb.name, false);
+            let _ = HeartbeatFire::insert_with_schedule(
+                &conn, &project_id, Some(&agent_name), Some(&hb.name),
+                &hb.frequency, "wakeup_file_missing",
+                Some(&format!("auto-disabled: {} not found", hb.wakeup_path)),
+                None, None,
+                Some(tick_start.elapsed().as_millis() as i64),
+            );
+            log_debug!(
+                "[heartbeat-tick] {} wakeup file missing ({}), auto-disabled",
+                hb.name, hb.wakeup_path
+            );
+            continue;
+        }
+
+        candidates.push(HeartbeatFireCandidate {
+            name: hb.name,
+            agent_name: agent_name.clone(),
+            wakeup_path_abs: wakeup_abs.to_string_lossy().to_string(),
+            wakeup_path_rel: hb.wakeup_path,
+        });
+    }
+    candidates
+}
+
+/// Stamp last_fired on a heartbeat row. Called by the scheduler caller
+/// AFTER spawn_wake_pty succeeds. Silent no-op when the row is gone
+/// (heartbeat removed mid-run) — audit rows survive independently.
+pub fn stamp_heartbeat_fired(project_path: &str, heartbeat_name: &str) {
+    let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) else { return };
+    let Some(project_id) = resolve_project_id(&conn, project_path) else { return };
+    let _ = AgentHeartbeat::stamp_last_fired(&conn, &project_id, heartbeat_name);
+}
+
+/// One-time promotion of the legacy `projects.heartbeat_schedule` single-slot
+/// config into the multi-heartbeat `agent_heartbeats` table. Safe to call
+/// repeatedly; no-ops when the project already has any agent_heartbeats
+/// row (migration is idempotent). Moves the legacy `wakeup.md` to
+/// `heartbeats/default/wakeup.md` so everything lives under a consistent
+/// hierarchy post-migration.
+pub fn promote_legacy_heartbeat(project_path: &str) {
+    let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) else { return };
+    let Some(project_id) = resolve_project_id(&conn, project_path) else { return };
+
+    // Idempotency: skip if any heartbeat row exists for this project.
+    if let Ok(existing) = AgentHeartbeat::list_by_project(&conn, &project_id) {
+        if !existing.is_empty() {
+            return;
+        }
+    }
+
+    // Read legacy slot. If empty or null, nothing to migrate.
+    let legacy: Option<(Option<String>, Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT heartbeat_mode, heartbeat_schedule, heartbeat_last_fire \
+             FROM projects WHERE id = ?1",
+            rusqlite::params![project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .ok();
+    let Some((mode, schedule, last_fire)) = legacy else { return };
+    let Some(schedule_json) = schedule else { return };
+    if schedule_json.trim().is_empty() {
+        return;
+    }
+
+    // Parse the legacy JSON to extract frequency and spec params.
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&schedule_json) else { return };
+    let frequency = v
+        .get("frequency")
+        .and_then(|s| s.as_str())
+        .unwrap_or(match mode.as_deref() {
+            Some("hourly") => "hourly",
+            _ => "daily",
+        })
+        .to_string();
+
+    let Some(agent_name) = find_primary_agent(project_path) else { return };
+
+    // Move legacy wakeup.md into heartbeats/default/ so the rest of the
+    // system has a single lookup pattern.
+    let default_dir = agent_dir(project_path, &agent_name)
+        .join("heartbeats")
+        .join("default");
+    if fs::create_dir_all(&default_dir).is_err() {
+        return;
+    }
+    let legacy_wakeup = agent_dir(project_path, &agent_name).join("wakeup.md");
+    let new_wakeup = default_dir.join("wakeup.md");
+    if legacy_wakeup.exists() && !new_wakeup.exists() {
+        // Follow symlinks by copying content rather than renaming the link.
+        if let Ok(content) = fs::read_to_string(&legacy_wakeup) {
+            if fs::write(&new_wakeup, content).is_ok() {
+                let _ = fs::remove_file(&legacy_wakeup);
+            }
+        }
+    } else if !new_wakeup.exists() {
+        // No legacy wakeup — scaffold a default from the templates.
+        let template = format!(
+            "---\ndescription: Default heartbeat migrated from legacy single-slot schedule\n---\n\n\
+            # Wake procedure: default\n\n\
+            This heartbeat was auto-created by the migration from the legacy single-slot\n\
+            heartbeat system. Edit this file to define what happens when this agent wakes.\n"
+        );
+        let _ = fs::write(&new_wakeup, template);
+    }
+
+    let workspace_relative = new_wakeup
+        .strip_prefix(project_path)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| new_wakeup.to_string_lossy().to_string());
+
+    let id = uuid::Uuid::new_v4().to_string();
+    if AgentHeartbeat::insert(
+        &conn,
+        &id,
+        &project_id,
+        "default",
+        &frequency,
+        &schedule_json,
+        &workspace_relative,
+        true,
+    )
+    .is_ok()
+    {
+        // Carry forward last_fire so we don't re-fire a schedule that
+        // just fired pre-migration.
+        if let Some(lf) = last_fire {
+            if !lf.is_empty() {
+                let _ = conn.execute(
+                    "UPDATE agent_heartbeats SET last_fired = ?1 \
+                     WHERE project_id = ?2 AND name = 'default'",
+                    rusqlite::params![lf, project_id],
+                );
+            }
+        }
+        log_debug!(
+            "[heartbeat-migrate] promoted legacy heartbeat_schedule for {} (agent={}, freq={})",
+            project_path, agent_name, frequency
+        );
+    }
 }
 
 /// Scaffold the wakeup files for a single workspace — one for each

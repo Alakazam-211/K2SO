@@ -864,6 +864,116 @@ else
     fail "wake reliability: session lock missing" "Expected k2so_agents_lock call in spawn_wake_pty"
 fi
 
+# Multi-heartbeat architecture — see .k2so/prds/multi-schedule-heartbeat.md
+if [ -f "$PROJECT_ROOT/src-tauri/drizzle_sql/0028_agent_heartbeats.sql" ]; then
+    pass "multi-heartbeat: migration 0028 (agent_heartbeats) present"
+else
+    fail "multi-heartbeat: 0028 missing" "Expected 0028_agent_heartbeats.sql"
+fi
+if [ -f "$PROJECT_ROOT/src-tauri/drizzle_sql/0029_heartbeat_fires_schedule_name.sql" ]; then
+    pass "multi-heartbeat: migration 0029 (heartbeat_fires.schedule_name) present"
+else
+    fail "multi-heartbeat: 0029 missing" "Expected 0029_heartbeat_fires_schedule_name.sql"
+fi
+
+if grep -q '"0028_agent_heartbeats"' "$DB_MOD_SRC" && grep -q '"0029_heartbeat_fires_schedule_name"' "$DB_MOD_SRC"; then
+    pass "multi-heartbeat: both migrations registered in db/mod.rs"
+else
+    fail "multi-heartbeat: migrations unregistered" "Expected 0028 + 0029 in db/mod.rs migrations list"
+fi
+
+if grep -q 'pub struct AgentHeartbeat' "$SCHEMA_SRC"; then
+    pass "multi-heartbeat: AgentHeartbeat struct defined"
+else
+    fail "multi-heartbeat: struct missing" "Expected AgentHeartbeat in schema.rs"
+fi
+
+if grep -q 'pub fn validate_name' "$SCHEMA_SRC"; then
+    pass "multi-heartbeat: AgentHeartbeat::validate_name guard present"
+else
+    fail "multi-heartbeat: validate_name missing" "Expected strict name validation"
+fi
+
+if grep -q 'pub fn insert_with_schedule' "$SCHEMA_SRC"; then
+    pass "multi-heartbeat: HeartbeatFire::insert_with_schedule (schedule_name audit) present"
+else
+    fail "multi-heartbeat: insert_with_schedule missing" "Expected HeartbeatFire::insert_with_schedule"
+fi
+
+if grep -q 'pub fn list_by_schedule_name' "$SCHEMA_SRC"; then
+    pass "multi-heartbeat: HeartbeatFire::list_by_schedule_name filter present"
+else
+    fail "multi-heartbeat: list_by_schedule_name missing" "Expected schedule-name filter for status CLI"
+fi
+
+if grep -q 'pub fn promote_legacy_heartbeat' "$AGENTS_SRC"; then
+    pass "multi-heartbeat: legacy heartbeat_schedule → agent_heartbeats migration present"
+else
+    fail "multi-heartbeat: legacy promotion missing" "Expected promote_legacy_heartbeat in k2so_agents.rs"
+fi
+
+if grep -q 'promote_legacy_heartbeat(&project.path)' "$LIB_SRC"; then
+    pass "multi-heartbeat: legacy promotion runs at startup per project"
+else
+    fail "multi-heartbeat: promotion not wired" "Expected promote_legacy_heartbeat call in startup loop"
+fi
+
+if grep -q 'pub fn k2so_agents_heartbeat_tick' "$AGENTS_SRC"; then
+    pass "multi-heartbeat: k2so_agents_heartbeat_tick (scheduler iteration) present"
+else
+    fail "multi-heartbeat: heartbeat_tick missing" "Expected k2so_agents_heartbeat_tick in k2so_agents.rs"
+fi
+
+if grep -q 'k2so_agents_heartbeat_tick(&project_path)' "$HOOKS_SRC"; then
+    pass "multi-heartbeat: scheduler-tick caller invokes heartbeat_tick"
+else
+    fail "multi-heartbeat: tick not wired" "Expected heartbeat_tick call in agent_hooks.rs scheduler-tick path"
+fi
+
+for cmd in k2so_heartbeat_add k2so_heartbeat_list k2so_heartbeat_remove k2so_heartbeat_set_enabled k2so_heartbeat_edit; do
+    if grep -q "pub fn $cmd" "$AGENTS_SRC"; then
+        pass "multi-heartbeat: command $cmd exported"
+    else
+        fail "multi-heartbeat: $cmd missing" "Expected $cmd in k2so_agents.rs"
+    fi
+done
+
+for route in "/cli/heartbeat/add" "/cli/heartbeat/list" "/cli/heartbeat/remove" "/cli/heartbeat/enable" "/cli/heartbeat/status"; do
+    if grep -q "\"$route\"" "$HOOKS_SRC"; then
+        pass "multi-heartbeat: HTTP route $route registered"
+    else
+        fail "multi-heartbeat: $route missing" "Expected $route in agent_hooks.rs"
+    fi
+done
+
+for cli_fn in cmd_heartbeat_add cmd_heartbeat_list cmd_heartbeat_remove cmd_heartbeat_enable_disable cmd_heartbeat_status; do
+    if grep -q "^$cli_fn()" "$K2SO_CLI"; then
+        pass "multi-heartbeat: CLI $cli_fn present"
+    else
+        fail "multi-heartbeat: $cli_fn missing" "Expected $cli_fn in cli/k2so"
+    fi
+done
+
+if grep -q 'add) .*cmd_heartbeat_add' "$K2SO_CLI" && grep -q 'list) .*cmd_heartbeat_list' "$K2SO_CLI"; then
+    pass "multi-heartbeat: 'heartbeat add/list/remove/enable/disable/status' dispatch present"
+else
+    fail "multi-heartbeat: CLI dispatch incomplete" "Expected case-branch for heartbeat subcommands"
+fi
+
+# FS-tampering recovery: auto-disable on missing wakeup_file
+if grep -q 'wakeup_file_missing' "$AGENTS_SRC"; then
+    pass "multi-heartbeat: FS-tampering recovery (auto-disable on missing wakeup)"
+else
+    fail "multi-heartbeat: FS recovery missing" "Expected 'wakeup_file_missing' decision in heartbeat_tick"
+fi
+
+# last_fired semantics: stamp only on successful spawn (not at decision time)
+if grep -q 'stamp_heartbeat_fired(&project_path, &cand.name)' "$HOOKS_SRC"; then
+    pass "multi-heartbeat: last_fired stamped only after successful spawn"
+else
+    fail "multi-heartbeat: last_fired semantics" "Expected stamp_heartbeat_fired after successful spawn"
+fi
+
 # Hook handler must sync AgentSession.status on every canonical event so the
 # scheduler's is_agent_locked check reflects reality. Without this the row
 # stays status='running' forever after the first wake and every subsequent

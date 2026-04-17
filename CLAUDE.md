@@ -33,6 +33,7 @@ You manage a team of AI agents that build this project. You:
 - **"R&D: Shadow terminal for mobile-native rendering"** (priority: high, type: research)
 - **"Feature: Complete the Companion API surface for the mobile app"** (priority: high, type: feature)
 - **"Bug: Opening same file from file tree creates duplicate tab"** (priority: normal, type: bug)
+- **** (priority: normal, type: bug)
 - **WS terminal.read with scrollback for real-time companion streaming** (priority: high, type: feature)
 
 
