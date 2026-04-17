@@ -143,6 +143,102 @@ pub fn fs_read_dir(path: String, show_hidden: Option<bool>) -> Result<Vec<DirEnt
     Ok(items)
 }
 
+/// Match returned by `fs_search_tree`. Just enough data to rebuild an
+/// ancestor chain on the frontend — the full `DirEntry` is fetched
+/// lazily by `fs_read_dir` when each ancestor folder is expanded.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchMatch {
+    pub path: String,
+    pub name: String,
+    pub is_directory: bool,
+}
+
+/// Recursively walk the tree at `root` and return entries whose file
+/// name contains `query` (case-insensitive). Used by the file-tree
+/// search box so matches in unloaded folders surface without the user
+/// needing to expand every folder manually.
+///
+/// Skips well-known heavy directories (`node_modules`, `.git`, etc.) to
+/// keep latency low on typical repos. Stops after `max_results` hits
+/// (default 500) so a pathological query like "a" doesn't lock up the
+/// UI.
+#[tauri::command]
+pub fn fs_search_tree(
+    root: String,
+    query: String,
+    show_hidden: Option<bool>,
+    max_results: Option<usize>,
+) -> Result<Vec<SearchMatch>, String> {
+    let show_hidden = show_hidden.unwrap_or(false);
+    let max = max_results.unwrap_or(500);
+    let query_lower = query.trim().to_lowercase();
+    if query_lower.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let root_path = validate_path(&root)?;
+    let mut results: Vec<SearchMatch> = Vec::new();
+    let mut stack: Vec<PathBuf> = vec![root_path];
+
+    // Directories we never walk into during search. Walking these
+    // dominates search time on most projects and almost never contains
+    // something the user is trying to find.
+    const SKIP_DIRS: &[&str] = &[
+        "node_modules",
+        ".git",
+        "target",
+        "dist",
+        "build",
+        ".next",
+        ".turbo",
+        ".cache",
+        "Pods",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        "DerivedData",
+    ];
+
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !show_hidden && name.starts_with('.') {
+                continue;
+            }
+            let full = dir.join(&name);
+            let is_dir = entry
+                .file_type()
+                .ok()
+                .map(|ft| ft.is_dir())
+                .unwrap_or(false);
+
+            if name.to_lowercase().contains(&query_lower) {
+                results.push(SearchMatch {
+                    path: full.to_string_lossy().to_string(),
+                    name: name.clone(),
+                    is_directory: is_dir,
+                });
+                if results.len() >= max {
+                    return Ok(results);
+                }
+            }
+
+            if is_dir && !SKIP_DIRS.contains(&name.as_str()) {
+                stack.push(full);
+            }
+        }
+    }
+
+    Ok(results)
+}
+
 #[tauri::command]
 pub fn fs_open_in_finder(path: String) -> Result<(), String> {
     Command::new("open")

@@ -56,6 +56,13 @@ function subtreeHasMatch(
   return false
 }
 
+/** POSIX-style dirname — returns the parent path, or '' if there is none. */
+function parentPath(p: string): string {
+  const idx = p.lastIndexOf('/')
+  if (idx <= 0) return ''
+  return p.slice(0, idx)
+}
+
 /** Collect all visible paths in tree order for shift-click range selection. */
 function collectVisiblePaths(
   rootPath: string,
@@ -452,6 +459,11 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
 
   const [cache, setCache] = useState<Map<string, FileEntry[]>>(new Map())
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set([rootPath]))
+  // Dirs auto-expanded because the user searched for something inside
+  // them. Reverted when the search clears — unless the user opened a
+  // file under them (in which case we remove from this set so the
+  // expansion sticks) or manually toggled the folder.
+  const searchAutoExpandedRef = useRef<Set<string>>(new Set())
   const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set())
   const [errorDirs, setErrorDirs] = useState<Map<string, string>>(new Map())
   const [dropTarget, setDropTarget] = useState<string | null>(null)
@@ -596,7 +608,11 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
     }
   }, [rootPath])
 
-  // Load directory contents
+  // Load directory contents. We always fetch with `showHidden: true` so
+  // the cache contains every entry; the render-time filter
+  // (filteredChildren / filteredRootEntries) hides dotfiles based on
+  // the store's `showHiddenFiles` toggle. This way, flipping the eye
+  // icon is a pure re-render — no re-fetch needed.
   const loadDir = useCallback(
     async (dirPath: string, force = false) => {
       if (!force && cache.has(dirPath)) return
@@ -609,7 +625,7 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
       })
 
       try {
-        const entries = await invoke<FileEntry[]>('fs_read_dir', { path: dirPath })
+        const entries = await invoke<FileEntry[]>('fs_read_dir', { path: dirPath, showHidden: true })
         setCache((prev) => new Map(prev).set(dirPath, entries))
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Failed to read directory'
@@ -624,6 +640,27 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
     },
     [cache]
   )
+
+  // When `showHiddenFiles` changes, any directories already in the cache
+  // may have been fetched before this render rule existed (old app
+  // sessions filtered at fetch time rather than at render time). Force
+  // a re-fetch of every cached dir so the cache catches up to the
+  // "always fetch everything" invariant.
+  //
+  // This is a one-time correction — subsequent toggles are cheap because
+  // loadDir only refetches if called with force=true.
+  const firstToggleDoneRef = useRef(false)
+  useEffect(() => {
+    if (!firstToggleDoneRef.current) {
+      firstToggleDoneRef.current = true
+      return // skip the initial mount pass
+    }
+    const cachedDirs = Array.from(cache.keys())
+    for (const dir of cachedDirs) {
+      loadDir(dir, true)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showHiddenFiles])
 
   // Refresh affected directories after a file operation
   const refreshDirs = useCallback(async (paths: string[]) => {
@@ -871,9 +908,12 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
     document.addEventListener('mouseup', handleMouseUp)
   }, [loadDir])
 
-  // Toggle directory expand/collapse
+  // Toggle directory expand/collapse. A manual toggle overrides the
+  // search auto-expand tracking — if the user explicitly collapsed (or
+  // re-expanded) a folder, we stop treating it as "search-expanded".
   const handleToggleDir = useCallback(
     (dirPath: string) => {
+      searchAutoExpandedRef.current.delete(dirPath)
       setExpandedDirs((prev) => {
         const next = new Set(prev)
         if (next.has(dirPath)) {
@@ -887,6 +927,19 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
     },
     [loadDir]
   )
+
+  // When the user opens a file that lives inside a search-auto-expanded
+  // folder, promote those ancestor folders to "user-expanded" so they
+  // don't collapse when the search is cleared.
+  const commitAncestorsToUser = useCallback((filePath: string) => {
+    if (searchAutoExpandedRef.current.size === 0) return
+    let p = parentPath(filePath)
+    while (p && p.startsWith(rootPath)) {
+      searchAutoExpandedRef.current.delete(p)
+      if (p === rootPath) break
+      p = parentPath(p)
+    }
+  }, [rootPath])
 
   // ── Selection + Click ──────────────────────────────────────────────
   const handleItemClick = useCallback(
@@ -906,10 +959,11 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
         // Open file on plain click — dedup: switch to existing tab if already open
         if (!entry.isDirectory) {
           useTabsStore.getState().openFileAsTab(entry.path)
+          commitAncestorsToUser(entry.path)
         }
       }
     },
-    [rootPath, cache, expandedDirs]
+    [rootPath, cache, expandedDirs, commitAncestorsToUser]
   )
 
   // ── Rename ──────────────────────────────────────────────────────────
@@ -1238,6 +1292,98 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
   if (!rootEntries && !loadingDirs.has(rootPath) && !errorDirs.has(rootPath)) {
     loadDir(rootPath)
   }
+
+  // Auto-expand folders containing search matches; revert when search
+  // clears. Matches come from a backend filesystem walk so files in
+  // folders the user has never opened still surface. We then load each
+  // ancestor folder into the cache and add it to expandedDirs; the
+  // existing render path fills in the rest.
+  //
+  // Folders the user had already expanded manually remain "user-owned"
+  // and won't collapse on search clear. Opening a file during search
+  // also promotes its ancestor chain to user-owned.
+  const searchRequestIdRef = useRef(0)
+  useEffect(() => {
+    const trimmed = searchQuery.trim()
+
+    if (!trimmed) {
+      const toCollapse = searchAutoExpandedRef.current
+      if (toCollapse.size === 0) return
+      setExpandedDirs((prev) => {
+        const next = new Set(prev)
+        for (const p of toCollapse) next.delete(p)
+        return next
+      })
+      searchAutoExpandedRef.current = new Set()
+      return
+    }
+
+    // Debounce + race-cancel: each keystroke bumps the request id;
+    // stale responses are discarded so fast typing doesn't flicker.
+    const myRequestId = ++searchRequestIdRef.current
+    const timeoutId = window.setTimeout(async () => {
+      let matches: Array<{ path: string; name: string; isDirectory: boolean }>
+      try {
+        matches = await invoke<Array<{ path: string; name: string; isDirectory: boolean }>>(
+          'fs_search_tree',
+          { root: rootPath, query: trimmed, showHidden: showHiddenFiles, maxResults: 500 }
+        )
+      } catch (err) {
+        console.warn('[file-tree] search failed:', err)
+        return
+      }
+      if (myRequestId !== searchRequestIdRef.current) return
+
+      // Collect every ancestor directory of every match, stopping at
+      // the root. These are the folders we'll expand to make each
+      // match visible.
+      const ancestors = new Set<string>()
+      for (const m of matches) {
+        let p = parentPath(m.path)
+        while (p && p.startsWith(rootPath)) {
+          if (p !== rootPath) ancestors.add(p)
+          if (p === rootPath) break
+          p = parentPath(p)
+        }
+      }
+
+      // Load any ancestor directories that aren't in the cache yet.
+      // Must wait for all loads before toggling expanded state, or the
+      // tree renders empty rows briefly.
+      const toLoad: string[] = []
+      for (const a of ancestors) {
+        if (!cache.has(a) && !loadingDirs.has(a)) toLoad.push(a)
+      }
+      if (toLoad.length > 0) {
+        await Promise.all(toLoad.map((p) => loadDir(p)))
+        if (myRequestId !== searchRequestIdRef.current) return
+      }
+
+      setExpandedDirs((prev) => {
+        const next = new Set(prev)
+        const newAutoExpanded = new Set<string>()
+
+        for (const p of searchAutoExpandedRef.current) {
+          if (ancestors.has(p)) newAutoExpanded.add(p)
+          else next.delete(p)
+        }
+
+        for (const a of ancestors) {
+          if (!next.has(a)) {
+            next.add(a)
+            newAutoExpanded.add(a)
+          }
+        }
+
+        searchAutoExpandedRef.current = newAutoExpanded
+        return next
+      })
+    }, 180)
+
+    return () => {
+      window.clearTimeout(timeoutId)
+    }
+  }, [searchQuery, showHiddenFiles, rootPath, cache, loadingDirs, loadDir])
 
   // Filter root entries by search and hidden files toggle
   const filteredRootEntries = useMemo(() => {

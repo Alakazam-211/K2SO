@@ -7,6 +7,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { usePresetsStore } from '@/stores/presets'
 import { useTerminalShortcuts } from '@/hooks/useTerminalShortcuts'
 import { KeyCombo } from '@/components/KeySymbol'
+import { TabVisibilityContext } from '@/contexts/TabVisibilityContext'
 
 interface TerminalAreaProps {
   cwd: string
@@ -161,17 +162,26 @@ function TabGroupColumn({
     >
       <TabBar cwd={cwd} groupIndex={groupIndex} />
       <div className="relative flex-1 overflow-hidden">
+        {/*
+          Retained-view model (see Zed/VS Code): every open tab's tree
+          stays mounted so scroll/cursor/focus state lives naturally on
+          the DOM across tab switches. Only the active tab is visible;
+          the rest are hidden via display:none, which preserves their
+          state without consuming paint cycles.
+        */}
         {tabs.map((tab) => {
           const isActiveTab = tab.id === activeTabId
-          if (!isActiveTab) return null
           return (
-            <div
-              key={tab.id}
-              data-tab-id={tab.id}
-              className="absolute inset-0"
-            >
-              <PaneLayout tabId={tab.id} />
-            </div>
+            <TabVisibilityContext.Provider key={tab.id} value={isActiveTab}>
+              <div
+                data-tab-id={tab.id}
+                className="absolute inset-0"
+                style={{ display: isActiveTab ? 'block' : 'none' }}
+                aria-hidden={!isActiveTab}
+              >
+                <PaneLayout tabId={tab.id} />
+              </div>
+            </TabVisibilityContext.Provider>
           )
         })}
         {tabs.length === 0 && <EmptyWorkspaceHints />}

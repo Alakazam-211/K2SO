@@ -594,6 +594,7 @@ pub fn run() {
             commands::filesystem::fs_read_dir,
             commands::filesystem::fs_open_in_finder,
             commands::filesystem::fs_copy_path,
+            commands::filesystem::fs_search_tree,
             commands::filesystem::clipboard_read_file_paths,
             commands::filesystem::fs_read_file,
             commands::filesystem::fs_read_binary_file,

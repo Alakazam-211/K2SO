@@ -265,6 +265,13 @@ export function AlacrittyTerminalView({
     if (!container) return { cols: 80, rows: 24 }
     const { width, height } = cellMetricsRef.current
     if (width === 0 || height === 0) return { cols: 80, rows: 24 }
+    // Container may be hidden (display:none on an inactive retained-view
+    // tab) — clientWidth/Height are 0 in that case. Fall back to 80x24
+    // so the PTY is born at a usable size; the ResizeObserver will
+    // reshape it to real dimensions when the tab becomes visible.
+    if (container.clientWidth === 0 || container.clientHeight === 0) {
+      return { cols: 80, rows: 24 }
+    }
     const cols = Math.max(1, Math.floor(container.clientWidth / width))
     const rows = Math.max(1, Math.floor(container.clientHeight / height))
     return { cols, rows }

@@ -112,6 +112,8 @@ export interface SerializedItem {
   sessionId?: string  // CLI tool session ID for resume on restart
   filePath?: string
   pinned?: boolean
+  scrollTop?: number   // file-viewer scroll position (for session restore)
+  cursorPos?: number   // file-viewer cursor offset (for session restore)
   agentName?: string
   projectPath?: string
 }
@@ -356,6 +358,8 @@ function serializeTab(tab: Tab): SerializedTab {
           type: 'file-viewer' as const,
           filePath: d.filePath,
           pinned: item.pinned,
+          scrollTop: d.scrollTop,
+          cursorPos: d.cursorPos,
         }
       }
     })
@@ -1710,7 +1714,11 @@ export const useTabsStore = create<TabsState>((set, get) => ({
             return {
               id: crypto.randomUUID(),
               type: 'file-viewer' as const,
-              data: { filePath: si.filePath ?? '' },
+              data: {
+                filePath: si.filePath ?? '',
+                scrollTop: si.scrollTop,
+                cursorPos: si.cursorPos,
+              },
               pinned: si.pinned ?? false,
             }
           }
@@ -1797,7 +1805,11 @@ export const useTabsStore = create<TabsState>((set, get) => ({
                   return {
                     id: crypto.randomUUID(),
                     type: 'file-viewer' as const,
-                    data: { filePath: si.filePath ?? '' },
+                    data: {
+                      filePath: si.filePath ?? '',
+                      scrollTop: si.scrollTop,
+                      cursorPos: si.cursorPos,
+                    },
                     pinned: si.pinned ?? false,
                   }
                 }

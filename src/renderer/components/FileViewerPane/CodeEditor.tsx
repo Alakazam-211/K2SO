@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { useIsTabVisible } from '@/contexts/TabVisibilityContext'
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, rectangularSelection, highlightWhitespace, gutter, GutterMarker, Decoration, ViewPlugin, ViewUpdate, type DecorationSet, scrollPastEnd } from '@codemirror/view'
 import { EditorState, Compartment, RangeSet, type Extension } from '@codemirror/state'
 import type { EditorSettingsBackend, EditorThemeId } from '@shared/types'
@@ -1170,6 +1171,10 @@ export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, r
   const editorSettings = useSettingsStore((s) => s.editor)
   // Subscribe to custom themes so we re-render when they load/change
   const customThemes = useCustomThemesStore((s) => s.customThemes)
+  // Retained-view: when this editor lives inside a hidden tab, CodeMirror
+  // mounts against a 0x0 parent. On visibility flip we re-measure so the
+  // viewport lays out correctly.
+  const isVisible = useIsTabVisible()
 
   // Keep refs current
   onSaveRef.current = onSave
@@ -1336,6 +1341,27 @@ export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, r
       viewRef.current = null
     }
   }, [filePath, readOnly]) // Recreate when file or readOnly changes
+
+  // Re-measure the editor when it transitions from hidden to visible.
+  // CodeMirror caches viewport dimensions; a display:none parent means
+  // those cached values are 0, so the editor renders blank after reveal
+  // without this nudge.
+  useEffect(() => {
+    if (!isVisible) return
+    const view = viewRef.current
+    if (!view) return
+    view.requestMeasure()
+    // Also restore the scroll position if it was saved — CodeMirror's
+    // scrollDOM state should survive display:none, but on first
+    // reveal after mount the RAF-deferred restore may have landed
+    // against a 0-height viewport. Re-apply if we have a target.
+    const target = initialScrollTopRef.current
+    if (typeof target === 'number' && target > 0 && view.scrollDOM.scrollTop === 0) {
+      requestAnimationFrame(() => {
+        if (viewRef.current) viewRef.current.scrollDOM.scrollTop = target
+      })
+    }
+  }, [isVisible])
 
   // Live-reconfigure compartments when settings change
   useEffect(() => {

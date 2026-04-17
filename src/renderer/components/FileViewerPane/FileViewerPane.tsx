@@ -146,19 +146,6 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
   const contentRef = useRef<HTMLDivElement>(null)
   const editorContainerRef = useRef<HTMLDivElement>(null)
 
-  // Hide the scroll container until the saved scroll position has been
-  // applied, so the user never sees the content flash at the top before
-  // jumping to the saved position. Starts hidden only if we have a
-  // non-zero target to restore.
-  const needsRestore = typeof initialScrollTop === 'number' && initialScrollTop > 0
-  const [scrollReady, setScrollReady] = useState(!needsRestore)
-  // If the user swaps to a different file in the same pane, re-hide until
-  // the new file's scroll is restored. (On a real tab switch the whole
-  // component remounts, so this is only for in-place file navigation.)
-  useLayoutEffect(() => {
-    setScrollReady(!needsRestore)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filePath, viewMode])
 
   const fileName = getFileName(filePath)
   const shortPath = getShortPath(filePath)
@@ -199,96 +186,47 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
     setTabDirty(tabId, isDirty)
   }, [isDirty, tabId, setTabDirty])
 
-  // Restore scroll position for rendered markdown/preview views (non-editor).
-  // CodeEditor handles its own scroll restore via props.
+  // Scroll persistence for markdown/preview views.
   //
-  // Markdown rendering is async — ReactMarkdown renders children in multiple
-  // passes (syntax-highlighted code blocks lazy-load their highlighter), so
-  // the scrollable content grows over several frames after mount. A single
-  // requestAnimationFrame restore clamps to the partially-rendered height
-  // and leaves the user at the top. We attach a ResizeObserver to the
-  // content element and keep re-applying the target scrollTop until either
-  // it's satisfied or the user scrolls manually (whichever comes first).
+  // In-session tab switches don't remount this component (see
+  // PaneGroupView — all pane items stay mounted, only visibility
+  // toggles), so the browser preserves scrollTop on the DOM natively.
+  // No restore dance needed.
+  //
+  // We still capture scroll position in a ref on every scroll and flush
+  // to the store on unmount / file change, so it can be serialized for
+  // session restore across app relaunches. `initialScrollTop` is used
+  // as a first-mount hint when hydrating a saved workspace session.
   useLayoutEffect(() => {
     if (loading) return
     const el = contentRef.current
     if (!el) return
 
-    let targetScroll = typeof initialScrollTop === 'number' && initialScrollTop > 0 ? initialScrollTop : 0
-    let userScrolled = false
-    let observer: ResizeObserver | null = null
-    let revealed = !needsRestore
-
-    const reveal = (): void => {
-      if (revealed) return
-      revealed = true
-      setScrollReady(true)
-    }
-
-    // Capture scrollTop in a local variable on every scroll event. This
-    // is a plain assignment — no state update, no re-render. We flush
-    // the captured value to the store on unmount (below). We don't read
-    // scrollTop in cleanup because React detaches the DOM before
-    // cleanups run, which resets scrollTop to 0.
-    let latestScrollTop = el.scrollTop
+    // Seed latestScrollTop with the saved position so the unmount flush
+    // preserves it even if the user never scrolled this session.
+    let latestScrollTop = typeof initialScrollTop === 'number' ? initialScrollTop : el.scrollTop
     const handleScroll = (): void => {
       if (contentRef.current) latestScrollTop = contentRef.current.scrollTop
     }
     el.addEventListener('scroll', handleScroll, { passive: true })
 
-    if (targetScroll > 0) {
-      const applyScroll = (): void => {
-        if (userScrolled || !contentRef.current) return
-        contentRef.current.scrollTop = targetScroll
-        if (contentRef.current.scrollTop >= targetScroll - 1) {
-          reveal()
-          observer?.disconnect()
-          observer = null
+    // One-shot restore for session-hydrated workspaces: if the store
+    // has a saved scroll but the DOM is at 0 (fresh mount after relaunch),
+    // apply it. Deferred to next frame for async-rendered content. If
+    // the DOM already has a scroll (tab was mounted in this session and
+    // user has scrolled), this is a no-op.
+    const target = typeof initialScrollTop === 'number' && initialScrollTop > 0 ? initialScrollTop : 0
+    if (target > 0 && el.scrollTop === 0) {
+      requestAnimationFrame(() => {
+        if (contentRef.current && contentRef.current.scrollTop === 0) {
+          contentRef.current.scrollTop = target
         }
-      }
-
-      const markUserScrolled = (): void => {
-        userScrolled = true
-        reveal() // user interacted — stop hiding regardless of where we landed
-      }
-      el.addEventListener('wheel', markUserScrolled, { passive: true, once: true })
-      el.addEventListener('touchstart', markUserScrolled, { passive: true, once: true })
-      el.addEventListener('keydown', markUserScrolled, { once: true })
-
-      // Synchronous first attempt (before paint) — often enough for
-      // already-rendered content (switching back to a tab whose markdown
-      // was previously laid out).
-      applyScroll()
-
-      // If the first attempt didn't reach the target, keep trying as
-      // content grows (images, code blocks, etc.). Also reveal after a
-      // safety timeout so we never leave the pane permanently hidden.
-      if (!revealed) {
-        observer = new ResizeObserver(applyScroll)
-        observer.observe(el)
-        const inner = el.firstElementChild
-        if (inner instanceof Element) observer.observe(inner)
-
-        // Failsafe: reveal after 300ms even if target is never reached
-        // (e.g., file content shrunk since last session).
-        const timeoutId = window.setTimeout(reveal, 300)
-        return () => {
-          window.clearTimeout(timeoutId)
-          observer?.disconnect()
-          observer = null
-          el.removeEventListener('scroll', handleScroll)
-          if (paneGroupId) {
-            setFileViewerState(tabId, paneGroupId, paneId, { scrollTop: latestScrollTop })
-          }
-        }
-      }
+      })
     }
 
     return () => {
-      observer?.disconnect()
-      observer = null
       el.removeEventListener('scroll', handleScroll)
-      if (paneGroupId) {
+      if (paneGroupId && latestScrollTop > 0) {
         setFileViewerState(tabId, paneGroupId, paneId, { scrollTop: latestScrollTop })
       }
     }
@@ -641,7 +579,7 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
           <DocxViewer filePath={filePath} />
         </div>
       ) : category === 'image' && viewMode === 'rendered' ? (
-        <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef} style={{ visibility: scrollReady ? 'visible' : 'hidden' }}>
+        <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef}>
           <div className="flex items-center justify-center p-4 min-h-full bg-[#0a0a0a]">
             <img
               src={convertFileSrc(filePath)}
@@ -655,13 +593,13 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
           </div>
         </div>
       ) : category === 'image' && viewMode === 'raw' ? (
-        <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef} style={{ visibility: scrollReady ? 'visible' : 'hidden' }}>
+        <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef}>
           <div className="p-4 text-xs text-[var(--color-text-muted)]">
             <p>Binary image file. Switch to Preview mode to view.</p>
           </div>
         </div>
       ) : category === 'markdown' && viewMode === 'rendered' ? (
-        <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef} style={{ visibility: scrollReady ? 'visible' : 'hidden' }}>
+        <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef}>
           <div className="markdown-content p-4">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}

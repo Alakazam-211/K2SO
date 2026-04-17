@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useContext, useState } from 'react'
 import { AlacrittyTerminalView } from '@/components/Terminal/AlacrittyTerminalView'
 import { FileViewerPane } from '@/components/FileViewerPane/FileViewerPane'
 import { AgentPane } from '@/components/AgentPane/AgentPane'
@@ -7,6 +7,7 @@ import type { TerminalItemData, FileViewerItemData, AgentItemData } from '@/stor
 import { useActiveAgentsStore, type ActiveAgent } from '@/stores/active-agents'
 import AgentCloseDialog from '@/components/AgentCloseDialog/AgentCloseDialog'
 import { PaneTabBar } from './PaneTabBar'
+import { TabVisibilityContext } from '@/contexts/TabVisibilityContext'
 
 // ── Props ────────────────────────────────────────────────────────────────
 
@@ -125,21 +126,17 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
     )
   }
 
-  const rawTerminalData = activeItem.type === 'terminal' && activeItem.data as TerminalItemData
-  // If this pane's agent exited, clear the command so it respawns as a plain shell
-  const isFallback = rawTerminalData && fallbackPanes.has(activeItem.id)
-  const terminalData = rawTerminalData
-    ? isFallback
-      ? { ...rawTerminalData, command: undefined, args: undefined, terminalId: `${rawTerminalData.terminalId}-shell` }
-      : rawTerminalData
-    : false
-  const fileData = activeItem.type === 'file-viewer' && activeItem.data as FileViewerItemData
-  // Only show per-pane tab bar when there are splits
-
   // Only show per-pane tab bar when there are splits
   // (so the close-pane button is accessible).
   // Single-pane items are managed by the workspace TabBar at the top.
   const showPaneTabBar = hasSplits
+
+  // Whether the enclosing tab is visible. PaneGroupView is nested inside
+  // TerminalArea's tab wrapper, which provides `false` when the outer
+  // tab is hidden. We AND this with per-item active state so nested
+  // consumers (CodeEditor, xterm) only treat themselves as "visible"
+  // when both the outer tab AND this specific pane item are active.
+  const tabIsVisible = useContext(TabVisibilityContext)
 
   return (
     <>
@@ -156,54 +153,89 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
           />
         )}
 
-        <div className="flex-1 min-h-0">
-          {activeItem.type === 'terminal' && terminalData ? (
-              <AlacrittyTerminalView
-                terminalId={terminalData.terminalId}
-                tabId={tabId}
-                paneGroupId={paneGroupId}
-                cwd={terminalData.cwd}
-                command={terminalData.command}
-                args={terminalData.args}
-                onExit={(exitCode) => {
-                  const hadCommand = rawTerminalData && rawTerminalData.command
-                  if (hadCommand && !isFallback) {
-                    // Agent command exited — respawn as a plain shell so the user
-                    // gets a working terminal instead of a blank pane
-                    setFallbackPanes((prev) => new Set(prev).add(activeItem.id))
-                  } else if (exitCode === 127) {
-                    // Command not found — remove the tab
-                    const store = useTabsStore.getState()
-                    const groupIdx = store.tabs.some((t) => t.id === tabId)
-                      ? 0
-                      : store.extraGroups.findIndex((g) => g.tabs.some((t) => t.id === tabId)) + 1
-                    if (groupIdx >= 0) {
-                      removeTabFromGroup(groupIdx, tabId)
+        <div className="flex-1 min-h-0 relative">
+          {/*
+            Retained-view model: every item in the paneGroup stays
+            mounted so scroll/cursor/focus state lives on the DOM across
+            pane switches. Only the active item is visible; others are
+            hidden with display:none.
+          */}
+          {paneGroup.items.map((item, index) => {
+            const isActiveItem = index === activeIndex
+            const itemIsVisible = tabIsVisible && isActiveItem
+            const hidden = !isActiveItem
+
+            let content: React.ReactNode = null
+            if (item.type === 'terminal') {
+              const raw = item.data as TerminalItemData
+              const isFallback = fallbackPanes.has(item.id)
+              const td = isFallback
+                ? { ...raw, command: undefined as string | undefined, args: undefined as string[] | undefined, terminalId: `${raw.terminalId}-shell` }
+                : raw
+              content = (
+                <AlacrittyTerminalView
+                  terminalId={td.terminalId}
+                  tabId={tabId}
+                  paneGroupId={paneGroupId}
+                  cwd={td.cwd}
+                  command={td.command}
+                  args={td.args}
+                  onExit={(exitCode) => {
+                    const hadCommand = raw.command
+                    if (hadCommand && !isFallback) {
+                      setFallbackPanes((prev) => new Set(prev).add(item.id))
+                    } else if (exitCode === 127) {
+                      const store = useTabsStore.getState()
+                      const groupIdx = store.tabs.some((t) => t.id === tabId)
+                        ? 0
+                        : store.extraGroups.findIndex((g) => g.tabs.some((t) => t.id === tabId)) + 1
+                      if (groupIdx >= 0) {
+                        removeTabFromGroup(groupIdx, tabId)
+                      }
+                    } else if (exitCode === 0) {
+                      handleClose(item.id)
                     }
-                  } else if (exitCode === 0) {
-                    // Plain shell exited cleanly — close the pane
-                    handleClose(activeItem.id)
-                  }
-                }}
-              />
-          ) : activeItem.type === 'file-viewer' && fileData ? (
-            <FileViewerPane
-              filePath={fileData.filePath}
-              mode={fileData.mode}
-              paneId={activeItem.id}
-              paneGroupId={paneGroupId}
-              tabId={tabId}
-              initialScrollTop={fileData.scrollTop}
-              initialCursorPos={fileData.cursorPos}
-              onClose={() => handleClose(activeItem.id)}
-            />
-          ) : activeItem.type === 'agent' ? (
-            <AgentPane
-              agentName={(activeItem.data as AgentItemData).agentName}
-              projectPath={(activeItem.data as AgentItemData).projectPath}
-              onClose={() => handleClose(activeItem.id)}
-            />
-          ) : null}
+                  }}
+                />
+              )
+            } else if (item.type === 'file-viewer') {
+              const fd = item.data as FileViewerItemData
+              content = (
+                <FileViewerPane
+                  filePath={fd.filePath}
+                  mode={fd.mode}
+                  paneId={item.id}
+                  paneGroupId={paneGroupId}
+                  tabId={tabId}
+                  initialScrollTop={fd.scrollTop}
+                  initialCursorPos={fd.cursorPos}
+                  onClose={() => handleClose(item.id)}
+                />
+              )
+            } else if (item.type === 'agent') {
+              const ad = item.data as AgentItemData
+              content = (
+                <AgentPane
+                  agentName={ad.agentName}
+                  projectPath={ad.projectPath}
+                  onClose={() => handleClose(item.id)}
+                />
+              )
+            }
+
+            return (
+              <TabVisibilityContext.Provider key={item.id} value={itemIsVisible}>
+                <div
+                  className="absolute inset-0"
+                  style={{ display: hidden ? 'none' : 'block' }}
+                  aria-hidden={hidden}
+                  data-pane-item-id={item.id}
+                >
+                  {content}
+                </div>
+              </TabVisibilityContext.Provider>
+            )
+          })}
         </div>
       </div>
 
