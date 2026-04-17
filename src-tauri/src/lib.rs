@@ -32,7 +32,7 @@ mod window;
 use state::AppState;
 use std::collections::HashMap;
 use parking_lot::Mutex;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 /// Entry point for the LLM worker subprocess.
 /// Loads the model, runs inference, prints the result to stdout, then exits.
@@ -329,11 +329,17 @@ pub fn run() {
                 let hook_port = agent_hooks::start_server(app.handle().clone());
                 match agent_hooks::write_hook_script(hook_port) {
                     Ok(script_path) => {
-                        agent_hooks::register_all_hooks(&script_path);
+                        agent_hooks::register_all_hooks(&app.handle().clone(), &script_path);
                         log_debug!("[agent-hooks] Hook system ready on port {} with script {}", hook_port, script_path);
                     }
                     Err(e) => {
                         log_debug!("[agent-hooks] Failed to write hook script: {}", e);
+                        let _ = app.handle().emit(
+                            "hook-injection-failed",
+                            serde_json::json!({
+                                "failures": [{"cli": "notify-script", "error": e}]
+                            }),
+                        );
                     }
                 }
 

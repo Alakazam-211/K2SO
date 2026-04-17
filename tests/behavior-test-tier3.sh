@@ -696,6 +696,39 @@ else
     fail "hook trust: output gate missing" "Expected OUTPUT_TRUST_GRACE_MS guard in pollOnce cleanup"
 fi
 
+# Hardening #1: notify.sh must read port + token dynamically so a K2SO
+# restart doesn't break hooks in long-running LLM sessions.
+if grep -q 'K2SO_PORT_FILE="\$HOME/.k2so/heartbeat.port"' "$HOOKS_SRC"; then
+    pass "hardening: notify.sh reads port from heartbeat.port at exec time"
+else
+    fail "hardening: port still baked in" "Expected K2SO_PORT_FILE in generate_hook_script"
+fi
+
+if grep -q 'K2SO_TOKEN_FILE="\$HOME/.k2so/heartbeat.token"' "$HOOKS_SRC"; then
+    pass "hardening: notify.sh prefers token from heartbeat.token at exec time"
+else
+    fail "hardening: token not dynamic" "Expected K2SO_TOKEN_FILE in generate_hook_script"
+fi
+
+# Hardening #3: hook-injection failures surface to the user via toast.
+if grep -q 'hook-injection-failed' "$HOOKS_SRC"; then
+    pass "hardening: register_all_hooks emits hook-injection-failed Tauri event"
+else
+    fail "hardening: injection event missing" "Expected hook-injection-failed emit in agent_hooks.rs"
+fi
+
+if grep -q 'hook-injection-failed' "$AA_SRC"; then
+    pass "hardening: frontend listens for hook-injection-failed and toasts"
+else
+    fail "hardening: frontend listener missing" "Expected hook-injection-failed listener in active-agents.ts"
+fi
+
+if grep -q 'register_all_hooks(app_handle: &AppHandle' "$HOOKS_SRC"; then
+    pass "hardening: register_all_hooks takes AppHandle for event emission"
+else
+    fail "hardening: signature not updated" "Expected register_all_hooks(app_handle: &AppHandle, …) signature"
+fi
+
 # ═══════════════════════════════════════════════════════════════════════
 section "3.9: Settings Search Palette"
 # ═══════════════════════════════════════════════════════════════════════

@@ -558,6 +558,21 @@ export function startAgentPolling(): void {
       hookUnlisten = fn
     })
 
+    // Surface hook-injection failures — previously these were debug-only
+    // log lines, so users never learned that e.g. a malformed
+    // ~/.claude/settings.json had silently broken their spinner pipeline.
+    // One toast per startup, listing which CLIs failed.
+    listen<{ failures: Array<{ cli: string; error: string }> }>('hook-injection-failed', (event) => {
+      const failures = event.payload?.failures ?? []
+      if (failures.length === 0) return
+      const clis = failures.map((f) => f.cli).join(', ')
+      useToastStore.getState().addToast(
+        `Hook injection failed for ${clis} — run \`k2so hooks status\` for details`,
+        'warning',
+        10000,
+      )
+    })
+
     // Listen for CLI-triggered agent launch requests
     listen<{ command: string; args: string[]; cwd: string; agentName: string; worktreePath?: string }>('cli:agent-launch', async (event) => {
       const { command, args, cwd, agentName, worktreePath } = event.payload

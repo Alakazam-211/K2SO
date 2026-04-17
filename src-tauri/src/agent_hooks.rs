@@ -2481,15 +2481,42 @@ fn cli_get_project_settings(project_path: &str) -> Result<serde_json::Value, Str
 }
 
 /// Generate the notify hook bash script content.
-pub fn generate_hook_script(port: u16) -> String {
-    format!(r#"#!/bin/bash
+///
+/// The script reads the port and (optionally) the auth token from
+/// `~/.k2so/heartbeat.port` / `~/.k2so/heartbeat.token` at exec time
+/// rather than baking them in. This means a K2SO restart (which picks a
+/// new random port + may rotate the token) doesn't silently break
+/// hooks in already-running Claude/Cursor/Gemini sessions.
+///
+/// The `_port` parameter is kept for API compatibility but no longer
+/// used — the caller can regenerate the script whenever they want.
+pub fn generate_hook_script(_port: u16) -> String {
+    r#"#!/bin/bash
 # K2SO Agent Lifecycle Hook — DO NOT EDIT (managed by K2SO)
 # This script is called by agent CLIs to notify K2SO of lifecycle events.
 
-K2SO_PORT="{port}"
+# Port and token are read at exec time so a K2SO restart (new random
+# port / rotated token) doesn't break hooks in long-running LLM sessions.
+K2SO_PORT_FILE="$HOME/.k2so/heartbeat.port"
+K2SO_TOKEN_FILE="$HOME/.k2so/heartbeat.token"
+
+if [ ! -r "$K2SO_PORT_FILE" ]; then
+    # K2SO isn't running — exit silently so we don't block the agent
+    exit 0
+fi
+K2SO_PORT=$(cat "$K2SO_PORT_FILE" 2>/dev/null)
+[ -z "$K2SO_PORT" ] && exit 0
+
+# Token from disk takes precedence over the PTY-injected env var so that
+# a K2SO restart (which rotates the token) immediately picks up the new
+# value instead of sending 403-rejected requests for the rest of the
+# session's life.
+if [ -r "$K2SO_TOKEN_FILE" ]; then
+    K2SO_HOOK_TOKEN=$(cat "$K2SO_TOKEN_FILE" 2>/dev/null)
+fi
 
 # Read JSON from argument or stdin
-INPUT="${{1:-}}"
+INPUT="${1:-}"
 if [ -z "$INPUT" ]; then
     INPUT=$(cat 2>/dev/null || true)
 fi
@@ -2505,7 +2532,7 @@ for key in hook_event_name type event eventType; do
 done
 
 # If event type was passed as first arg (Cursor style: script.sh Start)
-if [ -z "$EVENT_TYPE" ] && [ -n "$1" ] && ! echo "$1" | grep -q '{{'; then
+if [ -z "$EVENT_TYPE" ] && [ -n "$1" ] && ! echo "$1" | grep -q '{'; then
     EVENT_TYPE="$1"
 fi
 
@@ -2521,7 +2548,7 @@ curl -sG "http://127.0.0.1:$K2SO_PORT/hook/complete" \
     >/dev/null 2>&1 || true
 
 exit 0
-"#)
+"#.to_string()
 }
 
 /// Write the hook script to ~/.k2so/hooks/notify.sh
@@ -2763,15 +2790,32 @@ pub fn check_hook_injections() -> serde_json::Value {
 }
 
 /// Register hooks with all supported agents. Called on app startup.
-pub fn register_all_hooks(hook_script: &str) {
+///
+/// Per-CLI failures are collected and emitted as a `hook-injection-failed`
+/// Tauri event so the frontend can surface a toast — previously these
+/// failures only hit debug logs and users never knew their spinner was
+/// broken because of a malformed `~/.claude/settings.json` or similar.
+pub fn register_all_hooks(app_handle: &AppHandle, hook_script: &str) {
+    let mut failures: Vec<serde_json::Value> = Vec::new();
+
     if let Err(e) = register_claude_hooks(hook_script) {
         log_debug!("[agent-hooks] Failed to register Claude hooks: {}", e);
+        failures.push(serde_json::json!({ "cli": "claude", "error": e }));
     }
     if let Err(e) = register_cursor_hooks(hook_script) {
         log_debug!("[agent-hooks] Failed to register Cursor hooks: {}", e);
+        failures.push(serde_json::json!({ "cli": "cursor", "error": e }));
     }
     if let Err(e) = register_gemini_hooks(hook_script) {
         log_debug!("[agent-hooks] Failed to register Gemini hooks: {}", e);
+        failures.push(serde_json::json!({ "cli": "gemini", "error": e }));
+    }
+
+    if !failures.is_empty() {
+        let _ = app_handle.emit(
+            "hook-injection-failed",
+            serde_json::json!({ "failures": failures }),
+        );
     }
 }
 
@@ -2854,6 +2898,30 @@ mod tests {
         assert_eq!(map_event_type("beforeShellExecution"), Some("permission"));
         // Unknown events must return None
         assert_eq!(map_event_type("NoSuchEvent"), None);
+    }
+
+    #[test]
+    fn hook_script_reads_port_and_token_dynamically() {
+        // The script must read port + token from disk at exec time so a
+        // K2SO restart (new random port / rotated token) doesn't silently
+        // break hooks in long-running LLM sessions.
+        let script = generate_hook_script(12345);
+        assert!(
+            !script.contains("K2SO_PORT=\"12345\""),
+            "port must not be baked in as a literal"
+        );
+        assert!(
+            script.contains("K2SO_PORT_FILE=\"$HOME/.k2so/heartbeat.port\""),
+            "script must read port from heartbeat.port file"
+        );
+        assert!(
+            script.contains("K2SO_TOKEN_FILE=\"$HOME/.k2so/heartbeat.token\""),
+            "script must prefer token from heartbeat.token file"
+        );
+        assert!(
+            script.contains("K2SO_PORT=$(cat \"$K2SO_PORT_FILE\""),
+            "script must cat the port file at exec time"
+        );
     }
 
     #[test]
