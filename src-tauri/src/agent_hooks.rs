@@ -112,6 +112,19 @@ fn spawn_wake_pty(
         "[agent-hooks] Wake PTY spawned for {} ({}): id={}",
         agent_name, command, terminal_id
     );
+
+    // Record the session as `running` with owner=system so the scheduler
+    // won't double-launch this agent on the next tick. The frontend's
+    // cli:agent-launch listener used to call this via invoke() — with
+    // backend-direct spawn we have to do it here, otherwise two quick
+    // heartbeat ticks can race and spawn duplicate PTYs.
+    let _ = crate::commands::k2so_agents::k2so_agents_lock(
+        project_path.to_string(),
+        agent_name.to_string(),
+        Some(terminal_id.clone()),
+        Some("system".to_string()),
+    );
+
     // Tab-creation event for any currently-open window. Uses the same
     // event name the companion-spawn path already emits so the frontend
     // discovery code doesn't need a second listener.

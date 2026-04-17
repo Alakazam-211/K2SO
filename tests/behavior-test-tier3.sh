@@ -854,6 +854,16 @@ else
     fail "wake reliability: session detect missing" "Expected chat_history_detect_active_session call in spawn_wake_pty"
 fi
 
+# Backend-spawn must also lock the AgentSession row (status='running',
+# owner='system') so a racing heartbeat tick doesn't double-launch the
+# same agent. The frontend listener used to handle this via invoke(),
+# but backend-direct spawn bypasses that path.
+if grep -q 'k2so_agents_lock(' "$HOOKS_SRC"; then
+    pass "wake reliability: spawn_wake_pty locks AgentSession to prevent double-launch"
+else
+    fail "wake reliability: session lock missing" "Expected k2so_agents_lock call in spawn_wake_pty"
+fi
+
 # ═══════════════════════════════════════════════════════════════════════
 section "3.9: Settings Search Palette"
 # ═══════════════════════════════════════════════════════════════════════
