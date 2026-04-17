@@ -793,18 +793,50 @@ else
 fi
 
 # Wake-trigger positional message added unconditionally for build_launch path
-if grep -q 'Begin your wake procedure now' "$AGENTS_SRC"; then
-    pass "wake reliability: positional wake-trigger message present in build_launch"
+# Wake prompt must be delivered as the positional user message (wakeup.md
+# content), not buried in --append-system-prompt where Claude reads it as
+# background rather than an actionable directive.
+if grep -q 'let wake_message = wake_body.unwrap_or_else' "$AGENTS_SRC"; then
+    pass "wake reliability: wakeup.md content used as positional user message"
 else
-    fail "wake reliability: no wake trigger" "Claude would sit idle without a positional user message"
+    fail "wake reliability: wake message delivery" "Expected wake_body → wake_message positional"
 fi
 
-# __lead__ spawn paths also get the wake trigger (2 sites in agent_hooks.rs)
-LEAD_TRIGGER_HITS=$(grep -c 'Begin your wake procedure now' "$HOOKS_SRC" || true)
-if [ "$LEAD_TRIGGER_HITS" -ge 2 ]; then
-    pass "wake reliability: __lead__ spawn sites include wake trigger ($LEAD_TRIGGER_HITS)"
+# The system prompt for build_launch is now just CLAUDE.md (identity),
+# not CLAUDE.md + wakeup.md.
+if grep -q 'let system_prompt = claude_md;' "$AGENTS_SRC"; then
+    pass "wake reliability: system prompt is identity-only (CLAUDE.md)"
 else
-    fail "wake reliability: __lead__ spawn missing trigger" "Expected >=2 wake-trigger strings in agent_hooks.rs, got $LEAD_TRIGGER_HITS"
+    fail "wake reliability: system prompt" "Expected system_prompt = claude_md with no wake content"
+fi
+
+# Wake-site spawns must be backend-direct (not Tauri event emits) so they
+# fire when the K2SO window is closed. The helper spawn_wake_pty wraps
+# TerminalManager::create so the companion-background-spawn pattern
+# applies to heartbeat wakes too.
+if grep -q 'fn spawn_wake_pty' "$HOOKS_SRC"; then
+    pass "wake reliability: spawn_wake_pty helper defined"
+else
+    fail "wake reliability: helper missing" "Expected spawn_wake_pty in agent_hooks.rs"
+fi
+
+SPAWN_CALL_HITS=$(grep -c 'spawn_wake_pty(' "$HOOKS_SRC" || true)
+# 1 definition + 4 call sites (2 lead + 2 sub-agent paths) = 5 references
+if [ "$SPAWN_CALL_HITS" -ge 5 ]; then
+    pass "wake reliability: spawn_wake_pty used at all heartbeat wake sites ($SPAWN_CALL_HITS)"
+else
+    fail "wake reliability: spawn_wake_pty under-used" "Expected >=5 references (decl + 4 call sites), got $SPAWN_CALL_HITS"
+fi
+
+# No heartbeat-triggered wake should still be using cli:agent-launch
+# (the old event-driven path that broke when no window was open). The
+# event name may still appear in frontend listeners, so we check the
+# Rust side only.
+LAUNCH_EMIT_HITS=$(grep -c '"cli:agent-launch"' "$HOOKS_SRC" || true)
+if [ "$LAUNCH_EMIT_HITS" -eq 0 ]; then
+    pass "wake reliability: no cli:agent-launch emits remain in heartbeat path"
+else
+    fail "wake reliability: stale emit" "Expected 0 cli:agent-launch emits in agent_hooks.rs, got $LAUNCH_EMIT_HITS"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════

@@ -1320,18 +1320,14 @@ pub fn k2so_agents_build_launch(
         ).ok().flatten()
     });
 
-    // Prepend the agent's wake-up instructions to the system prompt
-    // when one is defined for the agent's type. This is the "no active
-    // task, no inbox work, but the scheduler woke me" path — the most
-    // common shape for custom/manager agents on a heartbeat tick. The
-    // system prompt ends up as: CLAUDE.md (identity + workspace) +
-    // wakeup.md (operational orders).
-    let prompt_body = match compose_wake_prompt_for_agent(&project_path, &agent_name) {
-        Some(wake) => format!("{}\n\n{}", claude_md, wake),
-        None => claude_md,
-    };
+    // System prompt holds the agent's *identity* (who you are, what
+    // tools you have access to). The wake-up *instructions* (what to do
+    // on this specific wake) belong in the user message so Claude reads
+    // them as an actionable directive, not as background context.
+    let system_prompt = claude_md;
+    let wake_body = compose_wake_prompt_for_agent(&project_path, &agent_name);
 
-    let mut args = vec!["--dangerously-skip-permissions".to_string(), "--append-system-prompt".to_string(), prompt_body];
+    let mut args = vec!["--dangerously-skip-permissions".to_string(), "--append-system-prompt".to_string(), system_prompt];
     // --resume + --fork-session: restore the agent's conversation history
     // but mint a new session ID so (a) the stale-session confirmation
     // dialog added in Claude Code v2.1.90 doesn't block the wake, and
@@ -1362,16 +1358,20 @@ pub fn k2so_agents_build_launch(
         }
     })().unwrap_or(false);
 
-    // Positional user message triggers Claude to actually do work (the
-    // system prompt alone leaves Claude sitting at an idle TUI). The
-    // `/compact` prefix, when present, compacts the conversation before
-    // the wake runs — `/compact\n\n<message>` is processed as one user
-    // message where the slash command fires first, then the remaining
-    // text becomes the next user message.
+    // The positional user message is the agent's wakeup.md content
+    // itself — the literal operational orders it was designed to run
+    // on wake. Fallback to a generic "begin" directive if no wakeup.md
+    // is defined (agent-template agents, fresh workspaces). When the
+    // compact counter trips, prepend `/compact\n\n` so the slash
+    // command fires first, then the wake instructions become the next
+    // user message.
+    let wake_message = wake_body.unwrap_or_else(||
+        "Begin your wake procedure now.".to_string()
+    );
     let wake_trigger = if should_compact {
-        "/compact\n\nBegin your wake procedure now per the instructions in your system prompt.".to_string()
+        format!("/compact\n\n{}", wake_message)
     } else {
-        "Begin your wake procedure now per the instructions in your system prompt.".to_string()
+        wake_message
     };
     args.push(wake_trigger);
 
