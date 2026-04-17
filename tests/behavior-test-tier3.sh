@@ -448,6 +448,102 @@ for cmd in fs_search_tree clipboard_read_file_paths; do
     fi
 done
 
+# Image-aware formatting for Claude Code [Image #N] detection
+FD_SRC="$PROJECT_ROOT/src/renderer/lib/file-drag.ts"
+ATV_SRC="$PROJECT_ROOT/src/renderer/components/Terminal/AlacrittyTerminalView.tsx"
+
+if grep -q 'export function isImagePath' "$FD_SRC"; then
+    pass "image-drop: isImagePath helper exported from file-drag.ts"
+else
+    fail "image-drop: isImagePath missing" "Expected exported isImagePath in file-drag.ts"
+fi
+
+if grep -q 'export function quotePathForImageDrop' "$FD_SRC"; then
+    pass "image-drop: quotePathForImageDrop helper exported from file-drag.ts"
+else
+    fail "image-drop: quote helper missing" "Expected quotePathForImageDrop in file-drag.ts"
+fi
+
+if grep -q "'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic', '.heif', '.pdf'" "$FD_SRC"; then
+    pass "image-drop: IMAGE_EXTS covers common formats (png/jpg/jpeg/gif/webp/bmp/heic/heif/pdf)"
+else
+    fail "image-drop: extension list" "Expected full IMAGE_EXTS list in file-drag.ts"
+fi
+
+if grep -q 'isImagePath(p) ? quotePathForImageDrop(p) : shellEscape(p)' "$FD_SRC"; then
+    pass "image-drop: in-app drag → terminal routes images through quotePathForImageDrop"
+else
+    fail "image-drop: in-app drag" "Expected image-aware formatter at drop-to-terminal site in file-drag.ts"
+fi
+
+if grep -q 'function formatPathForTerminal' "$ATV_SRC"; then
+    pass "image-drop: AlacrittyTerminalView has formatPathForTerminal helper"
+else
+    fail "image-drop: helper missing" "Expected formatPathForTerminal in AlacrittyTerminalView.tsx"
+fi
+
+if grep -q 'isImagePath, quotePathForImageDrop' "$ATV_SRC"; then
+    pass "image-drop: AlacrittyTerminalView imports image helpers from file-drag"
+else
+    fail "image-drop: import missing" "Expected named imports of isImagePath + quotePathForImageDrop"
+fi
+
+# All three terminal write sites use formatPathForTerminal (not bare shellEscape.*join)
+ATV_ESCAPE_HITS=$(grep -c 'paths.map(shellEscape)' "$ATV_SRC" || true)
+if [ "$ATV_ESCAPE_HITS" = "0" ]; then
+    pass "image-drop: no residual shellEscape .map sites in AlacrittyTerminalView"
+else
+    fail "image-drop: residual shellEscape" "$ATV_ESCAPE_HITS bare shellEscape map call(s) still present"
+fi
+
+ATV_DROP_HITS=$(grep -c 'buildDropPayload' "$ATV_SRC" || true)
+# Expected: 1 declaration + 3 call sites (tauri drop, paste, React onDrop) = 4
+if [ "$ATV_DROP_HITS" -ge 4 ]; then
+    pass "image-drop: buildDropPayload used at all three write sites (decl + 3 calls)"
+else
+    fail "image-drop: write sites" "Expected >=4 buildDropPayload references, got $ATV_DROP_HITS"
+fi
+
+# Bracketed paste helpers — required for Claude Code's image detector to fire
+if grep -q "export const BRACKETED_PASTE_START = '\\\\x1b\\[200~'" "$FD_SRC"; then
+    pass "image-drop: BRACKETED_PASTE_START constant defined"
+else
+    fail "image-drop: bracketed paste start" "Expected BRACKETED_PASTE_START = '\\x1b[200~' export"
+fi
+
+if grep -q 'export function bracketPaste' "$FD_SRC"; then
+    pass "image-drop: bracketPaste helper exported"
+else
+    fail "image-drop: bracketPaste missing" "Expected bracketPaste export in file-drag.ts"
+fi
+
+if grep -q 'bracketPaste' "$ATV_SRC"; then
+    pass "image-drop: AlacrittyTerminalView wraps image payloads in bracketed paste"
+else
+    fail "image-drop: bracket wrap" "Expected bracketPaste use in AlacrittyTerminalView.tsx"
+fi
+
+# Working-state title signal — must record BEFORE stripping so tab spinners
+# and the macOS close-button dot light up when Claude Code is working
+if grep -q 'recordTitleActivity: (paneId: string, isWorking: boolean)' "$PROJECT_ROOT/src/renderer/stores/active-agents.ts"; then
+    pass "working-state: recordTitleActivity method on active-agents store"
+else
+    fail "working-state: store method" "Expected recordTitleActivity in active-agents.ts"
+fi
+
+if grep -q 'recordTitleActivity(terminalId, isWorking)' "$ATV_SRC"; then
+    pass "working-state: AlacrittyTerminalView feeds title-based working signal"
+else
+    fail "working-state: title listener" "Expected recordTitleActivity call in title event listener"
+fi
+
+# Guard: recordTitleActivity must NOT clobber 'permission' or 'review' states
+if grep -q "if (current === 'permission' || current === 'review') return" "$PROJECT_ROOT/src/renderer/stores/active-agents.ts"; then
+    pass "working-state: title signal respects permission/review priority"
+else
+    fail "working-state: priority guard" "Expected guard against clobbering permission/review"
+fi
+
 # ═══════════════════════════════════════════════════════════════════════
 section "3.9: Settings Search Palette"
 # ═══════════════════════════════════════════════════════════════════════

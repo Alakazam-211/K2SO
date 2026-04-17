@@ -4,7 +4,7 @@ import { listen } from '@tauri-apps/api/event'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import { useSettingsStore } from '@/stores/settings'
 import { keyEventToSequence, naturalTextEditingSequence } from '@/lib/key-mapping'
-import { isFileDragActive, markDropConsumed } from '@/lib/file-drag'
+import { isFileDragActive, markDropConsumed, isImagePath, quotePathForImageDrop, bracketPaste } from '@/lib/file-drag'
 import { detectLinks, type DetectedLink } from './terminalLinkDetector'
 import { useTabsStore } from '@/stores/tabs'
 import { useActiveAgentsStore } from '@/stores/active-agents'
@@ -67,6 +67,25 @@ interface AlacrittyTerminalViewProps {
 function shellEscape(path: string): string {
   // Escape special shell characters with backslashes (like iTerm2/Terminal.app)
   return path.replace(/[ '"\\()&|;<>$`!#*?[\]{}~]/g, '\\$&')
+}
+
+// Image/PDF paths skip backslash-escape so Claude Code's `[Image #N]`
+// detection (which fs.exists()s the literal string) can resolve them.
+function formatPathForTerminal(path: string): string {
+  return isImagePath(path) ? quotePathForImageDrop(path) : shellEscape(path)
+}
+
+/**
+ * Build the terminal payload for a dropped/pasted set of paths. If any
+ * path is an image, the full payload is wrapped in bracketed paste so
+ * Claude Code's paste-event image detector fires and renders `[Image #N]`.
+ * Plain terminals with bracketed paste enabled (zsh, bash, vim) see a
+ * normal paste and insert the text as-is.
+ */
+function buildDropPayload(paths: string[]): string {
+  const formatted = paths.map(formatPathForTerminal).join(' ')
+  const trailing = formatted + ' '
+  return paths.some(isImagePath) ? bracketPaste(trailing) : trailing
 }
 
 function colorToCSS(c: number): string {
@@ -344,11 +363,18 @@ export function AlacrittyTerminalView({
         onExit?.(event.payload.exitCode)
       })
 
-      // Listen for terminal title changes (e.g. Claude chat names)
+      // Listen for terminal title changes (e.g. Claude chat names).
+      // Claude Code prefixes the title with ⠋⠙⠚⠦⠴ etc. (U+2800–U+28FF braille)
+      // while working and ✳ (plus related asterisk/bullet glyphs) when idle.
+      // We consume that signal *before* stripping it so the tab spinner and
+      // close-button dot light up, then strip for display.
       unlistenTitle = await listen<string>(`terminal:title:${terminalId}`, (event) => {
-        // Strip leading status indicators: asterisks, braille spinner chars, bullets
-        // Claude Code uses ✳ (idle), ⠂/⠐ (working spinner) as title prefixes
-        const newTitle = event.payload?.replace(/^[\u2800-\u28FF*✱✲✳✴✵✶✷✸✹⚹⁎∗※·•●◦‣⏺]\s*/g, '').trim()
+        const raw = event.payload ?? ''
+        const firstChar = raw.charCodeAt(0)
+        const isWorking = firstChar >= 0x2800 && firstChar <= 0x28FF
+        useActiveAgentsStore.getState().recordTitleActivity(terminalId, isWorking)
+
+        const newTitle = raw.replace(/^[\u2800-\u28FF*✱✲✳✴✵✶✷✸✹⚹⁎∗※·•●◦‣⏺]\s*/g, '').trim()
         if (newTitle && tabId) {
           useTabsStore.getState().setTabTitle(tabId, newTitle)
         }
@@ -366,9 +392,9 @@ export function AlacrittyTerminalView({
             if (el && (el as HTMLElement).closest?.('[data-path]')) return
           }
 
-          // Accept the drop — paste escaped paths into terminal
-          const escaped = paths.map(shellEscape).join(' ')
-          invoke('terminal_write', { id: ptyIdRef.current, data: escaped + ' ' })
+          // Accept the drop — paste paths into terminal (images get
+          // bracketed-paste wrapping so Claude Code's image detector fires)
+          invoke('terminal_write', { id: ptyIdRef.current, data: buildDropPayload(paths) })
         }
       )
     }
@@ -463,8 +489,7 @@ export function AlacrittyTerminalView({
     invoke<string[]>('clipboard_read_file_paths').then((paths) => {
       if (!ptyIdRef.current) return
       if (paths && paths.length > 0) {
-        const escaped = paths.map(shellEscape).join(' ')
-        invoke('terminal_write', { id: ptyIdRef.current, data: escaped + ' ' })
+        invoke('terminal_write', { id: ptyIdRef.current, data: buildDropPayload(paths) })
         return
       }
       if (!text) return
@@ -551,10 +576,10 @@ export function AlacrittyTerminalView({
       for (let i = 0; i < files.length; i++) {
         // Electron/Tauri expose the full path via .path property
         const filePath = (files[i] as any).path
-        if (filePath) paths.push(shellEscape(filePath))
+        if (filePath) paths.push(filePath)
       }
       if (paths.length > 0) {
-        invoke('terminal_write', { id: ptyIdRef.current, data: paths.join(' ') + ' ' })
+        invoke('terminal_write', { id: ptyIdRef.current, data: buildDropPayload(paths) })
       }
     }
 

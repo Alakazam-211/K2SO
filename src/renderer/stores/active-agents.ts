@@ -59,6 +59,7 @@ interface ActiveAgentsState {
   getAggregateStatus: () => PaneStatus
   getProjectStatus: (projectId: string) => PaneStatus
   recordOutput: (terminalId: string) => void
+  recordTitleActivity: (paneId: string, isWorking: boolean) => void
   handleLifecycleEvent: (paneId: string, tabId: string, eventType: string) => void
   addBackgroundSpawn: (spawn: BackgroundSpawn) => void
   removeBackgroundSpawn: (id: string) => void
@@ -143,6 +144,23 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
 
   recordOutput: (terminalId: string) => {
     get().outputTimestamps.set(terminalId, Date.now())
+  },
+
+  /**
+   * Light-touch state update from terminal title signals (braille-spinner
+   * prefix = working, ✳-family prefix = idle). Only flips between
+   * idle ↔ working so it never clobbers 'permission' or 'review' — those
+   * come from the Tauri lifecycle hook and have higher priority.
+   */
+  recordTitleActivity: (paneId: string, isWorking: boolean) => {
+    const { paneStatuses } = get()
+    const current = paneStatuses.get(paneId) ?? 'idle'
+    if (current === 'permission' || current === 'review') return
+    const next: PaneStatus = isWorking ? 'working' : 'idle'
+    if (current === next) return
+    const newStatuses = new Map(paneStatuses)
+    newStatuses.set(paneId, next)
+    set({ paneStatuses: newStatuses })
   },
 
   handleLifecycleEvent: (paneId: string, _tabId: string, eventType: string) => {
