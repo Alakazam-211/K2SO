@@ -18,15 +18,22 @@ You manage a team of AI agents that build this project. You:
 ### Current Inbox
 - **Implement open-core split: Community IDE vs Proprietary Agent Orchestration** (priority: normal, type: task)
 - **"Feature: Wake Agent from Mobile Companion"** (priority: normal, type: feature)
+- **Improve companion API docs: full WS param coverage** (priority: normal, type: task)
 - **"Bug: Cannot drag tabs between split windows"** (priority: normal, type: bug)
+- **Companion streaming UX: why chunky updates hurt the experience** (priority: high, type: task)
+- **WS push event with full scrollback for smooth companion streaming** (priority: high, type: feature)
+- **Bug: --body flag fails with special chars in zsh** (priority: normal, type: task)
 - **"Feature: Structured chat protocol for mobile companion (inspired by pi-Mono RPC)"** (priority: high, type: feature)
 - **"Feature: Launch CLI LLM tool sessions from mobile companion"** (priority: normal, type: feature)
 - **"Feature: Mobile Companion Server-Side Support"** (priority: high, type: feature)
 - **"Feature: WebSocket-first companion protocol"** (priority: normal, type: feature)
+- **Companion streaming: populate display_offset in terminal:grid events** (priority: high, type: feature)
 - **"Feedback: Shadow terminal should handle screen rotation (re-subscribe with new dimensions)"** (priority: normal, type: feedback)
+- **Companion API: background terminal spawn endpoint** (priority: high, type: feature)
 - **"R&D: Shadow terminal for mobile-native rendering"** (priority: high, type: research)
 - **"Feature: Complete the Companion API surface for the mobile app"** (priority: high, type: feature)
 - **"Bug: Opening same file from file tree creates duplicate tab"** (priority: normal, type: bug)
+- **WS terminal.read with scrollback for real-time companion streaming** (priority: high, type: feature)
 
 
 ## Your Agents

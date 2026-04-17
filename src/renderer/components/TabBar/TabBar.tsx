@@ -168,15 +168,19 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
     // Check if this tab has a running CLI tool — get the terminal ID for copy
     const tab = allTabs.find((t) => t.id === tabId)
     let tabTerminalId: string | null = null
+    let fileViewerPath: string | null = null
     if (tab) {
       for (const [, pg] of tab.paneGroups) {
         for (const item of pg.items) {
           if (item.type === 'terminal') {
             const d = item.data as TerminalItemData
             if (d.command) { tabTerminalId = d.terminalId; break }
+          } else if (item.type === 'file-viewer') {
+            const d = item.data as { filePath?: string }
+            if (d.filePath) { fileViewerPath = d.filePath; break }
           }
         }
-        if (tabTerminalId) break
+        if (tabTerminalId || fileViewerPath) break
       }
     }
 
@@ -184,6 +188,10 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
       { id: 'open-terminal', label: `Open in ${defaultTerminal}` },
       ...(tabTerminalId ? [
         { id: 'copy-terminal-id', label: 'Copy Terminal ID' },
+      ] : []),
+      ...(fileViewerPath ? [
+        { id: 'show-in-finder', label: 'Show in Finder' },
+        { id: 'copy-file-path', label: 'Copy Path' },
       ] : []),
       { id: 'separator', label: '', type: 'separator' as const },
       { id: 'close', label: 'Close Tab' },
@@ -212,6 +220,10 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
       for (const tab of allTabs) {
         removeTabFromGroup(groupIndex, tab.id)
       }
+    } else if (clickedId === 'show-in-finder' && fileViewerPath) {
+      invoke('fs_open_in_finder', { path: fileViewerPath }).catch((err) => console.warn('[tab-bar] show-in-finder', err))
+    } else if (clickedId === 'copy-file-path' && fileViewerPath) {
+      invoke('fs_copy_path', { path: fileViewerPath }).catch((err) => console.warn('[tab-bar] copy-file-path', err))
     } else if (clickedId === 'copy-terminal-id' && tabTerminalId) {
       // Copy workspace:agent qualified identifier
       const agName = tabTerminalId.replace(/^agent-chat-(?:wt-)?/, '')

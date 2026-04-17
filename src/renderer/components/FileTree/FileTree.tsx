@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event'
 import { beginFileDrag, wasDropConsumed } from '@/lib/file-drag'
 import { showContextMenu } from '@/lib/context-menu'
 import { useFileTreeStore } from '@/stores/filetree'
+import { useSettingsStore, getEffectiveKeybinding } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
 import { useToastStore } from '@/stores/toast'
 import { useFileSelectionStore } from '@/stores/file-selection'
@@ -31,6 +32,28 @@ interface FileTreeProps {
 function parentDir(path: string): string {
   const idx = path.lastIndexOf('/')
   return idx > 0 ? path.slice(0, idx) : '/'
+}
+
+/**
+ * Check if a directory's subtree contains any entry matching the search query.
+ * Only traverses already-cached directories (won't load new ones).
+ * Used to keep a directory visible if any of its loaded descendants match.
+ * Respects the showHiddenFiles toggle — hidden files don't count as matches.
+ */
+function subtreeHasMatch(
+  dirPath: string,
+  query: string,
+  cache: Map<string, FileEntry[]>,
+  showHiddenFiles: boolean = true
+): boolean {
+  const entries = cache.get(dirPath)
+  if (!entries) return false
+  for (const entry of entries) {
+    if (!showHiddenFiles && entry.name.startsWith('.')) continue
+    if (entry.name.toLowerCase().includes(query)) return true
+    if (entry.isDirectory && subtreeHasMatch(entry.path, query, cache, showHiddenFiles)) return true
+  }
+  return false
 }
 
 /** Collect all visible paths in tree order for shift-click range selection. */
@@ -254,6 +277,7 @@ interface TreeItemProps {
 }
 
 function TreeItem(props: TreeItemProps): React.JSX.Element | null {
+  const showHiddenFiles = useFileTreeStore((s) => s.showHiddenFiles)
   const {
     entry, depth, cache, expandedDirs, loadingDirs, errorDirs,
     selectedPaths, cutPaths,
@@ -274,16 +298,23 @@ function TreeItem(props: TreeItemProps): React.JSX.Element | null {
 
   const filteredChildren = useMemo(() => {
     if (!children) return null
-    if (!searchQuery) return children
-    return children.filter((child) => {
+    // Filter hidden files first (unless enabled)
+    let list = children
+    if (!showHiddenFiles) {
+      list = list.filter((c) => !c.name.startsWith('.'))
+    }
+    if (!searchQuery) return list
+    const q = searchQuery.toLowerCase()
+    return list.filter((child) => {
       if (child.isDirectory) {
-        if (child.name.toLowerCase().includes(searchQuery.toLowerCase())) return true
+        if (child.name.toLowerCase().includes(q)) return true
         if (expandedDirs.has(child.path)) return true
+        if (subtreeHasMatch(child.path, q, cache, showHiddenFiles)) return true
         return false
       }
-      return child.name.toLowerCase().includes(searchQuery.toLowerCase())
+      return child.name.toLowerCase().includes(q)
     })
-  }, [children, searchQuery, expandedDirs])
+  }, [children, searchQuery, expandedDirs, cache, showHiddenFiles])
 
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
@@ -416,6 +447,8 @@ function TreeItem(props: TreeItemProps): React.JSX.Element | null {
 export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element {
   const searchQuery = useFileTreeStore((s) => s.searchQuery)
   const setSearchQuery = useFileTreeStore((s) => s.setSearchQuery)
+  const showHiddenFiles = useFileTreeStore((s) => s.showHiddenFiles)
+  const toggleHiddenFiles = useFileTreeStore((s) => s.toggleHiddenFiles)
 
   const [cache, setCache] = useState<Map<string, FileEntry[]>>(new Map())
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set([rootPath]))
@@ -451,6 +484,27 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
     window.addEventListener('keyup', up)
     return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up) }
   }, [])
+
+  // Toggle hidden files hotkey — default CMD+Shift+. (matches macOS Finder), user-rebindable
+  useEffect(() => {
+    const handler = (e: KeyboardEvent): void => {
+      const { keybindings } = useSettingsStore.getState()
+      const combo = getEffectiveKeybinding(keybindings, 'toggleHiddenFiles')
+      if (!combo) return
+      const parts = combo.split('+')
+      const key = parts[parts.length - 1]
+      const wantMeta = parts.includes('Meta')
+      const wantShift = parts.includes('Shift')
+      const wantAlt = parts.includes('Alt')
+      const wantCtrl = parts.includes('Ctrl')
+      if (e.metaKey === wantMeta && e.shiftKey === wantShift && e.altKey === wantAlt && e.ctrlKey === wantCtrl && e.key === key) {
+        e.preventDefault()
+        toggleHiddenFiles()
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [toggleHiddenFiles])
 
   const treeRef = useRef<HTMLDivElement>(null)
 
@@ -1185,19 +1239,25 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
     loadDir(rootPath)
   }
 
-  // Filter root entries by search
+  // Filter root entries by search and hidden files toggle
   const filteredRootEntries = useMemo(() => {
     if (!rootEntries) return null
-    if (!searchQuery) return rootEntries
-    return rootEntries.filter((entry) => {
+    let list = rootEntries
+    if (!showHiddenFiles) {
+      list = list.filter((e) => !e.name.startsWith('.'))
+    }
+    if (!searchQuery) return list
+    const q = searchQuery.toLowerCase()
+    return list.filter((entry) => {
       if (entry.isDirectory) {
-        if (entry.name.toLowerCase().includes(searchQuery.toLowerCase())) return true
+        if (entry.name.toLowerCase().includes(q)) return true
         if (expandedDirs.has(entry.path)) return true
+        if (subtreeHasMatch(entry.path, q, cache, showHiddenFiles)) return true
         return false
       }
-      return entry.name.toLowerCase().includes(searchQuery.toLowerCase())
+      return entry.name.toLowerCase().includes(q)
     })
-  }, [rootEntries, searchQuery, expandedDirs])
+  }, [rootEntries, searchQuery, expandedDirs, cache, showHiddenFiles])
 
   const rootBasename = rootPath.split('/').pop() || rootPath
 
@@ -1248,6 +1308,23 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
                     useFileSelectionStore.getState().select(entry.path)
                     useTabsStore.getState().openFileAsTab(entry.path)
                   }}
+                  onContextMenu={async (e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    const items = [
+                      { id: 'open', label: 'Open' },
+                      { id: 'open-finder', label: 'Show in Finder' },
+                      { id: 'copy-path', label: 'Copy Path' },
+                    ]
+                    const id = await showContextMenu(items)
+                    if (id === 'open') {
+                      useTabsStore.getState().openFileAsTab(entry.path)
+                    } else if (id === 'open-finder') {
+                      await invoke('fs_open_in_finder', { path: entry.path })
+                    } else if (id === 'copy-path') {
+                      await invoke('fs_copy_path', { path: entry.path })
+                    }
+                  }}
                   title={entry.path}
                 >
                   <svg className="w-3 h-3 text-yellow-500/80 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
@@ -1297,6 +1374,31 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
                       useTabsStore.getState().openFileAsTab(entry.path)
                     }
                   }}
+                  onContextMenu={async (e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    const items = [
+                      entry.isDirectory
+                        ? { id: 'open', label: 'Reveal in Tree' }
+                        : { id: 'open', label: 'Open' },
+                      { id: 'open-finder', label: 'Show in Finder' },
+                      { id: 'copy-path', label: 'Copy Path' },
+                    ]
+                    const id = await showContextMenu(items)
+                    if (id === 'open') {
+                      if (entry.isDirectory) {
+                        setExpandedDirs((prev) => new Set(prev).add(entry.path))
+                        loadDir(entry.path)
+                        useFileSelectionStore.getState().select(entry.path)
+                      } else {
+                        useTabsStore.getState().openFileAsTab(entry.path)
+                      }
+                    } else if (id === 'open-finder') {
+                      await invoke('fs_open_in_finder', { path: entry.path })
+                    } else if (id === 'copy-path') {
+                      await invoke('fs_copy_path', { path: entry.path })
+                    }
+                  }}
                   title={entry.name}
                 >
                   <svg className="w-3 h-3 text-purple-400/80 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
@@ -1312,9 +1414,9 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
         </div>
       )}
 
-      {/* Search input */}
-      <div className="px-3 pt-2 pb-2">
-        <div className="relative">
+      {/* Search input + hidden files toggle */}
+      <div className="px-3 pt-2 pb-2 flex items-center gap-1.5">
+        <div className="relative flex-1">
           <svg
             className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-[var(--color-text-muted)]"
             viewBox="0 0 24 24"
@@ -1352,6 +1454,28 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
             </button>
           )}
         </div>
+        {/* Hidden files toggle (eye icon) — open eye = showing hidden, crossed = hiding */}
+        <button
+          onClick={toggleHiddenFiles}
+          title={`${showHiddenFiles ? 'Hide' : 'Show'} hidden files (⌘⇧.)`}
+          className={`flex items-center justify-center w-7 h-7 border border-[var(--color-border)] transition-colors ${
+            showHiddenFiles
+              ? 'text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20'
+              : 'text-[var(--color-text-muted)] bg-white/[0.04] hover:text-[var(--color-text-primary)] hover:bg-white/[0.08]'
+          }`}
+        >
+          {showHiddenFiles ? (
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
+          ) : (
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+              <line x1="1" y1="1" x2="23" y2="23" />
+            </svg>
+          )}
+        </button>
       </div>
 
       {/* Drop indicator banner */}

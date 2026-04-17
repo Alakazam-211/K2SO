@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react'
+import React, { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
@@ -17,7 +17,10 @@ interface FileViewerPaneProps {
   filePath: string
   mode?: 'edit' | 'diff'
   paneId: string
+  paneGroupId?: string
   tabId: string
+  initialScrollTop?: number
+  initialCursorPos?: number
   onClose?: () => void
 }
 
@@ -85,7 +88,8 @@ class EditorErrorBoundary extends React.Component<
 
 // ── Component ────────────────────────────────────────────────────────────
 
-export function FileViewerPane({ filePath, mode, paneId, tabId, onClose }: FileViewerPaneProps): React.JSX.Element {
+export function FileViewerPane(props: FileViewerPaneProps): React.JSX.Element {
+  const { filePath, mode, paneId, paneGroupId, tabId, initialScrollTop, initialCursorPos, onClose } = props
   // Diff mode — render DiffViewer instead of editor
   if (mode === 'diff') {
     return <DiffViewer filePath={filePath} className="h-full" />
@@ -93,12 +97,20 @@ export function FileViewerPane({ filePath, mode, paneId, tabId, onClose }: FileV
 
   return (
     <EditorErrorBoundary filePath={filePath}>
-      <FileViewerPaneInner filePath={filePath} paneId={paneId} tabId={tabId} onClose={onClose} />
+      <FileViewerPaneInner
+        filePath={filePath}
+        paneId={paneId}
+        paneGroupId={paneGroupId}
+        tabId={tabId}
+        initialScrollTop={initialScrollTop}
+        initialCursorPos={initialCursorPos}
+        onClose={onClose}
+      />
     </EditorErrorBoundary>
   )
 }
 
-function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileViewerPaneProps, 'mode'>): React.JSX.Element {
+function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScrollTop, initialCursorPos, onClose }: Omit<FileViewerPaneProps, 'mode'>): React.JSX.Element {
   const [content, setContent] = useState<string>('')
   const [editedContent, setEditedContent] = useState<string | null>(null) // null = not edited
   const [loading, setLoading] = useState(true)
@@ -110,6 +122,7 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
   const [viewMode, setViewMode] = useState<ViewMode>(getDefaultViewMode(category))
   const isDirty = editedContent !== null && editedContent !== content
   const setTabDirty = useTabsStore((s) => s.setTabDirty)
+  const setFileViewerState = useTabsStore((s) => s.setFileViewerState)
 
   const pinned = useTabsStore((s) => {
     const tab = s.tabs.find((t) => t.id === tabId)
@@ -132,6 +145,20 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
   const searchInputRef = useRef<HTMLInputElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const editorContainerRef = useRef<HTMLDivElement>(null)
+
+  // Hide the scroll container until the saved scroll position has been
+  // applied, so the user never sees the content flash at the top before
+  // jumping to the saved position. Starts hidden only if we have a
+  // non-zero target to restore.
+  const needsRestore = typeof initialScrollTop === 'number' && initialScrollTop > 0
+  const [scrollReady, setScrollReady] = useState(!needsRestore)
+  // If the user swaps to a different file in the same pane, re-hide until
+  // the new file's scroll is restored. (On a real tab switch the whole
+  // component remounts, so this is only for in-place file navigation.)
+  useLayoutEffect(() => {
+    setScrollReady(!needsRestore)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filePath, viewMode])
 
   const fileName = getFileName(filePath)
   const shortPath = getShortPath(filePath)
@@ -171,6 +198,102 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
   useEffect(() => {
     setTabDirty(tabId, isDirty)
   }, [isDirty, tabId, setTabDirty])
+
+  // Restore scroll position for rendered markdown/preview views (non-editor).
+  // CodeEditor handles its own scroll restore via props.
+  //
+  // Markdown rendering is async — ReactMarkdown renders children in multiple
+  // passes (syntax-highlighted code blocks lazy-load their highlighter), so
+  // the scrollable content grows over several frames after mount. A single
+  // requestAnimationFrame restore clamps to the partially-rendered height
+  // and leaves the user at the top. We attach a ResizeObserver to the
+  // content element and keep re-applying the target scrollTop until either
+  // it's satisfied or the user scrolls manually (whichever comes first).
+  useLayoutEffect(() => {
+    if (loading) return
+    const el = contentRef.current
+    if (!el) return
+
+    let targetScroll = typeof initialScrollTop === 'number' && initialScrollTop > 0 ? initialScrollTop : 0
+    let userScrolled = false
+    let observer: ResizeObserver | null = null
+    let revealed = !needsRestore
+
+    const reveal = (): void => {
+      if (revealed) return
+      revealed = true
+      setScrollReady(true)
+    }
+
+    // Capture scrollTop in a local variable on every scroll event. This
+    // is a plain assignment — no state update, no re-render. We flush
+    // the captured value to the store on unmount (below). We don't read
+    // scrollTop in cleanup because React detaches the DOM before
+    // cleanups run, which resets scrollTop to 0.
+    let latestScrollTop = el.scrollTop
+    const handleScroll = (): void => {
+      if (contentRef.current) latestScrollTop = contentRef.current.scrollTop
+    }
+    el.addEventListener('scroll', handleScroll, { passive: true })
+
+    if (targetScroll > 0) {
+      const applyScroll = (): void => {
+        if (userScrolled || !contentRef.current) return
+        contentRef.current.scrollTop = targetScroll
+        if (contentRef.current.scrollTop >= targetScroll - 1) {
+          reveal()
+          observer?.disconnect()
+          observer = null
+        }
+      }
+
+      const markUserScrolled = (): void => {
+        userScrolled = true
+        reveal() // user interacted — stop hiding regardless of where we landed
+      }
+      el.addEventListener('wheel', markUserScrolled, { passive: true, once: true })
+      el.addEventListener('touchstart', markUserScrolled, { passive: true, once: true })
+      el.addEventListener('keydown', markUserScrolled, { once: true })
+
+      // Synchronous first attempt (before paint) — often enough for
+      // already-rendered content (switching back to a tab whose markdown
+      // was previously laid out).
+      applyScroll()
+
+      // If the first attempt didn't reach the target, keep trying as
+      // content grows (images, code blocks, etc.). Also reveal after a
+      // safety timeout so we never leave the pane permanently hidden.
+      if (!revealed) {
+        observer = new ResizeObserver(applyScroll)
+        observer.observe(el)
+        const inner = el.firstElementChild
+        if (inner instanceof Element) observer.observe(inner)
+
+        // Failsafe: reveal after 300ms even if target is never reached
+        // (e.g., file content shrunk since last session).
+        const timeoutId = window.setTimeout(reveal, 300)
+        return () => {
+          window.clearTimeout(timeoutId)
+          observer?.disconnect()
+          observer = null
+          el.removeEventListener('scroll', handleScroll)
+          if (paneGroupId) {
+            setFileViewerState(tabId, paneGroupId, paneId, { scrollTop: latestScrollTop })
+          }
+        }
+      }
+    }
+
+    return () => {
+      observer?.disconnect()
+      observer = null
+      el.removeEventListener('scroll', handleScroll)
+      if (paneGroupId) {
+        setFileViewerState(tabId, paneGroupId, paneId, { scrollTop: latestScrollTop })
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, viewMode, filePath])
 
   // Auto-refresh: poll for file changes every 2 seconds (only when not editing)
   useEffect(() => {
@@ -518,7 +641,7 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
           <DocxViewer filePath={filePath} />
         </div>
       ) : category === 'image' && viewMode === 'rendered' ? (
-        <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef}>
+        <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef} style={{ visibility: scrollReady ? 'visible' : 'hidden' }}>
           <div className="flex items-center justify-center p-4 min-h-full bg-[#0a0a0a]">
             <img
               src={convertFileSrc(filePath)}
@@ -532,13 +655,13 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
           </div>
         </div>
       ) : category === 'image' && viewMode === 'raw' ? (
-        <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef}>
+        <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef} style={{ visibility: scrollReady ? 'visible' : 'hidden' }}>
           <div className="p-4 text-xs text-[var(--color-text-muted)]">
             <p>Binary image file. Switch to Preview mode to view.</p>
           </div>
         </div>
       ) : category === 'markdown' && viewMode === 'rendered' ? (
-        <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef}>
+        <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef} style={{ visibility: scrollReady ? 'visible' : 'hidden' }}>
           <div className="markdown-content p-4">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
@@ -566,6 +689,11 @@ function FileViewerPaneInner({ filePath, paneId, tabId, onClose }: Omit<FileView
               onSave={saveFile}
               onChange={(newContent) => setEditedContent(newContent)}
               onCursorChange={(line, col, selections) => setCursorInfo({ line, col, selections })}
+              initialScrollTop={initialScrollTop}
+              initialCursorPos={initialCursorPos}
+              onPersistState={paneGroupId ? ({ scrollTop, cursorPos }) => {
+                setFileViewerState(tabId, paneGroupId, paneId, { scrollTop, cursorPos })
+              } : undefined}
             />
           </div>
           {/* Status bar */}

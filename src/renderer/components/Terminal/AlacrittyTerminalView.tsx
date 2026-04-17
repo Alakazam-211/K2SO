@@ -447,18 +447,33 @@ export function AlacrittyTerminalView({
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     if (!ptyIdRef.current) return
     const text = e.clipboardData.getData('text')
-    if (!text) return
     e.preventDefault()
-    // Guard against extremely large text pastes (10MB limit)
-    const MAX_PASTE_BYTES = 10 * 1024 * 1024
-    if (text.length > MAX_PASTE_BYTES) {
-      useToastStore.getState().addToast(
-        `Paste too large (${(text.length / 1024 / 1024).toFixed(1)}MB, max 10MB)`,
-        'error'
-      )
-      return
-    }
-    invoke('terminal_write', { id: ptyIdRef.current, data: text })
+
+    // Finder's CMD+C copies file references via NSFilenamesPboardType, which
+    // WKWebView doesn't expose to the web clipboard API. Query the native
+    // pasteboard — if file paths are present, paste them shell-escaped to
+    // match drag-drop behavior.
+    invoke<string[]>('clipboard_read_file_paths').then((paths) => {
+      if (!ptyIdRef.current) return
+      if (paths && paths.length > 0) {
+        const escaped = paths.map(shellEscape).join(' ')
+        invoke('terminal_write', { id: ptyIdRef.current, data: escaped + ' ' })
+        return
+      }
+      if (!text) return
+      const MAX_PASTE_BYTES = 10 * 1024 * 1024
+      if (text.length > MAX_PASTE_BYTES) {
+        useToastStore.getState().addToast(
+          `Paste too large (${(text.length / 1024 / 1024).toFixed(1)}MB, max 10MB)`,
+          'error'
+        )
+        return
+      }
+      invoke('terminal_write', { id: ptyIdRef.current, data: text })
+    }).catch(() => {
+      if (!text || !ptyIdRef.current) return
+      invoke('terminal_write', { id: ptyIdRef.current, data: text })
+    })
   }, [])
 
   // ── Scroll — throttled + accumulated ─────────────────────────────────

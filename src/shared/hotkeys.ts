@@ -60,6 +60,12 @@ export const HOTKEYS: HotkeyDefinition[] = [
     defaultKey: 'Meta+Shift+B',
     category: 'Navigation'
   },
+  {
+    id: 'toggleHiddenFiles',
+    label: 'Show/Hide Hidden Files',
+    defaultKey: 'Meta+Shift+.',
+    category: 'Navigation'
+  },
 
   // ── App ──────────────────────────────────────────────────────────────
   { id: 'openSettings', label: 'Open Settings', defaultKey: 'Meta+,', category: 'App' },

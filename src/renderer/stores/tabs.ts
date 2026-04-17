@@ -48,6 +48,10 @@ export interface FileViewerItemData {
   filePath: string
   /** When 'diff', shows unified diff view instead of editor */
   mode?: 'edit' | 'diff'
+  /** Saved scroll position (pixels) — restored on tab re-activation */
+  scrollTop?: number
+  /** Saved cursor position in the editor (character offset) */
+  cursorPos?: number
 }
 
 export interface AgentItemData {
@@ -189,6 +193,7 @@ interface TabsState {
   setTabTitle: (tabId: string, title: string) => void
   renameTabByTitle: (oldTitle: string, newTitle: string) => void
   setTabDirty: (tabId: string, dirty: boolean) => void
+  setFileViewerState: (tabId: string, paneId: string, itemId: string, state: { scrollTop?: number; cursorPos?: number }) => void
   /** @deprecated Use openFileInPane instead */
   openMarkdownPane: (tabId: string, filePath: string, splitDirection?: 'row' | 'column') => void
 
@@ -1255,6 +1260,24 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   setTabDirty: (tabId: string, dirty: boolean) => {
     set((state) => {
       const result = mapTabAcrossGroups(state, tabId, (tab) => ({ ...tab, isDirty: dirty }))
+      return { tabs: result.tabs, extraGroups: result.extraGroups }
+    })
+  },
+
+  setFileViewerState: (tabId: string, paneId: string, itemId: string, viewerState: { scrollTop?: number; cursorPos?: number }) => {
+    set((state) => {
+      const result = mapTabAcrossGroups(state, tabId, (tab) => {
+        const pg = tab.paneGroups.get(paneId)
+        if (!pg) return tab
+        const newItems = pg.items.map((item) => {
+          if (item.id !== itemId || item.type !== 'file-viewer') return item
+          const prevData = item.data as FileViewerItemData
+          return { ...item, data: { ...prevData, ...viewerState } }
+        })
+        const newPaneGroups = new Map(tab.paneGroups)
+        newPaneGroups.set(paneId, { ...pg, items: newItems })
+        return { ...tab, paneGroups: newPaneGroups }
+      })
       return { tabs: result.tabs, extraGroups: result.extraGroups }
     })
   },

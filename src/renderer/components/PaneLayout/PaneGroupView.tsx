@@ -191,7 +191,10 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
               filePath={fileData.filePath}
               mode={fileData.mode}
               paneId={activeItem.id}
+              paneGroupId={paneGroupId}
               tabId={tabId}
+              initialScrollTop={fileData.scrollTop}
+              initialCursorPos={fileData.cursorPos}
               onClose={() => handleClose(activeItem.id)}
             />
           ) : activeItem.type === 'agent' ? (

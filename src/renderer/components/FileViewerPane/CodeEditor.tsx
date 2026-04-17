@@ -730,6 +730,12 @@ interface CodeEditorProps {
   demoLineChanges?: Map<number, 'added' | 'modified' | 'deleted'>
   /** Override theme from settings — used by the custom theme creator for live preview */
   themeOverride?: ThemeOverride
+  /** Restore scroll position on mount (pixels). */
+  initialScrollTop?: number
+  /** Restore cursor position on mount (character offset). */
+  initialCursorPos?: number
+  /** Called when the editor is about to unmount, with current scroll/cursor state. */
+  onPersistState?: (state: { scrollTop: number; cursorPos: number }) => void
 }
 
 // ── Compartments for live-reconfigurable settings ───────────────────
@@ -1150,13 +1156,16 @@ const stickyScrollPlugin = ViewPlugin.fromClass(
   }
 )
 
-export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, readOnly = false, demoLineChanges, themeOverride }: CodeEditorProps): React.JSX.Element {
+export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, readOnly = false, demoLineChanges, themeOverride, initialScrollTop, initialCursorPos, onPersistState }: CodeEditorProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
   const onSaveRef = useRef(onSave)
   const onChangeRef = useRef(onChange)
   const onCursorChangeRef = useRef(onCursorChange)
+  const onPersistStateRef = useRef(onPersistState)
   const codeRef = useRef(code)
+  const initialScrollTopRef = useRef(initialScrollTop)
+  const initialCursorPosRef = useRef(initialCursorPos)
 
   const editorSettings = useSettingsStore((s) => s.editor)
   // Subscribe to custom themes so we re-render when they load/change
@@ -1166,6 +1175,7 @@ export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, r
   onSaveRef.current = onSave
   onChangeRef.current = onChange
   onCursorChangeRef.current = onCursorChange
+  onPersistStateRef.current = onPersistState
   codeRef.current = code
 
   // Create editor on mount
@@ -1283,7 +1293,45 @@ export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, r
 
     viewRef.current = view
 
+    // Restore saved scroll/cursor position if provided.
+    // Defer to next frame so CodeMirror has laid out the content first.
+    const initScroll = initialScrollTopRef.current
+    const initCursor = initialCursorPosRef.current
+    if (initScroll || initCursor) {
+      requestAnimationFrame(() => {
+        if (!viewRef.current) return
+        if (typeof initCursor === 'number' && initCursor > 0) {
+          const docLen = viewRef.current.state.doc.length
+          const pos = Math.min(initCursor, docLen)
+          viewRef.current.dispatch({ selection: { anchor: pos, head: pos } })
+        }
+        if (typeof initScroll === 'number' && initScroll > 0) {
+          viewRef.current.scrollDOM.scrollTop = initScroll
+        }
+      })
+    }
+
+    // Capture scroll position in a local variable as the user scrolls —
+    // no state update, no re-render. Flush to the store on unmount
+    // (reading scrollDOM.scrollTop at cleanup time returns 0 because
+    // React detaches the DOM before cleanups run).
+    let latestScrollTop = view.scrollDOM.scrollTop
+    const handleScroll = (): void => {
+      if (viewRef.current) latestScrollTop = viewRef.current.scrollDOM.scrollTop
+    }
+    view.scrollDOM.addEventListener('scroll', handleScroll, { passive: true })
+
     return () => {
+      view.scrollDOM.removeEventListener('scroll', handleScroll)
+      // Flush final scroll/cursor state to the store. Read cursorPos
+      // from the state here (still accessible before view.destroy()).
+      const persist = onPersistStateRef.current
+      if (persist && viewRef.current) {
+        const cursorPos = viewRef.current.state.selection.main.head
+        if (latestScrollTop > 0 || cursorPos > 0) {
+          persist({ scrollTop: latestScrollTop, cursorPos })
+        }
+      }
       view.destroy()
       viewRef.current = null
     }

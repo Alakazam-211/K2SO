@@ -162,6 +162,44 @@ pub fn fs_copy_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Read file paths from the macOS general pasteboard.
+/// Finder's CMD+C writes `NSFilenamesPboardType`, which WKWebView does not
+/// surface via the web `clipboard` API. The terminal paste handler calls this
+/// to match the drag-drop behavior for Finder-copied files.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub fn clipboard_read_file_paths() -> Result<Vec<String>, String> {
+    use cocoa::appkit::{NSFilenamesPboardType, NSPasteboard};
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::{NSArray, NSString};
+    use objc::{msg_send, sel, sel_impl};
+    use std::ffi::CStr;
+
+    unsafe {
+        let pb: id = NSPasteboard::generalPasteboard(nil);
+        let list: id = msg_send![pb, propertyListForType: NSFilenamesPboardType];
+        if list == nil {
+            return Ok(Vec::new());
+        }
+        let count = NSArray::count(list);
+        let mut paths = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let ns_str: id = NSArray::objectAtIndex(list, i);
+            let c_str = NSString::UTF8String(ns_str);
+            if !c_str.is_null() {
+                paths.push(CStr::from_ptr(c_str).to_string_lossy().into_owned());
+            }
+        }
+        Ok(paths)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+pub fn clipboard_read_file_paths() -> Result<Vec<String>, String> {
+    Ok(Vec::new())
+}
+
 #[derive(Debug, Serialize)]
 pub struct FileContent {
     pub content: String,
