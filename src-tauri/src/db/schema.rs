@@ -886,7 +886,8 @@ impl WorkspaceState {
 
 // ── Agent Sessions ──────────────────────────────────────────────────────
 
-/// DB-tracked agent session. Replaces .lock/.last_session filesystem tracking.
+/// DB-tracked agent session. Single source of truth — the legacy
+/// `.lock` and `.last_session` filesystem tracking was retired.
 /// `owner` distinguishes system-managed sessions (safe to inject) from user
 /// interactive sessions (never inject).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -927,6 +928,36 @@ impl AgentSession {
             params![id, project_id, agent_name, terminal_id, session_id, harness, owner, status],
         )?;
         Ok(())
+    }
+
+    /// Find the session row whose `terminal_id` matches — used by the
+    /// hook handler to resolve which AgentSession row a fired event
+    /// belongs to without the caller needing to know project/agent.
+    pub fn get_by_terminal_id(conn: &Connection, terminal_id: &str) -> Result<Option<AgentSession>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, agent_name, terminal_id, session_id, harness, owner, status, status_message, last_activity_at, created_at \
+             FROM agent_sessions WHERE terminal_id = ?1 LIMIT 1"
+        )?;
+        let mut rows = stmt.query_map(params![terminal_id], |row| {
+            Ok(AgentSession {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                agent_name: row.get(2)?,
+                terminal_id: row.get(3)?,
+                session_id: row.get(4)?,
+                harness: row.get(5)?,
+                owner: row.get(6)?,
+                status: row.get(7)?,
+                status_message: row.get(8)?,
+                last_activity_at: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        })?;
+        match rows.next() {
+            Some(Ok(s)) => Ok(Some(s)),
+            Some(Err(e)) => Err(e),
+            None => Ok(None),
+        }
     }
 
     pub fn get_by_agent(conn: &Connection, project_id: &str, agent_name: &str) -> Result<Option<AgentSession>> {

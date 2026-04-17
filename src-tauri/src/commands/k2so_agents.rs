@@ -1280,11 +1280,13 @@ pub fn k2so_agents_build_launch(
     // (which launches from the workspace root) has the latest CLI tools and docs
     let _ = k2so_agents_generate_workspace_claude_md(project_path.clone());
 
-    // Check for previous session to resume (avoids cold-start context reload)
-    // Priority: DB → .last_session file → Claude's history.jsonl
+    // Check for previous session to resume (avoids cold-start context reload).
+    // Priority: DB → Claude's history.jsonl scan. The `.last_session` file
+    // fallback was retired — the DB (agent_sessions.session_id) is the
+    // single source of truth, updated by spawn_wake_pty and the frontend
+    // save path. See k2so_agents_save_session_id for the write path.
     let agent_cwd = agent_dir(&project_path, &agent_name);
     let resume_session = (|| -> Option<String> {
-        // Try DB first
         if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
             if let Some(project_id) = resolve_project_id(&conn, &project_path) {
                 if let Ok(Some(session)) = AgentSession::get_by_agent(&conn, &project_id, &agent_name) {
@@ -1298,13 +1300,6 @@ pub fn k2so_agents_build_launch(
         }
         None
     })()
-    .or_else(|| {
-        // Fall back to .last_session file
-        let session_file = agent_cwd.join(".last_session");
-        fs::read_to_string(&session_file).ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    })
     .or_else(|| {
         // Fall back to detecting from Claude's history (agent dir)
         crate::commands::chat_history::chat_history_detect_active_session(
@@ -3932,7 +3927,10 @@ fn get_highest_inbox_priority(project_path: &str, agent_name: &str) -> u8 {
 }
 
 /// Save the last Claude session ID for an agent (enables --resume on next launch).
-/// Also updates the DB session row.
+/// Stores the session ID in the DB (agent_sessions.session_id).
+/// This is the single source of truth — the legacy `.last_session`
+/// file was retired, as it was being deleted by the no-op pruner
+/// without touching the DB, leading to drift and failed resumes.
 #[tauri::command]
 pub fn k2so_agents_save_session_id(
     project_path: String,
@@ -3944,37 +3942,25 @@ pub fn k2so_agents_save_session_id(
         return Err(format!("Agent '{}' does not exist", agent_name));
     }
 
-    // DB tracking (best-effort)
-    if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
-        if let Some(project_id) = resolve_project_id(&conn, &project_path) {
-            let _ = AgentSession::update_session_id(&conn, &project_id, &agent_name, &session_id);
-        }
-    }
-
-    // Legacy .last_session file
-    let session_file = dir.join(".last_session");
-    fs::write(&session_file, &session_id)
+    let conn = rusqlite::Connection::open(k2so_db_path())
+        .map_err(|e| format!("Failed to open DB: {}", e))?;
+    let project_id = resolve_project_id(&conn, &project_path)
+        .ok_or_else(|| format!("Project not found: {}", project_path))?;
+    AgentSession::update_session_id(&conn, &project_id, &agent_name, &session_id)
+        .map(|_| ())
         .map_err(|e| format!("Failed to save session ID: {}", e))
 }
 
 /// Clear the saved session ID for an agent (called on no-op or when session should be fresh).
-/// Also clears the session_id in the DB.
 #[tauri::command]
 pub fn k2so_agents_clear_session_id(
     project_path: String,
     agent_name: String,
 ) -> Result<(), String> {
-    // DB tracking (best-effort)
     if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
         if let Some(project_id) = resolve_project_id(&conn, &project_path) {
             let _ = AgentSession::clear_session_id(&conn, &project_id, &agent_name);
         }
-    }
-
-    // Legacy .last_session file
-    let session_file = agent_dir(&project_path, &agent_name).join(".last_session");
-    if session_file.exists() {
-        let _ = fs::remove_file(&session_file);
     }
     Ok(())
 }
@@ -4006,11 +3992,15 @@ pub fn k2so_agents_heartbeat_noop(
         );
     }
 
-    // Prune wasteful session: clear the saved session ID so next launch is fresh
-    // (no point resuming a session that was just "I have nothing to do")
-    let session_file = agent_dir(&project_path, &agent_name).join(".last_session");
-    if session_file.exists() {
-        let _ = fs::remove_file(&session_file);
+    // Prune wasteful session: clear the saved session ID so next launch is
+    // fresh (no point resuming a session that was just "I have nothing to
+    // do"). Previously this only deleted the legacy `.last_session` file
+    // and left the DB's session_id stale, so the next wake still tried
+    // --resume on a pruned session. Now we clear the DB directly.
+    if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
+        if let Some(project_id) = resolve_project_id(&conn, &project_path) {
+            let _ = AgentSession::clear_session_id(&conn, &project_id, &agent_name);
+        }
     }
 
     write_heartbeat_config(&project_path, &agent_name, &config)?;

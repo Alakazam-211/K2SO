@@ -160,7 +160,7 @@ function AgentChatTerminal({ agentName, agentDir, projectPath, autoFocus }: { ag
       } catch { /* fall through */ }
 
       // Step 2: Ask the backend for full launch config
-      // k2so_agents_build_launch handles: DB session resume → .last_session → history.jsonl → fresh
+      // k2so_agents_build_launch handles: DB session resume → history.jsonl scan → fresh
       // Always uses --dangerously-skip-permissions and includes CLAUDE.md via --append-system-prompt
       try {
         const result = await invoke<{

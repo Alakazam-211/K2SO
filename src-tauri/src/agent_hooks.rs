@@ -142,12 +142,12 @@ fn spawn_wake_pty(
     // Save Claude's new session ID so the next wake can --resume it.
     // This used to run in the frontend `cli:agent-launch` listener,
     // but since backend-direct spawn bypasses the frontend entirely we
-    // have to do it here — otherwise every wake reads a stale
-    // `.last_session` and hits "No conversation found" on resume.
+    // have to do it here — otherwise every wake reads a stale DB row
+    // and hits "No conversation found" on resume.
     //
     // Claude takes a moment to write the session JSONL file, so we
     // wait a few seconds, scan the provider's history dir for the
-    // newest session, and persist it.
+    // newest session, and persist it in agent_sessions.session_id.
     let agent_name_owned = agent_name.to_string();
     let project_path_owned = project_path.to_string();
     let cwd_owned = cwd.to_string();
@@ -445,6 +445,33 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
 
                     log_debug!("[agent-hooks] {} → {} (pane={}, tab={})", raw_event, canonical, pane_id, tab_id);
                     let _ = app_handle.emit("agent:lifecycle", &event);
+
+                    // Sync AgentSession.status so the scheduler's
+                    // is_agent_locked check reflects reality. Without
+                    // this, a single wake leaves status='running'
+                    // forever and every subsequent heartbeat silently
+                    // skips the agent. Resolved via terminal_id lookup
+                    // — pane_id is the K2SO_PANE_ID env var we set at
+                    // PTY creation.
+                    let new_status: Option<&str> = match canonical {
+                        "start" => Some("running"),
+                        "stop" => Some("sleeping"),
+                        "permission" => Some("permission"),
+                        _ => None,
+                    };
+                    if let Some(new_status) = new_status {
+                        if let Ok(conn) = rusqlite::Connection::open(
+                            dirs::home_dir().map(|h| h.join(".k2so/k2so.db")).unwrap_or_default()
+                        ) {
+                            if let Ok(Some(s)) = crate::db::schema::AgentSession::get_by_terminal_id(&conn, &pane_id) {
+                                if s.status != new_status {
+                                    let _ = crate::db::schema::AgentSession::update_status(
+                                        &conn, &s.project_id, &s.agent_name, new_status,
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
 
                 let body = r#"{"success":true}"#;

@@ -864,6 +864,40 @@ else
     fail "wake reliability: session lock missing" "Expected k2so_agents_lock call in spawn_wake_pty"
 fi
 
+# Hook handler must sync AgentSession.status on every canonical event so the
+# scheduler's is_agent_locked check reflects reality. Without this the row
+# stays status='running' forever after the first wake and every subsequent
+# heartbeat skips the agent.
+if grep -q 'AgentSession::get_by_terminal_id' "$HOOKS_SRC"; then
+    pass "wake reliability: hook handler resolves pane_id → AgentSession row"
+else
+    fail "wake reliability: terminal_id lookup missing" "Expected get_by_terminal_id in hook handler"
+fi
+
+if grep -q '"stop" => Some("sleeping")' "$HOOKS_SRC"; then
+    pass "wake reliability: Stop event flips AgentSession.status to sleeping"
+else
+    fail "wake reliability: Stop → sleeping" "Expected canonical 'stop' → 'sleeping' mapping in hook handler"
+fi
+
+# AgentSession schema helper for terminal_id lookup
+if grep -q 'pub fn get_by_terminal_id' "$SCHEMA_SRC"; then
+    pass "wake reliability: AgentSession::get_by_terminal_id schema helper present"
+else
+    fail "wake reliability: helper missing" "Expected get_by_terminal_id in schema.rs"
+fi
+
+# .last_session retirement — no Rust code should still read/write it
+LAST_SESSION_FILE_HITS=$(grep -c '\.last_session' "$AGENTS_SRC" || true)
+# Allowed: only docstring/comment references in retired state
+if grep -q '\.last_session.*file.*was retired\|retired' "$AGENTS_SRC" && [ "$LAST_SESSION_FILE_HITS" -le 2 ]; then
+    pass ".last_session retired: no live read/write of the legacy file"
+elif grep -q 'fs::write.*last_session\|fs::remove_file.*last_session\|fs::read_to_string.*last_session' "$AGENTS_SRC"; then
+    fail ".last_session retirement" "Live file I/O of .last_session still present in k2so_agents.rs"
+else
+    pass ".last_session retirement: no live file I/O remains"
+fi
+
 # ═══════════════════════════════════════════════════════════════════════
 section "3.9: Settings Search Palette"
 # ═══════════════════════════════════════════════════════════════════════
