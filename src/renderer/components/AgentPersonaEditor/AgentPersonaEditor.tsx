@@ -285,24 +285,31 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
       `• Frontmatter (between --- delimiters): name, role, type — these are read by the system`,
       `• Body (below frontmatter): all instructions, behavior, personality, tools, integrations`,
       ``,
-      `## Three Files You Should Keep In Sync`,
+      `## Four Files You'll Be Editing`,
       ``,
-      `There are THREE files that define this agent's behavior. You have access to all of them:`,
+      `There are FOUR files that define this agent's behavior. You have direct read/write access to all of them:`,
       ``,
       `1. **agent.md** (in current directory) — the agent's core identity, role, standing orders, and personality.`,
       `   Path: \`${projectPath}/.k2so/agents/${context.agentName}/agent.md\``,
       ``,
-      `2. **Agent CLAUDE.md** — read by the agent during heartbeat/automated launches.`,
+      `2. **wakeup.md** (in current directory) — operational wake-up instructions the heartbeat scheduler reads every time this agent wakes.`,
+      `   Path: \`${projectPath}/.k2so/agents/${context.agentName}/wakeup.md\``,
+      `   NOT the persona. Small, tactical, edited often. Keep it focused on the wake-up procedure (checkin, triage, work through inbox, exit).`,
+      `   When the user asks to change "what the agent does on wake," edit wakeup.md — not agent.md.`,
+      ``,
+      `3. **Agent CLAUDE.md** — read by the agent during heartbeat/automated launches.`,
       `   Path: \`${projectPath}/.k2so/agents/${context.agentName}/CLAUDE.md\``,
       `   Should contain the agent identity + K2SO CLI tools + work queue info.`,
       ``,
-      `3. **Workspace CLAUDE.md** — read by the user's manual Claude sessions launched from the workspace.`,
+      `4. **Workspace CLAUDE.md** — read by the user's manual Claude sessions launched from the workspace.`,
       `   Path: \`${projectPath}/CLAUDE.md\``,
       `   Should contain project context + CLI tools so manual sessions understand the workspace.`,
       ``,
-      `When the user asks you to update the agent's behavior, update agent.md AND the relevant CLAUDE.md file(s).`,
-      `Don't just copy-paste — tailor each file for its audience (automated heartbeat vs manual user session).`,
-      `You can read and write all three files directly using their full paths above.`,
+      `When the user asks to update the agent's behavior, choose the right file(s):`,
+      `• "What does the agent do on wake?" → wakeup.md`,
+      `• "Change the agent's personality/role/tools/orders" → agent.md AND the relevant CLAUDE.md file(s)`,
+      `Don't just copy-paste between files — tailor each for its audience.`,
+      `You can read and write all four files directly using their full paths above.`,
       ``,
       `## Key Sections to Help Configure:`,
       ``,
@@ -317,19 +324,9 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
       ``,
       typeGuidance,
       ``,
-      `## Wake-up Instructions (wakeup.md)`,
-      ``,
-      `There is also a separate file for heartbeat wake-up instructions:`,
-      ``,
-      `• **wakeup.md** — operational instructions read by the heartbeat scheduler when it wakes this agent.`,
-      `  Path: \`${projectPath}/.k2so/agents/${context.agentName}/wakeup.md\``,
-      `  This is NOT the persona. It's "what do you do on wake" — small, tactical, edited often.`,
-      `  Keep it focused on the wake-up procedure (checkin, triage, work through inbox, exit).`,
-      `  When the user asks to change "what the agent does on wake," edit wakeup.md, not agent.md.`,
-      ``,
-      `The user sees a tabbed preview on the right with Profile, Wake-up, and CLAUDE.md tabs.`,
-      `The AIFileEditor tabs above the terminal let the user switch between editing agent.md and wakeup.md.`,
-      `Before editing, confirm which file they want to update and use the correct path.`,
+      `The user sees a tabbed preview on the right with Profile (agent.md), Wake-up (wakeup.md),`,
+      `Agent CLAUDE.md, and Workspace CLAUDE.md tabs. Before editing, confirm which file they want`,
+      `updated and use the path from the list above.`,
     ].join('\n')
   }, [context, projectPath])
 
@@ -342,7 +339,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
       return [
         ...baseArgs,
         '--append-system-prompt', agentPrompt,
-        `Open and read all three files: agent.md (current dir), CLAUDE.md (current dir), and ${projectPath}/CLAUDE.md (workspace root). This defines the agent "${context.agentName}" (${context.role}). The user sees all three files in the preview tabs. Start by asking what they want this agent to do.`,
+        `Open and read all four files: agent.md (current dir), wakeup.md (current dir), CLAUDE.md (current dir), and ${projectPath}/CLAUDE.md (workspace root). This defines the agent "${context.agentName}" (${context.role}). The user sees all four files in the preview tabs. Start by asking what they want this agent to do.`,
       ]
     }
     return baseArgs
@@ -367,23 +364,15 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
     )
   }
 
-  // AIFileEditor tabs: Persona (agent.md) + Wake-up (wakeup.md, if
-  // this agent type uses heartbeat wake). CLAUDE.md tabs remain as
-  // read-only previews in the preview panel.
-  const editorFiles = wakeupPath
-    ? [
-        { path: agentMdPath, label: 'Persona' },
-        { path: wakeupPath, label: 'Wake-up' },
-      ]
-    : undefined
+  // The AIFileEditor's outer tab strip was removed because the preview
+  // panel on the right already shows tabs for Profile / Wake-up /
+  // Agent CLAUDE.md / Workspace CLAUDE.md. Two layers of tabs was
+  // confusing. The AI agent running in the terminal is told about
+  // wakeup.md in its system prompt and edits it directly via its file
+  // tools — the user doesn't need a separate "focused file" selector.
   return (
     <AIFileEditor
       filePath={agentMdPath}
-      files={editorFiles}
-      onActiveFileChange={(p) => {
-        if (p === wakeupPath) setActiveTab('wakeup')
-        else if (p === agentMdPath) setActiveTab('profile')
-      }}
       watchDir={watchDir}
       cwd={watchDir}
       command={terminalCommand}
