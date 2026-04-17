@@ -472,6 +472,9 @@ pub fn run() {
                             // One-time promote of legacy single-slot heartbeat_schedule
                             // into the multi-heartbeat agent_heartbeats table. Idempotent.
                             crate::commands::k2so_agents::promote_legacy_heartbeat(&project.path);
+                            // Repair any mis-migrated rows from earlier 0.32.0 runs where
+                            // find_primary_agent picked an orphan agent dir. Idempotent.
+                            crate::commands::k2so_agents::repair_mismigrated_heartbeats(&project.path);
                         }
                     });
                 }
@@ -811,6 +814,7 @@ pub fn run() {
             commands::k2so_agents::k2so_heartbeat_remove,
             commands::k2so_agents::k2so_heartbeat_set_enabled,
             commands::k2so_agents::k2so_heartbeat_edit,
+            commands::k2so_agents::k2so_heartbeat_rename,
             // Agent Sessions (DB-tracked)
             commands::k2so_agents::agent_sessions_list,
             commands::k2so_agents::agent_sessions_get,

@@ -221,14 +221,67 @@ pub fn compose_wake_prompt_from_path(wakeup_path: &std::path::Path) -> Option<St
     ))
 }
 
-/// Find the first top-tier scheduleable agent in a workspace.
-/// Mutually exclusive by design: Custom, __lead__, or k2so-agent.
-/// Agent-templates are never scheduleable and are skipped.
+/// Find the workspace's primary scheduleable agent. A workspace is one-of
+/// Custom / K2SO Agent / Workspace Manager (mutually exclusive by design),
+/// but agent-mode swaps can leave orphan directories from prior modes on
+/// disk. We use `projects.agent_mode` as the source of truth and only
+/// return an agent dir whose type matches the workspace's declared mode.
+/// Agent-templates are never scheduleable and are always skipped.
 pub fn find_primary_agent(project_path: &str) -> Option<String> {
     let agents_root = agents_dir(project_path);
     if !agents_root.exists() {
         return None;
     }
+
+    // Resolve the declared workspace mode from the DB. This is what
+    // prevents alphabetical scan order from picking a stale orphan
+    // (e.g. returning pod-leader before sarah when the workspace is
+    // actually a Custom agent workspace for sarah).
+    let declared_mode: Option<String> = rusqlite::Connection::open(k2so_db_path())
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT agent_mode FROM projects WHERE path = ?1",
+                rusqlite::params![project_path],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+        });
+
+    let type_for_mode = |mode: &str| match mode {
+        "custom" => "custom",
+        "manager" => "manager",
+        "k2so" | "agent" => "k2so",
+        _ => "",
+    };
+
+    // Pass 1: prefer the agent whose type matches the declared mode.
+    if let Some(ref mode) = declared_mode {
+        let wanted = type_for_mode(mode);
+        if !wanted.is_empty() {
+            if let Ok(entries) = fs::read_dir(&agents_root) {
+                for entry in entries.flatten() {
+                    if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
+                        continue;
+                    }
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    // __lead__ is a directory-less concept; if mode is
+                    // manager we return the sentinel name directly below.
+                    if agent_type_for(project_path, &name) == wanted {
+                        return Some(name);
+                    }
+                }
+            }
+            // Manager mode doesn't require a filesystem dir — __lead__
+            // lives at the project root. Return the sentinel.
+            if wanted == "manager" {
+                return Some("__lead__".to_string());
+            }
+        }
+    }
+
+    // Pass 2 (fallback, no declared mode): first scheduleable dir wins.
     let Ok(entries) = fs::read_dir(&agents_root) else { return None };
     for entry in entries.flatten() {
         if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
@@ -445,6 +498,155 @@ pub fn stamp_heartbeat_fired(project_path: &str, heartbeat_name: &str) {
     let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) else { return };
     let Some(project_id) = resolve_project_id(&conn, project_path) else { return };
     let _ = AgentHeartbeat::stamp_last_fired(&conn, &project_id, heartbeat_name);
+}
+
+/// Rename a heartbeat — renames the row AND moves the filesystem folder
+/// so wakeup_path stays in sync. Lets users swap the migration-reserved
+/// `default` name for something meaningful without losing audit history.
+#[tauri::command]
+pub fn k2so_heartbeat_rename(
+    project_path: String,
+    old_name: String,
+    new_name: String,
+) -> Result<(), String> {
+    AgentHeartbeat::validate_name(&new_name).map_err(|e| e.to_string())?;
+    let conn = rusqlite::Connection::open(k2so_db_path()).map_err(|e| e.to_string())?;
+    let project_id = resolve_project_id(&conn, &project_path)
+        .ok_or_else(|| format!("Project not found: {}", project_path))?;
+    let hb = AgentHeartbeat::get_by_name(&conn, &project_id, &old_name)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Heartbeat '{}' not found", old_name))?;
+    if AgentHeartbeat::get_by_name(&conn, &project_id, &new_name)
+        .map_err(|e| e.to_string())?
+        .is_some()
+    {
+        return Err(format!("Heartbeat '{}' already exists", new_name));
+    }
+
+    let agent_name = find_primary_agent(&project_path)
+        .ok_or("No scheduleable agent in this workspace")?;
+    let hb_parent = agent_dir(&project_path, &agent_name).join("heartbeats");
+    let old_dir = hb_parent.join(&old_name);
+    let new_dir = hb_parent.join(&new_name);
+
+    // Move folder if it exists; tolerate already-moved state for reruns.
+    if old_dir.exists() && !new_dir.exists() {
+        fs::rename(&old_dir, &new_dir)
+            .map_err(|e| format!("Failed to rename heartbeat folder: {}", e))?;
+    }
+
+    let new_wakeup = new_dir.join("wakeup.md");
+    let workspace_relative = new_wakeup
+        .strip_prefix(&project_path)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| new_wakeup.to_string_lossy().to_string());
+
+    // UPDATE both name and wakeup_path atomically — schedule_name on
+    // heartbeat_fires is denormalized so audit survives without a
+    // cascade (name in old fires points to the old value, as designed).
+    conn.execute(
+        "UPDATE agent_heartbeats SET name = ?1, wakeup_path = ?2 \
+         WHERE project_id = ?3 AND name = ?4",
+        rusqlite::params![new_name, workspace_relative, project_id, old_name],
+    )
+    .map_err(|e| format!("Failed to rename row: {}", e))?;
+
+    log_debug!("[heartbeat-rename] {} → {} ({})", old_name, new_name, hb.wakeup_path);
+    Ok(())
+}
+
+/// Detect and repair heartbeats whose `wakeup_path` points at the wrong
+/// agent — typically caused by the pre-0.32.1 migration picking an
+/// orphan agent directory from a prior agent-mode swap. Called on
+/// startup after `promote_legacy_heartbeat`. Idempotent: no-op when
+/// all rows already point at the correct agent.
+pub fn repair_mismigrated_heartbeats(project_path: &str) {
+    let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) else { return };
+    let Some(project_id) = resolve_project_id(&conn, project_path) else { return };
+    let Ok(rows) = AgentHeartbeat::list_by_project(&conn, &project_id) else { return };
+    if rows.is_empty() {
+        return;
+    }
+    let Some(correct_agent) = find_primary_agent(project_path) else { return };
+
+    let expected_prefix = format!(".k2so/agents/{}/heartbeats/", correct_agent);
+    let legacy_wakeup = agent_dir(project_path, &correct_agent).join("wakeup.md");
+    for hb in rows {
+        let wrong_abs = std::path::Path::new(project_path).join(&hb.wakeup_path);
+        let correct_dir = agent_dir(project_path, &correct_agent)
+            .join("heartbeats")
+            .join(&hb.name);
+        let correct_wakeup = correct_dir.join("wakeup.md");
+
+        let row_is_correct = hb.wakeup_path.starts_with(&expected_prefix);
+        let legacy_present = legacy_wakeup.exists()
+            && fs::read_to_string(&legacy_wakeup).map(|s| !s.trim().is_empty()).unwrap_or(false);
+
+        // Nothing to do when the row is correct AND no legacy agent-root
+        // wakeup.md is left behind from a broken prior migration.
+        if row_is_correct && !legacy_present {
+            continue;
+        }
+
+        if fs::create_dir_all(&correct_dir).is_err() {
+            continue;
+        }
+
+        // Source priority:
+        //   1. Legacy agent-root wakeup.md — the user's REAL content,
+        //      whether the row is currently pointing at the wrong agent
+        //      or was already pointed at the correct agent but a broken
+        //      pre-0.32.1 run left the user's real file behind at the
+        //      agent root without copying it into heartbeats/<name>/.
+        //   2. The row's current wakeup_path if it has non-empty content
+        //      (e.g. the user had already edited the wrong-agent folder).
+        //   3. Scaffold a placeholder if neither source exists.
+        let source = if legacy_present {
+            Some(legacy_wakeup.clone())
+        } else if wrong_abs.exists()
+            && fs::read_to_string(&wrong_abs).map(|s| !s.trim().is_empty()).unwrap_or(false)
+        {
+            Some(wrong_abs.clone())
+        } else {
+            None
+        };
+
+        if let Some(src) = source {
+            if let Ok(content) = fs::read_to_string(&src) {
+                if fs::write(&correct_wakeup, content).is_ok() {
+                    // Clean up the legacy agent-root file if we just
+                    // used it. Avoids dual-source-of-truth on next run.
+                    if src == legacy_wakeup {
+                        let _ = fs::remove_file(&legacy_wakeup);
+                    }
+                }
+            }
+        } else if !correct_wakeup.exists() {
+            let template = format!(
+                "---\ndescription: Heartbeat migrated by 0.32.1 repair (content was missing pre-repair)\n---\n\n\
+                # Wake procedure: {}\n\n\
+                This heartbeat's wakeup file was lost during the 0.32.0 migration.\n\
+                Edit this file with the instructions this heartbeat should run.\n",
+                hb.name
+            );
+            let _ = fs::write(&correct_wakeup, template);
+        }
+
+        let new_relative = correct_wakeup
+            .strip_prefix(project_path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| correct_wakeup.to_string_lossy().to_string());
+        if !row_is_correct {
+            let _ = AgentHeartbeat::update_wakeup_path(&conn, &project_id, &hb.name, &new_relative);
+        }
+        log_debug!(
+            "[heartbeat-repair] {} wakeup_path {} → {} (source={})",
+            hb.name,
+            hb.wakeup_path,
+            new_relative,
+            if legacy_present { "legacy agent-root" } else { "existing path" }
+        );
+    }
 }
 
 /// One-time promotion of the legacy `projects.heartbeat_schedule` single-slot

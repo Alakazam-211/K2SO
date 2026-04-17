@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.31.9"
+K2SO_CLI_VERSION="0.32.0"
 
 set -euo pipefail
 
@@ -690,6 +690,24 @@ cmd_heartbeat_enable_disable() {
     [ -z "$name" ] && { echo "Usage: k2so heartbeat enable|disable <name>" >&2; exit 1; }
     cli_request "/cli/heartbeat/enable" "name=$(urlencode "$name")&enabled=$enabled" > /dev/null
     echo "Heartbeat '$name' ${enabled}d"
+}
+
+cmd_heartbeat_rename() {
+    local from="${1:-}"
+    local to="${2:-}"
+    if [ -z "$from" ] || [ -z "$to" ]; then
+        echo "Usage: k2so heartbeat rename <old-name> <new-name>" >&2
+        exit 1
+    fi
+    cli_request "/cli/heartbeat/rename" "from=$(urlencode "$from")&to=$(urlencode "$to")" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    if d.get('success'): print(f'Renamed heartbeat: $from -> $to')
+    else: print(f\"Error: {d.get('error', 'unknown')}\", file=sys.stderr); sys.exit(1)
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr); sys.exit(1)
+"
 }
 
 cmd_heartbeat_status() {
@@ -1976,7 +1994,7 @@ cmd_update() {
 
     # Extract the version from the remote script
     local remote_version
-    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.31.9"//')
+    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.32.0"//')
     if [ -z "$remote_version" ]; then
         echo "Error: Could not parse remote version." >&2
         exit 1
@@ -2122,6 +2140,7 @@ case "${1:-help}" in
             remove)  shift 2; cmd_heartbeat_remove "$@" ;;
             enable)  shift 2; cmd_heartbeat_enable_disable true "$@" ;;
             disable) shift 2; cmd_heartbeat_enable_disable false "$@" ;;
+            rename)  shift 2; cmd_heartbeat_rename "$@" ;;
             status)  shift 2; cmd_heartbeat_status "$@" ;;
             *)       shift; cmd_heartbeat_toggle "$@" ;;
         esac

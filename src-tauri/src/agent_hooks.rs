@@ -986,6 +986,17 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             ).map(|_| r#"{"success":true}"#.to_string())
                         }
                     }
+                    "/cli/heartbeat/rename" => {
+                        let old_name = params.get("from").cloned().unwrap_or_default();
+                        let new_name = params.get("to").cloned().unwrap_or_default();
+                        if old_name.is_empty() || new_name.is_empty() {
+                            Err("Missing 'from' or 'to' parameter".to_string())
+                        } else {
+                            crate::commands::k2so_agents::k2so_heartbeat_rename(
+                                project_path.clone(), old_name, new_name,
+                            ).map(|_| r#"{"success":true}"#.to_string())
+                        }
+                    }
                     "/cli/heartbeat/status" => {
                         // Last N fires for a specific heartbeat by name.
                         let name = params.get("name").cloned().unwrap_or_default();

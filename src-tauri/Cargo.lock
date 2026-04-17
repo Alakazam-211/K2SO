@@ -2670,7 +2670,7 @@ dependencies = [
 
 [[package]]
 name = "k2so"
-version = "0.31.9"
+version = "0.32.0"
 dependencies = [
  "alacritty_terminal",
  "argon2",

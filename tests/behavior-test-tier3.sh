@@ -974,6 +974,43 @@ else
     fail "multi-heartbeat: last_fired semantics" "Expected stamp_heartbeat_fired after successful spawn"
 fi
 
+# 0.32.1 fixes: agent-mode-aware primary pick + startup repair + rename
+if grep -q 'declared_mode: Option<String>' "$AGENTS_SRC" || grep -q "conn.query_row\s*(\s*\"SELECT agent_mode FROM projects WHERE path" "$AGENTS_SRC"; then
+    pass "multi-heartbeat: find_primary_agent respects projects.agent_mode"
+else
+    fail "multi-heartbeat: agent_mode dispatch missing" "find_primary_agent must consult projects.agent_mode, not just fs scan order"
+fi
+
+if grep -q 'pub fn repair_mismigrated_heartbeats' "$AGENTS_SRC"; then
+    pass "multi-heartbeat: repair_mismigrated_heartbeats detector present"
+else
+    fail "multi-heartbeat: repair missing" "Expected repair_mismigrated_heartbeats fn"
+fi
+
+if grep -q 'repair_mismigrated_heartbeats(&project.path)' "$LIB_SRC"; then
+    pass "multi-heartbeat: repair runs at startup per project"
+else
+    fail "multi-heartbeat: repair not wired" "Expected repair_mismigrated_heartbeats in startup loop"
+fi
+
+if grep -q 'pub fn k2so_heartbeat_rename' "$AGENTS_SRC"; then
+    pass "multi-heartbeat: k2so_heartbeat_rename command present"
+else
+    fail "multi-heartbeat: rename command missing" "Expected k2so_heartbeat_rename in k2so_agents.rs"
+fi
+
+if grep -q '"/cli/heartbeat/rename"' "$HOOKS_SRC"; then
+    pass "multi-heartbeat: /cli/heartbeat/rename endpoint registered"
+else
+    fail "multi-heartbeat: rename route missing" "Expected /cli/heartbeat/rename in agent_hooks.rs"
+fi
+
+if grep -q 'cmd_heartbeat_rename()' "$K2SO_CLI" && grep -q 'rename) .*cmd_heartbeat_rename' "$K2SO_CLI"; then
+    pass "multi-heartbeat: CLI rename subcommand wired"
+else
+    fail "multi-heartbeat: CLI rename missing" "Expected cmd_heartbeat_rename + dispatch"
+fi
+
 # Hook handler must sync AgentSession.status on every canonical event so the
 # scheduler's is_agent_locked check reflects reality. Without this the row
 # stays status='running' forever after the first wake and every subsequent
