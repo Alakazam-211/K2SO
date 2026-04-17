@@ -1011,6 +1011,42 @@ else
     fail "multi-heartbeat: CLI rename missing" "Expected cmd_heartbeat_rename + dispatch"
 fi
 
+# Orphan cleanup — archive top-tier agents whose type doesn't match the
+# workspace's declared agent_mode, from the mode-swap-cleanup bug.
+if grep -q 'pub fn archive_orphan_top_tier_agents' "$AGENTS_SRC"; then
+    pass "orphan cleanup: archive_orphan_top_tier_agents fn present"
+else
+    fail "orphan cleanup: archive fn missing" "Expected archive_orphan_top_tier_agents in k2so_agents.rs"
+fi
+
+if grep -q 'archive_orphan_top_tier_agents(&project.path)' "$LIB_SRC"; then
+    pass "orphan cleanup: startup archive pass wired per project"
+else
+    fail "orphan cleanup: startup not wired" "Expected archive call in startup loop"
+fi
+
+if grep -q 'archive_orphan_top_tier_agents(&path)' "$PROJECT_ROOT/src-tauri/src/commands/projects.rs"; then
+    pass "orphan cleanup: mode-swap triggers archive before agent_mode update"
+else
+    fail "orphan cleanup: mode-swap hook missing" "Expected archive call in projects_update when agent_mode changes"
+fi
+
+# Scaffolding guard: ensure_agent_wakeup must not scaffold agent-root wakeup.md
+# when heartbeats/default/wakeup.md already exists (prevents template overwrite
+# via the repair pass on subsequent startups).
+if grep -q 'hb_default.exists' "$AGENTS_SRC"; then
+    pass "orphan cleanup: ensure_agent_wakeup skips scaffold when heartbeats/default/ exists"
+else
+    fail "orphan cleanup: scaffold guard missing" "ensure_agent_wakeup must check heartbeats/default/ before scaffolding agent-root wakeup.md"
+fi
+
+# Repair must detect template scaffolds and refuse to use them as source
+if grep -q 'legacy_is_template' "$AGENTS_SRC"; then
+    pass "orphan cleanup: repair treats template scaffolds as non-legacy"
+else
+    fail "orphan cleanup: template detection missing" "repair must skip template-marked legacy files"
+fi
+
 # Hook handler must sync AgentSession.status on every canonical event so the
 # scheduler's is_agent_locked check reflects reality. Without this the row
 # stays status='running' forever after the first wake and every subsequent

@@ -475,6 +475,9 @@ pub fn run() {
                             // Repair any mis-migrated rows from earlier 0.32.0 runs where
                             // find_primary_agent picked an orphan agent dir. Idempotent.
                             crate::commands::k2so_agents::repair_mismigrated_heartbeats(&project.path);
+                            // Archive orphan top-tier agents left behind by prior agent-mode
+                            // swaps. Templates preserved. Idempotent.
+                            crate::commands::k2so_agents::archive_orphan_top_tier_agents(&project.path);
                         }
                     });
                 }

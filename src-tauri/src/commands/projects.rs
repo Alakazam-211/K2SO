@@ -351,6 +351,23 @@ pub fn projects_update(
         if url.is_empty() { None } else { Some(url.as_str()) }
     });
 
+    // Before changing agent_mode, archive the current mode's orphan
+    // top-tier agents so the swap doesn't leave stale dirs behind.
+    // The archive function itself is a no-op when there's nothing to
+    // clean up, so this is safe to call unconditionally.
+    if agent_mode.is_some() {
+        let project_path: Option<String> = conn.query_row(
+            "SELECT path FROM projects WHERE id = ?1",
+            rusqlite::params![&id],
+            |row| row.get::<_, String>(0),
+        ).ok();
+        if let Some(path) = project_path {
+            drop(conn); // release the lock before the archive call reopens
+            crate::commands::k2so_agents::archive_orphan_top_tier_agents(&path);
+        }
+    }
+    let conn = state.db.lock();
+
     Project::update(
         &conn,
         &id,

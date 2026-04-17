@@ -143,6 +143,18 @@ fn ensure_agent_wakeup(project_path: &str, agent_name: &str, agent_type: &str) {
     if path.exists() {
         return;
     }
+    // Multi-heartbeat lives at heartbeats/<name>/wakeup.md — if any
+    // heartbeat folder already exists for this agent, we're past the
+    // legacy single-slot world and the agent-root wakeup.md is no
+    // longer the source of truth. Skip scaffolding to avoid tricking
+    // the repair pass into clobbering real content.
+    let hb_default = agent_dir(project_path, agent_name)
+        .join("heartbeats")
+        .join("default")
+        .join("wakeup.md");
+    if hb_default.exists() {
+        return;
+    }
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -555,6 +567,81 @@ pub fn k2so_heartbeat_rename(
     Ok(())
 }
 
+/// Archive orphan top-tier agents — agents whose type is `custom`,
+/// `manager`, or `k2so` but that aren't the current primary for this
+/// workspace. Moves them to `.k2so/agents/.archive/<name>-<timestamp>/`
+/// and removes their DB rows (`agent_sessions`, and any stray
+/// `agent_heartbeats` pointing at the orphan's folder). Templates are
+/// ALWAYS preserved — the Workspace Manager delegates to them on-demand.
+///
+/// Idempotent: no-op when there are no orphans. Called at startup
+/// (after heartbeat repair) and from projects_update before an
+/// agent_mode change takes effect.
+pub fn archive_orphan_top_tier_agents(project_path: &str) -> Vec<String> {
+    let mut archived = Vec::new();
+    let agents_root = agents_dir(project_path);
+    if !agents_root.exists() {
+        return archived;
+    }
+    let Some(primary) = find_primary_agent(project_path) else {
+        // Can't resolve primary — don't risk archiving the wrong thing.
+        return archived;
+    };
+
+    let Ok(entries) = fs::read_dir(&agents_root) else { return archived };
+    let mut orphans: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || name == primary {
+            continue;
+        }
+        let agent_type = agent_type_for(project_path, &name);
+        if matches!(agent_type.as_str(), "custom" | "manager" | "k2so") {
+            orphans.push(name);
+        }
+    }
+    if orphans.is_empty() {
+        return archived;
+    }
+
+    let archive_root = agents_root.join(".archive");
+    if fs::create_dir_all(&archive_root).is_err() {
+        return archived;
+    }
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+
+    let project_id = rusqlite::Connection::open(k2so_db_path())
+        .ok()
+        .and_then(|c| resolve_project_id(&c, project_path));
+
+    for orphan in orphans {
+        let src = agents_root.join(&orphan);
+        let dst = archive_root.join(format!("{}-{}", orphan, stamp));
+        if fs::rename(&src, &dst).is_err() {
+            continue;
+        }
+        if let Some(ref pid) = project_id {
+            if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
+                let _ = AgentSession::delete(&conn, pid, &orphan);
+                let prefix = format!(".k2so/agents/{}/", orphan);
+                let _ = conn.execute(
+                    "DELETE FROM agent_heartbeats WHERE project_id = ?1 AND wakeup_path LIKE ?2 || '%'",
+                    rusqlite::params![pid, prefix],
+                );
+            }
+        }
+        archived.push(orphan.clone());
+        log_debug!(
+            "[agent-archive] {} → .archive/{}-{} (primary={})",
+            orphan, orphan, stamp, primary
+        );
+    }
+    archived
+}
+
 /// Detect and repair heartbeats whose `wakeup_path` points at the wrong
 /// agent — typically caused by the pre-0.32.1 migration picking an
 /// orphan agent directory from a prior agent-mode swap. Called on
@@ -579,12 +666,31 @@ pub fn repair_mismigrated_heartbeats(project_path: &str) {
         let correct_wakeup = correct_dir.join("wakeup.md");
 
         let row_is_correct = hb.wakeup_path.starts_with(&expected_prefix);
-        let legacy_present = legacy_wakeup.exists()
-            && fs::read_to_string(&legacy_wakeup).map(|s| !s.trim().is_empty()).unwrap_or(false);
 
-        // Nothing to do when the row is correct AND no legacy agent-root
-        // wakeup.md is left behind from a broken prior migration.
+        // Read legacy agent-root wakeup (if any) and detect whether it's
+        // just a freshly-scaffolded default template. Template marker is
+        // `<!-- DEFAULT TEMPLATE` (from wakeup_templates/*.md). When the
+        // legacy is a template, DON'T use it as a content source — the
+        // row's current wakeup_path has the real edits.
+        let legacy_content = fs::read_to_string(&legacy_wakeup).ok();
+        let legacy_is_template = legacy_content
+            .as_deref()
+            .map(|s| s.contains("<!-- DEFAULT TEMPLATE"))
+            .unwrap_or(false);
+        let legacy_present = legacy_content
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+            && !legacy_is_template;
+
+        // Nothing to do when the row is correct AND no real legacy
+        // agent-root wakeup.md is left behind.
         if row_is_correct && !legacy_present {
+            // Clean up a stray template scaffold if present — it'll
+            // just trick the repair into work on future runs.
+            if legacy_is_template {
+                let _ = fs::remove_file(&legacy_wakeup);
+            }
             continue;
         }
 

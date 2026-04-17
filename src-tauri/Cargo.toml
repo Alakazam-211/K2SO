@@ -1,6 +1,6 @@
 [package]
 name = "k2so"
-version = "0.32.0"
+version = "0.32.1"
 edition = "2021"
 description = "Developer workspace with terminals, git worktrees, and agent presets"
 license = "MIT"
