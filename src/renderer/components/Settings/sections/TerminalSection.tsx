@@ -5,6 +5,17 @@ import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import type { LinkClickMode } from '@/stores/terminal-settings'
 import { SettingRow } from '../controls/SettingControls'
 import { SettingDropdown } from '../controls/SettingControls'
+import type { SettingEntry } from '../searchManifest'
+
+export const TERMINAL_MANIFEST: SettingEntry[] = [
+  { id: 'terminal.font-family', section: 'terminal', label: 'Font Family', description: 'Typeface for terminal text', keywords: ['font', 'typeface'] },
+  { id: 'terminal.font-size', section: 'terminal', label: 'Font Size', description: 'Text size in pixels', keywords: ['font', 'size', 'zoom'] },
+  { id: 'terminal.cursor-style', section: 'terminal', label: 'Cursor Style', description: 'Bar, block, or underline', keywords: ['cursor', 'caret'] },
+  { id: 'terminal.scrollback', section: 'terminal', label: 'Scrollback Buffer', description: 'Number of scrollback lines retained', keywords: ['history', 'buffer', 'scroll'] },
+  { id: 'terminal.natural-text-editing', section: 'terminal', label: 'Natural Text Editing', description: 'Opt+Arrow word motion, Cmd+Arrow line motion', keywords: ['keyboard', 'edit', 'opt', 'alt'] },
+  { id: 'terminal.link-click-mode', section: 'terminal', label: 'Link Click Mode', description: 'Click vs Cmd+Click to activate links', keywords: ['link', 'url', 'click'] },
+  { id: 'terminal.open-links-in-split', section: 'terminal', label: 'Open Links in Split Pane', description: 'Open file links in a sibling pane when splits are active', keywords: ['link', 'split', 'pane'] },
+]
 
 export function TerminalSection(): React.JSX.Element {
   const terminal = useSettingsStore((s) => s.terminal)
@@ -20,7 +31,7 @@ export function TerminalSection(): React.JSX.Element {
 
       <div className="space-y-4">
         {/* Font Family */}
-        <SettingRow label="Font Family">
+        <SettingRow settingId="terminal.font-family" label="Font Family">
           <input
             type="text"
             value={terminal.fontFamily}
@@ -30,7 +41,7 @@ export function TerminalSection(): React.JSX.Element {
         </SettingRow>
 
         {/* Font Size */}
-        <SettingRow label="Font Size">
+        <SettingRow settingId="terminal.font-size" label="Font Size">
           <div className="flex items-center gap-3">
             <input
               type="range"
@@ -56,7 +67,7 @@ export function TerminalSection(): React.JSX.Element {
         </SettingRow>
 
         {/* Cursor Style */}
-        <SettingRow label="Cursor Style">
+        <SettingRow settingId="terminal.cursor-style" label="Cursor Style">
           <SettingDropdown
             value={terminal.cursorStyle}
             options={[
@@ -69,7 +80,7 @@ export function TerminalSection(): React.JSX.Element {
         </SettingRow>
 
         {/* Scrollback */}
-        <SettingRow label="Scrollback Buffer">
+        <SettingRow settingId="terminal.scrollback" label="Scrollback Buffer">
           <input
             type="number"
             min={500}
@@ -85,7 +96,7 @@ export function TerminalSection(): React.JSX.Element {
         </SettingRow>
 
         {/* Natural Text Editing */}
-        <SettingRow label={
+        <SettingRow settingId="terminal.natural-text-editing" label={
           <span title="Opt+Arrow to move by word, Cmd+Arrow for line start/end, Opt+Backspace to delete word">
             Natural Text Editing
           </span>
@@ -105,7 +116,7 @@ export function TerminalSection(): React.JSX.Element {
         </SettingRow>
 
         {/* Link Click Mode */}
-        <SettingRow label={
+        <SettingRow settingId="terminal.link-click-mode" label={
           <span title="How to activate clickable links (URLs and file paths) in terminal output">
             Link Click Mode
           </span>
@@ -121,7 +132,7 @@ export function TerminalSection(): React.JSX.Element {
         </SettingRow>
 
         {/* Open Links in Split Pane */}
-        <SettingRow label={
+        <SettingRow settingId="terminal.open-links-in-split" label={
           <span title="When split panes are active, open file links in the sibling pane instead of a new tab">
             Open Links in Split Pane
           </span>

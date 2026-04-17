@@ -2,6 +2,13 @@ import React from 'react'
 import { useCallback, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { CAP_STATES, CAP_LABELS, CAP_COLORS, CAPABILITIES, type StateData } from '@shared/constants/capabilities'
+import type { SettingEntry } from '../searchManifest'
+
+export const WORKSPACE_STATES_MANIFEST: SettingEntry[] = [
+  { id: 'workspace-states.list', section: 'workspace-states', label: 'Workspace States', description: 'Capability states that control what agents do automatically per workspace', keywords: ['workspace', 'state', 'locked', 'managed', 'build', 'maintenance', 'heartbeat', 'capability'] },
+  { id: 'workspace-states.new', section: 'workspace-states', label: 'New State', description: 'Create a custom workspace state', keywords: ['new', 'create', 'state', 'custom'] },
+  { id: 'workspace-states.capabilities', section: 'workspace-states', label: 'Capabilities Explained', description: 'Features / Issues / Crashes / Security / Audits and auto vs gated vs off', keywords: ['capabilities', 'features', 'issues', 'crashes', 'security', 'audits', 'auto', 'gated'] },
+]
 
 export function WorkspaceStatesSection(): React.JSX.Element {
   const [states, setStates] = useState<StateData[]>([])

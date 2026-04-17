@@ -10,6 +10,17 @@ import {
 } from '@/stores/timer'
 import { SettingDropdown } from '../controls/SettingControls'
 import { BUILT_IN_THEMES } from '@shared/constants/timer-themes'
+import type { SettingEntry } from '../searchManifest'
+
+export const TIMER_MANIFEST: SettingEntry[] = [
+  { id: 'timer.visible', section: 'timer', label: 'Show Timer Button', description: 'Display the timer icon in the top bar', keywords: ['timer', 'clock', 'show', 'hide'] },
+  { id: 'timer.countdown', section: 'timer', label: 'Countdown Before Start', description: 'Animated 3-2-1 countdown before the timer begins', keywords: ['countdown', 'intro', 'start'] },
+  { id: 'timer.countdown-theme', section: 'timer', label: 'Countdown Theme', description: 'Visual theme for the countdown animation', keywords: ['theme', 'countdown', 'rocket', 'matrix', 'retro'] },
+  { id: 'timer.custom-themes', section: 'timer', label: 'Custom Themes', description: 'Upload your own countdown theme JSON', keywords: ['custom', 'theme', 'upload', 'json'] },
+  { id: 'timer.skip-memo', section: 'timer', label: 'Skip Memo on Stop', description: 'Save entries without asking for a note', keywords: ['memo', 'note', 'prompt'] },
+  { id: 'timer.timezone', section: 'timer', label: 'Timezone', description: 'Display times in this IANA timezone', keywords: ['timezone', 'time', 'zone', 'tz'] },
+  { id: 'timer.history', section: 'timer', label: 'Timer History', description: 'Past time entries with CSV/JSON export', keywords: ['history', 'entries', 'export', 'csv', 'json'] },
+]
 
 // Common IANA timezones for the dropdown
 const COMMON_TIMEZONES = [

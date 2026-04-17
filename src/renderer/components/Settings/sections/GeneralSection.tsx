@@ -7,6 +7,20 @@ import { checkForUpdate } from '@/hooks/useUpdateChecker'
 import { AgenticSystemsToggle } from '../shared/AgenticSystemsToggle'
 import { ClaudeAuthRefreshRow } from '../shared/ClaudeAuthRefreshRow'
 import { LocalLLMSettings } from '../shared/LocalLLMSettings'
+import type { SettingEntry } from '../searchManifest'
+
+export const GENERAL_MANIFEST: SettingEntry[] = [
+  { id: 'general.app-version', section: 'general', label: 'App Version', description: 'K2SO version and auto-updater', keywords: ['update', 'version', 'check', 'release'] },
+  { id: 'general.cli-version', section: 'general', label: 'CLI Version', description: 'Installed k2so CLI version + install/update button', keywords: ['k2so', 'cli', 'terminal', 'install', 'update', 'path'] },
+  { id: 'general.agentic-systems', section: 'general', label: 'Agentic Systems', description: 'Enable AI agent orchestration, workspace manager, heartbeat, review queue', keywords: ['ai', 'agent', 'agentic', 'heartbeat', 'manager', 'workspace states', 'review', 'beta'] },
+  { id: 'general.claude-auth-refresh', section: 'general', label: 'Auto-refresh Claude credentials', description: 'Background scheduler that keeps your Claude session alive', keywords: ['claude', 'auth', 'token', 'login', 'credentials', 'scheduler'] },
+  { id: 'general.ai-assistant', section: 'general', label: 'AI Workspace Assistant', description: 'Local LLM for natural-language workspace operations (⌘L)', keywords: ['ai', 'assistant', 'llm', 'cmd+l', 'qwen', 'model', 'local', 'gguf'] },
+  { id: 'general.model-status', section: 'general', label: 'Model Status', description: 'Current local LLM load state', keywords: ['model', 'llm', 'loaded', 'download'] },
+  { id: 'general.download-model', section: 'general', label: 'Download Default Model', description: 'Fetch Qwen2.5-1.5B locally (~1.1GB)', keywords: ['download', 'model', 'qwen', 'local llm'] },
+  { id: 'general.custom-model', section: 'general', label: 'Custom Model', description: 'Point at any GGUF model file', keywords: ['model', 'gguf', 'custom', 'load'] },
+  { id: 'general.config-location', section: 'general', label: 'Config Location', description: '~/.k2so/settings.json', keywords: ['settings', 'config', 'location', 'path'] },
+  { id: 'general.reset-all', section: 'general', label: 'Reset All Settings', description: 'Revert every setting to its default', keywords: ['reset', 'defaults', 'factory'] },
+]
 
 export function GeneralSection(): React.JSX.Element {
   const resetAllSettings = useSettingsStore((s) => s.resetAllSettings)

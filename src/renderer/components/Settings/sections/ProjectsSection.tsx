@@ -20,6 +20,20 @@ import { SettingsGroup, SettingDropdown } from '../controls/SettingControls'
 import { CAP_LABELS, CAP_COLORS, CAPABILITIES, type StateData } from '@shared/constants/capabilities'
 import { showContextMenu } from '@/lib/context-menu'
 import { SectionErrorBoundary } from '../SectionErrorBoundary'
+import type { SettingEntry } from '../searchManifest'
+
+export const PROJECTS_MANIFEST: SettingEntry[] = [
+  { id: 'projects.list', section: 'projects', label: 'Workspaces', description: 'All registered projects + focus groups', keywords: ['workspaces', 'projects', 'focus groups'] },
+  { id: 'projects.add', section: 'projects', label: 'Add Workspace', description: 'Register a new project directory', keywords: ['add', 'new', 'workspace', 'project', 'folder'] },
+  { id: 'projects.focus-groups', section: 'projects', label: 'Focus Groups', description: 'Organize workspaces into tabbed folders', keywords: ['focus', 'groups', 'tabs'] },
+  { id: 'projects.project-context', section: 'projects', label: 'Project Context', description: 'Shared .k2so/PROJECT.md injected into every agent', keywords: ['project context', 'project.md', 'claude.md', 'shared'] },
+  { id: 'projects.workspace-wakeup', section: 'projects', label: 'Workspace Wake-up', description: 'What the workspace manager does when the heartbeat wakes it', keywords: ['wakeup', 'wake-up', 'heartbeat', 'manager', 'lead', 'triage'] },
+  { id: 'projects.heartbeat', section: 'projects', label: 'Heartbeat Schedule', description: 'Scheduled / hourly / off per-project heartbeat mode', keywords: ['heartbeat', 'schedule', 'cron', 'hourly', 'scheduled'] },
+  { id: 'projects.agents', section: 'projects', label: 'Project Agents', description: 'Custom agent personas + wake-up files per workspace', keywords: ['agent', 'persona', 'wakeup', 'create'] },
+  { id: 'projects.worktrees', section: 'projects', label: 'Worktree Folders', description: 'Enable/disable per-agent git worktrees', keywords: ['worktree', 'git', 'branch'] },
+  { id: 'projects.relations', section: 'projects', label: 'Connected Workspaces', description: 'Workspace relations for cross-project messaging', keywords: ['relations', 'connected', 'cross-workspace', 'links'] },
+  { id: 'projects.cursor-migrate', section: 'projects', label: 'Cursor Session Migration', description: 'Port Cursor IDE sessions into K2SO', keywords: ['cursor', 'migrate', 'session', 'import'] },
+]
 
 export function ProjectsSection(): React.JSX.Element {
   const projects = useProjectsStore((s) => s.projects)

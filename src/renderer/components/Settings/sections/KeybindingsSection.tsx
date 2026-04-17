@@ -11,6 +11,38 @@ import {
 } from '@shared/hotkeys'
 import type { HotkeyDefinition } from '@shared/hotkeys'
 import { KeyCombo } from '@/components/KeySymbol'
+import type { SettingEntry } from '../searchManifest'
+
+/**
+ * Keybindings manifest: one entry per hotkey definition (dynamically
+ * derived from HOTKEYS) plus the workspace-number-shortcuts layout
+ * toggle. HOTKEYS is imported above, so changing it here once keeps
+ * the search index in sync.
+ */
+export const KEYBINDINGS_MANIFEST: SettingEntry[] = [
+  {
+    id: 'keybindings.shortcut-layout',
+    section: 'keybindings',
+    label: 'Workspace Number Shortcuts',
+    description: '⌘ 1-9 for Active vs Pinned (swap)',
+    keywords: ['workspace', 'shortcut', 'layout', 'number', 'cmd', 'pinned', 'active'],
+  },
+  {
+    id: 'keybindings.reset-all',
+    section: 'keybindings',
+    label: 'Reset All to Defaults',
+    description: 'Revert every keybinding to its default',
+    keywords: ['reset', 'defaults', 'keybindings'],
+  },
+  ...HOTKEYS.map((h) => ({
+    id: `keybindings.${h.id}`,
+    section: 'keybindings' as const,
+    group: h.category,
+    label: h.label,
+    description: `Rebind the ${h.category} hotkey for ${h.label}`,
+    keywords: [h.id, h.category.toLowerCase(), 'hotkey', 'shortcut', 'keybinding', 'rebind'],
+  })),
+]
 
 export function KeybindingsSection(): React.JSX.Element {
   const keybindings = useSettingsStore((s) => s.keybindings)

@@ -1,6 +1,17 @@
 import React from 'react'
 import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import type { SettingEntry } from '../searchManifest'
+
+export const COMPANION_MANIFEST: SettingEntry[] = [
+  { id: 'companion.enable', section: 'companion', label: 'Enable Companion', description: 'Start the ngrok tunnel for the K2SO mobile companion app', keywords: ['mobile', 'companion', 'remote', 'ngrok', 'tunnel'] },
+  { id: 'companion.auto-start', section: 'companion', label: 'Start on Launch', description: 'Auto-connect when K2SO opens', keywords: ['auto', 'launch', 'startup'] },
+  { id: 'companion.username', section: 'companion', label: 'Username', description: 'Username the mobile app authenticates with', keywords: ['username', 'auth', 'login'] },
+  { id: 'companion.password', section: 'companion', label: 'Password', description: 'Password the mobile app authenticates with', keywords: ['password', 'auth', 'login'] },
+  { id: 'companion.ngrok-token', section: 'companion', label: 'ngrok Auth Token', description: 'Required for the remote tunnel', keywords: ['ngrok', 'token', 'tunnel', 'auth'] },
+  { id: 'companion.ngrok-domain', section: 'companion', label: 'Custom Domain', description: 'Paid ngrok plans (e.g. myapp.ngrok.app)', keywords: ['domain', 'ngrok', 'url'] },
+  { id: 'companion.sessions', section: 'companion', label: 'Active Sessions', description: 'Connected mobile companion clients', keywords: ['sessions', 'connected', 'disconnect', 'client'] },
+]
 
 export function CompanionSection(): React.JSX.Element {
   const [enabled, setEnabled] = useState(false)

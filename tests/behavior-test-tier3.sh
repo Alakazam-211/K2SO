@@ -449,6 +449,96 @@ for cmd in fs_search_tree clipboard_read_file_paths; do
 done
 
 # ═══════════════════════════════════════════════════════════════════════
+section "3.9: Settings Search Palette"
+# ═══════════════════════════════════════════════════════════════════════
+
+SETTINGS_DIR="$PROJECT_ROOT/src/renderer/components/Settings"
+
+# Core files exist
+if [ -f "$SETTINGS_DIR/searchManifest.ts" ]; then
+    pass "settings search: searchManifest.ts exists"
+else
+    fail "settings search: searchManifest.ts missing" "Expected $SETTINGS_DIR/searchManifest.ts"
+fi
+
+if [ -f "$SETTINGS_DIR/SettingsSearchModal.tsx" ]; then
+    pass "settings search: SettingsSearchModal.tsx exists"
+else
+    fail "settings search: modal missing" "Expected $SETTINGS_DIR/SettingsSearchModal.tsx"
+fi
+
+# Every section file exports SECTION_MANIFEST (or its named equivalent)
+SECTIONS=(
+    "GeneralSection:GENERAL_MANIFEST"
+    "ProjectsSection:PROJECTS_MANIFEST"
+    "WorkspaceStatesSection:WORKSPACE_STATES_MANIFEST"
+    "AgentSkillsSection:AGENT_SKILLS_MANIFEST"
+    "TerminalSection:TERMINAL_MANIFEST"
+    "CodeEditorSettingsSection:CODE_EDITOR_MANIFEST"
+    "EditorsAgentsSection:EDITORS_AGENTS_MANIFEST"
+    "KeybindingsSection:KEYBINDINGS_MANIFEST"
+    "TimerSection:TIMER_MANIFEST"
+    "CompanionSection:COMPANION_MANIFEST"
+)
+for pair in "${SECTIONS[@]}"; do
+    file="${pair%:*}"
+    export_name="${pair#*:}"
+    path="$SETTINGS_DIR/sections/$file.tsx"
+    if [ -f "$path" ] && grep -q "export const $export_name" "$path"; then
+        pass "section manifest: $file exports $export_name"
+    else
+        fail "section manifest: $file missing $export_name" "Expected in $path"
+    fi
+done
+
+# Router imports every manifest
+ROUTER="$SETTINGS_DIR/Settings.tsx"
+for pair in "${SECTIONS[@]}"; do
+    export_name="${pair#*:}"
+    if grep -q "$export_name" "$ROUTER"; then
+        pass "Settings.tsx imports $export_name"
+    else
+        fail "Settings.tsx missing $export_name import" "Add import to Settings.tsx"
+    fi
+done
+
+# Escape fix: modal has both React-synthetic stopPropagation AND native
+# capture-phase window listener. Regression-guards the fix that keeps
+# Escape from closing Settings when the search modal is open.
+MODAL_SRC="$SETTINGS_DIR/SettingsSearchModal.tsx"
+if grep -q "stopPropagation" "$MODAL_SRC"; then
+    pass "settings search: modal stops event propagation on Escape"
+else
+    fail "settings search: propagation not stopped" "Expected stopPropagation() in Escape handler"
+fi
+if grep -q "window.addEventListener.*keydown.*true" "$MODAL_SRC"; then
+    pass "settings search: modal installs native capture-phase Escape listener"
+else
+    fail "settings search: no capture listener" "Expected window.addEventListener('keydown', ..., true)"
+fi
+
+# SettingRow accepts settingId prop (powers scroll-to-row highlighting)
+CONTROLS="$SETTINGS_DIR/controls/SettingControls.tsx"
+if grep -q "settingId" "$CONTROLS" && grep -q "data-settings-id" "$CONTROLS"; then
+    pass "settings search: SettingRow supports settingId + renders data-settings-id"
+else
+    fail "settings search: row id plumbing" "SettingRow should accept settingId and set data-settings-id"
+fi
+
+# Magnifier button + CMD+F hotkey wired in router
+if grep -q "setSearchOpen" "$ROUTER"; then
+    pass "Settings.tsx: searchOpen state wired"
+else
+    fail "Settings.tsx: searchOpen state missing" "Router should manage modal open/close state"
+fi
+
+if grep -q "metaKey.*'f'\|ctrlKey.*'f'" "$ROUTER" || grep -q "'f'.*metaKey\|'f'.*ctrlKey" "$ROUTER"; then
+    pass "Settings.tsx: ⌘F hotkey opens the search modal"
+else
+    fail "Settings.tsx: ⌘F hotkey missing" "Expected Cmd/Ctrl+F binding that opens the modal"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
 # Results
 # ═══════════════════════════════════════════════════════════════════════
 

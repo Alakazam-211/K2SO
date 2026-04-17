@@ -6,6 +6,33 @@ import { usePresetsStore } from '@/stores/presets'
 import AgentIcon from '@/components/AgentIcon/AgentIcon'
 import { KeyCombo } from '@/components/KeySymbol'
 import { SettingDropdown } from '../controls/SettingControls'
+import type { SettingEntry } from '../searchManifest'
+
+export const EDITORS_AGENTS_MANIFEST: SettingEntry[] = [
+  // Defaults
+  { id: 'editors-agents.default-editor', section: 'editors-agents', group: 'Defaults', label: 'Default Editor', description: 'Opens files and projects with this editor', keywords: ['editor', 'default', 'cursor', 'vscode', 'zed'] },
+  { id: 'editors-agents.default-terminal', section: 'editors-agents', group: 'Defaults', label: 'Default Terminal', description: 'Right-click a tab to open in this terminal', keywords: ['terminal', 'default', 'iterm', 'warp', 'ghostty'] },
+  { id: 'editors-agents.default-agent', section: 'editors-agents', group: 'Defaults', label: 'Default AI Agent', description: 'Launched with ⇧⌘T or from the assistant', keywords: ['agent', 'default', 'claude', 'codex', 'gemini'] },
+  // Detected apps
+  { id: 'editors-agents.detected-editors', section: 'editors-agents', label: 'Detected Editors', description: 'Editors discovered on your system', keywords: ['detected', 'editors', 'scan', 'refresh'] },
+  { id: 'editors-agents.terminal-apps', section: 'editors-agents', label: 'Terminal Apps', description: 'Terminal emulators detected on your system', keywords: ['terminal', 'apps', 'detected'] },
+  // Presets
+  { id: 'editors-agents.agent-presets', section: 'editors-agents', label: 'Agent Presets', description: 'AI coding agent command palette', keywords: ['presets', 'commands', 'agents'] },
+  { id: 'editors-agents.reset-built-ins', section: 'editors-agents', label: 'Reset Built-ins', description: 'Restore the default agent presets', keywords: ['reset', 'defaults', 'built-in'] },
+  { id: 'editors-agents.add-preset', section: 'editors-agents', label: 'Add Custom Preset', description: 'Register your own AI agent command', keywords: ['preset', 'custom', 'add', 'cli'] },
+  // CLI install guide — one entry per shipped CLI tool
+  { id: 'editors-agents.cli-claude', section: 'editors-agents', group: 'CLI Tools', label: 'Claude Code', description: 'Install instructions for the Claude Code CLI', keywords: ['claude', 'install', 'cli'] },
+  { id: 'editors-agents.cli-codex', section: 'editors-agents', group: 'CLI Tools', label: 'OpenAI Codex', description: 'Install instructions for the Codex CLI', keywords: ['codex', 'openai', 'install', 'cli'] },
+  { id: 'editors-agents.cli-gemini', section: 'editors-agents', group: 'CLI Tools', label: 'Gemini CLI', description: 'Install instructions for the Gemini CLI', keywords: ['gemini', 'google', 'install', 'cli'] },
+  { id: 'editors-agents.cli-copilot', section: 'editors-agents', group: 'CLI Tools', label: 'GitHub Copilot CLI', description: 'Install instructions for the Copilot CLI', keywords: ['copilot', 'github', 'install', 'cli'] },
+  { id: 'editors-agents.cli-aider', section: 'editors-agents', group: 'CLI Tools', label: 'Aider', description: 'Install instructions for Aider', keywords: ['aider', 'install', 'cli', 'pip'] },
+  { id: 'editors-agents.cli-cursor-agent', section: 'editors-agents', group: 'CLI Tools', label: 'Cursor Agent', description: 'Install instructions for Cursor Agent', keywords: ['cursor', 'install', 'cli'] },
+  { id: 'editors-agents.cli-opencode', section: 'editors-agents', group: 'CLI Tools', label: 'OpenCode', description: 'Install instructions for OpenCode', keywords: ['opencode', 'install', 'cli'] },
+  { id: 'editors-agents.cli-code-puppy', section: 'editors-agents', group: 'CLI Tools', label: 'Code Puppy', description: 'Install instructions for Code Puppy', keywords: ['puppy', 'install', 'cli'] },
+  { id: 'editors-agents.cli-goose', section: 'editors-agents', group: 'CLI Tools', label: 'Goose', description: 'Install instructions for Goose', keywords: ['goose', 'block', 'install', 'cli'] },
+  { id: 'editors-agents.cli-pi', section: 'editors-agents', group: 'CLI Tools', label: 'Pi', description: 'Install instructions for Pi', keywords: ['pi', 'install', 'cli'] },
+  { id: 'editors-agents.cli-ollama', section: 'editors-agents', group: 'CLI Tools', label: 'Ollama', description: 'Install instructions for Ollama (local models)', keywords: ['ollama', 'install', 'cli', 'local llm'] },
+]
 
 interface EditorDetected {
   id: string

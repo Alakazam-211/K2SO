@@ -3,13 +3,23 @@ import { useEffect, useRef, useState } from 'react'
 
 export function SettingRow({
   label,
-  children
+  children,
+  settingId,
 }: {
   label: React.ReactNode
   children: React.ReactNode
+  /**
+   * Optional stable identifier used by the Settings search palette to
+   * scroll this row into view and highlight it. Conventionally matches
+   * a `SettingEntry.id` — e.g. `"terminal.font-family"`.
+   */
+  settingId?: string
 }): React.JSX.Element {
   return (
-    <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
+    <div
+      className="flex items-center justify-between py-2 border-b border-[var(--color-border)]"
+      data-settings-id={settingId}
+    >
       <span className="text-xs text-[var(--color-text-secondary)]">{label}</span>
       {children}
     </div>

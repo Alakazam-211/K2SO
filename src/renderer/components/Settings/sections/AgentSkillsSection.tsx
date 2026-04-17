@@ -3,6 +3,14 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import type { SettingEntry } from '../searchManifest'
+
+export const AGENT_SKILLS_MANIFEST: SettingEntry[] = [
+  { id: 'agent-skills.manager', section: 'agent-skills', label: 'Workspace Manager Skills', description: 'Auto-generated + custom skill layers for the workspace manager', keywords: ['manager', 'skills', 'workspace', 'triage', 'delegate'] },
+  { id: 'agent-skills.agent-template', section: 'agent-skills', label: 'Agent Template Skills', description: 'Skill layers shared by every team member agent', keywords: ['template', 'skills', 'agent', 'checkin'] },
+  { id: 'agent-skills.custom-agent', section: 'agent-skills', label: 'Custom Agent Skills', description: 'Skill layers for custom / heartbeat-driven agents', keywords: ['custom', 'skills', 'agent', 'cross-workspace'] },
+  { id: 'agent-skills.add-layer', section: 'agent-skills', label: 'Add Skill Layer', description: 'Create a new markdown skill layer', keywords: ['add', 'new', 'layer', 'skill'] },
+]
 
 type SkillTier = 'manager' | 'agent_template' | 'custom_agent'
 

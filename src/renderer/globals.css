@@ -980,3 +980,18 @@ a,
   50%  { transform: scale(1.8); opacity: 0; }
   100% { transform: scale(1.8); opacity: 0; }
 }
+
+/* ── Settings search — pulse the jumped-to row ────────────────────── */
+/* When the Settings search palette picks a row, we scroll it into view
+   and toggle this class for ~1.5s so the user's eye can catch it. */
+
+@keyframes settings-search-pulse {
+  0%, 100% { background-color: transparent; }
+  15%      { background-color: rgba(147, 197, 253, 0.25); }
+  50%      { background-color: rgba(147, 197, 253, 0.15); }
+}
+
+.settings-search-pulse {
+  animation: settings-search-pulse 1.5s ease-out;
+  border-radius: 2px;
+}

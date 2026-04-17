@@ -6,6 +6,36 @@ import { EDITOR_THEMES, EDITOR_FONTS, CodeEditor } from '@/components/FileViewer
 import { CustomThemeCreator } from '../CustomThemeCreator'
 import { SectionErrorBoundary } from '../SectionErrorBoundary'
 import { SettingDropdown } from '../controls/SettingControls'
+import type { SettingEntry } from '../searchManifest'
+
+export const CODE_EDITOR_MANIFEST: SettingEntry[] = [
+  // Appearance
+  { id: 'code-editor.theme', section: 'code-editor', group: 'Appearance', label: 'Theme', description: 'Color theme for the code editor', keywords: ['theme', 'colors', 'appearance', 'dark mode', 'light mode'] },
+  { id: 'code-editor.font-family', section: 'code-editor', group: 'Appearance', label: 'Font Family', description: 'Monospace font for code editing', keywords: ['font', 'typeface', 'family'] },
+  { id: 'code-editor.font-size', section: 'code-editor', group: 'Appearance', label: 'Font Size', description: 'Editor text size in pixels', keywords: ['font', 'size', 'zoom'] },
+  { id: 'code-editor.font-ligatures', section: 'code-editor', group: 'Appearance', label: 'Font Ligatures', description: 'Programming ligatures (e.g. => becomes arrow)', keywords: ['ligatures', 'font', 'arrow', 'fira', 'jetbrains'] },
+  { id: 'code-editor.cursor-style', section: 'code-editor', group: 'Appearance', label: 'Cursor Style', description: 'Bar / block / underline', keywords: ['cursor', 'caret'] },
+  { id: 'code-editor.cursor-blink', section: 'code-editor', group: 'Appearance', label: 'Cursor Blink', description: 'Animate the cursor blinking', keywords: ['cursor', 'blink'] },
+  // Editing
+  { id: 'code-editor.tab-size', section: 'code-editor', group: 'Editing', label: 'Tab Size', description: 'Default spaces per indentation', keywords: ['tab', 'indent', 'spaces', 'size'] },
+  { id: 'code-editor.word-wrap', section: 'code-editor', group: 'Editing', label: 'Word Wrap', description: 'Wrap long lines instead of horizontal scroll', keywords: ['wrap', 'word', 'lines'] },
+  { id: 'code-editor.autocomplete', section: 'code-editor', group: 'Editing', label: 'Autocomplete', description: 'Word-based completion suggestions as you type', keywords: ['autocomplete', 'complete', 'suggestions', 'intellisense'] },
+  { id: 'code-editor.bracket-matching', section: 'code-editor', group: 'Editing', label: 'Bracket Matching', description: 'Highlight matching brackets', keywords: ['brackets', 'match', 'pair'] },
+  { id: 'code-editor.format-on-save', section: 'code-editor', group: 'Editing', label: 'Format on Save', description: 'Auto-format with Prettier/rustfmt/black on ⌘S', keywords: ['format', 'save', 'prettier', 'rustfmt', 'black'] },
+  { id: 'code-editor.show-whitespace', section: 'code-editor', group: 'Editing', label: 'Show Whitespace', description: 'Render spaces and tabs as visible dots', keywords: ['whitespace', 'spaces', 'tabs', 'invisible'] },
+  // Gutter & Display
+  { id: 'code-editor.line-numbers', section: 'code-editor', group: 'Gutter & Display', label: 'Line Numbers', description: 'Show line numbers in the gutter', keywords: ['line numbers', 'gutter', 'numbers'] },
+  { id: 'code-editor.indent-guides', section: 'code-editor', group: 'Gutter & Display', label: 'Indent Guides', description: 'Vertical indentation guide lines', keywords: ['indent', 'guides', 'rulers'] },
+  { id: 'code-editor.fold-gutter', section: 'code-editor', group: 'Gutter & Display', label: 'Code Folding', description: 'Show fold/unfold arrows in the gutter', keywords: ['fold', 'collapse', 'gutter'] },
+  { id: 'code-editor.highlight-active-line', section: 'code-editor', group: 'Gutter & Display', label: 'Highlight Active Line', description: 'Subtle background on the current line', keywords: ['highlight', 'active', 'current line'] },
+  { id: 'code-editor.scroll-past-end', section: 'code-editor', group: 'Gutter & Display', label: 'Scroll Past End', description: 'Allow scrolling beyond the last line', keywords: ['scroll', 'past end', 'bottom'] },
+  { id: 'code-editor.minimap', section: 'code-editor', group: 'Gutter & Display', label: 'Minimap', description: 'Miniature overview of the file on the right', keywords: ['minimap', 'overview', 'scroll preview'] },
+  { id: 'code-editor.diff-style', section: 'code-editor', group: 'Gutter & Display', label: 'Diff Style', description: 'Gutter marks vs inline PR-style diffs', keywords: ['diff', 'changes', 'pr view'] },
+  { id: 'code-editor.scrollbar-annotations', section: 'code-editor', group: 'Gutter & Display', label: 'Scrollbar Annotations', description: 'Colored markers on the scrollbar where code changed', keywords: ['scrollbar', 'annotations', 'markers'] },
+  { id: 'code-editor.sticky-scroll', section: 'code-editor', group: 'Gutter & Display', label: 'Sticky Scroll', description: 'Pin current function/class header at the top', keywords: ['sticky', 'scroll', 'breadcrumbs', 'header'] },
+  // Keybindings & Modes
+  { id: 'code-editor.vim-mode', section: 'code-editor', group: 'Keybindings', label: 'Vim Mode', description: 'Full vim keybinding emulation (hjkl, modes, commands)', keywords: ['vim', 'modal', 'hjkl', 'keybindings'] },
+]
 
 export function CodeEditorSettingsSection(): React.JSX.Element {
   const editor = useSettingsStore((s) => s.editor)
