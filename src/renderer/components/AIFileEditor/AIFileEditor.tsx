@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { AlacrittyTerminalView } from '../Terminal/AlacrittyTerminalView'
@@ -99,6 +99,12 @@ interface AIFileEditorProps {
    * Parent can use this to swap its preview panel to match.
    */
   onActiveFileChange?: (path: string) => void
+  /**
+   * Render the file tab strip. Defaults to true when `files` is provided.
+   * Set to false when the parent already has its own tab UI and is only
+   * using `files` for multi-file watching.
+   */
+  showTabs?: boolean
 }
 
 // ── Component ────────────────────────────────────────────────────────
@@ -119,6 +125,7 @@ export function AIFileEditor({
   onManualRefresh,
   trackFileRename = false,
   onActiveFileChange,
+  showTabs,
 }: AIFileEditorProps): React.JSX.Element {
   const terminalIdRef = useRef(`ai-editor-${crypto.randomUUID()}`)
   const [terminalReady, setTerminalReady] = useState(false)
@@ -130,10 +137,11 @@ export function AIFileEditor({
   const [activeFilePath, setActiveFilePath] = useState(effectivePath)
 
   // Sync with prop changes (e.g. tab switches from within multi-file mode,
-  // or parent swapping the single-file filePath).
+  // or parent swapping the single-file filePath). The per-path Map in
+  // the watcher handles cache invalidation for previously-unseen paths,
+  // so no manual reset is needed here.
   useEffect(() => {
     setActiveFilePath(effectivePath)
-    lastContentRef.current = '' // Reset so new file content triggers onFileChange
   }, [effectivePath])
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -175,16 +183,40 @@ export function AIFileEditor({
   }, [command, args, cwd])
 
   // ── File watching + polling fallback ─────────────────────────────────
-  const lastContentRef = useRef<string>('')
+  // We watch every file the parent declared (via `files`) — not just the
+  // currently-active tab — so the parent's preview can reflect external
+  // edits to any tracked file (e.g. the AI terminal editing wakeup.md
+  // while the user has the Persona tab in focus).
+  const lastContentByPathRef = useRef<Map<string, string>>(new Map())
   const fileExtension = effectivePath.split('.').pop() || 'json'
+  const watchedPaths = useMemo<string[]>(() => {
+    if (files && files.length > 0) return files.map((f) => f.path)
+    return [filePath]
+  }, [files, filePath])
+  // Stable dep for the watcher effect — re-run only when the set of
+  // watched paths actually changes, not on every render.
+  const watchedKey = watchedPaths.join('|')
 
   useEffect(() => {
     let unlisten: (() => void) | null = null
 
-    const findAndRead = async () => {
+    const readOne = async (path: string) => {
       try {
-        if (trackFileRename) {
-          // Scan directory for renamed files — used by theme editor etc.
+        const result = await invoke<{ content: string; path: string; name: string }>('fs_read_file', { path })
+        const prev = lastContentByPathRef.current.get(path)
+        if (result.content !== prev) {
+          lastContentByPathRef.current.set(path, result.content)
+          onFileChange(result.content, path)
+        }
+      } catch {
+        // File may be mid-write or temporarily missing — ignore
+      }
+    }
+
+    const findAndRead = async () => {
+      if (trackFileRename) {
+        // Scan directory for renamed files — used by theme editor etc.
+        try {
           const entries = await invoke<{ name: string; path: string; isDirectory: boolean; modifiedAt: number }[]>(
             'fs_read_dir', { path: watchDir }
           )
@@ -195,30 +227,19 @@ export function AIFileEditor({
           const target = matching[0]
           if (!target) return
 
-          // Only update activeFilePath if the original was renamed (no longer in directory)
           const originalStillExists = entries.some((e) => e.path === filePath)
           if (!originalStillExists && target.path !== filePath) {
             setActiveFilePath(target.path)
           }
-
-          const result = await invoke<{ content: string; path: string; name: string }>('fs_read_file', { path: target.path })
-          const content = result.content
-          if (content !== lastContentRef.current) {
-            lastContentRef.current = content
-            onFileChange(content, target.path)
-          }
-        } else {
-          // Direct file read — no directory scanning, no rename detection
-          const result = await invoke<{ content: string; path: string; name: string }>('fs_read_file', { path: effectivePath })
-          const content = result.content
-          if (content !== lastContentRef.current) {
-            lastContentRef.current = content
-            onFileChange(content, effectivePath)
-          }
+          await readOne(target.path)
+        } catch {
+          // Directory may not exist yet — ignore
         }
-      } catch {
-        // Directory might not exist yet or file mid-write — ignore
+        return
       }
+      // Normal mode: re-read every tracked file, fire onFileChange only
+      // for those whose content actually changed since last read.
+      await Promise.all(watchedPaths.map(readOne))
     }
 
     invoke('fs_watch_dir', { path: watchDir }).catch((err) => {
@@ -238,7 +259,7 @@ export function AIFileEditor({
       if (debounceRef.current) clearTimeout(debounceRef.current)
       invoke('fs_unwatch_dir', { path: watchDir }).catch((e) => console.warn('[ai-editor]', e))
     }
-  }, [watchDir, effectivePath, fileExtension, trackFileRename, onFileChange])
+  }, [watchDir, watchedKey, fileExtension, trackFileRename, onFileChange, filePath, watchedPaths])
 
   // ── Terminal cleanup on unmount ────────────────────────────────────
   const cwdRef = useRef(cwd)
@@ -296,8 +317,8 @@ export function AIFileEditor({
         <span className="text-[11px] text-amber-300/80 leading-relaxed">{warningText}</span>
       </div>
 
-      {/* ── File tabs (multi-file mode only) ── */}
-      {isMultiFile && files && (
+      {/* ── File tabs (multi-file mode only; parent can hide via showTabs=false) ── */}
+      {isMultiFile && files && (showTabs ?? true) && (
         <div className="flex items-center gap-1 px-4 py-1.5 border-b border-[var(--color-border)] flex-shrink-0">
           {files.map((f, i) => (
             <button

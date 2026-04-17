@@ -364,15 +364,23 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
     )
   }
 
-  // The AIFileEditor's outer tab strip was removed because the preview
-  // panel on the right already shows tabs for Profile / Wake-up /
-  // Agent CLAUDE.md / Workspace CLAUDE.md. Two layers of tabs was
-  // confusing. The AI agent running in the terminal is told about
-  // wakeup.md in its system prompt and edits it directly via its file
-  // tools — the user doesn't need a separate "focused file" selector.
+  // The AIFileEditor's outer tab strip is hidden (showTabs={false})
+  // because the preview panel on the right already shows tabs for
+  // Profile / Wake-up / Agent CLAUDE.md / Workspace CLAUDE.md. Two
+  // layers of tabs was confusing. We still pass `files` so the
+  // watcher tracks every file — otherwise AI edits to wakeup.md (or
+  // any non-active file) wouldn't reach the preview panel.
+  const editorFiles = wakeupPath
+    ? [
+        { path: agentMdPath, label: 'Persona' },
+        { path: wakeupPath, label: 'Wake-up' },
+      ]
+    : undefined
   return (
     <AIFileEditor
       filePath={agentMdPath}
+      files={editorFiles}
+      showTabs={false}
       watchDir={watchDir}
       cwd={watchDir}
       command={terminalCommand}
