@@ -544,6 +544,15 @@ else
     fail "working-state: priority guard" "Expected guard against clobbering permission/review"
 fi
 
+# tauri://drag-drop is window-level — every terminal listens. Without a
+# hit-test against containerRef, a drop into one column of a split layout
+# pastes into every terminal in the window.
+if grep -q 'containerRef.current?.contains(el)' "$ATV_SRC"; then
+    pass "drop hit-test: tauri://drag-drop listener checks containerRef before accepting"
+else
+    fail "drop hit-test: missing containerRef check" "Expected containerRef.current?.contains(el) guard in tauri://drag-drop listener"
+fi
+
 # ═══════════════════════════════════════════════════════════════════════
 section "3.9: Settings Search Palette"
 # ═══════════════════════════════════════════════════════════════════════

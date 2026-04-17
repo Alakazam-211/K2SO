@@ -386,11 +386,16 @@ export function AlacrittyTerminalView({
           const { paths, position } = event.payload
           if (!paths || paths.length === 0 || !ptyIdRef.current) return
 
-          // Check if drop landed on a file tree element — if so, let FileTree handle it
-          if (position) {
-            const el = document.elementFromPoint(position.x, position.y)
-            if (el && (el as HTMLElement).closest?.('[data-path]')) return
-          }
+          // tauri://drag-drop is window-level: every terminal in the window
+          // receives it. Hit-test the drop position against this terminal's
+          // container so split-column layouts don't paste into every pane.
+          if (!position) return
+          const el = document.elementFromPoint(position.x, position.y)
+          if (!el) return
+          // File tree handles its own drops
+          if ((el as HTMLElement).closest?.('[data-path]')) return
+          // Only accept if the drop landed inside *this* terminal's container
+          if (!containerRef.current?.contains(el)) return
 
           // Accept the drop — paste paths into terminal (images get
           // bracketed-paste wrapping so Claude Code's image detector fires)
