@@ -567,6 +567,20 @@ pub fn k2so_heartbeat_rename(
     Ok(())
 }
 
+/// Return the most recent `limit` fire rows for a workspace. Powers the
+/// History panel on the Workspaces Settings page. Newest first.
+#[tauri::command]
+pub fn k2so_heartbeat_fires_list(
+    project_path: String,
+    limit: Option<i64>,
+) -> Result<Vec<HeartbeatFire>, String> {
+    let conn = rusqlite::Connection::open(k2so_db_path()).map_err(|e| e.to_string())?;
+    let project_id = resolve_project_id(&conn, &project_path)
+        .ok_or_else(|| format!("Project not found: {}", project_path))?;
+    HeartbeatFire::list_by_project(&conn, &project_id, limit.unwrap_or(50))
+        .map_err(|e| e.to_string())
+}
+
 /// Archive orphan top-tier agents — agents whose type is `custom`,
 /// `manager`, or `k2so` but that aren't the current primary for this
 /// workspace. Moves them to `.k2so/agents/.archive/<name>-<timestamp>/`

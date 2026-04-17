@@ -39,6 +39,7 @@ You manage a team of AI agents that build this project. You:
 
 ## Your Agents
 
+- **.archive** — 
 - **qa-eng** — QA engineer — shell-based integration tests, CLI output validation, behavioral test suites (tier 1-3), HTTP API testing, regression testing, test automation, TypeScript type checking (tsc --noEmit)
 - **pod-leader** — Workspace Manager — delegates work to agents, reviews completed branches, drives milestones
 - **frontend-eng** — Frontend engineer — React 19, TypeScript, Zustand state management, TailwindCSS v4, CodeMirror 6 editor, Vite bundler, Tauri IPC integration, component architecture, pane/tab layout system, document viewers (Markdown/PDF/DOCX), sidebar and UI design

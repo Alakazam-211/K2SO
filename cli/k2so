@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.32.2"
+K2SO_CLI_VERSION="0.32.3"
 
 set -euo pipefail
 
@@ -708,6 +708,156 @@ try:
 except Exception as e:
     print(f'Error: {e}', file=sys.stderr); sys.exit(1)
 "
+}
+
+# Change an existing heartbeat's schedule. Mirrors the flag surface of
+# `cmd_heartbeat_add` — the NAME is positional-or-flag, all other args
+# go through hb_parse_spec. The heartbeat's folder/wakeup.md are left
+# alone; only the spec/frequency change.
+cmd_heartbeat_edit() {
+    local name=""
+    # Support both `edit <name>` and `edit --name <name>` to stay
+    # consistent with add/remove/rename argument styles.
+    if [[ $# -gt 0 && "$1" != --* ]]; then
+        name="$1"; shift
+    fi
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name) name="$2"; shift 2 ;;
+            *) break ;;
+        esac
+    done
+    [ -z "$name" ] && { echo "Usage: k2so heartbeat edit <name> --daily|--weekly|... [--time HH:MM] [--days ...]" >&2; exit 1; }
+    local spec_output
+    spec_output=$(hb_parse_spec "$@")
+    local spec_json
+    spec_json=$(echo "$spec_output" | head -1)
+    local freq
+    freq=$(echo "$spec_output" | grep '^FREQ:' | sed 's/^FREQ://')
+    local params="name=$(urlencode "$name")&frequency=$freq&spec=$(urlencode "$spec_json")"
+    cli_request "/cli/heartbeat/edit" "$params" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    if d.get('success'):
+        print(f'Updated heartbeat: $name ($freq)')
+    else:
+        print(f\"Error: {d.get('error', 'unknown')}\", file=sys.stderr); sys.exit(1)
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr); sys.exit(1)
+"
+}
+
+# Print a single heartbeat's full details. Default output is human-readable
+# (key: value per line); --json dumps the raw row for scripting/piping.
+# Implemented client-side off /cli/heartbeat/list to avoid adding a new
+# backend endpoint for a simple filter.
+cmd_heartbeat_show() {
+    local name=""
+    local as_json=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) as_json=1; shift ;;
+            -*) shift ;;
+            *) if [ -z "$name" ]; then name="$1"; fi; shift ;;
+        esac
+    done
+    [ -z "$name" ] && { echo "Usage: k2so heartbeat show <name> [--json]" >&2; exit 1; }
+    cli_request "/cli/heartbeat/list" | NAME="$name" AS_JSON="$as_json" python3 -c "
+import json, os, sys
+name = os.environ['NAME']
+as_json = os.environ['AS_JSON'] == '1'
+try:
+    rows = json.loads(sys.stdin.read())
+    row = next((r for r in rows if r.get('name') == name), None)
+    if not row:
+        print(f'No heartbeat named \"{name}\" in this workspace.', file=sys.stderr)
+        sys.exit(1)
+    if as_json:
+        print(json.dumps(row, indent=2))
+        sys.exit(0)
+    spec = json.loads(row.get('specJson') or '{}')
+    enabled = 'yes' if row.get('enabled') else 'no'
+    last = row.get('lastFired') or 'never'
+    created = row.get('createdAt') or '?'
+    print(f'Name:        {row.get(\"name\")}')
+    print(f'Frequency:   {row.get(\"frequency\")}')
+    print(f'Enabled:     {enabled}')
+    print(f'Last fired:  {last}')
+    print(f'Wakeup file: {row.get(\"wakeupPath\")}')
+    print(f'Created:     {created}')
+    print(f'Spec:')
+    for k, v in spec.items():
+        print(f'  {k}: {v}')
+except SystemExit:
+    raise
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr); sys.exit(1)
+"
+}
+
+# Read or edit the wakeup.md that fires for this heartbeat.
+#   k2so heartbeat wakeup <name>              # cat the file
+#   k2so heartbeat wakeup <name> --path-only  # print absolute path only (for scripting)
+#   k2so heartbeat wakeup <name> --edit       # open $EDITOR on the file
+#
+# The wakeup.md path is workspace-relative in the DB; we resolve it
+# against the workspace root (K2SO_PROJECT_PATH or $PWD).
+cmd_heartbeat_wakeup() {
+    local name=""
+    local mode="cat"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --path-only) mode="path"; shift ;;
+            --edit)      mode="edit"; shift ;;
+            -*)          shift ;;
+            *) if [ -z "$name" ]; then name="$1"; fi; shift ;;
+        esac
+    done
+    [ -z "$name" ] && { echo "Usage: k2so heartbeat wakeup <name> [--path-only|--edit]" >&2; exit 1; }
+
+    local rel_path
+    rel_path=$(cli_request "/cli/heartbeat/list" | NAME="$name" python3 -c "
+import json, os, sys
+try:
+    rows = json.loads(sys.stdin.read())
+    row = next((r for r in rows if r.get('name') == os.environ['NAME']), None)
+    if not row:
+        print(f'No heartbeat named \"{os.environ[\"NAME\"]}\" in this workspace.', file=sys.stderr)
+        sys.exit(1)
+    print(row.get('wakeupPath') or '')
+except SystemExit:
+    raise
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr); sys.exit(1)
+")
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then exit $exit_code; fi
+    [ -z "$rel_path" ] && { echo "Heartbeat '$name' has no wakeup path on file." >&2; exit 1; }
+
+    local base="${K2SO_PROJECT_PATH:-$PWD}"
+    local abs_path="$base/$rel_path"
+
+    case "$mode" in
+        path)
+            echo "$abs_path"
+            ;;
+        edit)
+            if [ ! -f "$abs_path" ]; then
+                echo "Note: $abs_path does not exist yet; $EDITOR will create it."
+            fi
+            exec "${EDITOR:-vi}" "$abs_path"
+            ;;
+        cat)
+            if [ ! -f "$abs_path" ]; then
+                echo "(wakeup.md not present yet — $abs_path)" >&2
+                exit 0
+            fi
+            echo "# $abs_path"
+            echo
+            cat "$abs_path"
+            ;;
+    esac
 }
 
 cmd_heartbeat_status() {
@@ -1880,6 +2030,21 @@ COMMANDS:
   heartbeat noop --agent <name>   Report no work found (triggers auto-backoff)
   heartbeat action --agent <name> Report action taken (resets backoff)
 
+  # Multi-heartbeat CRUD (per-workspace named schedules)
+  heartbeat add --name <n> <spec>  Create a named heartbeat
+    --daily|--weekly|--monthly|--yearly|--hourly plus --time, --days, etc.
+  heartbeat list                  Table of heartbeats for this workspace
+  heartbeat show <name>           Single heartbeat details [--json]
+  heartbeat edit <name> <spec>    Change schedule of existing heartbeat
+  heartbeat remove <name>         Delete heartbeat + its folder
+  heartbeat rename <old> <new>    Rename a heartbeat (folder + DB)
+  heartbeat enable <name>         Resume scheduling for this heartbeat
+  heartbeat disable <name>        Pause scheduling for this heartbeat
+  heartbeat status <name>         Recent fire history for one heartbeat [-n N]
+  heartbeat wakeup <name>         Print the wakeup.md contents
+    [--path-only]                 Print only the absolute path (scripting)
+    [--edit]                      Open the file in $EDITOR
+
   agentic                         Show agentic systems status (on/off)
   agentic <on|off>                Enable/disable agentic systems globally
 
@@ -1994,7 +2159,7 @@ cmd_update() {
 
     # Extract the version from the remote script
     local remote_version
-    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.32.2"//')
+    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.32.3"//')
     if [ -z "$remote_version" ]; then
         echo "Error: Could not parse remote version." >&2
         exit 1
@@ -2141,6 +2306,9 @@ case "${1:-help}" in
             enable)  shift 2; cmd_heartbeat_enable_disable true "$@" ;;
             disable) shift 2; cmd_heartbeat_enable_disable false "$@" ;;
             rename)  shift 2; cmd_heartbeat_rename "$@" ;;
+            edit)    shift 2; cmd_heartbeat_edit "$@" ;;
+            show)    shift 2; cmd_heartbeat_show "$@" ;;
+            wakeup)  shift 2; cmd_heartbeat_wakeup "$@" ;;
             status)  shift 2; cmd_heartbeat_status "$@" ;;
             *)       shift; cmd_heartbeat_toggle "$@" ;;
         esac

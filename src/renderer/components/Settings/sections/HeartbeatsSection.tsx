@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { useProjectsStore } from '@/stores/projects'
 import { useToastStore } from '@/stores/toast'
 import type { SettingEntry } from '../searchManifest'
 import { AIFileEditor } from '@/components/AIFileEditor/AIFileEditor'
 import { useSettingsStore } from '@/stores/settings'
 import { usePresetsStore, parseCommand } from '@/stores/presets'
+import { SettingDropdown } from '../controls/SettingControls'
 
 // ── Types mirroring the backend agent_heartbeats table ────────────────
 
@@ -19,6 +19,21 @@ interface HeartbeatRow {
   enabled: boolean
   lastFired: string | null
   createdAt: number
+}
+
+// Mirrors src-tauri db::schema::HeartbeatFire (camelCase via serde rename).
+interface HeartbeatFire {
+  id: number
+  projectId: string
+  agentName: string | null
+  scheduleName: string | null
+  firedAt: string
+  mode: string
+  decision: string
+  reason: string | null
+  inboxPriority: string | null
+  inboxCount: number | null
+  durationMs: number | null
 }
 
 interface ScheduleSpec {
@@ -44,19 +59,33 @@ function parseSpec(json: string): ScheduleSpec {
   }
 }
 
+/** Convert "HH:MM" 24h → "h:MM AM/PM" 12h for display. Minute '00' is
+ *  elided so 9 AM reads clean instead of "9:00 AM". */
+function to12h(t: string | undefined): string {
+  if (!t) return ''
+  const [hh, mm] = t.split(':')
+  let h = parseInt(hh, 10)
+  if (isNaN(h)) return t
+  const ap = h >= 12 ? 'PM' : 'AM'
+  if (h === 0) h = 12
+  else if (h > 12) h -= 12
+  return mm === '00' ? `${h} ${ap}` : `${h}:${mm} ${ap}`
+}
+
 function describeSpec(row: HeartbeatRow): string {
   const spec = parseSpec(row.specJson)
+  const at = spec.time ? ` at ${to12h(spec.time)}` : ''
   switch (spec.frequency) {
     case 'daily':
-      return `Every day${spec.time ? ` at ${spec.time}` : ''}`
+      return `Every day${at}`
     case 'weekly':
-      return `${(spec.days ?? []).join(', ') || '—'}${spec.time ? ` at ${spec.time}` : ''}`
+      return `${(spec.days ?? []).join(', ') || '—'}${at}`
     case 'monthly':
-      return `Day(s) ${(spec.days_of_month ?? []).join(', ') || '—'}${spec.time ? ` at ${spec.time}` : ''}`
+      return `Day(s) ${(spec.days_of_month ?? []).join(', ') || '—'}${at}`
     case 'yearly':
-      return `${(spec.months ?? []).join(', ')} day(s) ${(spec.days_of_month ?? []).join(', ') || '—'}${spec.time ? ` at ${spec.time}` : ''}`
+      return `${(spec.months ?? []).join(', ')} day(s) ${(spec.days_of_month ?? []).join(', ') || '—'}${at}`
     case 'hourly':
-      return `Every ${Math.round((spec.every_seconds ?? 3600) / 60)}min ${spec.start ?? '00:00'}–${spec.end ?? '23:59'}`
+      return `Every ${Math.round((spec.every_seconds ?? 3600) / 60)}min ${to12h(spec.start ?? '00:00')}–${to12h(spec.end ?? '23:59')}`
     default:
       return row.frequency
   }
@@ -145,17 +174,17 @@ function ScheduleEditor({ initial, onCancel, onSave, isEdit }: ScheduleEditorPro
           <label className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] mb-1">
             Frequency
           </label>
-          <select
+          <SettingDropdown
             value={spec.frequency}
-            onChange={(e) => update({ frequency: e.target.value as ScheduleSpec['frequency'] })}
-            className="w-full px-2 py-1.5 text-xs bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)]"
-          >
-            <option value="daily">Daily</option>
-            <option value="weekly">Weekly</option>
-            <option value="monthly">Monthly</option>
-            <option value="yearly">Yearly</option>
-            <option value="hourly">Hourly</option>
-          </select>
+            options={[
+              { value: 'daily', label: 'Daily' },
+              { value: 'weekly', label: 'Weekly' },
+              { value: 'monthly', label: 'Monthly' },
+              { value: 'yearly', label: 'Yearly' },
+              { value: 'hourly', label: 'Hourly' },
+            ]}
+            onChange={(v) => update({ frequency: v as ScheduleSpec['frequency'] })}
+          />
         </div>
 
         {(spec.frequency === 'daily' || spec.frequency === 'weekly' || spec.frequency === 'monthly' || spec.frequency === 'yearly') && (
@@ -388,7 +417,7 @@ function WakeupEditor({ projectPath, agentName, heartbeat, otherHeartbeats, onCl
   if (!agentCommand) return null
 
   return (
-    <div className="fixed inset-0 z-40 bg-[var(--color-bg-canvas)]">
+    <div className="absolute inset-0 overflow-hidden bg-[var(--color-bg)]">
       <AIFileEditor
         filePath={wakeupAbs}
         watchDir={wakeupDir}
@@ -426,54 +455,200 @@ function WakeupPreview({ path }: { path: string }): React.JSX.Element {
   )
 }
 
-// ── Section component ────────────────────────────────────────────────
+// ── History panel (per-workspace fire audit) ─────────────────────────
 
-export function HeartbeatsSection(): React.JSX.Element {
-  const activeProjectId = useProjectsStore((s) => s.activeProjectId)
-  const projects = useProjectsStore((s) => s.projects)
-  const project = useMemo(() => projects.find((p) => p.id === activeProjectId), [projects, activeProjectId])
+function decisionColor(decision: string): string {
+  if (decision === 'fired') return 'text-green-400'
+  if (decision === 'error' || decision === 'wakeup_file_missing') return 'text-red-400'
+  if (decision.startsWith('skipped_')) return 'text-[var(--color-text-muted)]'
+  if (decision === 'no_work') return 'text-[var(--color-text-muted)]'
+  return 'text-[var(--color-text-secondary)]'
+}
+
+function shortDecision(decision: string): string {
+  if (decision.startsWith('skipped_')) return 'skipped'
+  return decision
+}
+
+function fmtTime(iso: string): string {
+  try {
+    const d = new Date(iso)
+    const h12 = d.getHours() % 12 || 12
+    const ap = d.getHours() >= 12 ? 'PM' : 'AM'
+    const mm = String(d.getMinutes()).padStart(2, '0')
+    return `${h12}:${mm} ${ap}`
+  } catch {
+    return iso.slice(11, 16)
+  }
+}
+
+function fmtDateHeader(iso: string): string {
+  try {
+    const d = new Date(iso)
+    const today = new Date()
+    const yest = new Date()
+    yest.setDate(yest.getDate() - 1)
+    const sameDay = (a: Date, b: Date): boolean =>
+      a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
+    if (sameDay(d, today)) return 'Today'
+    if (sameDay(d, yest)) return 'Yesterday'
+    return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+  } catch {
+    return iso.slice(0, 10)
+  }
+}
+
+interface HistoryPanelProps {
+  projectPath: string
+  /** Emits true while the workspace has zero recorded fires. Used by the
+   *  parent to collapse the right column when agentMode is 'off' AND no
+   *  historical audit rows exist. */
+  onEmptyChange?: (empty: boolean) => void
+}
+
+export function HistoryPanel({ projectPath, onEmptyChange }: HistoryPanelProps): React.JSX.Element {
+  const [fires, setFires] = useState<HeartbeatFire[]>([])
+  const [loading, setLoading] = useState(true)
+
+  const refresh = useCallback(async () => {
+    try {
+      const list = await invoke<HeartbeatFire[]>('k2so_heartbeat_fires_list', {
+        projectPath,
+        limit: 50,
+      })
+      setFires(list)
+      onEmptyChange?.(list.length === 0)
+    } catch (e) {
+      console.error('[heartbeats-history] list failed', e)
+    } finally {
+      setLoading(false)
+    }
+  }, [projectPath, onEmptyChange])
+
+  useEffect(() => {
+    refresh()
+    const t = setInterval(refresh, 15000)
+    return () => clearInterval(t)
+  }, [refresh])
+
+  // Group by date header (Today / Yesterday / Mon Apr 14)
+  const groups = useMemo(() => {
+    const map = new Map<string, HeartbeatFire[]>()
+    for (const f of fires) {
+      const key = fmtDateHeader(f.firedAt)
+      const arr = map.get(key) ?? []
+      arr.push(f)
+      map.set(key, arr)
+    }
+    return Array.from(map.entries())
+  }, [fires])
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <h3 className="text-xs font-medium text-[var(--color-text-primary)]">History</h3>
+          <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
+            Last 50 heartbeat fires. Refreshes every 15s.
+          </p>
+        </div>
+        <button
+          onClick={refresh}
+          title="Refresh history"
+          className="w-6 h-6 flex items-center justify-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] cursor-pointer no-drag"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="23 4 23 10 17 10" />
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+          </svg>
+        </button>
+      </div>
+
+      <div className="border border-[var(--color-border)] max-h-[420px] overflow-y-auto">
+        {loading ? (
+          <div className="px-3 py-2 text-[10px] text-[var(--color-text-muted)]">Loading…</div>
+        ) : fires.length === 0 ? (
+          <div className="px-3 py-2 text-[10px] text-[var(--color-text-muted)]">No fires recorded yet.</div>
+        ) : (
+          groups.map(([label, entries]) => (
+            <div key={label}>
+              <div className="px-3 py-1 bg-[var(--color-bg-elevated)] text-[9px] uppercase tracking-wider text-[var(--color-text-muted)] border-b border-[var(--color-border)] sticky top-0">
+                {label}
+              </div>
+              {entries.map((f) => {
+                const inbox = f.inboxCount != null ? `${f.inboxCount}${f.inboxPriority ? ` ${f.inboxPriority}` : ''}` : null
+                return (
+                  <div
+                    key={f.id}
+                    className="px-3 py-1.5 border-b border-[var(--color-border)] last:border-b-0 text-[10px]"
+                    title={f.reason ?? ''}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-[var(--color-text-muted)] font-mono tabular-nums">{fmtTime(f.firedAt)}</span>
+                      <span className="font-mono text-[var(--color-text-primary)] truncate">
+                        {f.scheduleName ?? f.agentName ?? '(workspace)'}
+                      </span>
+                      <span className={`ml-auto ${decisionColor(f.decision)}`}>{shortDecision(f.decision)}</span>
+                    </div>
+                    {f.reason && (
+                      <div className="text-[9px] text-[var(--color-text-muted)] truncate">{f.reason}</div>
+                    )}
+                    {(inbox || f.durationMs != null) && (
+                      <div className="text-[9px] text-[var(--color-text-muted)] flex gap-2">
+                        {inbox && <span>inbox: {inbox}</span>}
+                        {f.durationMs != null && <span>{f.durationMs}ms</span>}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Reusable panel ───────────────────────────────────────────────────
+// Rendered inline per-workspace inside ProjectsSection. The wrapper
+// HeartbeatsSection (below) is kept as a thin shim for the Settings
+// router in case we ever want a top-level view again.
+
+interface HeartbeatsPanelProps {
+  projectPath: string
+  agentName: string | null
+}
+
+export function HeartbeatsPanel({ projectPath, agentName: agentNameProp }: HeartbeatsPanelProps): React.JSX.Element {
+  // Shape compat: the old section component took no props and resolved
+  // project from the active-project store. The panel version takes
+  // explicit props so it can be embedded anywhere and still work.
+  const project = useMemo(() => ({ path: projectPath } as { path: string }), [projectPath])
 
   const [rows, setRows] = useState<HeartbeatRow[]>([])
-  const [agentName, setAgentName] = useState<string | null>(null)
+  const agentName = agentNameProp
   const [showAdd, setShowAdd] = useState(false)
   const [editing, setEditing] = useState<HeartbeatRow | null>(null)
   const [wakeupEditing, setWakeupEditing] = useState<HeartbeatRow | null>(null)
+  // Inline rename: id of the row currently being edited and the draft value.
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
+  const [renameError, setRenameError] = useState<string | null>(null)
   const toast = useToastStore.getState()
 
   const refresh = useCallback(async () => {
-    if (!project) return
     try {
       const list = await invoke<HeartbeatRow[]>('k2so_heartbeat_list', { projectPath: project.path })
       setRows(list)
     } catch (e) {
       console.error('[heartbeats] list failed', e)
     }
-  }, [project])
-
-  // Resolve the workspace's primary agent for display purposes. We only
-  // need the name; the backend commands infer it from agent_mode.
-  const refreshAgentName = useCallback(async () => {
-    if (!project) return
-    try {
-      // Walk .k2so/agents for a scheduleable directory. First non-template
-      // non-hidden dir wins — matches find_primary_agent's ordering.
-      const entries = await invoke<{ name: string; isDirectory: boolean }[]>('fs_read_dir', {
-        path: `${project.path}/.k2so/agents`,
-      }).catch(() => [])
-      const dirs = entries.filter((e) => e.isDirectory && !e.name.startsWith('.'))
-      // Prefer a non-manager/non-k2so name as a rough custom-agent heuristic;
-      // ultimate source of truth is the backend anyway.
-      const candidate = dirs.find((e) => !['k2so-agent', '__lead__', 'pod-leader'].includes(e.name)) ?? dirs[0]
-      setAgentName(candidate?.name ?? null)
-    } catch {
-      setAgentName(null)
-    }
-  }, [project])
+  }, [project.path])
 
   useEffect(() => {
     refresh()
-    refreshAgentName()
-  }, [refresh, refreshAgentName])
+  }, [refresh])
 
   const handleAdd = async (name: string, spec: ScheduleSpec): Promise<void> => {
     if (!project) return
@@ -519,10 +694,28 @@ export function HeartbeatsSection(): React.JSX.Element {
     await refresh()
   }
 
-  const handleRename = async (row: HeartbeatRow): Promise<void> => {
-    if (!project) return
-    const newName = prompt(`Rename "${row.name}" to:`, row.name)
-    if (!newName || newName === row.name) return
+  const startRename = (row: HeartbeatRow): void => {
+    setRenamingId(row.id)
+    setRenameDraft(row.name)
+    setRenameError(null)
+  }
+
+  const cancelRename = (): void => {
+    setRenamingId(null)
+    setRenameDraft('')
+    setRenameError(null)
+  }
+
+  const commitRename = async (row: HeartbeatRow): Promise<void> => {
+    const newName = renameDraft.trim().toLowerCase()
+    if (!newName || newName === row.name) {
+      cancelRename()
+      return
+    }
+    if (!/^[a-z][a-z0-9-]*[a-z0-9]$/.test(newName) || ['default', 'legacy'].includes(newName)) {
+      setRenameError('Lowercase letters, digits, and hyphens only. Not "default" or "legacy".')
+      return
+    }
     try {
       await invoke('k2so_heartbeat_rename', {
         projectPath: project.path,
@@ -530,99 +723,133 @@ export function HeartbeatsSection(): React.JSX.Element {
         newName,
       })
       toast.addToast(`Renamed "${row.name}" → "${newName}"`, 'success', 3000)
+      cancelRename()
       await refresh()
     } catch (e) {
-      toast.addToast(`Rename failed: ${e}`, 'error', 5000)
+      setRenameError(String(e))
     }
   }
 
-  if (!project) {
-    return (
-      <div className="p-6 text-xs text-[var(--color-text-muted)]">
-        Select a workspace to view its heartbeats.
-      </div>
-    )
-  }
-
   return (
-    <div className="p-6" data-settings-id="heartbeats">
-      <div className="flex items-center justify-between mb-4">
+    <div data-settings-id="heartbeats">
+      <div className="flex items-center justify-between mb-2">
         <div>
-          <h2 className="text-sm font-medium text-[var(--color-text-primary)]">Heartbeats</h2>
-          <p className="text-[11px] text-[var(--color-text-muted)] mt-0.5">
-            Named scheduled wakeups for <span className="font-mono">{agentName ?? '(no agent)'}</span>. Each heartbeat has its own folder under <span className="font-mono">.k2so/agents/{agentName ?? 'agent'}/heartbeats/&lt;name&gt;/</span> and fires on its own schedule.
+          <h3 className="text-xs font-medium text-[var(--color-text-primary)]">Heartbeats</h3>
+          <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
+            Scheduled wakeups for <span className="font-mono">{agentName ?? '(no agent)'}</span>. Each fires on its own cadence with its own <span className="font-mono">wakeup.md</span>.
           </p>
         </div>
         <button
           onClick={() => setShowAdd(true)}
-          className="px-3 py-1.5 text-xs bg-[var(--color-accent)] text-white cursor-pointer no-drag"
+          title="Add heartbeat"
+          className="w-6 h-6 flex items-center justify-center text-sm leading-none bg-[var(--color-accent)] text-white cursor-pointer no-drag"
         >
-          + Add heartbeat
+          +
         </button>
       </div>
 
       {rows.length === 0 ? (
-        <div className="p-4 border border-dashed border-[var(--color-border)] text-[11px] text-[var(--color-text-muted)]">
-          No heartbeats configured yet. Click <strong>+ Add heartbeat</strong> to schedule one.
+        <div className="p-3 border border-dashed border-[var(--color-border)] text-[10px] text-[var(--color-text-muted)]">
+          No heartbeats yet. Click <strong>+ Add heartbeat</strong>.
         </div>
       ) : (
         <div className="border border-[var(--color-border)]">
-          <div className="grid grid-cols-[1.5fr_2fr_1fr_auto] gap-4 px-3 py-2 bg-[var(--color-bg-elevated)] text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] border-b border-[var(--color-border)]">
+          <div className="grid grid-cols-[auto_1.2fr_2fr_auto_auto] gap-3 px-3 py-1.5 bg-[var(--color-bg-elevated)] text-[9px] uppercase tracking-wider text-[var(--color-text-muted)] border-b border-[var(--color-border)]">
+            <div>On/Off</div>
             <div>Heartbeat Name</div>
-            <div>Schedule</div>
-            <div>Last Fired</div>
-            <div className="text-right">Actions</div>
+            <div>Schedule (click to edit)</div>
+            <div className="text-right pr-[28px]">Wakeup</div>
+            <div></div>
           </div>
-          {rows.map((r) => (
-            <div
-              key={r.id}
-              className="grid grid-cols-[1.5fr_2fr_1fr_auto] gap-4 px-3 py-2 border-b border-[var(--color-border)] last:border-b-0 text-xs items-center"
-            >
-              <div className="font-mono text-[var(--color-text-primary)] truncate">{r.name}</div>
-              <div className="text-[var(--color-text-secondary)]">
-                <span className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] mr-2">
-                  {r.frequency}
-                </span>
-                {describeSpec(r)}
-              </div>
-              <div className="text-[10px] text-[var(--color-text-muted)]">{describeLastFired(r.lastFired)}</div>
-              <div className="flex gap-1 justify-end">
+          {rows.map((r) => {
+            const isRenaming = renamingId === r.id
+            return (
+              <div
+                key={r.id}
+                className="grid grid-cols-[auto_1.2fr_2fr_auto_auto] gap-3 px-3 py-2 border-b border-[var(--color-border)] last:border-b-0 text-xs items-center"
+              >
+                {/* Col 1 — On/Off toggle (its own column now) */}
                 <button
                   onClick={() => handleToggle(r)}
-                  className={`px-2 py-1 text-[10px] cursor-pointer no-drag ${
-                    r.enabled ? 'bg-green-500/10 text-green-400' : 'bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)]'
+                  role="switch"
+                  aria-checked={r.enabled}
+                  className={`w-7 h-3.5 flex items-center transition-colors no-drag cursor-pointer flex-shrink-0 ${
+                    r.enabled ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
                   }`}
-                  title={r.enabled ? 'Click to disable' : 'Click to enable'}
+                  title={r.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
                 >
-                  {r.enabled ? 'on' : 'off'}
+                  <span
+                    className={`w-2.5 h-2.5 bg-white block transition-transform ${
+                      r.enabled ? 'translate-x-3.5' : 'translate-x-0.5'
+                    }`}
+                  />
                 </button>
+
+                {/* Col 2 — name (click-to-edit) + last-fired hint */}
+                <div className="flex flex-col min-w-0">
+                  {isRenaming ? (
+                    <input
+                      autoFocus
+                      type="text"
+                      value={renameDraft}
+                      onChange={(e) => setRenameDraft(e.target.value.toLowerCase())}
+                      onBlur={() => { void commitRename(r) }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') { e.preventDefault(); void commitRename(r) }
+                        else if (e.key === 'Escape') { e.preventDefault(); cancelRename() }
+                      }}
+                      className="font-mono text-xs px-1 py-0.5 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] text-[var(--color-text-primary)] focus:outline-none"
+                    />
+                  ) : (
+                    <span
+                      onClick={() => startRename(r)}
+                      title="Click to rename"
+                      className={`font-mono truncate cursor-text no-drag hover:text-[var(--color-accent)] ${r.enabled ? 'text-[var(--color-text-primary)]' : 'text-[var(--color-text-muted)] line-through'}`}
+                    >
+                      {r.name}
+                    </span>
+                  )}
+                  {isRenaming && renameError ? (
+                    <span className="text-[9px] text-red-400 truncate">{renameError}</span>
+                  ) : (
+                    <span className="text-[9px] text-[var(--color-text-muted)] truncate">
+                      Last fired: {describeLastFired(r.lastFired)}
+                    </span>
+                  )}
+                </div>
+
+                {/* Col 2 — schedule (click to edit) */}
+                <button
+                  onClick={() => setEditing(r)}
+                  className="text-left text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] cursor-pointer no-drag truncate"
+                  title="Click to edit schedule"
+                >
+                  <span className="text-[9px] uppercase tracking-wider text-[var(--color-text-muted)] mr-2">{r.frequency}</span>
+                  {describeSpec(r)}
+                </button>
+
+                {/* Col 3 — Configure Wakeup button */}
                 <button
                   onClick={() => setWakeupEditing(r)}
-                  className="px-2 py-1 text-[10px] bg-[var(--color-accent)] text-white cursor-pointer no-drag"
+                  className="px-2 py-1 text-[10px] bg-[var(--color-accent)] text-white cursor-pointer no-drag justify-self-end"
                 >
                   Configure Wakeup
                 </button>
-                <button
-                  onClick={() => setEditing(r)}
-                  className="px-2 py-1 text-[10px] bg-[var(--color-bg-elevated)] text-[var(--color-text-secondary)] border border-[var(--color-border)] cursor-pointer no-drag"
-                >
-                  Edit schedule
-                </button>
-                <button
-                  onClick={() => handleRename(r)}
-                  className="px-2 py-1 text-[10px] bg-[var(--color-bg-elevated)] text-[var(--color-text-secondary)] border border-[var(--color-border)] cursor-pointer no-drag"
-                >
-                  Rename
-                </button>
+
+                {/* Col 4 — Remove (same x as Connected Workspaces) */}
                 <button
                   onClick={() => handleRemove(r.name)}
-                  className="px-2 py-1 text-[10px] bg-[var(--color-bg-elevated)] text-red-400 border border-[var(--color-border)] cursor-pointer no-drag"
+                  className="w-5 h-5 flex items-center justify-center text-[var(--color-text-muted)] hover:text-red-400 transition-colors no-drag cursor-pointer flex-shrink-0"
+                  title="Remove heartbeat"
                 >
-                  Remove
+                  <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <line x1="1" y1="1" x2="7" y2="7" />
+                    <line x1="7" y1="1" x2="1" y2="7" />
+                  </svg>
                 </button>
               </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
 
@@ -656,14 +883,23 @@ export function HeartbeatsSection(): React.JSX.Element {
   )
 }
 
-// ── Search manifest ──────────────────────────────────────────────────
+// Backwards-compat alias — the old Settings router imported
+// HeartbeatsSection. We removed the top-level nav entry and now
+// render the panel inline inside ProjectsSection, so this is
+// effectively unused, but the export avoids breaking any stale
+// imports during transition.
+export function HeartbeatsSection(): React.JSX.Element {
+  return (
+    <div className="p-6 text-xs text-[var(--color-text-muted)]">
+      Heartbeats are managed inline per-workspace in the Workspaces section.
+    </div>
+  )
+}
 
-export const HEARTBEATS_MANIFEST: SettingEntry[] = [
-  {
-    id: 'heartbeats-list',
-    section: 'heartbeats',
-    label: 'Heartbeats',
-    description: 'Named scheduled wakeups for the workspace agent',
-    keywords: ['heartbeat', 'schedule', 'cron', 'daily', 'weekly', 'wakeup'],
-  },
-]
+// ── Search manifest ──────────────────────────────────────────────────
+// Empty — heartbeats are inline in the Workspaces section, and
+// PROJECTS_MANIFEST already has a 'Heartbeat Schedule' entry that
+// jumps users to the right place. A separate entry would land on
+// a section id that no longer exists.
+
+export const HEARTBEATS_MANIFEST: SettingEntry[] = []

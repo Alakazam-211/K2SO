@@ -1469,6 +1469,7 @@ pub struct HeartbeatFire {
     pub id: i64,
     pub project_id: String,
     pub agent_name: Option<String>,
+    pub schedule_name: Option<String>,
     pub fired_at: String,
     pub mode: String,
     pub decision: String,
@@ -1542,7 +1543,7 @@ impl HeartbeatFire {
         limit: i64,
     ) -> Result<Vec<HeartbeatFire>> {
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, agent_name, fired_at, mode, decision, reason, \
+            "SELECT id, project_id, agent_name, schedule_name, fired_at, mode, decision, reason, \
                     inbox_priority, inbox_count, duration_ms \
              FROM heartbeat_fires WHERE project_id = ?1 \
              ORDER BY fired_at DESC LIMIT ?2"
@@ -1552,13 +1553,14 @@ impl HeartbeatFire {
                 id: row.get(0)?,
                 project_id: row.get(1)?,
                 agent_name: row.get(2)?,
-                fired_at: row.get(3)?,
-                mode: row.get(4)?,
-                decision: row.get(5)?,
-                reason: row.get(6)?,
-                inbox_priority: row.get(7)?,
-                inbox_count: row.get(8)?,
-                duration_ms: row.get(9)?,
+                schedule_name: row.get(3)?,
+                fired_at: row.get(4)?,
+                mode: row.get(5)?,
+                decision: row.get(6)?,
+                reason: row.get(7)?,
+                inbox_priority: row.get(8)?,
+                inbox_count: row.get(9)?,
+                duration_ms: row.get(10)?,
             })
         })?;
         rows.collect()
@@ -1572,7 +1574,7 @@ impl HeartbeatFire {
         limit: i64,
     ) -> Result<Vec<HeartbeatFire>> {
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, agent_name, fired_at, mode, decision, reason, \
+            "SELECT id, project_id, agent_name, schedule_name, fired_at, mode, decision, reason, \
                     inbox_priority, inbox_count, duration_ms \
              FROM heartbeat_fires WHERE project_id = ?1 AND schedule_name = ?2 \
              ORDER BY fired_at DESC LIMIT ?3"
@@ -1582,13 +1584,14 @@ impl HeartbeatFire {
                 id: row.get(0)?,
                 project_id: row.get(1)?,
                 agent_name: row.get(2)?,
-                fired_at: row.get(3)?,
-                mode: row.get(4)?,
-                decision: row.get(5)?,
-                reason: row.get(6)?,
-                inbox_priority: row.get(7)?,
-                inbox_count: row.get(8)?,
-                duration_ms: row.get(9)?,
+                schedule_name: row.get(3)?,
+                fired_at: row.get(4)?,
+                mode: row.get(5)?,
+                decision: row.get(6)?,
+                reason: row.get(7)?,
+                inbox_priority: row.get(8)?,
+                inbox_count: row.get(9)?,
+                duration_ms: row.get(10)?,
             })
         })?;
         rows.collect()

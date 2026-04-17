@@ -21,6 +21,7 @@ import { CAP_LABELS, CAP_COLORS, CAPABILITIES, type StateData } from '@shared/co
 import { showContextMenu } from '@/lib/context-menu'
 import { SectionErrorBoundary } from '../SectionErrorBoundary'
 import type { SettingEntry } from '../searchManifest'
+import { HeartbeatsPanel, HistoryPanel } from './HeartbeatsSection'
 
 export const PROJECTS_MANIFEST: SettingEntry[] = [
   { id: 'projects.list', section: 'projects', label: 'Workspaces', description: 'All registered projects + focus groups', keywords: ['workspaces', 'projects', 'focus groups'] },
@@ -959,8 +960,10 @@ function ProjectDetail({
   const [cropImage, setCropImage] = useState<string | null>(null)
   const [agentEditorOpen, setAgentEditorOpen] = useState(false)
   const [agentEditorName, setAgentEditorName] = useState('')
-  const [claudeMdHasK2so, setClaudeMdHasK2so] = useState(true) // assume true to avoid flash
-  const [claudeMdAppending, setClaudeMdAppending] = useState(false)
+  // When agentMode is 'off' and there are no historical fires for this
+  // workspace, there's no audit to show — collapse the right column so
+  // we don't leave an empty frame next to every Off workspace.
+  const [historyEmpty, setHistoryEmpty] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Close editor when project changes (user navigated away without using back button)
@@ -968,22 +971,6 @@ function ProjectDetail({
     setAgentEditorOpen(false)
     setAgentEditorName('')
   }, [project.id])
-
-  // Check if CLAUDE.md has k2so context
-  useEffect(() => {
-    let cancelled = false
-    const claudeMdPath = `${project.path}/CLAUDE.md`
-    invoke<{ content: string }>('fs_read_file', { path: claudeMdPath })
-      .then((result) => {
-        if (!cancelled) {
-          setClaudeMdHasK2so(result.content.includes('.k2so') || result.content.includes('k2so'))
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setClaudeMdHasK2so(false) // file doesn't exist
-      })
-    return () => { cancelled = true }
-  }, [project.path, project.id])
 
 
   const handleDetectIcon = async (): Promise<void> => {
@@ -1087,7 +1074,12 @@ function ProjectDetail({
         onCancel={() => setCropImage(null)}
       />
     )}
-    <div className="max-w-xl space-y-6">
+    <div className={`grid gap-8 ${
+      (project.agentMode || 'off') === 'off' && historyEmpty
+        ? 'grid-cols-[minmax(0,42rem)]'
+        : 'grid-cols-[minmax(0,42rem)_minmax(0,1fr)]'
+    }`}>
+    <div className="space-y-6 min-w-0">
       {/* ── Header ── */}
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
@@ -1208,54 +1200,25 @@ function ProjectDetail({
           </div>
         )}
 
-        {/* CLAUDE.md */}
+        {/* Workspace Knowledge — canonical SKILL file all CLI harnesses read. */}
+        {/* Lives at .k2so/skills/k2so/SKILL.md and is symlinked to Claude, */}
+        {/* OpenCode, Pi, plus marker-injected into AGENTS.md + Copilot paths. */}
+        {/* One edit here propagates to every CLI LLM in the workspace. */}
         <div className="pt-3 border-t border-[var(--color-border)]">
           <div className="flex items-center justify-between">
             <div>
-              <span className="text-xs text-[var(--color-text-secondary)]">CLAUDE.md</span>
+              <span className="text-xs text-[var(--color-text-secondary)]">Workspace Knowledge</span>
               <p className="text-[9px] text-[var(--color-text-muted)] mt-0.5">
-                Instructions that every Claude session reads on launch.
+                Canonical <span className="font-mono">SKILL.md</span> every CLI LLM reads — symlinked to Claude, OpenCode, Pi, and marker-injected into AGENTS.md + Copilot paths.
               </p>
             </div>
             <button
               onClick={() => { setAgentEditorName('__claude_md__'); setAgentEditorOpen(true) }}
-              className="px-2.5 py-1 text-[11px] text-[var(--color-accent)] border border-[var(--color-accent)]/30 hover:bg-[var(--color-accent)]/10 transition-colors no-drag cursor-pointer"
+              className="px-5 py-1.5 text-[11px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer flex-shrink-0 whitespace-nowrap"
             >
-              Manage CLAUDE.md
+              Manage Knowledge
             </button>
           </div>
-          {!claudeMdHasK2so && (
-            <button
-              onClick={async () => {
-                setClaudeMdAppending(true)
-                try {
-                  const claudeMdPath = `${project.path}/CLAUDE.md`
-                  let existing = ''
-                  try {
-                    const result = await invoke<{ content: string }>('fs_read_file', { path: claudeMdPath })
-                    existing = result.content
-                  } catch { /* file doesn't exist */ }
-
-                  const k2soSection = `\n\n<!-- K2SO Context -->\n## K2SO Workspace\n\nThis project is managed by [K2SO](https://k2so.sh), an AI workspace IDE.\n\n### Directory Structure\n- \`.k2so/\` — K2SO workspace configuration\n  - \`.k2so/agents/\` — Agent profiles and work queues\n  - \`.k2so/work/inbox/\` — Workspace-level work inbox\n  - \`.k2so/prds/\` — Product requirement documents\n  - \`.k2so/PROJECT.md\` — Shared project context for agents\n\n### K2SO CLI\nThe \`k2so\` command is available in your terminal for workspace operations:\n\`\`\`\nk2so work inbox              # View workspace inbox\nk2so work create --title "..." --body "..."  # Create work items\nk2so agents list             # List agents with work counts\nk2so agents running          # List all active CLI LLM sessions\nk2so delegate <agent> <file> # Assign work: creates worktree + launches agent\nk2so reviews                 # List pending reviews\nk2so review approve <agent> <branch>  # Merge + cleanup\nk2so terminal write <id> "msg"  # Send message to a running terminal\nk2so terminal read <id> --lines 50  # Read terminal buffer output\nk2so commit                  # AI-assisted commit review\nk2so settings                # Show workspace settings\n\`\`\`\n\nRun \`k2so --help\` for all available commands.\n<!-- End K2SO Context -->\n`
-
-                  const newContent = existing + k2soSection
-                  await invoke('fs_write_file', { path: claudeMdPath, content: newContent })
-                  setClaudeMdHasK2so(true)
-                } catch (err) {
-                  console.error('[settings] Failed to append k2so context:', err)
-                } finally {
-                  setClaudeMdAppending(false)
-                }
-              }}
-              disabled={claudeMdAppending}
-              className="mt-2 w-full px-2.5 py-1.5 text-[11px] text-[var(--color-text-secondary)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-40"
-            >
-              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 5v14M5 12h14" />
-              </svg>
-              {claudeMdAppending ? 'Adding...' : 'Add K2SO Context to CLAUDE.md'}
-            </button>
-          )}
         </div>
       </SettingsGroup>
 
@@ -1387,70 +1350,43 @@ function ProjectDetail({
             {((project.agentMode || 'off') === 'manager' || project.agentMode === 'coordinator' || project.agentMode === 'pod') && 'Workspace Manager — delegates work to agent templates that execute in parallel worktrees.'}
           </p>
 
-          {/* State selector — only when a mode is active */}
-          {(project.agentMode || 'off') !== 'off' && (
-            <StateSelector projectId={project.id} currentStateId={project.stateId} />
-          )}
-
-          {/* Heartbeat — only when a mode is active */}
-          {(project.agentMode || 'off') !== 'off' && (
-            <div className="flex items-center justify-between py-2 border-t border-[var(--color-border)]">
-              <div className="flex items-center gap-2">
-                {/* Heartbeat indicator with pulse waves */}
-                <div className="relative flex items-center justify-center w-5 h-5 flex-shrink-0 overflow-hidden">
-                  <span className={`absolute w-5 h-5 rounded-full transition-opacity ${project.heartbeatEnabled ? 'bg-red-500/30 animate-[heartwave_1.2s_ease-out_infinite] opacity-100' : 'opacity-0'}`} />
-                  <span className={`absolute w-5 h-5 rounded-full transition-opacity ${project.heartbeatEnabled ? 'bg-red-500/20 animate-[heartwave_1.2s_ease-out_0.3s_infinite] opacity-100' : 'opacity-0'}`} />
-                  <span className={`relative w-2 h-2 rounded-full transition-colors ${
-                    project.heartbeatEnabled ? 'bg-red-500 animate-[heartpulse_1.2s_ease-in-out_infinite]' : 'bg-red-500/25'
-                  }`} />
-                </div>
-                <div>
-                  <span className={`text-xs ${project.heartbeatMode !== 'off' ? 'text-[var(--color-text-primary)]' : 'text-[var(--color-text-secondary)]'}`}>Heartbeat</span>
-                  <p className={`text-[9px] ${project.heartbeatMode !== 'off' ? 'text-[var(--color-text-secondary)]' : 'text-[var(--color-text-muted)]'}`}>
-                    {project.heartbeatMode !== 'off' ? 'Wakes up automatically to work' : 'Only works when manually launched'}
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={() => {
-                  import('@/stores/heartbeat-schedule').then(({ useHeartbeatScheduleStore }) => {
-                    useHeartbeatScheduleStore.getState().open(project.id)
-                  })
-                }}
-                className="text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] border border-[var(--color-border)] px-2 py-0.5 transition-colors no-drag cursor-pointer"
-              >
-                {project.heartbeatMode !== 'off'
-                  ? (() => {
-                      try {
-                        const s = project.heartbeatSchedule ? JSON.parse(project.heartbeatSchedule) : null
-                        const to12h = (t: string) => { const [hh, mm] = t.split(':'); let h = parseInt(hh); const ap = h >= 12 ? 'PM' : 'AM'; if (h === 0) h = 12; else if (h > 12) h -= 12; return mm === '00' ? `${h} ${ap}` : `${h}:${mm} ${ap}` }
-                        if (project.heartbeatMode === 'hourly' && s) {
-                          const secs = s.every_seconds ?? 300
-                          const freq = secs >= 3600 ? `${Math.round(secs / 3600)}h` : `${Math.round(secs / 60)}m`
-                          return `Every ${freq}`
-                        }
-                        if (s?.frequency) return `${s.frequency.charAt(0).toUpperCase() + s.frequency.slice(1)} ${to12h(s.time ?? '09:00')}`
-                      } catch {}
-                      return project.heartbeatMode
-                    })()
-                  : 'Configure'}
-              </button>
-            </div>
-          )}
-
-          {/* Adaptive Heartbeat Config — removed, now handled by HeartbeatScheduleDialog */}
-
-          {/* Custom Agent persona — only in Custom Agent mode */}
+          {/* Agent identity — Persona + name FIRST (above State) so the
+              reading order is identity → lifecycle-state → schedule. */}
           {(project.agentMode || 'off') === 'custom' && (
             <div className="pt-2 border-t border-[var(--color-border)]">
               <CustomAgentPersonaButton projectPath={project.path} projectName={project.name} onOpenEditor={(name) => { setAgentEditorName(name); setAgentEditorOpen(true) }} />
             </div>
           )}
-
-          {/* K2SO Agent persona — only in K2SO Agent mode */}
           {(project.agentMode || 'off') === 'agent' && (
             <div className="pt-2 border-t border-[var(--color-border)]">
               <K2SOAgentPersonaButton projectPath={project.path} projectName={project.name} onOpenEditor={(name) => { setAgentEditorName(name); setAgentEditorOpen(true) }} />
+            </div>
+          )}
+
+          {/* State selector — only when a mode is active */}
+          {(project.agentMode || 'off') !== 'off' && (
+            <StateSelector projectId={project.id} currentStateId={project.stateId} />
+          )}
+
+          {/* Multi-heartbeat list — inline per-workspace, see
+              .k2so/prds/multi-schedule-heartbeat.md. Replaces the
+              single-heartbeat row that lived here pre-0.32.3. Only
+              rendered for modes that support scheduleable agents. */}
+          {(project.agentMode || 'off') !== 'off' && (
+            <div className="pt-2 border-t border-[var(--color-border)]">
+              <HeartbeatsPanel
+                projectPath={project.path}
+                agentName={(() => {
+                  const mode = project.agentMode || 'off'
+                  if (mode === 'manager' || mode === 'coordinator' || mode === 'pod') return '__lead__'
+                  if (mode === 'agent') return 'k2so-agent'
+                  // Custom mode — backend find_primary_agent scans for the
+                  // custom-typed agent by reading agent.md frontmatter. The
+                  // UI just needs a display name; use the project.name as a
+                  // reasonable fallback until we wire a lookup.
+                  return project.name.toLowerCase().replace(/\s+/g, '-')
+                })()}
+              />
             </div>
           )}
 
@@ -1513,6 +1449,18 @@ function ProjectDetail({
           Remove Workspace
         </button>
       </div>
+    </div>
+
+    {/* Right column — per-workspace heartbeat fire history. Sticks to
+        the top while the left column scrolls so the audit stays visible
+        next to whatever setting you're editing. Hidden entirely when
+        the workspace is Off AND has no historical fire rows, so an Off
+        workspace that was never an agent doesn't get a dead frame. */}
+    {!((project.agentMode || 'off') === 'off' && historyEmpty) && (
+      <aside className="min-w-0 sticky top-0 self-start">
+        <HistoryPanel projectPath={project.path} onEmptyChange={setHistoryEmpty} />
+      </aside>
+    )}
     </div>
     </>
   )
@@ -2092,7 +2040,13 @@ function WorkspaceWakeupEditor({ projectPath, projectName, onClose }: { projectP
   )
 }
 
-// ── CLAUDE.md Editor (AIFileEditor for workspace root CLAUDE.md) ──────
+// ── Workspace Knowledge editor (canonical SKILL.md) ──────
+// Edits the workspace's canonical SKILL file — one source of truth,
+// symlinked to Claude/OpenCode/Pi and marker-injected into AGENTS.md +
+// .github/copilot-instructions.md by write_skill_to_all_harnesses.
+// Every CLI LLM (Claude, Codex, Gemini, Cursor, Copilot, etc.) reads
+// this content via its own preferred discovery path, so a single edit
+// here propagates everywhere.
 
 function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: string; projectName: string; onClose: () => void }): React.JSX.Element {
   const [content, setContent] = useState('')
@@ -2100,8 +2054,8 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
   const [previewScale, setPreviewScale] = useState(100)
   const cssScale = Math.round(previewScale * 0.7)
 
-  const filePath = `${projectPath}/CLAUDE.md`
-  const watchDir = projectPath
+  const filePath = `${projectPath}/.k2so/skills/k2so/SKILL.md`
+  const watchDir = `${projectPath}/.k2so/skills/k2so`
 
   const defaultAgent = useSettingsStore((s) => s.defaultAgent)
   const presets = usePresetsStore((s) => s.presets)
@@ -2120,21 +2074,28 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
   const handleFileChange = useCallback((c: string) => setContent(c), [])
 
   const systemPrompt = useMemo(() => [
-    `You're helping the user write their CLAUDE.md file for the "${projectName}" workspace.`,
+    `You're helping the user edit the canonical workspace knowledge file for "${projectName}".`,
     ``,
-    `File: CLAUDE.md (project root)`,
+    `File: .k2so/skills/k2so/SKILL.md (canonical — every CLI LLM reads it)`,
     ``,
-    `This file is automatically read by Claude Code at the start of every session.`,
-    `It should contain project-specific instructions, conventions, and context:`,
+    `This is the one-source-of-truth file every CLI LLM in this workspace reads.`,
+    `Symlinked to: .claude/skills/k2so/SKILL.md, .opencode/agent/k2so.md, .pi/skills/k2so/SKILL.md`,
+    `Marker-injected into: AGENTS.md (Codex / Copilot CLI / Code Puppy), .github/copilot-instructions.md (Copilot)`,
     ``,
+    `Every CLI LLM — Claude, Codex, Gemini, Cursor, Copilot, Pi, OpenCode — reads this file`,
+    `via its own preferred discovery path. Edit here once; changes propagate everywhere.`,
+    ``,
+    `Good content for this file:`,
     `• Project overview — what this codebase does`,
     `• Tech stack — languages, frameworks, key dependencies`,
     `• Key directories — important paths and what lives in them`,
     `• Conventions — code style, commit format, branch naming, PR process`,
     `• Build & test — how to build, run tests, deploy`,
+    `• K2SO CLI — mention the workspace is K2SO-managed so agents know about \`k2so\` commands`,
     `• Important notes — gotchas, known issues, things to watch out for`,
     ``,
-    `Edit CLAUDE.md in the current directory. The user sees a live preview on the right.`,
+    `The user sees a live preview on the right. Make sure the frontmatter keeps the`,
+    `\`name: k2so\` and \`description:\` fields intact — Claude Code's skill loader uses them.`,
     ``,
     `Current contents:`,
     content,
@@ -2148,31 +2109,31 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
       return [
         ...baseArgs,
         '--append-system-prompt', systemPrompt,
-        `Open and read CLAUDE.md in the current directory. Help the user define their project context for "${projectName}". Start by asking about their tech stack and project structure.`,
+        `Read ${filePath}. Help the user define their workspace knowledge for "${projectName}". Start by asking about their tech stack and project structure.`,
       ]
     }
     return baseArgs
-  }, [agentCommand, systemPrompt, projectName])
+  }, [agentCommand, systemPrompt, projectName, filePath])
 
   return (
     <AIFileEditor
       filePath={filePath}
       watchDir={watchDir}
-      cwd={watchDir}
+      cwd={projectPath}
       command={terminalCommand}
       args={terminalArgs}
-      title={`CLAUDE.md: ${projectName}`}
-      instructions="Editing CLAUDE.md — read by Claude Code at the start of every session. Note: K2SO regenerates parts of this file on launch. For persistent custom instructions, use .k2so/PROJECT.md instead."
-      warningText="This file is partially auto-generated by K2SO. Custom edits may be overwritten on next launch."
+      title={`Workspace Knowledge: ${projectName}`}
+      instructions="Editing the canonical SKILL.md — every CLI LLM in this workspace reads it via its own discovery path. Edits propagate to Claude, OpenCode, Pi, AGENTS.md, and Copilot automatically."
+      warningText="This is the canonical knowledge file for the workspace. Edits propagate to every CLI LLM — Claude, Codex, Gemini, Cursor, Copilot, etc."
       onFileChange={handleFileChange}
       onClose={onClose}
       preview={
         <div className="h-full flex flex-col">
           <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--color-border)] flex-shrink-0">
             <div className="text-xs text-[var(--color-text-muted)]">
-              <span className="font-medium text-[var(--color-text-primary)]">CLAUDE.md</span>
+              <span className="font-medium text-[var(--color-text-primary)]">SKILL.md</span>
               <span className="mx-2">&middot;</span>
-              <span>Session context</span>
+              <span>Workspace knowledge (read by every CLI LLM)</span>
             </div>
             <div className="flex items-center gap-2 flex-shrink-0">
               {previewMode === 'preview' && (
@@ -2213,7 +2174,7 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
             <div className="flex-1 overflow-auto p-4">
               <div className="markdown-content" style={{ fontSize: `${cssScale}%` }}>
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {content || '*No CLAUDE.md yet. Use the AI assistant to set up your project context, or click Edit to write it manually.*'}
+                  {content || '*No SKILL.md yet. Use the AI assistant to set up your workspace knowledge, or click Edit to write it manually.*'}
                 </ReactMarkdown>
               </div>
             </div>
@@ -2238,26 +2199,25 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
 // ── Custom Agent Persona Button ──────────────────────────────────────
 
 function CustomAgentPersonaButton({ projectPath, projectName, onOpenEditor }: { projectPath: string; projectName: string; onOpenEditor: (agentName: string) => void }): React.JSX.Element {
+  const derived = projectName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
   const [ready, setReady] = useState(false)
-  const [agentName, setAgentName] = useState(projectName.toLowerCase().replace(/\s+/g, '-'))
+  const [agentExists, setAgentExists] = useState(false)
+  const [agentName, setAgentName] = useState(derived)
+  const [nameDraft, setNameDraft] = useState(derived)
+  const [nameError, setNameError] = useState<string | null>(null)
 
-  // Ensure the single custom agent exists for this workspace
+  // Load existing Custom agent name if one is already set up for this
+  // workspace. First-time render (no agent yet) leaves the draft at the
+  // workspace-derived default, ready for the user to edit before creation.
   useEffect(() => {
-    const ensure = async () => {
+    const init = async () => {
       try {
         const agents = await invoke<(K2soAgentInfo & { agentType?: string })[]>('k2so_agents_list', { projectPath })
         const existing = agents.find((a: any) => a.agentType === 'custom')
         if (existing) {
           setAgentName(existing.name)
-        } else {
-          const name = projectName.toLowerCase().replace(/\s+/g, '-')
-          await invoke('k2so_agents_create', {
-            projectPath,
-            name,
-            role: 'Custom agent — customize via the persona editor',
-            agentType: 'custom',
-          })
-          setAgentName(name)
+          setNameDraft(existing.name)
+          setAgentExists(true)
         }
         setReady(true)
       } catch (e) {
@@ -2265,21 +2225,82 @@ function CustomAgentPersonaButton({ projectPath, projectName, onOpenEditor }: { 
         setReady(true)
       }
     }
-    ensure()
+    init()
   }, [projectPath, projectName])
 
+  const RESERVED = ['__lead__', 'k2so-agent', 'pod-leader', 'default', 'legacy']
+  const validateName = (n: string): string | null => {
+    if (!/^[a-z][a-z0-9-]*[a-z0-9]$/.test(n) || n.length < 2) {
+      return 'Lowercase letters, digits, hyphens only (min 2 chars, no leading/trailing hyphen)'
+    }
+    if (RESERVED.includes(n)) return `"${n}" is reserved`
+    return null
+  }
+
+  const handleOpen = async (): Promise<void> => {
+    const err = validateName(nameDraft)
+    if (err) { setNameError(err); return }
+    setNameError(null)
+
+    if (!agentExists) {
+      // First-time setup — create the agent with the user's chosen name.
+      try {
+        await invoke('k2so_agents_create', {
+          projectPath,
+          name: nameDraft,
+          role: 'Custom agent — customize via the persona editor',
+          agentType: 'custom',
+        })
+        setAgentName(nameDraft)
+        setAgentExists(true)
+        onOpenEditor(nameDraft)
+      } catch (e) {
+        setNameError(String(e))
+      }
+      return
+    }
+    // Already exists. If the user changed the name, note that rename
+    // isn't wired yet — direct them to open the current persona for now.
+    if (nameDraft !== agentName) {
+      setNameError('Rename support for existing agents is coming in a later release — open the current persona for now, or use the CLI to rename.')
+      setNameDraft(agentName)
+      return
+    }
+    onOpenEditor(agentName)
+  }
+
   return (
-    <div className="flex items-center justify-between gap-3">
-      <p className="text-[10px] text-[var(--color-text-muted)]">
-        Define what this agent does when it wakes up on the heartbeat.
+    <div>
+      <div className="flex items-center gap-2">
+        <div className="flex-1 min-w-0">
+          <label className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)] mb-1">
+            Agent name
+          </label>
+          <input
+            type="text"
+            value={nameDraft}
+            onChange={(e) => { setNameDraft(e.target.value.toLowerCase()); setNameError(null) }}
+            disabled={!ready || agentExists}
+            placeholder={derived}
+            className="w-full px-2 py-1 text-xs bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)] disabled:opacity-60"
+          />
+        </div>
+        <button
+          onClick={handleOpen}
+          disabled={!ready}
+          className="px-5 py-1.5 text-[11px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer disabled:opacity-50 flex-shrink-0 whitespace-nowrap self-end"
+        >
+          Manage Persona
+        </button>
+      </div>
+      {nameError && (
+        <p className="text-[10px] text-red-400 mt-1">{nameError}</p>
+      )}
+      <p className="text-[9px] text-[var(--color-text-muted)] mt-1">
+        {agentExists
+          ? `Define what ${agentName} does. Name is locked — rename support lands in a later release.`
+          : `Give your custom agent a short name (defaults to the workspace name). The Persona editor creates the agent on first open.`}
       </p>
-      <button
-        onClick={() => onOpenEditor(agentName)}
-        disabled={!ready}
-        className="px-3 py-1.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer disabled:opacity-50 flex-shrink-0"
-      >
-        ✎ Manage Persona
-      </button>
     </div>
   )
 }
@@ -2325,7 +2346,7 @@ function K2SOAgentPersonaButton({ projectPath, projectName, onOpenEditor }: { pr
         disabled={!ready}
         className="px-3 py-1.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer disabled:opacity-50 flex-shrink-0"
       >
-        ✎ Manage Persona
+        Manage Persona
       </button>
     </div>
   )
@@ -2415,28 +2436,24 @@ function ConnectedWorkspacesPanel({ projectId }: { projectId: string }): React.J
   }, [projects])
 
   return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between">
-        <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
-          Connected Workspaces
-        </h3>
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <h3 className="text-xs font-medium text-[var(--color-text-primary)]">Connected Workspaces</h3>
+          <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
+            Connect other workspaces so this agent can oversee or interact with them.
+          </p>
+        </div>
         {availableProjects.length > 0 && (
           <button
             onClick={() => { setShowAdd(!showAdd); setSearch('') }}
-            className="w-5 h-5 flex items-center justify-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-white/10 transition-colors no-drag cursor-pointer"
             title="Add connection"
+            className="w-6 h-6 flex items-center justify-center text-sm leading-none bg-[var(--color-accent)] text-white cursor-pointer no-drag"
           >
-            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5">
-              <line x1="5" y1="1" x2="5" y2="9" />
-              <line x1="1" y1="5" x2="9" y2="5" />
-            </svg>
+            +
           </button>
         )}
       </div>
-
-      <p className="text-[10px] text-[var(--color-text-muted)]">
-        Connect other workspaces so this agent can oversee or interact with them.
-      </p>
 
       {/* Add connection dropdown with search */}
       {showAdd && (

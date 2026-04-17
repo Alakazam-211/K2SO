@@ -14,7 +14,9 @@ import { CompanionSection, COMPANION_MANIFEST } from './sections/CompanionSectio
 import { ProjectsSection, PROJECTS_MANIFEST } from './sections/ProjectsSection'
 import { WorkspaceStatesSection, WORKSPACE_STATES_MANIFEST } from './sections/WorkspaceStatesSection'
 import { AgentSkillsSection, AGENT_SKILLS_MANIFEST } from './sections/AgentSkillsSection'
-import { HeartbeatsSection, HEARTBEATS_MANIFEST } from './sections/HeartbeatsSection'
+// HeartbeatsPanel is rendered inline inside ProjectsSection now; manifest
+// stays exported from HeartbeatsSection so searches still find it.
+import { HEARTBEATS_MANIFEST } from './sections/HeartbeatsSection'
 
 // ── Section nav items ────────────────────────────────────────────────
 const SECTIONS: { id: SettingsSection; label: string; agenticOnly?: boolean }[] = [
@@ -22,7 +24,6 @@ const SECTIONS: { id: SettingsSection; label: string; agenticOnly?: boolean }[] 
   { id: 'projects', label: 'Workspaces' },
   { id: 'workspace-states', label: 'Workspace States', agenticOnly: true },
   { id: 'agent-skills', label: 'Agent Skills', agenticOnly: true },
-  { id: 'heartbeats', label: 'Heartbeats', agenticOnly: true },
   { id: 'terminal', label: 'Terminal' },
   { id: 'code-editor', label: 'Code Editor' },
   { id: 'editors-agents', label: 'Editors & Agents' },
@@ -179,11 +180,6 @@ export default function Settings(): React.JSX.Element {
         {activeSection === 'agent-skills' && (
           <SectionErrorBoundary>
             <AgentSkillsSection />
-          </SectionErrorBoundary>
-        )}
-        {activeSection === 'heartbeats' && (
-          <SectionErrorBoundary>
-            <HeartbeatsSection />
           </SectionErrorBoundary>
         )}
       </div>

@@ -818,6 +818,7 @@ pub fn run() {
             commands::k2so_agents::k2so_heartbeat_set_enabled,
             commands::k2so_agents::k2so_heartbeat_edit,
             commands::k2so_agents::k2so_heartbeat_rename,
+            commands::k2so_agents::k2so_heartbeat_fires_list,
             // Agent Sessions (DB-tracked)
             commands::k2so_agents::agent_sessions_list,
             commands::k2so_agents::agent_sessions_get,
