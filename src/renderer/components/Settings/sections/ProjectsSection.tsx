@@ -1046,6 +1046,12 @@ function ProjectDetail({
               projectName={project.name}
               onClose={() => setAgentEditorOpen(false)}
             />
+          ) : agentEditorName === '__workspace_wakeup__' ? (
+            <WorkspaceWakeupEditor
+              projectPath={project.path}
+              projectName={project.name}
+              onClose={() => setAgentEditorOpen(false)}
+            />
           ) : (
             <AgentPersonaEditor
               agentName={agentEditorName}
@@ -1927,6 +1933,151 @@ function ProjectContextEditor({ projectPath, projectName, onClose }: { projectPa
   )
 }
 
+// ── Workspace Wake-up Editor (AIFileEditor for .k2so/wakeup.md) ──────
+//
+// Simple single-file editor. Drives what the `__lead__` manager does
+// when the heartbeat scheduler wakes it to triage the workspace inbox.
+// Stored at `.k2so/wakeup.md`; the shipped template has a visible
+// `<!-- DEFAULT TEMPLATE -->` comment so users know what's scaffolded.
+
+function WorkspaceWakeupEditor({ projectPath, projectName, onClose }: { projectPath: string; projectName: string; onClose: () => void }): React.JSX.Element {
+  const [content, setContent] = useState('')
+  const [previewMode, setPreviewMode] = useState<'preview' | 'edit'>('preview')
+  const [previewScale, setPreviewScale] = useState(100)
+  const cssScale = Math.round(previewScale * 0.7)
+
+  const filePath = `${projectPath}/.k2so/wakeup.md`
+  const watchDir = `${projectPath}/.k2so`
+
+  const defaultAgent = useSettingsStore((s) => s.defaultAgent)
+  const presets = usePresetsStore((s) => s.presets)
+  const agentCommand = useMemo(() => {
+    const preset = presets.find((p) => p.id === defaultAgent) || presets.find((p) => p.enabled)
+    if (!preset) return null
+    return parseCommand(preset.command)
+  }, [defaultAgent, presets])
+
+  useEffect(() => {
+    invoke<{ content: string }>('fs_read_file', { path: filePath })
+      .then((r) => setContent(r.content))
+      .catch(() => setContent(''))
+  }, [filePath])
+
+  const handleFileChange = useCallback((c: string) => setContent(c), [])
+
+  const systemPrompt = useMemo(() => [
+    `You're helping the user customize their workspace wake-up instructions.`,
+    ``,
+    `Project: "${projectName}"`,
+    `File: .k2so/wakeup.md`,
+    ``,
+    `This file is read by the K2SO heartbeat scheduler when it wakes the workspace manager (\`__lead__\`) to triage new inbox items.`,
+    `It's NOT a persona — it's operational: "on wake, do these things, then exit."`,
+    ``,
+    `Keep it short (a numbered list, usually under 10 steps).`,
+    `Focus on triage actions: read the inbox, decide delegate vs handle directly, check reviews, and exit cleanly.`,
+    ``,
+    `The shipped template has a DEFAULT TEMPLATE comment at the top — the user can delete it once they've made the file their own.`,
+    ``,
+    `Current contents:`,
+    content,
+  ].join('\n'), [projectName, content])
+
+  const terminalCommand = agentCommand?.command
+  const terminalArgs = useMemo(() => {
+    if (!agentCommand) return undefined
+    const baseArgs = [...agentCommand.args]
+    if (agentCommand.command === 'claude') {
+      return [
+        ...baseArgs,
+        '--append-system-prompt', systemPrompt,
+        `Open and read .k2so/wakeup.md. This is the workspace manager's wake-up script. Ask the user what they want the manager to do on wake.`,
+      ]
+    }
+    return baseArgs
+  }, [agentCommand, systemPrompt])
+
+  return (
+    <AIFileEditor
+      filePath={filePath}
+      watchDir={watchDir}
+      cwd={watchDir}
+      command={terminalCommand}
+      args={terminalArgs}
+      title={`Workspace Wake-up: ${projectName}`}
+      instructions={`Editing .k2so/wakeup.md — used by the heartbeat scheduler when waking the workspace manager.`}
+      warningText="Changes here affect what the workspace manager does on every heartbeat tick."
+      onFileChange={handleFileChange}
+      onClose={onClose}
+      preview={
+        <div className="h-full flex flex-col">
+          <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--color-border)] flex-shrink-0">
+            <div className="text-xs text-[var(--color-text-muted)]">
+              <span className="font-medium text-[var(--color-text-primary)]">wakeup.md</span>
+              <span className="mx-2">&middot;</span>
+              <span>Workspace manager wake-up</span>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              {previewMode === 'preview' && (
+                <div className="flex items-center gap-0.5">
+                  <button
+                    onClick={() => setPreviewScale((s) => Math.max(50, s - 10))}
+                    className="w-5 h-5 flex items-center justify-center text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] bg-[var(--color-bg-elevated)] border border-[var(--color-border)] no-drag cursor-pointer"
+                  >
+                    −
+                  </button>
+                  <span className="text-[9px] tabular-nums text-[var(--color-text-muted)] w-7 text-center">{previewScale}%</span>
+                  <button
+                    onClick={() => setPreviewScale((s) => Math.min(200, s + 10))}
+                    className="w-5 h-5 flex items-center justify-center text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] bg-[var(--color-bg-elevated)] border border-[var(--color-border)] no-drag cursor-pointer"
+                  >
+                    +
+                  </button>
+                </div>
+              )}
+              <div className="flex gap-0.5">
+                {(['preview', 'edit'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    onClick={() => setPreviewMode(mode)}
+                    className={`px-2 py-1 text-[10px] font-medium transition-colors no-drag cursor-pointer ${
+                      previewMode === mode
+                        ? 'bg-[var(--color-accent)] text-white'
+                        : 'bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] border border-[var(--color-border)]'
+                    }`}
+                  >
+                    {mode === 'preview' ? 'Preview' : 'Edit'}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          {previewMode === 'preview' ? (
+            <div className="flex-1 overflow-auto p-4">
+              <div className="markdown-content" style={{ fontSize: `${cssScale}%` }}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {content || '*No wakeup.md yet — will be created from the template when the scheduler first wakes the workspace manager.*'}
+                </ReactMarkdown>
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 overflow-hidden">
+              <CodeEditor
+                code={content}
+                filePath={filePath}
+                onSave={async (c) => {
+                  try { await invoke('fs_write_file', { path: filePath, content: c }) } catch (err) { console.error('[wakeup-editor] Save failed:', err) }
+                }}
+                onChange={(c) => setContent(c)}
+              />
+            </div>
+          )}
+        </div>
+      }
+    />
+  )
+}
+
 // ── CLAUDE.md Editor (AIFileEditor for workspace root CLAUDE.md) ──────
 
 function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: string; projectName: string; onClose: () => void }): React.JSX.Element {
@@ -2610,6 +2761,31 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
               title="Edit shared project context"
             >
               Manage Project Context
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Workspace Wake-up — operational instructions used when the
+          heartbeat scheduler wakes the workspace manager (__lead__)
+          to triage the workspace inbox. */}
+      <div>
+        <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mb-1">
+          Workspace Wake-up
+        </h3>
+        <div className="border border-[var(--color-border)] px-3 py-2">
+          <div className="flex items-center justify-between">
+            <div className="flex-1 min-w-0 mr-3">
+              <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed">
+                What the workspace manager does when the heartbeat wakes it. Edited in natural language — the scheduler hands these instructions to Claude each time triage fires.
+              </p>
+            </div>
+            <button
+              onClick={() => onOpenEditor('__workspace_wakeup__')}
+              className="px-2 py-0.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer flex-shrink-0"
+              title="Edit workspace wake-up instructions"
+            >
+              Manage Wake-up
             </button>
           </div>
         </div>

@@ -238,6 +238,217 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════
+section "3.5: Heartbeat Audit Log (heartbeat_fires)"
+# ═══════════════════════════════════════════════════════════════════════
+
+# Migration 0026 file exists
+if [ -f "$MIGRATIONS_DIR/0026_heartbeat_fires.sql" ]; then
+    pass "migration 0026: heartbeat_fires migration file exists"
+else
+    fail "migration 0026: file missing" "Expected $MIGRATIONS_DIR/0026_heartbeat_fires.sql"
+fi
+
+# After migrations run, verify heartbeat_fires table + columns
+if command -v sqlite3 &> /dev/null; then
+    HB_TEMP_DB="/tmp/k2so-test-heartbeat-$$.db"
+    sqlite3 "$HB_TEMP_DB" "CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY, applied_at INTEGER);"
+    for sql_file in "$MIGRATIONS_DIR"/*.sql; do
+        sqlite3 "$HB_TEMP_DB" < "$sql_file" 2>/dev/null || true
+    done
+
+    HB_TABLES=$(sqlite3 "$HB_TEMP_DB" ".tables" 2>/dev/null)
+    if echo "$HB_TABLES" | grep -q "heartbeat_fires"; then
+        pass "heartbeat_fires: table created by migration"
+    else
+        fail "heartbeat_fires: table missing" "Tables: $HB_TABLES"
+    fi
+
+    HB_COLS=$(sqlite3 "$HB_TEMP_DB" "PRAGMA table_info(heartbeat_fires);" 2>/dev/null | cut -d'|' -f2 | tr '\n' ' ')
+    for col in project_id agent_name fired_at mode decision reason inbox_priority inbox_count duration_ms; do
+        if echo "$HB_COLS" | grep -q "\b$col\b"; then
+            pass "heartbeat_fires: column $col present"
+        else
+            fail "heartbeat_fires: column $col missing" "Columns: $HB_COLS"
+        fi
+    done
+
+    HB_INDEXES=$(sqlite3 "$HB_TEMP_DB" "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='heartbeat_fires';" 2>/dev/null)
+    if echo "$HB_INDEXES" | grep -q "idx_heartbeat_fires_project_time"; then
+        pass "heartbeat_fires: project-time index present"
+    else
+        fail "heartbeat_fires: project-time index missing" "Indexes: $HB_INDEXES"
+    fi
+
+    rm -f "$HB_TEMP_DB"
+else
+    skip "heartbeat_fires table checks — sqlite3 not installed"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
+section "3.6: Wakeup.md Templates"
+# ═══════════════════════════════════════════════════════════════════════
+
+WAKEUP_DIR="$PROJECT_ROOT/src-tauri/wakeup_templates"
+
+for template in workspace manager custom k2so; do
+    if [ -f "$WAKEUP_DIR/$template.md" ]; then
+        pass "wakeup template: $template.md exists"
+    else
+        fail "wakeup template: $template.md missing" "Expected $WAKEUP_DIR/$template.md"
+    fi
+done
+
+# Each template should carry the visible DEFAULT TEMPLATE marker
+for template in workspace manager custom k2so; do
+    if [ -f "$WAKEUP_DIR/$template.md" ] && grep -q "DEFAULT TEMPLATE" "$WAKEUP_DIR/$template.md"; then
+        pass "wakeup template: $template.md has DEFAULT TEMPLATE marker"
+    else
+        fail "wakeup template: $template.md marker" "DEFAULT TEMPLATE marker not found"
+    fi
+done
+
+# Agent-template type does NOT get a wakeup template (confirmed in source)
+if grep -q 'fn wakeup_template_for' "$AGENTS_SRC" && grep -q '_ => None' "$AGENTS_SRC"; then
+    pass "wakeup: wakeup_template_for returns None for agent-template type"
+else
+    fail "wakeup: type exclusion" "wakeup_template_for signature missing or doesn't fall through to None"
+fi
+
+# Compose helpers exist
+if grep -q 'pub fn compose_wake_prompt_for_lead' "$AGENTS_SRC"; then
+    pass "wakeup: compose_wake_prompt_for_lead exists"
+else
+    fail "wakeup: compose_wake_prompt_for_lead missing" "Helper not found"
+fi
+
+if grep -q 'pub fn compose_wake_prompt_for_agent' "$AGENTS_SRC"; then
+    pass "wakeup: compose_wake_prompt_for_agent exists"
+else
+    fail "wakeup: compose_wake_prompt_for_agent missing" "Helper not found"
+fi
+
+# Lazy-create sweep exists (called on app launch for every project)
+if grep -q 'pub fn ensure_workspace_wakeups' "$AGENTS_SRC"; then
+    pass "wakeup: ensure_workspace_wakeups sweep helper exists"
+else
+    fail "wakeup: sweep helper missing" "ensure_workspace_wakeups not found"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
+section "3.7: Scripted Triage (LLM Removed)"
+# ═══════════════════════════════════════════════════════════════════════
+
+HOOKS_SRC="$PROJECT_ROOT/src-tauri/src/agent_hooks.rs"
+
+# LLM path removed from the /cli/scheduler-tick HTTP handler. The LLM
+# module still exists and can be kept around for other uses, but the
+# scheduler is now deterministic/scripted by default.
+if grep -A 60 '"/cli/scheduler-tick" =>' "$HOOKS_SRC" | grep -q 'llm_triage_decide'; then
+    fail "scheduler-tick: still invokes LLM" "llm_triage_decide called inside /cli/scheduler-tick branch"
+else
+    pass "scheduler-tick: LLM triage removed (fully scripted)"
+fi
+
+# HTTP handler returns count synchronously, not just {status: triage_started}
+if grep -A 60 '"/cli/scheduler-tick" =>' "$HOOKS_SRC" | grep -q '"count":'; then
+    pass "scheduler-tick: returns count field synchronously"
+else
+    fail "scheduler-tick: response shape" "Expected count field; likely still returning {status: triage_started}"
+fi
+
+# Scheduler writes audit rows on every decision point
+if grep -q 'HeartbeatFire::insert' "$AGENTS_SRC"; then
+    pass "scheduler: writes heartbeat_fires audit rows"
+else
+    fail "scheduler: audit writes missing" "HeartbeatFire::insert not called"
+fi
+
+# /cli/heartbeat-log endpoint + CLI command
+if grep -q '/cli/heartbeat-log' "$HOOKS_SRC"; then
+    pass "heartbeat: /cli/heartbeat-log endpoint present"
+else
+    fail "heartbeat: log endpoint missing" "/cli/heartbeat-log not in agent_hooks.rs"
+fi
+
+if grep -q 'cmd_heartbeat_log' "$K2SO_CLI"; then
+    pass "CLI: k2so heartbeat log command wired up"
+else
+    fail "CLI: heartbeat log command missing" "cmd_heartbeat_log not in cli/k2so"
+fi
+
+# /cli/checkin includes wakeupInstructions
+if grep -q 'wakeupInstructions' "$HOOKS_SRC"; then
+    pass "checkin: response includes wakeupInstructions field"
+else
+    fail "checkin: missing wakeupInstructions" "Field not found in /cli/checkin handler"
+fi
+
+# Heartbeat shell script logs every tick (not just successful launches)
+if grep -q 'tick project=' "$AGENTS_SRC"; then
+    pass "heartbeat script: logs every tick (fires + skips + errors)"
+else
+    fail "heartbeat script: silent ticks" "Expected 'tick project=' log pattern in shell script generator"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
+section "3.8: Retained-View + File Search + Paste"
+# ═══════════════════════════════════════════════════════════════════════
+
+# Retained-view context module exists
+if [ -f "$PROJECT_ROOT/src/renderer/contexts/TabVisibilityContext.tsx" ]; then
+    pass "retained-view: TabVisibilityContext present"
+else
+    fail "retained-view: context missing" "Expected src/renderer/contexts/TabVisibilityContext.tsx"
+fi
+
+# TerminalArea uses display:none for inactive tabs
+TA="$PROJECT_ROOT/src/renderer/components/Terminal/TerminalArea.tsx"
+if grep -q "display: isActiveTab ? 'block' : 'none'" "$TA"; then
+    pass "retained-view: TerminalArea hides inactive tabs via display:none"
+else
+    fail "retained-view: TerminalArea" "Expected display:none tab hiding in TerminalArea"
+fi
+
+# PaneGroupView renders every item, not just active
+PGV="$PROJECT_ROOT/src/renderer/components/PaneLayout/PaneGroupView.tsx"
+if grep -q 'paneGroup.items.map' "$PGV" && grep -q "display: hidden ? 'none' : 'block'" "$PGV"; then
+    pass "retained-view: PaneGroupView renders all items with display:none"
+else
+    fail "retained-view: PaneGroupView" "Expected items.map + display:none pattern"
+fi
+
+# Backend file search command
+FS_SRC="$PROJECT_ROOT/src-tauri/src/commands/filesystem.rs"
+if grep -q 'pub fn fs_search_tree' "$FS_SRC"; then
+    pass "file search: fs_search_tree command defined"
+else
+    fail "file search: command missing" "fs_search_tree not found in filesystem.rs"
+fi
+
+if grep -q 'SKIP_DIRS.*node_modules\|"node_modules"' "$FS_SRC"; then
+    pass "file search: skip-list includes heavy dirs (node_modules, .git, etc.)"
+else
+    fail "file search: skip-list" "Expected SKIP_DIRS constant referencing node_modules"
+fi
+
+# Clipboard file-paths command (Finder CMD+V → terminal)
+if grep -q 'pub fn clipboard_read_file_paths' "$FS_SRC"; then
+    pass "clipboard: native file-path read command present"
+else
+    fail "clipboard: command missing" "clipboard_read_file_paths not found"
+fi
+
+# Commands registered in lib.rs invoke_handler
+LIB_SRC="$PROJECT_ROOT/src-tauri/src/lib.rs"
+for cmd in fs_search_tree clipboard_read_file_paths; do
+    if grep -q "$cmd" "$LIB_SRC"; then
+        pass "lib.rs: $cmd registered with invoke_handler"
+    else
+        fail "lib.rs: $cmd not registered" "Command missing from invoke_handler in lib.rs"
+    fi
+done
+
+# ═══════════════════════════════════════════════════════════════════════
 # Results
 # ═══════════════════════════════════════════════════════════════════════
 

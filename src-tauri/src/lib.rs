@@ -425,6 +425,30 @@ pub fn run() {
                     }
                 }
 
+                // One-shot migration: ensure every registered project has
+                // a workspace `.k2so/wakeup.md` and every existing agent
+                // has its own `wakeup.md` (if its type supports wake-up).
+                // Runs on every launch but is a no-op for projects already
+                // migrated — `ensure_*_wakeup` never overwrites an existing
+                // file. Spawns off the main thread so a slow filesystem
+                // can't delay startup.
+                {
+                    let handle = app.handle().clone();
+                    std::thread::spawn(move || {
+                        use tauri::Manager;
+                        let projects = match handle.try_state::<crate::state::AppState>() {
+                            Some(state) => {
+                                let conn = state.db.lock();
+                                crate::db::schema::Project::list(&conn).unwrap_or_default()
+                            }
+                            None => return,
+                        };
+                        for project in &projects {
+                            crate::commands::k2so_agents::ensure_workspace_wakeups(&project.path);
+                        }
+                    });
+                }
+
                 // Watchdog: periodically verify the port file exists and is correct.
                 // If another process deletes it or it gets corrupted, recreate it so
                 // the heartbeat script can always find the running K2SO instance.

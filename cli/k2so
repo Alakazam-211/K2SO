@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.29.7"
+K2SO_CLI_VERSION="0.30.0"
 
 set -euo pipefail
 
@@ -559,6 +559,42 @@ cmd_heartbeat() {
     cli_request "/cli/heartbeat"
 }
 
+# Show the recent heartbeat decision log for this workspace.
+# Every tick writes one row per agent — fired OR skipped — with the
+# reason. This makes "why didn't my agent wake?" directly answerable.
+cmd_heartbeat_log() {
+    local limit="50"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --limit) limit="$2"; shift 2 ;;
+            -n) limit="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    cli_request "/cli/heartbeat-log" "limit=$limit" | python3 -c "
+import json, sys
+try:
+    rows = json.loads(sys.stdin.read())
+    if not rows:
+        print('No heartbeat activity recorded yet.')
+        sys.exit(0)
+    print(f'{'Fired At':<22} {'Agent':<20} {'Decision':<22} {'Inbox':<8} Reason')
+    print('-' * 100)
+    for r in rows:
+        fired = r.get('firedAt', '?')[:19].replace('T', ' ')
+        agent = r.get('agentName') or '(project)'
+        decision = r.get('decision', '?')
+        inbox_count = r.get('inboxCount')
+        inbox_priority = r.get('inboxPriority') or ''
+        inbox = f'{inbox_count or 0}{\" \" + inbox_priority if inbox_priority else \"\"}'
+        reason = r.get('reason') or ''
+        print(f'{fired:<22} {agent:<20} {decision:<22} {inbox:<8} {reason}')
+except Exception as e:
+    print(f'Error parsing response: {e}', file=sys.stderr)
+    sys.exit(1)
+" 2>/dev/null || cat
+}
+
 cmd_reviews() {
     cli_request "/cli/reviews" | python3 -c "
 import json, sys
@@ -940,6 +976,15 @@ try:
             print('  %s: %s %s' % (agent_name or '-', etype, summary or ''))
     else:
         print('Recent Activity: None')
+    print()
+
+    # Wake-up instructions — the agent's wakeup.md (or the shipped default
+    # template if the user hasn't edited it yet). Null for agent-template
+    # types, which are dispatched by a manager with explicit orders.
+    wakeup = d.get('wakeupInstructions')
+    if wakeup:
+        print('== Wake-up Instructions ==')
+        print(wakeup)
 except Exception as e:
     sys.stderr.write('Error: %s\n' % e)
 " 2>/dev/null
@@ -1587,6 +1632,7 @@ COMMANDS:
   mode <off|agent|manager>          Set workspace agent mode
   heartbeat                       Manually trigger heartbeat triage
   heartbeat wake                  Auto-wake Workspace Manager if inbox work exists
+  heartbeat log [-n <limit>]      Show the recent scheduler decisions (fires + skips)
   heartbeat <on|off>              Enable/disable automatic heartbeat
   heartbeat schedule              Show current project schedule
   heartbeat schedule off          Disable scheduled heartbeat
@@ -1723,7 +1769,7 @@ cmd_update() {
 
     # Extract the version from the remote script
     local remote_version
-    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.29.7"//')
+    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.30.0"//')
     if [ -z "$remote_version" ]; then
         echo "Error: Could not parse remote version." >&2
         exit 1
@@ -1863,6 +1909,8 @@ case "${1:-help}" in
     heartbeat)
         if [ "${2:-}" = "wake" ]; then
             shift 2; cmd_heartbeat_wake "$@"
+        elif [ "${2:-}" = "log" ]; then
+            shift 2; cmd_heartbeat_log "$@"
         else
             shift; cmd_heartbeat_toggle "$@"
         fi

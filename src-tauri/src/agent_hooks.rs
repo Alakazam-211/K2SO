@@ -740,10 +740,43 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                 .map(|config| serde_json::to_string(&config).unwrap_or_default())
                         }
                     }
+                    "/cli/heartbeat-log" => {
+                        // Return the most recent heartbeat fire rows for a project.
+                        // Query params: limit (default 50, max 500).
+                        let limit = params
+                            .get("limit")
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .unwrap_or(50)
+                            .clamp(1, 500);
+
+                        (|| -> Result<String, String> {
+                            let db_path = dirs::home_dir()
+                                .map(|h| h.join(".k2so/k2so.db"))
+                                .ok_or("No home dir")?;
+                            let conn = rusqlite::Connection::open(&db_path)
+                                .map_err(|e| format!("DB open failed: {}", e))?;
+                            let project_id: String = conn
+                                .query_row(
+                                    "SELECT id FROM projects WHERE path = ?1",
+                                    rusqlite::params![project_path],
+                                    |row| row.get(0),
+                                )
+                                .map_err(|e| format!("Project not found: {}", e))?;
+
+                            crate::db::schema::HeartbeatFire::list_by_project(&conn, &project_id, limit)
+                                .map(|rows| serde_json::to_string(&rows).unwrap_or_default())
+                                .map_err(|e| e.to_string())
+                        })()
+                    }
                     "/cli/scheduler-tick" => {
-                        // Enhanced triage: LLM-powered decision with filesystem fallback.
-                        // Runs in a background thread to avoid blocking the HTTP server
-                        // (LLM inference can take 2-30 seconds).
+                        // Scripted triage: deterministic priority/gate logic, no LLM.
+                        // Runs synchronously — the function itself is <10ms in typical
+                        // workspaces, so we can return the real launch count.
+                        //
+                        // The triage-in-flight lock remains to prevent overlap when two
+                        // ticks race (rare, but possible if launchd fires while the
+                        // previous tick is still auditing). Skipped ticks are visible
+                        // in `heartbeat_fires` so users aren't left guessing.
                         let already_running = {
                             let mut in_flight = triage_lock().lock().unwrap_or_else(|e| e.into_inner());
                             if in_flight.contains(&project_path) {
@@ -755,62 +788,51 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                         };
 
                         if already_running {
-                            Ok(serde_json::json!({"count": 0, "launched": [], "skipped": "triage already in flight"}).to_string())
+                            Ok(serde_json::json!({
+                                "count": 0,
+                                "launched": [],
+                                "skipped": "triage already in flight",
+                            }).to_string())
                         } else {
-                            // Spawn triage in background thread — return immediately to unblock HTTP server
-                            let bg_project_path = project_path.clone();
-                            let bg_app_handle = app_handle.clone();
-                            std::thread::spawn(move || {
-                                let agents_result = {
-                                    use tauri::Manager;
-                                    let llm_result = bg_app_handle.try_state::<crate::state::AppState>()
-                                        .and_then(|state| {
-                                            let manager = state.llm_manager.lock();
-                                            if manager.is_loaded() {
-                                                Some(crate::commands::k2so_agents::llm_triage_decide(
-                                                    &bg_project_path,
-                                                    &manager,
-                                                ))
-                                            } else {
-                                                None
-                                            }
-                                        });
+                            let result = crate::commands::k2so_agents::k2so_agents_scheduler_tick(project_path.clone());
+                            let launched = result.as_ref().cloned().unwrap_or_default();
 
-                                    match llm_result {
-                                        Some(result) => result,
-                                        None => {
-                                            crate::commands::k2so_agents::k2so_agents_scheduler_tick(bg_project_path.clone())
-                                        }
-                                    }
-                                };
-
-                                if let Ok(agents) = agents_result {
-                                    for agent_name in &agents {
-                                        if agent_name == "__lead__" {
-                                            let _ = crate::commands::k2so_agents::k2so_agents_generate_workspace_claude_md(bg_project_path.clone());
-                                            let _ = bg_app_handle.emit("cli:agent-launch", serde_json::json!({
-                                                "command": "claude",
-                                                "args": ["--append-system-prompt", "Check the workspace inbox: `k2so work inbox` and triage any new items to the appropriate sub-agents using `k2so delegate`."],
-                                                "cwd": &bg_project_path,
-                                                "agentName": "__lead__",
-                                            }));
-                                        } else {
-                                            if let Ok(launch) = crate::commands::k2so_agents::k2so_agents_build_launch(
-                                                bg_project_path.clone(), agent_name.clone(), None
-                                            ) {
-                                                let _ = bg_app_handle.emit("cli:agent-launch", &launch);
-                                            }
-                                        }
-                                    }
+                            // Fire launch events to the UI for each chosen agent.
+                            for agent_name in &launched {
+                                if agent_name == "__lead__" {
+                                    let _ = crate::commands::k2so_agents::k2so_agents_generate_workspace_claude_md(project_path.clone());
+                                    // Wake prompt composed from the workspace wakeup.md
+                                    // (falls back to the shipped template when the user
+                                    // hasn't customized it). Replaces the previously
+                                    // hard-coded "Check the workspace inbox..." string
+                                    // so users can edit what the manager does at wake.
+                                    let wake_prompt = crate::commands::k2so_agents::compose_wake_prompt_for_lead(&project_path);
+                                    let _ = app_handle.emit("cli:agent-launch", serde_json::json!({
+                                        "command": "claude",
+                                        "args": ["--append-system-prompt", wake_prompt],
+                                        "cwd": &project_path,
+                                        "agentName": "__lead__",
+                                    }));
+                                } else if let Ok(launch) = crate::commands::k2so_agents::k2so_agents_build_launch(
+                                    project_path.clone(), agent_name.clone(), None,
+                                ) {
+                                    let _ = app_handle.emit("cli:agent-launch", &launch);
                                 }
+                            }
 
-                                // Release triage lock
+                            // Release triage lock
+                            {
                                 let mut in_flight = triage_lock().lock().unwrap_or_else(|e| e.into_inner());
-                                in_flight.remove(&bg_project_path);
-                            });
+                                in_flight.remove(&project_path);
+                            }
 
-                            // Return immediately — triage runs in background
-                            Ok(serde_json::json!({"status": "triage_started"}).to_string())
+                            match result {
+                                Ok(agents) => Ok(serde_json::json!({
+                                    "count": agents.len(),
+                                    "launched": agents,
+                                }).to_string()),
+                                Err(e) => Err(e),
+                            }
                         }
                     }
                     "/cli/agentic" => {
@@ -1231,6 +1253,20 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                 // Log checkin
                                 crate::db::schema::log_activity(&conn, &project_id, Some(&agent), "checkin", Some(&agent), None, None, None);
 
+                                // Wake-up instructions — the agent's wakeup.md content,
+                                // or the shipped template if the user hasn't customized.
+                                // `null` for agents whose type doesn't use wake-up
+                                // (agent-template). Workspace-level (__lead__) uses a
+                                // different file at .k2so/wakeup.md.
+                                let wakeup_instructions: serde_json::Value = if agent == "__lead__" {
+                                    serde_json::Value::String(crate::commands::k2so_agents::compose_wake_prompt_for_lead(&project_path))
+                                } else {
+                                    match crate::commands::k2so_agents::compose_wake_prompt_for_agent(&project_path, &agent) {
+                                        Some(s) => serde_json::Value::String(s),
+                                        None => serde_json::Value::Null,
+                                    }
+                                };
+
                                 Ok(serde_json::json!({
                                     "agent": agent,
                                     "project": project_path,
@@ -1239,6 +1275,7 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                     "peers": peers,
                                     "reservations": reservations,
                                     "feed": feed,
+                                    "wakeupInstructions": wakeup_instructions,
                                 }).to_string())
                             })()
                         }

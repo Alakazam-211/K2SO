@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::db::schema::{AgentSession, WorkspaceRelation};
+use crate::db::schema::{AgentSession, HeartbeatFire, WorkspaceRelation};
 
 // ── DB helpers (standalone connection, no AppState needed) ──────────────
 
@@ -72,6 +72,161 @@ fn agent_work_dir(project_path: &str, agent_name: &str, folder: &str) -> PathBuf
 
 fn workspace_inbox_dir(project_path: &str) -> PathBuf {
     PathBuf::from(project_path).join(".k2so").join("work").join("inbox")
+}
+
+// ── Wake-up templates ──────────────────────────────────────────────────
+//
+// Shipped with the binary at compile time. On first app launch (or when
+// an agent is created), the matching template is copied to
+// `.k2so/agents/<name>/wakeup.md` with its `<!-- DEFAULT TEMPLATE -->`
+// header intact so users can see the scaffolded defaults and edit them.
+//
+// The workspace-level template lives at `.k2so/wakeup.md` for
+// `__lead__`. Agent-templates (the `agent-template` type) are
+// intentionally excluded — they're dispatched with explicit orders by
+// their manager and never wake autonomously.
+
+const WAKEUP_TEMPLATE_WORKSPACE: &str = include_str!("../../wakeup_templates/workspace.md");
+const WAKEUP_TEMPLATE_MANAGER: &str = include_str!("../../wakeup_templates/manager.md");
+const WAKEUP_TEMPLATE_CUSTOM: &str = include_str!("../../wakeup_templates/custom.md");
+const WAKEUP_TEMPLATE_K2SO: &str = include_str!("../../wakeup_templates/k2so.md");
+
+/// Resolve the wake-up template content for a given agent type.
+/// Returns `None` for agent types that don't use wake-up at all
+/// (currently just `agent-template`, which is always dispatched with
+/// explicit orders by a manager).
+fn wakeup_template_for(agent_type: &str) -> Option<&'static str> {
+    match agent_type {
+        "manager" | "coordinator" | "pod-leader" => Some(WAKEUP_TEMPLATE_MANAGER),
+        "custom" => Some(WAKEUP_TEMPLATE_CUSTOM),
+        "k2so" => Some(WAKEUP_TEMPLATE_K2SO),
+        _ => None,
+    }
+}
+
+fn agent_wakeup_path(project_path: &str, agent_name: &str) -> PathBuf {
+    agent_dir(project_path, agent_name).join("wakeup.md")
+}
+
+fn workspace_wakeup_path(project_path: &str) -> PathBuf {
+    PathBuf::from(project_path).join(".k2so").join("wakeup.md")
+}
+
+/// Read `wakeup.md` for an agent, falling back to the shipped template
+/// if the file doesn't exist or is empty. Returns `None` for agent
+/// types that don't use wake-up (agent-template and unknown types).
+fn read_agent_wakeup(project_path: &str, agent_name: &str, agent_type: &str) -> Option<String> {
+    let template = wakeup_template_for(agent_type)?;
+    let path = agent_wakeup_path(project_path, agent_name);
+    match fs::read_to_string(&path) {
+        Ok(s) if !s.trim().is_empty() => Some(s),
+        _ => Some(template.to_string()),
+    }
+}
+
+/// Read the workspace-level `wakeup.md` used by `__lead__`, falling
+/// back to the shipped template if missing or empty.
+fn read_workspace_wakeup(project_path: &str) -> String {
+    match fs::read_to_string(workspace_wakeup_path(project_path)) {
+        Ok(s) if !s.trim().is_empty() => s,
+        _ => WAKEUP_TEMPLATE_WORKSPACE.to_string(),
+    }
+}
+
+/// Create `wakeup.md` from the matching template if it doesn't exist.
+/// No-op if the file already exists (never overwrite user edits) or if
+/// the agent type doesn't use wake-up. Silently returns on any error —
+/// missing wakeup.md is not fatal.
+fn ensure_agent_wakeup(project_path: &str, agent_name: &str, agent_type: &str) {
+    let Some(template) = wakeup_template_for(agent_type) else { return };
+    let path = agent_wakeup_path(project_path, agent_name);
+    if path.exists() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, template);
+}
+
+/// Create the workspace-level `wakeup.md` (used by `__lead__`) from
+/// the shipped template if it doesn't exist. No-op if present.
+fn ensure_workspace_wakeup(project_path: &str) {
+    let path = workspace_wakeup_path(project_path);
+    if path.exists() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, WAKEUP_TEMPLATE_WORKSPACE);
+}
+
+/// Determine an agent's type from its `agent.md` frontmatter. Returns
+/// `"agent-template"` if no frontmatter or no `type:` field is found
+/// (the same default the scheduler uses elsewhere).
+fn agent_type_for(project_path: &str, agent_name: &str) -> String {
+    let md = agent_dir(project_path, agent_name).join("agent.md");
+    if let Ok(content) = fs::read_to_string(&md) {
+        let fm = parse_frontmatter(&content);
+        if let Some(t) = fm.get("type") {
+            return t.clone();
+        }
+    }
+    "agent-template".to_string()
+}
+
+/// Compose the `--append-system-prompt` text for `__lead__` at wake time.
+/// Pulls the user's workspace `wakeup.md` (or the shipped template if
+/// they haven't customized it) and prepends a short heading so the
+/// manager agent knows the context.
+pub fn compose_wake_prompt_for_lead(project_path: &str) -> String {
+    let wakeup = read_workspace_wakeup(project_path);
+    format!(
+        "# K2SO Heartbeat Wake — Workspace Manager\n\n\
+         The heartbeat scheduler woke you because new work has arrived in the \
+         workspace inbox. Your wake-up instructions are below; follow them \
+         and exit when done.\n\n\
+         ----\n\n{}",
+        wakeup.trim()
+    )
+}
+
+/// Compose the `--append-system-prompt` text for a regular agent
+/// woken by the heartbeat scheduler. Returns `None` for agent types
+/// that don't have wake-up semantics (agent-template).
+pub fn compose_wake_prompt_for_agent(project_path: &str, agent_name: &str) -> Option<String> {
+    let agent_type = agent_type_for(project_path, agent_name);
+    let wakeup = read_agent_wakeup(project_path, agent_name, &agent_type)?;
+    Some(format!(
+        "# K2SO Heartbeat Wake\n\n\
+         The heartbeat scheduler woke you. Your wake-up instructions are below; \
+         follow them and exit when done.\n\n\
+         ----\n\n{}",
+        wakeup.trim()
+    ))
+}
+
+/// Scaffold the wakeup files for a single workspace — one for each
+/// existing agent that supports wake-up, plus the workspace-level file
+/// for `__lead__`. Safe to call repeatedly; never overwrites an
+/// existing file. Used by the app-launch migration pass.
+pub fn ensure_workspace_wakeups(project_path: &str) {
+    ensure_workspace_wakeup(project_path);
+
+    let agents_root = agents_dir(project_path);
+    if !agents_root.exists() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(&agents_root) else { return };
+    for entry in entries.flatten() {
+        if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let agent_type = agent_type_for(project_path, &name);
+        ensure_agent_wakeup(project_path, &name, &agent_type);
+    }
 }
 
 // ── Frontmatter parsing ────────────────────────────────────────────────
@@ -387,6 +542,10 @@ pub fn k2so_agents_create(
 
     // Generate SKILL.md for the new agent
     write_agent_skill_file(&project_path, &name, &agent_type);
+
+    // Scaffold wakeup.md from the matching template (no-op for
+    // agent-template type — they're dispatched with explicit orders).
+    ensure_agent_wakeup(&project_path, &name, &agent_type);
 
     Ok(K2soAgentInfo {
         name,
@@ -1161,7 +1320,18 @@ pub fn k2so_agents_build_launch(
         ).ok().flatten()
     });
 
-    let mut args = vec!["--dangerously-skip-permissions".to_string(), "--append-system-prompt".to_string(), claude_md];
+    // Prepend the agent's wake-up instructions to the system prompt
+    // when one is defined for the agent's type. This is the "no active
+    // task, no inbox work, but the scheduler woke me" path — the most
+    // common shape for custom/manager agents on a heartbeat tick. The
+    // system prompt ends up as: CLAUDE.md (identity + workspace) +
+    // wakeup.md (operational orders).
+    let prompt_body = match compose_wake_prompt_for_agent(&project_path, &agent_name) {
+        Some(wake) => format!("{}\n\n{}", claude_md, wake),
+        None => claude_md,
+    };
+
+    let mut args = vec!["--dangerously-skip-permissions".to_string(), "--append-system-prompt".to_string(), prompt_body];
     if let Some(ref session_id) = resume_session {
         args.push("--resume".to_string());
         args.push(session_id.clone());
@@ -3473,36 +3643,66 @@ pub fn k2so_agents_set_heartbeat(
 /// Differentiates between manager agents (inbox-based) and custom agents (timing-based).
 #[tauri::command]
 pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, String> {
-    // Check workspace state — if heartbeat is disabled (Locked state), skip entirely
-    if let Some(ws_state) = get_workspace_state(&project_path) {
-        if ws_state.heartbeat == 0 {
-            return Ok(vec![]); // Locked state — no agent activity
-        }
-    }
-
-    // Project-level schedule gate: check if the schedule says "fire now"
-    // Look up project from DB by path
+    let tick_start = std::time::Instant::now();
     let db_path = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".k2so/k2so.db");
-    let mut resolved_project_id: Option<String> = None;
-    if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-        let project_row: Option<(String, String, Option<String>, Option<String>)> = conn.query_row(
-            "SELECT id, heartbeat_mode, heartbeat_schedule, heartbeat_last_fire FROM projects WHERE path = ?1",
-            rusqlite::params![project_path],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        ).ok();
 
-        if let Some((project_id, mode, schedule, last_fire)) = project_row {
-            resolved_project_id = Some(project_id.clone());
-            if mode == "off" {
+    // Look up project row up-front so audit writes have a project_id to
+    // hang on. Audit rows without a project_id are dropped silently.
+    let project_row: Option<(String, String, Option<String>, Option<String>)> =
+        rusqlite::Connection::open(&db_path)
+            .ok()
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT id, heartbeat_mode, heartbeat_schedule, heartbeat_last_fire \
+                     FROM projects WHERE path = ?1",
+                    rusqlite::params![project_path],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .ok()
+            });
+
+    // Helper: write one audit row. Silently drops writes if project_id
+    // isn't resolved (we'd have nothing to attach to anyway).
+    let resolved_project_id: Option<String> = project_row.as_ref().map(|r| r.0.clone());
+    let audit = |agent: Option<&str>, mode: &str, decision: &str, reason: Option<&str>,
+                 inbox_priority: Option<&str>, inbox_count: Option<i64>| {
+        if let Some(pid) = resolved_project_id.as_deref() {
+            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                let _ = HeartbeatFire::insert(
+                    &conn, pid, agent, mode, decision, reason,
+                    inbox_priority, inbox_count,
+                    Some(tick_start.elapsed().as_millis() as i64),
+                );
+            }
+        }
+    };
+
+    let mode_str = project_row.as_ref().map(|r| r.1.clone()).unwrap_or_else(|| "heartbeat".to_string());
+
+    // Gate 1: workspace-level state. Locked workspaces halt all agent activity.
+    if let Some(ws_state) = get_workspace_state(&project_path) {
+        if ws_state.heartbeat == 0 {
+            audit(None, &mode_str, "skipped_locked", Some("workspace state has heartbeat=0"), None, None);
+            return Ok(vec![]);
+        }
+    }
+
+    // Gate 2: project-level schedule.
+    if let Some((project_id, mode, schedule, last_fire)) = project_row.clone() {
+        if mode == "off" {
+            audit(None, &mode, "skipped_schedule", Some("heartbeat_mode=off"), None, None);
+            return Ok(vec![]);
+        }
+        if mode == "scheduled" || mode == "hourly" {
+            if !should_project_fire(&mode, schedule.as_deref(), last_fire.as_deref()) {
+                audit(None, &mode, "skipped_schedule", Some("schedule window not open"), None, None);
                 return Ok(vec![]);
             }
-            if mode == "scheduled" || mode == "hourly" {
-                if !should_project_fire(&mode, schedule.as_deref(), last_fire.as_deref()) {
-                    return Ok(vec![]); // Schedule says "not now"
-                }
-                // Update last_fire timestamp
+            // Record that the schedule opened. We only stamp last_fire
+            // here (not for "heartbeat" mode, which fires every tick).
+            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
                 let _ = conn.execute(
                     "UPDATE projects SET heartbeat_last_fire = ?1 WHERE id = ?2",
                     rusqlite::params![chrono::Local::now().to_rfc3339(), project_id],
@@ -3514,14 +3714,27 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
     let mut launchable = Vec::new();
     let now = chrono::Utc::now();
 
+    // Helper: friendly priority string from rank (0=critical, 3=low).
+    let priority_label = |rank: u8| -> &'static str {
+        match rank { 0 => "critical", 1 => "high", 2 => "normal", _ => "low" }
+    };
+
     // Step 1: Check workspace inbox (always — same as before)
     let ws_inbox = workspace_inbox_dir(&project_path);
-    let has_workspace_inbox = ws_inbox.exists() && fs::read_dir(&ws_inbox)
-        .map(|e| e.flatten().any(|e| e.path().extension().map_or(false, |ext| ext == "md")))
-        .unwrap_or(false);
+    let ws_inbox_count = if ws_inbox.exists() {
+        fs::read_dir(&ws_inbox)
+            .map(|e| e.flatten().filter(|e| e.path().extension().map_or(false, |ext| ext == "md")).count() as i64)
+            .unwrap_or(0)
+    } else { 0 };
+    let has_workspace_inbox = ws_inbox_count > 0;
 
-    if has_workspace_inbox && !is_agent_locked(&project_path, "__lead__") {
-        launchable.push("__lead__".to_string());
+    if has_workspace_inbox {
+        if is_agent_locked(&project_path, "__lead__") {
+            audit(Some("__lead__"), &mode_str, "skipped_locked", Some("lead already running"), None, Some(ws_inbox_count));
+        } else {
+            launchable.push("__lead__".to_string());
+            audit(Some("__lead__"), &mode_str, "fired", Some("workspace inbox has items"), None, Some(ws_inbox_count));
+        }
     }
 
     // Step 2: Check each agent
@@ -3539,6 +3752,7 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
 
             // Skip agents that already have an active session (lock file exists)
             if is_agent_locked(&project_path, &name) {
+                audit(Some(&name), &mode_str, "skipped_locked", Some("agent is already running"), None, None);
                 continue;
             }
 
@@ -3547,6 +3761,8 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
                 if let Ok(conn) = rusqlite::Connection::open(&db_path) {
                     if let Ok(Some(session)) = AgentSession::get_by_agent(&conn, pid, &name) {
                         if session.owner == "user" && session.status == "running" {
+                            audit(Some(&name), &mode_str, "skipped_user_session",
+                                  Some("user is driving this agent's terminal"), None, None);
                             continue;
                         }
                     }
@@ -3569,12 +3785,16 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
 
                 // Skip persistent mode agents (they're always running)
                 if config.mode == "persistent" {
+                    audit(Some(&name), &mode_str, "skipped_custom_timing",
+                          Some("persistent mode — always running"), None, None);
                     continue;
                 }
 
                 // Check active hours
                 if let Some(ref hours) = config.active_hours {
                     if !is_within_active_hours(hours, &now) {
+                        audit(Some(&name), &mode_str, "skipped_custom_timing",
+                              Some("outside active hours"), None, None);
                         continue;
                     }
                 }
@@ -3597,26 +3817,44 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
                         (now + chrono::Duration::seconds(updated.interval_seconds as i64)).to_rfc3339()
                     );
                     let _ = write_heartbeat_config(&project_path, &name, &updated);
+                    audit(Some(&name), &mode_str, "fired",
+                          Some(&format!("custom agent next_wake elapsed (interval {}s)", updated.interval_seconds)),
+                          None, None);
                     launchable.push(name);
+                } else {
+                    audit(Some(&name), &mode_str, "skipped_custom_timing",
+                          Some("next_wake not elapsed"), None, None);
                 }
             } else {
                 // Manager agents (manager, coordinator, agent-template, k2so): inbox-based triage
                 let inbox = agent_work_dir(&project_path, &name, "inbox");
-                let has_inbox = inbox.exists() && fs::read_dir(&inbox)
-                    .map(|e| e.flatten().any(|e| e.path().extension().map_or(false, |ext| ext == "md")))
-                    .unwrap_or(false);
+                let inbox_count = if inbox.exists() {
+                    fs::read_dir(&inbox)
+                        .map(|e| e.flatten().filter(|e| e.path().extension().map_or(false, |ext| ext == "md")).count() as i64)
+                        .unwrap_or(0)
+                } else { 0 };
 
-                if has_inbox {
-                    // Quality gate: skip agents with only low-priority inbox items
-                    // that already have active work in progress
-                    let active_count = count_md_files(&agent_work_dir(&project_path, &name, "active"));
-                    let highest_prio = get_highest_inbox_priority(&project_path, &name);
-                    if active_count > 0 && highest_prio > priority_rank("high") {
-                        // Agent has active work and inbox is only normal/low — defer to next cycle
-                        continue;
-                    }
-                    launchable.push(name);
+                if inbox_count == 0 {
+                    audit(Some(&name), &mode_str, "no_work", Some("empty inbox"), None, Some(0));
+                    continue;
                 }
+
+                let highest_prio = get_highest_inbox_priority(&project_path, &name);
+                let prio_label = priority_label(highest_prio);
+
+                // Quality gate: skip agents with only low-priority inbox items
+                // that already have active work in progress
+                let active_count = count_md_files(&agent_work_dir(&project_path, &name, "active"));
+                if active_count > 0 && highest_prio > priority_rank("high") {
+                    audit(Some(&name), &mode_str, "skipped_quality_gate",
+                          Some(&format!("active work in progress, inbox only {}", prio_label)),
+                          Some(prio_label), Some(inbox_count));
+                    continue;
+                }
+                audit(Some(&name), &mode_str, "fired",
+                      Some(&format!("inbox has items at priority {}", prio_label)),
+                      Some(prio_label), Some(inbox_count));
+                launchable.push(name);
             }
         }
     }
@@ -4218,19 +4456,27 @@ if [ -z "$TOKEN" ]; then
     exit 0
 fi
 
-# Trigger triage for each heartbeat-enabled project
+# Trigger triage for each heartbeat-enabled project. We log EVERY tick
+# (fires, skips, errors) so users can see when the heartbeat ran — the
+# old version only logged successful launches, which made it look like
+# nothing was firing even when everything was working.
 while IFS= read -r project_path; do
     [ -z "$project_path" ] && continue
     ENCODED_PATH=$(urlencode "$project_path")
     RESULT=$(curl -sG "http://127.0.0.1:$PORT/cli/scheduler-tick?token=$TOKEN&project=$ENCODED_PATH" --connect-timeout 5 --max-time 30 2>>"$LOG_FILE")
-    if [ $? -ne 0 ]; then
-        echo "$(ts) ERROR: curl failed for $project_path" >> "$LOG_FILE"
+    CURL_EXIT=$?
+    if [ "$CURL_EXIT" -ne 0 ]; then
+        echo "$(ts) ERROR curl exit=$CURL_EXIT project=$project_path" >> "$LOG_FILE"
         continue
     fi
-    # Extract count from JSON without python3 (pattern: "count":N)
-    COUNT=$(echo "$RESULT" | grep -o '"count":[0-9]*' | grep -o '[0-9]*' || echo 0)
-    if [ -n "$COUNT" ] && [ "$COUNT" -gt 0 ] 2>/dev/null; then
-        echo "$(ts) Heartbeat: launched $COUNT agents for $project_path" >> "$LOG_FILE"
+    COUNT=$(echo "$RESULT" | grep -o '"count":[0-9]*' | grep -o '[0-9]*' | head -1 || echo 0)
+    SKIPPED=$(echo "$RESULT" | grep -o '"skipped":"[^"]*"' | sed 's/"skipped":"\([^"]*\)"/\1/')
+    if [ -n "$SKIPPED" ]; then
+        echo "$(ts) tick project=$project_path skipped=$SKIPPED" >> "$LOG_FILE"
+    elif [ -n "$COUNT" ] && [ "$COUNT" -gt 0 ] 2>/dev/null; then
+        echo "$(ts) tick project=$project_path launched=$COUNT" >> "$LOG_FILE"
+    else
+        echo "$(ts) tick project=$project_path launched=0" >> "$LOG_FILE"
     fi
 done < "$PROJECTS_FILE"
 

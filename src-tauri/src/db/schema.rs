@@ -1232,3 +1232,94 @@ pub fn mark_messages_read(
         params![agent_name, project_id],
     )
 }
+
+// ── Heartbeat audit log ────────────────────────────────────────────────
+
+/// One row per scheduler decision. Written on every tick — both for
+/// agents that were launched and for agents that were skipped — so users
+/// can see exactly why each agent did or didn't wake.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeartbeatFire {
+    pub id: i64,
+    pub project_id: String,
+    pub agent_name: Option<String>,
+    pub fired_at: String,
+    pub mode: String,
+    pub decision: String,
+    pub reason: Option<String>,
+    pub inbox_priority: Option<String>,
+    pub inbox_count: Option<i64>,
+    pub duration_ms: Option<i64>,
+}
+
+impl HeartbeatFire {
+    pub fn insert(
+        conn: &Connection,
+        project_id: &str,
+        agent_name: Option<&str>,
+        mode: &str,
+        decision: &str,
+        reason: Option<&str>,
+        inbox_priority: Option<&str>,
+        inbox_count: Option<i64>,
+        duration_ms: Option<i64>,
+    ) -> Result<i64> {
+        conn.execute(
+            "INSERT INTO heartbeat_fires \
+             (project_id, agent_name, fired_at, mode, decision, reason, inbox_priority, inbox_count, duration_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                project_id,
+                agent_name,
+                chrono::Local::now().to_rfc3339(),
+                mode,
+                decision,
+                reason,
+                inbox_priority,
+                inbox_count,
+                duration_ms,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Return the most recent `limit` fire rows for a project.
+    pub fn list_by_project(
+        conn: &Connection,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<Vec<HeartbeatFire>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, agent_name, fired_at, mode, decision, reason, \
+                    inbox_priority, inbox_count, duration_ms \
+             FROM heartbeat_fires WHERE project_id = ?1 \
+             ORDER BY fired_at DESC LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(params![project_id, limit], |row| {
+            Ok(HeartbeatFire {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                agent_name: row.get(2)?,
+                fired_at: row.get(3)?,
+                mode: row.get(4)?,
+                decision: row.get(5)?,
+                reason: row.get(6)?,
+                inbox_priority: row.get(7)?,
+                inbox_count: row.get(8)?,
+                duration_ms: row.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Delete fire rows older than the given RFC3339 timestamp. Returns
+    /// the number of rows removed. Used by retention pruning (e.g., a
+    /// user-triggered "clear old heartbeats" action).
+    pub fn prune_before(conn: &Connection, cutoff: &str) -> Result<usize> {
+        conn.execute(
+            "DELETE FROM heartbeat_fires WHERE fired_at < ?1",
+            params![cutoff],
+        )
+    }
+}

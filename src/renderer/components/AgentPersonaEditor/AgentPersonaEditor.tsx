@@ -36,7 +36,7 @@ interface ClaudeMdPreview {
   claudeMdPath: string
 }
 
-type PreviewTab = 'profile' | 'claude-md' | 'workspace-claude-md'
+type PreviewTab = 'profile' | 'wakeup' | 'claude-md' | 'workspace-claude-md'
 
 interface AgentPersonaEditorProps {
   agentName: string
@@ -48,6 +48,8 @@ interface AgentPersonaEditorProps {
 
 export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPersonaEditorProps): React.JSX.Element {
   const [agentMdPath, setAgentMdPath] = useState<string | null>(null)
+  const [wakeupPath, setWakeupPath] = useState<string | null>(null)
+  const [wakeupContent, setWakeupContent] = useState<string>('')
   const [watchDir, setWatchDir] = useState<string | null>(null)
   const [agentContent, setAgentContent] = useState<string>('')
   const [context, setContext] = useState<EditorContext | null>(null)
@@ -87,6 +89,18 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
         setAgentMdPath(ctx.agentMdPath)
         setWatchDir(ctx.agentDir)
 
+        // Load wakeup.md (created lazily by the backend on first app
+        // launch after this feature shipped — may still be missing for
+        // agent-template type agents, which don't use wake-up).
+        const wkPath = `${ctx.agentDir}/wakeup.md`
+        setWakeupPath(wkPath)
+        try {
+          const wk = await invoke<{ content: string }>('fs_read_file', { path: wkPath })
+          setWakeupContent(wk.content)
+        } catch {
+          setWakeupContent('')
+        }
+
         // Fetch CLAUDE.md preview
         try {
           const preview = await invoke<ClaudeMdPreview>('k2so_agents_preview_claude_md', {
@@ -116,16 +130,27 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
     init()
   }, [projectPath, agentName])
 
-  const handleFileChange = useCallback((content: string) => {
-    // Route file change to the correct state based on active tab
-    if (activeTab === 'profile') {
+  const handleFileChange = useCallback((content: string, path?: string) => {
+    // In multi-file mode the watcher tells us which path changed; route
+    // to the right state slot directly. Fall back to the active preview
+    // tab when path is unknown (single-file mode preserved).
+    if (path && wakeupPath && path === wakeupPath) {
+      setWakeupContent(content)
+      return
+    }
+    if (path && agentMdPath && path === agentMdPath) {
+      setAgentContent(content)
+      return
+    }
+    if (activeTab === 'profile' || activeTab === 'wakeup') {
+      // 'wakeup' routes above via path; treat unpathed content as agent.md
       setAgentContent(content)
     } else if (activeTab === 'claude-md') {
       setClaudeMdContent(content)
     } else {
       setWsClaudeMdContent(content)
     }
-  }, [activeTab])
+  }, [activeTab, agentMdPath, wakeupPath])
 
   // Manual refresh: re-read agent.md directly
   const handleManualRefresh = useCallback(async () => {
@@ -292,9 +317,21 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
       ``,
       typeGuidance,
       ``,
-      `The user sees a tabbed preview on the right with Profile and CLAUDE.md tabs. Only edit agent.md.`,
+      `## Wake-up Instructions (wakeup.md)`,
+      ``,
+      `There is also a separate file for heartbeat wake-up instructions:`,
+      ``,
+      `• **wakeup.md** — operational instructions read by the heartbeat scheduler when it wakes this agent.`,
+      `  Path: \`${projectPath}/.k2so/agents/${context.agentName}/wakeup.md\``,
+      `  This is NOT the persona. It's "what do you do on wake" — small, tactical, edited often.`,
+      `  Keep it focused on the wake-up procedure (checkin, triage, work through inbox, exit).`,
+      `  When the user asks to change "what the agent does on wake," edit wakeup.md, not agent.md.`,
+      ``,
+      `The user sees a tabbed preview on the right with Profile, Wake-up, and CLAUDE.md tabs.`,
+      `The AIFileEditor tabs above the terminal let the user switch between editing agent.md and wakeup.md.`,
+      `Before editing, confirm which file they want to update and use the correct path.`,
     ].join('\n')
-  }, [context])
+  }, [context, projectPath])
 
   const terminalCommand = agentCommand?.command
   const terminalArgs = useMemo(() => {
@@ -330,11 +367,23 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
     )
   }
 
-  // AI always edits agent.md (the source of truth).
-  // CLAUDE.md tabs are read-only previews — they're generated from agent.md.
+  // AIFileEditor tabs: Persona (agent.md) + Wake-up (wakeup.md, if
+  // this agent type uses heartbeat wake). CLAUDE.md tabs remain as
+  // read-only previews in the preview panel.
+  const editorFiles = wakeupPath
+    ? [
+        { path: agentMdPath, label: 'Persona' },
+        { path: wakeupPath, label: 'Wake-up' },
+      ]
+    : undefined
   return (
     <AIFileEditor
       filePath={agentMdPath}
+      files={editorFiles}
+      onActiveFileChange={(p) => {
+        if (p === wakeupPath) setActiveTab('wakeup')
+        else if (p === agentMdPath) setActiveTab('profile')
+      }}
       watchDir={watchDir}
       cwd={watchDir}
       command={terminalCommand}
@@ -350,7 +399,10 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
           {/* Tab bar */}
           <div className="flex items-center justify-between px-3 py-1.5 border-b border-[var(--color-border)] flex-shrink-0">
             <div className="flex items-center gap-1">
-              {(['profile', 'claude-md', 'workspace-claude-md'] as const).map((tab) => (
+              {((wakeupPath
+                ? ['profile', 'wakeup', 'claude-md', 'workspace-claude-md']
+                : ['profile', 'claude-md', 'workspace-claude-md']
+              ) as PreviewTab[]).map((tab) => (
                 <button
                   key={tab}
                   onClick={() => { setActiveTab(tab); setPreviewMode('preview') }}
@@ -360,7 +412,10 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
                       : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]'
                   }`}
                 >
-                  {tab === 'profile' ? 'Profile' : tab === 'claude-md' ? 'Agent CLAUDE.md' : 'Workspace CLAUDE.md'}
+                  {tab === 'profile' ? 'Profile'
+                    : tab === 'wakeup' ? 'Wake-up'
+                    : tab === 'claude-md' ? 'Agent CLAUDE.md'
+                    : 'Workspace CLAUDE.md'}
                 </button>
               ))}
             </div>
@@ -440,9 +495,11 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
                   {activeTab === 'profile'
                     ? (stripFrontmatter(agentContent) || '*No content yet*')
-                    : activeTab === 'claude-md'
-                      ? (claudeMdContent || '*CLAUDE.md not yet generated. Click Regenerate to create it.*')
-                      : (wsClaudeMdContent || '*No workspace CLAUDE.md yet.*')
+                    : activeTab === 'wakeup'
+                      ? (wakeupContent || '*No wakeup.md yet — will be created from the template on first heartbeat.*')
+                      : activeTab === 'claude-md'
+                        ? (claudeMdContent || '*CLAUDE.md not yet generated. Click Regenerate to create it.*')
+                        : (wsClaudeMdContent || '*No workspace CLAUDE.md yet.*')
                   }
                 </ReactMarkdown>
               </div>
@@ -450,11 +507,23 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
           ) : (
             <div className="flex-1 overflow-hidden">
               <CodeEditor
-                code={currentContent}
-                filePath={currentPath}
+                code={
+                  activeTab === 'profile' ? agentContent
+                    : activeTab === 'wakeup' ? wakeupContent
+                    : activeTab === 'claude-md' ? claudeMdContent
+                    : wsClaudeMdContent
+                }
+                filePath={
+                  activeTab === 'profile' ? (agentMdPath ?? '')
+                    : activeTab === 'wakeup' ? (wakeupPath ?? '')
+                    : activeTab === 'claude-md' ? claudeMdPath
+                    : wsClaudeMdPath
+                }
                 onSave={async (content) => {
                   if (activeTab === 'profile') {
                     try { await invoke('fs_write_file', { path: agentMdPath, content }) } catch (err) { console.error('[agent-editor] Save failed:', err) }
+                  } else if (activeTab === 'wakeup' && wakeupPath) {
+                    try { await invoke('fs_write_file', { path: wakeupPath, content }) } catch (err) { console.error('[agent-editor] Wake-up save failed:', err) }
                   } else if (activeTab === 'claude-md') {
                     await handleSaveClaudeMd(content)
                   } else {
@@ -464,6 +533,8 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
                 onChange={(content) => {
                   if (activeTab === 'profile') {
                     setAgentContent(content)
+                  } else if (activeTab === 'wakeup') {
+                    setWakeupContent(content)
                   } else if (activeTab === 'claude-md') {
                     setClaudeMdContent(content)
                   } else {

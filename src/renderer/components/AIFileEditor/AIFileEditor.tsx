@@ -43,9 +43,29 @@ async function saveEditorSession(cwd: string, command: string | undefined): Prom
 
 // ── Props ────────────────────────────────────────────────────────────
 
+/** A single file tab when AIFileEditor is in multi-file mode. */
+export interface EditorFile {
+  /** Absolute path to this file */
+  path: string
+  /** Short tab label shown to the user (e.g., 'Persona', 'Wake-up') */
+  label: string
+}
+
 interface AIFileEditorProps {
-  /** Absolute path to the file being edited */
+  /**
+   * Absolute path to the file being edited. In multi-file mode this
+   * is ignored in favor of `files[activeFileIndex].path`.
+   */
   filePath: string
+  /**
+   * Optional list of files for multi-file editing. When provided,
+   * renders a small tab strip; the parent's `onFileChange` is called
+   * with the newly-read content of whichever file is currently active.
+   * The AI terminal remains a single session so it can reason across
+   * all files at once — the system prompt the parent supplies via
+   * `args` should explain each file's purpose.
+   */
+  files?: EditorFile[]
   /** Directory to watch for changes (usually the parent of filePath) */
   watchDir: string
   /** Terminal working directory */
@@ -60,8 +80,12 @@ interface AIFileEditorProps {
   warningText?: string
   /** Live preview content — any React node, managed by the parent */
   preview: React.ReactNode
-  /** Called when the watched file changes. Parent handles parsing. */
-  onFileChange: (content: string) => void
+  /**
+   * Called when the watched file changes. In multi-file mode the
+   * second argument is the path that changed so the parent can route
+   * content to the right state slot.
+   */
+  onFileChange: (content: string, path?: string) => void
   /** Called when user clicks Back */
   onClose: () => void
   /** Top bar title */
@@ -70,12 +94,18 @@ interface AIFileEditorProps {
   onManualRefresh?: () => void
   /** Enable file rename detection — watcher scans watchDir for renamed files (default: false) */
   trackFileRename?: boolean
+  /**
+   * Called when the user clicks a file tab (multi-file mode only).
+   * Parent can use this to swap its preview panel to match.
+   */
+  onActiveFileChange?: (path: string) => void
 }
 
 // ── Component ────────────────────────────────────────────────────────
 
 export function AIFileEditor({
   filePath,
+  files,
   watchDir,
   cwd,
   command,
@@ -88,16 +118,23 @@ export function AIFileEditor({
   title = 'AI File Editor',
   onManualRefresh,
   trackFileRename = false,
+  onActiveFileChange,
 }: AIFileEditorProps): React.JSX.Element {
   const terminalIdRef = useRef(`ai-editor-${crypto.randomUUID()}`)
   const [terminalReady, setTerminalReady] = useState(false)
-  const [activeFilePath, setActiveFilePath] = useState(filePath)
+  // In multi-file mode, `files[0]` is the initial active tab. In single-file
+  // mode we fall back to the legacy `filePath` prop.
+  const isMultiFile = !!files && files.length > 1
+  const [activeFileIndex, setActiveFileIndex] = useState(0)
+  const effectivePath = isMultiFile ? files![activeFileIndex]?.path ?? filePath : filePath
+  const [activeFilePath, setActiveFilePath] = useState(effectivePath)
 
-  // Sync with prop changes (e.g. persona editor tab switches)
+  // Sync with prop changes (e.g. tab switches from within multi-file mode,
+  // or parent swapping the single-file filePath).
   useEffect(() => {
-    setActiveFilePath(filePath)
+    setActiveFilePath(effectivePath)
     lastContentRef.current = '' // Reset so new file content triggers onFileChange
-  }, [filePath])
+  }, [effectivePath])
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // ── Session resume: detect previous editor session ────────────────
@@ -139,7 +176,7 @@ export function AIFileEditor({
 
   // ── File watching + polling fallback ─────────────────────────────────
   const lastContentRef = useRef<string>('')
-  const fileExtension = filePath.split('.').pop() || 'json'
+  const fileExtension = effectivePath.split('.').pop() || 'json'
 
   useEffect(() => {
     let unlisten: (() => void) | null = null
@@ -168,15 +205,15 @@ export function AIFileEditor({
           const content = result.content
           if (content !== lastContentRef.current) {
             lastContentRef.current = content
-            onFileChange(content)
+            onFileChange(content, target.path)
           }
         } else {
           // Direct file read — no directory scanning, no rename detection
-          const result = await invoke<{ content: string; path: string; name: string }>('fs_read_file', { path: filePath })
+          const result = await invoke<{ content: string; path: string; name: string }>('fs_read_file', { path: effectivePath })
           const content = result.content
           if (content !== lastContentRef.current) {
             lastContentRef.current = content
-            onFileChange(content)
+            onFileChange(content, effectivePath)
           }
         }
       } catch {
@@ -201,7 +238,7 @@ export function AIFileEditor({
       if (debounceRef.current) clearTimeout(debounceRef.current)
       invoke('fs_unwatch_dir', { path: watchDir }).catch((e) => console.warn('[ai-editor]', e))
     }
-  }, [watchDir, filePath, fileExtension, trackFileRename, onFileChange])
+  }, [watchDir, effectivePath, fileExtension, trackFileRename, onFileChange])
 
   // ── Terminal cleanup on unmount ────────────────────────────────────
   const cwdRef = useRef(cwd)
@@ -258,6 +295,29 @@ export function AIFileEditor({
         <span className="text-amber-400 text-sm flex-shrink-0">&#9888;</span>
         <span className="text-[11px] text-amber-300/80 leading-relaxed">{warningText}</span>
       </div>
+
+      {/* ── File tabs (multi-file mode only) ── */}
+      {isMultiFile && files && (
+        <div className="flex items-center gap-1 px-4 py-1.5 border-b border-[var(--color-border)] flex-shrink-0">
+          {files.map((f, i) => (
+            <button
+              key={f.path}
+              onClick={() => {
+                setActiveFileIndex(i)
+                onActiveFileChange?.(f.path)
+              }}
+              className={`px-2.5 py-1 text-[11px] font-medium transition-colors no-drag cursor-pointer ${
+                i === activeFileIndex
+                  ? 'text-[var(--color-text-primary)] border-b-2 border-[var(--color-accent)]'
+                  : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]'
+              }`}
+              title={f.path}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* ── Instructions (optional) ── */}
       {instructions && (
