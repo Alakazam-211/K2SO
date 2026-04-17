@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { getDefaultKeybindings } from '@shared/hotkeys'
 import type { AppSettingsResponse, EditorSettingsBackend } from '@shared/types'
 
-export type SettingsSection = 'general' | 'terminal' | 'code-editor' | 'editors-agents' | 'keybindings' | 'projects' | 'timer' | 'workspace-states' | 'agent-skills' | 'companion'
+export type SettingsSection = 'general' | 'terminal' | 'code-editor' | 'editors-agents' | 'keybindings' | 'projects' | 'timer' | 'workspace-states' | 'agent-skills' | 'heartbeats' | 'companion'
 
 export interface TerminalSettings {
   fontFamily: string

@@ -14,6 +14,7 @@ import { CompanionSection, COMPANION_MANIFEST } from './sections/CompanionSectio
 import { ProjectsSection, PROJECTS_MANIFEST } from './sections/ProjectsSection'
 import { WorkspaceStatesSection, WORKSPACE_STATES_MANIFEST } from './sections/WorkspaceStatesSection'
 import { AgentSkillsSection, AGENT_SKILLS_MANIFEST } from './sections/AgentSkillsSection'
+import { HeartbeatsSection, HEARTBEATS_MANIFEST } from './sections/HeartbeatsSection'
 
 // ── Section nav items ────────────────────────────────────────────────
 const SECTIONS: { id: SettingsSection; label: string; agenticOnly?: boolean }[] = [
@@ -21,6 +22,7 @@ const SECTIONS: { id: SettingsSection; label: string; agenticOnly?: boolean }[] 
   { id: 'projects', label: 'Workspaces' },
   { id: 'workspace-states', label: 'Workspace States', agenticOnly: true },
   { id: 'agent-skills', label: 'Agent Skills', agenticOnly: true },
+  { id: 'heartbeats', label: 'Heartbeats', agenticOnly: true },
   { id: 'terminal', label: 'Terminal' },
   { id: 'code-editor', label: 'Code Editor' },
   { id: 'editors-agents', label: 'Editors & Agents' },
@@ -50,6 +52,7 @@ export default function Settings(): React.JSX.Element {
       ...PROJECTS_MANIFEST,
       ...WORKSPACE_STATES_MANIFEST,
       ...AGENT_SKILLS_MANIFEST,
+      ...HEARTBEATS_MANIFEST,
       ...TERMINAL_MANIFEST,
       ...CODE_EDITOR_MANIFEST,
       ...EDITORS_AGENTS_MANIFEST,
@@ -58,7 +61,7 @@ export default function Settings(): React.JSX.Element {
       ...COMPANION_MANIFEST,
     ]
     if (agenticEnabled) return combined
-    return combined.filter((e) => e.section !== 'workspace-states' && e.section !== 'agent-skills')
+    return combined.filter((e) => e.section !== 'workspace-states' && e.section !== 'agent-skills' && e.section !== 'heartbeats')
   }, [agenticEnabled])
 
   useEffect(() => {
@@ -176,6 +179,11 @@ export default function Settings(): React.JSX.Element {
         {activeSection === 'agent-skills' && (
           <SectionErrorBoundary>
             <AgentSkillsSection />
+          </SectionErrorBoundary>
+        )}
+        {activeSection === 'heartbeats' && (
+          <SectionErrorBoundary>
+            <HeartbeatsSection />
           </SectionErrorBoundary>
         )}
       </div>

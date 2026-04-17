@@ -1047,6 +1047,57 @@ else
     fail "orphan cleanup: template detection missing" "repair must skip template-marked legacy files"
 fi
 
+# Phase 2: Heartbeats Settings UI
+HB_SECTION="$PROJECT_ROOT/src/renderer/components/Settings/sections/HeartbeatsSection.tsx"
+SETTINGS_ROUTER="$PROJECT_ROOT/src/renderer/components/Settings/Settings.tsx"
+
+if [ -f "$HB_SECTION" ]; then
+    pass "Phase 2: HeartbeatsSection.tsx present"
+else
+    fail "Phase 2: HeartbeatsSection missing" "Expected HeartbeatsSection.tsx in Settings/sections/"
+fi
+
+if grep -q 'HEARTBEATS_MANIFEST' "$HB_SECTION" && grep -q 'HEARTBEATS_MANIFEST' "$SETTINGS_ROUTER"; then
+    pass "Phase 2: HEARTBEATS_MANIFEST exported + imported into Settings router"
+else
+    fail "Phase 2: manifest wiring" "Expected HEARTBEATS_MANIFEST exported from section and imported in Settings.tsx"
+fi
+
+if grep -q "id: 'heartbeats'" "$SETTINGS_ROUTER" && grep -q "activeSection === 'heartbeats'" "$SETTINGS_ROUTER"; then
+    pass "Phase 2: 'heartbeats' nav entry + router branch present"
+else
+    fail "Phase 2: nav entry" "Expected 'heartbeats' in SECTIONS list + activeSection branch"
+fi
+
+if grep -q "'heartbeats'" "$PROJECT_ROOT/src/renderer/stores/settings.ts"; then
+    pass "Phase 2: 'heartbeats' added to SettingsSection type"
+else
+    fail "Phase 2: type missing" "Expected 'heartbeats' in SettingsSection union in stores/settings.ts"
+fi
+
+# Schedule picker GUI (no raw cron typing)
+if grep -q 'function ScheduleEditor' "$HB_SECTION" && grep -q 'Frequency' "$HB_SECTION"; then
+    pass "Phase 2: ScheduleEditor modal with frequency picker present"
+else
+    fail "Phase 2: schedule picker" "Expected ScheduleEditor component with frequency picker"
+fi
+
+# Configure Wakeup button → AIFileEditor with AI context
+if grep -q 'function WakeupEditor' "$HB_SECTION" && grep -q 'Other heartbeats on this agent' "$HB_SECTION"; then
+    pass "Phase 2: WakeupEditor injects persona + other-heartbeat summaries into AI context"
+else
+    fail "Phase 2: wakeup editor AI context" "Expected WakeupEditor with persona + other-heartbeat context"
+fi
+
+# CRUD actions call the backend commands we shipped in 0.32.0/0.32.1
+for cmd in k2so_heartbeat_add k2so_heartbeat_list k2so_heartbeat_remove k2so_heartbeat_set_enabled k2so_heartbeat_edit k2so_heartbeat_rename; do
+    if grep -q "'$cmd'" "$HB_SECTION"; then
+        pass "Phase 2: HeartbeatsSection invokes $cmd"
+    else
+        fail "Phase 2: $cmd missing" "Expected invoke('$cmd', ...) in HeartbeatsSection"
+    fi
+done
+
 # Hook handler must sync AgentSession.status on every canonical event so the
 # scheduler's is_agent_locked check reflects reality. Without this the row
 # stays status='running' forever after the first wake and every subsequent
