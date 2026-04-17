@@ -220,8 +220,26 @@ pub fn run() {
             // Save window state and clean up terminals on close
             let app_handle = app.handle().clone();
             if let Some(win) = app.get_webview_window("main") {
+                let win_for_hide = win.clone();
                 win.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { .. } = event {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        // Keep the process alive if any project has heartbeat
+                        // enabled — otherwise autonomous wakes can't fire
+                        // when the user closes the window. This matches
+                        // the "always-on" pattern used by Slack/1Password
+                        // and makes K2SO actually autonomous.
+                        //
+                        // Users with no heartbeat-enabled projects get the
+                        // normal "red button quits" behavior. Cmd+Q always
+                        // quits regardless (NSApplication terminate: goes
+                        // straight to RunEvent::Exit, not here).
+                        if any_heartbeat_enabled() {
+                            window::save_window_state(&app_handle);
+                            api.prevent_close();
+                            let _ = win_for_hide.hide();
+                            log_debug!("[window] Close intercepted — process staying alive for heartbeat agents");
+                            return;
+                        }
                         window::save_window_state(&app_handle);
 
                         // Parallelize LLM unload and terminal kill with a 5-second timeout.
@@ -826,19 +844,59 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building K2SO")
-        .run(|_app, event| {
-            if let tauri::RunEvent::Exit = event {
-                if RELAUNCH_MODE.load(std::sync::atomic::Ordering::Relaxed) {
-                    // Relaunch mode — use normal exit so the spawned process survives
-                    std::process::exit(0);
-                } else {
-                    // Use _exit() to skip C++ static destructors (ggml_metal).
-                    // This handles Cmd+Q (NSApplication terminate:) which bypasses
-                    // the window CloseRequested event and goes straight to exit().
-                    unsafe { libc::_exit(0); }
+        .run(|app, event| {
+            match event {
+                tauri::RunEvent::Exit => {
+                    if RELAUNCH_MODE.load(std::sync::atomic::Ordering::Relaxed) {
+                        // Relaunch mode — use normal exit so the spawned process survives
+                        std::process::exit(0);
+                    } else {
+                        // Use _exit() to skip C++ static destructors (ggml_metal).
+                        // This handles Cmd+Q (NSApplication terminate:) which bypasses
+                        // the window CloseRequested event and goes straight to exit().
+                        unsafe { libc::_exit(0); }
+                    }
                 }
+                // macOS: user clicked the Dock icon while the window was
+                // hidden (e.g. they had closed it with the red button and
+                // we kept the app alive for heartbeat agents). Re-show
+                // the main window instead of opening a new one.
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Reopen { has_visible_windows, .. } => {
+                    if !has_visible_windows {
+                        if let Some(win) = app.get_webview_window("main") {
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                        }
+                    }
+                }
+                _ => {}
             }
         });
+}
+
+/// True when at least one project has heartbeat enabled. Used by the
+/// window close handler to decide whether to keep the app alive after
+/// the user clicks the red button. If heartbeat is fully off, red-button
+/// quits normally — we don't force the user to Cmd+Q unless they're
+/// actually relying on autonomous wakes.
+fn any_heartbeat_enabled() -> bool {
+    let db_path = match dirs::home_dir() {
+        Some(h) => h.join(".k2so/k2so.db"),
+        None => return false,
+    };
+    let conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM projects WHERE heartbeat_enabled = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    count > 0
 }
 
 /// One-time migration: move workspace_layouts from settings.json → workspace_sessions SQLite table.

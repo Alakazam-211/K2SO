@@ -898,6 +898,28 @@ else
     pass ".last_session retirement: no live file I/O remains"
 fi
 
+# Red-button should keep the process alive when any project has heartbeat
+# enabled, so autonomous wakes can fire without the user remembering to
+# keep the window open. Cmd+Q still quits.
+LIB_SRC="$PROJECT_ROOT/src-tauri/src/lib.rs"
+if grep -q 'fn any_heartbeat_enabled' "$LIB_SRC"; then
+    pass "red-button keep-alive: any_heartbeat_enabled helper defined"
+else
+    fail "red-button: helper missing" "Expected any_heartbeat_enabled fn in lib.rs"
+fi
+
+if grep -q 'if any_heartbeat_enabled()' "$LIB_SRC" && grep -q 'api.prevent_close()' "$LIB_SRC"; then
+    pass "red-button keep-alive: CloseRequested intercepted when heartbeat enabled"
+else
+    fail "red-button: intercept missing" "Expected any_heartbeat_enabled + prevent_close in CloseRequested"
+fi
+
+if grep -q 'RunEvent::Reopen' "$LIB_SRC"; then
+    pass "red-button keep-alive: Reopen handler re-shows hidden window on Dock click"
+else
+    fail "red-button: Reopen missing" "Expected RunEvent::Reopen handler in app.run"
+fi
+
 # ═══════════════════════════════════════════════════════════════════════
 section "3.9: Settings Search Palette"
 # ═══════════════════════════════════════════════════════════════════════
