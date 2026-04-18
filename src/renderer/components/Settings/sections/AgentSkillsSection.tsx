@@ -8,12 +8,13 @@ import { AgentContextDiagram } from './AgentContextDiagram'
 
 export const AGENT_SKILLS_MANIFEST: SettingEntry[] = [
   { id: 'agent-skills.manager', section: 'agent-skills', label: 'Workspace Manager Skills', description: 'Auto-generated + custom skill layers for the workspace manager', keywords: ['manager', 'skills', 'workspace', 'triage', 'delegate'] },
+  { id: 'agent-skills.k2so-agent', section: 'agent-skills', label: 'K2SO Agent Skills', description: 'Skill layers for the K2SO planner agent (PRDs, milestones, technical plans)', keywords: ['k2so', 'agent', 'planner', 'prd', 'milestone', 'skills'] },
   { id: 'agent-skills.agent-template', section: 'agent-skills', label: 'Agent Template Skills', description: 'Skill layers shared by every team member agent', keywords: ['template', 'skills', 'agent', 'checkin'] },
   { id: 'agent-skills.custom-agent', section: 'agent-skills', label: 'Custom Agent Skills', description: 'Skill layers for custom / heartbeat-driven agents', keywords: ['custom', 'skills', 'agent', 'cross-workspace'] },
   { id: 'agent-skills.add-layer', section: 'agent-skills', label: 'Add Skill Layer', description: 'Create a new markdown skill layer', keywords: ['add', 'new', 'layer', 'skill'] },
 ]
 
-type SkillTier = 'manager' | 'agent_template' | 'custom_agent'
+type SkillTier = 'manager' | 'k2so_agent' | 'agent_template' | 'custom_agent'
 
 interface SkillLayerInfo {
   filename: string
@@ -24,6 +25,7 @@ interface SkillLayerInfo {
 
 const SKILL_TABS: { key: SkillTier; label: string }[] = [
   { key: 'manager', label: 'Workspace Manager' },
+  { key: 'k2so_agent', label: 'K2SO Agent' },
   { key: 'agent_template', label: 'Agent Template' },
   { key: 'custom_agent', label: 'Custom Agent' },
 ]
@@ -37,6 +39,16 @@ const LOCKED_LAYERS: Record<SkillTier, string[]> = {
     'Decision Framework',
     'Delegation + Review',
     'Communication Commands',
+  ],
+  k2so_agent: [
+    'Identity',
+    'Every Wake (k2so checkin)',
+    'Report + Complete',
+    'Planning (PRDs + Milestones)',
+    'Your Own Heartbeats',
+    'Cross-Workspace Messaging',
+    'File Reservations',
+    'Settings + Diagnostic',
   ],
   agent_template: [
     'Identity',

@@ -1,6 +1,6 @@
 import React from 'react'
 
-type SkillTier = 'manager' | 'agent_template' | 'custom_agent'
+type SkillTier = 'manager' | 'k2so_agent' | 'agent_template' | 'custom_agent'
 
 interface Props {
   tier: SkillTier
@@ -69,6 +69,26 @@ const AGENT_TEMPLATE_SPEC: {
   ],
 }
 
+const K2SO_AGENT_SPEC: {
+  sources: SourceNode[]
+  artifacts: ArtifactNode[]
+  deliveries: Delivery[]
+} = {
+  sources: [
+    { label: 'AGENT.md', path: '.k2so/agents/<k2so-agent>/AGENT.md', hint: 'K2SO planner persona — role, tone, goals.', flowsTo: 'claude_md' },
+    { label: 'Auto layers (8)', path: 'regenerated at launch', hint: 'Identity, Every Wake (k2so checkin), Report + Complete, Planning (PRDs + Milestones), Your Own Heartbeats, Cross-Workspace Messaging, File Reservations, Settings + Diagnostic', flowsTo: 'skill_md' },
+    { label: 'Custom layers', path: '~/.k2so/templates/k2so-agent/*.md', hint: 'Your "+ Add Layer" entries — global across every K2SO-agent workspace.', flowsTo: 'skill_md' },
+    { label: 'heartbeat WAKEUP.md', path: '.k2so/agents/<k2so-agent>/heartbeats/<sched>/WAKEUP.md', hint: 'Per-schedule wake trigger. K2SO agents can have multiple heartbeats (daily brief, weekly review, etc.).', flowsTo: 'argv' },
+  ],
+  artifacts: [
+    { label: 'SKILL.md', hint: 'Regenerated at launch. Single canonical file — fans out via symlinks to every harness.' },
+  ],
+  deliveries: [
+    { label: '--append-system-prompt', hint: 'SKILL.md body + AGENT.md ship here at launch.' },
+    { label: 'positional argv', hint: 'Per-heartbeat WAKEUP.md arrives as the first user message on fire.' },
+  ],
+}
+
 const CUSTOM_AGENT_SPEC: {
   sources: SourceNode[]
   artifacts: ArtifactNode[]
@@ -93,6 +113,7 @@ const CUSTOM_AGENT_SPEC: {
 function specForTier(tier: SkillTier): typeof MANAGER_SPEC {
   switch (tier) {
     case 'manager': return MANAGER_SPEC
+    case 'k2so_agent': return K2SO_AGENT_SPEC
     case 'agent_template': return AGENT_TEMPLATE_SPEC
     case 'custom_agent': return CUSTOM_AGENT_SPEC
   }
@@ -118,7 +139,11 @@ function flowAccent(flow: SourceNode['flowsTo']): string {
 
 export function AgentContextDiagram({ tier }: Props): React.JSX.Element {
   const spec = specForTier(tier)
-  const tierName = tier === 'manager' ? 'Workspace Manager' : tier === 'agent_template' ? 'Agent Template' : 'Custom Agent'
+  const tierName =
+    tier === 'manager' ? 'Workspace Manager' :
+    tier === 'k2so_agent' ? 'K2SO Agent' :
+    tier === 'agent_template' ? 'Agent Template' :
+    'Custom Agent'
 
   return (
     <div className="border border-[var(--color-border)] bg-[var(--color-bg-elevated)]/30 px-4 py-3 mb-4">
