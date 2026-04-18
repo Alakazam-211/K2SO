@@ -22,6 +22,7 @@ import { showContextMenu } from '@/lib/context-menu'
 import { SectionErrorBoundary } from '../SectionErrorBoundary'
 import type { SettingEntry } from '../searchManifest'
 import { HeartbeatsPanel, HistoryPanel } from './HeartbeatsSection'
+import { ContextLayersPreview } from './ContextLayersPreview'
 
 export const PROJECTS_MANIFEST: SettingEntry[] = [
   { id: 'projects.list', section: 'projects', label: 'Workspaces', description: 'All registered projects + focus groups', keywords: ['workspaces', 'projects', 'focus groups'] },
@@ -1361,27 +1362,10 @@ function ProjectDetail({
             <StateSelector projectId={project.id} currentStateId={project.stateId} />
           )}
 
-          {/* Multi-heartbeat list — inline per-workspace, see
-              .k2so/prds/multi-schedule-heartbeat.md. Replaces the
-              single-heartbeat row that lived here pre-0.32.3. Only
-              rendered for modes that support scheduleable agents. */}
-          {(project.agentMode || 'off') !== 'off' && (
-            <div className="pt-2 border-t border-[var(--color-border)]">
-              <HeartbeatsPanel
-                projectPath={project.path}
-                agentName={(() => {
-                  const mode = project.agentMode || 'off'
-                  if (mode === 'manager' || mode === 'coordinator' || mode === 'pod') return '__lead__'
-                  if (mode === 'agent') return 'k2so-agent'
-                  // Custom mode — backend find_primary_agent scans for the
-                  // custom-typed agent by reading agent.md frontmatter. The
-                  // UI just needs a display name; use the project.name as a
-                  // reasonable fallback until we wire a lookup.
-                  return project.name.toLowerCase().replace(/\s+/g, '-')
-                })()}
-              />
-            </div>
-          )}
+          {/* Heartbeats moved to the right column (next to History +
+              Context Layers) so the wake-related surfaces live together
+              and the main settings column stays focused on workspace
+              identity/mode/worktree setup. See the aside below. */}
 
           {/* Agent templates list — only in Manager mode */}
           {((project.agentMode || 'off') === 'manager' || project.agentMode === 'coordinator' || project.agentMode === 'pod') && (
@@ -1444,13 +1428,41 @@ function ProjectDetail({
       </div>
     </div>
 
-    {/* Right column — per-workspace heartbeat fire history. Sticks to
-        the top while the left column scrolls so the audit stays visible
-        next to whatever setting you're editing. Hidden entirely when
-        the workspace is Off AND has no historical fire rows, so an Off
+    {/* Right column — wake-related surfaces grouped together: Heartbeats
+        (the schedule), Context Layers (what ships in each wake), and the
+        fire History (what actually happened). Sticks to the top while
+        the left column scrolls so the wake picture stays visible next to
+        whatever setting you're editing. Hidden entirely when the
+        workspace is Off AND has no historical fire rows, so an Off
         workspace that was never an agent doesn't get a dead frame. */}
     {!((project.agentMode || 'off') === 'off' && historyEmpty) && (
-      <aside className="min-w-0 sticky top-0 self-start">
+      <aside className="min-w-0 sticky top-0 self-start space-y-4">
+        {(project.agentMode || 'off') !== 'off' && (
+          <HeartbeatsPanel
+            projectPath={project.path}
+            agentName={(() => {
+              const mode = project.agentMode || 'off'
+              if (mode === 'manager' || mode === 'coordinator' || mode === 'pod') return '__lead__'
+              if (mode === 'agent') return 'k2so-agent'
+              // Custom mode — backend find_primary_agent scans for the
+              // custom-typed agent by reading agent.md frontmatter. The
+              // UI just needs a display name; use the project.name as a
+              // reasonable fallback until we wire a lookup.
+              return project.name.toLowerCase().replace(/\s+/g, '-')
+            })()}
+          />
+        )}
+        {(project.agentMode || 'off') !== 'off' && (
+          <ContextLayersPreview
+            projectPath={project.path}
+            agentMode={project.agentMode || null}
+            onOpenSettings={() => {
+              // Deep-link to Settings → Agent Skills. The layer stack is
+              // read-only; edits go through the Agent Skills section.
+              useSettingsStore.getState().setSection('agent-skills')
+            }}
+          />
+        )}
         <HistoryPanel projectPath={project.path} onEmptyChange={setHistoryEmpty} />
       </aside>
     )}
