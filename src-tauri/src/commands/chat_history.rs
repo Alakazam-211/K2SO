@@ -576,6 +576,28 @@ fn detect_claude_session(project_path: &str) -> Option<String> {
     })
 }
 
+/// Check whether a claude session file exists on disk for the given
+/// session_id + project path (including any worktree siblings). Used before
+/// `--resume` to avoid claude bailing with "No conversation found" when the
+/// DB holds a stale session_id (workspace remove+readd, claude-side session
+/// pruning, migrations, etc.). Returns false if the file is missing or the
+/// projects directory isn't readable.
+pub fn claude_session_file_exists(session_id: &str, project_path: &str) -> bool {
+    let Some(home) = dirs::home_dir() else { return false };
+    let project_hash = claude_project_hash(resolve_root_project_path(project_path));
+    let projects_dir = home.join(".claude").join("projects");
+    let Ok(entries) = fs::read_dir(&projects_dir) else { return false };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == project_hash || name.starts_with(&format!("{}-", project_hash)) {
+            if entry.path().join(format!("{}.jsonl", session_id)).exists() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn detect_cursor_session(project_path: &str) -> Option<String> {
     let cursor_chats_dir = dirs::home_dir()?.join(".cursor").join("chats");
     let root = resolve_root_project_path(project_path);

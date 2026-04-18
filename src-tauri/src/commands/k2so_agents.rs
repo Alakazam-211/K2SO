@@ -2206,7 +2206,17 @@ pub fn k2so_agents_build_launch(
                 if let Ok(Some(session)) = AgentSession::get_by_agent(&conn, &project_id, &agent_name) {
                     if let Some(sid) = session.session_id {
                         if !sid.is_empty() {
-                            return Some(sid);
+                            // Validate the session file still exists on disk before
+                            // handing the id to --resume. Stale ids survive workspace
+                            // remove+readd and claude-side session pruning, and with
+                            // --fork-session skipped (heartbeats) claude bails with
+                            // "No conversation found" instead of silently minting
+                            // a new session. Clear the DB row so the next wake starts
+                            // fresh, then fall through to the history-scan fallback.
+                            if crate::commands::chat_history::claude_session_file_exists(&sid, &project_path) {
+                                return Some(sid);
+                            }
+                            let _ = AgentSession::clear_session_id(&conn, &project_id, &agent_name);
                         }
                     }
                 }
