@@ -416,8 +416,14 @@ function WakeupEditor({ projectPath, agentName, heartbeat, otherHeartbeats, onCl
 
   if (!agentCommand) return null
 
+  // Use `fixed` (viewport-relative) instead of `absolute` (nearest
+  // positioned ancestor). HeartbeatsPanel now lives inside a sticky
+  // right-column aside, which acts as the containing block for
+  // `absolute` children — the editor would otherwise render only in
+  // that narrow column. Fixed covers the whole Settings surface
+  // regardless of which column launched it.
   return (
-    <div className="absolute inset-0 overflow-hidden bg-[var(--color-bg)]">
+    <div className="fixed inset-0 overflow-hidden bg-[var(--color-bg)] z-50">
       <AIFileEditor
         filePath={wakeupAbs}
         watchDir={wakeupDir}
