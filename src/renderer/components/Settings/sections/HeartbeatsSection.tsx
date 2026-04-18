@@ -634,9 +634,30 @@ export function HistoryPanel({ projectPath, onEmptyChange }: HistoryPanelProps):
 interface HeartbeatsPanelProps {
   projectPath: string
   agentName: string | null
+  /** Workspace agent mode (manager / agent / custom / coordinator / pod). Used
+      to derive a friendly display label for the header — e.g. "Workspace
+      Manager" instead of the raw dir name (`pod-leader` / `__lead__`) or the
+      internal sentinel. Optional for backwards compatibility. */
+  agentMode?: string | null
 }
 
-export function HeartbeatsPanel({ projectPath, agentName: agentNameProp }: HeartbeatsPanelProps): React.JSX.Element {
+function agentModeLabel(mode: string | null | undefined, fallbackName: string | null): string {
+  switch (mode) {
+    case 'manager':
+    case 'coordinator':
+    case 'pod':
+      return 'Workspace Manager'
+    case 'agent':
+      return 'K2SO Agent'
+    case 'custom':
+      // Custom agents have a meaningful display name — show it.
+      return fallbackName ?? 'Custom Agent'
+    default:
+      return fallbackName ?? '(no agent)'
+  }
+}
+
+export function HeartbeatsPanel({ projectPath, agentName: agentNameProp, agentMode }: HeartbeatsPanelProps): React.JSX.Element {
   // Shape compat: the old section component took no props and resolved
   // project from the active-project store. The panel version takes
   // explicit props so it can be embedded anywhere and still work.
@@ -752,7 +773,7 @@ export function HeartbeatsPanel({ projectPath, agentName: agentNameProp }: Heart
         <div>
           <h3 className="text-xs font-medium text-[var(--color-text-primary)]">Heartbeats</h3>
           <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
-            Scheduled wakeups for <span className="font-mono">{agentName ?? '(no agent)'}</span>. Each fires on its own cadence with its own <span className="font-mono">wakeup.md</span>.
+            Scheduled wakeups for <span className="text-[var(--color-text-secondary)]">{agentModeLabel(agentMode, agentName)}</span>. Each fires on its own cadence with its own <span className="font-mono">wakeup.md</span>.
           </p>
         </div>
         <button

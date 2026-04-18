@@ -1440,6 +1440,7 @@ function ProjectDetail({
         {(project.agentMode || 'off') !== 'off' && (
           <HeartbeatsPanel
             projectPath={project.path}
+            agentMode={project.agentMode || null}
             agentName={(() => {
               const mode = project.agentMode || 'off'
               if (mode === 'manager' || mode === 'coordinator' || mode === 'pod') return '__lead__'
