@@ -26,6 +26,7 @@ pub fn focus_groups_create(
         .map_err(|e| e.to_string())?;
 
     let result = FocusGroup::get(&conn, &id).map_err(|e| e.to_string())?;
+    drop(conn);
     let _ = app.emit("sync:focus-groups", ());
     Ok(result)
 }
@@ -43,6 +44,7 @@ pub fn focus_groups_update(
     FocusGroup::update(&conn, &id, name.as_deref(), color.as_deref(), tab_order)
         .map_err(|e| e.to_string())?;
     let result = FocusGroup::get(&conn, &id).map_err(|e| e.to_string())?;
+    drop(conn);
     let _ = app.emit("sync:focus-groups", ());
     Ok(result)
 }
@@ -51,6 +53,7 @@ pub fn focus_groups_update(
 pub fn focus_groups_delete(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     let conn = state.db.lock();
     FocusGroup::delete(&conn, &id).map_err(|e| e.to_string())?;
+    drop(conn);
     let _ = app.emit("sync:focus-groups", ());
     Ok(())
 }
@@ -92,6 +95,7 @@ pub fn focus_groups_assign_project(
     .ok(); // Don't fail the command if config write fails
 
     let result = Project::get(&conn, &project_id).map_err(|e| e.to_string())?;
+    drop(conn);
     let _ = app.emit("sync:focus-groups", ());
     let _ = app.emit("sync:projects", ());
     Ok(result)
@@ -148,6 +152,7 @@ pub fn focus_groups_reconcile_project(
     }
 
     let result = Project::get(&conn, &project_id).map_err(|e| e.to_string())?;
+    drop(conn);
     let _ = app.emit("sync:focus-groups", ());
     let _ = app.emit("sync:projects", ());
     Ok(result)

@@ -773,6 +773,7 @@ pub fn chat_history_rename_session(
         rusqlite::params![provider, session_id, custom_name],
     )
     .map_err(|e| e.to_string())?;
+    drop(conn);
     let _ = app.emit("sync:chat-history", ());
     Ok(())
 }
@@ -822,6 +823,7 @@ pub fn chat_history_toggle_pin(
         rusqlite::params![provider, session_id, pinned_val],
     )
     .map_err(|e| e.to_string())?;
+    drop(conn);
     let _ = app.emit("sync:chat-history", ());
     Ok(())
 }

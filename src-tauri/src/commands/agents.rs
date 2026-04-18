@@ -46,6 +46,7 @@ pub fn presets_create(
     .map_err(|e| e.to_string())?;
 
     let result = AgentPreset::get(&conn, &id).map_err(|e| e.to_string())?;
+    drop(conn);
     let _ = app.emit("sync:presets", ());
     Ok(result)
 }
@@ -73,6 +74,7 @@ pub fn presets_update(
     )
     .map_err(|e| e.to_string())?;
     let result = AgentPreset::get(&conn, &id).map_err(|e| e.to_string())?;
+    drop(conn);
     let _ = app.emit("sync:presets", ());
     Ok(result)
 }
@@ -88,6 +90,7 @@ pub fn presets_delete(app: AppHandle, state: State<'_, AppState>, id: String) ->
     }
 
     AgentPreset::delete(&conn, &id).map_err(|e| e.to_string())?;
+    drop(conn);
     let _ = app.emit("sync:presets", ());
     Ok(())
 }
@@ -99,6 +102,7 @@ pub fn presets_reorder(app: AppHandle, state: State<'_, AppState>, ids: Vec<Stri
         AgentPreset::update(&conn, id, None, None, None, None, Some(i as i64))
             .map_err(|e| e.to_string())?;
     }
+    drop(conn);
     let _ = app.emit("sync:presets", ());
     Ok(())
 }
@@ -120,6 +124,7 @@ pub fn presets_reset_built_ins(app: AppHandle, state: State<'_, AppState>) -> Re
     }
 
     let result = AgentPreset::list(&conn).map_err(|e| e.to_string())?;
+    drop(conn);
     let _ = app.emit("sync:presets", ());
     Ok(result)
 }

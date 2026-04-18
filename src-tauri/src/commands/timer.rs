@@ -35,6 +35,7 @@ pub fn timer_entry_create(
         memo.as_deref(),
     )
     .map_err(|e| e.to_string())?;
+    drop(conn);
     let _ = app.emit("sync:timer-entries", ());
     Ok(())
 }
@@ -47,6 +48,7 @@ pub fn timer_entry_delete(
 ) -> Result<(), String> {
     let conn = state.db.lock();
     TimeEntry::delete(&conn, id.as_str()).map_err(|e| e.to_string())?;
+    drop(conn);
     let _ = app.emit("sync:timer-entries", ());
     Ok(())
 }
