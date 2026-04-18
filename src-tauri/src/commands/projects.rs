@@ -321,6 +321,7 @@ pub fn projects_create(
 
         Project::get(&conn, &project_id).map_err(|e| e.to_string())
     })?;
+    drop(conn); // release before emit — see projects_update for rationale
     let _ = app.emit("sync:projects", ());
     Ok(result)
 }
@@ -344,28 +345,30 @@ pub fn projects_update(
     heartbeat_mode: Option<String>,
     heartbeat_schedule: Option<String>,
 ) -> Result<Project, String> {
-    let conn = state.db.lock();
-
     // icon_url: Some("data:...") sets it, Some("") clears it, None leaves unchanged
     let icon_param = icon_url.as_ref().map(|url| {
         if url.is_empty() { None } else { Some(url.as_str()) }
     });
 
-    // Before changing agent_mode, archive the current mode's orphan
-    // top-tier agents so the swap doesn't leave stale dirs behind.
-    // The archive function itself is a no-op when there's nothing to
-    // clean up, so this is safe to call unconditionally.
-    if agent_mode.is_some() {
-        let project_path: Option<String> = conn.query_row(
+    // Before changing agent_mode, archive the current mode's orphan top-tier
+    // agents so the swap doesn't leave stale dirs behind. Scoped so the guard
+    // is dropped before we re-acquire below — parking_lot::Mutex is not
+    // reentrant and shadowing a live MutexGuard self-deadlocks on the main
+    // thread (symptom: UI beachball on any projects_update call).
+    let project_path_for_archive: Option<String> = if agent_mode.is_some() {
+        let conn = state.db.lock();
+        conn.query_row(
             "SELECT path FROM projects WHERE id = ?1",
             rusqlite::params![&id],
             |row| row.get::<_, String>(0),
-        ).ok();
-        if let Some(path) = project_path {
-            drop(conn); // release the lock before the archive call reopens
-            crate::commands::k2so_agents::archive_orphan_top_tier_agents(&path);
-        }
+        ).ok()
+    } else {
+        None
+    };
+    if let Some(path) = project_path_for_archive.as_deref() {
+        crate::commands::k2so_agents::archive_orphan_top_tier_agents(path);
     }
+
     let conn = state.db.lock();
 
     Project::update(
@@ -393,6 +396,15 @@ pub fn projects_update(
     )
     .map_err(|e| e.to_string())?;
     let result = Project::get(&conn, &id).map_err(|e| e.to_string())?;
+    // Drop the DB lock BEFORE emitting the sync event. The frontend's
+    // sync:projects listener re-invokes Rust commands (fetchProjects →
+    // projects_list) that need the same lock. If we emit while holding
+    // conn, the listener blocks waiting for it, and WebKit's URL-scheme
+    // handler on the main thread ends up waiting on the same condvar —
+    // classic re-entrant deadlock (symptom: beachball on workspace
+    // state change, especially with heartbeat-enabled projects where
+    // the cascade is longer and hits the race every time).
+    drop(conn);
     let _ = app.emit("sync:projects", ());
     Ok(result)
 }
@@ -453,6 +465,7 @@ pub fn projects_enable_worktrees(
 
         Project::get(&conn, &project_id).map_err(|e| e.to_string())
     })?;
+    drop(conn);
     let _ = app.emit("sync:projects", ());
     Ok(result)
 }
@@ -464,6 +477,7 @@ pub fn projects_delete(app: AppHandle, state: State<'_, AppState>, id: String) -
     conn.execute("DELETE FROM workspaces WHERE project_id = ?1", rusqlite::params![id])
         .map_err(|e| e.to_string())?;
     Project::delete(&conn, &id).map_err(|e| e.to_string())?;
+    drop(conn);
     let _ = app.emit("sync:projects", ());
     Ok(())
 }
@@ -485,6 +499,7 @@ pub fn projects_reorder(app: AppHandle, state: State<'_, AppState>, ids: Vec<Str
         Project::update(&conn, id, None, None, None, Some(i as i64), None, None, None, None, None, None, None, None, None, None, None)
             .map_err(|e| e.to_string())?;
     }
+    drop(conn);
     let _ = app.emit("sync:projects", ());
     Ok(())
 }
@@ -602,6 +617,7 @@ pub fn projects_add_from_path(
         let project = Project::get(&conn, &project_id).map_err(|e| e.to_string())?;
         Ok(AddFromPathResult::Project(project))
     })?;
+    drop(conn);
     let _ = app.emit("sync:projects", ());
     Ok(result)
 }
@@ -661,6 +677,7 @@ pub fn projects_add_without_git(
 
         Project::get(&conn, &project_id).map_err(|e| e.to_string())
     })?;
+    drop(conn);
     let _ = app.emit("sync:projects", ());
     Ok(result)
 }
@@ -730,6 +747,7 @@ pub fn projects_init_git_and_open(
 
         Project::get(&conn, &project_id).map_err(|e| e.to_string())
     })?;
+    drop(conn);
     let _ = app.emit("sync:projects", ());
     Ok(result)
 }
@@ -871,6 +889,7 @@ pub async fn projects_upload_icon(
             )
             .map_err(|e| e.to_string())?;
 
+            drop(conn);
             let _ = app.emit("sync:projects", ());
             Ok(IconResult {
                 found: true,
@@ -892,6 +911,7 @@ pub fn projects_clear_icon(
         Some(None), None, None, None, None, None, None, None, None, None,
     )
     .map_err(|e| e.to_string())?;
+    drop(conn);
     let _ = app.emit("sync:projects", ());
     Ok(())
 }
