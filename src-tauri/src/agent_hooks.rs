@@ -82,6 +82,27 @@ fn event_queues() -> &'static Mutex<HashMap<String, VecDeque<ChannelEvent>>> {
 /// Returns the generated terminal ID (also the pane/tab ID used for
 /// hook routing). Returns Err when the terminal manager can't be
 /// reached (AppState not yet initialized).
+/// Post-spawn SIGWINCH nudge. The frontend normally calls terminal_resize on
+/// mount, which sends SIGWINCH to the child process — some CLI TUIs (claude
+/// among them) hold off on full initialization and queued-input processing
+/// until they see that first resize after exec. Without this, heartbeats
+/// "fire" (PTY spawned, wake message queued in input) but the agent sits
+/// idle until a user opens the tab and the frontend's mount handler runs —
+/// which defeats the whole point of headless wakes. Replays the same
+/// resize-to-known-dims nudge from the backend so the invariant holds.
+fn nudge_wake_pty_async(app_handle: AppHandle, terminal_id: String) {
+    std::thread::spawn(move || {
+        // Brief settle so the shell's exec of claude has completed before
+        // the signal lands. Under 1 s in practice; 800 ms buys margin.
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let Some(state) = app_handle.try_state::<crate::state::AppState>() else {
+            return;
+        };
+        let manager = state.terminal_manager.lock();
+        let _ = manager.resize(&terminal_id, 120, 38);
+    });
+}
+
 /// Post-spawn watcher: detects Claude Code's stale-session confirmation dialog
 /// and dismisses it by selecting option 3 ("never ask again"). Used by the
 /// heartbeat paths which spawn with `--resume` but WITHOUT `--fork-session`
@@ -164,6 +185,11 @@ fn spawn_wake_pty(
         "[agent-hooks] Wake PTY spawned for {} ({}): id={}",
         agent_name, command, terminal_id
     );
+
+    // Kick claude's TUI into full initialization with a deferred SIGWINCH.
+    // Headless heartbeats would otherwise sit idle until a user opens the
+    // tab — see nudge_wake_pty_async for the rationale.
+    nudge_wake_pty_async(app_handle.clone(), terminal_id.clone());
 
     // Record the session as `running` with owner=system so the scheduler
     // won't double-launch this agent on the next tick. The frontend's
