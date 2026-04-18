@@ -365,8 +365,8 @@ pub fn projects_update(
     } else {
         None
     };
-    if let Some(path) = project_path_for_archive.as_deref() {
-        crate::commands::k2so_agents::archive_orphan_top_tier_agents(path);
+    if let Some(path) = project_path_for_archive {
+        crate::commands::k2so_agents::archive_orphan_top_tier_agents(&path);
     }
 
     let conn = state.db.lock();
