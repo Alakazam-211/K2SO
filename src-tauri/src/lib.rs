@@ -473,6 +473,11 @@ pub fn run() {
                             None => return,
                         };
                         for project in &projects {
+                            // Multi-heartbeat migration / scaffold for __lead__. Must run
+                            // before `ensure_workspace_wakeups` so the legacy
+                            // `.k2so/wakeup.md` content gets picked up before any new
+                            // scaffold writes over it. Idempotent.
+                            crate::commands::k2so_agents::migrate_or_scaffold_lead_heartbeat(&project.path);
                             crate::commands::k2so_agents::ensure_workspace_wakeups(&project.path);
                             // One-time promote of legacy single-slot heartbeat_schedule
                             // into the multi-heartbeat agent_heartbeats table. Idempotent.

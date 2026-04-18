@@ -911,20 +911,25 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                         // Emit launch events for each agent
                                         for agent_name in &agents {
                                             if agent_name == "__lead__" {
-                                                // Wake the lead agent — generate workspace CLAUDE.md and launch in project root.
-                                                // Wake prompt (from workspace wakeup.md) goes in the user message so
-                                                // Claude treats it as actionable instructions. Spawned directly in
-                                                // Rust so the wake fires whether or not a K2SO window is open.
+                                                // triage_decide returns the literal "__lead__" sentinel, but the
+                                                // on-disk primary may be a real agent dir (coordinator/pod-leader/
+                                                // manager). Resolve it so build_launch reads the right SKILL.md /
+                                                // CLAUDE.md. wakeup_override comes from the triage heartbeat row.
                                                 let _ = crate::commands::k2so_agents::k2so_agents_generate_workspace_claude_md(project_path.clone());
-                                                let wake_prompt = crate::commands::k2so_agents::compose_wake_prompt_for_lead(&project_path);
-                                                let _ = spawn_wake_pty(
-                                                    &app_handle,
-                                                    "__lead__",
-                                                    &project_path,
-                                                    "claude",
-                                                    vec!["--dangerously-skip-permissions".to_string(), wake_prompt],
-                                                    &project_path,
-                                                );
+                                                let primary = crate::commands::k2so_agents::find_primary_agent(&project_path)
+                                                    .unwrap_or_else(|| "__lead__".to_string());
+                                                let wakeup_override = crate::commands::k2so_agents::default_heartbeat_wakeup_abs(&project_path, &primary);
+                                                if let Ok(launch) = crate::commands::k2so_agents::k2so_agents_build_launch(
+                                                    project_path.clone(), primary.clone(), None, wakeup_override, Some(true),
+                                                ) {
+                                                    let command = launch.get("command").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
+                                                    let cwd = launch.get("cwd").and_then(|v| v.as_str()).unwrap_or(&project_path).to_string();
+                                                    let args: Vec<String> = launch.get("args")
+                                                        .and_then(|v| v.as_array())
+                                                        .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                                                        .unwrap_or_default();
+                                                    let _ = spawn_wake_pty(&app_handle, &primary, &project_path, &command, args, &cwd);
+                                                }
                                             } else if let Ok(launch) = crate::commands::k2so_agents::k2so_agents_build_launch(
                                                 project_path.clone(), agent_name.clone(), None, None, None,
                                             ) {
@@ -1274,20 +1279,22 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             // Fire launch events to the UI for each chosen agent.
                             for agent_name in &launched {
                                 if agent_name == "__lead__" {
+                                    // Unified builder — resolve the real primary agent like the triage-wake site above.
                                     let _ = crate::commands::k2so_agents::k2so_agents_generate_workspace_claude_md(project_path.clone());
-                                    // Wake prompt (workspace wakeup.md) is the user
-                                    // message — operational orders Claude must execute
-                                    // this turn. Direct Rust spawn so the wake fires
-                                    // whether or not a K2SO window is open.
-                                    let wake_prompt = crate::commands::k2so_agents::compose_wake_prompt_for_lead(&project_path);
-                                    let _ = spawn_wake_pty(
-                                        &app_handle,
-                                        "__lead__",
-                                        &project_path,
-                                        "claude",
-                                        vec!["--dangerously-skip-permissions".to_string(), wake_prompt],
-                                        &project_path,
-                                    );
+                                    let primary = crate::commands::k2so_agents::find_primary_agent(&project_path)
+                                        .unwrap_or_else(|| "__lead__".to_string());
+                                    let wakeup_override = crate::commands::k2so_agents::default_heartbeat_wakeup_abs(&project_path, &primary);
+                                    if let Ok(launch) = crate::commands::k2so_agents::k2so_agents_build_launch(
+                                        project_path.clone(), primary.clone(), None, wakeup_override, Some(true),
+                                    ) {
+                                        let command = launch.get("command").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
+                                        let cwd = launch.get("cwd").and_then(|v| v.as_str()).unwrap_or(&project_path).to_string();
+                                        let args: Vec<String> = launch.get("args")
+                                            .and_then(|v| v.as_array())
+                                            .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                                            .unwrap_or_default();
+                                        let _ = spawn_wake_pty(&app_handle, &primary, &project_path, &command, args, &cwd);
+                                    }
                                 } else if let Ok(launch) = crate::commands::k2so_agents::k2so_agents_build_launch(
                                     project_path.clone(), agent_name.clone(), None, None, None,
                                 ) {

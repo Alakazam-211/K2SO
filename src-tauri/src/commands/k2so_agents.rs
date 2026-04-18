@@ -188,21 +188,47 @@ fn agent_type_for(project_path: &str, agent_name: &str) -> String {
     "agent-template".to_string()
 }
 
+/// Resolve the absolute filesystem path of the primary heartbeat's
+/// wakeup.md for the given agent. Prefers a row named `"triage"`
+/// (the one `migrate_or_scaffold_lead_heartbeat` creates for manager
+/// mode); falls back to the first enabled row. Returns `None` if the
+/// agent has no heartbeats configured — callers should fall back to
+/// the shipped template in that case.
+pub fn default_heartbeat_wakeup_abs(project_path: &str, _agent_name: &str) -> Option<String> {
+    let conn = rusqlite::Connection::open(k2so_db_path()).ok()?;
+    let project_id = resolve_project_id(&conn, project_path)?;
+    let rows = crate::db::schema::AgentHeartbeat::list_enabled(&conn, &project_id).ok()?;
+    let hb = rows.iter().find(|h| h.name == "triage").or_else(|| rows.first())?;
+    let abs = std::path::Path::new(project_path).join(&hb.wakeup_path);
+    Some(abs.to_string_lossy().to_string())
+}
+
 /// Compose the `--append-system-prompt` text for `__lead__` at wake time.
-/// Pulls the user's workspace `wakeup.md` (or the shipped template if
-/// they haven't customized it) and prepends a short heading so the
-/// manager agent knows the context.
+/// Pulls the wakeup.md from the default heartbeat row (migrated there by
+/// `migrate_or_scaffold_lead_heartbeat`); falls back to the shipped
+/// manager template if no row exists yet (freshly-created workspace
+/// that hasn't been through the migration pass).
+///
+/// Used only by the `/cli/checkin` response builder — all actual wake
+/// *launches* for `__lead__` now go through `k2so_agents_build_launch`
+/// with the per-row wakeup_override so SKILL.md / PROJECT.md / --resume
+/// / session-continuity all apply uniformly.
 pub fn compose_wake_prompt_for_lead(project_path: &str) -> String {
-    let wakeup = read_workspace_wakeup(project_path);
+    let wakeup_body = default_heartbeat_wakeup_abs(project_path, "__lead__")
+        .and_then(|p| fs::read_to_string(&p).ok())
+        .map(|s| strip_frontmatter(&s).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| WAKEUP_TEMPLATE_WORKSPACE.trim().to_string());
     format!(
         "# K2SO Heartbeat Wake — Workspace Manager\n\n\
          The heartbeat scheduler woke you because new work has arrived in the \
          workspace inbox. Your wake-up instructions are below; follow them \
          and exit when done.\n\n\
          ----\n\n{}",
-        wakeup.trim()
+        wakeup_body
     )
 }
+
 
 /// Compose the `--append-system-prompt` text for a regular agent
 /// woken by the heartbeat scheduler. Returns `None` for agent types
@@ -879,12 +905,12 @@ pub fn promote_legacy_heartbeat(project_path: &str) {
 }
 
 /// Scaffold the wakeup files for a single workspace — one for each
-/// existing agent that supports wake-up, plus the workspace-level file
-/// for `__lead__`. Safe to call repeatedly; never overwrites an
-/// existing file. Used by the app-launch migration pass.
+/// existing agent that supports wake-up. Safe to call repeatedly;
+/// never overwrites an existing file. Used by the app-launch migration
+/// pass. Workspace-level `.k2so/wakeup.md` is no longer scaffolded here
+/// — `migrate_or_scaffold_lead_heartbeat` handles the __lead__ case
+/// via the multi-heartbeat system.
 pub fn ensure_workspace_wakeups(project_path: &str) {
-    ensure_workspace_wakeup(project_path);
-
     let agents_root = agents_dir(project_path);
     if !agents_root.exists() {
         return;
@@ -897,6 +923,124 @@ pub fn ensure_workspace_wakeups(project_path: &str) {
         let name = entry.file_name().to_string_lossy().to_string();
         let agent_type = agent_type_for(project_path, &name);
         ensure_agent_wakeup(project_path, &name, &agent_type);
+    }
+}
+
+/// For Workspace Manager projects, make sure `__lead__` has at least
+/// one heartbeat row. Two paths:
+///
+/// 1. **Migrate existing `.k2so/wakeup.md`** (users who configured the
+///    retired Workspace Wake-up). Copy its content into
+///    `.k2so/agents/__lead__/heartbeats/default/wakeup.md`, insert a
+///    matching `agent_heartbeats` row (hourly default), rename the old
+///    file to `.k2so/wakeup.md.migrated` so nothing else picks it up.
+///
+/// 2. **Scaffold a lean default** for fresh manager workspaces. The
+///    SKILL.md layers (Standing Orders / Delegation + Review / etc.)
+///    already carry the manager's playbook, so the per-row wakeup.md
+///    is just the "wake trigger" — one-sentence action prompt.
+///
+/// Idempotent: bails immediately if `__lead__` already has any
+/// heartbeat row, or if the project isn't in manager mode.
+pub fn migrate_or_scaffold_lead_heartbeat(project_path: &str) {
+    let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) else { return };
+    let Some(project_id) = resolve_project_id(&conn, project_path) else { return };
+
+    let agent_mode: Option<String> = conn.query_row(
+        "SELECT agent_mode FROM projects WHERE id = ?1",
+        rusqlite::params![&project_id],
+        |row| row.get::<_, Option<String>>(0),
+    ).ok().flatten();
+    if agent_mode.as_deref() != Some("manager") {
+        return;
+    }
+
+    let has_rows: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_heartbeats WHERE project_id = ?1)",
+        rusqlite::params![&project_id],
+        |row| row.get(0),
+    ).unwrap_or(false);
+    if has_rows {
+        return;
+    }
+
+    let legacy_path = workspace_wakeup_path(project_path);
+    let migrated_content: Option<String> = fs::read_to_string(&legacy_path)
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+
+    let wake_body = if let Some(ref existing) = migrated_content {
+        // Preserve the user's customized triage instructions verbatim,
+        // prepending a frontmatter block if it's missing so the row's
+        // `description` surface in the UI isn't empty.
+        if existing.trim_start().starts_with("---") {
+            existing.clone()
+        } else {
+            format!(
+                "---\ndescription: Workspace manager triage (migrated from .k2so/wakeup.md)\n---\n\n{}",
+                existing
+            )
+        }
+    } else {
+        // Lean default. The manager-tier skill layers already ship the
+        // Standing Orders / Delegation + Review playbook; no need to
+        // repeat it here.
+        "---\ndescription: Workspace manager triage — follow your Standing Orders\n---\n\n\
+         # Wake procedure: default\n\n\
+         Follow your Standing Orders to triage the workspace inbox and review queue. \
+         Delegate, approve, or exit — keep the session short.\n".to_string()
+    };
+
+    // Pick the agent the heartbeat will attach to — match what
+    // k2so_heartbeat_add does internally so we write to the right path
+    // after it scaffolds the template. For workspaces with a manager-type
+    // agent dir (coordinator/pod-leader), find_primary_agent returns
+    // that dir's name; otherwise it returns the `__lead__` sentinel
+    // (which k2so_heartbeat_add creates on demand).
+    let Some(primary_agent) = find_primary_agent(project_path) else {
+        log_debug!(
+            "[migrate] {}: no scheduleable agent, skipping heartbeat scaffold",
+            project_path
+        );
+        return;
+    };
+
+    let spec = r#"{"frequency":"hourly","every_seconds":3600}"#.to_string();
+    match k2so_heartbeat_add(
+        project_path.to_string(),
+        "triage".to_string(),
+        "hourly".to_string(),
+        spec,
+    ) {
+        Ok(_) => {
+            // k2so_heartbeat_add already scaffolded a template. Overwrite
+            // with our migrated-or-lean content at the correct agent's path.
+            let wake_path = agent_dir(project_path, &primary_agent)
+                .join("heartbeats")
+                .join("triage")
+                .join("wakeup.md");
+            let _ = fs::write(&wake_path, &wake_body);
+
+            if migrated_content.is_some() {
+                let migrated_to = legacy_path.with_file_name("wakeup.md.migrated");
+                let _ = fs::rename(&legacy_path, &migrated_to);
+                log_debug!(
+                    "[migrate] {}: moved .k2so/wakeup.md → triage heartbeat row for agent '{}'; legacy archived as wakeup.md.migrated",
+                    project_path, primary_agent
+                );
+            } else {
+                log_debug!(
+                    "[migrate] {}: scaffolded lean triage heartbeat for agent '{}'",
+                    project_path, primary_agent
+                );
+            }
+        }
+        Err(e) => {
+            log_debug!(
+                "[migrate] Failed to scaffold triage heartbeat for {}: {}",
+                project_path, e
+            );
+        }
     }
 }
 
