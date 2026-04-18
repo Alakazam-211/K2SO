@@ -3394,11 +3394,33 @@ Any heartbeat can be fired on demand (bypassing its schedule):
 k2so heartbeat wake                          # triage + wake the right agent(s)
 ```
 
-## Creating + routing work
+## Your role: planning, not implementation
+
+You don't implement. Your job is to turn raw requests into well-scoped plans — PRDs, milestones, technical specs — that can be handed off to workspaces with engineering templates. When the right way to ship something is "hand it to another workspace", do that via cross-workspace messaging below; don't try to execute the work yourself.
+
+### PRDs (product requirement documents)
+
+Long-form docs that capture the *why* and *what* of a piece of work. Keep them under `.k2so/prds/` on disk, then register each one as a work item so it shows up in triage:
+
+```
+k2so work create --type prd --title "Auth V2: session rotation" --body-file .k2so/prds/auth-v2.md --priority high
+```
+
+### Milestones
+
+Break a PRD into milestones — each is a ship-sized slice with its own acceptance criteria:
+
+```
+k2so work create --type milestone --title "M1: Rotate on login" --body "Rotate session token on every successful login. Keep the old token valid for 60s for in-flight requests." --priority high
+k2so work create --type milestone --title "M2: Force rotation on password reset" --body "..." --priority normal
+```
+
+### Tasks for triage
+
+Everyday work items for this workspace's own inbox:
 
 ```
 k2so work create --title "Ship auth fix" --body "..." --priority high --source feature
-k2so work create --agent <template> --title "..."  # route to a delegate template
 k2so work inbox                              # this workspace's inbox
 ```
 
@@ -3451,7 +3473,7 @@ You are {agent_name}, a specialist agent working in a dedicated worktree for {pr
         skill.push_str(&custom_layers);
     }
 
-    skill.push_str(r#"### Check In (do this first)
+    skill.push_str(r#"## Check In (do this first)
 
 ```
 k2so checkin
@@ -3459,13 +3481,13 @@ k2so checkin
 
 This returns your assigned task and any file reservations from other active agents.
 
-### Report Status
+## Report Status
 
 ```
 k2so status "implementing JWT validation"
 ```
 
-### Complete Task
+## Complete Task
 
 When you have finished your assigned work:
 ```
@@ -3477,7 +3499,7 @@ If you are blocked and cannot proceed:
 k2so done --blocked "need clarification on auth flow"
 ```
 
-### Claim Files (coordinate with other active agents)
+## Claim Files (coordinate with other active agents)
 
 Before editing shared paths, check reservations and claim what you need:
 ```

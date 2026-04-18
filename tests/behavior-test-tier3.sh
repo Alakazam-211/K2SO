@@ -1245,6 +1245,161 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════
+section "3.10: Heartbeat → Hamburger Delivery"
+# Ensures the heartbeat fire path delivers the full Agent Skills hamburger
+# (SKILL.md layers) + PROJECT.md + the per-row wakeup.md to claude.
+# Addresses regressions where the wake path shipped only a bare argv
+# prompt with no skill context. See agent_hooks.rs + k2so_agents.rs
+# build_launch + migrate_or_scaffold_lead_heartbeat.
+# ═══════════════════════════════════════════════════════════════════════
+
+AGENTS_SRC="$PROJECT_ROOT/src-tauri/src/commands/k2so_agents.rs"
+HOOKS_SRC="$PROJECT_ROOT/src-tauri/src/agent_hooks.rs"
+
+# Migration: .k2so/wakeup.md → triage heartbeat row on startup
+if grep -q 'pub fn migrate_or_scaffold_lead_heartbeat' "$AGENTS_SRC"; then
+    pass "hamburger: migrate_or_scaffold_lead_heartbeat present"
+else
+    fail "hamburger: migration fn missing" "Expected migrate_or_scaffold_lead_heartbeat in k2so_agents.rs"
+fi
+
+if grep -q 'migrate_or_scaffold_lead_heartbeat' "$PROJECT_ROOT/src-tauri/src/lib.rs"; then
+    pass "hamburger: migration wired into startup loop"
+else
+    fail "hamburger: migration not called on startup" "Expected migrate_or_scaffold_lead_heartbeat call in lib.rs startup pass"
+fi
+
+# k2so_agents_build_launch: the skip_fork_session parameter must exist so
+# heartbeats can opt out of --fork-session (one chat per agent vs one per fire)
+if grep -q 'skip_fork_session: Option<bool>' "$AGENTS_SRC"; then
+    pass "hamburger: build_launch accepts skip_fork_session"
+else
+    fail "hamburger: skip_fork_session parameter missing" "Expected skip_fork_session: Option<bool> on k2so_agents_build_launch"
+fi
+
+# wakeup_override parameter lets heartbeats pass their per-row wakeup.md
+if grep -q 'wakeup_override: Option<String>' "$AGENTS_SRC"; then
+    pass "hamburger: build_launch accepts wakeup_override"
+else
+    fail "hamburger: wakeup_override parameter missing" "Expected wakeup_override on k2so_agents_build_launch"
+fi
+
+# Default heartbeat resolver for the __lead__ triage path
+if grep -q 'pub fn default_heartbeat_wakeup_abs' "$AGENTS_SRC"; then
+    pass "hamburger: default_heartbeat_wakeup_abs helper present"
+else
+    fail "hamburger: default_heartbeat_wakeup_abs missing" "Expected helper that resolves the triage heartbeat's wakeup path"
+fi
+
+# Every spawn site that wants per-agent session continuity (heartbeats +
+# __lead__ triage + scheduled-tick) now passes Some(true) for
+# skip_fork_session. Count across the whole hooks file.
+SKIP_FORK_COUNT=$(grep -c 'Some(true)' "$HOOKS_SRC" 2>/dev/null || echo 0)
+if [ "$SKIP_FORK_COUNT" -ge 3 ]; then
+    pass "hamburger: ≥3 spawn sites pass skip_fork_session=Some(true) (heartbeats + triage)"
+else
+    fail "hamburger: skip_fork sites not unified" "Expected ≥3 Some(true) in agent_hooks.rs; found $SKIP_FORK_COUNT"
+fi
+
+# SIGWINCH nudge: post-spawn thread that sends a resize so claude's TUI
+# wakes up without needing a user to open the tab
+if grep -q 'fn nudge_wake_pty_async' "$HOOKS_SRC"; then
+    pass "hamburger: SIGWINCH nudge helper present"
+else
+    fail "hamburger: SIGWINCH nudge missing" "Expected nudge_wake_pty_async in agent_hooks.rs"
+fi
+
+if grep -q 'nudge_wake_pty_async(app_handle' "$HOOKS_SRC"; then
+    pass "hamburger: spawn_wake_pty invokes the nudge"
+else
+    fail "hamburger: nudge not wired into spawn_wake_pty" "Expected nudge call from spawn_wake_pty"
+fi
+
+# Stale-session dialog auto-dismissal (since --fork-session is skipped
+# for heartbeats, the v2.1.90 confirmation dialog may appear; we auto-
+# select option 3 "never ask again")
+if grep -q 'fn dismiss_stale_session_dialog_async' "$HOOKS_SRC"; then
+    pass "hamburger: stale-session dialog auto-dismisser present"
+else
+    fail "hamburger: dismisser missing" "Expected dismiss_stale_session_dialog_async in agent_hooks.rs"
+fi
+
+# Session-file validation before --resume (stale IDs from workspace
+# remove+readd would otherwise make claude bail with "No conversation found")
+if grep -q 'pub fn claude_session_file_exists' "$PROJECT_ROOT/src-tauri/src/commands/chat_history.rs"; then
+    pass "hamburger: claude_session_file_exists validator present"
+else
+    fail "hamburger: session validator missing" "Expected claude_session_file_exists in chat_history.rs"
+fi
+
+# Manager skill (the full hamburger) composes all expected sections +
+# user custom layers. Confirms the content path build_launch delivers.
+# Section titles here match what generate_manager_skill_content actually
+# emits — if any of these disappear from the generator the agent loses
+# its playbook on wake.
+MANAGER_SECTIONS=("Connected Workspaces" "Your Team" "Standing Orders" "Decision Framework" "Delegation" "Reviewing Agent Work" "Communication")
+MANAGER_BODY=$(awk '/fn generate_manager_skill_content/,/^fn generate_custom_agent_skill_content/' "$AGENTS_SRC")
+for sec in "${MANAGER_SECTIONS[@]}"; do
+    if echo "$MANAGER_BODY" | grep -q "## $sec"; then
+        pass "hamburger: manager skill emits $sec section"
+    else
+        fail "hamburger: manager skill missing $sec" "Expected '## $sec' inside generate_manager_skill_content"
+    fi
+done
+
+# Workspace Manager identity header (h1) — confirms the top-level agent-type
+# framing makes it into SKILL.md before the rest of the layers compose in.
+if echo "$MANAGER_BODY" | grep -q '# K2SO Workspace Manager Skill'; then
+    pass "hamburger: manager skill identity header present"
+else
+    fail "hamburger: manager identity header missing" "Expected '# K2SO Workspace Manager Skill' at the top of the generator"
+fi
+
+# Custom layer injection for each tier — ~/.k2so/templates/<tier>/*.md
+# must compose into the skill on every generation
+for tier in manager custom-agent k2so-agent agent-template; do
+    if grep -q "load_custom_layers(\"$tier\"" "$AGENTS_SRC"; then
+        pass "hamburger: $tier tier loads custom layers on every launch"
+    else
+        fail "hamburger: $tier custom layer hook missing" "Expected load_custom_layers(\"$tier\") in generator"
+    fi
+done
+
+# K2SO Agent skill: should NOT have manager-tier delegation syntax
+if ! grep -A 50 'fn generate_k2so_agent_skill_content' "$AGENTS_SRC" | grep -q 'k2so work create --agent <template>'; then
+    pass "hamburger: k2so-agent skill free of manager-tier delegation syntax"
+else
+    fail "hamburger: k2so-agent still has --agent <template>" "K2SO Agent is a planner, not a manager — delegation to templates is manager-tier"
+fi
+
+# K2SO Agent skill: planning guidance (PRDs, milestones) is present
+if awk '/fn generate_k2so_agent_skill_content/,/^fn generate_template_skill_content/' "$AGENTS_SRC" | grep -q -- '--type prd'; then
+    pass "hamburger: k2so-agent skill covers PRD creation"
+else
+    fail "hamburger: k2so-agent PRD guidance missing" "Expected --type prd in generate_k2so_agent_skill_content"
+fi
+
+if awk '/fn generate_k2so_agent_skill_content/,/^fn generate_template_skill_content/' "$AGENTS_SRC" | grep -q -- '--type milestone'; then
+    pass "hamburger: k2so-agent skill covers milestone creation"
+else
+    fail "hamburger: k2so-agent milestone guidance missing" "Expected --type milestone in generate_k2so_agent_skill_content"
+fi
+
+# Agent Template skill: heading style consistency (## not ###)
+if ! awk '/fn generate_template_skill_content/,/^fn /' "$AGENTS_SRC" | tail -n +2 | grep -q '^### '; then
+    pass "hamburger: template skill uses ## headings consistently"
+else
+    fail "hamburger: template skill has stray ### headings" "Standardize on ## to match other skill generators"
+fi
+
+# Per-heartbeat wakeup.md scaffold must happen when k2so_heartbeat_add fires
+if grep -A 30 'pub fn k2so_heartbeat_add' "$AGENTS_SRC" | grep -q 'wakeup.md'; then
+    pass "hamburger: k2so_heartbeat_add scaffolds per-row wakeup.md"
+else
+    fail "hamburger: heartbeat add missing wakeup scaffold" "Expected wakeup.md write in k2so_heartbeat_add"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
 # Results
 # ═══════════════════════════════════════════════════════════════════════
 
