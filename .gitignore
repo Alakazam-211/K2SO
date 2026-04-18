@@ -18,3 +18,4 @@ SKILL.md
 .env.*
 *.key
 *.key.pub
+.worktrees/
