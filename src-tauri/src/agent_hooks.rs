@@ -82,6 +82,58 @@ fn event_queues() -> &'static Mutex<HashMap<String, VecDeque<ChannelEvent>>> {
 /// Returns the generated terminal ID (also the pane/tab ID used for
 /// hook routing). Returns Err when the terminal manager can't be
 /// reached (AppState not yet initialized).
+/// Post-spawn watcher: detects Claude Code's stale-session confirmation dialog
+/// and dismisses it by selecting option 3 ("never ask again"). Used by the
+/// heartbeat paths which spawn with `--resume` but WITHOUT `--fork-session`
+/// (to keep wakes writing into the same session — one chat per agent instead
+/// of one per fire). Without this, a stale session would block the wake at
+/// the dialog until a human intervened.
+///
+/// Detection is heuristic (looks for "3" + session/ask phrasing in the
+/// terminal buffer). If the dialog isn't shown (fresh session, already
+/// dismissed permanently), this is a safe no-op — we never send the "3".
+fn dismiss_stale_session_dialog_async(app_handle: AppHandle, terminal_id: String) {
+    std::thread::spawn(move || {
+        // Wait for claude to start and render any dialog
+        std::thread::sleep(std::time::Duration::from_secs(3));
+
+        let Some(state) = app_handle.try_state::<crate::state::AppState>() else {
+            return;
+        };
+
+        let lines = {
+            let mgr = state.terminal_manager.lock();
+            mgr.read_lines_with_scrollback(&terminal_id, 60, false).unwrap_or_default()
+        };
+        let buf = lines.join("\n").to_lowercase();
+
+        // Conservative: require BOTH an option-3 marker AND a session/ask phrase.
+        // Keeps us from typing "3" into a normal input prompt.
+        let has_option_three = buf.contains("3.") || buf.contains("3)") || buf.contains("[3]");
+        let has_dialog_phrase = buf.contains("never ask")
+            || buf.contains("don't ask")
+            || buf.contains("previous session")
+            || buf.contains("full context")
+            || buf.contains("resume with");
+
+        if has_option_three && has_dialog_phrase {
+            log_debug!(
+                "[heartbeat] Stale-session dialog detected in {}; selecting option 3",
+                terminal_id
+            );
+            {
+                let mgr = state.terminal_manager.lock();
+                let _ = mgr.write(&terminal_id, "3");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            {
+                let mgr = state.terminal_manager.lock();
+                let _ = mgr.write(&terminal_id, "\r");
+            }
+        }
+    });
+}
+
 fn spawn_wake_pty(
     app_handle: &AppHandle,
     agent_name: &str,
@@ -228,13 +280,32 @@ pub fn k2so_heartbeat_force_fire(
         return Err(format!("agent '{}' is already running — close its session first", agent_name));
     }
 
-    let wake_prompt = crate::commands::k2so_agents::compose_wake_prompt_from_path(&wakeup_abs)
-        .unwrap_or_else(|| format!("Begin heartbeat '{}'.", hb.name));
-    let args = vec!["--dangerously-skip-permissions".to_string(), wake_prompt];
+    // Use the full launch-args builder (same as /cli/agents/launch) so heartbeats
+    // --resume the saved session, --fork-session past the stale-session dialog,
+    // attach the agent's CLAUDE.md as --append-system-prompt, and honor the
+    // wakes-since-compact counter. Prior code here shipped only
+    // `--dangerously-skip-permissions <prompt>`, which (a) spawned a fresh
+    // claude each fire (breaking session continuity) and (b) let claude
+    // v2.1.114 silently drop the argv prompt in minimal-argv mode — agents
+    // looked "fired" in the audit log but never read their wakeup.md.
+    let launch = crate::commands::k2so_agents::k2so_agents_build_launch(
+        project_path.clone(),
+        agent_name.clone(),
+        None,
+        Some(wakeup_abs.to_string_lossy().to_string()),
+        Some(true), // skip --fork-session so wakes resume the same session (one chat per agent)
+    )?;
+    let command = launch.get("command").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
+    let cwd = launch.get("cwd").and_then(|v| v.as_str()).unwrap_or(&project_path).to_string();
+    let args: Vec<String> = launch.get("args")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+        .unwrap_or_default();
 
     let terminal_id = spawn_wake_pty(
-        &app_handle, &agent_name, &project_path, "claude", args, &project_path,
+        &app_handle, &agent_name, &project_path, &command, args, &cwd,
     )?;
+    dismiss_stale_session_dialog_async(app_handle.clone(), terminal_id.clone());
     crate::commands::k2so_agents::stamp_heartbeat_fired(&project_path, &hb.name);
     let _ = HeartbeatFire::insert_with_schedule(
         &conn, &project_id, Some(&agent_name), Some(&hb.name),
@@ -695,7 +766,7 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                         let cli_command = params.get("command").cloned();
                         let agent_clone = agent.clone();
                         match crate::commands::k2so_agents::k2so_agents_build_launch(
-                            project_path.clone(), agent, cli_command,
+                            project_path.clone(), agent, cli_command, None, None,
                         ) {
                             Ok(launch_info) => {
                                 // Backend-direct spawn — works when K2SO window is closed.
@@ -829,7 +900,7 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                                     &project_path,
                                                 );
                                             } else if let Ok(launch) = crate::commands::k2so_agents::k2so_agents_build_launch(
-                                                project_path.clone(), agent_name.clone(), None
+                                                project_path.clone(), agent_name.clone(), None, None, None,
                                             ) {
                                                 // Backend-direct spawn so wakes fire regardless of window state.
                                                 let command = launch.get("command").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
@@ -1192,7 +1263,7 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                         &project_path,
                                     );
                                 } else if let Ok(launch) = crate::commands::k2so_agents::k2so_agents_build_launch(
-                                    project_path.clone(), agent_name.clone(), None,
+                                    project_path.clone(), agent_name.clone(), None, None, None,
                                 ) {
                                     let command = launch.get("command").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
                                     let cwd = launch.get("cwd").and_then(|v| v.as_str()).unwrap_or(&project_path).to_string();
@@ -1219,23 +1290,35 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                     );
                                     continue;
                                 }
-                                // Read wakeup content and build the user-message prompt.
-                                let wake_prompt = crate::commands::k2so_agents::compose_wake_prompt_from_path(
-                                    std::path::Path::new(&cand.wakeup_path_abs)
-                                ).unwrap_or_else(|| format!("Begin heartbeat '{}'.", cand.name));
-
-                                let args = vec![
-                                    "--dangerously-skip-permissions".to_string(),
-                                    wake_prompt,
-                                ];
-                                if spawn_wake_pty(
-                                    &app_handle,
-                                    &cand.agent_name,
-                                    &project_path,
-                                    "claude",
-                                    args,
-                                    &project_path,
-                                ).is_ok() {
+                                // Full launch-args builder — see forced-fire site above for rationale.
+                                let launched = crate::commands::k2so_agents::k2so_agents_build_launch(
+                                    project_path.clone(),
+                                    cand.agent_name.clone(),
+                                    None,
+                                    Some(cand.wakeup_path_abs.clone()),
+                                    Some(true), // skip --fork-session (see forced-fire site)
+                                )
+                                .ok()
+                                .and_then(|launch| {
+                                    let command = launch.get("command").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
+                                    let cwd = launch.get("cwd").and_then(|v| v.as_str()).unwrap_or(&project_path).to_string();
+                                    let args: Vec<String> = launch.get("args")
+                                        .and_then(|v| v.as_array())
+                                        .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                                        .unwrap_or_default();
+                                    spawn_wake_pty(
+                                        &app_handle,
+                                        &cand.agent_name,
+                                        &project_path,
+                                        &command,
+                                        args,
+                                        &cwd,
+                                    ).ok().map(|tid| {
+                                        dismiss_stale_session_dialog_async(app_handle.clone(), tid.clone());
+                                        tid
+                                    })
+                                });
+                                if launched.is_some() {
                                     crate::commands::k2so_agents::stamp_heartbeat_fired(&project_path, &cand.name);
                                     hb_fired.push(cand.name.clone());
                                 }
@@ -1983,7 +2066,7 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                                 let session = crate::db::schema::AgentSession::get_by_agent(&conn, wpid, &wake_agent).ok().flatten();
                                                 let has_prior = session.as_ref().map(|s| s.session_id.is_some()).unwrap_or(false);
                                                 if let Ok(info) = crate::commands::k2so_agents::k2so_agents_build_launch(
-                                                    wp.clone(), wake_agent.clone(), None,
+                                                    wp.clone(), wake_agent.clone(), None, None, None,
                                                 ) {
                                                     // Backend-direct spawn — work-send wake fires regardless of window state.
                                                     let command = info.get("command").and_then(|v| v.as_str()).unwrap_or("claude").to_string();

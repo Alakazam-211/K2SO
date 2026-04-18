@@ -2107,8 +2107,11 @@ pub fn k2so_agents_build_launch(
     project_path: String,
     agent_name: String,
     agent_cli_command: Option<String>,
+    wakeup_override: Option<String>,
+    skip_fork_session: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let command = agent_cli_command.unwrap_or_else(|| "claude".to_string());
+    let skip_fork = skip_fork_session.unwrap_or(false);
 
     // Case 1: Check for active work with a worktree path (resume)
     let active_dir = agent_work_dir(&project_path, &agent_name, "active");
@@ -2231,7 +2234,13 @@ pub fn k2so_agents_build_launch(
     // on this specific wake) belong in the user message so Claude reads
     // them as an actionable directive, not as background context.
     let system_prompt = claude_md;
-    let wake_body = compose_wake_prompt_for_agent(&project_path, &agent_name);
+    // Heartbeats pass wakeup_override so each heartbeat row can fire its own
+    // workflow (different wakeup.md per schedule). Manual launches pass None
+    // and get the agent's default wakeup.
+    let wake_body = match wakeup_override.as_deref() {
+        Some(p) => compose_wake_prompt_from_path(std::path::Path::new(p)),
+        None => compose_wake_prompt_for_agent(&project_path, &agent_name),
+    };
 
     let mut args = vec!["--dangerously-skip-permissions".to_string(), "--append-system-prompt".to_string(), system_prompt];
     // --resume + --fork-session: restore the agent's conversation history
@@ -2243,7 +2252,15 @@ pub fn k2so_agents_build_launch(
     if let Some(ref session_id) = resume_session {
         args.push("--resume".to_string());
         args.push(session_id.clone());
-        args.push("--fork-session".to_string());
+        // --fork-session mints a new session ID each wake to sidestep the
+        // stale-session confirmation dialog added in Claude Code v2.1.90.
+        // Heartbeats pass skip_fork_session=true so wakes keep writing into
+        // the same session (one growing chat per agent). When the dialog
+        // appears post-spawn, the caller is expected to detect it and send
+        // '3' + Enter ("never ask again") to dismiss it permanently.
+        if !skip_fork {
+            args.push("--fork-session".to_string());
+        }
     }
 
     // Wakes-since-compact counter: prepend `/compact` to the wake
