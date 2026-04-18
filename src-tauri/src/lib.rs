@@ -478,6 +478,12 @@ pub fn run() {
                             // Archive orphan top-tier agents left behind by prior agent-mode
                             // swaps. Templates preserved. Idempotent.
                             crate::commands::k2so_agents::archive_orphan_top_tier_agents(&project.path);
+                            // Universal skill refresh. Drives the managed-markers upgrade
+                            // protocol for EVERY skill (workspace + every agent's),
+                            // so future skill version bumps roll out automatically
+                            // without adding a new migration helper. See
+                            // ensure_all_skills_up_to_date for the contract.
+                            crate::commands::k2so_agents::ensure_all_skills_up_to_date(&project.path);
                         }
                     });
                 }
@@ -819,6 +825,7 @@ pub fn run() {
             commands::k2so_agents::k2so_heartbeat_edit,
             commands::k2so_agents::k2so_heartbeat_rename,
             commands::k2so_agents::k2so_heartbeat_fires_list,
+            agent_hooks::k2so_heartbeat_force_fire,
             // Agent Sessions (DB-tracked)
             commands::k2so_agents::agent_sessions_list,
             commands::k2so_agents::agent_sessions_get,

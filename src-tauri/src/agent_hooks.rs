@@ -175,6 +175,75 @@ fn spawn_wake_pty(
     Ok(terminal_id)
 }
 
+/// Force-fire a specific heartbeat by name, bypassing its schedule. The
+/// frontend uses this for per-row Launch buttons in the workspace drawer
+/// so the user can manually kick off a scheduled workflow without waiting
+/// for the cron window. Path is identical to a scheduled fire: resolve
+/// the row → read its wakeup.md → spawn_wake_pty → stamp last_fired →
+/// write a heartbeat_fires audit row (decision='fired', reason='forced').
+///
+/// Returns the spawned terminal_id on success so the caller can focus it.
+#[tauri::command]
+pub fn k2so_heartbeat_force_fire(
+    app_handle: AppHandle,
+    project_path: String,
+    name: String,
+) -> Result<String, String> {
+    use crate::db::schema::{AgentHeartbeat, HeartbeatFire};
+
+    let conn = rusqlite::Connection::open(
+        dirs::home_dir().ok_or("No home dir")?.join(".k2so/k2so.db")
+    ).map_err(|e| e.to_string())?;
+    let project_id: String = conn.query_row(
+        "SELECT id FROM projects WHERE path = ?1",
+        rusqlite::params![project_path],
+        |row| row.get(0),
+    ).map_err(|e| format!("Project not found: {}", e))?;
+
+    let hb = AgentHeartbeat::get_by_name(&conn, &project_id, &name)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Heartbeat '{}' not found", name))?;
+
+    let agent_name = crate::commands::k2so_agents::find_primary_agent(&project_path)
+        .ok_or("No scheduleable agent in this workspace")?;
+
+    let wakeup_abs = std::path::Path::new(&project_path).join(&hb.wakeup_path);
+    if !wakeup_abs.exists() {
+        let _ = HeartbeatFire::insert_with_schedule(
+            &conn, &project_id, Some(&agent_name), Some(&hb.name),
+            &hb.frequency, "wakeup_file_missing",
+            Some(&format!("forced fire failed: {} not found", hb.wakeup_path)),
+            None, None, None,
+        );
+        return Err(format!("wakeup.md missing at {}", hb.wakeup_path));
+    }
+
+    if crate::commands::k2so_agents::is_agent_locked(&project_path, &agent_name) {
+        let _ = HeartbeatFire::insert_with_schedule(
+            &conn, &project_id, Some(&agent_name), Some(&hb.name),
+            &hb.frequency, "skipped_locked",
+            Some("forced fire refused: agent already running"),
+            None, None, None,
+        );
+        return Err(format!("agent '{}' is already running — close its session first", agent_name));
+    }
+
+    let wake_prompt = crate::commands::k2so_agents::compose_wake_prompt_from_path(&wakeup_abs)
+        .unwrap_or_else(|| format!("Begin heartbeat '{}'.", hb.name));
+    let args = vec!["--dangerously-skip-permissions".to_string(), wake_prompt];
+
+    let terminal_id = spawn_wake_pty(
+        &app_handle, &agent_name, &project_path, "claude", args, &project_path,
+    )?;
+    crate::commands::k2so_agents::stamp_heartbeat_fired(&project_path, &hb.name);
+    let _ = HeartbeatFire::insert_with_schedule(
+        &conn, &project_id, Some(&agent_name), Some(&hb.name),
+        &hb.frequency, "fired",
+        Some("forced from UI"), None, None, None,
+    );
+    Ok(terminal_id)
+}
+
 /// Push an event into an agent's channel event queue.
 pub fn push_agent_event(project_path: &str, agent_name: &str, event_type: &str, message: &str, priority: &str) {
     let key = format!("{}:{}", project_path, agent_name);

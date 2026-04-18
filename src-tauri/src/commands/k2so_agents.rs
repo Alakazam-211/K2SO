@@ -902,6 +902,246 @@ pub fn ensure_workspace_wakeups(project_path: &str) {
 
 // ── Frontmatter parsing ────────────────────────────────────────────────
 
+// ── Skill upgrade protocol (universal) ───────────────────────────────
+// Every generated SKILL.md is wrapped with frontmatter (k2so_skill,
+// skill_version, skill_checksum) and MANAGED markers. On startup,
+// ensure_skill_up_to_date compares the stamped version + checksum to the
+// current generator output; if the managed region is unmodified we
+// rewrite it in place when the generator version advances, and if the
+// user has edited it we drop the new version alongside as `.proposed`
+// instead of stomping their work.
+//
+// Bumping SKILL_VERSION_* forces every workspace's next startup to
+// re-evaluate. That's the whole point: ship a better skill, bump the
+// constant, it rolls out automatically to all unmodified files.
+
+const SKILL_BEGIN_MARKER: &str = "<!-- K2SO:MANAGED:BEGIN -->";
+const SKILL_END_MARKER: &str = "<!-- K2SO:MANAGED:END -->";
+
+const SKILL_VERSION_MANAGER: u32 = 1;
+const SKILL_VERSION_K2SO_AGENT: u32 = 1;
+const SKILL_VERSION_CUSTOM_AGENT: u32 = 1;
+const SKILL_VERSION_TEMPLATE: u32 = 1;
+const SKILL_VERSION_WORKSPACE: u32 = 1;
+
+/// 64-bit FNV-1a hex. Deterministic across Rust versions (unlike
+/// `DefaultHasher`), so a checksum written today still matches its
+/// content read from disk months later. Not cryptographic — we only
+/// need "has this text changed" detection, not adversarial integrity.
+fn skill_checksum_hex(bytes: &[u8]) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{:016x}", h)
+}
+
+/// Build the final file contents for a generated skill. `body` is the
+/// raw generator output (H1 + sections); this function wraps it with
+/// upgrade-tracking frontmatter, managed markers, and a user-editable
+/// tail placeholder.
+///
+/// `extra_frontmatter` is appended to the managed frontmatter block —
+/// used by the harness-canonical writer to add `name:` / `description:`
+/// fields that Claude Code and Pi expect, without losing our upgrade
+/// metadata.
+fn wrap_managed_skill(
+    skill_type: &str,
+    version: u32,
+    body: &str,
+    extra_frontmatter: Option<&str>,
+) -> String {
+    let trimmed = body.trim();
+    let checksum = skill_checksum_hex(trimmed.as_bytes());
+    let extras = extra_frontmatter.map(|s| format!("\n{}", s.trim_end())).unwrap_or_default();
+    format!(
+        "---\nk2so_skill: {skill_type}\nskill_version: {version}\nskill_checksum: {checksum}{extras}\n---\n\n{begin}\n{trimmed}\n{end}\n\n<!-- Content below this line is yours — K2SO will never modify it. -->\n",
+        begin = SKILL_BEGIN_MARKER,
+        end = SKILL_END_MARKER,
+    )
+}
+
+struct ParsedSkill {
+    k2so_skill: Option<String>,
+    skill_version: Option<u32>,
+    skill_checksum: Option<String>,
+    /// Frontmatter lines OTHER than our upgrade keys — preserved on
+    /// rewrite so harness-specific fields like `name:` / `description:`
+    /// survive unchanged.
+    extra_frontmatter: String,
+    /// The trimmed bytes between the two markers. None when the file
+    /// has no markers (legacy, pre-upgrade-protocol) or we couldn't
+    /// find both markers.
+    managed_region: Option<String>,
+    /// Everything after the closing marker (user tail).
+    after_end: String,
+    has_markers: bool,
+}
+
+fn parse_skill(content: &str) -> ParsedSkill {
+    let mut parsed = ParsedSkill {
+        k2so_skill: None,
+        skill_version: None,
+        skill_checksum: None,
+        extra_frontmatter: String::new(),
+        managed_region: None,
+        after_end: String::new(),
+        has_markers: false,
+    };
+
+    // Frontmatter — extract our upgrade keys + preserve the rest.
+    if content.starts_with("---") {
+        if let Some(end) = content[3..].find("---") {
+            let fm_block = &content[3..3 + end];
+            let mut extras = String::new();
+            for line in fm_block.lines() {
+                if let Some((key, value)) = line.split_once(':') {
+                    let k = key.trim();
+                    let v = value.trim();
+                    match k {
+                        "k2so_skill" => parsed.k2so_skill = Some(v.to_string()),
+                        "skill_version" => parsed.skill_version = v.parse().ok(),
+                        "skill_checksum" => parsed.skill_checksum = Some(v.to_string()),
+                        _ if !k.is_empty() && !v.is_empty() => {
+                            extras.push_str(&format!("{}: {}\n", k, v));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            parsed.extra_frontmatter = extras.trim_end().to_string();
+        }
+    }
+
+    // Managed-region extraction.
+    if let Some(begin_idx) = content.find(SKILL_BEGIN_MARKER) {
+        if let Some(end_rel) = content[begin_idx..].find(SKILL_END_MARKER) {
+            parsed.has_markers = true;
+            let region_start = begin_idx + SKILL_BEGIN_MARKER.len();
+            let region_end = begin_idx + end_rel;
+            parsed.managed_region = Some(content[region_start..region_end].trim().to_string());
+            let after_end_start = region_end + SKILL_END_MARKER.len();
+            parsed.after_end = content[after_end_start..].to_string();
+        }
+    }
+
+    parsed
+}
+
+#[derive(Debug)]
+enum SkillUpgradeOutcome {
+    Created,
+    UpToDate,
+    Upgraded,
+    MigratedLegacy,
+    UserModified,
+}
+
+/// The universal upgrade step. Every skill writer routes through this —
+/// no more per-skill one-off ensure/migrate helpers. Behavior:
+///   - missing file → create with wrapped body
+///   - current version AND type match → no-op (file on disk is fine)
+///   - no markers → legacy file, wrap the new content ABOVE existing content
+///   - markers + checksum match → rewrite managed region, preserve tail
+///   - markers + checksum differs → user edited, emit .proposed sibling
+fn ensure_skill_up_to_date(
+    skill_path: &std::path::Path,
+    skill_type: &str,
+    current_version: u32,
+    fresh_body: &str,
+    extra_frontmatter: Option<&str>,
+) -> SkillUpgradeOutcome {
+    if let Some(parent) = skill_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if !skill_path.exists() {
+        let wrapped = wrap_managed_skill(skill_type, current_version, fresh_body, extra_frontmatter);
+        let _ = fs::write(skill_path, wrapped);
+        return SkillUpgradeOutcome::Created;
+    }
+
+    let existing = fs::read_to_string(skill_path).unwrap_or_default();
+    let parsed = parse_skill(&existing);
+
+    // Fast path: already on the current contract. Still update extras if
+    // they changed (the harness `name:`/`description:` is regenerated on
+    // every call and should reflect current state).
+    if parsed.has_markers
+        && parsed.k2so_skill.as_deref() == Some(skill_type)
+        && parsed.skill_version == Some(current_version)
+    {
+        return SkillUpgradeOutcome::UpToDate;
+    }
+
+    // Legacy: file has no markers at all. Two sub-cases to distinguish:
+    //   (a) our own pre-0.32.4 generator output (should be replaced
+    //       entirely — keeping it would duplicate the content we're
+    //       about to write), or
+    //   (b) user-custom content with no K2SO signature (preserve as
+    //       tail so nothing is lost).
+    // We tell them apart by looking at the first H1 after any legacy
+    // frontmatter. If it starts with "# K2SO " it's ours; otherwise
+    // treat it as user content.
+    if !parsed.has_markers {
+        let after_fm: &str = if existing.starts_with("---") {
+            existing[3..]
+                .find("---")
+                .map(|end| existing[3 + end + 3..].trim_start_matches(|c: char| c.is_whitespace()))
+                .unwrap_or(&existing)
+        } else {
+            existing.trim_start_matches(|c: char| c.is_whitespace())
+        };
+        let first_h1 = after_fm.lines().find(|l| l.starts_with("# ")).unwrap_or("");
+        let is_our_legacy_output = first_h1.starts_with("# K2SO ");
+
+        let wrapped = wrap_managed_skill(skill_type, current_version, fresh_body, extra_frontmatter);
+        let final_content = if is_our_legacy_output {
+            // Our old output — replace entirely. No user tail to preserve.
+            wrapped
+        } else if after_fm.trim().is_empty() {
+            wrapped
+        } else {
+            // User-custom content predating the protocol — keep it below
+            // the managed region.
+            format!("{}\n{}\n", wrapped.trim_end(), after_fm.trim_end())
+        };
+        let _ = fs::write(skill_path, final_content);
+        return SkillUpgradeOutcome::MigratedLegacy;
+    }
+
+    // Markers present. Compare checksum of the current managed region
+    // against the stamped checksum. Match → safe auto-upgrade.
+    let actual_checksum = skill_checksum_hex(
+        parsed.managed_region.as_deref().unwrap_or("").trim().as_bytes()
+    );
+    let stamped = parsed.skill_checksum.as_deref().unwrap_or("");
+    if actual_checksum == stamped {
+        let wrapped = wrap_managed_skill(skill_type, current_version, fresh_body, extra_frontmatter);
+        let tail = parsed.after_end.trim();
+        let final_content = if tail.is_empty() {
+            wrapped
+        } else {
+            format!("{}\n{}\n", wrapped.trim_end(), tail)
+        };
+        let _ = fs::write(skill_path, final_content);
+        return SkillUpgradeOutcome::Upgraded;
+    }
+
+    // User has modified the managed region. Don't overwrite — drop the
+    // proposed new version next to the file so the user can diff and
+    // merge when they're ready.
+    let proposed_path = skill_path.with_extension("md.proposed");
+    let wrapped = wrap_managed_skill(skill_type, current_version, fresh_body, extra_frontmatter);
+    let _ = fs::write(&proposed_path, wrapped);
+    log_debug!(
+        "[skill-upgrade] {} user-modified; wrote {} alongside",
+        skill_path.display(),
+        proposed_path.display()
+    );
+    SkillUpgradeOutcome::UserModified
+}
+
 fn parse_frontmatter(content: &str) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     if !content.starts_with("---") {
@@ -2905,6 +3145,122 @@ k2so release
     skill
 }
 
+/// Generate the comprehensive K2SO Agent skill. Broader than the custom-agent
+/// template: includes the full multi-heartbeat CRUD, connections messaging,
+/// work creation, and audit commands — because a K2SO agent is the top-tier
+/// autonomous role in its workspace and needs the full surface area.
+///
+/// Detected by the migration in ensure_k2so_skills_up_to_date() via the
+/// first-line signature "# K2SO Agent Skill (Comprehensive)" which the
+/// older shared `generate_custom_agent_skill_content` doesn't emit.
+fn generate_k2so_agent_skill_content(project_name: &str, agent_name: &str) -> String {
+    let mut skill = format!(
+r#"# K2SO Agent Skill (Comprehensive)
+
+You are **{agent_name}**, the top-level K2SO Agent for **{project_name}**. This skill lists the full CLI surface — check in, manage your own schedules, create and route work, and coordinate with other workspaces.
+
+"#,
+        agent_name = agent_name,
+        project_name = project_name,
+    );
+
+    // Let user layers inject project-specific policy on top
+    let custom_layers = load_custom_layers("k2so-agent");
+    if !custom_layers.is_empty() {
+        skill.push_str(&custom_layers);
+    }
+
+    skill.push_str(r#"## Every wake (do this first)
+
+```
+k2so checkin
+```
+
+Returns your current task, inbox messages, peer status, file reservations, and the recent activity feed for the workspace.
+
+## Report + complete
+
+```
+k2so status "triaging inbox"
+k2so done
+k2so done --blocked "waiting for design review"
+```
+
+## Your own heartbeats
+
+A K2SO agent can have multiple scheduled heartbeats — each has its own `wakeup.md` file that fires on its schedule. You can manage them from the CLI:
+
+```
+k2so heartbeat list                          # see what you have
+k2so heartbeat show <name> [--json]          # full details of one
+k2so heartbeat add --name daily-brief --daily --time 08:00
+k2so heartbeat add --name end-of-day --daily --time 17:30
+k2so heartbeat add --name weekly-review --weekly --days fri --time 16:00
+k2so heartbeat edit <name> --weekly --days mon,wed --time 14:00
+k2so heartbeat rename <old> <new>
+k2so heartbeat enable <name>
+k2so heartbeat disable <name>
+k2so heartbeat remove <name>
+k2so heartbeat status <name>                 # recent fire history for one
+k2so heartbeat log                           # workspace-wide fire log
+```
+
+### Editing your wakeup prompts
+
+Each heartbeat has a `wakeup.md` that is injected as the user message on fire.
+
+```
+k2so heartbeat wakeup <name>                 # print the current contents
+k2so heartbeat wakeup <name> --path-only     # print just the absolute path
+k2so heartbeat wakeup <name> --edit          # open it in $EDITOR
+```
+
+### Forcing a wake
+
+Any heartbeat can be fired on demand (bypassing its schedule):
+
+```
+k2so heartbeat wake                          # triage + wake the right agent(s)
+```
+
+## Creating + routing work
+
+```
+k2so work create --title "Ship auth fix" --body "..." --priority high --source feature
+k2so work create --agent <template> --title "..."  # route to a delegate template
+k2so work inbox                              # this workspace's inbox
+```
+
+## Cross-workspace messaging
+
+```
+k2so connections list                        # who's wired up to me
+k2so msg <workspace>:inbox "work needed over there"
+k2so msg --wake <workspace>:inbox "urgent — wake their agent"
+```
+
+Only workspaces linked via Connected Workspaces in Settings (or `k2so connections`) are reachable.
+
+## Claim files
+
+Before editing shared paths, coordinate with any other active agents:
+
+```
+k2so reserve src/auth/ src/middleware/jwt.ts
+k2so release
+```
+
+## Settings + diagnostic
+
+```
+k2so settings                                # current mode, state, heartbeat, connections
+k2so feed                                    # recent activity feed
+k2so hooks status                            # verify CLI-LLM hook wiring is live
+```
+"#);
+    skill
+}
+
 /// Generate the universal skill protocol for agent templates (delegates).
 /// Focused protocol — NO delegate, NO cross-workspace messaging.
 fn generate_template_skill_content(project_name: &str, agent_name: &str) -> String {
@@ -2997,6 +3353,19 @@ Add work to this workspace's inbox for the manager to triage:
 ```
 k2so work create --title "Fix login bug" --body "Users can't log in after password reset" --source issue
 ```
+
+## Heartbeats
+
+The agent in this workspace can have one or more scheduled wakeups. Manage them with:
+```
+k2so heartbeat list                   # see configured schedules
+k2so heartbeat show <name>            # full details for one
+k2so heartbeat add --name <n> --daily --time HH:MM
+k2so heartbeat wakeup <name> --edit   # edit the prompt that fires
+k2so heartbeat wake                   # trigger a tick now
+```
+
+Run `k2so heartbeat --help` for the full surface.
 "#,
         project_name = project_name,
     )
@@ -5611,25 +5980,50 @@ pub fn k2so_agents_regenerate_skills(
                 "agent-template".to_string()
             };
 
-            let skill_content = match agent_type.as_str() {
-                "manager" => generate_manager_skill_content(&project_path, &project_name),
-                "custom" | "k2so" => generate_custom_agent_skill_content(&project_name, &name),
-                _ => generate_template_skill_content(&project_name, &name),
+            let (skill_content, skill_type_tag, skill_version) = match agent_type.as_str() {
+                "manager" => (
+                    generate_manager_skill_content(&project_path, &project_name),
+                    "manager",
+                    SKILL_VERSION_MANAGER,
+                ),
+                "k2so" => (
+                    generate_k2so_agent_skill_content(&project_name, &name),
+                    "k2so-agent",
+                    SKILL_VERSION_K2SO_AGENT,
+                ),
+                "custom" => (
+                    generate_custom_agent_skill_content(&project_name, &name),
+                    "custom-agent",
+                    SKILL_VERSION_CUSTOM_AGENT,
+                ),
+                _ => (
+                    generate_template_skill_content(&project_name, &name),
+                    "agent-template",
+                    SKILL_VERSION_TEMPLATE,
+                ),
             };
 
-            // Write to agent dir
+            // Agent-dir SKILL.md via the upgrade protocol.
             let skill_path = path.join("SKILL.md");
-            if fs::write(&skill_path, &skill_content).is_ok() {
-                updated += 1;
-            }
+            ensure_skill_up_to_date(&skill_path, skill_type_tag, skill_version, &skill_content, None);
+            updated += 1;
 
-            // Write to all harness-specific locations
+            // Canonical + symlinks.
             let description = match agent_type.as_str() {
                 "manager" => format!("K2SO Workspace Manager commands for {}", name),
-                "custom" | "k2so" => format!("K2SO agent commands for {}", name),
+                "k2so" => format!("K2SO Agent commands for {} — full surface", name),
+                "custom" => format!("K2SO agent commands for {}", name),
                 _ => format!("K2SO agent template commands for {}", name),
             };
-            write_skill_to_all_harnesses(&project_path, &format!("k2so-{}", name), &description, &skill_content);
+            write_skill_to_all_harnesses(
+                &project_path,
+                &format!("k2so-{}", name),
+                skill_type_tag,
+                skill_version,
+                &description,
+                &skill_content,
+                false,
+            );
         }
     }
 
@@ -5683,15 +6077,29 @@ fn force_symlink(source: &std::path::Path, target: &std::path::Path) {
 /// Canonical location: .k2so/skills/{name}/SKILL.md
 /// Symlinked to: Claude Code, OpenCode, Pi, Cursor (project root)
 /// Marker-injected into: AGENTS.md, .github/copilot-instructions.md
-fn write_skill_to_all_harnesses(project_path: &str, skill_name: &str, description: &str, content: &str) {
+// `write_shared_markers`: only the workspace-level skill should set this
+// true — per-agent skills would otherwise clobber each other in the
+// single K2SO marker block inside AGENTS.md / copilot-instructions.md.
+fn write_skill_to_all_harnesses(
+    project_path: &str,
+    skill_name: &str,
+    skill_type: &str,
+    skill_version: u32,
+    description: &str,
+    content: &str,
+    write_shared_markers: bool,
+) {
     let root = PathBuf::from(project_path);
 
-    // Write the canonical file with Claude Code frontmatter (superset format)
+    // Canonical skill with both harness-format (name/description) AND
+    // upgrade-tracking frontmatter (k2so_skill/skill_version/checksum +
+    // managed markers). Written via ensure_skill_up_to_date so user edits
+    // below the managed region or the closing marker survive future
+    // regenerations, and version bumps auto-upgrade unmodified files.
     let canonical_dir = root.join(".k2so/skills").join(skill_name);
-    let _ = fs::create_dir_all(&canonical_dir);
-    let canonical_content = format!("---\nname: {}\ndescription: {}\n---\n\n{}", skill_name, description, content);
     let canonical_path = canonical_dir.join("SKILL.md");
-    let _ = fs::write(&canonical_path, &canonical_content);
+    let extras = format!("name: {}\ndescription: {}", skill_name, description);
+    ensure_skill_up_to_date(&canonical_path, skill_type, skill_version, content, Some(&extras));
 
     // 1. Claude Code: .claude/skills/{name}/SKILL.md → symlink
     let claude_dir = root.join(".claude/skills").join(skill_name);
@@ -5708,13 +6116,15 @@ fn write_skill_to_all_harnesses(project_path: &str, skill_name: &str, descriptio
     let _ = fs::create_dir_all(&pi_dir);
     force_symlink(&canonical_path, &pi_dir.join("SKILL.md"));
 
-    // 4. Codex / Copilot CLI / Code Puppy: AGENTS.md (marker-injected, can't symlink a section)
-    upsert_k2so_section(&root.join("AGENTS.md"), content);
-
-    // 5. Copilot CLI: .github/copilot-instructions.md (marker-injected)
-    let github_dir = root.join(".github");
-    let _ = fs::create_dir_all(&github_dir);
-    upsert_k2so_section(&github_dir.join("copilot-instructions.md"), content);
+    // 4-5. Marker-injected shared files. Only the workspace skill writes
+    // here — otherwise each per-agent run clobbers the block written by
+    // the previous one.
+    if write_shared_markers {
+        upsert_k2so_section(&root.join("AGENTS.md"), content);
+        let github_dir = root.join(".github");
+        let _ = fs::create_dir_all(&github_dir);
+        upsert_k2so_section(&github_dir.join("copilot-instructions.md"), content);
+    }
 }
 
 /// Write the workspace-level K2SO skill to all harness locations.
@@ -5731,8 +6141,11 @@ pub fn write_workspace_skill_file(project_path: &str) {
     write_skill_to_all_harnesses(
         project_path,
         "k2so",
+        "workspace",
+        SKILL_VERSION_WORKSPACE,
         "K2SO workspace commands — send work to agents, view activity, manage connections",
         &content,
+        true, // workspace skill owns AGENTS.md + copilot-instructions.md
     );
 
     // Symlink project root SKILL.md → canonical (Cursor Agent, generic)
@@ -5748,21 +6161,91 @@ pub fn write_agent_skill_file(project_path: &str, agent_name: &str, agent_type: 
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "workspace".to_string());
 
-    let skill_content = match agent_type {
-        "manager" | "coordinator" | "pod-leader" => generate_manager_skill_content(project_path, &project_name),
-        "custom" | "k2so" => generate_custom_agent_skill_content(&project_name, agent_name),
-        _ => generate_template_skill_content(&project_name, agent_name),
+    let (skill_content, skill_type_tag, skill_version) = match agent_type {
+        "manager" | "coordinator" | "pod-leader" => (
+            generate_manager_skill_content(project_path, &project_name),
+            "manager",
+            SKILL_VERSION_MANAGER,
+        ),
+        "k2so" => (
+            generate_k2so_agent_skill_content(&project_name, agent_name),
+            "k2so-agent",
+            SKILL_VERSION_K2SO_AGENT,
+        ),
+        "custom" => (
+            generate_custom_agent_skill_content(&project_name, agent_name),
+            "custom-agent",
+            SKILL_VERSION_CUSTOM_AGENT,
+        ),
+        _ => (
+            generate_template_skill_content(&project_name, agent_name),
+            "agent-template",
+            SKILL_VERSION_TEMPLATE,
+        ),
     };
 
-    // Write to agent dir (for harnesses running in agent context)
-    let skill_path = agent_dir(project_path, agent_name).join("SKILL.md");
-    let _ = fs::write(&skill_path, &skill_content);
+    // Agent-dir SKILL.md (for harnesses that launch in the agent's cwd).
+    // Goes through the same upgrade protocol so user edits are preserved.
+    let agent_skill_path = agent_dir(project_path, agent_name).join("SKILL.md");
+    ensure_skill_up_to_date(&agent_skill_path, skill_type_tag, skill_version, &skill_content, None);
 
-    // Write to all harness-specific locations
+    // Harness-specific symlinks + marker-injected files share the same
+    // canonical source, also upgrade-tracked.
     let description = match agent_type {
         "manager" | "coordinator" | "pod-leader" => format!("K2SO Workspace Manager commands for {} — checkin, delegate, message, reserve files", agent_name),
-        "custom" | "k2so" => format!("K2SO agent commands for {} — checkin, message connected workspaces, reserve files", agent_name),
+        "k2so" => format!("K2SO Agent commands for {} — full surface (checkin, heartbeats, work, messaging, reserves)", agent_name),
+        "custom" => format!("K2SO agent commands for {} — checkin, message connected workspaces, reserve files", agent_name),
         _ => format!("K2SO agent template commands for {} — checkin, status, done, reserve files", agent_name),
     };
-    write_skill_to_all_harnesses(project_path, &format!("k2so-{}", agent_name), &description, &skill_content);
+    write_skill_to_all_harnesses(
+        project_path,
+        &format!("k2so-{}", agent_name),
+        skill_type_tag,
+        skill_version,
+        &description,
+        &skill_content,
+        false, // per-agent skills don't touch AGENTS.md / copilot markers
+    );
+}
+
+/// Universal skill refresh. Walks every agent folder + the workspace
+/// skill and re-invokes the regular write_* functions. Because those now
+/// route through ensure_skill_up_to_date, this is idempotent:
+///   - Files on the current SKILL_VERSION_* → no-op.
+///   - Legacy/unversioned files → migrated to the managed-markers layout
+///     without losing content (legacy text lands below the closing marker).
+///   - Version-bumped + unmodified → rewritten in place to the new body.
+///   - User-edited (checksum mismatch) → new body dropped as `.proposed`.
+///
+/// Call this at startup per project. Replaces the pre-0.32.4 one-off
+/// `ensure_k2so_agent_skill_upgraded` — adding new skill types or bumping
+/// a generator version no longer requires a new helper.
+pub fn ensure_all_skills_up_to_date(project_path: &str) {
+    // Workspace skill (human-user surface).
+    write_workspace_skill_file(project_path);
+
+    // Each agent's skill.
+    let agents_root = agents_dir(project_path);
+    if !agents_root.exists() { return; }
+    let Ok(entries) = fs::read_dir(&agents_root) else { return };
+    for entry in entries.flatten() {
+        let agent_path = entry.path();
+        if !agent_path.is_dir() { continue; }
+        let name_osstr = entry.file_name();
+        let agent_name = name_osstr.to_string_lossy();
+        // Skip bookkeeping dirs like `.archive/`.
+        if agent_name.starts_with('.') { continue; }
+
+        let agent_md = agent_path.join("agent.md");
+        if !agent_md.exists() { continue; }
+        let agent_content = fs::read_to_string(&agent_md).unwrap_or_default();
+        let fm = parse_frontmatter(&agent_content);
+        let agent_type = fm.get("type").cloned().unwrap_or_else(|| "agent-template".to_string());
+        // Normalize legacy aliases the rest of the codebase uses.
+        let normalized_type = match agent_type.as_str() {
+            "pod-leader" | "coordinator" => "manager".to_string(),
+            other => other.to_string(),
+        };
+        write_agent_skill_file(project_path, &agent_name, &normalized_type);
+    }
 }
