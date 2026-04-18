@@ -3705,9 +3705,24 @@ pub fn k2so_agents_generate_workspace_claude_md(
             let project_md_content = format!(
 r#"# {project_name}
 
-<!-- This file is shared context injected into every agent's CLAUDE.md at launch. -->
-<!-- Use it for project-wide knowledge that all agents need, regardless of their role. -->
-<!-- Edit this file via Settings > Manage Project Context, or directly. -->
+<!--
+  PROJECT.md is the "what" half of agent context — the codebase facts
+  every agent needs regardless of role. K2SO ships this file as part of
+  the agent's system prompt on every launch, via --append-system-prompt
+  (injected alongside SKILL.md as a "Project Context (shared)" section).
+  You don't need to reference it from wakeup.md — it's always there.
+
+  Pair it with Agent Skills (SKILL.md layers) which cover the "how":
+    PROJECT.md = what this project IS (tech stack, conventions)
+    SKILL.md   = what the agent DOES (standing orders, procedures)
+
+  Edit this file directly or via Settings → Projects → "Manage Project
+  Context". Applies to Workspace Manager and Agent Template agents.
+  Custom Agents don't receive PROJECT.md by design — they may not be
+  codebase-scoped.
+
+  Delete these comments once you've filled the sections in.
+-->
 
 ## About This Project
 
@@ -3715,19 +3730,24 @@ r#"# {project_name}
 
 ## Tech Stack
 
-<!-- Languages, frameworks, databases, infrastructure -->
+<!-- Languages, frameworks, databases, infrastructure. Include versions
+     where they matter (e.g. "Tauri v2, React 19, TailwindCSS v4"). -->
 
 ## Key Directories
 
-<!-- Important paths and what lives in them -->
+<!-- Important paths and what lives in them. Call out where tests live,
+     where generated files go, where NOT to edit. -->
 
 ## Conventions
 
-<!-- Code style, commit message format, PR process, branch naming -->
+<!-- Code style, commit message format, PR process, branch naming.
+     Anything an engineer would otherwise have to discover by osmosis. -->
 
 ## External Systems
 
-<!-- Links to issue trackers, CI dashboards, staging environments, docs -->
+<!-- Links to issue trackers, CI dashboards, staging environments, docs.
+     If the project depends on an external service the agent may need to
+     know about or call, document it here. -->
 "#,
                 project_name = project_name,
             );

@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { SettingEntry } from '../searchManifest'
+import { AgentContextDiagram } from './AgentContextDiagram'
 
 export const AGENT_SKILLS_MANIFEST: SettingEntry[] = [
   { id: 'agent-skills.manager', section: 'agent-skills', label: 'Workspace Manager Skills', description: 'Auto-generated + custom skill layers for the workspace manager', keywords: ['manager', 'skills', 'workspace', 'triage', 'delegate'] },
@@ -174,6 +175,10 @@ export function AgentSkillsSection(): React.JSX.Element {
           </button>
         ))}
       </div>
+
+      {/* Context flow diagram — changes per tier so users can see where each
+          file ends up at launch / wake. */}
+      <AgentContextDiagram tier={activeTier} />
 
       {/* Split layout: layer list + preview */}
       <div className="flex gap-3">
