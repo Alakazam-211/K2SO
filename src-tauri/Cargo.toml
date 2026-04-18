@@ -1,6 +1,6 @@
 [package]
 name = "k2so"
-version = "0.32.3"
+version = "0.32.4"
 edition = "2021"
 description = "Developer workspace with terminals, git worktrees, and agent presets"
 license = "MIT"
@@ -44,6 +44,7 @@ libc = "0.2"
 llama-cpp-2 = { version = "0.1", features = ["metal", "sampler"] }
 encoding_rs = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 tauri-plugin-drag = "2.1.0"
 tauri-plugin-opener = "2"
 notify = { version = "7", features = ["macos_fsevent"] }

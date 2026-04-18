@@ -2670,7 +2670,7 @@ dependencies = [
 
 [[package]]
 name = "k2so"
-version = "0.32.3"
+version = "0.32.4"
 dependencies = [
  "alacritty_terminal",
  "argon2",
@@ -2699,6 +2699,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rusqlite",
  "rustix",
+ "rustls",
  "serde",
  "serde_json",
  "signal-hook 0.3.18",

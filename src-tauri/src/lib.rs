@@ -85,6 +85,11 @@ pub fn run() {
     #[cfg(unix)]
     terminal::ignore_sigpipe();
 
+    // Rustls 0.23 compiles both aws-lc-rs (via reqwest rustls-tls) and ring
+    // (via ngrok) into the binary; it refuses to auto-pick and panics on
+    // first TLS use unless a provider is explicitly installed.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let conn = match db::init_database() {
         Ok(c) => c,
         Err(e) => {
