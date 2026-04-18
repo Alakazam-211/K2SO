@@ -471,16 +471,17 @@ export const useTimerStore = create<TimerState>((set, get) => ({
   },
 
   syncFromEvent: (payload: TimerSyncPayload) => {
+    // Only sync the cross-window status — NOT the dialog flags. broadcast_sync
+    // echoes back to the sender, so if stopTimer resets our own dialogs here
+    // the memo dialog unmounts the instant it was opened (stop button appears
+    // to act like pause). Dialogs are per-window UI state and are managed by
+    // the window that opened them (saveEntry clears showMemoDialog itself).
     set({
       status: payload.status,
       startTime: payload.startTime,
       pausedElapsed: payload.pausedElapsed,
       resumeTime: payload.resumeTime,
       targetDurationMs: payload.targetDurationMs,
-      // Close dialogs if synced from another window
-      showCountdown: false,
-      showMemoDialog: false,
-      showExtendDialog: false,
     })
   },
 }))

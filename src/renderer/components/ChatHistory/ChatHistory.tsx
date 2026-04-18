@@ -366,21 +366,22 @@ export default function ChatHistory(): React.JSX.Element {
         }
       }},
     ]
+    const closeMenu = () => {
+      if (menuDiv.parentNode) menuDiv.remove()
+      document.removeEventListener('mousedown', dismiss)
+    }
     for (const item of items) {
       const btn = document.createElement('button')
       btn.textContent = item.label
       btn.style.cssText = 'display:block;width:100%;text-align:left;padding:4px 12px;background:none;border:none;color:#ccc;cursor:pointer;font:inherit;'
       btn.onmouseenter = () => { btn.style.background = '#333' }
       btn.onmouseleave = () => { btn.style.background = 'none' }
-      btn.onclick = () => { item.action(); document.body.removeChild(menuDiv) }
+      btn.onclick = () => { item.action(); closeMenu() }
       menuDiv.appendChild(btn)
     }
     document.body.appendChild(menuDiv)
     const dismiss = (ev: MouseEvent) => {
-      if (!menuDiv.contains(ev.target as Node)) {
-        document.body.removeChild(menuDiv)
-        document.removeEventListener('mousedown', dismiss)
-      }
+      if (!menuDiv.contains(ev.target as Node)) closeMenu()
     }
     setTimeout(() => document.addEventListener('mousedown', dismiss), 0)
   }, [pinnedKeys, customNames, handleTogglePin])
