@@ -29,7 +29,10 @@ mod fs_atomic;
 mod git;
 pub mod llm;
 mod menu;
-pub mod perf;
+// `perf` now lives in the k2so-core crate. Re-exported so existing
+// `crate::perf_timer!` / `crate::perf_hist!` / `crate::perf::*` call sites
+// keep working unchanged. See crates/k2so-core/src/perf.rs.
+pub use k2so_core::{perf, perf_hist, perf_timer};
 mod project_config;
 mod state;
 pub mod terminal;

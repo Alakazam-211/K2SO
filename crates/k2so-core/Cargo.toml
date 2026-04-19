@@ -7,3 +7,8 @@ description = "K2SO device-local core library: db, llm, terminal, companion, sch
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+# perf.rs uses parking_lot::Mutex for the global histogram registry.
+# Cross-platform dep; will host SQLite/terminal/etc. migrations later.
+parking_lot = "0.12"

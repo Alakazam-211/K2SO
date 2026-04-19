@@ -11,8 +11,9 @@
 //! while the Tauri app stays a thin client that proxies state-mutating
 //! commands over HTTP.
 //!
-//! Module migration from src-tauri lands incrementally; this file is the
-//! placeholder entry point for the workspace scaffolding commit.
+//! Module migration from src-tauri lands incrementally.
+
+pub mod perf;
 
 #[doc(hidden)]
 pub fn __scaffolding_marker() {}

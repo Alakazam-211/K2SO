@@ -15,6 +15,10 @@ name = "k2so"
 path = "src/main.rs"
 
 [dependencies]
+# Device-local core library — houses perf (and will host db, llm, terminal,
+# companion, scheduler, agent_hooks, push_adapter as modules migrate in).
+k2so-core = { path = "../crates/k2so-core" }
+
 tauri = { version = "2", features = ["protocol-asset", "macos-private-api", "tray-icon"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
