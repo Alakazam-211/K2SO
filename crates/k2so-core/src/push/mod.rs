@@ -141,24 +141,37 @@ impl PushTarget for NoOp {
 }
 
 /// HTTP `POST` adapter: sends the event to a user-configured URL as JSON.
-/// The payload shape is `{"title": "...", "body": "...", "action_url": "..."}`
-/// — simple enough that users can route it into Slack, Discord, Shortcuts,
-/// their own ntfy server, etc.
-///
-/// Implementation lives in a separate commit once k2so-core gains the HTTP
-/// client dependency. Placeholder struct + trait impl only for now so the
-/// module compiles end-to-end from the scaffolding pass onward.
+/// Payload shape is `{"title": "...", "body": "...", "action_url": "..."}` —
+/// simple enough that users can route it into Slack webhooks, Discord,
+/// Apple Shortcuts HTTP, their own ntfy server, etc.
 #[derive(Debug, Clone)]
 pub struct Webhook {
     pub url: String,
 }
 
 impl PushTarget for Webhook {
-    fn send(&self, _event: &PushEvent) -> Result<(), PushError> {
-        // TODO: wire up reqwest once http dep lands in k2so-core.
-        Err(PushError::BadConfig(
-            "Webhook adapter not yet implemented".to_string(),
-        ))
+    fn send(&self, event: &PushEvent) -> Result<(), PushError> {
+        let payload = serde_json::json!({
+            "title": event.title(),
+            "body": event.body(),
+            "action_url": event.action_url(),
+        });
+        let response = reqwest::blocking::Client::new()
+            .post(&self.url)
+            .header("Content-Type", "application/json")
+            .header("User-Agent", "k2so-daemon")
+            .body(payload.to_string())
+            .send()
+            .map_err(|e| PushError::Transport(e.to_string()))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            return Err(PushError::Remote {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        Ok(())
     }
 
     fn label(&self) -> String {
@@ -166,23 +179,42 @@ impl PushTarget for Webhook {
     }
 }
 
-/// Convenience wrapper for <https://ntfy.sh>. Same underlying mechanism as
-/// [`Webhook`] but packages the ntfy-specific fields (topic, priority).
-/// Supports user-specified ntfy servers for fully self-hosted delivery.
+/// Convenience wrapper for <https://ntfy.sh>. Supports user-specified ntfy
+/// servers for fully self-hosted delivery. Payload matches the ntfy HTTP
+/// protocol: `POST <server>/<topic>` with title / message / click headers
+/// (a plain text body carries the message).
 #[derive(Debug, Clone)]
 pub struct NtfySh {
-    /// `https://ntfy.sh` or user's self-hosted server URL.
+    /// `https://ntfy.sh` or the user's self-hosted server URL.
     pub server: String,
     /// Topic under `<server>/<topic>`.
     pub topic: String,
 }
 
 impl PushTarget for NtfySh {
-    fn send(&self, _event: &PushEvent) -> Result<(), PushError> {
-        // TODO: wire up reqwest once http dep lands in k2so-core.
-        Err(PushError::BadConfig(
-            "NtfySh adapter not yet implemented".to_string(),
-        ))
+    fn send(&self, event: &PushEvent) -> Result<(), PushError> {
+        let url = format!("{}/{}", self.server.trim_end_matches('/'), self.topic);
+        let mut request = reqwest::blocking::Client::new()
+            .post(&url)
+            .header("User-Agent", "k2so-daemon")
+            .header("Title", event.title());
+        let action = event.action_url();
+        if !action.is_empty() {
+            request = request.header("Click", action);
+        }
+        let response = request
+            .body(event.body().to_string())
+            .send()
+            .map_err(|e| PushError::Transport(e.to_string()))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            return Err(PushError::Remote {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        Ok(())
     }
 
     fn label(&self) -> String {
