@@ -10,16 +10,15 @@ use std::path::{Path, PathBuf};
 use crate::db::schema::{AgentHeartbeat, AgentSession, HeartbeatFire, WorkspaceRelation};
 use crate::fs_atomic::{self, atomic_symlink, atomic_write_str, log_if_err, unique_archive_path};
 
-// ── DB helpers (standalone connection, no AppState needed) ──────────────
-
-fn resolve_project_id(conn: &rusqlite::Connection, path: &str) -> Option<String> {
-    conn.query_row(
-        "SELECT id FROM projects WHERE path = ?1",
-        rusqlite::params![path],
-        |r| r.get(0),
-    )
-    .ok()
-}
+// Core-hosted helpers + heartbeat fns. Re-imported at crate-local paths
+// so the 170+ existing call sites below keep resolving via name-in-scope
+// without touching each one. External references via
+// `crate::commands::k2so_agents::find_primary_agent` (agent_hooks.rs)
+// also continue to work because re-exports behave like normal items.
+pub use k2so_core::agents::{
+    agent_dir, agent_type_for, agents_dir, find_primary_agent, parse_frontmatter,
+    resolve_project_id,
+};
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -52,14 +51,11 @@ pub struct WorkItem {
 }
 
 // ── Path helpers ────────────────────────────────────────────────────────
-
-fn agents_dir(project_path: &str) -> PathBuf {
-    PathBuf::from(project_path).join(".k2so").join("agents")
-}
-
-fn agent_dir(project_path: &str, agent_name: &str) -> PathBuf {
-    agents_dir(project_path).join(agent_name)
-}
+//
+// `agents_dir` + `agent_dir` now live in k2so_core::agents (re-exported
+// above so local call sites resolve unchanged). `agent_work_dir` and
+// `workspace_inbox_dir` stay local because other non-migrated functions
+// in this file use them against paths that haven't moved yet.
 
 fn agent_work_dir(project_path: &str, agent_name: &str, folder: &str) -> PathBuf {
     agent_dir(project_path, agent_name).join("work").join(folder)
@@ -150,19 +146,7 @@ fn ensure_agent_wakeup(project_path: &str, agent_name: &str, agent_type: &str) {
     );
 }
 
-/// Determine an agent's type from its `agent.md` frontmatter. Returns
-/// `"agent-template"` if no frontmatter or no `type:` field is found
-/// (the same default the scheduler uses elsewhere).
-fn agent_type_for(project_path: &str, agent_name: &str) -> String {
-    let md = agent_dir(project_path, agent_name).join("AGENT.md");
-    if let Ok(content) = fs::read_to_string(&md) {
-        let fm = parse_frontmatter(&content);
-        if let Some(t) = fm.get("type") {
-            return t.clone();
-        }
-    }
-    "agent-template".to_string()
-}
+// `agent_type_for` moved to k2so_core::agents (re-exported above).
 
 /// Resolve the absolute filesystem path of the primary heartbeat's
 /// wakeup.md for the given agent. Prefers a row named `"triage"`
@@ -257,77 +241,16 @@ pub fn compose_wake_prompt_from_path(wakeup_path: &std::path::Path) -> Option<St
 /// disk. We use `projects.agent_mode` as the source of truth and only
 /// return an agent dir whose type matches the workspace's declared mode.
 /// Agent-templates are never scheduleable and are always skipped.
-pub fn find_primary_agent(project_path: &str) -> Option<String> {
-    let agents_root = agents_dir(project_path);
-    if !agents_root.exists() {
-        return None;
-    }
-
-    // Resolve the declared workspace mode from the DB. This is what
-    // prevents alphabetical scan order from picking a stale orphan
-    // (e.g. returning pod-leader before sarah when the workspace is
-    // actually a Custom agent workspace for sarah).
-    let declared_mode: Option<String> = {
-        let db = crate::db::shared();
-        let conn = db.lock();
-        conn.query_row(
-            "SELECT agent_mode FROM projects WHERE path = ?1",
-            rusqlite::params![project_path],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .ok()
-        .flatten()
-    };
-
-    let type_for_mode = |mode: &str| match mode {
-        "custom" => "custom",
-        "manager" => "manager",
-        "k2so" | "agent" => "k2so",
-        _ => "",
-    };
-
-    // Pass 1: prefer the agent whose type matches the declared mode.
-    if let Some(ref mode) = declared_mode {
-        let wanted = type_for_mode(mode);
-        if !wanted.is_empty() {
-            if let Ok(entries) = fs::read_dir(&agents_root) {
-                for entry in entries.flatten() {
-                    if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
-                        continue;
-                    }
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    // __lead__ is a directory-less concept; if mode is
-                    // manager we return the sentinel name directly below.
-                    if agent_type_for(project_path, &name) == wanted {
-                        return Some(name);
-                    }
-                }
-            }
-            // Manager mode doesn't require a filesystem dir — __lead__
-            // lives at the project root. Return the sentinel.
-            if wanted == "manager" {
-                return Some("__lead__".to_string());
-            }
-        }
-    }
-
-    // Pass 2 (fallback, no declared mode): first scheduleable dir wins.
-    let Ok(entries) = fs::read_dir(&agents_root) else { return None };
-    for entry in entries.flatten() {
-        if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let agent_type = agent_type_for(project_path, &name);
-        if matches!(agent_type.as_str(), "custom" | "manager" | "k2so") {
-            return Some(name);
-        }
-    }
-    None
-}
+// `find_primary_agent` moved to k2so_core::agents (re-exported above).
 
 /// Multi-heartbeat architecture: CRUD for agent_heartbeats table.
 /// See .k2so/prds/multi-schedule-heartbeat.md.
+
+// All heartbeat business logic lives in k2so_core::agents::heartbeat.
+// The `#[tauri::command]` wrappers below are thin forwards so the
+// React UI's existing `invoke("k2so_heartbeat_*")` calls keep working;
+// the daemon calls the core fns directly from its `/cli/heartbeat/*`
+// HTTP routes so scheduled wakes fire while the Tauri app is quit.
 
 #[tauri::command]
 pub fn k2so_heartbeat_add(
@@ -336,90 +259,17 @@ pub fn k2so_heartbeat_add(
     frequency: String,
     spec_json: String,
 ) -> Result<serde_json::Value, String> {
-    AgentHeartbeat::validate_name(&name).map_err(|e| e.to_string())?;
-    let db = crate::db::shared();
-    let conn = db.lock();
-    let project_id = resolve_project_id(&conn, &project_path)
-        .ok_or_else(|| format!("Project not found: {}", project_path))?;
-
-    let agent_name = find_primary_agent(&project_path)
-        .ok_or("No scheduleable agent found in this workspace. Enable heartbeat on a Custom, Workspace Manager, or K2SO Agent workspace first.")?;
-
-    // Create heartbeat folder and scaffold wakeup.md
-    let hb_dir = agent_dir(&project_path, &agent_name)
-        .join("heartbeats")
-        .join(&name);
-    fs::create_dir_all(&hb_dir).map_err(|e| format!("Failed to create heartbeat folder: {}", e))?;
-    let wakeup_file = hb_dir.join("WAKEUP.md");
-    if !wakeup_file.exists() {
-        let template = format!(
-            "---\ndescription: One-line summary of what this heartbeat does (shown in other wakeup's context)\n---\n\n\
-            # Wake procedure: {}\n\n\
-            Replace this with the operational instructions for this heartbeat.\n\
-            Keep it focused on what to do for this specific cadence — other heartbeats\n\
-            live in sibling folders and run on their own schedules.\n",
-            name
-        );
-        fs::write(&wakeup_file, template).map_err(|e| format!("Failed to write wakeup.md: {}", e))?;
-    }
-
-    // Store workspace-relative path so project moves don't break rows
-    let workspace_relative = wakeup_file
-        .strip_prefix(&project_path)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| wakeup_file.to_string_lossy().to_string());
-
-    let id = uuid::Uuid::new_v4().to_string();
-    AgentHeartbeat::insert(
-        &conn,
-        &id,
-        &project_id,
-        &name,
-        &frequency,
-        &spec_json,
-        &workspace_relative,
-        true,
-    )
-    .map_err(|e| format!("Failed to insert heartbeat: {}", e))?;
-
-    Ok(serde_json::json!({
-        "id": id,
-        "name": name,
-        "wakeupPath": workspace_relative,
-        "wakeupAbs": wakeup_file.to_string_lossy(),
-    }))
+    k2so_core::agents::heartbeat::k2so_heartbeat_add(project_path, name, frequency, spec_json)
 }
 
 #[tauri::command]
 pub fn k2so_heartbeat_list(project_path: String) -> Result<Vec<AgentHeartbeat>, String> {
-    let db = crate::db::shared();
-    let conn = db.lock();
-    let project_id = resolve_project_id(&conn, &project_path)
-        .ok_or_else(|| format!("Project not found: {}", project_path))?;
-    AgentHeartbeat::list_by_project(&conn, &project_id).map_err(|e| e.to_string())
+    k2so_core::agents::heartbeat::k2so_heartbeat_list(project_path)
 }
 
 #[tauri::command]
-pub fn k2so_heartbeat_remove(
-    project_path: String,
-    name: String,
-) -> Result<(), String> {
-    let db = crate::db::shared();
-    let conn = db.lock();
-    let project_id = resolve_project_id(&conn, &project_path)
-        .ok_or_else(|| format!("Project not found: {}", project_path))?;
-    let agent_name = find_primary_agent(&project_path)
-        .ok_or("No scheduleable agent in this workspace")?;
-
-    // Delete row first; folder cleanup second (best-effort)
-    AgentHeartbeat::delete(&conn, &project_id, &name).map_err(|e| e.to_string())?;
-    let hb_dir = agent_dir(&project_path, &agent_name)
-        .join("heartbeats")
-        .join(&name);
-    if hb_dir.exists() {
-        let _ = fs::remove_dir_all(&hb_dir);
-    }
-    Ok(())
+pub fn k2so_heartbeat_remove(project_path: String, name: String) -> Result<(), String> {
+    k2so_core::agents::heartbeat::k2so_heartbeat_remove(project_path, name)
 }
 
 #[tauri::command]
@@ -428,13 +278,7 @@ pub fn k2so_heartbeat_set_enabled(
     name: String,
     enabled: bool,
 ) -> Result<(), String> {
-    let db = crate::db::shared();
-    let conn = db.lock();
-    let project_id = resolve_project_id(&conn, &project_path)
-        .ok_or_else(|| format!("Project not found: {}", project_path))?;
-    AgentHeartbeat::set_enabled(&conn, &project_id, &name, enabled)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    k2so_core::agents::heartbeat::k2so_heartbeat_set_enabled(project_path, name, enabled)
 }
 
 #[tauri::command]
@@ -444,168 +288,37 @@ pub fn k2so_heartbeat_edit(
     frequency: String,
     spec_json: String,
 ) -> Result<(), String> {
-    let db = crate::db::shared();
-    let conn = db.lock();
-    let project_id = resolve_project_id(&conn, &project_path)
-        .ok_or_else(|| format!("Project not found: {}", project_path))?;
-    AgentHeartbeat::update_schedule(&conn, &project_id, &name, &frequency, &spec_json)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    k2so_core::agents::heartbeat::k2so_heartbeat_edit(project_path, name, frequency, spec_json)
 }
 
-/// Result of a multi-heartbeat tick — one entry per heartbeat that's
-/// eligible to fire right now. Caller is responsible for locking,
-/// spawning, and stamping last_fired on success.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HeartbeatFireCandidate {
-    pub name: String,
-    pub agent_name: String,
-    pub wakeup_path_abs: String, // absolute path ready for PTY
-    pub wakeup_path_rel: String, // workspace-relative (for DB)
-}
+// Re-exported so the name stays reachable at its historical path
+// (`crate::commands::k2so_agents::HeartbeatFireCandidate`) while the
+// struct itself lives in k2so-core.
+pub use k2so_core::agents::heartbeat::HeartbeatFireCandidate;
 
-/// Iterate enabled agent_heartbeats for this project and return the
-/// subset whose schedules are due to fire now. Does NOT lock, spawn,
-/// or stamp — those are the caller's responsibility. Writes audit rows
-/// into heartbeat_fires for each evaluated candidate (fired_multi or
-/// skipped_schedule) so `k2so heartbeat status <name>` can show what
-/// happened.
 pub fn k2so_agents_heartbeat_tick(project_path: &str) -> Vec<HeartbeatFireCandidate> {
-    let db = crate::db::shared();
-    let conn = db.lock();
-    let Some(project_id) = resolve_project_id(&conn, project_path) else { return vec![] };
-    let heartbeats = AgentHeartbeat::list_enabled(&conn, &project_id).unwrap_or_default();
-    if heartbeats.is_empty() {
-        return vec![];
-    }
-    let Some(agent_name) = find_primary_agent(project_path) else { return vec![] };
-
-    let tick_start = std::time::Instant::now();
-    let mut candidates = Vec::new();
-    for hb in heartbeats {
-        let eligible = should_project_fire(
-            &hb.frequency,
-            Some(&hb.spec_json),
-            hb.last_fired.as_deref(),
-        );
-        if !eligible {
-            let _ = HeartbeatFire::insert_with_schedule(
-                &conn, &project_id, Some(&agent_name), Some(&hb.name),
-                &hb.frequency, "skipped_schedule",
-                Some("window not open"), None, None,
-                Some(tick_start.elapsed().as_millis() as i64),
-            );
-            continue;
-        }
-
-        let wakeup_abs = std::path::Path::new(project_path).join(&hb.wakeup_path);
-        if !wakeup_abs.exists() {
-            // FS tampering recovery — auto-disable so user notices.
-            let _ = AgentHeartbeat::set_enabled(&conn, &project_id, &hb.name, false);
-            let _ = HeartbeatFire::insert_with_schedule(
-                &conn, &project_id, Some(&agent_name), Some(&hb.name),
-                &hb.frequency, "wakeup_file_missing",
-                Some(&format!("auto-disabled: {} not found", hb.wakeup_path)),
-                None, None,
-                Some(tick_start.elapsed().as_millis() as i64),
-            );
-            log_debug!(
-                "[heartbeat-tick] {} wakeup file missing ({}), auto-disabled",
-                hb.name, hb.wakeup_path
-            );
-            continue;
-        }
-
-        candidates.push(HeartbeatFireCandidate {
-            name: hb.name,
-            agent_name: agent_name.clone(),
-            wakeup_path_abs: wakeup_abs.to_string_lossy().to_string(),
-            wakeup_path_rel: hb.wakeup_path,
-        });
-    }
-    candidates
+    k2so_core::agents::heartbeat::k2so_agents_heartbeat_tick(project_path)
 }
 
-/// Stamp last_fired on a heartbeat row. Called by the scheduler caller
-/// AFTER spawn_wake_pty succeeds. Silent no-op when the row is gone
-/// (heartbeat removed mid-run) — audit rows survive independently.
 pub fn stamp_heartbeat_fired(project_path: &str, heartbeat_name: &str) {
-    let db = crate::db::shared();
-    let conn = db.lock();
-    let Some(project_id) = resolve_project_id(&conn, project_path) else { return };
-    let _ = AgentHeartbeat::stamp_last_fired(&conn, &project_id, heartbeat_name);
+    k2so_core::agents::heartbeat::stamp_heartbeat_fired(project_path, heartbeat_name)
 }
 
-/// Rename a heartbeat — renames the row AND moves the filesystem folder
-/// so wakeup_path stays in sync. Lets users swap the migration-reserved
-/// `default` name for something meaningful without losing audit history.
 #[tauri::command]
 pub fn k2so_heartbeat_rename(
     project_path: String,
     old_name: String,
     new_name: String,
 ) -> Result<(), String> {
-    AgentHeartbeat::validate_name(&new_name).map_err(|e| e.to_string())?;
-    let db = crate::db::shared();
-    let conn = db.lock();
-    let project_id = resolve_project_id(&conn, &project_path)
-        .ok_or_else(|| format!("Project not found: {}", project_path))?;
-    let hb = AgentHeartbeat::get_by_name(&conn, &project_id, &old_name)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Heartbeat '{}' not found", old_name))?;
-    if AgentHeartbeat::get_by_name(&conn, &project_id, &new_name)
-        .map_err(|e| e.to_string())?
-        .is_some()
-    {
-        return Err(format!("Heartbeat '{}' already exists", new_name));
-    }
-
-    let agent_name = find_primary_agent(&project_path)
-        .ok_or("No scheduleable agent in this workspace")?;
-    let hb_parent = agent_dir(&project_path, &agent_name).join("heartbeats");
-    let old_dir = hb_parent.join(&old_name);
-    let new_dir = hb_parent.join(&new_name);
-
-    // Move folder if it exists; tolerate already-moved state for reruns.
-    if old_dir.exists() && !new_dir.exists() {
-        fs::rename(&old_dir, &new_dir)
-            .map_err(|e| format!("Failed to rename heartbeat folder: {}", e))?;
-    }
-
-    let new_wakeup = new_dir.join("WAKEUP.md");
-    let workspace_relative = new_wakeup
-        .strip_prefix(&project_path)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| new_wakeup.to_string_lossy().to_string());
-
-    // UPDATE both name and wakeup_path atomically — schedule_name on
-    // heartbeat_fires is denormalized so audit survives without a
-    // cascade (name in old fires points to the old value, as designed).
-    conn.execute(
-        "UPDATE agent_heartbeats SET name = ?1, wakeup_path = ?2 \
-         WHERE project_id = ?3 AND name = ?4",
-        rusqlite::params![new_name, workspace_relative, project_id, old_name],
-    )
-    .map_err(|e| format!("Failed to rename row: {}", e))?;
-
-    log_debug!("[heartbeat-rename] {} → {} ({})", old_name, new_name, hb.wakeup_path);
-    Ok(())
+    k2so_core::agents::heartbeat::k2so_heartbeat_rename(project_path, old_name, new_name)
 }
 
-/// Return the most recent `limit` fire rows for a workspace. Powers the
-/// History panel on the Workspaces Settings page. Newest first.
 #[tauri::command]
 pub fn k2so_heartbeat_fires_list(
     project_path: String,
     limit: Option<i64>,
 ) -> Result<Vec<HeartbeatFire>, String> {
-    let db = crate::db::shared();
-    let conn = db.lock();
-    let project_id = resolve_project_id(&conn, &project_path)
-        .ok_or_else(|| format!("Project not found: {}", project_path))?;
-    HeartbeatFire::list_by_project(&conn, &project_id, limit.unwrap_or(50))
-        .map_err(|e| e.to_string())
+    k2so_core::agents::heartbeat::k2so_heartbeat_fires_list(project_path, limit)
 }
 
 /// Archive orphan top-tier agents — agents whose type is `custom`,
@@ -1463,25 +1176,8 @@ fn ensure_skill_up_to_date(
     SkillUpgradeOutcome::UserModified
 }
 
-fn parse_frontmatter(content: &str) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    if !content.starts_with("---") {
-        return map;
-    }
-    if let Some(end) = content[3..].find("---") {
-        let frontmatter = &content[3..3 + end];
-        for line in frontmatter.lines() {
-            if let Some((key, value)) = line.split_once(':') {
-                let key = key.trim().to_string();
-                let value = value.trim().to_string();
-                if !key.is_empty() && !value.is_empty() {
-                    map.insert(key, value);
-                }
-            }
-        }
-    }
-    map
-}
+// `parse_frontmatter` moved to k2so_core::agents (re-exported at the
+// top of this file).
 
 /// Parse raw markdown content into a WorkItem. Pure — no I/O, no Tauri
 /// deps, directly unit-testable. The on-disk `read_work_item` is now a

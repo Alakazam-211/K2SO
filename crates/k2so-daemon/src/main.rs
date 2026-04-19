@@ -274,11 +274,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             // k2so_core so src-tauri's existing server hits the same
             // code path.
             let _ = stream.read(&mut buf).await;
-            let path_and_query = match query.is_empty() {
-                true => path.clone(),
-                false => format!("{}?{}", path, query),
-            };
-            let params = k2so_core::agent_hooks::parse_query_params(&path_and_query);
+            let params = parse_params(&path, &query);
             let req_token = params.get("token").cloned().unwrap_or_default();
             if req_token != *state.token {
                 send_response(
@@ -292,6 +288,48 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             }
             let body = k2so_core::agent_hooks::handle_hook_complete(&params);
             send_response(&mut stream, "200 OK", "application/json", body).await;
+        }
+        // Heartbeat CRUD + fire-audit — fires while the Tauri app is
+        // quit, so the daemon has to own these routes for the
+        // persistent-agents feature to mean anything.
+        p if p.starts_with("/cli/heartbeat/") => {
+            let _ = stream.read(&mut buf).await;
+            let params = parse_params(&path, &query);
+            let req_token = params.get("token").cloned().unwrap_or_default();
+            if req_token != *state.token {
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"Invalid or missing auth token"}"#,
+                )
+                .await;
+                return;
+            }
+            let project_path = match params.get("project_path") {
+                Some(p) if !p.is_empty() => p.clone(),
+                _ => {
+                    send_response(
+                        &mut stream,
+                        "400 Bad Request",
+                        "application/json",
+                        r#"{"error":"Missing project_path"}"#,
+                    )
+                    .await;
+                    return;
+                }
+            };
+            let result = handle_cli_heartbeat(p, &project_path, &params);
+            match result {
+                Ok(body) => {
+                    send_response(&mut stream, "200 OK", "application/json", &body).await
+                }
+                Err(msg) => {
+                    let body = serde_json::json!({"error": msg}).to_string();
+                    send_response(&mut stream, "400 Bad Request", "application/json", &body)
+                        .await
+                }
+            }
         }
         "/events" => {
             // Token check BEFORE the upgrade so unauthenticated clients
@@ -315,6 +353,95 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             let _ = stream.read(&mut buf).await;
             send_response(&mut stream, "404 Not Found", "text/plain", "not found\n").await;
         }
+    }
+}
+
+/// Reassemble a full `path?query` URL and hand off to k2so_core's
+/// URL-decoding query parser. The core helper knows how to unescape
+/// `%20`/`+` and multi-byte UTF-8 — we just combine the pieces.
+fn parse_params(
+    path: &str,
+    query: &str,
+) -> std::collections::HashMap<String, String> {
+    let path_and_query = if query.is_empty() {
+        path.to_string()
+    } else {
+        format!("{}?{}", path, query)
+    };
+    k2so_core::agent_hooks::parse_query_params(&path_and_query)
+}
+
+/// Dispatch an authenticated `/cli/heartbeat/*` request to the matching
+/// core function. Returns the JSON response body on success or an error
+/// message the caller turns into a 400.
+///
+/// Mirrors the dispatch shape in src-tauri's agent_hooks server so the
+/// CLI sees identical responses regardless of which process is
+/// listening. Unrecognized sub-paths return 404 (caller picks the
+/// status code from the string).
+fn handle_cli_heartbeat(
+    path: &str,
+    project_path: &str,
+    params: &std::collections::HashMap<String, String>,
+) -> Result<String, String> {
+    use k2so_core::agents::heartbeat as hb;
+
+    match path {
+        "/cli/heartbeat/add" => {
+            let name = params.get("name").cloned().unwrap_or_default();
+            let frequency = params.get("frequency").cloned().unwrap_or_default();
+            let spec_json = params
+                .get("spec")
+                .cloned()
+                .unwrap_or_else(|| "{}".to_string());
+            if name.is_empty() || frequency.is_empty() {
+                return Err("Missing 'name' or 'frequency' parameter".to_string());
+            }
+            hb::k2so_heartbeat_add(project_path.to_string(), name, frequency, spec_json)
+                .map(|v| v.to_string())
+        }
+        "/cli/heartbeat/list" => hb::k2so_heartbeat_list(project_path.to_string())
+            .map(|rows| serde_json::to_string(&rows).unwrap_or_default()),
+        "/cli/heartbeat/remove" => {
+            let name = params.get("name").cloned().unwrap_or_default();
+            if name.is_empty() {
+                return Err("Missing 'name' parameter".to_string());
+            }
+            hb::k2so_heartbeat_remove(project_path.to_string(), name)
+                .map(|_| r#"{"success":true}"#.to_string())
+        }
+        "/cli/heartbeat/enable" => {
+            let name = params.get("name").cloned().unwrap_or_default();
+            let enabled = params
+                .get("enabled")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(true);
+            if name.is_empty() {
+                return Err("Missing 'name' parameter".to_string());
+            }
+            hb::k2so_heartbeat_set_enabled(project_path.to_string(), name, enabled)
+                .map(|_| r#"{"success":true}"#.to_string())
+        }
+        "/cli/heartbeat/edit" => {
+            let name = params.get("name").cloned().unwrap_or_default();
+            let frequency = params.get("frequency").cloned().unwrap_or_default();
+            let spec_json = params.get("spec").cloned().unwrap_or_default();
+            if name.is_empty() || frequency.is_empty() {
+                return Err("Missing 'name' or 'frequency' parameter".to_string());
+            }
+            hb::k2so_heartbeat_edit(project_path.to_string(), name, frequency, spec_json)
+                .map(|_| r#"{"success":true}"#.to_string())
+        }
+        "/cli/heartbeat/rename" => {
+            let old_name = params.get("from").cloned().unwrap_or_default();
+            let new_name = params.get("to").cloned().unwrap_or_default();
+            if old_name.is_empty() || new_name.is_empty() {
+                return Err("Missing 'from' or 'to' parameter".to_string());
+            }
+            hb::k2so_heartbeat_rename(project_path.to_string(), old_name, new_name)
+                .map(|_| r#"{"success":true}"#.to_string())
+        }
+        _ => Err(format!("Unknown heartbeat route: {path}")),
     }
 }
 

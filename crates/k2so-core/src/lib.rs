@@ -29,6 +29,7 @@ macro_rules! log_debug {
 }
 
 pub mod agent_hooks;
+pub mod agents;
 pub mod companion;
 pub mod db;
 pub mod editors;
