@@ -1928,8 +1928,12 @@ pub fn k2so_agents_workspace_inbox_create(
 
 // ── Lock Files ──────────────────────────────────────────────────────────
 
-/// Create a lock file for an agent (called when a Claude session starts).
-/// Also upserts an AgentSession row in the DB for richer tracking.
+// Session lifecycle (lock / unlock / save-session-id / clear-session-id)
+// lives in k2so_core::agents::session. These #[tauri::command] wrappers
+// are thin forwards so the React frontend's existing invokes keep
+// working unchanged; the daemon calls the core fns directly from its
+// wake path.
+
 #[tauri::command]
 pub fn k2so_agents_lock(
     project_path: String,
@@ -1937,54 +1941,12 @@ pub fn k2so_agents_lock(
     terminal_id: Option<String>,
     owner: Option<String>,
 ) -> Result<(), String> {
-    // DB tracking (best-effort)
-    {
-        let db = crate::db::shared();
-        let conn = db.lock();
-        if let Some(project_id) = resolve_project_id(&conn, &project_path) {
-            let session_uuid = uuid::Uuid::new_v4().to_string();
-            let owner_val = owner.as_deref().unwrap_or("system");
-            let _ = AgentSession::upsert(
-                &conn,
-                &session_uuid,
-                &project_id,
-                &agent_name,
-                terminal_id.as_deref(),
-                None,
-                "claude",
-                owner_val,
-                "running",
-            );
-        }
-    }
-
-    // Legacy .lock file (backward compat)
-    let lock_path = agent_work_dir(&project_path, &agent_name, "").join(".lock");
-    if let Some(parent) = lock_path.parent() {
-        fs::create_dir_all(parent).ok();
-    }
-    fs::write(&lock_path, simple_date()).map_err(|e| e.to_string())
+    k2so_core::agents::session::k2so_agents_lock(project_path, agent_name, terminal_id, owner)
 }
 
-/// Remove a lock file for an agent (called when a Claude session ends).
-/// Also updates the DB session status to "sleeping".
 #[tauri::command]
 pub fn k2so_agents_unlock(project_path: String, agent_name: String) -> Result<(), String> {
-    // DB tracking (best-effort)
-    {
-        let db = crate::db::shared();
-        let conn = db.lock();
-        if let Some(project_id) = resolve_project_id(&conn, &project_path) {
-            let _ = AgentSession::update_status(&conn, &project_id, &agent_name, "sleeping");
-        }
-    }
-
-    // Legacy .lock file removal
-    let lock_path = agent_work_dir(&project_path, &agent_name, "").join(".lock");
-    if lock_path.exists() {
-        fs::remove_file(&lock_path).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    k2so_core::agents::session::k2so_agents_unlock(project_path, agent_name)
 }
 
 // `is_agent_locked` moved to k2so_core::agents::scheduler (re-exported).
@@ -4580,34 +4542,19 @@ pub fn k2so_agents_save_session_id(
     agent_name: String,
     session_id: String,
 ) -> Result<(), String> {
-    let dir = agent_dir(&project_path, &agent_name);
-    if !dir.exists() {
-        return Err(format!("Agent '{}' does not exist", agent_name));
-    }
-
-    let db = crate::db::shared();
-    let conn = db.lock();
-    let project_id = resolve_project_id(&conn, &project_path)
-        .ok_or_else(|| format!("Project not found: {}", project_path))?;
-    AgentSession::update_session_id(&conn, &project_id, &agent_name, &session_id)
-        .map(|_| ())
-        .map_err(|e| format!("Failed to save session ID: {}", e))
+    k2so_core::agents::session::k2so_agents_save_session_id(
+        project_path,
+        agent_name,
+        session_id,
+    )
 }
 
-/// Clear the saved session ID for an agent (called on no-op or when session should be fresh).
 #[tauri::command]
 pub fn k2so_agents_clear_session_id(
     project_path: String,
     agent_name: String,
 ) -> Result<(), String> {
-    {
-        let db = crate::db::shared();
-        let conn = db.lock();
-        if let Some(project_id) = resolve_project_id(&conn, &project_path) {
-            let _ = AgentSession::clear_session_id(&conn, &project_id, &agent_name);
-        }
-    }
-    Ok(())
+    k2so_core::agents::session::k2so_agents_clear_session_id(project_path, agent_name)
 }
 
 /// Record a no-op (agent woke up but had nothing to do) and apply auto-backoff.

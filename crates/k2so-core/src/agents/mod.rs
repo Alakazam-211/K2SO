@@ -23,6 +23,7 @@ use std::path::PathBuf;
 
 pub mod heartbeat;
 pub mod scheduler;
+pub mod session;
 
 /// Resolve a project's primary-key id from its filesystem path. `None`
 /// when the project hasn't been registered via `projects` yet.
