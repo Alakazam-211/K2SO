@@ -353,59 +353,8 @@ fn shell_escape(s: &str) -> String {
 
 /// Gather git context (branch, status, diff stat, recent log) for AI commit prompts.
 /// Each git command has a 5-second timeout to prevent blocking the HTTP thread.
-fn gather_git_context(project_path: &str) -> serde_json::Value {
-    let run = |args: &[&str]| -> String {
-        let mut child = match std::process::Command::new("git")
-            .args(args)
-            .current_dir(project_path)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => return String::new(),
-        };
-
-        // Wait with 5-second timeout
-        let start = std::time::Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    if !status.success() { return String::new(); }
-                    return child.stdout.take()
-                        .and_then(|mut out| {
-                            let mut buf = String::new();
-                            std::io::Read::read_to_string(&mut out, &mut buf).ok()?;
-                            Some(buf.trim().to_string())
-                        })
-                        .unwrap_or_default();
-                }
-                Ok(None) => {
-                    if start.elapsed() > std::time::Duration::from_secs(5) {
-                        let _ = child.kill();
-                        return String::new();
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Err(_) => return String::new(),
-            }
-        }
-    };
-
-    let branch = run(&["rev-parse", "--abbrev-ref", "HEAD"]);
-    let status = run(&["status", "--short"]);
-    let diff_stat = run(&["diff", "--stat"]);
-    let staged_stat = run(&["diff", "--cached", "--stat"]);
-    let log = run(&["log", "--oneline", "-5"]);
-
-    serde_json::json!({
-        "branch": branch,
-        "status": status,
-        "diffStat": diff_stat,
-        "stagedStat": staged_stat,
-        "recentLog": log,
-    })
-}
+// `gather_git_context` moved to k2so_core::git; see call sites below.
+use k2so_core::git::gather_git_context;
 
 /// Start the notification server on a random port. Returns the port, or
 /// an error describing why the bind failed (e.g., port exhaustion, sandbox
@@ -2269,10 +2218,8 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                     }
                     "/cli/skills/regenerate" => {
                         // Regenerate SKILL.md files for all agents in this workspace
-                        match crate::commands::k2so_agents::k2so_agents_regenerate_skills(project_path.to_string()) {
-                            Ok(result) => Ok(result.to_string()),
-                            Err(e) => Err(e),
-                        }
+                        k2so_core::agents::commands::regenerate_skills(project_path.to_string())
+                            .map(|v| v.to_string())
                     }
                     "/cli/feed" => {
                         // Query the activity feed

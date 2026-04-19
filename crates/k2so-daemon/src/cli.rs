@@ -504,6 +504,99 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
 
+        // ── Skill fan-out ───────────────────────────────────────────
+        "/cli/skills/regenerate" => match need_project(params) {
+            Ok(p) => respond(k2so_core::agents::commands::regenerate_skills(p)),
+            Err(r) => r,
+        },
+
+        // ── Activity feed ───────────────────────────────────────────
+        "/cli/feed" => match need_project(params) {
+            Ok(p) => {
+                let limit = params
+                    .get("limit")
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(20);
+                let agent = opt_param(params, "agent");
+
+                let db = k2so_core::db::shared();
+                let conn = db.lock();
+
+                let project_id: String = match conn.query_row(
+                    "SELECT id FROM projects WHERE path = ?1",
+                    rusqlite::params![p],
+                    |row| row.get(0),
+                ) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        return CliResponse::bad_request(format!("Project not found: {}", e))
+                    }
+                };
+
+                let entries = match agent {
+                    Some(agent_name) => k2so_core::db::schema::ActivityFeedEntry::list_by_agent(
+                        &conn, &project_id, &agent_name, limit,
+                    ),
+                    None => k2so_core::db::schema::ActivityFeedEntry::list_by_project(
+                        &conn, &project_id, limit, 0,
+                    ),
+                };
+
+                match entries {
+                    Ok(entries) => {
+                        let items: Vec<serde_json::Value> = entries
+                            .iter()
+                            .map(|e| {
+                                serde_json::json!({
+                                    "id": e.id,
+                                    "agent": e.agent_name,
+                                    "type": e.event_type,
+                                    "from": e.from_agent,
+                                    "to": e.to_agent,
+                                    "summary": e.summary,
+                                    "at": e.created_at,
+                                })
+                            })
+                            .collect();
+                        CliResponse::ok_json(serde_json::json!({ "feed": items }).to_string())
+                    }
+                    Err(e) => CliResponse::bad_request(e.to_string()),
+                }
+            }
+            Err(r) => r,
+        },
+
+        // ── AI-assisted commit (emit-only) ──────────────────────────
+        // /cli/commit and /cli/commit-merge both emit HookEvent::CliAiCommit
+        // — Tauri-side sink spawns the commit terminal. Daemon has no PTY
+        // of its own to spawn, so emission is the whole job.
+        "/cli/commit" | "/cli/commit-merge" => match need_project(params) {
+            Ok(p) => {
+                let include_merge = path == "/cli/commit-merge";
+                let message = str_param(params, "message");
+                let git_context = k2so_core::git::gather_git_context(&p);
+                let event_payload = serde_json::json!({
+                    "projectPath": p,
+                    "includeMerge": include_merge,
+                    "message": message,
+                    "gitContext": git_context,
+                });
+                k2so_core::agent_hooks::emit(
+                    k2so_core::agent_hooks::HookEvent::CliAiCommit,
+                    event_payload,
+                );
+                CliResponse::ok_json(
+                    serde_json::json!({
+                        "success": true,
+                        "action": if include_merge { "commit-merge" } else { "commit" },
+                        "note": "AI commit terminal session will be launched by K2SO"
+                    })
+                    .to_string(),
+                )
+            }
+            Err(r) => r,
+        },
+
         // ── Per-project heartbeat schedule (distinct from per-agent) ─
         "/cli/heartbeat/schedule" => match need_project(params) {
             Ok(p) => {

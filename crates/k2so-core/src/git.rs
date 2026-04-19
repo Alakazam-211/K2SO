@@ -1112,3 +1112,62 @@ pub fn delete_branch(repo_path: &str, branch_name: &str) -> Result<(), String> {
 
     branch.delete().map_err(|e| format!("Failed to delete branch '{branch_name}': {e}"))
 }
+
+/// Collect a JSON snapshot of the repo's current state for the AI
+/// commit workflow. Runs a few tiny `git` subprocesses with a 5-second
+/// per-command timeout — libgit2 would need 5 separate code paths for
+/// the same info, and the AI-commit terminal wants the raw CLI output
+/// anyway. Returns an empty object-fields if `project_path` isn't a
+/// repo or if a command times out.
+pub fn gather_git_context(project_path: &str) -> serde_json::Value {
+    use std::io::Read;
+
+    let run = |args: &[&str]| -> String {
+        let mut child = match Command::new("git")
+            .args(args)
+            .current_dir(project_path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return String::new(),
+        };
+
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        return String::new();
+                    }
+                    return child
+                        .stdout
+                        .take()
+                        .and_then(|mut out| {
+                            let mut buf = String::new();
+                            out.read_to_string(&mut buf).ok()?;
+                            Some(buf.trim().to_string())
+                        })
+                        .unwrap_or_default();
+                }
+                Ok(None) => {
+                    if start.elapsed() > std::time::Duration::from_secs(5) {
+                        let _ = child.kill();
+                        return String::new();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => return String::new(),
+            }
+        }
+    };
+
+    serde_json::json!({
+        "branch": run(&["rev-parse", "--abbrev-ref", "HEAD"]),
+        "status": run(&["status", "--short"]),
+        "diffStat": run(&["diff", "--stat"]),
+        "stagedStat": run(&["diff", "--cached", "--stat"]),
+        "recentLog": run(&["log", "--oneline", "-5"]),
+    })
+}
