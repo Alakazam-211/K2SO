@@ -202,6 +202,35 @@ prerequisites for remaining corners.
 
 Commit `075ef534`. Details folded into corner #1 above.
 
+### Session + wake slices migrated
+
+Commits `2ae16b8a` + `35208737`.
+
+`k2so_core::agents::session`:
+- `k2so_agents_lock` / `k2so_agents_unlock` — `agent_sessions`
+  upsert + legacy `.lock` file.
+- `k2so_agents_save_session_id` / `k2so_agents_clear_session_id` —
+  Claude `--resume` target.
+- `simple_date` / `is_leap` — chrono-free ISO day stamp for the
+  `.lock` file body.
+
+`k2so_core::agents::wake`:
+- All four shipped wakeup templates (moved from `src-tauri/wakeup_
+  templates/` into `crates/k2so-core/wakeup_templates/`).
+- Resolvers: `wakeup_template_for`, `agent_wakeup_path`,
+  `workspace_wakeup_path`, `read_agent_wakeup`,
+  `default_heartbeat_wakeup_abs`.
+- Composers: `strip_frontmatter` + five `compose_*` fns.
+
+Together these close the **pure-logic half** of the daemon's wake
+path: every decision the heartbeat pipeline makes — which agent,
+which prompt, how to format it — now runs in k2so-core. What's
+still in src-tauri is the **side-effecting half**: `spawn_wake_pty`
+(needs a `TerminalEventSink` bridge for daemon context) plus
+`k2so_agents_build_launch` (~228 lines that pull in
+`generate_agent_claude_md_content`, `k2so_agents_delegate`,
+worktree helpers, etc.).
+
 ### Scheduler slice migrated (tick + 8 helpers + /cli/scheduler-tick)
 
 Commits `1c55a37d` + `12a870a1`. Daemon now serves:
