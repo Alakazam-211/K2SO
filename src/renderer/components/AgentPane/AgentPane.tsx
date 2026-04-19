@@ -451,7 +451,7 @@ function AgentPaneInner({ agentName, projectPath }: AgentPaneProps): React.JSX.E
                   key={mode}
                   onClick={() => {
                     if (mode === 'edit') {
-                      openFile(`${agentDir}/${activeSection === 'profile' ? 'agent.md' : 'CLAUDE.md'}`)
+                      openFile(`${agentDir}/${activeSection === 'profile' ? 'AGENT.md' : 'CLAUDE.md'}`)
                     }
                     setViewMode(mode)
                   }}
@@ -513,12 +513,12 @@ function AgentPaneInner({ agentName, projectPath }: AgentPaneProps): React.JSX.E
             {viewMode === 'preview' ? (
               <div className="markdown-content p-4">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {profile?.raw || '*No agent.md found*'}
+                  {profile?.raw || '*No AGENT.md found*'}
                 </ReactMarkdown>
               </div>
             ) : (
               <pre className="text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap font-mono p-4 leading-relaxed">
-                {profile?.raw || 'No agent.md found'}
+                {profile?.raw || 'No AGENT.md found'}
               </pre>
             )}
           </div>

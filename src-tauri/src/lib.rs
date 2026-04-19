@@ -152,7 +152,7 @@ pub fn run() {
                     if !agents_dir.exists() { continue; }
                     if let Ok(entries) = std::fs::read_dir(&agents_dir) {
                         for entry in entries.flatten() {
-                            let agent_md = entry.path().join("agent.md");
+                            let agent_md = entry.path().join("AGENT.md");
                             if !agent_md.exists() { continue; }
                             if let Ok(content) = std::fs::read_to_string(&agent_md) {
                                 let mut updated = content.clone();
@@ -473,6 +473,11 @@ pub fn run() {
                             None => return,
                         };
                         for project in &projects {
+                            // 0.32.7 filename standardization: rename all lowercase
+                            // agent.md / wakeup.md on disk → AGENT.md / WAKEUP.md.
+                            // Must run BEFORE the heartbeat migrations below so those
+                            // find the UPPERCASE filenames on disk. Idempotent.
+                            crate::commands::k2so_agents::migrate_filenames_to_uppercase(&project.path);
                             // Multi-heartbeat migration / scaffold for __lead__. Must run
                             // before `ensure_workspace_wakeups` so the legacy
                             // `.k2so/wakeup.md` content gets picked up before any new

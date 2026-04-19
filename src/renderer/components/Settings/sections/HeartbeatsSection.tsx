@@ -351,12 +351,12 @@ function WakeupEditor({ projectPath, agentName, heartbeat, otherHeartbeats, onCl
     return parseCommand(preset.command)
   }, [defaultAgent, presets])
 
-  // AI context: persona (agent.md) full + summaries of OTHER heartbeats
+  // AI context: persona (AGENT.md) full + summaries of OTHER heartbeats
   // so the AI can catch conflicts/duplication without ballooning prompt size.
   const [agentMd, setAgentMd] = useState<string>('')
   useEffect(() => {
     invoke<{ content: string }>('fs_read_file', {
-      path: `${projectPath}/.k2so/agents/${agentName}/agent.md`,
+      path: `${projectPath}/.k2so/agents/${agentName}/AGENT.md`,
     })
       .then((r) => setAgentMd(r.content))
       .catch(() => setAgentMd(''))
@@ -373,19 +373,19 @@ function WakeupEditor({ projectPath, agentName, heartbeat, otherHeartbeats, onCl
 
   const systemPrompt = useMemo(() => {
     const parts: string[] = [
-      `You're editing the wakeup.md for the \`${heartbeat.name}\` heartbeat of agent \`${agentName}\`.`,
+      `You're editing the WAKEUP.md for the \`${heartbeat.name}\` heartbeat of agent \`${agentName}\`.`,
       ``,
-      `This file is the operational directive that fires when this specific heartbeat wakes. Other heartbeats for this agent have their own wakeup.md files in sibling folders — keep this one focused on its own schedule's workflow.`,
+      `This file is the operational directive that fires when this specific heartbeat wakes. Other heartbeats for this agent have their own WAKEUP.md files in sibling folders — keep this one focused on its own schedule's workflow.`,
       ``,
-      `## Agent persona (${agentName}/agent.md)`,
+      `## Agent persona (${agentName}/AGENT.md)`,
       ``,
-      agentMd || '(agent.md not available)',
+      agentMd || '(AGENT.md not available)',
       ``,
     ]
     if (otherSummaries) {
       parts.push('## Other heartbeats on this agent', '', otherSummaries, '')
       parts.push(
-        'If you need details on another heartbeat, `cat` its wakeup.md directly. Avoid duplicating instructions across heartbeats.',
+        'If you need details on another heartbeat, `cat` its WAKEUP.md directly. Avoid duplicating instructions across heartbeats.',
         '',
       )
     }
@@ -779,7 +779,7 @@ export function HeartbeatsPanel({ projectPath, agentName: agentNameProp, agentMo
         <div>
           <h3 className="text-xs font-medium text-[var(--color-text-primary)]">Heartbeats</h3>
           <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
-            Scheduled wakeups for <span className="text-[var(--color-text-secondary)]">{agentModeLabel(agentMode, agentName)}</span>. Each fires on its own cadence with its own <span className="font-mono">wakeup.md</span>.
+            Scheduled wakeups for <span className="text-[var(--color-text-secondary)]">{agentModeLabel(agentMode, agentName)}</span>. Each fires on its own cadence with its own <span className="font-mono">WAKEUP.md</span>.
           </p>
         </div>
         <button

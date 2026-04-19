@@ -105,11 +105,13 @@ fn wakeup_template_for(agent_type: &str) -> Option<&'static str> {
 }
 
 fn agent_wakeup_path(project_path: &str, agent_name: &str) -> PathBuf {
-    agent_dir(project_path, agent_name).join("wakeup.md")
+    // UPPERCASE as of 0.32.7 (ecosystem convention: CLAUDE.md, AGENTS.md, etc.).
+    // Reads tolerate both via read_wakeup_md shim during the transition window.
+    agent_dir(project_path, agent_name).join("WAKEUP.md")
 }
 
 fn workspace_wakeup_path(project_path: &str) -> PathBuf {
-    PathBuf::from(project_path).join(".k2so").join("wakeup.md")
+    PathBuf::from(project_path).join(".k2so").join("WAKEUP.md")
 }
 
 /// Read `wakeup.md` for an agent, falling back to the shipped template
@@ -151,7 +153,7 @@ fn ensure_agent_wakeup(project_path: &str, agent_name: &str, agent_type: &str) {
     let hb_default = agent_dir(project_path, agent_name)
         .join("heartbeats")
         .join("default")
-        .join("wakeup.md");
+        .join("WAKEUP.md");
     if hb_default.exists() {
         return;
     }
@@ -178,7 +180,7 @@ fn ensure_workspace_wakeup(project_path: &str) {
 /// `"agent-template"` if no frontmatter or no `type:` field is found
 /// (the same default the scheduler uses elsewhere).
 fn agent_type_for(project_path: &str, agent_name: &str) -> String {
-    let md = agent_dir(project_path, agent_name).join("agent.md");
+    let md = agent_dir(project_path, agent_name).join("AGENT.md");
     if let Ok(content) = fs::read_to_string(&md) {
         let fm = parse_frontmatter(&content);
         if let Some(t) = fm.get("type") {
@@ -357,7 +359,7 @@ pub fn k2so_heartbeat_add(
         .join("heartbeats")
         .join(&name);
     fs::create_dir_all(&hb_dir).map_err(|e| format!("Failed to create heartbeat folder: {}", e))?;
-    let wakeup_file = hb_dir.join("wakeup.md");
+    let wakeup_file = hb_dir.join("WAKEUP.md");
     if !wakeup_file.exists() {
         let template = format!(
             "---\ndescription: One-line summary of what this heartbeat does (shown in other wakeup's context)\n---\n\n\
@@ -573,7 +575,7 @@ pub fn k2so_heartbeat_rename(
             .map_err(|e| format!("Failed to rename heartbeat folder: {}", e))?;
     }
 
-    let new_wakeup = new_dir.join("wakeup.md");
+    let new_wakeup = new_dir.join("WAKEUP.md");
     let workspace_relative = new_wakeup
         .strip_prefix(&project_path)
         .map(|p| p.to_string_lossy().to_string())
@@ -697,13 +699,13 @@ pub fn repair_mismigrated_heartbeats(project_path: &str) {
     let Some(correct_agent) = find_primary_agent(project_path) else { return };
 
     let expected_prefix = format!(".k2so/agents/{}/heartbeats/", correct_agent);
-    let legacy_wakeup = agent_dir(project_path, &correct_agent).join("wakeup.md");
+    let legacy_wakeup = agent_dir(project_path, &correct_agent).join("WAKEUP.md");
     for hb in rows {
         let wrong_abs = std::path::Path::new(project_path).join(&hb.wakeup_path);
         let correct_dir = agent_dir(project_path, &correct_agent)
             .join("heartbeats")
             .join(&hb.name);
-        let correct_wakeup = correct_dir.join("wakeup.md");
+        let correct_wakeup = correct_dir.join("WAKEUP.md");
 
         let row_is_correct = hb.wakeup_path.starts_with(&expected_prefix);
 
@@ -848,8 +850,8 @@ pub fn promote_legacy_heartbeat(project_path: &str) {
     if fs::create_dir_all(&default_dir).is_err() {
         return;
     }
-    let legacy_wakeup = agent_dir(project_path, &agent_name).join("wakeup.md");
-    let new_wakeup = default_dir.join("wakeup.md");
+    let legacy_wakeup = agent_dir(project_path, &agent_name).join("WAKEUP.md");
+    let new_wakeup = default_dir.join("WAKEUP.md");
     if legacy_wakeup.exists() && !new_wakeup.exists() {
         // Follow symlinks by copying content rather than renaming the link.
         if let Ok(content) = fs::read_to_string(&legacy_wakeup) {
@@ -940,6 +942,115 @@ pub fn ensure_workspace_wakeups(project_path: &str) {
 ///    already carry the manager's playbook, so the per-row wakeup.md
 ///    is just the "wake trigger" — one-sentence action prompt.
 ///
+/// Rename lowercase `agent.md` / `wakeup.md` filenames to UPPERCASE in all
+/// known locations within a workspace. Idempotent — skips files that are
+/// already uppercase.
+///
+/// Case-insensitive filesystems (macOS HFS+, default APFS) refuse a direct
+/// `fs::rename("agent.md", "AGENT.md")` — it's the same filename to the FS.
+/// We two-step through a temporary name so the final result is a real case
+/// change recorded in the directory entry.
+///
+/// Scope:
+///   `.k2so/agents/<agent>/agent.md` → `.../AGENT.md`
+///   `.k2so/agents/<agent>/wakeup.md` → `.../WAKEUP.md` (agent-root legacy)
+///   `.k2so/agents/<agent>/heartbeats/<sched>/wakeup.md` → `.../WAKEUP.md`
+///
+/// `.k2so/PROJECT.md` is already UPPERCASE in the shipping scaffold and
+/// doesn't need migration.
+pub fn migrate_filenames_to_uppercase(project_path: &str) {
+    let agents_root = agents_dir(project_path);
+    if agents_root.exists() {
+        if let Ok(entries) = fs::read_dir(&agents_root) {
+            for entry in entries.flatten() {
+                if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    // skip .archive and similar
+                    continue;
+                }
+                let agent_path = entry.path();
+
+                // 1. Agent persona: agent.md → AGENT.md
+                case_rename(&agent_path.join("agent.md"), &agent_path.join("AGENT.md"));
+
+                // 2. Agent-root legacy wakeup.md → WAKEUP.md (pre-multi-heartbeat era)
+                case_rename(&agent_path.join("wakeup.md"), &agent_path.join("WAKEUP.md"));
+
+                // 3. Per-heartbeat wakeups
+                let heartbeats_dir = agent_path.join("heartbeats");
+                if let Ok(hb_entries) = fs::read_dir(&heartbeats_dir) {
+                    for hb in hb_entries.flatten() {
+                        if !hb.file_type().map_or(false, |ft| ft.is_dir()) { continue; }
+                        let sched_path = hb.path();
+                        case_rename(&sched_path.join("wakeup.md"), &sched_path.join("WAKEUP.md"));
+                    }
+                }
+            }
+        }
+    }
+
+    // Migrate DB rows: agent_heartbeats.wakeup_path entries that reference
+    // lowercase `wakeup.md` → UPPERCASE. This matters on case-sensitive
+    // filesystems (Linux); case-insensitive FS would tolerate either.
+    if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
+        if let Some(project_id) = resolve_project_id(&conn, project_path) {
+            let _ = conn.execute(
+                "UPDATE agent_heartbeats \
+                 SET wakeup_path = replace(wakeup_path, 'wakeup.md', 'WAKEUP.md') \
+                 WHERE project_id = ?1 AND wakeup_path LIKE '%wakeup.md'",
+                rusqlite::params![&project_id],
+            );
+        }
+    }
+}
+
+/// Rename `from` → `to` with a temp-name intermediate step to survive
+/// case-insensitive filesystems. No-op if `from` doesn't exist OR if
+/// `to` already exists with different content (we don't want to clobber).
+fn case_rename(from: &std::path::Path, to: &std::path::Path) {
+    if !from.exists() {
+        return;
+    }
+    // If the destination already exists AND refers to a DIFFERENT inode,
+    // the user has both files — bail rather than clobber. On case-insensitive
+    // FS, from and to refer to the same inode so this check is harmless.
+    if to.exists() {
+        let from_meta = fs::metadata(from).ok();
+        let to_meta = fs::metadata(to).ok();
+        if let (Some(a), Some(b)) = (from_meta, to_meta) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if a.ino() != b.ino() {
+                    log_debug!(
+                        "[filename-migrate] both {} and {} exist with different inodes — skipping",
+                        from.display(), to.display()
+                    );
+                    return;
+                }
+            }
+        }
+    }
+    // Two-step via a unique temp name so the FS always sees an actual
+    // directory-entry change (necessary on HFS+ / default APFS where
+    // case-only renames are no-ops).
+    let tmp = from.with_extension(format!("md.tmp-case-rename-{}", uuid::Uuid::new_v4()));
+    if fs::rename(from, &tmp).is_err() {
+        return;
+    }
+    if fs::rename(&tmp, to).is_err() {
+        // Couldn't finish the rename — try to restore the original name.
+        let _ = fs::rename(&tmp, from);
+        log_debug!(
+            "[filename-migrate] second-step rename failed for {} → {}",
+            from.display(), to.display()
+        );
+    }
+}
+
 /// Idempotent: bails immediately if `__lead__` already has any
 /// heartbeat row, or if the project isn't in manager mode.
 pub fn migrate_or_scaffold_lead_heartbeat(project_path: &str) {
@@ -1018,7 +1129,7 @@ pub fn migrate_or_scaffold_lead_heartbeat(project_path: &str) {
             let wake_path = agent_dir(project_path, &primary_agent)
                 .join("heartbeats")
                 .join("triage")
-                .join("wakeup.md");
+                .join("WAKEUP.md");
             let _ = fs::write(&wake_path, &wake_body);
 
             if migrated_content.is_some() {
@@ -1509,7 +1620,7 @@ pub fn k2so_agents_list(project_path: String) -> Result<Vec<K2soAgentInfo>, Stri
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        let agent_md = entry.path().join("agent.md");
+        let agent_md = entry.path().join("AGENT.md");
 
         let (role, is_manager, agent_type) = if agent_md.exists() {
             let content = fs::read_to_string(&agent_md).unwrap_or_default();
@@ -1583,7 +1694,7 @@ pub fn k2so_agents_create(
         .map_err(|e| format!("Failed to create done: {}", e))?;
     let _ = fs::create_dir_all(workspace_inbox_dir(&project_path));
 
-    let agent_md = dir.join("agent.md");
+    let agent_md = dir.join("AGENT.md");
     let mut frontmatter = format!("name: {}\nrole: {}\ntype: {}", name, role, agent_type);
     if is_manager {
         frontmatter.push_str("\nmanager: true");
@@ -1634,7 +1745,7 @@ pub fn k2so_agents_delete_inner(project_path: &str, name: &str, force: bool) -> 
     }
 
     // Read agent type to check if it's a manager/coordinator
-    let agent_md = dir.join("agent.md");
+    let agent_md = dir.join("AGENT.md");
     if agent_md.exists() {
         let content = fs::read_to_string(&agent_md).unwrap_or_default();
         let fm = parse_frontmatter(&content);
@@ -1680,7 +1791,7 @@ pub fn k2so_agents_update_field(
         return Err(format!("Agent '{}' does not exist", name));
     }
 
-    let md_path = dir.join("agent.md");
+    let md_path = dir.join("AGENT.md");
     let content = fs::read_to_string(&md_path)
         .map_err(|e| format!("Failed to read agent.md: {}", e))?;
 
@@ -2052,7 +2163,7 @@ pub fn k2so_agents_work_move(
 /// Read an agent's agent.md content.
 #[tauri::command]
 pub fn k2so_agents_get_profile(project_path: String, agent_name: String) -> Result<String, String> {
-    let path = agent_dir(&project_path, &agent_name).join("agent.md");
+    let path = agent_dir(&project_path, &agent_name).join("AGENT.md");
     if !path.exists() {
         return Err(format!("Agent '{}' does not exist", agent_name));
     }
@@ -2070,7 +2181,7 @@ pub fn k2so_agents_update_profile(
     if !dir.exists() {
         return Err(format!("Agent '{}' does not exist", agent_name));
     }
-    let path = dir.join("agent.md");
+    let path = dir.join("AGENT.md");
     atomic_write(&path, &content)
 }
 
@@ -2523,7 +2634,7 @@ fn generate_default_agent_body(agent_type: &str, name: &str, role: &str, project
                         if entry.file_type().map_or(false, |ft| ft.is_dir()) {
                             let member_name = entry.file_name().to_string_lossy().to_string();
                             if member_name == name { continue; }
-                            let md_path = entry.path().join("agent.md");
+                            let md_path = entry.path().join("AGENT.md");
                             let member_role = if md_path.exists() {
                                 let content = fs::read_to_string(&md_path).unwrap_or_default();
                                 let fm = parse_frontmatter(&content);
@@ -2829,7 +2940,7 @@ fn generate_agent_claude_md_content(
     }
 
     // Read agent identity
-    let agent_md_path = dir.join("agent.md");
+    let agent_md_path = dir.join("AGENT.md");
     let agent_md = fs::read_to_string(&agent_md_path).unwrap_or_default();
     let fm = parse_frontmatter(&agent_md);
     let role = fm.get("role").cloned().unwrap_or("AI Agent".to_string());
@@ -2893,7 +3004,7 @@ fn generate_agent_claude_md_content(
                 if entry.file_type().map_or(false, |ft| ft.is_dir()) {
                     let name = entry.file_name().to_string_lossy().to_string();
                     if name != agent_name {
-                        let their_md = entry.path().join("agent.md");
+                        let their_md = entry.path().join("AGENT.md");
                         let their_role = if their_md.exists() {
                             let content = fs::read_to_string(&their_md).unwrap_or_default();
                             let fm = parse_frontmatter(&content);
@@ -3122,7 +3233,7 @@ fn generate_manager_skill_content(project_path: &str, project_name: &str) -> Str
             for entry in entries.flatten() {
                 if !entry.file_type().map_or(false, |ft| ft.is_dir()) { continue; }
                 let name = entry.file_name().to_string_lossy().to_string();
-                let agent_md = entry.path().join("agent.md");
+                let agent_md = entry.path().join("AGENT.md");
                 if agent_md.exists() {
                     let content = fs::read_to_string(&agent_md).unwrap_or_default();
                     let fm = parse_frontmatter(&content);
@@ -3612,7 +3723,7 @@ pub fn k2so_agents_generate_workspace_claude_md(
             "---\nname: manager\nrole: {}\ntype: manager\nmanager: true\n---\n\n{}\n",
             manager_role, manager_body
         );
-        let _ = fs::write(manager_dir.join("agent.md"), &manager_md);
+        let _ = fs::write(manager_dir.join("AGENT.md"), &manager_md);
         write_agent_skill_file(&project_path, "manager", "manager");
     }
 
@@ -3628,7 +3739,7 @@ pub fn k2so_agents_generate_workspace_claude_md(
             "---\nname: k2so-agent\nrole: {}\ntype: k2so\n---\n\n{}\n",
             k2so_role, k2so_body
         );
-        let _ = fs::write(k2so_agent_dir.join("agent.md"), &k2so_md);
+        let _ = fs::write(k2so_agent_dir.join("AGENT.md"), &k2so_md);
         write_agent_skill_file(&project_path, "k2so-agent", "k2so");
     }
 
@@ -3640,7 +3751,7 @@ pub fn k2so_agents_generate_workspace_claude_md(
             for entry in entries.flatten() {
                 if entry.file_type().map_or(false, |ft| ft.is_dir()) {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    let agent_md = entry.path().join("agent.md");
+                    let agent_md = entry.path().join("AGENT.md");
                     let role = if agent_md.exists() {
                         let content = fs::read_to_string(&agent_md).unwrap_or_default();
                         let fm = parse_frontmatter(&content);
@@ -4604,7 +4715,7 @@ pub fn k2so_agents_triage_summary(project_path: String) -> Result<String, String
         }
 
         // Read agent type and role for LLM context
-        let agent_md_path = entry.path().join("agent.md");
+        let agent_md_path = entry.path().join("AGENT.md");
         let (agent_type, agent_role) = if agent_md_path.exists() {
             let content = fs::read_to_string(&agent_md_path).unwrap_or_default();
             let fm = parse_frontmatter(&content);
@@ -5045,7 +5156,7 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
             }
 
             // Read agent type
-            let agent_md = entry.path().join("agent.md");
+            let agent_md = entry.path().join("AGENT.md");
             let agent_type = if agent_md.exists() {
                 let content = fs::read_to_string(&agent_md).unwrap_or_default();
                 let fm = parse_frontmatter(&content);
@@ -5943,7 +6054,7 @@ pub fn k2so_agents_get_editor_context(
         return Err(format!("Agent '{}' does not exist", agent_name));
     }
 
-    let agent_md = fs::read_to_string(dir.join("agent.md")).unwrap_or_default();
+    let agent_md = fs::read_to_string(dir.join("AGENT.md")).unwrap_or_default();
     let fm = parse_frontmatter(&agent_md);
     let is_manager = fm.get("pod_leader").map_or(false, |v| v == "true")
         || fm.get("coordinator").map_or(false, |v| v == "true")
@@ -5963,7 +6074,7 @@ pub fn k2so_agents_get_editor_context(
         "agentType": agent_type,
         "isManager": is_manager,
         "agentMd": agent_md,
-        "agentMdPath": dir.join("agent.md").to_string_lossy(),
+        "agentMdPath": dir.join("AGENT.md").to_string_lossy(),
         "agentDir": dir.to_string_lossy(),
     }))
 }
@@ -6018,7 +6129,7 @@ pub fn k2so_agents_save_agent_md(
         return Err(format!("Agent '{}' does not exist", agent_name));
     }
 
-    let agent_md_path = dir.join("agent.md");
+    let agent_md_path = dir.join("AGENT.md");
 
     // Back up existing agent.md before overwriting
     if agent_md_path.exists() {
@@ -6159,7 +6270,7 @@ pub fn k2so_agents_regenerate_skills(
             let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
 
             // Determine agent type from agent.md frontmatter
-            let agent_md = path.join("agent.md");
+            let agent_md = path.join("AGENT.md");
             let agent_type = if agent_md.exists() {
                 let content = fs::read_to_string(&agent_md).unwrap_or_default();
                 let fm = parse_frontmatter(&content);
@@ -6392,7 +6503,7 @@ pub fn write_workspace_skill_file_with_body(project_path: &str, base_body: Optio
             "custom" | "k2so" | "manager" | "coordinator" | "pod-leader"
         );
         if include_primary {
-            let agent_md_path = agent_dir(project_path, &primary_agent).join("agent.md");
+            let agent_md_path = agent_dir(project_path, &primary_agent).join("AGENT.md");
             if let Ok(raw) = fs::read_to_string(&agent_md_path) {
                 let stripped = strip_frontmatter(&raw).trim().to_string();
                 if !stripped.is_empty() {
@@ -6545,7 +6656,7 @@ pub fn ensure_all_skills_up_to_date(project_path: &str) {
         // Skip bookkeeping dirs like `.archive/`.
         if agent_name.starts_with('.') { continue; }
 
-        let agent_md = agent_path.join("agent.md");
+        let agent_md = agent_path.join("AGENT.md");
         if !agent_md.exists() { continue; }
         let agent_content = fs::read_to_string(&agent_md).unwrap_or_default();
         let fm = parse_frontmatter(&agent_content);

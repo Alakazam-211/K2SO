@@ -32,10 +32,10 @@ const MANAGER_SPEC: {
 } = {
   sources: [
     { label: 'PROJECT.md', path: '.k2so/PROJECT.md', hint: 'Codebase knowledge (tech stack, conventions, key directories)', flowsTo: 'claude_md' },
-    { label: 'agent.md', path: '.k2so/agents/<manager>/agent.md', hint: 'Manager persona + standing orders', flowsTo: 'claude_md' },
+    { label: 'AGENT.md', path: '.k2so/agents/<manager>/AGENT.md', hint: 'Manager persona + standing orders', flowsTo: 'claude_md' },
     { label: 'Auto layers (7)', path: 'regenerated from live DB + FS', hint: 'Identity, Connected Workspaces, Team Roster, Standing Orders, Decision Framework, Delegation + Review, Communication Commands', flowsTo: 'skill_md' },
     { label: 'Custom layers', path: '~/.k2so/templates/manager/*.md', hint: 'Your "+ Add Layer" entries — global across every manager-mode workspace', flowsTo: 'skill_md' },
-    { label: 'triage wakeup.md', path: '.k2so/agents/<manager>/heartbeats/triage/wakeup.md', hint: 'Fires on the heartbeat schedule', flowsTo: 'argv' },
+    { label: 'triage WAKEUP.md', path: '.k2so/agents/<manager>/heartbeats/triage/WAKEUP.md', hint: 'Fires on the heartbeat schedule', flowsTo: 'argv' },
   ],
   artifacts: [
     { label: 'CLAUDE.md', hint: 'Regenerated at launch. Contains PROJECT.md body + agent persona + task context.' },
@@ -43,7 +43,7 @@ const MANAGER_SPEC: {
   ],
   deliveries: [
     { label: '--append-system-prompt', hint: 'CLAUDE.md + SKILL.md both ship here at launch. Every wake gets a fresh copy.' },
-    { label: 'positional argv', hint: 'The wakeup.md contents arrive as the first user message on each fire.' },
+    { label: 'positional argv', hint: 'The WAKEUP.md contents arrive as the first user message on each fire.' },
   ],
 }
 
@@ -54,7 +54,7 @@ const AGENT_TEMPLATE_SPEC: {
 } = {
   sources: [
     { label: 'PROJECT.md', path: '.k2so/PROJECT.md', hint: 'Same codebase context the manager reads — templates need it too.', flowsTo: 'claude_md' },
-    { label: 'agent.md', path: '.k2so/agents/<template>/agent.md', hint: 'Template persona + role (e.g. "backend-eng").', flowsTo: 'claude_md' },
+    { label: 'AGENT.md', path: '.k2so/agents/<template>/AGENT.md', hint: 'Template persona + role (e.g. "backend-eng").', flowsTo: 'claude_md' },
     { label: 'Auto layers (3)', path: 'regenerated at launch', hint: 'Identity, Check In + Status + Done, File Reservations', flowsTo: 'skill_md' },
     { label: 'Custom layers', path: '~/.k2so/templates/agent-template/*.md', hint: 'Your "+ Add Layer" entries — shared across every template agent.', flowsTo: 'skill_md' },
     { label: 'Delegated task', path: '.k2so/agents/<template>/work/active/<file>.md', hint: 'When `k2so delegate` fires, the task file contents become the launch prompt.', flowsTo: 'task_context' },
@@ -95,10 +95,10 @@ const CUSTOM_AGENT_SPEC: {
   deliveries: Delivery[]
 } = {
   sources: [
-    { label: 'agent.md', path: '.k2so/agents/<custom>/agent.md', hint: 'Custom agent persona — the user-defined role/behavior.', flowsTo: 'claude_md' },
+    { label: 'AGENT.md', path: '.k2so/agents/<custom>/AGENT.md', hint: 'Custom agent persona — the user-defined role/behavior.', flowsTo: 'claude_md' },
     { label: 'Auto layers (4)', path: 'regenerated at launch', hint: 'Identity, Check In + Status + Done, Cross-Workspace Messaging, File Reservations', flowsTo: 'skill_md' },
     { label: 'Custom layers', path: '~/.k2so/templates/custom-agent/*.md', hint: 'Your "+ Add Layer" entries — global across every custom-agent workspace.', flowsTo: 'skill_md' },
-    { label: 'heartbeat wakeup.md', path: '.k2so/agents/<custom>/heartbeats/<sched>/wakeup.md', hint: 'Per-schedule wake trigger. Custom agents can have multiple heartbeats.', flowsTo: 'argv' },
+    { label: 'heartbeat WAKEUP.md', path: '.k2so/agents/<custom>/heartbeats/<sched>/WAKEUP.md', hint: 'Per-schedule wake trigger. Custom agents can have multiple heartbeats.', flowsTo: 'argv' },
   ],
   artifacts: [
     { label: 'CLAUDE.md', hint: 'Regenerated at launch. Custom-agent CLAUDE.md does NOT include PROJECT.md (by design — custom agents may not be codebase-scoped).' },
@@ -106,7 +106,7 @@ const CUSTOM_AGENT_SPEC: {
   ],
   deliveries: [
     { label: '--append-system-prompt', hint: 'CLAUDE.md + SKILL.md ship here at every launch.' },
-    { label: 'positional argv', hint: 'Per-heartbeat wakeup.md arrives as the first user message on fire.' },
+    { label: 'positional argv', hint: 'Per-heartbeat WAKEUP.md arrives as the first user message on fire.' },
   ],
 }
 
@@ -219,7 +219,7 @@ export function AgentContextDiagram({ tier }: Props): React.JSX.Element {
           {tier === 'agent_template' ? (
             <><span className="text-[var(--color-text-secondary)] font-medium">On delegation:</span> task context becomes the argv kickoff.</>
           ) : (
-            <><span className="text-[var(--color-text-secondary)] font-medium">On wake:</span> heartbeat wakeup.md becomes argv user message.</>
+            <><span className="text-[var(--color-text-secondary)] font-medium">On wake:</span> heartbeat WAKEUP.md becomes argv user message.</>
           )}
         </div>
       </div>

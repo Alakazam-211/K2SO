@@ -89,10 +89,10 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
         setAgentMdPath(ctx.agentMdPath)
         setWatchDir(ctx.agentDir)
 
-        // Load wakeup.md (created lazily by the backend on first app
+        // Load WAKEUP.md (created lazily by the backend on first app
         // launch after this feature shipped — may still be missing for
         // agent-template type agents, which don't use wake-up).
-        const wkPath = `${ctx.agentDir}/wakeup.md`
+        const wkPath = `${ctx.agentDir}/WAKEUP.md`
         setWakeupPath(wkPath)
         try {
           const wk = await invoke<{ content: string }>('fs_read_file', { path: wkPath })
@@ -143,7 +143,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
       return
     }
     if (activeTab === 'profile' || activeTab === 'wakeup') {
-      // 'wakeup' routes above via path; treat unpathed content as agent.md
+      // 'wakeup' routes above via path; treat unpathed content as AGENT.md
       setAgentContent(content)
     } else if (activeTab === 'claude-md') {
       setClaudeMdContent(content)
@@ -152,7 +152,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
     }
   }, [activeTab, agentMdPath, wakeupPath])
 
-  // Manual refresh: re-read agent.md directly
+  // Manual refresh: re-read AGENT.md directly
   const handleManualRefresh = useCallback(async () => {
     if (!agentMdPath) return
     try {
@@ -163,7 +163,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
     }
   }, [agentMdPath, handleFileChange])
 
-  // On close: backup agent.md, then close
+  // On close: backup AGENT.md, then close
   const handleClose = useCallback(async () => {
     try {
       if (agentMdPath) {
@@ -249,8 +249,8 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
         ].join('\n')
       : isCustom
         ? [
-            `This is a Custom Agent — it runs purely from agent.md with no K2SO infrastructure injected.`,
-            `The body of agent.md IS the agent's entire system prompt when it wakes up on the heartbeat.`,
+            `This is a Custom Agent — it runs purely from AGENT.md with no K2SO infrastructure injected.`,
+            `The body of AGENT.md IS the agent's entire system prompt when it wakes up on the heartbeat.`,
             `Focus on: what software it operates, what it does on each wake, tools/APIs it uses, constraints.`,
           ].join('\n')
         : [
@@ -260,7 +260,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
             `• Work queue structure (inbox/active/done folders)`,
             `• Other agents list (for delegation awareness)`,
             ``,
-            `Focus agent.md body on what makes this agent unique beyond the standard K2SO setup.`,
+            `Focus AGENT.md body on what makes this agent unique beyond the standard K2SO setup.`,
           ].join('\n')
 
     const projectMdNote = isCoordMode
@@ -280,7 +280,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
       `Role: ${context.role}`,
       `Type: ${typeLabel}`,
       ``,
-      `Edit the file agent.md in the current directory. This single file defines everything about the agent:`,
+      `Edit the file AGENT.md in the current directory. This single file defines everything about the agent:`,
       ``,
       `• Frontmatter (between --- delimiters): name, role, type — these are read by the system`,
       `• Body (below frontmatter): all instructions, behavior, personality, tools, integrations`,
@@ -289,13 +289,13 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
       ``,
       `There are FOUR files that define this agent's behavior. You have direct read/write access to all of them:`,
       ``,
-      `1. **agent.md** (in current directory) — the agent's core identity, role, standing orders, and personality.`,
-      `   Path: \`${projectPath}/.k2so/agents/${context.agentName}/agent.md\``,
+      `1. **AGENT.md** (in current directory) — the agent's core identity, role, standing orders, and personality.`,
+      `   Path: \`${projectPath}/.k2so/agents/${context.agentName}/AGENT.md\``,
       ``,
-      `2. **wakeup.md** (in current directory) — operational wake-up instructions the heartbeat scheduler reads every time this agent wakes.`,
-      `   Path: \`${projectPath}/.k2so/agents/${context.agentName}/wakeup.md\``,
+      `2. **WAKEUP.md** (in current directory) — operational wake-up instructions the heartbeat scheduler reads every time this agent wakes.`,
+      `   Path: \`${projectPath}/.k2so/agents/${context.agentName}/WAKEUP.md\``,
       `   NOT the persona. Small, tactical, edited often. Keep it focused on the wake-up procedure (checkin, triage, work through inbox, exit).`,
-      `   When the user asks to change "what the agent does on wake," edit wakeup.md — not agent.md.`,
+      `   When the user asks to change "what the agent does on wake," edit WAKEUP.md — not AGENT.md.`,
       ``,
       `3. **Agent CLAUDE.md** — read by the agent during heartbeat/automated launches.`,
       `   Path: \`${projectPath}/.k2so/agents/${context.agentName}/CLAUDE.md\``,
@@ -306,8 +306,8 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
       `   Should contain project context + CLI tools so manual sessions understand the workspace.`,
       ``,
       `When the user asks to update the agent's behavior, choose the right file(s):`,
-      `• "What does the agent do on wake?" → wakeup.md`,
-      `• "Change the agent's personality/role/tools/orders" → agent.md AND the relevant CLAUDE.md file(s)`,
+      `• "What does the agent do on wake?" → WAKEUP.md`,
+      `• "Change the agent's personality/role/tools/orders" → AGENT.md AND the relevant CLAUDE.md file(s)`,
       `Don't just copy-paste between files — tailor each for its audience.`,
       `You can read and write all four files directly using their full paths above.`,
       ``,
@@ -324,7 +324,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
       ``,
       typeGuidance,
       ``,
-      `The user sees a tabbed preview on the right with Profile (agent.md), Wake-up (wakeup.md),`,
+      `The user sees a tabbed preview on the right with Profile (AGENT.md), Wake-up (WAKEUP.md),`,
       `Agent CLAUDE.md, and Workspace CLAUDE.md tabs. Before editing, confirm which file they want`,
       `updated and use the path from the list above.`,
     ].join('\n')
@@ -339,7 +339,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
       return [
         ...baseArgs,
         '--append-system-prompt', agentPrompt,
-        `Open and read all four files: agent.md (current dir), wakeup.md (current dir), CLAUDE.md (current dir), and ${projectPath}/CLAUDE.md (workspace root). This defines the agent "${context.agentName}" (${context.role}). The user sees all four files in the preview tabs. Start by asking what they want this agent to do.`,
+        `Open and read all four files: AGENT.md (current dir), WAKEUP.md (current dir), CLAUDE.md (current dir), and ${projectPath}/CLAUDE.md (workspace root). This defines the agent "${context.agentName}" (${context.role}). The user sees all four files in the preview tabs. Start by asking what they want this agent to do.`,
       ]
     }
     return baseArgs
@@ -368,7 +368,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
   // because the preview panel on the right already shows tabs for
   // Profile / Wake-up / Agent CLAUDE.md / Workspace CLAUDE.md. Two
   // layers of tabs was confusing. We still pass `files` so the
-  // watcher tracks every file — otherwise AI edits to wakeup.md (or
+  // watcher tracks every file — otherwise AI edits to WAKEUP.md (or
   // any non-active file) wouldn't reach the preview panel.
   const editorFiles = wakeupPath
     ? [
@@ -493,7 +493,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
                   {activeTab === 'profile'
                     ? (stripFrontmatter(agentContent) || '*No content yet*')
                     : activeTab === 'wakeup'
-                      ? (wakeupContent || '*No wakeup.md yet — will be created from the template on first heartbeat.*')
+                      ? (wakeupContent || '*No WAKEUP.md yet — will be created from the template on first heartbeat.*')
                       : activeTab === 'claude-md'
                         ? (claudeMdContent || '*CLAUDE.md not yet generated. Click Regenerate to create it.*')
                         : (wsClaudeMdContent || '*No workspace CLAUDE.md yet.*')

@@ -1446,7 +1446,7 @@ function ProjectDetail({
               if (mode === 'manager' || mode === 'coordinator' || mode === 'pod') return '__lead__'
               if (mode === 'agent') return 'k2so-agent'
               // Custom mode — backend find_primary_agent scans for the
-              // custom-typed agent by reading agent.md frontmatter. The
+              // custom-typed agent by reading AGENT.md frontmatter. The
               // UI just needs a display name; use the project.name as a
               // reasonable fallback until we wire a lookup.
               return project.name.toLowerCase().replace(/\s+/g, '-')
@@ -1902,8 +1902,8 @@ function ProjectContextEditor({ projectPath, projectName, onClose }: { projectPa
 }
 
 // ── Workspace Wake-up Editor — REMOVED in 0.32.6 ──────
-// `.k2so/wakeup.md` retired; manager wake content now lives in the
-// per-row `triage` heartbeat's wakeup.md (see Heartbeats panel).
+// `.k2so/WAKEUP.md` retired; manager wake content now lives in the
+// per-row `triage` heartbeat's WAKEUP.md (see Heartbeats panel).
 
 // ── Workspace Knowledge editor (canonical SKILL.md) ──────
 // Edits the workspace's canonical SKILL file — one source of truth,
@@ -2664,7 +2664,7 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
 
       {/* Workspace Wake-up retired in 0.32.6. Its content migrated to the
           per-workspace `triage` heartbeat row (edit via the Heartbeats
-          list above — each row has its own wakeup.md now). See the
+          list above — each row has its own WAKEUP.md now). See the
           migrate_or_scaffold_lead_heartbeat startup pass. */}
 
       {/* Agent Templates section */}

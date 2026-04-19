@@ -77,7 +77,7 @@ interface LayerEntry {
   subtitle?: string
   description?: string
   editAction?: () => void
-  // For heartbeat rows — when expanded, fetch wakeup.md content from disk
+  // For heartbeat rows — when expanded, fetch WAKEUP.md content from disk
   loadOnExpand?: () => Promise<string>
 }
 
@@ -197,15 +197,15 @@ export function ContextLayersPreview({ projectPath, agentMode, onOpenSettings, o
       key: `heartbeat-${hb.id}`,
       name: `${hb.name}`,
       kind: 'heartbeat',
-      subtitle: `${hb.frequency} · wakeup.md`,
+      subtitle: `${hb.frequency} · WAKEUP.md`,
       description: `**Per-heartbeat wake trigger.** Shipped as the user message (positional argv) when this schedule fires. Expand to see the content, or edit from the Heartbeats panel above.`,
       editAction: onEditHeartbeat ? () => onEditHeartbeat(hb.name) : undefined,
       loadOnExpand: async () => {
         try {
           const r = await invoke<{ content: string }>('fs_read_file', { path: `${projectPath}/${hb.wakeupPath}` })
-          return r.content || '*Empty wakeup.md.*'
+          return r.content || '*Empty WAKEUP.md.*'
         } catch {
-          return '*Failed to load wakeup.md.*'
+          return '*Failed to load WAKEUP.md.*'
         }
       },
     })
