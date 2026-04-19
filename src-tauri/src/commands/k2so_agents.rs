@@ -1865,63 +1865,14 @@ pub fn k2so_agents_review_queue_inner(project_path: &str) -> Result<Vec<ReviewIt
     k2so_core::agents::reviews::review_queue(project_path)
 }
 
-/// Approve an agent's work — merge branch, clean up worktree, archive done items.
-///
-/// This is the all-in-one approve command. In one step, K2SO:
-/// Sub-agent completion handler. Reads workspace state capability for the work
-/// item's source type, then either auto-merges (auto mode) or moves to done (gated mode).
-/// Returns JSON describing what was done.
+/// Sub-agent completion. Core logic in
+/// `k2so_core::agents::reviews::agent_complete`.
 pub fn k2so_agent_complete(
     project_path: String,
     agent_name: String,
     filename: String,
 ) -> Result<String, String> {
-    // Read the work item to get its source type
-    let active_dir = agent_work_dir(&project_path, &agent_name, "active");
-    let item_path = active_dir.join(&filename);
-    if !item_path.exists() {
-        return Err(format!("Work item not found: {}", filename));
-    }
-    let content = fs::read_to_string(&item_path).unwrap_or_default();
-    let fm = parse_frontmatter(&content);
-    let source = fm.get("source").cloned().unwrap_or_else(|| "manual".to_string());
-
-    // Get workspace state and determine capability for this source
-    let capability = if let Some(ws_state) = get_workspace_state(&project_path) {
-        ws_state.capability_for_source(&source).to_string()
-    } else {
-        "gated".to_string()
-    };
-
-    // Get branch from work item frontmatter
-    let branch = fm.get("branch").cloned().unwrap_or_default();
-
-    if capability == "auto" && !branch.is_empty() {
-        // AUTO MODE: merge branch, clean up worktree, archive done items, unlock
-        match k2so_agents_review_approve(project_path.clone(), branch.clone(), agent_name.clone()) {
-            Ok(_) => Ok(serde_json::json!({
-                "mode": "auto",
-                "action": "merged",
-                "branch": branch,
-                "agent": agent_name,
-            }).to_string()),
-            Err(e) => Err(format!("Auto-merge failed: {}", e)),
-        }
-    } else {
-        // GATED MODE: move work to done, let human review
-        let done_dir = agent_work_dir(&project_path, &agent_name, "done");
-        fs::create_dir_all(&done_dir).ok();
-        let dest = done_dir.join(&filename);
-        fs::rename(&item_path, &dest).map_err(|e| format!("Failed to move to done: {}", e))?;
-
-        Ok(serde_json::json!({
-            "mode": "gated",
-            "action": "moved_to_done",
-            "branch": branch,
-            "agent": agent_name,
-            "file": filename,
-        }).to_string())
-    }
+    k2so_core::agents::reviews::agent_complete(project_path, agent_name, filename)
 }
 
 /// Approve the agent's branch — merge + cleanup. Core logic lives in

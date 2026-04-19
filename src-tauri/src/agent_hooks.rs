@@ -1316,13 +1316,12 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                         }
                     }
                     "/cli/agent/complete" => {
-                        // Sub-agent completion: reads workspace state, auto-merges or moves to done
                         let agent = params.get("agent").cloned().unwrap_or_default();
                         let file = params.get("file").cloned().unwrap_or_default();
                         if agent.is_empty() || file.is_empty() {
                             Err("Missing 'agent' or 'file' parameter".to_string())
                         } else {
-                            crate::commands::k2so_agents::k2so_agent_complete(project_path, agent, file)
+                            k2so_core::agents::reviews::agent_complete(project_path, agent, file)
                         }
                     }
                     "/cli/agents/running" => {
@@ -1872,133 +1871,18 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                             .map(|v| v.to_string())
                     }
                     "/cli/connections" => {
-                        // List, create, or delete workspace relations
-                        let action = params.get("action").cloned().unwrap_or_else(|| "list".to_string());
-                        (|| -> Result<String, String> {
-                            let db_path = dirs::home_dir()
-                                .ok_or("No home dir")?
-                                .join(".k2so/k2so.db");
-                            let db = crate::db::shared();
-                            let conn = db.lock();
-                            let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
-
-                            let project_id: String = conn.query_row(
-                                "SELECT id FROM projects WHERE path = ?1",
-                                rusqlite::params![project_path],
-                                |row| row.get(0),
-                            ).map_err(|e| format!("Project not found: {}", e))?;
-
-                            match action.as_str() {
-                                "list" => {
-                                    // List outgoing connections (this project oversees)
-                                    let outgoing = crate::db::schema::WorkspaceRelation::list_for_source(&conn, &project_id)
-                                        .map_err(|e| e.to_string())?;
-                                    // List incoming connections (overseen by)
-                                    let incoming = crate::db::schema::WorkspaceRelation::list_for_target(&conn, &project_id)
-                                        .map_err(|e| e.to_string())?;
-
-                                    // Resolve project names
-                                    let mut connections = Vec::new();
-                                    for rel in &outgoing {
-                                        let name: String = conn.query_row(
-                                            "SELECT name FROM projects WHERE id = ?1",
-                                            rusqlite::params![rel.target_project_id],
-                                            |row| row.get(0),
-                                        ).unwrap_or_else(|_| "Unknown".to_string());
-                                        connections.push(serde_json::json!({
-                                            "id": rel.id,
-                                            "direction": "outgoing",
-                                            "type": rel.relation_type,
-                                            "projectId": rel.target_project_id,
-                                            "projectName": name,
-                                        }));
-                                    }
-                                    for rel in &incoming {
-                                        let name: String = conn.query_row(
-                                            "SELECT name FROM projects WHERE id = ?1",
-                                            rusqlite::params![rel.source_project_id],
-                                            |row| row.get(0),
-                                        ).unwrap_or_else(|_| "Unknown".to_string());
-                                        connections.push(serde_json::json!({
-                                            "id": rel.id,
-                                            "direction": "incoming",
-                                            "type": rel.relation_type,
-                                            "projectId": rel.source_project_id,
-                                            "projectName": name,
-                                        }));
-                                    }
-                                    Ok(serde_json::json!({ "connections": connections }).to_string())
-                                }
-                                "add" => {
-                                    let target_name = params.get("target").cloned().unwrap_or_default();
-                                    if target_name.is_empty() {
-                                        return Err("Missing 'target' parameter (workspace name or path)".to_string());
-                                    }
-                                    // Resolve target by name or path
-                                    let target_id: String = conn.query_row(
-                                        "SELECT id FROM projects WHERE name = ?1 OR path = ?1",
-                                        rusqlite::params![target_name],
-                                        |row| row.get(0),
-                                    ).map_err(|_| format!("Workspace '{}' not found", target_name))?;
-
-                                    let id = uuid::Uuid::new_v4().to_string();
-                                    let rel_type = params.get("type").cloned().unwrap_or_else(|| "oversees".to_string());
-                                    crate::db::schema::WorkspaceRelation::create(&conn, &id, &project_id, &target_id, &rel_type)
-                                        .map_err(|e| e.to_string())?;
-
-                                    let target_display: String = conn.query_row(
-                                        "SELECT name FROM projects WHERE id = ?1",
-                                        rusqlite::params![target_id],
-                                        |row| row.get(0),
-                                    ).unwrap_or_else(|_| target_name.clone());
-
-                                    crate::db::schema::log_activity(
-                                        &conn, &project_id, None, "connection.created",
-                                        None, None, Some(&target_id),
-                                        Some(&format!("Connected to {}", target_display)),
-                                    );
-
-                                    Ok(serde_json::json!({
-                                        "success": true,
-                                        "id": id,
-                                        "target": target_display,
-                                    }).to_string())
-                                }
-                                "remove" => {
-                                    let target_name = params.get("target").cloned().unwrap_or_default();
-                                    if target_name.is_empty() {
-                                        return Err("Missing 'target' parameter".to_string());
-                                    }
-                                    // Resolve target
-                                    let target_id: String = conn.query_row(
-                                        "SELECT id FROM projects WHERE name = ?1 OR path = ?1",
-                                        rusqlite::params![target_name],
-                                        |row| row.get(0),
-                                    ).map_err(|_| format!("Workspace '{}' not found", target_name))?;
-
-                                    // Find and delete the relation
-                                    let rel_id: Result<String, _> = conn.query_row(
-                                        "SELECT id FROM workspace_relations WHERE source_project_id = ?1 AND target_project_id = ?2",
-                                        rusqlite::params![project_id, target_id],
-                                        |row| row.get(0),
-                                    );
-                                    match rel_id {
-                                        Ok(id) => {
-                                            crate::db::schema::WorkspaceRelation::delete(&conn, &id)
-                                                .map_err(|e| e.to_string())?;
-                                            crate::db::schema::log_activity(
-                                                &conn, &project_id, None, "connection.removed",
-                                                None, None, Some(&target_id),
-                                                Some(&format!("Disconnected from {}", target_name)),
-                                            );
-                                            Ok(serde_json::json!({"success": true}).to_string())
-                                        }
-                                        Err(_) => Err(format!("No connection to '{}' found", target_name)),
-                                    }
-                                }
-                                _ => Err(format!("Unknown action '{}'. Use: list, add, remove", action)),
-                            }
-                        })()
+                        let action = params
+                            .get("action")
+                            .cloned()
+                            .unwrap_or_else(|| "list".to_string());
+                        let target = params.get("target").cloned();
+                        let rel_type = params.get("type").cloned();
+                        k2so_core::agents::connections::connections(
+                            &project_path,
+                            &action,
+                            target.as_deref(),
+                            rel_type.as_deref(),
+                        )
                     }
                     "/cli/companion/start" => {
                         match crate::companion::start_companion() {
@@ -2021,7 +1905,10 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                             .map(|v| v.to_string())
                     }
                     "/cli/feed" => {
-                        // Query the activity feed
+                        // Query the activity feed — core has the logic as of
+                        // Batch 4. This handler's body is kept DB-direct so
+                        // it stays byte-compatible with what pre-daemon CLI
+                        // users hit, but both now agree on the result shape.
                         let limit = params.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(20);
                         let agent = params.get("agent").cloned();
                         (|| -> Result<String, String> {

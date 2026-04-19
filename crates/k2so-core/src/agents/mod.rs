@@ -24,6 +24,7 @@ use std::path::PathBuf;
 pub mod build_launch;
 pub mod channel;
 pub mod commands;
+pub mod connections;
 pub mod delegate;
 pub mod events;
 pub mod heartbeat;

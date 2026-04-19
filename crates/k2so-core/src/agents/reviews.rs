@@ -19,11 +19,12 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 
-use crate::agents::agents_dir;
 use crate::agents::delegate::strip_worktree_from_frontmatter;
-use crate::agents::scheduler::agent_work_dir;
+use crate::agents::parse_frontmatter;
+use crate::agents::scheduler::{agent_work_dir, get_workspace_state};
 use crate::agents::session::{k2so_agents_unlock, simple_date};
 use crate::agents::work_item::{atomic_write, read_work_item, WorkItem};
+use crate::agents::agents_dir;
 
 /// One file in the branch diff between main and the agent's worktree.
 /// Mirrors `crate::git::FileDiffSummary` but drops the `old_path` field
@@ -269,6 +270,64 @@ pub fn review_request_changes(
     atomic_write(&path, &content)?;
 
     Ok(())
+}
+
+/// Sub-agent completion. Reads the work item's frontmatter, consults
+/// the workspace state's capability for the item's `source`, and
+/// either auto-merges (`auto` mode — delegates to [`review_approve`])
+/// or moves the file from `active/` to `done/` for human review
+/// (`gated` mode). Returns JSON the CLI echoes back.
+pub fn agent_complete(
+    project_path: String,
+    agent_name: String,
+    filename: String,
+) -> Result<String, String> {
+    let active_dir = agent_work_dir(&project_path, &agent_name, "active");
+    let item_path = active_dir.join(&filename);
+    if !item_path.exists() {
+        return Err(format!("Work item not found: {}", filename));
+    }
+    let content = fs::read_to_string(&item_path).unwrap_or_default();
+    let fm = parse_frontmatter(&content);
+    let source = fm
+        .get("source")
+        .cloned()
+        .unwrap_or_else(|| "manual".to_string());
+
+    let capability = if let Some(ws_state) = get_workspace_state(&project_path) {
+        ws_state.capability_for_source(&source).to_string()
+    } else {
+        "gated".to_string()
+    };
+
+    let branch = fm.get("branch").cloned().unwrap_or_default();
+
+    if capability == "auto" && !branch.is_empty() {
+        match review_approve(project_path.clone(), branch.clone(), agent_name.clone()) {
+            Ok(_) => Ok(serde_json::json!({
+                "mode": "auto",
+                "action": "merged",
+                "branch": branch,
+                "agent": agent_name,
+            })
+            .to_string()),
+            Err(e) => Err(format!("Auto-merge failed: {}", e)),
+        }
+    } else {
+        let done_dir = agent_work_dir(&project_path, &agent_name, "done");
+        fs::create_dir_all(&done_dir).ok();
+        let dest = done_dir.join(&filename);
+        fs::rename(&item_path, &dest).map_err(|e| format!("Failed to move to done: {}", e))?;
+
+        Ok(serde_json::json!({
+            "mode": "gated",
+            "action": "moved_to_done",
+            "branch": branch,
+            "agent": agent_name,
+            "file": filename,
+        })
+        .to_string())
+    }
 }
 
 #[cfg(test)]

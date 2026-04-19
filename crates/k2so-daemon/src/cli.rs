@@ -463,6 +463,70 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
 
+        // ── Sub-agent completion ────────────────────────────────────
+        "/cli/agent/complete" => match need_project(params) {
+            Ok(p) => {
+                let agent = str_param(params, "agent");
+                let file = str_param(params, "file");
+                match k2so_core::agents::reviews::agent_complete(p, agent, file) {
+                    Ok(body) => CliResponse::ok_json(body),
+                    Err(e) => CliResponse::bad_request(e),
+                }
+            }
+            Err(r) => r,
+        },
+
+        // ── Agent CLAUDE.md regen ───────────────────────────────────
+        "/cli/agents/generate-claude-md" => match need_project(params) {
+            Ok(p) => {
+                let agent = str_param(params, "agent");
+                if agent.is_empty() {
+                    return CliResponse::bad_request("Missing 'agent' parameter");
+                }
+                match k2so_core::agents::skill_content::generate_agent_claude_md_content(
+                    &p, &agent, None,
+                ) {
+                    Ok(md) => {
+                        let claude_md_path =
+                            k2so_core::agents::agent_dir(&p, &agent).join("CLAUDE.md");
+                        if let Err(e) =
+                            k2so_core::agents::work_item::atomic_write(&claude_md_path, &md)
+                        {
+                            return CliResponse::bad_request(e);
+                        }
+                        CliResponse::ok_json(
+                            serde_json::json!({"success": true, "length": md.len()})
+                                .to_string(),
+                        )
+                    }
+                    Err(e) => CliResponse::bad_request(e),
+                }
+            }
+            Err(r) => r,
+        },
+
+        // ── Workspace connections ───────────────────────────────────
+        "/cli/connections" => match need_project(params) {
+            Ok(p) => {
+                let action = params
+                    .get("action")
+                    .cloned()
+                    .unwrap_or_else(|| "list".to_string());
+                let target = opt_param(params, "target");
+                let rel_type = opt_param(params, "type");
+                match k2so_core::agents::connections::connections(
+                    &p,
+                    &action,
+                    target.as_deref(),
+                    rel_type.as_deref(),
+                ) {
+                    Ok(body) => CliResponse::ok_json(body),
+                    Err(e) => CliResponse::bad_request(e),
+                }
+            }
+            Err(r) => r,
+        },
+
         // ── Workspace states ────────────────────────────────────────
         "/cli/states/list" => {
             let db = k2so_core::db::shared();
