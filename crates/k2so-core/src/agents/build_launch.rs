@@ -1,0 +1,269 @@
+//! Full-fat wake-launch argument builder.
+//!
+//! [`k2so_agents_build_launch`] is the code path behind the UI's
+//! "Launch agent" button and the scheduler-triggered heartbeat wake.
+//! It returns the JSON the host (Tauri app or daemon) uses to spawn
+//! `claude` with the right `cwd`, `args`, and `--resume` handling for
+//! whichever branch of the decision tree applies:
+//!
+//! 1. **Resume an active worktree.** Agent has a work item in
+//!    `active/` with a `worktree_path` frontmatter field → launch in
+//!    that worktree, write the task CLAUDE.md, return args with a
+//!    resume-context system prompt.
+//! 2. **Delegate from inbox.** Agent has work waiting in `inbox/` but
+//!    no active worktree → call
+//!    [`super::delegate::k2so_agents_delegate`] on the highest-
+//!    priority item, which creates a worktree + moves inbox → active
+//!    in one step.
+//! 3. **Fresh launch.** No active worktree, no inbox → launch in the
+//!    project root with a compose_agent_wake_context system prompt,
+//!    the agent's wakeup.md as the user message, and a
+//!    checksum-derived resume session ID if one is on file.
+//!
+//! The daemon's lid-closed wake path uses a much simpler variant
+//! (`super::wake::spawn_wake_headless`) that doesn't branch on work
+//! queue state — lid-closed fires just want to hand the agent its
+//! wakeup.md. This function is the supervised-launch surface that
+//! needs the full decision tree.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use crate::agents::scheduler::{agent_work_dir, priority_rank};
+use crate::agents::skill_content::compose_agent_wake_context;
+use crate::agents::wake::{compose_wake_prompt_for_agent, compose_wake_prompt_from_path};
+use crate::agents::work_item::{read_work_item, WorkItem};
+use crate::agents::{agent_dir, parse_frontmatter, resolve_project_id};
+use crate::chat_history;
+use crate::db::schema::AgentSession;
+
+/// See module docs. Returns the launch JSON for the chosen wake
+/// branch. Errors only for filesystem / DB failures during the
+/// chosen branch; empty inbox + missing active worktree + missing
+/// wakeup.md are all handled gracefully.
+pub fn k2so_agents_build_launch(
+    project_path: String,
+    agent_name: String,
+    agent_cli_command: Option<String>,
+    wakeup_override: Option<String>,
+    skip_fork_session: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let command = agent_cli_command.unwrap_or_else(|| "claude".to_string());
+    let skip_fork = skip_fork_session.unwrap_or(false);
+
+    // Case 1: resume active worktree
+    let active_dir = agent_work_dir(&project_path, &agent_name, "active");
+    if active_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&active_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "md") {
+                    if let Some(item) = read_work_item(&path, "active") {
+                        let content = fs::read_to_string(&path).unwrap_or_default();
+                        let fm = parse_frontmatter(&content);
+                        if let Some(wt_path) = fm.get("worktree_path") {
+                            let branch = fm.get("branch").cloned().unwrap_or_default();
+                            let claude_md = compose_agent_wake_context(
+                                &project_path,
+                                &agent_name,
+                                Some(&item),
+                            )?;
+                            let claude_md_path = PathBuf::from(wt_path).join("CLAUDE.md");
+                            fs::write(&claude_md_path, &claude_md).ok();
+
+                            let resume_context = format!(
+                                "{}\n\n## Resuming Work\n\n\
+                                You are in worktree `{wt_path}` on branch `{branch}`.\n\
+                                Current task: **{title}** (priority: {priority})\n\
+                                Task file: `.k2so/agents/{agent}/work/active/{filename}`\n\n\
+                                Continue where you left off. When done: `k2so work move --agent {agent} --file {filename} --from active --to done`",
+                                claude_md,
+                                agent = agent_name, wt_path = wt_path, branch = branch,
+                                title = item.title, priority = item.priority, filename = item.filename,
+                            );
+
+                            let resume_kickoff = format!(
+                                "Continue working on your task: **{}**. Check your progress and pick up where you left off.",
+                                item.title
+                            );
+
+                            return Ok(serde_json::json!({
+                                "command": command,
+                                "args": ["--dangerously-skip-permissions", "--append-system-prompt", resume_context, resume_kickoff],
+                                "cwd": wt_path,
+                                "claudeMdPath": claude_md_path.to_string_lossy(),
+                                "agentName": agent_name,
+                                "worktreePath": wt_path,
+                                "branch": branch,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Case 2: delegate top-priority inbox item into a fresh worktree
+    let inbox_dir = agent_work_dir(&project_path, &agent_name, "inbox");
+    if inbox_dir.exists() {
+        let mut items: Vec<(PathBuf, WorkItem)> = Vec::new();
+        if let Ok(entries) = fs::read_dir(&inbox_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "md") {
+                    if let Some(item) = read_work_item(&path, "inbox") {
+                        items.push((path, item));
+                    }
+                }
+            }
+        }
+        items.sort_by(|a, b| priority_rank(&a.1.priority).cmp(&priority_rank(&b.1.priority)));
+
+        if let Some((top_path, _)) = items.into_iter().next() {
+            let source_file = top_path.to_string_lossy().to_string();
+            return super::delegate::k2so_agents_delegate(
+                project_path,
+                agent_name,
+                source_file,
+            );
+        }
+    }
+
+    // Case 3: no work — launch in project root with general context.
+    // The composed body is passed to --append-system-prompt below; no
+    // file write needed (Phase 1a retired per-agent CLAUDE.md side-
+    // effects).
+    let claude_md = compose_agent_wake_context(&project_path, &agent_name, None)?;
+
+    // Eagerly regen the workspace-root SKILL.md so the Claude session
+    // (which launches from the workspace root) picks up the latest
+    // CLI tools, PROJECT.md, and primary agent persona via the
+    // symlinked ./CLAUDE.md → SKILL.md discovery path. Goes through
+    // the WorkspaceRegenProvider bridge because the full regen
+    // orchestrator still lives in src-tauri; the daemon context
+    // no-ops and relies on Tauri's next startup for freshness.
+    let _ = super::workspace_regen::regen_workspace_skill(&project_path);
+
+    // Check for previous session to resume. Priority: DB → Claude
+    // history scan (agent dir) → Claude history scan (project root).
+    // The `.last_session` file fallback is retired; the DB's
+    // agent_sessions.session_id row is the source of truth.
+    let agent_cwd = agent_dir(&project_path, &agent_name);
+    let resume_session = (|| -> Option<String> {
+        let db = crate::db::shared();
+        let conn = db.lock();
+        if let Some(project_id) = resolve_project_id(&conn, &project_path) {
+            if let Ok(Some(session)) =
+                AgentSession::get_by_agent(&conn, &project_id, &agent_name)
+            {
+                if let Some(sid) = session.session_id {
+                    if !sid.is_empty() {
+                        // Validate the session file still exists. Stale
+                        // session IDs survive workspace remove+readd +
+                        // Claude-side pruning; with --fork-session
+                        // skipped (heartbeats), Claude bails with "No
+                        // conversation found" rather than minting a new
+                        // session. Clear the row so the next wake starts
+                        // fresh, then fall through to the history-scan.
+                        if chat_history::claude_session_file_exists(&sid, &project_path) {
+                            return Some(sid);
+                        }
+                        let _ = AgentSession::clear_session_id(
+                            &conn,
+                            &project_id,
+                            &agent_name,
+                        );
+                    }
+                }
+            }
+        }
+        None
+    })()
+    .or_else(|| {
+        chat_history::detect_active_session(
+            "claude",
+            &agent_cwd.to_string_lossy().to_string(),
+        )
+        .ok()
+        .flatten()
+    })
+    .or_else(|| {
+        chat_history::detect_active_session("claude", &project_path)
+            .ok()
+            .flatten()
+    });
+
+    let system_prompt = claude_md;
+    // Heartbeats pass wakeup_override so each heartbeat row fires its
+    // own workflow. Manual launches pass None and get the agent's
+    // default wakeup.
+    let wake_body = match wakeup_override.as_deref() {
+        Some(p) => compose_wake_prompt_from_path(Path::new(p)),
+        None => compose_wake_prompt_for_agent(&project_path, &agent_name),
+    };
+
+    let mut args = vec![
+        "--dangerously-skip-permissions".to_string(),
+        "--append-system-prompt".to_string(),
+        system_prompt,
+    ];
+    // --resume + --fork-session: restore the agent's conversation
+    // history but mint a new session ID so Claude Code v2.1.90's stale-
+    // session confirmation dialog doesn't block the wake. Heartbeats
+    // pass skip_fork_session=true so wakes keep writing into the same
+    // session (one growing chat per agent); the dismiss-stale-session
+    // watcher in the host handles the dialog if it appears.
+    if let Some(ref session_id) = resume_session {
+        args.push("--resume".to_string());
+        args.push(session_id.clone());
+        if !skip_fork {
+            args.push("--fork-session".to_string());
+        }
+    }
+
+    // Wakes-since-compact counter: prepend `/compact` to the wake
+    // message every WAKES_PER_COMPACT wakes so inherited conversation
+    // history doesn't grow unbounded across heartbeats.
+    const WAKES_PER_COMPACT: i64 = 20;
+    let should_compact = (|| -> Option<bool> {
+        let db = crate::db::shared();
+        let conn = db.lock();
+        let pid = resolve_project_id(&conn, &project_path)?;
+        let n = AgentSession::bump_wake_counter(&conn, &pid, &agent_name).ok()?;
+        if n >= WAKES_PER_COMPACT {
+            let _ = AgentSession::reset_wake_counter(&conn, &pid, &agent_name);
+            Some(true)
+        } else {
+            Some(false)
+        }
+    })()
+    .unwrap_or(false);
+
+    // The positional user message is the agent's wakeup.md content.
+    // Fallback to a generic "begin" directive for agent-template
+    // agents / fresh workspaces with no wakeup.md. When the compact
+    // counter trips, prepend `/compact\n\n` so the slash command fires
+    // first.
+    let wake_message = wake_body.unwrap_or_else(|| "Begin your wake procedure now.".to_string());
+    let wake_trigger = if should_compact {
+        format!("/compact\n\n{}", wake_message)
+    } else {
+        wake_message
+    };
+    args.push(wake_trigger);
+
+    let launch_cwd = project_path.clone();
+    // Phase 1a: root CLAUDE.md is a symlink to canonical SKILL.md.
+    let claude_md_path = PathBuf::from(&launch_cwd).join("CLAUDE.md");
+    Ok(serde_json::json!({
+        "command": command,
+        "args": args,
+        "cwd": launch_cwd,
+        "claudeMdPath": claude_md_path.to_string_lossy(),
+        "agentName": agent_name,
+        "worktreePath": null,
+        "branch": null,
+        "resumeSession": resume_session,
+        "didCompact": should_compact,
+    }))
+}

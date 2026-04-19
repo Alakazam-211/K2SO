@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+pub mod build_launch;
 pub mod delegate;
 pub mod heartbeat;
 pub mod scheduler;
@@ -29,6 +30,7 @@ pub mod skill;
 pub mod skill_content;
 pub mod wake;
 pub mod work_item;
+pub mod workspace_regen;
 
 /// Resolve a project's primary-key id from its filesystem path. `None`
 /// when the project hasn't been registered via `projects` yet.

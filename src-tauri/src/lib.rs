@@ -61,6 +61,10 @@ mod companion_host;
 // agent-hook events (agent:lifecycle, agent:reply, sync:projects, …)
 // back onto Tauri's event bus.
 mod agent_hook_sink;
+// Tauri-backed WorkspaceRegenProvider impl — lets the core
+// build_launch path eagerly regen workspace SKILL.md through the
+// src-tauri scaffolding orchestrator.
+mod workspace_regen_provider;
 // Background subscriber for the daemon's /events WebSocket. Spawned in
 // setup() once; reconnects forever so we survive daemon restarts.
 mod daemon_events;
@@ -204,6 +208,17 @@ pub fn run() {
             // request can land.
             k2so_core::agent_hooks::set_sink(Box::new(
                 agent_hook_sink::TauriAgentHookEventSink::new(app.handle().clone()),
+            ));
+
+            // Workspace regen bridge: lets
+            // k2so_core::agents::build_launch invoke the src-tauri-
+            // resident workspace-SKILL.md scaffolding orchestrator
+            // (`k2so_agents_generate_workspace_claude_md`). Daemon
+            // + test contexts run without a provider and silently
+            // skip the eager regen; freshness arrives on next Tauri
+            // startup.
+            k2so_core::agents::workspace_regen::set_provider(Box::new(
+                workspace_regen_provider::TauriWorkspaceRegenProvider,
             ));
 
             // Subscribe to the daemon's /events WebSocket. Daemon-
