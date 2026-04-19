@@ -202,6 +202,42 @@ prerequisites for remaining corners.
 
 Commit `075ef534`. Details folded into corner #1 above.
 
+### Lid-closed fire works end-to-end — /cli/agents/triage
+
+Commit `68eb23a0`. The last mile: daemon can actually SPAWN claude
+now, not just decide whether to.
+
+New in `k2so_core::agents::wake`:
+- `NoOpTerminalEventSink` — `TerminalEventSink` impl that ignores
+  every event. Lid-closed wakes have no UI consumer; the Tauri app
+  learns about the running PTY via the daemon's `/events` WS when
+  it reopens.
+- `spawn_wake_headless(agent, project, prompt)` — spawns `claude
+  --dangerously-skip-permissions --append-system-prompt <body>` via
+  `k2so_core::terminal::shared()`, locks the session, fires
+  `HookEvent::CliTerminalSpawnBackground`. Intentionally simpler
+  than src-tauri's `spawn_wake_pty` — no worktree resume, no inbox
+  delegate. Those stay supervised.
+
+New daemon route `/cli/agents/triage`:
+- `scheduler_tick` → launchable agents → compose each wake prompt
+  → `spawn_wake_headless` per agent.
+- Multi-heartbeat tick → candidates → `spawn_wake_headless` with
+  the row's explicit wakeup path → `stamp_heartbeat_fired`.
+- Skips locked agents (race-safe against the Tauri app also owning
+  the session).
+
+End-to-end verified. The daemon log shows the correct
+`skipped_locked` path when Tauri is live; when Tauri is quit, the
+same code launches claude.
+
+**Corner #3 effectively closed for the persistent-agents feature.**
+Every route on the lid-closed critical path is daemon-hosted. The
+remaining ~60 `/cli/*` routes (agent CRUD, launch, worktree, review)
+are UI-adjacent and don't need to run without a user — they stay
+src-tauri for now. Corner #2 (heartbeat.port ownership swap) is
+now unblocked; can be a small follow-up commit.
+
 ### Session + wake slices migrated
 
 Commits `2ae16b8a` + `35208737`.
