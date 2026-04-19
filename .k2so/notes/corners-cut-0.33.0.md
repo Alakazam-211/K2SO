@@ -191,6 +191,41 @@ found.
 
 ---
 
-**Last updated:** 2026-04-19. Review on merge of `feat/persistent-agents`
-into `main` — any items still open become their own work-item files
-under `.k2so/work/inbox/`.
+---
+
+## Infrastructure shipped since 2026-04-19 compaction checkpoint
+
+These aren't "corners" — they're affirmative build-outs that close
+prerequisites for remaining corners.
+
+### Tokio runtime on daemon (closes corner #1)
+
+Commit `075ef534`. Details folded into corner #1 above.
+
+### Daemon -> Tauri WS event channel (/events)
+
+Commit `385d0977`. New module `crates/k2so-daemon/src/events.rs`
+(`DaemonBroadcastSink` + `serve_events_connection`) plus new module
+`src-tauri/src/daemon_events.rs` (reconnecting subscriber thread).
+Wire format is `WireEvent { event: &'static str, payload: Value }`
+JSON-encoded text frames; event names match `HookEvent::event_name()`
+so Tauri can emit them through the existing AppHandle bus without a
+second mapping table.
+
+This is the prerequisite that unblocks **incremental** migration of
+`/hook/*` + `/cli/*` routes (corner #3): handlers can now move to the
+daemon one at a time, each emitting `HookEvent` frames that reach the
+UI identically to src-tauri's existing server. No need for a big-bang
+migration to make the daemon's routes useful.
+
+Auth is the same 32-hex token as /ping and /status; validated pre-WS-
+upgrade so unauthenticated clients see a 403 rather than a dangling
+close. Reconnect backoff is 2/4/8/16/30s capped; daemon-not-installed
+case is treated the same as "daemon transient error" — no error noise
+when running against the pre-0.33.0 binary.
+
+---
+
+**Last updated:** 2026-04-19 post-compaction. Review on merge of
+`feat/persistent-agents` into `main` — any items still open become their
+own work-item files under `.k2so/work/inbox/`.
