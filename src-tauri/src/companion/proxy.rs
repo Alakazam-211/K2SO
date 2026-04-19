@@ -27,6 +27,22 @@ pub fn client_ip(headers: &HashMap<String, String>, remote_addr: &str) -> IpAddr
         .unwrap_or(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)))
 }
 
+/// True iff the HTTP route launches a fresh terminal (arbitrary shell command
+/// with arbitrary args). These are gated behind CompanionSettings.allow_remote_spawn
+/// because they give the caller arbitrary-code-execution on the user's Mac.
+pub fn is_privileged_spawn_path(path: &str) -> bool {
+    let clean = path.split('?').next().unwrap_or("");
+    matches!(
+        clean,
+        "/companion/terminal/spawn" | "/companion/terminal/spawn-background"
+    )
+}
+
+/// True iff a WS method name is one of the privileged spawn methods.
+pub fn is_privileged_spawn_method(method: &str) -> bool {
+    matches!(method, "terminal.spawn" | "terminal.spawn_background")
+}
+
 /// Route mapping: companion endpoint → (internal route, allowed methods)
 fn map_route(method: &str, path: &str) -> Option<&'static str> {
     let clean = path.split('?').next().unwrap_or("");
@@ -203,6 +219,73 @@ fn urlencode(s: &str) -> String {
         }
     }
     result
+}
+
+/// Validate the `Host` request header against an allowlist of bare hostnames
+/// (port stripped). Defends against DNS rebinding: an attacker DNS-pointing
+/// their domain at the user's ngrok URL would send `Host: attacker.com`,
+/// which won't match the real tunnel host.
+///
+/// Policy:
+///   - Missing/empty Host → reject (HTTP/1.1 requires Host)
+///   - Host == the tunnel URL's host → allow
+///   - Host is loopback (127.0.0.1, localhost, ::1) → allow
+///   - Host matches an entry in `allowlist` (CORS origins) → allow
+///   - Anything else → reject
+pub fn host_allowed(
+    request_host: Option<&str>,
+    tunnel_url: Option<&str>,
+    allowlist: &[String],
+) -> bool {
+    let raw = match request_host {
+        Some(s) => s.trim(),
+        None => return false,
+    };
+    if raw.is_empty() {
+        return false;
+    }
+    let host = strip_port(&raw.to_lowercase());
+
+    if matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1") {
+        return true;
+    }
+
+    if let Some(tunnel) = tunnel_url {
+        if host == strip_port(&normalize_origin_host(tunnel)) {
+            return true;
+        }
+    }
+
+    for allowed in allowlist {
+        if host == strip_port(&normalize_origin_host(allowed)) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Extract the host (with port) from a normalized origin or full URL.
+fn normalize_origin_host(url: &str) -> String {
+    let norm = normalize_origin(url);
+    match norm.split_once("://") {
+        Some((_, rest)) => rest.to_string(),
+        None => norm,
+    }
+}
+
+/// Drop the port from a `host[:port]` string, handling bracketed IPv6.
+fn strip_port(host_with_port: &str) -> String {
+    if host_with_port.starts_with('[') {
+        if let Some(end) = host_with_port.find(']') {
+            return host_with_port[1..end].to_string();
+        }
+    }
+    host_with_port
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Decide whether a WebSocket upgrade should be accepted based on its Origin
@@ -427,6 +510,27 @@ pub fn handle_request(
     let cors = allowed_cors_origin(request_origin, &state.cors_origins);
     let cors_ref = cors.as_deref();
 
+    // DNS rebinding defense: reject any Host header that isn't the tunnel
+    // URL, loopback, or an operator-configured allowlist entry.
+    let request_host = headers.get("host").map(|s| s.as_str());
+    let tunnel_snapshot: Option<String> = state.tunnel_url.lock().clone();
+    if !host_allowed(request_host, tunnel_snapshot.as_deref(), &state.cors_origins) {
+        log_debug!(
+            "[companion] Rejected request — Host {:?} not allowed",
+            request_host
+        );
+        send_response(
+            stream,
+            403,
+            &serde_json::json!({
+                "ok": false,
+                "error": "Host not allowed"
+            }),
+            cors_ref,
+        );
+        return;
+    }
+
     // OPTIONS (CORS preflight)
     if method == "OPTIONS" {
         send_response(stream, 200, &serde_json::json!({"ok": true}), cors_ref);
@@ -480,6 +584,21 @@ pub fn handle_request(
             stream,
             status,
             &serde_json::json!({"ok": false, "error": msg}),
+            cors_ref,
+        );
+        return;
+    }
+
+    // Gate arbitrary-command endpoints unless the operator has explicitly
+    // opted in. Default-off limits blast radius if a bearer token is stolen.
+    if is_privileged_spawn_path(clean_path) && !state.allow_remote_spawn {
+        send_response(
+            stream,
+            403,
+            &serde_json::json!({
+                "ok": false,
+                "error": "Remote terminal spawn is disabled. Enable 'Allow remote spawn' in Companion settings and restart the tunnel to permit this endpoint.",
+            }),
             cors_ref,
         );
         return;
@@ -755,6 +874,59 @@ mod security_tests {
         assert!(!ws_origin_allowed(
             Some("https://attacker-example.com"),
             Some("https://example.com"),
+            &[],
+        ));
+    }
+
+    // ── Host header (DNS rebinding defense) ──
+
+    #[test]
+    fn host_missing_rejected() {
+        assert!(!host_allowed(None, Some("https://x.ngrok.app"), &[]));
+        assert!(!host_allowed(Some(""), Some("https://x.ngrok.app"), &[]));
+    }
+
+    #[test]
+    fn host_loopback_allowed() {
+        assert!(host_allowed(Some("127.0.0.1:3000"), None, &[]));
+        assert!(host_allowed(Some("localhost:8080"), None, &[]));
+        assert!(host_allowed(Some("127.0.0.1"), None, &[]));
+    }
+
+    #[test]
+    fn host_tunnel_allowed() {
+        assert!(host_allowed(
+            Some("x.ngrok.app"),
+            Some("https://x.ngrok.app"),
+            &[],
+        ));
+    }
+
+    #[test]
+    fn host_rebinding_attacker_rejected() {
+        // Attacker points evil.com DNS at ngrok IP. Host header carries evil.com.
+        assert!(!host_allowed(
+            Some("evil.com"),
+            Some("https://x.ngrok.app"),
+            &[],
+        ));
+    }
+
+    #[test]
+    fn host_allowlist_entry_allowed() {
+        let allow = vec!["https://companion.example.com".to_string()];
+        assert!(host_allowed(
+            Some("companion.example.com"),
+            None,
+            &allow,
+        ));
+    }
+
+    #[test]
+    fn host_port_stripped_for_comparison() {
+        assert!(host_allowed(
+            Some("x.ngrok.app:443"),
+            Some("https://x.ngrok.app"),
             &[],
         ));
     }

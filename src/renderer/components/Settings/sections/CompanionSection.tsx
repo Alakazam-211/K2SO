@@ -6,6 +6,7 @@ import type { SettingEntry } from '../searchManifest'
 export const COMPANION_MANIFEST: SettingEntry[] = [
   { id: 'companion.enable', section: 'companion', label: 'Enable Companion', description: 'Start the ngrok tunnel for the K2SO mobile companion app', keywords: ['mobile', 'companion', 'remote', 'ngrok', 'tunnel'] },
   { id: 'companion.auto-start', section: 'companion', label: 'Start on Launch', description: 'Auto-connect when K2SO opens', keywords: ['auto', 'launch', 'startup'] },
+  { id: 'companion.allow-remote-spawn', section: 'companion', label: 'Allow Remote Spawn', description: 'Permit mobile app to launch arbitrary terminals (off by default)', keywords: ['spawn', 'terminal', 'command', 'security', 'remote', 'execute'] },
   { id: 'companion.username', section: 'companion', label: 'Username', description: 'Username the mobile app authenticates with', keywords: ['username', 'auth', 'login'] },
   { id: 'companion.password', section: 'companion', label: 'Password', description: 'Password the mobile app authenticates with', keywords: ['password', 'auth', 'login'] },
   { id: 'companion.ngrok-token', section: 'companion', label: 'ngrok Auth Token', description: 'Required for the remote tunnel', keywords: ['ngrok', 'token', 'tunnel', 'auth'] },
@@ -16,6 +17,7 @@ export const COMPANION_MANIFEST: SettingEntry[] = [
 export function CompanionSection(): React.JSX.Element {
   const [enabled, setEnabled] = useState(false)
   const [autoStart, setAutoStart] = useState(false)
+  const [allowRemoteSpawn, setAllowRemoteSpawn] = useState(false)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [passwordSet, setPasswordSet] = useState(false)
@@ -41,6 +43,7 @@ export function CompanionSection(): React.JSX.Element {
         setNgrokToken(c.ngrokAuthToken || '')
         setNgrokDomain(c.ngrokDomain || '')
         setAutoStart(c.autoStart || false)
+        setAllowRemoteSpawn(!!c.allowRemoteSpawn)
       } catch { /* ignore */ }
       try {
         const status = await invoke<any>('companion_status')
@@ -186,6 +189,27 @@ export function CompanionSection(): React.JSX.Element {
             className={`w-7 h-3.5 flex items-center transition-colors no-drag cursor-pointer flex-shrink-0 ${autoStart ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'}`}
           >
             <span className={`w-2.5 h-2.5 bg-white block transition-transform ${autoStart ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
+          </button>
+        </div>
+
+        <div className="flex items-center justify-between py-2.5 border-b border-[var(--color-border)]">
+          <div>
+            <span className="text-xs text-[var(--color-text-secondary)]">Allow Remote Spawn</span>
+            <p className="text-[10px] text-[var(--color-text-muted)]">
+              Permit the mobile app to launch new terminals running arbitrary commands.
+              Off by default — if the tunnel is compromised, leaving this off limits the
+              blast radius to reading existing terminals. Restart the companion after changing.
+            </p>
+          </div>
+          <button
+            onClick={() => {
+              const next = !allowRemoteSpawn
+              setAllowRemoteSpawn(next)
+              invoke('settings_update', { updates: { companion: { allowRemoteSpawn: next } } }).catch(() => {})
+            }}
+            className={`w-7 h-3.5 flex items-center transition-colors no-drag cursor-pointer flex-shrink-0 ${allowRemoteSpawn ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'}`}
+          >
+            <span className={`w-2.5 h-2.5 bg-white block transition-transform ${allowRemoteSpawn ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
           </button>
         </div>
 

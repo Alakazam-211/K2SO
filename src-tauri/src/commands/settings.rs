@@ -179,6 +179,13 @@ pub struct CompanionSettings {
     /// (e.g. "https://companion.example.com") here to opt in.
     #[serde(default)]
     pub cors_origins: Vec<String>,
+    /// When false (default) the companion API refuses /companion/terminal/spawn
+    /// and /companion/terminal/spawn-background — clients can still read and
+    /// write to existing terminals, but can't launch arbitrary commands. Flip
+    /// this on explicitly if the companion app's workflow needs it; restart
+    /// the companion for the change to take effect.
+    #[serde(default)]
+    pub allow_remote_spawn: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

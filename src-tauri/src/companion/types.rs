@@ -22,6 +22,10 @@ pub struct CompanionState {
     /// Snapshot of CompanionSettings.cors_origins taken at start_companion.
     /// Empty → no CORS headers emitted. Restart the companion to pick up changes.
     pub cors_origins: Vec<String>,
+    /// Snapshot of CompanionSettings.allow_remote_spawn taken at
+    /// start_companion. When false, /companion/terminal/spawn endpoints
+    /// return 403. Restart the companion to pick up changes.
+    pub allow_remote_spawn: bool,
     /// Per-IP rate limiter gating /companion/auth attempts.
     pub auth_limiter: Mutex<AuthRateLimiter>,
     /// Keeps the ngrok runtime thread alive — drop this to stop the tunnel

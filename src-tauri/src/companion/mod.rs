@@ -93,6 +93,7 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
         hook_port,
         hook_token: hook_token.to_string(),
         cors_origins: companion.cors_origins.clone(),
+        allow_remote_spawn: companion.allow_remote_spawn,
         auth_limiter: Mutex::new(AuthRateLimiter::new()),
         _tunnel_keepalive: Mutex::new(Some(keepalive_tx)),
     };
@@ -124,6 +125,28 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
             }
         }
     });
+
+    // Prominent startup warning. The companion tunnel is public surface, and
+    // there are a couple of knobs that materially change the exposure. Put
+    // them in the log so operators can verify what's live at a glance.
+    log_debug!(
+        "[companion] ⚠️  TUNNEL ACTIVE — {} is now reachable from the public internet. \
+         remote_spawn={} cors_origins={} (toggle these in Settings → Companion)",
+        tunnel_url,
+        if companion.allow_remote_spawn { "ENABLED (arbitrary shell commands permitted)" } else { "disabled" },
+        if companion.cors_origins.is_empty() { "none (browser access blocked)".to_string() } else { companion.cors_origins.join(", ") },
+    );
+
+    // Notify the UI so it can show a banner / toast.
+    use tauri::Emitter;
+    let _ = app_handle.emit(
+        "companion:tunnel_activated",
+        serde_json::json!({
+            "tunnelUrl": tunnel_url,
+            "allowRemoteSpawn": companion.allow_remote_spawn,
+            "corsOriginsCount": companion.cors_origins.len(),
+        }),
+    );
 
     // Register Tauri event listeners for WebSocket broadcast
     register_event_listeners(&app_handle);
@@ -443,11 +466,12 @@ fn run_local_listener(listener: std::net::TcpListener) {
                     .unwrap_or("/companion/ws");
                 let path = path.to_string();
 
-                // Parse Origin from the upgrade request and enforce policy
-                // before handing the stream to tungstenite. A rejected upgrade
-                // gets a plain HTTP 403 and we drop the stream.
+                // Parse Origin + Host from the upgrade request and enforce
+                // policy before handing the stream to tungstenite. A rejected
+                // upgrade gets a plain HTTP 403 and we drop the stream.
                 let headers = proxy::parse_headers(&peek_str);
                 let request_origin = headers.get("origin").map(|s| s.as_str());
+                let request_host = headers.get("host").map(|s| s.as_str());
 
                 let (allowed, tunnel_snapshot, allowlist_snapshot) = {
                     let guard = STATE.lock();
@@ -455,12 +479,17 @@ fn run_local_listener(listener: std::net::TcpListener) {
                         Some(state) => {
                             let tunnel = state.tunnel_url.try_lock().and_then(|u| u.clone());
                             let allowlist = state.cors_origins.clone();
-                            let ok = proxy::ws_origin_allowed(
+                            let origin_ok = proxy::ws_origin_allowed(
                                 request_origin,
                                 tunnel.as_deref(),
                                 &allowlist,
                             );
-                            (ok, tunnel, allowlist)
+                            let host_ok = proxy::host_allowed(
+                                request_host,
+                                tunnel.as_deref(),
+                                &allowlist,
+                            );
+                            (origin_ok && host_ok, tunnel, allowlist)
                         }
                         None => (false, None, Vec::new()),
                     }

@@ -252,6 +252,18 @@ pub fn handle_ws_upgrade(
 
                     // Dispatch API method to internal server
                     if !method.is_empty() {
+                        // Gate privileged spawn methods: refuse unless the
+                        // operator has explicitly enabled remote spawn.
+                        if super::proxy::is_privileged_spawn_method(method)
+                            && !reader_state.allow_remote_spawn
+                        {
+                            send_response(
+                                &tx,
+                                id.as_deref(),
+                                Err("Remote terminal spawn is disabled. Enable 'Allow remote spawn' in Companion settings and restart the tunnel.".to_string()),
+                            );
+                            continue;
+                        }
                         let result = dispatch_ws_method(reader_state, method, &params);
                         send_response(&tx, id.as_deref(), result);
                         continue;
