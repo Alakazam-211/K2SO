@@ -202,6 +202,44 @@ prerequisites for remaining corners.
 
 Commit `075ef534`. Details folded into corner #1 above.
 
+### Scheduler slice migrated (tick + 8 helpers + /cli/scheduler-tick)
+
+Commits `1c55a37d` + `12a870a1`. Daemon now serves:
+
+- `/cli/heartbeat/status` — last N fires by schedule name
+- `/cli/heartbeat/fires-list` — recent fires by project
+- `/cli/heartbeat-log` — alias the History panel uses
+- `/cli/scheduler-tick` — returns `Vec<String>` of agents ready to
+  wake (the core decision path of the launchd-fired triage)
+
+Moved into `k2so_core::agents::scheduler`:
+- Types: `AgentHeartbeatConfig`, `ActiveHours`.
+- Path helpers: `workspace_inbox_dir`, `agent_work_dir`,
+  `count_md_files`.
+- Lock + gate: `is_agent_locked`, `get_workspace_state`,
+  `is_within_active_hours`.
+- Priority: `priority_rank`, `priority_label`,
+  `get_highest_inbox_priority`.
+- Config IO: `read_heartbeat_config`, `write_heartbeat_config`.
+- The tick itself: `k2so_agents_scheduler_tick` (228 lines, fully
+  behavior-preserving move).
+
+**This is the last piece the daemon needs to decide whether to fire.**
+The remaining gap for lid-closed firing is the *PTY spawn* path
+(`spawn_wake_pty` + `k2so_agents_build_launch`) which still depends
+on:
+- A `TerminalEventSink` bridge for the daemon context (Tauri's
+  impl emits `terminal:grid/...` via `AppHandle`; the daemon needs
+  either a no-op sink or one that forwards onto the `/events` WS).
+- `k2so_agents_save_session_id` (still in src-tauri; small, pure
+  DB write).
+- `k2so_agents_lock` (still in src-tauri).
+- `chat_history_detect_active_session` (still in src-tauri; looks
+  under `~/.claude/projects/*` for the newest session).
+
+All four are small individually but compose into the wake-and-track
+workflow. Earmarked for a follow-up commit focused on the PTY spawn.
+
 ### Heartbeat slice migrated (9 fns + 6 daemon routes)
 
 Commit `cdf20a34`. Moved from `src-tauri/src/commands/k2so_agents.rs`
