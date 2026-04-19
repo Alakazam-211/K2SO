@@ -33,20 +33,20 @@ struct SessionAccumulator {
 /// Given a project path (which may be a worktree), resolve the root project path.
 /// e.g. "/repo/.worktrees/feature" → "/repo"
 /// e.g. "/repo" → "/repo"
-fn resolve_root_project_path(path: &str) -> &str {
-    if let Some(idx) = path.find("/.worktrees/") {
-        &path[..idx]
-    } else {
-        path
-    }
-}
+// Pure session-detection helpers moved to k2so_core::chat_history so the
+// daemon's post-spawn session-save path can call the same functions the
+// Tauri UI does. Re-exported here under their historical unqualified
+// names so the 20+ internal call sites below resolve unchanged.
+use k2so_core::chat_history::{
+    claude_history_path, claude_project_hash, claude_session_file_exists as core_claude_session_file_exists,
+    cursor_project_hash, detect_active_session as core_detect_active_session,
+    detect_claude_session, detect_cursor_session, matches_project_family, resolve_root_project_path,
+};
 
-/// Check if a session's project path belongs to the given root project
-/// (either the root itself or any worktree under it).
-fn matches_project_family(session_project: &str, root: &str) -> bool {
-    session_project == root
-        || session_project.starts_with(&format!("{}/.worktrees/", root))
-}
+// Re-export under the src-tauri path so `crate::commands::chat_history::
+// claude_session_file_exists` keeps working for external callers (the
+// wake path uses this to verify a session file before --resume).
+pub use k2so_core::chat_history::claude_session_file_exists;
 
 /// Extract the worktree branch name from a project path, if present.
 /// e.g. "/repo/.worktrees/feature-x" → Some("feature-x")
@@ -57,9 +57,7 @@ fn extract_worktree_branch(project: &str) -> Option<String> {
 
 // ── Claude history parsing ───────────────────────────────────────────────
 
-fn claude_history_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join("history.jsonl"))
-}
+// `claude_history_path` moved to k2so_core::chat_history (re-exported).
 
 fn parse_claude_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSession>, String> {
     let path = match claude_history_path() {
@@ -170,13 +168,7 @@ fn parse_claude_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSession
 
 // ── Cursor chat parsing ─────────────────────────────────────────────────
 
-/// Convert a project path to Cursor's hash format.
-/// e.g. "/Users/z3thon/DevProjects/K2SO" → "Users-z3thon-DevProjects-K2SO"
-fn cursor_project_hash(project_path: &str) -> String {
-    project_path
-        .trim_start_matches('/')
-        .replace('/', "-")
-}
+// `cursor_project_hash` moved to k2so_core::chat_history (re-exported).
 
 /// Read Cursor chat metadata from store.db to extract the chat name and timestamp.
 /// Cursor stores metadata as hex-encoded JSON in the `meta` table, key "0".
@@ -491,90 +483,7 @@ fn parse_cursor_ide_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSes
     Ok(results)
 }
 
-// ── Session detection for resume ────────────────────────────────────────
-
-/// Detect the most recent active session ID for a CLI tool in a given project.
-/// Used before app close to capture session IDs for resume on reopen.
-fn detect_claude_session(project_path: &str) -> Option<String> {
-    let path = claude_history_path()?;
-    let file = File::open(&path).ok()?;
-
-    // Read the last 64KB of the file to find recent sessions efficiently
-    let metadata = file.metadata().ok()?;
-    let file_size = metadata.len();
-    let read_from = if file_size > 65536 { file_size - 65536 } else { 0 };
-
-    let mut file = file;
-    file.seek(SeekFrom::Start(read_from)).ok()?;
-
-    let mut buf = String::new();
-    file.read_to_string(&mut buf).ok()?;
-
-    // Find the most recent sessionId matching this exact path first.
-    // Only fall back to project-family matching if the input is the root project
-    // (not a worktree or agent subdirectory).
-    let is_subpath = project_path.contains("/.worktrees/") || project_path.contains("/.k2so/");
-    let root = resolve_root_project_path(project_path);
-    let mut best_session: Option<(i64, String)> = None;
-
-    for line in buf.lines() {
-        let parsed: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let project = parsed.get("project").and_then(|v| v.as_str()).unwrap_or("");
-        // For subpaths (worktrees, agent dirs), require exact match
-        // For root projects, allow any worktree under it
-        if is_subpath {
-            if project != project_path { continue; }
-        } else {
-            if !matches_project_family(project, root) { continue; }
-        }
-
-        let session_id = match parsed.get("sessionId").and_then(|v| v.as_str()) {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-
-        let timestamp = parsed.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
-
-        match &best_session {
-            Some((best_ts, _)) if timestamp > *best_ts => {
-                best_session = Some((timestamp, session_id));
-            }
-            None => {
-                best_session = Some((timestamp, session_id));
-            }
-            _ => {}
-        }
-    }
-
-    // Verify the session file actually exists on disk before returning.
-    // A session ID appears in history.jsonl when Claude launches, but the
-    // session .jsonl file is only written once a prompt is sent. If the user
-    // opened a session but never typed anything, the file won't exist and
-    // --resume would fail with "No conversation found".
-    best_session.and_then(|(_, id)| {
-        let home = dirs::home_dir()?;
-        let project_hash = claude_project_hash(&resolve_root_project_path(project_path));
-        let projects_dir = home.join(".claude").join("projects");
-
-        // Check all matching project dirs (root + worktree variants)
-        if let Ok(entries) = fs::read_dir(&projects_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name == project_hash || name.starts_with(&format!("{}-", project_hash)) {
-                    let session_file = entry.path().join(format!("{}.jsonl", id));
-                    if session_file.exists() {
-                        return Some(id);
-                    }
-                }
-            }
-        }
-        None
-    })
-}
+// ── Session detection for resume ──────────────────────────────────────── moved to k2so_core::chat_history (re-exported).
 
 /// Check whether a claude session file exists on disk for the given
 /// session_id + project path (including any worktree siblings). Used before
@@ -582,72 +491,9 @@ fn detect_claude_session(project_path: &str) -> Option<String> {
 /// DB holds a stale session_id (workspace remove+readd, claude-side session
 /// pruning, migrations, etc.). Returns false if the file is missing or the
 /// projects directory isn't readable.
-pub fn claude_session_file_exists(session_id: &str, project_path: &str) -> bool {
-    let Some(home) = dirs::home_dir() else { return false };
-    let project_hash = claude_project_hash(resolve_root_project_path(project_path));
-    let projects_dir = home.join(".claude").join("projects");
-    let Ok(entries) = fs::read_dir(&projects_dir) else { return false };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name == project_hash || name.starts_with(&format!("{}-", project_hash)) {
-            if entry.path().join(format!("{}.jsonl", session_id)).exists() {
-                return true;
-            }
-        }
-    }
-    false
-}
+// pub fn claude_session_file_exists moved to k2so_core::chat_history (re-exported).
 
-fn detect_cursor_session(project_path: &str) -> Option<String> {
-    let cursor_chats_dir = dirs::home_dir()?.join(".cursor").join("chats");
-    let root = resolve_root_project_path(project_path);
-    let root_hash = cursor_project_hash(root);
-
-    // Collect matching hash dirs (root + worktrees)
-    let hash_dirs: Vec<PathBuf> = match fs::read_dir(&cursor_chats_dir) {
-        Ok(entries) => entries
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                let name = e.file_name().to_string_lossy().to_string();
-                e.path().is_dir() && (name == root_hash || name.starts_with(&format!("{}-.worktrees-", root_hash)))
-            })
-            .map(|e| e.path())
-            .collect(),
-        Err(_) => return None,
-    };
-
-    // Find the most recently modified chat directory across all matching hash dirs
-    let mut best: Option<(std::time::SystemTime, String)> = None;
-
-    for hash_dir in hash_dirs {
-        let entries = match fs::read_dir(&hash_dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            if !entry.path().is_dir() {
-                continue;
-            }
-            let store_db = entry.path().join("store.db");
-            if let Ok(meta) = fs::metadata(&store_db) {
-                if let Ok(modified) = meta.modified() {
-                    let chat_id = entry.file_name().to_string_lossy().to_string();
-                    match &best {
-                        Some((best_time, _)) if modified > *best_time => {
-                            best = Some((modified, chat_id));
-                        }
-                        None => {
-                            best = Some((modified, chat_id));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-
-    best.map(|(_, id)| id)
-}
+// fn detect_cursor_session moved to k2so_core::chat_history (re-exported).
 
 // ── Tauri commands ──────────────────────────────────────────────────────
 
@@ -685,18 +531,7 @@ pub struct ChatStoragePaths {
     pub cursor_chats_dirs: Vec<String>,
 }
 
-/// Convert a project path to Claude's project hash format.
-/// Same as Cursor: strip leading `/`, replace `/` with `-`.
-fn claude_project_hash(project_path: &str) -> String {
-    // Claude Code converts project paths to directory names by replacing / with -
-    // and stripping leading dots from path components (e.g. /.k2so → /-k2so → --k2so).
-    // The leading / becomes a leading -, so the directory starts with -.
-    // Example: /Users/z3thon/DevProjects/TestingK2SO/.k2so/agents/coordinator
-    //       → -Users-z3thon-DevProjects-TestingK2SO--k2so-agents-coordinator
-    project_path
-        .replace("/.", "/-")  // /.hidden → /-hidden (strip dot, keep separator)
-        .replace('/', "-")
-}
+// Convert a project path to Claude's project hash format. moved to k2so_core::chat_history (re-exported).
 
 #[tauri::command]
 pub fn chat_history_get_storage_paths(project_path: String) -> Result<ChatStoragePaths, String> {
@@ -855,12 +690,7 @@ pub fn chat_history_detect_active_session(
     provider: String,
     project_path: String,
 ) -> Result<Option<String>, String> {
-    let session_id = match provider.as_str() {
-        "claude" => detect_claude_session(&project_path),
-        "cursor" => detect_cursor_session(&project_path),
-        _ => None,
-    };
-    Ok(session_id)
+    core_detect_active_session(&provider, &project_path)
 }
 
 // ── Cursor IDE → CLI migration ─────────────────────────────────────────

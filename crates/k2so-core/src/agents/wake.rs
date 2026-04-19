@@ -291,6 +291,42 @@ pub fn spawn_wake_headless(
         }),
     );
 
+    // Deferred session-ID save: claude writes the session JSONL a few
+    // seconds after launch; poll the provider's history dir and persist
+    // the newest session on `agent_sessions.session_id` so the *next*
+    // wake can `--resume` into the same chat. Best-effort, runs off a
+    // detached thread so a slow filesystem never stalls the wake path.
+    {
+        let agent_name_owned = agent_name.to_string();
+        let project_path_owned = project_path.to_string();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            if let Ok(Some(session_id)) =
+                crate::chat_history::detect_active_session("claude", &project_path_owned)
+            {
+                if session_id.is_empty() {
+                    return;
+                }
+                match crate::agents::session::k2so_agents_save_session_id(
+                    project_path_owned.clone(),
+                    agent_name_owned.clone(),
+                    session_id.clone(),
+                ) {
+                    Ok(_) => crate::log_debug!(
+                        "[daemon/wake] saved session id for {}: {}",
+                        agent_name_owned,
+                        session_id
+                    ),
+                    Err(e) => crate::log_debug!(
+                        "[daemon/wake] save session id for {} failed: {}",
+                        agent_name_owned,
+                        e
+                    ),
+                }
+            }
+        });
+    }
+
     Ok(terminal_id)
 }
 
