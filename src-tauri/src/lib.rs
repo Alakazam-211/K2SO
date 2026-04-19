@@ -20,10 +20,12 @@ mod commands;
 mod companion;
 mod db;
 mod editors;
+mod fs_abstract;
 mod fs_atomic;
 mod git;
 mod llm;
 mod menu;
+mod perf;
 mod project_config;
 mod state;
 mod terminal;
@@ -91,14 +93,16 @@ pub fn run() {
     // first TLS use unless a provider is explicitly installed.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let db_handle = match db::init_database() {
-        Ok(c) => c,
-        Err(e) => {
-            log_debug!("[k2so] FATAL: Failed to initialize database: {}", e);
-            log_debug!("[k2so] The app will now exit. Check disk permissions and space at ~/.k2so/");
-            std::process::exit(1);
+    let db_handle = perf_timer!("startup_db_init", {
+        match db::init_database() {
+            Ok(c) => c,
+            Err(e) => {
+                log_debug!("[k2so] FATAL: Failed to initialize database: {}", e);
+                log_debug!("[k2so] The app will now exit. Check disk permissions and space at ~/.k2so/");
+                std::process::exit(1);
+            }
         }
-    };
+    });
 
     let app_state = AppState {
         // Same Arc lives in AppState and in db::SHARED — Tauri commands
@@ -124,11 +128,30 @@ pub fn run() {
         .menu(|handle| menu::create_menu(handle))
         .on_menu_event(menu::handle_menu_event)
         .setup(|app| {
+            let __setup_start = std::time::Instant::now();
+            struct SetupGuard(std::time::Instant);
+            impl Drop for SetupGuard {
+                fn drop(&mut self) {
+                    if crate::perf::is_enabled() {
+                        use std::io::Write;
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "[perf] startup_setup_total — {}µs",
+                            self.0.elapsed().as_micros()
+                        );
+                    }
+                }
+            }
+            let _setup_guard = SetupGuard(__setup_start);
             // Migrate old JSON window state to SQLite (one-time migration)
-            window::migrate_json_window_state(app.handle());
+            perf_timer!("startup_migrate_window_state", {
+                window::migrate_json_window_state(app.handle());
+            });
 
             // Migrate workspace_layouts from settings.json → SQLite (one-time)
-            migrate_workspace_layouts_to_db(app.handle());
+            perf_timer!("startup_migrate_workspace_layouts", {
+                migrate_workspace_layouts_to_db(app.handle());
+            });
 
             // Create skill layer template directories if they don't exist
             if let Some(home) = dirs::home_dir() {
@@ -183,7 +206,7 @@ pub fn run() {
             }
 
             // Regenerate SKILL.md files for all workspaces (v0.26 migration)
-            {
+            perf_timer!("startup_skill_regen_loop", {
                 let all_projects: Vec<(String, String)> = {
                     let state = app.state::<AppState>();
                     let db = state.db.lock();
@@ -209,7 +232,7 @@ pub fn run() {
                     // All workspaces: write workspace-level skill to all harness locations
                     commands::k2so_agents::write_workspace_skill_file(path);
                 }
-            }
+            });
 
             // Apply saved window state on startup
             if let Some(saved) = window::load_window_state(app.handle()) {

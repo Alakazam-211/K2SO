@@ -18,6 +18,7 @@ struct LogicalLine {
 /// Reflow a GridUpdate from its original column width to a target width.
 /// Returns a new GridUpdate with lines re-wrapped at `target_cols`.
 pub fn reflow_grid(grid: &GridUpdate, target_cols: u16, target_rows: u16) -> GridUpdate {
+    let _h = crate::perf_hist!("reflow");
     if target_cols == 0 || target_rows == 0 {
         return grid.clone();
     }

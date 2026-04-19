@@ -12,12 +12,6 @@ use crate::fs_atomic::{self, atomic_symlink, atomic_write_str, log_if_err, uniqu
 
 // ── DB helpers (standalone connection, no AppState needed) ──────────────
 
-fn k2so_db_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".k2so/k2so.db")
-}
-
 fn resolve_project_id(conn: &rusqlite::Connection, path: &str) -> Option<String> {
     conn.query_row(
         "SELECT id FROM projects WHERE path = ?1",
@@ -127,15 +121,6 @@ fn read_agent_wakeup(project_path: &str, agent_name: &str, agent_type: &str) -> 
     }
 }
 
-/// Read the workspace-level `wakeup.md` used by `__lead__`, falling
-/// back to the shipped template if missing or empty.
-fn read_workspace_wakeup(project_path: &str) -> String {
-    match fs::read_to_string(workspace_wakeup_path(project_path)) {
-        Ok(s) if !s.trim().is_empty() => s,
-        _ => WAKEUP_TEMPLATE_WORKSPACE.to_string(),
-    }
-}
-
 /// Create `wakeup.md` from the matching template if it doesn't exist.
 /// No-op if the file already exists (never overwrite user edits) or if
 /// the agent type doesn't use wake-up. Silently returns on any error —
@@ -162,20 +147,6 @@ fn ensure_agent_wakeup(project_path: &str, agent_name: &str, agent_type: &str) {
         "ensure_agent_wakeup",
         &path,
         atomic_write_str(&path, template),
-    );
-}
-
-/// Create the workspace-level `wakeup.md` (used by `__lead__`) from
-/// the shipped template if it doesn't exist. No-op if present.
-fn ensure_workspace_wakeup(project_path: &str) {
-    let path = workspace_wakeup_path(project_path);
-    if path.exists() {
-        return;
-    }
-    log_if_err(
-        "ensure_workspace_wakeup",
-        &path,
-        atomic_write_str(&path, WAKEUP_TEMPLATE_WORKSPACE),
     );
 }
 
@@ -219,10 +190,17 @@ pub fn default_heartbeat_wakeup_abs(project_path: &str, _agent_name: &str) -> Op
 /// *launches* for `__lead__` now go through `k2so_agents_build_launch`
 /// with the per-row wakeup_override so SKILL.md / PROJECT.md / --resume
 /// / session-continuity all apply uniformly.
-pub fn compose_wake_prompt_for_lead(project_path: &str) -> String {
-    let wakeup_body = default_heartbeat_wakeup_abs(project_path, "__lead__")
-        .and_then(|p| fs::read_to_string(&p).ok())
-        .map(|s| strip_frontmatter(&s).trim().to_string())
+/// Pure composer for the Workspace Manager wake prompt. Given an
+/// optional raw wakeup body (as read from disk), produces the full
+/// wake message — frontmatter stripped, fallback to
+/// WAKEUP_TEMPLATE_WORKSPACE if the body is empty or missing.
+///
+/// Split out from `compose_wake_prompt_for_lead` so every branch
+/// (body present / body empty / body missing) is unit-testable
+/// without scaffolding a filesystem.
+pub fn compose_manager_wake_from_body(raw_body: Option<&str>) -> String {
+    let wakeup_body = raw_body
+        .map(|s| strip_frontmatter(s).trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| WAKEUP_TEMPLATE_WORKSPACE.trim().to_string());
     format!(
@@ -235,6 +213,26 @@ pub fn compose_wake_prompt_for_lead(project_path: &str) -> String {
     )
 }
 
+pub fn compose_wake_prompt_for_lead(project_path: &str) -> String {
+    let raw = default_heartbeat_wakeup_abs(project_path, "__lead__")
+        .and_then(|p| fs::read_to_string(&p).ok());
+    compose_manager_wake_from_body(raw.as_deref())
+}
+
+/// Pure composer for a regular agent wake prompt. Given the raw
+/// wakeup body string (already read from disk), produces the full
+/// wake message. Returns None when the input is None, matching the
+/// "no wake for agent-template" semantic.
+pub fn compose_agent_wake_from_body(raw_body: Option<&str>) -> Option<String> {
+    let body = raw_body?;
+    Some(format!(
+        "# K2SO Heartbeat Wake\n\n\
+         The heartbeat scheduler woke you. Your wake-up instructions are below; \
+         follow them and exit when done.\n\n\
+         ----\n\n{}",
+        body.trim()
+    ))
+}
 
 /// Compose the `--append-system-prompt` text for a regular agent
 /// woken by the heartbeat scheduler. Returns `None` for agent types
@@ -242,13 +240,7 @@ pub fn compose_wake_prompt_for_lead(project_path: &str) -> String {
 pub fn compose_wake_prompt_for_agent(project_path: &str, agent_name: &str) -> Option<String> {
     let agent_type = agent_type_for(project_path, agent_name);
     let wakeup = read_agent_wakeup(project_path, agent_name, &agent_type)?;
-    Some(format!(
-        "# K2SO Heartbeat Wake\n\n\
-         The heartbeat scheduler woke you. Your wake-up instructions are below; \
-         follow them and exit when done.\n\n\
-         ----\n\n{}",
-        wakeup.trim()
-    ))
+    compose_agent_wake_from_body(Some(&wakeup))
 }
 
 /// Compose the wake prompt from an explicit wakeup file path. Used by
@@ -256,13 +248,7 @@ pub fn compose_wake_prompt_for_agent(project_path: &str, agent_name: &str) -> Op
 /// it should read rather than relying on a naming convention.
 pub fn compose_wake_prompt_from_path(wakeup_path: &std::path::Path) -> Option<String> {
     let content = std::fs::read_to_string(wakeup_path).ok()?;
-    Some(format!(
-        "# K2SO Heartbeat Wake\n\n\
-         The heartbeat scheduler woke you. Your wake-up instructions are below; \
-         follow them and exit when done.\n\n\
-         ----\n\n{}",
-        content.trim()
-    ))
+    compose_agent_wake_from_body(Some(&content))
 }
 
 /// Find the workspace's primary scheduleable agent. A workspace is one-of
@@ -1497,27 +1483,36 @@ fn parse_frontmatter(content: &str) -> std::collections::HashMap<String, String>
     map
 }
 
-fn read_work_item(path: &Path, folder: &str) -> Option<WorkItem> {
-    let content = safe_read_to_string(path).ok()?;
-    let fm = parse_frontmatter(&content);
-    let filename = path.file_name()?.to_string_lossy().to_string();
+/// Parse raw markdown content into a WorkItem. Pure — no I/O, no Tauri
+/// deps, directly unit-testable. The on-disk `read_work_item` is now a
+/// thin wrapper that reads the file and calls this.
+pub fn parse_work_item_content(content: &str, filename: &str, folder: &str) -> WorkItem {
+    let fm = parse_frontmatter(content);
 
     // Extract body preview (first ~120 chars after frontmatter)
     let body_preview = if content.starts_with("---") {
         if let Some(end) = content[3..].find("---") {
             let body = content[3 + end + 3..].trim();
             let preview: String = body.chars().take(120).collect();
-            if body.len() > 120 { format!("{}...", preview.trim()) } else { preview.trim().to_string() }
+            if body.len() > 120 {
+                format!("{}...", preview.trim())
+            } else {
+                preview.trim().to_string()
+            }
         } else {
             String::new()
         }
     } else {
         let preview: String = content.chars().take(120).collect();
-        if content.len() > 120 { format!("{}...", preview.trim()) } else { preview.trim().to_string() }
+        if content.len() > 120 {
+            format!("{}...", preview.trim())
+        } else {
+            preview.trim().to_string()
+        }
     };
 
-    Some(WorkItem {
-        filename,
+    WorkItem {
+        filename: filename.to_string(),
         title: fm.get("title").cloned().unwrap_or_default(),
         priority: fm.get("priority").cloned().unwrap_or("normal".to_string()),
         assigned_by: fm.get("assigned_by").cloned().unwrap_or("unknown".to_string()),
@@ -1526,7 +1521,13 @@ fn read_work_item(path: &Path, folder: &str) -> Option<WorkItem> {
         folder: folder.to_string(),
         body_preview,
         source: fm.get("source").cloned().unwrap_or("manual".to_string()),
-    })
+    }
+}
+
+fn read_work_item(path: &Path, folder: &str) -> Option<WorkItem> {
+    let content = safe_read_to_string(path).ok()?;
+    let filename = path.file_name()?.to_string_lossy().to_string();
+    Some(parse_work_item_content(&content, &filename, folder))
 }
 
 /// Bounded count of .md files in a directory (max 10,000 to prevent memory exhaustion
@@ -1847,6 +1848,72 @@ pub fn k2so_agents_delete_inner(project_path: &str, name: &str, force: bool) -> 
 /// `field` can be a frontmatter key (e.g. "role") or a section name (e.g. "Work Sources").
 /// For frontmatter fields, `value` replaces the existing value.
 /// For body sections (## heading), `value` replaces everything from ## heading to the next ## heading.
+///
+/// This is the pure, I/O-free core of `k2so_agents_update_field` — so
+/// every parsing edge case can be unit-tested without scaffolding a
+/// filesystem. Returns the rewritten markdown on success. The command
+/// wrapper handles disk I/O (read → this → backup + atomic_write).
+pub fn update_agent_md_field(content: &str, field: &str, value: &str) -> Result<String, String> {
+    if !content.starts_with("---") {
+        return Err("agent.md missing frontmatter".to_string());
+    }
+    let end_idx = content[3..]
+        .find("---")
+        .ok_or_else(|| "Invalid frontmatter in agent.md".to_string())?;
+    let frontmatter = &content[3..3 + end_idx];
+    let body = &content[3 + end_idx + 3..];
+
+    // Check if it's a frontmatter field
+    let fm_keys: Vec<&str> = frontmatter
+        .lines()
+        .filter_map(|l| l.split_once(':').map(|(k, _)| k.trim()))
+        .collect();
+
+    if fm_keys.contains(&field) {
+        // Update frontmatter field
+        let updated_fm: String = frontmatter
+            .lines()
+            .map(|line| {
+                if let Some((key, _)) = line.split_once(':') {
+                    if key.trim() == field {
+                        return format!("{}: {}", field, value);
+                    }
+                }
+                line.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Ok(format!("---\n{}\n---{}", updated_fm.trim(), body));
+    }
+
+    // Try to find and replace a markdown section (## heading)
+    let section_header = format!("## {}", field);
+    if let Some(start) = body.find(&section_header) {
+        let after_header = start + section_header.len();
+        // Find the next ## heading or end of body
+        let end = body[after_header..]
+            .find("\n## ")
+            .map(|pos| after_header + pos)
+            .unwrap_or(body.len());
+        let mut new_body = String::new();
+        new_body.push_str(&body[..start]);
+        new_body.push_str(&section_header);
+        new_body.push_str("\n\n");
+        new_body.push_str(value);
+        new_body.push_str("\n\n");
+        new_body.push_str(body[end..].trim_start());
+        Ok(format!("---\n{}\n---{}", frontmatter.trim(), new_body))
+    } else {
+        // Section doesn't exist — append it
+        let mut new_body = body.to_string();
+        if !new_body.ends_with('\n') {
+            new_body.push('\n');
+        }
+        new_body.push_str(&format!("\n## {}\n\n{}\n", field, value));
+        Ok(format!("---\n{}\n---{}", frontmatter.trim(), new_body))
+    }
+}
+
 #[tauri::command]
 pub fn k2so_agents_update_field(
     project_path: String,
@@ -1863,64 +1930,7 @@ pub fn k2so_agents_update_field(
     let content = fs::read_to_string(&md_path)
         .map_err(|e| format!("Failed to read agent.md: {}", e))?;
 
-    let updated = if content.starts_with("---") {
-        if let Some(end_idx) = content[3..].find("---") {
-            let frontmatter = &content[3..3 + end_idx];
-            let body = &content[3 + end_idx + 3..];
-
-            // Check if it's a frontmatter field
-            let fm_keys: Vec<&str> = frontmatter.lines()
-                .filter_map(|l| l.split_once(':').map(|(k, _)| k.trim()))
-                .collect();
-
-            if fm_keys.contains(&field.as_str()) {
-                // Update frontmatter field
-                let updated_fm: String = frontmatter
-                    .lines()
-                    .map(|line| {
-                        if let Some((key, _)) = line.split_once(':') {
-                            if key.trim() == field {
-                                return format!("{}: {}", field, value);
-                            }
-                        }
-                        line.to_string()
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                format!("---\n{}\n---{}", updated_fm.trim(), body)
-            } else {
-                // Try to find and replace a markdown section (## heading)
-                let section_header = format!("## {}", field);
-                if let Some(start) = body.find(&section_header) {
-                    let after_header = start + section_header.len();
-                    // Find the next ## heading or end of body
-                    let end = body[after_header..].find("\n## ")
-                        .map(|pos| after_header + pos)
-                        .unwrap_or(body.len());
-                    let mut new_body = String::new();
-                    new_body.push_str(&body[..start]);
-                    new_body.push_str(&section_header);
-                    new_body.push_str("\n\n");
-                    new_body.push_str(&value);
-                    new_body.push_str("\n\n");
-                    new_body.push_str(body[end..].trim_start());
-                    format!("---\n{}\n---{}", frontmatter.trim(), new_body)
-                } else {
-                    // Section doesn't exist — append it
-                    let mut new_body = body.to_string();
-                    if !new_body.ends_with('\n') {
-                        new_body.push('\n');
-                    }
-                    new_body.push_str(&format!("\n## {}\n\n{}\n", field, value));
-                    format!("---\n{}\n---{}", frontmatter.trim(), new_body)
-                }
-            }
-        } else {
-            return Err("Invalid frontmatter in agent.md".to_string());
-        }
-    } else {
-        return Err("agent.md missing frontmatter".to_string());
-    };
+    let updated = update_agent_md_field(&content, &field, &value)?;
 
     // Backup before writing
     let backup_dir = dir.join("agent-backups");
@@ -4932,123 +4942,6 @@ pub fn k2so_agents_triage_decide(project_path: String) -> Result<Vec<String>, St
     Ok(launchable)
 }
 
-// ── LLM-Powered Triage ──────────────────────────────────────────────────
-
-const TRIAGE_SYSTEM_PROMPT: &str = r#"You are K2SO's agent dispatcher. Your job is to decide which AI agents should be woken up based on their pending work.
-
-Rules:
-1. SKIP agents marked as LOCKED (they already have an active session)
-2. Wake agents with "critical" or "high" priority inbox items first
-3. If an agent already has active items in progress, only wake it for critical new inbox items
-4. Consider dependencies: if one agent's work likely depends on another's output, wake the dependency first
-5. If the workspace inbox has unassigned items and the Coordinator is not locked, wake __lead__
-6. For "low" priority items, only wake if the agent has no other work in progress
-7. Items marked [NEEDS APPROVAL] can be worked on but must be built as PRs (not auto-merged)
-8. Items with source type "off" in the workspace state are already filtered out — you won't see them
-9. The workspace state controls what kinds of work are allowed. Respect it.
-
-Respond with ONLY a JSON object, no other text:
-{"wake":["agent-name-1","agent-name-2"],"reasoning":"brief explanation"}
-
-If no agents should be woken, respond:
-{"wake":[],"reasoning":"brief explanation"}"#;
-
-/// Run LLM-based triage: feed the triage summary to the local LLM and parse its decision.
-/// Returns the list of agent names to launch.
-/// Falls back to filesystem-based triage if LLM is unavailable or fails.
-pub fn llm_triage_decide(
-    project_path: &str,
-    llm_manager: &crate::llm::LlmManager,
-) -> Result<Vec<String>, String> {
-    // Build the triage summary
-    let summary = k2so_agents_triage_summary(project_path.to_string())?;
-
-    // Quick exit: nothing to triage
-    if summary == "No agents have pending work." {
-        return Ok(vec![]);
-    }
-
-    // Check if LLM is loaded
-    if !llm_manager.is_loaded() {
-        log_agent_warning(project_path, "__lead__", "LLM not loaded — falling back to filesystem triage");
-        // Direct fallback — no recursion, calls scheduler_tick which is non-recursive
-        return k2so_agents_scheduler_tick(project_path.to_string());
-    }
-
-    // Call the local LLM via safe subprocess
-    let result = crate::commands::assistant::safe_generate_for_triage(
-        llm_manager,
-        TRIAGE_SYSTEM_PROMPT,
-        &summary,
-    );
-
-    match result {
-        Ok(response) => {
-            // Parse the JSON response
-            match parse_triage_response(&response) {
-                Some(agents) => {
-                    // Validate agent names — filter out hallucinated names
-                    let agents_root = agents_dir(project_path);
-                    let valid_agents: Vec<String> = agents.into_iter().filter(|name| {
-                        name == "__lead__" || agents_root.join(name).exists()
-                    }).collect();
-
-                    // Log the decision
-                    let k2so_dir = PathBuf::from(project_path).join(".k2so");
-                    let log_path = k2so_dir.join("triage.log");
-                    let entry = format!(
-                        "[{}] LLM triage: wake={:?} | summary_len={}\n",
-                        simple_date(),
-                        valid_agents,
-                        summary.len()
-                    );
-                    if let Ok(mut file) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&log_path)
-                    {
-                        use std::io::Write;
-                        let _ = file.write_all(entry.as_bytes());
-                    }
-                    Ok(valid_agents)
-                }
-                None => {
-                    log_agent_warning(project_path, "__lead__",
-                        &format!("LLM triage returned unparseable response: {}",
-                            &response[..response.len().min(200)]));
-                    // Fallback to filesystem triage (non-recursive — calls scheduler_tick directly)
-                    k2so_agents_scheduler_tick(project_path.to_string())
-                }
-            }
-        }
-        Err(e) => {
-            log_agent_warning(project_path, "__lead__",
-                &format!("LLM triage failed: {} — falling back to filesystem", e));
-            // Fallback to filesystem triage (non-recursive — calls scheduler_tick directly)
-            k2so_agents_scheduler_tick(project_path.to_string())
-        }
-    }
-}
-
-/// Parse the LLM's triage JSON response into a list of agent names.
-fn parse_triage_response(response: &str) -> Option<Vec<String>> {
-    // Try to find JSON in the response (LLM might add extra text/preamble)
-    let json_start = response.find('{')?;
-    let json_end = response.rfind('}').map(|i| i + 1)?;
-    // Bounds check: end must be after start
-    if json_end <= json_start {
-        return None;
-    }
-    let json_str = response.get(json_start..json_end)?;
-
-    let parsed: serde_json::Value = serde_json::from_str(json_str).ok()?;
-    let wake = parsed.get("wake")?.as_array()?;
-    Some(
-        wake.iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect()
-    )
-}
 
 // ── Adaptive Heartbeat Commands ──────────────────────────────────────────
 
@@ -5119,11 +5012,8 @@ pub fn k2so_agents_set_heartbeat(
 /// Differentiates between manager agents (inbox-based) and custom agents (timing-based).
 #[tauri::command]
 pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, String> {
+    let _h = crate::perf_hist!("scheduler_tick");
     let tick_start = std::time::Instant::now();
-    let db_path = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".k2so/k2so.db");
-
     // Look up project row up-front so audit writes have a project_id to
     // hang on. Audit rows without a project_id are dropped silently.
     let project_row: Option<(String, String, Option<String>, Option<String>)> = {
@@ -9081,5 +8971,306 @@ mod migration_safety_tests {
             &conn, &sid3, &pid, "agent-a", Some("term-3"), "claude", "system",
         ).expect("third acquire");
         assert!(third, "acquire after release must succeed");
+    }
+}
+
+#[cfg(test)]
+mod pure_helper_tests {
+    //! Tests for the I/O-free helpers extracted from Tauri command
+    //! handlers in Phase C of the testability work. Each helper is a
+    //! pure function (no fs, no db, no Tauri state) so these tests
+    //! run in microseconds and cover edge cases that would otherwise
+    //! require scaffolding a full workspace.
+    use super::*;
+
+    // ── update_agent_md_field ────────────────────────────────────
+    #[test]
+    fn update_field_replaces_frontmatter_value() {
+        let content = "---\nrole: old role\ntype: custom\n---\n# Agent body\n";
+        let updated = update_agent_md_field(content, "role", "new role").unwrap();
+        assert!(updated.contains("role: new role"), "got: {}", updated);
+        assert!(!updated.contains("role: old role"));
+        assert!(updated.contains("type: custom"), "other keys preserved: {}", updated);
+        assert!(updated.contains("# Agent body"), "body preserved: {}", updated);
+    }
+
+    #[test]
+    fn update_field_replaces_section_body() {
+        let content = "---\nrole: x\n---\n# Agent\n\n## Work Sources\n\nold content\n\n## Other\n\nkeep\n";
+        let updated = update_agent_md_field(content, "Work Sources", "new content").unwrap();
+        assert!(updated.contains("## Work Sources\n\nnew content"), "got: {}", updated);
+        assert!(!updated.contains("old content"));
+        assert!(updated.contains("## Other\n\nkeep"), "trailing section preserved: {}", updated);
+    }
+
+    #[test]
+    fn update_field_appends_missing_section() {
+        let content = "---\nrole: x\n---\n# Agent\n\n## Existing\n\ntext\n";
+        let updated = update_agent_md_field(content, "New Section", "added body").unwrap();
+        assert!(updated.contains("## New Section\n\nadded body"), "got: {}", updated);
+        assert!(updated.contains("## Existing"), "existing preserved");
+    }
+
+    #[test]
+    fn update_field_replaces_last_section_to_end_of_body() {
+        // Edge case: section has no following `## ` so end-of-body
+        // is the boundary. Verifies the .unwrap_or(body.len()) path.
+        let content = "---\nrole: x\n---\n# Agent\n\n## Tail\n\nold tail content\n";
+        let updated = update_agent_md_field(content, "Tail", "new tail").unwrap();
+        assert!(updated.contains("## Tail\n\nnew tail"));
+        assert!(!updated.contains("old tail content"));
+    }
+
+    #[test]
+    fn update_field_rejects_missing_frontmatter() {
+        let content = "# Just body\n\nno frontmatter here\n";
+        let err = update_agent_md_field(content, "role", "x").unwrap_err();
+        assert!(err.contains("missing frontmatter"), "got: {}", err);
+    }
+
+    #[test]
+    fn update_field_rejects_unterminated_frontmatter() {
+        let content = "---\nrole: x\nnever-closed\n# body\n";
+        let err = update_agent_md_field(content, "role", "y").unwrap_err();
+        assert!(err.contains("Invalid frontmatter"), "got: {}", err);
+    }
+
+    #[test]
+    fn update_field_frontmatter_update_preserves_body_exactly() {
+        // The body section after --- must be byte-identical when only
+        // a frontmatter key is updated. Regression guard for the
+        // extraction: the pre-refactor code stitched body back in
+        // verbatim, and we must preserve that.
+        let body = "\n# Heading\n\nLine one.\nLine two.\n\n## Sub\n\nMore.\n";
+        let content = format!("---\nrole: a\n---{}", body);
+        let updated = update_agent_md_field(&content, "role", "b").unwrap();
+        assert!(updated.ends_with(body), "body not byte-preserved: {}", updated);
+    }
+
+    #[test]
+    fn update_field_handles_value_containing_colon() {
+        // Values with colons (URLs, ratio notation) must survive the
+        // split_once logic and round-trip correctly.
+        let content = "---\nrole: old\n---\n";
+        let updated = update_agent_md_field(content, "role", "URL: https://example.com/path").unwrap();
+        assert!(updated.contains("role: URL: https://example.com/path"), "got: {}", updated);
+    }
+
+    // ── compose_manager_wake_from_body ───────────────────────────
+    #[test]
+    fn compose_manager_wake_uses_provided_body() {
+        let out = compose_manager_wake_from_body(Some("custom manager instructions"));
+        assert!(out.contains("Workspace Manager"), "header present");
+        assert!(out.contains("custom manager instructions"), "body inlined");
+    }
+
+    #[test]
+    fn compose_manager_wake_falls_back_when_body_none() {
+        let out = compose_manager_wake_from_body(None);
+        assert!(out.contains("Workspace Manager"));
+        // Fallback uses WAKEUP_TEMPLATE_WORKSPACE — assert its trim()'d
+        // first line is in the output.
+        let template_lead = WAKEUP_TEMPLATE_WORKSPACE.trim().lines().next().unwrap_or("");
+        assert!(!template_lead.is_empty());
+        assert!(
+            out.contains(template_lead),
+            "expected template fallback to contain first line '{}', got: {}",
+            template_lead,
+            out
+        );
+    }
+
+    #[test]
+    fn compose_manager_wake_falls_back_when_body_is_empty_string() {
+        // A disk read returning "" after frontmatter strip must hit
+        // the fallback — not silently emit an empty wake prompt.
+        let out = compose_manager_wake_from_body(Some(""));
+        let template_lead = WAKEUP_TEMPLATE_WORKSPACE.trim().lines().next().unwrap_or("");
+        assert!(out.contains(template_lead), "expected template fallback, got: {}", out);
+    }
+
+    #[test]
+    fn compose_manager_wake_strips_frontmatter_from_body() {
+        // If the disk body has its own frontmatter (e.g. a scaffolded
+        // WAKEUP.md with metadata), strip_frontmatter must run before
+        // the empty-check.
+        let body = "---\ntitle: foo\n---\nActual wake instructions here.";
+        let out = compose_manager_wake_from_body(Some(body));
+        assert!(!out.contains("title: foo"), "frontmatter leaked: {}", out);
+        assert!(out.contains("Actual wake instructions here"), "body survived: {}", out);
+    }
+
+    // ── compose_agent_wake_from_body ─────────────────────────────
+    #[test]
+    fn compose_agent_wake_returns_none_on_none_input() {
+        assert!(compose_agent_wake_from_body(None).is_none());
+    }
+
+    #[test]
+    fn compose_agent_wake_wraps_body_with_header() {
+        let out = compose_agent_wake_from_body(Some("  agent instructions  \n"))
+            .expect("body present -> Some");
+        assert!(out.contains("K2SO Heartbeat Wake"));
+        assert!(
+            out.contains("agent instructions"),
+            "body trimmed and included: {}",
+            out
+        );
+        // Leading/trailing whitespace on input is trimmed in the
+        // output body — the header+separator structure is preserved.
+        assert!(!out.contains("  agent instructions"), "leading spaces should be trimmed");
+    }
+
+    #[test]
+    fn compose_agent_wake_does_not_strip_frontmatter() {
+        // Unlike manager wake, the agent composer operates on the body
+        // as-given — if the caller wants frontmatter stripped, they do
+        // it before calling. Verify the "as-given" behavior by passing
+        // frontmatter and seeing it stay.
+        let body = "---\nname: foo\n---\nbody";
+        let out = compose_agent_wake_from_body(Some(body)).unwrap();
+        assert!(out.contains("name: foo"), "agent composer keeps frontmatter: {}", out);
+    }
+
+    // ── parse_work_item_content ──────────────────────────────────
+    #[test]
+    fn parse_work_item_full_frontmatter() {
+        let content = "---\ntitle: Add OAuth\npriority: high\ntype: feature\nsource: feedback\ncreated: 2026-04-01\nassigned_by: user\n---\n\nBody text here that describes the work.";
+        let item = parse_work_item_content(content, "add-oauth.md", "inbox");
+        assert_eq!(item.title, "Add OAuth");
+        assert_eq!(item.priority, "high");
+        assert_eq!(item.item_type, "feature");
+        assert_eq!(item.source, "feedback");
+        assert_eq!(item.assigned_by, "user");
+        assert_eq!(item.folder, "inbox");
+        assert_eq!(item.filename, "add-oauth.md");
+        assert!(item.body_preview.contains("Body text here"));
+    }
+
+    #[test]
+    fn parse_work_item_missing_fields_use_defaults() {
+        let content = "---\ntitle: minimal\n---\nbody";
+        let item = parse_work_item_content(content, "m.md", "active");
+        assert_eq!(item.title, "minimal");
+        assert_eq!(item.priority, "normal"); // default
+        assert_eq!(item.item_type, "task"); // default
+        assert_eq!(item.source, "manual"); // default
+        assert_eq!(item.assigned_by, "unknown"); // default
+    }
+
+    #[test]
+    fn parse_work_item_no_frontmatter_defaults_all_but_body() {
+        let content = "just a body with no metadata";
+        let item = parse_work_item_content(content, "raw.md", "inbox");
+        assert_eq!(item.title, "");
+        assert_eq!(item.body_preview, "just a body with no metadata");
+    }
+
+    #[test]
+    fn parse_work_item_body_preview_truncates_over_120_chars() {
+        let long_body = "x".repeat(300);
+        let content = format!("---\ntitle: t\n---\n{}", long_body);
+        let item = parse_work_item_content(&content, "l.md", "inbox");
+        // Preview is 120 + "..." — exact char count matters.
+        assert!(item.body_preview.ends_with("..."), "preview: {:?}", item.body_preview);
+        let without_ellipsis = item.body_preview.trim_end_matches("...");
+        assert_eq!(without_ellipsis.chars().count(), 120);
+    }
+
+    // ── FakeFs-driven demonstration ──────────────────────────────
+    //
+    // These tests show the end-state pattern: use FakeFs to scaffold
+    // a workspace tree, call the Fs trait to read content, then feed
+    // that content into the pure parser. No tempdir, no disk I/O.
+    //
+    // Once `read_work_item` is threaded with `&dyn Fs`, these tests
+    // can drop the manual read_to_string and just pass the fs into a
+    // higher-level helper. For now they demonstrate the pattern and
+    // prove the integration (pure parser + FakeFs storage).
+
+    #[test]
+    fn fake_fs_scaffolds_agent_work_tree_and_parses_items() {
+        use crate::fs_abstract::{FakeFs, Fs};
+        use std::path::Path;
+
+        let fs = FakeFs::new();
+        fs.insert_tree(
+            Path::new("/proj/.k2so/agents/backend-eng/work"),
+            serde_json::json!({
+                "inbox": {
+                    "build-oauth.md": "---\ntitle: Build OAuth\npriority: high\ntype: feature\n---\n\nOAuth endpoints required.",
+                    "fix-crash.md": "---\ntitle: Fix startup crash\npriority: urgent\ntype: bug\nsource: crash\n---\n\nCrashes on launch.",
+                },
+                "active": {},
+                "done": {},
+            }),
+        );
+
+        let inbox_dir = Path::new("/proj/.k2so/agents/backend-eng/work/inbox");
+        let mut entries = fs.read_dir(inbox_dir).unwrap();
+        entries.sort();
+
+        let items: Vec<WorkItem> = entries
+            .iter()
+            .map(|p| {
+                let content = fs.read_to_string(p).unwrap();
+                let filename = p.file_name().unwrap().to_string_lossy();
+                parse_work_item_content(&content, &filename, "inbox")
+            })
+            .collect();
+
+        assert_eq!(items.len(), 2);
+        let oauth = items.iter().find(|i| i.filename == "build-oauth.md").unwrap();
+        assert_eq!(oauth.title, "Build OAuth");
+        assert_eq!(oauth.priority, "high");
+        let crash = items.iter().find(|i| i.filename == "fix-crash.md").unwrap();
+        assert_eq!(crash.priority, "urgent");
+        assert_eq!(crash.source, "crash");
+
+        // Sanity: FakeFs's write counter shows exactly one write per
+        // file (the insert_tree calls). Good regression guard for
+        // "does my test accidentally double-write?"
+        assert_eq!(fs.write_count(&inbox_dir.join("build-oauth.md")), 1);
+        assert_eq!(fs.write_count(&inbox_dir.join("fix-crash.md")), 1);
+    }
+
+    #[test]
+    fn fake_fs_simulates_missing_agent_work_dir() {
+        use crate::fs_abstract::{FakeFs, Fs};
+        use std::path::Path;
+
+        let fs = FakeFs::new();
+        // Intentionally do NOT scaffold the inbox — simulate a fresh
+        // agent directory with no work yet. The caller must handle
+        // NotFound gracefully.
+        let err = fs
+            .read_dir(Path::new("/proj/.k2so/agents/solo/work/inbox"))
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn fake_fs_verifies_frontmatter_round_trip_via_update_field() {
+        // End-to-end: scaffold an AGENT.md in FakeFs, read it out,
+        // pass through the extracted pure updater, write the result
+        // back. Confirm the write went through and content matches.
+        use crate::fs_abstract::{FakeFs, Fs};
+        use std::path::Path;
+
+        let fs = FakeFs::new();
+        let agent_md = Path::new("/proj/.k2so/agents/rust-eng/AGENT.md");
+        let original = "---\nrole: rust engineer\ntype: custom\n---\n# Rust engineer\n\nFocus: backend, systems.";
+        fs.insert_file(agent_md, original.as_bytes());
+
+        let content = fs.read_to_string(agent_md).unwrap();
+        let updated = update_agent_md_field(&content, "role", "principal rust engineer").unwrap();
+        fs.write(agent_md, updated.as_bytes()).unwrap();
+
+        let final_content = fs.read_to_string(agent_md).unwrap();
+        assert!(final_content.contains("role: principal rust engineer"));
+        assert!(final_content.contains("type: custom"));
+        assert!(final_content.contains("# Rust engineer"));
+        // write_count should be 2: insert_file (1) + write (1).
+        assert_eq!(fs.write_count(agent_md), 2);
     }
 }

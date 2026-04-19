@@ -105,6 +105,7 @@ const SEARCH_MAX_RESULTS: usize = 20;
 /// Returns matching paths relative to `workspace_root`, sorted by relevance.
 /// Used by the `search_files` LLM tool.
 pub fn search_files(workspace_root: &str, query: &str) -> String {
+    let _h = crate::perf_hist!("file_search");
     let root = Path::new(workspace_root);
     if !root.is_dir() {
         return format!("Not a directory: {workspace_root}");

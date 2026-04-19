@@ -605,6 +605,8 @@ fn run_terminal_polling(app_handle: &AppHandle) {
 
         if !RUNNING.load(Ordering::Relaxed) { break; }
 
+        let _poll_tick = crate::perf_hist!("terminal_poll_tick");
+
         let guard = STATE.lock();
         let state = match guard.as_ref() {
             Some(s) => s,
@@ -637,6 +639,7 @@ fn run_terminal_polling(app_handle: &AppHandle) {
             if let Ok(grid) = manager.get_grid(tid) {
                 // Simple change detection: hash the grid text content
                 let hash = {
+                    let _h = crate::perf_hist!("grid_hash");
                     use std::hash::{Hash, Hasher};
                     let mut hasher = std::collections::hash_map::DefaultHasher::new();
                     for line in &grid.lines {

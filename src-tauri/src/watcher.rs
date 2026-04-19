@@ -92,12 +92,22 @@ pub fn fs_watch_dir(app: tauri::AppHandle, path: String) -> Result<(), String> {
             }
 
             // Emit one event per unique path (deduplicated)
+            let batch_size = coalesced.len();
             for (path, kind) in &coalesced {
                 let payload = FsChangePayload {
                     path: path.clone(),
                     kind: kind.clone(),
                 };
                 let _ = app_handle.emit("fs://change", &payload);
+            }
+            if crate::perf::is_enabled() {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[perf] fs_watcher_batch — batch_size={} emit_count={}",
+                    batch_size,
+                    batch_size,
+                );
             }
         }
     });

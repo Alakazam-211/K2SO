@@ -365,6 +365,7 @@ pub fn broadcast_terminal_output(state: &CompanionState, terminal_id: &str, line
 /// Broadcast a CompactLine grid update to subscribed clients.
 /// If a client has mobile_dims set, the grid is reflowed to those dimensions.
 pub fn broadcast_terminal_grid(state: &CompanionState, terminal_id: &str, grid: &crate::terminal::grid_types::GridUpdate) {
+    let _h = crate::perf_hist!("broadcast_grid");
     let clients = state.ws_clients.lock();
 
     // Cache the desktop JSON (no reflow) — only computed if needed
