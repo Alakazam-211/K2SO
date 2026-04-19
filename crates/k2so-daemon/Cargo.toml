@@ -36,6 +36,12 @@ serde_json = "1"
 # chrono — agent-reply event payload needs an RFC-3339 timestamp.
 chrono = { version = "0.4", features = ["serde"] }
 
+# rusqlite — the per-project heartbeat-schedule route in cli.rs pokes
+# the `projects` table directly (it's the only daemon code that touches
+# a column k2so-core doesn't already wrap). Bundled feature matches
+# what k2so-core uses so rusqlite resolves to a single crate version.
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 # Futures helpers (Stream trait / StreamExt / SinkExt) needed by
 # tokio-tungstenite's async message loop.
 futures-util = "0.3"

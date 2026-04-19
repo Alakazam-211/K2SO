@@ -26,6 +26,7 @@ pub mod commands;
 pub mod delegate;
 pub mod events;
 pub mod heartbeat;
+pub mod reviews;
 pub mod scheduler;
 pub mod session;
 pub mod settings;

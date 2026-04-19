@@ -660,25 +660,25 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                         }
                     }
                     "/cli/reviews" => {
-                        crate::commands::k2so_agents::k2so_agents_review_queue_inner(&project_path)
+                        k2so_core::agents::reviews::review_queue(&project_path)
                             .map(|items| serde_json::to_string(&items).unwrap_or_default())
                     }
                     "/cli/review/approve" => {
                         let agent = params.get("agent").cloned().unwrap_or_default();
                         let branch = params.get("branch").cloned().unwrap_or_default();
-                        crate::commands::k2so_agents::k2so_agents_review_approve(project_path, branch, agent)
+                        k2so_core::agents::reviews::review_approve(project_path, branch, agent)
                             .map(|msg| serde_json::json!({"success": true, "message": msg}).to_string())
                     }
                     "/cli/review/reject" => {
                         let agent = params.get("agent").cloned().unwrap_or_default();
                         let reason = params.get("reason").cloned();
-                        crate::commands::k2so_agents::k2so_agents_review_reject(project_path, agent, reason)
+                        k2so_core::agents::reviews::review_reject(project_path, agent, reason)
                             .map(|_| r#"{"success":true}"#.to_string())
                     }
                     "/cli/review/feedback" => {
                         let agent = params.get("agent").cloned().unwrap_or_default();
                         let feedback = params.get("feedback").cloned().unwrap_or_default();
-                        crate::commands::k2so_agents::k2so_agents_review_request_changes(project_path, agent, feedback)
+                        k2so_core::agents::reviews::review_request_changes(project_path, agent, feedback)
                             .map(|_| r#"{"success":true}"#.to_string())
                     }
                     "/cli/mode" => {

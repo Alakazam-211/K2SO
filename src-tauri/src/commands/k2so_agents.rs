@@ -1847,104 +1847,22 @@ You are launched into a dedicated worktree with your task already set up.
 // (duplicate of k2so_core helpers — removed during skill_content migration)
 
 // ── Review Queue ────────────────────────────────────────────────────────
+// Core types + logic live in `k2so_core::agents::reviews`. We re-export
+// the types so the Tauri command signatures below (and any callers that
+// imported from this module) keep their shapes.
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReviewDiffFile {
-    pub path: String,
-    pub status: String,
-    pub additions: u32,
-    pub deletions: u32,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReviewItem {
-    pub agent_name: String,
-    pub branch: String,
-    pub worktree_path: Option<String>,
-    pub work_items: Vec<WorkItem>,
-    pub diff_summary: Vec<ReviewDiffFile>,
-}
+pub use k2so_core::agents::reviews::{ReviewDiffFile, ReviewItem};
 
 /// Get the review queue — agents with completed work in worktree branches.
 #[tauri::command]
 pub async fn k2so_agents_review_queue(project_path: String) -> Result<Vec<ReviewItem>, String> {
-    tokio::task::spawn_blocking(move || k2so_agents_review_queue_inner(&project_path))
+    tokio::task::spawn_blocking(move || k2so_core::agents::reviews::review_queue(&project_path))
         .await
         .map_err(|e| format!("review_queue task failed: {}", e))?
 }
 
 pub fn k2so_agents_review_queue_inner(project_path: &str) -> Result<Vec<ReviewItem>, String> {
-    let dir = agents_dir(&project_path);
-    if !dir.exists() {
-        return Ok(vec![]);
-    }
-
-    // Get worktrees for this project
-    let worktrees = crate::git::list_worktrees(&project_path);
-
-    let mut reviews = Vec::new();
-    let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
-
-    for entry in entries.flatten() {
-        if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let done_dir = agent_work_dir(&project_path, &name, "done");
-
-        if !done_dir.exists() {
-            continue;
-        }
-
-        // Collect done items
-        let done_items: Vec<WorkItem> = fs::read_dir(&done_dir)
-            .ok()
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .filter(|e| e.path().extension().map_or(false, |ext| ext == "md"))
-                    .filter_map(|e| read_work_item(&e.path(), "done"))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        if done_items.is_empty() {
-            continue;
-        }
-
-        // Find worktree branch for this agent (convention: branch name contains agent name)
-        let matching_worktree = worktrees.iter().find(|wt| {
-            !wt.is_main && (wt.branch.contains(&name) || wt.branch.starts_with("agent/"))
-        });
-
-        // Get diff summary if we have a branch
-        let diff_summary: Vec<ReviewDiffFile> = if let Some(wt) = matching_worktree {
-            crate::git::diff_between_branches(&project_path, "main", &wt.branch)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|f| ReviewDiffFile {
-                    path: f.path,
-                    status: f.status,
-                    additions: f.additions,
-                    deletions: f.deletions,
-                })
-                .collect()
-        } else {
-            vec![]
-        };
-
-        reviews.push(ReviewItem {
-            agent_name: name,
-            branch: matching_worktree.map(|wt| wt.branch.clone()).unwrap_or_default(),
-            worktree_path: matching_worktree.map(|wt| wt.path.clone()),
-            work_items: done_items,
-            diff_summary,
-        });
-    }
-
-    Ok(reviews)
+    k2so_core::agents::reviews::review_queue(project_path)
 }
 
 /// Approve an agent's work — merge branch, clean up worktree, archive done items.
@@ -2006,169 +1924,38 @@ pub fn k2so_agent_complete(
     }
 }
 
-/// 1. Merges the agent's branch into main
-/// 2. Removes the worktree directory
-/// 3. Deletes the branch (it's now merged)
-/// 4. Archives done items (deletes them — the work is in git history now)
-/// 5. Unlocks the agent
+/// Approve the agent's branch — merge + cleanup. Core logic lives in
+/// `k2so_core::agents::reviews::review_approve`.
 #[tauri::command]
 pub fn k2so_agents_review_approve(
     project_path: String,
     branch: String,
     agent_name: String,
 ) -> Result<String, String> {
-    // 1. Merge the branch into main
-    let result = crate::git::merge_branch(&project_path, &branch)?;
-
-    if !result.success {
-        return Err(format!("Merge conflicts: {}", result.conflicts.join(", ")));
-    }
-
-    // 2. Remove the worktree (find it by branch name) + cleanup DB workspace record
-    let worktrees = crate::git::list_worktrees(&project_path);
-    if let Some(wt) = worktrees.iter().find(|wt| wt.branch == branch) {
-        let wt_path = wt.path.clone();
-        let _ = crate::git::remove_worktree(&project_path, &wt_path, true);
-
-        // Remove the workspace DB record so it disappears from the UI
-        {
-            let db = crate::db::shared();
-            let conn = db.lock();
-            let _ = conn.execute(
-                "DELETE FROM workspaces WHERE worktree_path = ?1",
-                rusqlite::params![wt_path],
-            );
-        }
-    }
-
-    // 3. Delete the branch (now merged)
-    let _ = crate::git::delete_branch(&project_path, &branch);
-
-    // 4. Archive done items for this agent
-    let done_dir = agent_work_dir(&project_path, &agent_name, "done");
-    if done_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&done_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "md") {
-                    let _ = fs::remove_file(&path);
-                }
-            }
-        }
-    }
-
-    // 5. Unlock the agent so it can pick up new work
-    let _ = k2so_agents_unlock(project_path, agent_name);
-
-    Ok(format!("Approved and merged: {} files", result.merged_files))
+    k2so_core::agents::reviews::review_approve(project_path, branch, agent_name)
 }
 
-/// Reject an agent's work — clean up worktree, move done items back to inbox.
-///
-/// This is the all-in-one reject command. In one step, K2SO:
-/// 1. Removes the worktree directory (discards the code)
-/// 2. Deletes the branch
-/// 3. Moves done items back to inbox (so the agent retries on next launch)
-/// 4. Creates a high-priority feedback file explaining what went wrong
-/// 5. Unlocks the agent
+/// Reject the agent's work — clean up worktree, restore inbox, write
+/// optional feedback. Core logic lives in
+/// `k2so_core::agents::reviews::review_reject`.
 #[tauri::command]
 pub fn k2so_agents_review_reject(
     project_path: String,
     agent_name: String,
     reason: Option<String>,
 ) -> Result<(), String> {
-    let done_dir = agent_work_dir(&project_path, &agent_name, "done");
-    let inbox_dir = agent_work_dir(&project_path, &agent_name, "inbox");
-
-    if !done_dir.exists() {
-        return Ok(());
-    }
-
-    // 1. Find and remove the worktree + branch + DB record for this agent
-    let worktrees = crate::git::list_worktrees(&project_path);
-    for wt in worktrees.iter().filter(|wt| wt.branch.starts_with(&format!("agent/{}/", agent_name))) {
-        let wt_path = wt.path.clone();
-        if let Err(e) = crate::git::remove_worktree(&project_path, &wt_path, true) {
-            log_debug!("[review-reject] Failed to remove worktree {}: {}", wt_path, e);
-        }
-        if let Err(e) = crate::git::delete_branch(&project_path, &wt.branch) {
-            log_debug!("[review-reject] Failed to delete branch {}: {}", wt.branch, e);
-        }
-        // Remove workspace DB record
-        {
-            let db = crate::db::shared();
-            let conn = db.lock();
-            let _ = conn.execute(
-                "DELETE FROM workspaces WHERE worktree_path = ?1",
-                rusqlite::params![wt_path],
-            );
-        }
-    }
-
-    // 2. Move all done items back to inbox (strip worktree info from frontmatter)
-    fs::create_dir_all(&inbox_dir).map_err(|e| format!("Failed to create inbox dir: {}", e))?;
-    if let Ok(entries) = fs::read_dir(&done_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "md") {
-                let filename = path.file_name().unwrap();
-                let target = inbox_dir.join(filename);
-                // Strip old worktree info so a fresh worktree gets created on retry
-                if let Ok(content) = fs::read_to_string(&path) {
-                    let cleaned = strip_worktree_from_frontmatter(&content);
-                    if let Err(e) = atomic_write(&target, &cleaned) {
-                        log_debug!("[review-reject] Failed to write cleaned work item: {}", e);
-                    }
-                } else {
-                    if let Err(e) = fs::rename(&path, &target) {
-                        log_debug!("[review-reject] Failed to move work item: {}", e);
-                    }
-                }
-                let _ = fs::remove_file(&path);
-            }
-        }
-    }
-
-    // 3. Create a feedback file in inbox if reason provided
-    if let Some(reason) = reason {
-        let now = simple_date();
-        let content = format!(
-            "---\ntitle: Review Feedback — Work Rejected\npriority: high\nassigned_by: reviewer\ncreated: {}\ntype: feedback\n---\n\n## Rejection Reason\n\n{}\n\n## Action Required\n\nReview the feedback above and address the issues in your next attempt.\nA fresh worktree will be created when you are relaunched.\n",
-            now, reason
-        );
-        let filename = format!("review-feedback-{}.md", now);
-        let path = inbox_dir.join(&filename);
-        atomic_write(&path, &content)?;
-    }
-
-    // 4. Unlock the agent
-    let _ = k2so_agents_unlock(project_path, agent_name);
-
-    Ok(())
+    k2so_core::agents::reviews::review_reject(project_path, agent_name, reason)
 }
 
-/// Request changes on an agent's work — create feedback file in inbox.
+/// Request changes — drop a feedback file in inbox, don't tear down
+/// the worktree. Core logic in `k2so_core::agents::reviews::review_request_changes`.
 #[tauri::command]
 pub fn k2so_agents_review_request_changes(
     project_path: String,
     agent_name: String,
     feedback: String,
 ) -> Result<(), String> {
-    let inbox_dir = agent_work_dir(&project_path, &agent_name, "inbox");
-    if !inbox_dir.exists() {
-        fs::create_dir_all(&inbox_dir).map_err(|e| e.to_string())?;
-    }
-
-    let now = simple_date();
-    let content = format!(
-        "---\ntitle: Review Feedback — Changes Requested\npriority: high\nassigned_by: reviewer\ncreated: {}\ntype: feedback\n---\n\n## Requested Changes\n\n{}\n\n## Action Required\n\nAddress the feedback above, then move this item to done/ when complete.\n",
-        now, feedback
-    );
-    let filename = format!("review-feedback-{}.md", now);
-    let path = inbox_dir.join(&filename);
-    atomic_write(&path, &content)?;
-
-    Ok(())
+    k2so_core::agents::reviews::review_request_changes(project_path, agent_name, feedback)
 }
 
 // ── Heartbeat Triage (Workspace State) ──────────────────────────────────
@@ -2908,36 +2695,7 @@ fn uninstall_heartbeat_cron() -> Result<(), String> {
     Ok(())
 }
 
-// ── Utility ─────────────────────────────────────────────────────────────
-
-fn simple_date() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let days = now / 86400;
-    let mut y = 1970i64;
-    let mut remaining = days as i64;
-    loop {
-        let days_in_year = if is_leap(y) { 366 } else { 365 };
-        if remaining < days_in_year { break; }
-        remaining -= days_in_year;
-        y += 1;
-    }
-    let months = [31, if is_leap(y) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let mut m = 1;
-    for &dim in &months {
-        if remaining < dim { break; }
-        remaining -= dim;
-        m += 1;
-    }
-    format!("{:04}-{:02}-{:02}", y, m, remaining + 1)
-}
-
-fn is_leap(y: i64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
-}
-
+// `simple_date` + `is_leap` moved to k2so_core::agents::session.
 // `update_assigned_by` moved to k2so_core::agents::delegate (re-exported).
 
 // ── Agent Editor ───────────────────────────────────────────────────────

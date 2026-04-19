@@ -122,7 +122,7 @@ pub fn k2so_agents_clear_session_id(
 // std::time rather than chrono so pre-migration tooling that reads the
 // file doesn't have to match a Rust formatting crate.
 
-pub(crate) fn simple_date() -> String {
+pub fn simple_date() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

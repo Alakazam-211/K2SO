@@ -428,6 +428,149 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             }
         }
 
+        // ── Review queue ────────────────────────────────────────────
+        "/cli/reviews" => match need_project(params) {
+            Ok(p) => respond(k2so_core::agents::reviews::review_queue(&p)),
+            Err(r) => r,
+        },
+        "/cli/review/approve" => match need_project(params) {
+            Ok(p) => {
+                let branch = str_param(params, "branch");
+                let agent = str_param(params, "agent");
+                match k2so_core::agents::reviews::review_approve(p, branch, agent) {
+                    Ok(msg) => CliResponse::ok_json(
+                        serde_json::json!({"success": true, "message": msg}).to_string(),
+                    ),
+                    Err(e) => CliResponse::bad_request(e),
+                }
+            }
+            Err(r) => r,
+        },
+        "/cli/review/reject" => match need_project(params) {
+            Ok(p) => respond_unit(k2so_core::agents::reviews::review_reject(
+                p,
+                str_param(params, "agent"),
+                opt_param(params, "reason"),
+            )),
+            Err(r) => r,
+        },
+        "/cli/review/feedback" => match need_project(params) {
+            Ok(p) => respond_unit(k2so_core::agents::reviews::review_request_changes(
+                p,
+                str_param(params, "agent"),
+                str_param(params, "feedback"),
+            )),
+            Err(r) => r,
+        },
+
+        // ── Workspace states ────────────────────────────────────────
+        "/cli/states/list" => {
+            let db = k2so_core::db::shared();
+            let conn = db.lock();
+            match k2so_core::db::schema::WorkspaceState::list(&conn) {
+                Ok(rows) => CliResponse::ok_json(
+                    serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string()),
+                ),
+                Err(e) => CliResponse::bad_request(e.to_string()),
+            }
+        }
+        "/cli/states/get" => {
+            let id = str_param(params, "id");
+            let db = k2so_core::db::shared();
+            let conn = db.lock();
+            match k2so_core::db::schema::WorkspaceState::get(&conn, &id) {
+                Ok(s) => CliResponse::ok_json(serde_json::to_string(&s).unwrap_or_default()),
+                Err(_) => CliResponse::bad_request(format!("State '{}' not found", id)),
+            }
+        }
+        "/cli/states/set" => match need_project(params) {
+            Ok(p) => {
+                let state_id = str_param(params, "state_id");
+                match k2so_core::agents::settings::update_project_setting(&p, "tier_id", &state_id)
+                {
+                    Ok(()) => {
+                        k2so_core::agent_hooks::emit(
+                            k2so_core::agent_hooks::HookEvent::SyncProjects,
+                            serde_json::Value::Null,
+                        );
+                        CliResponse::ok_json(
+                            serde_json::json!({"success": true, "stateId": state_id})
+                                .to_string(),
+                        )
+                    }
+                    Err(e) => CliResponse::bad_request(e),
+                }
+            }
+            Err(r) => r,
+        },
+
+        // ── Per-project heartbeat schedule (distinct from per-agent) ─
+        "/cli/heartbeat/schedule" => match need_project(params) {
+            Ok(p) => {
+                let db = k2so_core::db::shared();
+                let conn = db.lock();
+
+                if let Some(mode) = opt_param(params, "mode") {
+                    let schedule = opt_param(params, "schedule");
+                    let hb_enabled = if mode == "off" { "0" } else { "1" };
+
+                    let res = conn
+                        .execute(
+                            "UPDATE projects SET heartbeat_mode = ?1, heartbeat_schedule = ?2, heartbeat_enabled = ?3 WHERE path = ?4",
+                            rusqlite::params![mode, schedule, hb_enabled, p],
+                        )
+                        .map(|_| ())
+                        .map_err(|e| format!("DB update failed: {}", e));
+                    drop(conn);
+
+                    match res {
+                        Ok(()) => {
+                            // Nudge the Tauri side to refresh its
+                            // launchd/cron installer via SyncProjects.
+                            k2so_core::agent_hooks::emit(
+                                k2so_core::agent_hooks::HookEvent::SyncProjects,
+                                serde_json::Value::Null,
+                            );
+                            CliResponse::ok_json(
+                                serde_json::json!({
+                                    "success": true,
+                                    "mode": mode,
+                                    "schedule": schedule,
+                                })
+                                .to_string(),
+                            )
+                        }
+                        Err(e) => CliResponse::bad_request(e),
+                    }
+                } else {
+                    let res = conn.query_row(
+                        "SELECT heartbeat_mode, heartbeat_schedule, heartbeat_last_fire FROM projects WHERE path = ?1",
+                        rusqlite::params![p],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, Option<String>>(1)?,
+                                row.get::<_, Option<String>>(2)?,
+                            ))
+                        },
+                    );
+                    drop(conn);
+                    match res {
+                        Ok((mode, schedule, last_fire)) => CliResponse::ok_json(
+                            serde_json::json!({
+                                "mode": mode,
+                                "schedule": schedule,
+                                "lastFire": last_fire,
+                            })
+                            .to_string(),
+                        ),
+                        Err(e) => CliResponse::bad_request(format!("Project not found: {}", e)),
+                    }
+                }
+            }
+            Err(r) => r,
+        },
+
         // ── Hook diagnostic ─────────────────────────────────────────
         "/cli/hooks/status" => {
             let limit = params
