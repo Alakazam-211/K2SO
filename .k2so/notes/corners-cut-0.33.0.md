@@ -202,6 +202,25 @@ prerequisites for remaining corners.
 
 Commit `075ef534`. Details folded into corner #1 above.
 
+### First route migrated: /hook/complete
+
+Commit `a3136d74`. `k2so_core::agent_hooks::handle_hook_complete`
+takes a pre-parsed params map, fires `HookEvent::AgentLifecycle`
+through the registered sink, and syncs `agent_sessions.status` via
+`db::shared()`. Both the daemon and src-tauri's existing server now
+call this one function so their behavior can't drift — verified with
+a Python WS subscriber that watches a real `/hook/complete` fired via
+curl to the daemon.
+
+Pattern for the remaining routes: each handler moves into a
+`k2so_core::agent_hooks::handle_*` function that takes a
+`&HashMap<String, String>` of params and returns a response body
+string; the daemon + src-tauri HTTP layers each keep their own token
+validation and serialization but delegate the actual work. Routes
+that currently call into `commands::k2so_agents::*` are blocked on
+that module moving into k2so-core (or bridge traits if the move is
+deferred). See "Remaining for corner #3" below.
+
 ### Daemon -> Tauri WS event channel (/events)
 
 Commit `385d0977`. New module `crates/k2so-daemon/src/events.rs`
@@ -223,6 +242,42 @@ upgrade so unauthenticated clients see a 403 rather than a dangling
 close. Reconnect backoff is 2/4/8/16/30s capped; daemon-not-installed
 case is treated the same as "daemon transient error" — no error noise
 when running against the pre-0.33.0 binary.
+
+---
+
+---
+
+## Remaining for corner #3 ("daemon serves /hook/* + /cli/*")
+
+**Routes still owned exclusively by src-tauri's server:**
+
+- `/hook/*` — **all migrated.** There's only one hook endpoint
+  (`/hook/complete`).
+- `/cli/*` — **73 branches remain in src-tauri.** Most delegate to
+  `crate::commands::k2so_agents::*` (~9k lines). The blocker isn't
+  the HTTP layer; it's that `commands::k2so_agents` has to either
+  move into k2so-core or grow a `CommandDispatcher` bridge trait.
+
+**Recommended next slice (heartbeat-critical for the persistent-agents
+feature):** migrate these 9 public functions from
+`src-tauri/src/commands/k2so_agents.rs` into `k2so-core`:
+`k2so_heartbeat_{add,list,remove,set_enabled,edit,rename,fires_list}`,
+`k2so_agents_heartbeat_tick`, `stamp_heartbeat_fired`. All are already
+Tauri-free internally (uses `db::shared()` + pure helpers from the
+same file). Pull the shared pure helpers (`resolve_project_id`,
+`agents_dir`, `agent_dir`, `find_primary_agent`, `agent_wakeup_path`,
+etc.) alongside them.
+
+After that slice lands, the daemon's `/cli/heartbeat{,/add,/list,…}`
+routes can migrate as thin 3-line wrappers around the extracted core
+fns — the same pattern `/hook/complete` uses.
+
+**Full scope beyond heartbeat:** the remaining ~64 /cli/* routes
+require the rest of `commands::k2so_agents.rs` (and smaller chunks
+of `commands::{projects, git, filesystem, settings, terminal}`) to
+move into k2so-core. Estimate: 2–3 focused days if done carefully,
+more if caught by circular deps. Not required for the "agents run
+when lid is closed" demo — only the heartbeat slice is.
 
 ---
 
