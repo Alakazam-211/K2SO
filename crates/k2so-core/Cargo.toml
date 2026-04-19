@@ -51,3 +51,20 @@ ignore = "0.4"
 # Character-encoding detection for llm::file_index when files are mixed
 # UTF-8 / UTF-16 / Latin-1.
 encoding_rs = "0.8"
+
+# Terminal backend — VT-compliant parser + PTY management + reflow.
+alacritty_terminal = "0.26.0-rc1"
+portable-pty = "0.8"
+
+# Glyph rendering (bitmap renderer path) + QOI image encoding for mobile
+# companion snapshots.
+fontdue = "0.9"
+qoi = "0.4"
+
+# Low-level primitives used by the alacritty PTY event loop.
+libc = "0.2"
+polling = "3"
+rustix = { version = "1", features = ["termios", "process"] }
+mio = { version = "1", features = ["os-poll", "os-ext"] }
+signal-hook = "0.3"
+signal-hook-mio = { version = "0.2", features = ["support-v1_0"] }

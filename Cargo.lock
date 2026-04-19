@@ -2960,16 +2960,26 @@ dependencies = [
 name = "k2so-core"
 version = "0.33.0-dev"
 dependencies = [
+ "alacritty_terminal",
  "chrono",
  "dirs 5.0.1",
  "encoding_rs",
+ "fontdue",
  "ignore",
+ "libc",
  "llama-cpp-2",
+ "mio",
  "parking_lot",
+ "polling",
+ "portable-pty",
+ "qoi",
  "reqwest 0.12.28",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
+ "signal-hook 0.3.18",
+ "signal-hook-mio",
  "uuid",
 ]
 

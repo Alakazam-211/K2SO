@@ -29,9 +29,11 @@ macro_rules! log_debug {
 }
 
 pub mod db;
+pub mod hook_config;
 pub mod llm;
 pub mod perf;
 pub mod push;
+pub mod terminal;
 
 #[doc(hidden)]
 pub fn __scaffolding_marker() {}

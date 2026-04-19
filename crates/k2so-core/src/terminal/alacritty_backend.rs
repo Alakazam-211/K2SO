@@ -18,19 +18,19 @@ use alacritty_terminal::tty;
 use alacritty_terminal::Term;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Rgb};
 
-use tauri::{AppHandle, Emitter};
-
+use super::event_sink::TerminalEventSink;
 use super::font_renderer::GlyphCache;
 use super::grid_types::*;
 
 // ── K2SO Event Listener ──────────────────────────────────────────────────
 
-/// Event listener that forwards alacritty terminal events to a channel
-/// for the grid emission thread to process.
+/// Event listener that forwards alacritty terminal events to the active
+/// [`TerminalEventSink`] (or onto the wakeup channel, for grid-redraw
+/// triggers).
 #[derive(Clone)]
 struct K2SOListener {
     wakeup_tx: mpsc::Sender<()>,
-    app_handle: AppHandle,
+    event_sink: Arc<dyn TerminalEventSink>,
     id: String,
 }
 
@@ -41,29 +41,17 @@ impl EventListener for K2SOListener {
                 let _ = self.wakeup_tx.send(());
             }
             AlacEvent::Title(title) => {
-                let _ = self.app_handle.emit(
-                    &format!("terminal:title:{}", self.id),
-                    &title,
-                );
+                self.event_sink.on_title(&self.id, &title);
             }
             AlacEvent::Bell => {
-                let _ = self.app_handle.emit(
-                    &format!("terminal:bell:{}", self.id),
-                    (),
-                );
+                self.event_sink.on_bell(&self.id);
             }
             AlacEvent::ChildExit(status) => {
                 let code = status.code().unwrap_or(-1);
-                let _ = self.app_handle.emit(
-                    &format!("terminal:exit:{}", self.id),
-                    serde_json::json!({ "exitCode": code }),
-                );
+                self.event_sink.on_exit(&self.id, code);
             }
             AlacEvent::Exit => {
-                let _ = self.app_handle.emit(
-                    &format!("terminal:exit:{}", self.id),
-                    serde_json::json!({ "exitCode": 0 }),
-                );
+                self.event_sink.on_exit(&self.id, 0);
             }
             _ => {}
         }
@@ -234,7 +222,11 @@ struct AlacrittyTerminalInstance {
     /// need to emit lifecycle events ("terminal about to die", etc.)
     /// don't need to thread a separate handle through every method.
     #[allow(dead_code)]
-    app_handle: AppHandle,
+    /// Sink the listener + emission loop forward events through. Held on
+    /// the instance so lifecycle paths can reuse it if they ever grow
+    /// their own emissions.
+    #[allow(dead_code)]
+    event_sink: Arc<dyn TerminalEventSink>,
     cwd: String,
     pty_raw_fd: i32,
     child_pid: Option<u32>,
@@ -278,7 +270,7 @@ impl TerminalManager {
         args: Option<Vec<String>>,
         cols: Option<u16>,
         rows: Option<u16>,
-        app_handle: AppHandle,
+        event_sink: Arc<dyn TerminalEventSink>,
     ) -> Result<(), String> {
         if self.terminals.contains_key(&id) {
             log_debug!("[terminal/alacritty] Terminal {} already exists, skipping creation", id);
@@ -304,7 +296,7 @@ impl TerminalManager {
         let scroll_wakeup_tx = wakeup_tx.clone();
         let listener = K2SOListener {
             wakeup_tx,
-            app_handle: app_handle.clone(),
+            event_sink: event_sink.clone(),
             id: id.clone(),
         };
 
@@ -343,12 +335,12 @@ impl TerminalManager {
         pty_options.env.insert("PROMPT_EOL_MARK".to_string(), String::new());
 
         // Agent lifecycle hook env vars
-        let hook_port = crate::agent_hooks::get_port();
+        let hook_port = crate::hook_config::get_port();
         if hook_port > 0 {
             pty_options.env.insert("K2SO_PORT".to_string(), hook_port.to_string());
             pty_options.env.insert("K2SO_PANE_ID".to_string(), id.clone());
             pty_options.env.insert("K2SO_TAB_ID".to_string(), id.clone());
-            pty_options.env.insert("K2SO_HOOK_TOKEN".to_string(), crate::agent_hooks::get_token().to_string());
+            pty_options.env.insert("K2SO_HOOK_TOKEN".to_string(), crate::hook_config::get_token().to_string());
         }
 
         // K2SO CLI: add cli/ directory to PATH so agents can call `k2so` commands
@@ -452,7 +444,7 @@ impl TerminalManager {
 
         // Spawn grid (DOM text) emission thread
         let term_for_grid = Arc::clone(&term);
-        let app_for_grid = app_handle.clone();
+        let sink_for_grid = event_sink.clone();
         let id_for_grid = id.clone();
         let grid_palette = palette;
         let force_full_for_grid = Arc::clone(&force_full_render);
@@ -462,7 +454,7 @@ impl TerminalManager {
             grid_emission_loop(
                 &id_for_grid,
                 &term_for_grid,
-                &app_for_grid,
+                &sink_for_grid,
                 wakeup_rx,
                 grid_palette,
                 force_full_for_grid,
@@ -473,7 +465,7 @@ impl TerminalManager {
         let instance = AlacrittyTerminalInstance {
             term,
             event_loop_sender,
-            app_handle,
+            event_sink,
             cwd: safe_cwd,
             pty_raw_fd: raw_fd,
             child_pid: Some(child_pid),
@@ -1273,13 +1265,12 @@ fn snapshot_damaged(
 fn grid_emission_loop(
     id: &str,
     term: &Arc<FairMutex<Term<K2SOListener>>>,
-    app_handle: &AppHandle,
+    event_sink: &Arc<dyn TerminalEventSink>,
     wakeup_rx: mpsc::Receiver<()>,
     palette: [Option<Rgb>; 269],
     force_full_render: Arc<std::sync::atomic::AtomicBool>,
     seqno: Arc<std::sync::atomic::AtomicU64>,
 ) {
-    let event_name = format!("terminal:grid:{}", id);
     let min_frame_interval = Duration::from_millis(16);
     let mut last_emit = std::time::Instant::now() - min_frame_interval;
 
@@ -1356,7 +1347,7 @@ fn grid_emission_loop(
             // against its last-seen seqno to gate all subsequent work.
             let next = seqno.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             update.seqno = next;
-            let _ = app_handle.emit(&event_name, &update);
+            event_sink.on_grid_update(id, &update);
         }
 
         last_emit = std::time::Instant::now();

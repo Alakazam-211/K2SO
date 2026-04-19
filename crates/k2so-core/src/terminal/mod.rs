@@ -1,12 +1,14 @@
 // Terminal backend — Alacritty-based terminal emulation with grid-based IPC.
 
 mod alacritty_backend;
+pub mod event_sink;
 pub mod grid_types;
 pub mod reflow;
 mod font_renderer;
 mod bitmap_renderer;
 
 pub use alacritty_backend::TerminalManager;
+pub use event_sink::TerminalEventSink;
 
 // ── Shared utilities ───────────────────────────────────────────────────────
 

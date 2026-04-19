@@ -7,13 +7,14 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicU16, Ordering};
 use parking_lot::Mutex;
 use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter, Manager};
 
-static HOOK_PORT: AtomicU16 = AtomicU16::new(0);
-static HOOK_TOKEN: OnceLock<String> = OnceLock::new();
+// Port + token moved to k2so_core::hook_config so the terminal backend
+// (also in k2so-core) can read them without a circular dep.
+use k2so_core::hook_config;
+
 /// Guard against concurrent triage runs for the same project path.
 static TRIAGE_IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -169,6 +170,7 @@ fn spawn_wake_pty(
         .try_state::<crate::state::AppState>()
         .ok_or_else(|| "AppState not available".to_string())?;
     {
+        let event_sink = crate::terminal_event_sink::TauriTerminalEventSink::new(app_handle.clone());
         let mut manager = state.terminal_manager.lock();
         manager
             .create(
@@ -178,7 +180,7 @@ fn spawn_wake_pty(
                 Some(args.clone()),
                 Some(120),
                 Some(38),
-                app_handle.clone(),
+                event_sink,
             )
             .map_err(|e| format!("Failed to spawn wake PTY: {}", e))?;
     }
@@ -370,14 +372,16 @@ fn triage_lock() -> &'static Mutex<HashSet<String>> {
     TRIAGE_IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// Get the port the notification server is listening on.
+/// Get the port the notification server is listening on. Thin
+/// re-export kept for existing callers (`crate::agent_hooks::get_port`);
+/// the real static lives in `k2so_core::hook_config`.
 pub fn get_port() -> u16 {
-    HOOK_PORT.load(Ordering::Relaxed)
+    hook_config::get_port()
 }
 
 /// Get the auth token for hook requests.
 pub fn get_token() -> &'static str {
-    HOOK_TOKEN.get().map(|s| s.as_str()).unwrap_or("")
+    hook_config::get_token()
 }
 
 /// Generate a cryptographically secure random hex token.
@@ -538,10 +542,10 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
         .local_addr()
         .map_err(|e| format!("read bound port: {}", e))?
         .port();
-    HOOK_PORT.store(port, Ordering::Relaxed);
+    hook_config::set_port(port);
 
     let token = generate_token();
-    let _ = HOOK_TOKEN.set(token.clone());
+    hook_config::set_token(token.clone());
     log_debug!("[agent-hooks] Notification server listening on port {}", port);
 
     std::thread::spawn(move || {
@@ -1042,7 +1046,8 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                             } else {
                                 (Some(command.clone()), None)
                             };
-                            match manager.create(id.clone(), cwd.clone(), prog, args, Some(80), Some(24), app_handle.clone()) {
+                            let event_sink = crate::terminal_event_sink::TauriTerminalEventSink::new(app_handle.clone());
+                            match manager.create(id.clone(), cwd.clone(), prog, args, Some(80), Some(24), event_sink) {
                                 Ok(()) => {
                                     log_debug!("[companion] Background terminal spawned: {} ({})", id, command);
                                     // Emit background spawn event for the frontend to create a tab

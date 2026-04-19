@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use crate::terminal_event_sink::TauriTerminalEventSink;
 use tauri::State;
 use uuid::Uuid;
 
@@ -17,11 +18,12 @@ pub fn terminal_create(
 
     log_debug!("[terminal] Creating terminal id={} cwd={} command={:?} size={}x{}", id, cwd, command, cols.unwrap_or(80), rows.unwrap_or(24));
 
+    let event_sink = TauriTerminalEventSink::new(app);
     let mut manager = state
         .terminal_manager
         .lock();
 
-    match manager.create(id.clone(), cwd, command, args, cols, rows, app) {
+    match manager.create(id.clone(), cwd, command, args, cols, rows, event_sink) {
         Ok(()) => {
             log_debug!("[terminal] Terminal {} created successfully", id);
             Ok(serde_json::json!({ "id": id }))

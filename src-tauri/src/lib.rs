@@ -37,7 +37,11 @@ mod menu;
 pub use k2so_core::{perf, perf_hist, perf_timer};
 mod project_config;
 mod state;
-pub mod terminal;
+// `terminal` now lives in k2so-core. Re-exported so existing
+// `crate::terminal::*` paths keep working.
+pub use k2so_core::terminal;
+// Local Tauri-backed implementation of k2so_core::terminal::TerminalEventSink.
+mod terminal_event_sink;
 mod watcher;
 mod window;
 
