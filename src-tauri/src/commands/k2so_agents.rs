@@ -19,6 +19,15 @@ pub use k2so_core::agents::{
     agent_dir, agent_type_for, agents_dir, find_primary_agent, parse_frontmatter,
     resolve_project_id,
 };
+// Scheduler-path helpers + types moved alongside the heartbeat slice.
+// Re-exported here at their historical paths so the 9k-line file's
+// internal call sites continue to resolve unchanged.
+pub use k2so_core::agents::scheduler::{
+    agent_work_dir, count_md_files, get_highest_inbox_priority, get_workspace_state,
+    is_agent_locked, is_within_active_hours, k2so_agents_scheduler_tick as core_scheduler_tick,
+    priority_label, priority_rank, read_heartbeat_config, workspace_inbox_dir,
+    write_heartbeat_config, ActiveHours, AgentHeartbeatConfig,
+};
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -54,16 +63,8 @@ pub struct WorkItem {
 //
 // `agents_dir` + `agent_dir` now live in k2so_core::agents (re-exported
 // above so local call sites resolve unchanged). `agent_work_dir` and
-// `workspace_inbox_dir` stay local because other non-migrated functions
-// in this file use them against paths that haven't moved yet.
-
-fn agent_work_dir(project_path: &str, agent_name: &str, folder: &str) -> PathBuf {
-    agent_dir(project_path, agent_name).join("work").join(folder)
-}
-
-fn workspace_inbox_dir(project_path: &str) -> PathBuf {
-    PathBuf::from(project_path).join(".k2so").join("work").join("inbox")
-}
+// `workspace_inbox_dir` now also live in k2so_core::agents::scheduler
+// alongside the rest of the heartbeat-fire dependency closure.
 
 // ── Wake-up templates ──────────────────────────────────────────────────
 //
@@ -1226,20 +1227,7 @@ fn read_work_item(path: &Path, folder: &str) -> Option<WorkItem> {
     Some(parse_work_item_content(&content, &filename, folder))
 }
 
-/// Bounded count of .md files in a directory (max 10,000 to prevent memory exhaustion
-/// from corrupted or adversarial directories with millions of entries).
-fn count_md_files(dir: &Path) -> usize {
-    const MAX_COUNT: usize = 10_000;
-    fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().map_or(false, |ext| ext == "md"))
-                .take(MAX_COUNT)
-                .count()
-        })
-        .unwrap_or(0)
-}
+// `count_md_files` moved to k2so_core::agents::scheduler (re-exported).
 
 /// Maximum file size for reading work items and agent profiles (1MB).
 /// Prevents memory exhaustion from malicious or corrupted files.
@@ -1265,107 +1253,11 @@ fn safe_read_to_string(path: &Path) -> Result<String, String> {
 }
 
 // ── Heartbeat Configuration ─────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentHeartbeatConfig {
-    /// Execution mode: "heartbeat", "persistent", or "hybrid"
-    #[serde(default = "default_heartbeat_mode")]
-    pub mode: String,
-    /// Current check-in interval in seconds
-    #[serde(default = "default_interval")]
-    pub interval_seconds: u64,
-    /// Current work phase (freeform, but well-known: setup, active, monitoring, idle, blocked)
-    #[serde(default = "default_phase")]
-    pub phase: String,
-    /// Active hours window (optional)
-    #[serde(default)]
-    pub active_hours: Option<ActiveHours>,
-    /// Maximum interval (auto-backoff ceiling)
-    #[serde(default = "default_max_interval")]
-    pub max_interval_seconds: u64,
-    /// Minimum interval (floor)
-    #[serde(default = "default_min_interval")]
-    pub min_interval_seconds: u64,
-    /// Cost budget: "low", "medium", "high"
-    #[serde(default = "default_cost_budget")]
-    pub cost_budget: String,
-    /// Consecutive no-ops (for auto-backoff)
-    #[serde(default)]
-    pub consecutive_no_ops: u32,
-    /// Enable auto-backoff on idle
-    #[serde(default = "default_true")]
-    pub auto_backoff: bool,
-    /// ISO timestamp of last wake
-    #[serde(default)]
-    pub last_wake: Option<String>,
-    /// ISO timestamp of next scheduled wake
-    #[serde(default)]
-    pub next_wake: Option<String>,
-    /// Who last updated: "agent" or "user"
-    #[serde(default = "default_updated_by")]
-    pub updated_by: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActiveHours {
-    pub start: String,
-    pub end: String,
-    pub timezone: String,
-}
-
-fn default_heartbeat_mode() -> String { "heartbeat".to_string() }
-fn default_interval() -> u64 { 300 }
-fn default_phase() -> String { "monitoring".to_string() }
-fn default_max_interval() -> u64 { 3600 }
-fn default_min_interval() -> u64 { 60 }
-fn default_cost_budget() -> String { "low".to_string() }
-fn default_true() -> bool { true }
-fn default_updated_by() -> String { "user".to_string() }
-
-impl Default for AgentHeartbeatConfig {
-    fn default() -> Self {
-        Self {
-            mode: default_heartbeat_mode(),
-            interval_seconds: default_interval(),
-            phase: default_phase(),
-            active_hours: None,
-            max_interval_seconds: default_max_interval(),
-            min_interval_seconds: default_min_interval(),
-            cost_budget: default_cost_budget(),
-            consecutive_no_ops: 0,
-            auto_backoff: true,
-            last_wake: None,
-            next_wake: None,
-            updated_by: default_updated_by(),
-        }
-    }
-}
-
-/// Read an agent's heartbeat configuration from .k2so/agents/<name>/heartbeat.json
-fn read_heartbeat_config(project_path: &str, agent_name: &str) -> AgentHeartbeatConfig {
-    let path = agent_dir(project_path, agent_name).join("heartbeat.json");
-    if path.exists() {
-        fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
-    } else {
-        AgentHeartbeatConfig::default()
-    }
-}
-
-/// Write an agent's heartbeat configuration to .k2so/agents/<name>/heartbeat.json
-fn write_heartbeat_config(project_path: &str, agent_name: &str, config: &AgentHeartbeatConfig) -> Result<(), String> {
-    let dir = agent_dir(project_path, agent_name);
-    if !dir.exists() {
-        return Err(format!("Agent '{}' does not exist", agent_name));
-    }
-    let path = dir.join("heartbeat.json");
-    let json = serde_json::to_string_pretty(config)
-        .map_err(|e| format!("Failed to serialize heartbeat config: {}", e))?;
-    atomic_write(&path, &json)
-}
+//
+// `AgentHeartbeatConfig`, `ActiveHours`, `read_heartbeat_config`,
+// `write_heartbeat_config`, and the per-field default fns all now live
+// in k2so_core::agents::scheduler. The types + functions are re-exported
+// at the top of this file so existing call sites resolve unchanged.
 
 // ── Tauri Commands ──────────────────────────────────────────────────────
 
@@ -2095,26 +1987,7 @@ pub fn k2so_agents_unlock(project_path: String, agent_name: String) -> Result<()
     Ok(())
 }
 
-/// Check if an agent is locked (has an active session).
-/// Tries DB first, falls back to .lock file.
-pub fn is_agent_locked(project_path: &str, agent_name: &str) -> bool {
-    // Try DB first
-    {
-        let db = crate::db::shared();
-        let conn = db.lock();
-        if let Some(project_id) = resolve_project_id(&conn, project_path) {
-            if let Ok(Some(session)) = AgentSession::get_by_agent(&conn, &project_id, agent_name) {
-                if session.status == "running" {
-                    return true;
-                }
-            }
-        }
-    }
-
-    // Fall back to .lock file
-    let lock_path = agent_work_dir(project_path, agent_name, "").join(".lock");
-    lock_path.exists()
-}
+// `is_agent_locked` moved to k2so_core::agents::scheduler (re-exported).
 
 // ── CLAUDE.md Generator ─────────────────────────────────────────────────
 
@@ -3474,16 +3347,7 @@ Run `k2so heartbeat --help` for the full surface.
     )
 }
 
-/// Priority rank for sorting (lower = higher priority).
-fn priority_rank(priority: &str) -> u8 {
-    match priority {
-        "critical" => 0,
-        "high" => 1,
-        "normal" => 2,
-        "low" => 3,
-        _ => 2,
-    }
-}
+// `priority_rank` moved to k2so_core::agents::scheduler (re-exported).
 
 /// Generate a comprehensive CLAUDE.md for the workspace root.
 /// This is the lead agent's complete operating manual for K2SO.
@@ -4440,17 +4304,7 @@ pub fn k2so_agents_review_request_changes(
 // ── Heartbeat Triage (Workspace State) ──────────────────────────────────
 
 /// Read the workspace state for a project, returning the state or None if unset.
-fn get_workspace_state(project_path: &str) -> Option<crate::db::schema::WorkspaceState> {
-    let db = crate::db::shared();
-    let conn = db.lock();
-    let state_id: Option<String> = conn.query_row(
-        "SELECT tier_id FROM projects WHERE path = ?1",
-        rusqlite::params![project_path],
-        |row| row.get(0),
-    ).ok()?;
-    let sid = state_id?;
-    crate::db::schema::WorkspaceState::get(&conn, &sid).ok()
-}
+// `get_workspace_state` moved to k2so_core::agents::scheduler (re-exported).
 
 /// Build a triage summary for the local LLM to evaluate.
 /// Returns a plain-text summary of all agents with pending work in a project.
@@ -4709,253 +4563,11 @@ pub fn k2so_agents_set_heartbeat(
 #[tauri::command]
 pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, String> {
     let _h = crate::perf_hist!("scheduler_tick");
-    let tick_start = std::time::Instant::now();
-    // Look up project row up-front so audit writes have a project_id to
-    // hang on. Audit rows without a project_id are dropped silently.
-    let project_row: Option<(String, String, Option<String>, Option<String>)> = {
-        let db = crate::db::shared();
-        let conn = db.lock();
-        conn.query_row(
-            "SELECT id, heartbeat_mode, heartbeat_schedule, heartbeat_last_fire \
-             FROM projects WHERE path = ?1",
-            rusqlite::params![project_path],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .ok()
-    };
-
-    // Helper: write one audit row. Silently drops writes if project_id
-    // isn't resolved (we'd have nothing to attach to anyway). Routes
-    // through the shared connection; the closure captures the Arc handle
-    // so it stays valid for the lifetime of the surrounding function.
-    let resolved_project_id: Option<String> = project_row.as_ref().map(|r| r.0.clone());
-    let audit = |agent: Option<&str>, mode: &str, decision: &str, reason: Option<&str>,
-                 inbox_priority: Option<&str>, inbox_count: Option<i64>| {
-        if let Some(pid) = resolved_project_id.as_deref() {
-            let db = crate::db::shared();
-            let conn = db.lock();
-            let _ = HeartbeatFire::insert(
-                &conn, pid, agent, mode, decision, reason,
-                inbox_priority, inbox_count,
-                Some(tick_start.elapsed().as_millis() as i64),
-            );
-        }
-    };
-
-    let mode_str = project_row.as_ref().map(|r| r.1.clone()).unwrap_or_else(|| "heartbeat".to_string());
-
-    // Gate 1: workspace-level state. Locked workspaces halt all agent activity.
-    if let Some(ws_state) = get_workspace_state(&project_path) {
-        if ws_state.heartbeat == 0 {
-            audit(None, &mode_str, "skipped_locked", Some("workspace state has heartbeat=0"), None, None);
-            return Ok(vec![]);
-        }
-    }
-
-    // Gate 2: project-level schedule.
-    if let Some((project_id, mode, schedule, last_fire)) = project_row.clone() {
-        if mode == "off" {
-            audit(None, &mode, "skipped_schedule", Some("heartbeat_mode=off"), None, None);
-            return Ok(vec![]);
-        }
-        if mode == "scheduled" || mode == "hourly" {
-            if !should_project_fire(&mode, schedule.as_deref(), last_fire.as_deref()) {
-                audit(None, &mode, "skipped_schedule", Some("schedule window not open"), None, None);
-                return Ok(vec![]);
-            }
-            // Record that the schedule opened. We only stamp last_fire
-            // here (not for "heartbeat" mode, which fires every tick).
-            {
-                let db = crate::db::shared();
-                let conn = db.lock();
-                let _ = conn.execute(
-                    "UPDATE projects SET heartbeat_last_fire = ?1 WHERE id = ?2",
-                    rusqlite::params![chrono::Local::now().to_rfc3339(), project_id],
-                );
-            }
-        }
-    }
-
-    let mut launchable = Vec::new();
-    let now = chrono::Utc::now();
-
-    // Helper: friendly priority string from rank (0=critical, 3=low).
-    let priority_label = |rank: u8| -> &'static str {
-        match rank { 0 => "critical", 1 => "high", 2 => "normal", _ => "low" }
-    };
-
-    // Step 1: Check workspace inbox (always — same as before)
-    let ws_inbox = workspace_inbox_dir(&project_path);
-    let ws_inbox_count = if ws_inbox.exists() {
-        fs::read_dir(&ws_inbox)
-            .map(|e| e.flatten().filter(|e| e.path().extension().map_or(false, |ext| ext == "md")).count() as i64)
-            .unwrap_or(0)
-    } else { 0 };
-    let has_workspace_inbox = ws_inbox_count > 0;
-
-    if has_workspace_inbox {
-        if is_agent_locked(&project_path, "__lead__") {
-            audit(Some("__lead__"), &mode_str, "skipped_locked", Some("lead already running"), None, Some(ws_inbox_count));
-        } else {
-            launchable.push("__lead__".to_string());
-            audit(Some("__lead__"), &mode_str, "fired", Some("workspace inbox has items"), None, Some(ws_inbox_count));
-        }
-    }
-
-    // Step 2: Check each agent
-    let dir = agents_dir(&project_path);
-    if !dir.exists() {
-        return Ok(launchable);
-    }
-
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-
-            // Skip agents that already have an active session (lock file exists)
-            if is_agent_locked(&project_path, &name) {
-                audit(Some(&name), &mode_str, "skipped_locked", Some("agent is already running"), None, None);
-                continue;
-            }
-
-            // Safety: skip agents whose terminal is being used interactively by the user
-            if let Some(ref pid) = resolved_project_id {
-                let db = crate::db::shared();
-                let conn = db.lock();
-                if let Ok(Some(session)) = AgentSession::get_by_agent(&conn, pid, &name) {
-                    if session.owner == "user" && session.status == "running" {
-                        audit(Some(&name), &mode_str, "skipped_user_session",
-                              Some("user is driving this agent's terminal"), None, None);
-                        continue;
-                    }
-                }
-            }
-
-            // Read agent type
-            let agent_md = entry.path().join("AGENT.md");
-            let agent_type = if agent_md.exists() {
-                let content = fs::read_to_string(&agent_md).unwrap_or_default();
-                let fm = parse_frontmatter(&content);
-                fm.get("type").cloned().unwrap_or("agent-template".to_string())
-            } else {
-                "agent-template".to_string()
-            };
-
-            if agent_type == "custom" {
-                // Custom agents: check heartbeat timing
-                let config = read_heartbeat_config(&project_path, &name);
-
-                // Skip persistent mode agents (they're always running)
-                if config.mode == "persistent" {
-                    audit(Some(&name), &mode_str, "skipped_custom_timing",
-                          Some("persistent mode — always running"), None, None);
-                    continue;
-                }
-
-                // Check active hours
-                if let Some(ref hours) = config.active_hours {
-                    if !is_within_active_hours(hours, &now) {
-                        audit(Some(&name), &mode_str, "skipped_custom_timing",
-                              Some("outside active hours"), None, None);
-                        continue;
-                    }
-                }
-
-                // Check if it's time to wake
-                let should_wake = match &config.next_wake {
-                    Some(next) => {
-                        chrono::DateTime::parse_from_rfc3339(next)
-                            .map(|t| now >= t)
-                            .unwrap_or(true) // If parse fails, wake anyway
-                    }
-                    None => true, // No next_wake set — wake now
-                };
-
-                if should_wake {
-                    // Update last_wake and schedule next
-                    let mut updated = config.clone();
-                    updated.last_wake = Some(now.to_rfc3339());
-                    updated.next_wake = Some(
-                        (now + chrono::Duration::seconds(updated.interval_seconds as i64)).to_rfc3339()
-                    );
-                    let _ = write_heartbeat_config(&project_path, &name, &updated);
-                    audit(Some(&name), &mode_str, "fired",
-                          Some(&format!("custom agent next_wake elapsed (interval {}s)", updated.interval_seconds)),
-                          None, None);
-                    launchable.push(name);
-                } else {
-                    audit(Some(&name), &mode_str, "skipped_custom_timing",
-                          Some("next_wake not elapsed"), None, None);
-                }
-            } else {
-                // Manager agents (manager, coordinator, agent-template, k2so): inbox-based triage
-                let inbox = agent_work_dir(&project_path, &name, "inbox");
-                let inbox_count = if inbox.exists() {
-                    fs::read_dir(&inbox)
-                        .map(|e| e.flatten().filter(|e| e.path().extension().map_or(false, |ext| ext == "md")).count() as i64)
-                        .unwrap_or(0)
-                } else { 0 };
-
-                if inbox_count == 0 {
-                    audit(Some(&name), &mode_str, "no_work", Some("empty inbox"), None, Some(0));
-                    continue;
-                }
-
-                let highest_prio = get_highest_inbox_priority(&project_path, &name);
-                let prio_label = priority_label(highest_prio);
-
-                // Quality gate: skip agents with only low-priority inbox items
-                // that already have active work in progress
-                let active_count = count_md_files(&agent_work_dir(&project_path, &name, "active"));
-                if active_count > 0 && highest_prio > priority_rank("high") {
-                    audit(Some(&name), &mode_str, "skipped_quality_gate",
-                          Some(&format!("active work in progress, inbox only {}", prio_label)),
-                          Some(prio_label), Some(inbox_count));
-                    continue;
-                }
-                audit(Some(&name), &mode_str, "fired",
-                      Some(&format!("inbox has items at priority {}", prio_label)),
-                      Some(prio_label), Some(inbox_count));
-                launchable.push(name);
-            }
-        }
-    }
-
-    // Sort by highest-priority inbox item (critical > high > normal > low)
-    // The __lead__ agent always goes first if present
-    launchable.sort_by(|a, b| {
-        if a == "__lead__" { return std::cmp::Ordering::Less; }
-        if b == "__lead__" { return std::cmp::Ordering::Greater; }
-        let prio_a = get_highest_inbox_priority(&project_path, a);
-        let prio_b = get_highest_inbox_priority(&project_path, b);
-        prio_a.cmp(&prio_b) // Lower rank = higher priority
-    });
-
-    Ok(launchable)
+    core_scheduler_tick(project_path)
 }
 
-/// Get the highest priority rank of inbox items for an agent (0=critical, 3=low).
-fn get_highest_inbox_priority(project_path: &str, agent_name: &str) -> u8 {
-    let inbox = agent_work_dir(project_path, agent_name, "inbox");
-    if !inbox.exists() { return 3; }
-    fs::read_dir(&inbox)
-        .ok()
-        .map(|entries| {
-            entries.flatten()
-                .filter(|e| e.path().extension().map_or(false, |ext| ext == "md"))
-                .filter_map(|e| {
-                    let content = fs::read_to_string(e.path()).ok()?;
-                    let fm = parse_frontmatter(&content);
-                    Some(priority_rank(fm.get("priority").map(|s| s.as_str()).unwrap_or("normal")))
-                })
-                .min()
-                .unwrap_or(3)
-        })
-        .unwrap_or(3)
-}
+// `get_highest_inbox_priority` moved to k2so_core::agents::scheduler
+// (re-exported at the top of this file).
 
 /// Save the last Claude session ID for an agent (enables --resume on next launch).
 /// Stores the session ID in the DB (agent_sessions.session_id).
@@ -5054,55 +4666,8 @@ pub fn k2so_agents_heartbeat_action(
     Ok(config)
 }
 
-/// Check if the current time is within the active hours window.
-/// NOTE: The `timezone` field is accepted but currently compared against local system time.
-/// Full timezone support (chrono-tz) is planned for a future release.
-fn is_within_active_hours(hours: &ActiveHours, _now: &chrono::DateTime<chrono::Utc>) -> bool {
-    let parse_hhmm = |s: &str| -> Option<(u32, u32)> {
-        let parts: Vec<&str> = s.split(':').collect();
-        if parts.len() == 2 {
-            let h: u32 = parts[0].parse().ok()?;
-            let m: u32 = parts[1].parse().ok()?;
-            // Validate ranges: hours 0-23, minutes 0-59
-            if h > 23 || m > 59 {
-                return None;
-            }
-            Some((h, m))
-        } else {
-            None
-        }
-    };
-
-    let (start_h, start_m) = match parse_hhmm(&hours.start) {
-        Some(v) => v,
-        None => {
-            log_debug!("[heartbeat] Invalid active_hours start format: '{}' — allowing wake", hours.start);
-            return true; // Invalid format — don't block (permissive)
-        }
-    };
-    let (end_h, end_m) = match parse_hhmm(&hours.end) {
-        Some(v) => v,
-        None => {
-            log_debug!("[heartbeat] Invalid active_hours end format: '{}' — allowing wake", hours.end);
-            return true;
-        }
-    };
-
-    // Use local system time (best approximation without chrono-tz)
-    let local_now = chrono::Local::now();
-    let hour = local_now.format("%H").to_string().parse::<u32>().unwrap_or(0);
-    let minute = local_now.format("%M").to_string().parse::<u32>().unwrap_or(0);
-    let now_mins = hour * 60 + minute;
-    let start_mins = start_h * 60 + start_m;
-    let end_mins = end_h * 60 + end_m;
-
-    if start_mins <= end_mins {
-        now_mins >= start_mins && now_mins < end_mins
-    } else {
-        // Wraps midnight
-        now_mins >= start_mins || now_mins < end_mins
-    }
-}
+// `is_within_active_hours` moved to k2so_core::agents::scheduler
+// (re-exported at the top of this file).
 
 // ── Project-Level Schedule Evaluation ─────────────────────────────────────
 //

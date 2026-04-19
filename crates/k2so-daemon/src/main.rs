@@ -292,6 +292,50 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         // Heartbeat CRUD + fire-audit — fires while the Tauri app is
         // quit, so the daemon has to own these routes for the
         // persistent-agents feature to mean anything.
+        // Scheduler tick: decides which agents are ready to wake.
+        // Returns the ordered list of agent names. PTY spawning + wake
+        // prompt assembly is still caller-side (future daemon commit)
+        // but the core decision path already lives in
+        // k2so_core::agents::scheduler.
+        "/cli/scheduler-tick" => {
+            let _ = stream.read(&mut buf).await;
+            let params = parse_params(&path, &query);
+            let req_token = params.get("token").cloned().unwrap_or_default();
+            if req_token != *state.token {
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"Invalid or missing auth token"}"#,
+                )
+                .await;
+                return;
+            }
+            let project_path = match params.get("project_path") {
+                Some(p) if !p.is_empty() => p.clone(),
+                _ => {
+                    send_response(
+                        &mut stream,
+                        "400 Bad Request",
+                        "application/json",
+                        r#"{"error":"Missing project_path"}"#,
+                    )
+                    .await;
+                    return;
+                }
+            };
+            match k2so_core::agents::scheduler::k2so_agents_scheduler_tick(project_path) {
+                Ok(agents) => {
+                    let body = serde_json::to_string(&agents).unwrap_or_else(|_| "[]".to_string());
+                    send_response(&mut stream, "200 OK", "application/json", &body).await
+                }
+                Err(e) => {
+                    let body = serde_json::json!({"error": e}).to_string();
+                    send_response(&mut stream, "400 Bad Request", "application/json", &body)
+                        .await
+                }
+            }
+        }
         p if p.starts_with("/cli/heartbeat/") || p == "/cli/heartbeat-log" => {
             let _ = stream.read(&mut buf).await;
             let params = parse_params(&path, &query);
