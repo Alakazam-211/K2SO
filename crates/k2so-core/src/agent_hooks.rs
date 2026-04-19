@@ -12,6 +12,73 @@ use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::sync::OnceLock;
 
+// ── Host event sink ─────────────────────────────────────────────────────
+//
+// Agent hooks fire 7 distinct host-facing events; enumerated here so a
+// future migration can swap `app_handle.emit(...)` call sites in
+// src-tauri/agent_hooks.rs for `sink.emit(HookEvent::...)` without any
+// string-match typos. Matches the companion::event_sink shape: set-once
+// ambient global with a silent no-op default for daemon / test contexts.
+
+/// Canonical set of events src-tauri/agent_hooks.rs emits to the React
+/// frontend. The variant names are kebab-cased in the wire format to
+/// match the existing string keys the renderer already listens for.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HookEvent {
+    AgentLifecycle,
+    AgentReply,
+    SyncProjects,
+    SyncSettings,
+    CliTerminalSpawn,
+    CliTerminalSpawnBackground,
+    CliAiCommit,
+}
+
+impl HookEvent {
+    /// The wire-format event name the React frontend listens for.
+    pub fn event_name(&self) -> &'static str {
+        match self {
+            Self::AgentLifecycle => "agent:lifecycle",
+            Self::AgentReply => "agent:reply",
+            Self::SyncProjects => "sync:projects",
+            Self::SyncSettings => "sync:settings",
+            Self::CliTerminalSpawn => "cli:terminal-spawn",
+            Self::CliTerminalSpawnBackground => "cli:terminal-spawn-background",
+            Self::CliAiCommit => "cli:ai-commit",
+        }
+    }
+}
+
+/// Abstraction for "how do agent-hook emissions reach the UI." The
+/// Tauri app provides an impl that calls `AppHandle::emit`; the future
+/// k2so-daemon provides one that fans out over the companion WS.
+pub trait AgentHookEventSink: Send + Sync {
+    fn emit(&self, event: HookEvent, payload: serde_json::Value);
+}
+
+static SINK: OnceLock<Mutex<Option<Box<dyn AgentHookEventSink>>>> = OnceLock::new();
+
+fn sink_slot() -> &'static Mutex<Option<Box<dyn AgentHookEventSink>>> {
+    SINK.get_or_init(|| Mutex::new(None))
+}
+
+/// Register the host's sink. Idempotent; last writer wins (tests).
+pub fn set_sink(s: Box<dyn AgentHookEventSink>) {
+    *sink_slot().lock() = Some(s);
+}
+
+/// Fire `event` through the registered sink, if any. Silent no-op if
+/// unregistered — daemon smoke tests + early-startup paths don't need
+/// to care.
+pub fn emit(event: HookEvent, payload: serde_json::Value) {
+    if let Some(s) = sink_slot().lock().as_ref() {
+        s.emit(event, payload);
+    }
+}
+
+// ── Recent-event ring buffer ────────────────────────────────────────────
+
 const RECENT_EVENTS_CAP: usize = 50;
 
 /// Past-events ring buffer used by `k2so hooks status` and friends.
@@ -158,8 +225,51 @@ pub fn urldecode(s: &str) -> String {
 mod tests {
     use super::*;
     use parking_lot::Mutex as PLMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     static TEST_LOCK: PLMutex<()> = PLMutex::new(());
+
+    #[test]
+    fn hook_event_name_matches_wire_format() {
+        assert_eq!(HookEvent::AgentLifecycle.event_name(), "agent:lifecycle");
+        assert_eq!(HookEvent::AgentReply.event_name(), "agent:reply");
+        assert_eq!(HookEvent::SyncProjects.event_name(), "sync:projects");
+        assert_eq!(HookEvent::SyncSettings.event_name(), "sync:settings");
+        assert_eq!(
+            HookEvent::CliTerminalSpawn.event_name(),
+            "cli:terminal-spawn"
+        );
+        assert_eq!(
+            HookEvent::CliTerminalSpawnBackground.event_name(),
+            "cli:terminal-spawn-background"
+        );
+        assert_eq!(HookEvent::CliAiCommit.event_name(), "cli:ai-commit");
+    }
+
+    #[test]
+    fn emit_without_sink_is_silent_noop() {
+        let _g = TEST_LOCK.lock();
+        *sink_slot().lock() = None;
+        emit(HookEvent::AgentLifecycle, serde_json::json!({}));
+    }
+
+    #[test]
+    fn registered_sink_receives_emit() {
+        let _g = TEST_LOCK.lock();
+        let count = Arc::new(AtomicUsize::new(0));
+        struct Fake(Arc<AtomicUsize>);
+        impl AgentHookEventSink for Fake {
+            fn emit(&self, _e: HookEvent, _p: serde_json::Value) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        set_sink(Box::new(Fake(count.clone())));
+        emit(HookEvent::SyncProjects, serde_json::json!({}));
+        emit(HookEvent::AgentReply, serde_json::json!({"x": 1}));
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        *sink_slot().lock() = None;
+    }
 
     #[test]
     fn map_event_type_buckets() {

@@ -5,7 +5,9 @@ pub mod event_sink;
 pub mod grid_types;
 pub mod reflow;
 mod font_renderer;
-mod bitmap_renderer;
+// `bitmap_renderer` was deleted in 0.33.x. The DOM/grid broadcast
+// protocol that shipped in 0.32.13 retired bitmap rendering; the
+// module's 414 lines were dead code for a full release.
 
 pub use alacritty_backend::TerminalManager;
 pub use event_sink::TerminalEventSink;

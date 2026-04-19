@@ -102,10 +102,12 @@ pub fn shared() -> Arc<ReentrantMutex<Connection>> {
 /// rows on exit, or (b) use a scratch_project() directory pattern that
 /// keeps filesystem state separate even when DB state overlaps.
 ///
-/// Not gated on `#[cfg(test)]` because src-tauri's test binary is a
-/// downstream consumer of k2so-core — `cfg(test)` there doesn't flip
-/// cfg(test) here. Function body is inert in release builds (no caller
-/// in production code).
+/// Gated on `#[cfg(test)]` OR the `test-util` feature so downstream
+/// crates' test binaries can reach it (their cfg(test) doesn't flip
+/// cfg(test) here). Production builds compile this out, restoring the
+/// invariant that only test contexts can acquire an in-memory DB
+/// without first calling `init_database()`.
+#[cfg(any(test, feature = "test-util"))]
 pub fn init_for_tests() -> Arc<ReentrantMutex<Connection>> {
     if let Some(handle) = SHARED.get() {
         return handle.clone();
