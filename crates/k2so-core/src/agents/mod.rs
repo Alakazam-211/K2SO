@@ -28,6 +28,7 @@ pub mod scheduler;
 pub mod session;
 pub mod skill;
 pub mod skill_content;
+pub mod skill_writer;
 pub mod wake;
 pub mod work_item;
 pub mod workspace_regen;
