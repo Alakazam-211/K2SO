@@ -146,6 +146,53 @@ pub struct AppSettings {
     pub editor: EditorSettings,
     #[serde(default)]
     pub companion: CompanionSettings,
+    /// Heartbeat wake scheduler: controls whether + how often launchd
+    /// wakes the laptop to fire agent heartbeats.
+    #[serde(default)]
+    pub wake_scheduler: WakeSchedulerSettings,
+}
+
+/// Heartbeat wake-scheduler configuration.
+///
+/// Mirrors the modes the persistent-agents PRD ratified:
+/// - `"off"` — no launchd plist; Tauri app handles heartbeats while
+///   open, nothing fires when the app is quit.
+/// - `"on_demand"` — Tauri handles heartbeats while open, daemon
+///   runs them when the app is closed BUT the system stays asleep
+///   if the lid is closed.
+/// - `"heartbeat"` — launchd fires the heartbeat plist every
+///   `interval_minutes`. When `wake_system` is true, launchd wakes
+///   a sleeping machine (lid closed, on battery) to fire. This is
+///   the flag-planting configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WakeSchedulerSettings {
+    #[serde(default = "default_wake_mode")]
+    pub mode: String,
+    #[serde(default = "default_wake_interval")]
+    pub interval_minutes: u32,
+    /// `WakeSystem: true` in the plist — lets launchd wake the laptop
+    /// from sleep to fire the heartbeat. Same mechanism Time Machine
+    /// uses for battery-powered hourly backups.
+    #[serde(default)]
+    pub wake_system: bool,
+}
+
+fn default_wake_mode() -> String {
+    "on_demand".to_string()
+}
+fn default_wake_interval() -> u32 {
+    5
+}
+
+impl Default for WakeSchedulerSettings {
+    fn default() -> Self {
+        Self {
+            mode: default_wake_mode(),
+            interval_minutes: default_wake_interval(),
+            wake_system: false,
+        }
+    }
 }
 
 /// Mobile Companion API settings.
@@ -300,6 +347,7 @@ impl Default for AppSettings {
             last_active_workspace_id: None,
             editor: EditorSettings::default(),
             companion: CompanionSettings::default(),
+            wake_scheduler: WakeSchedulerSettings::default(),
         }
     }
 }

@@ -17,6 +17,7 @@ import { AgentSkillsSection, AGENT_SKILLS_MANIFEST } from './sections/AgentSkill
 // HeartbeatsPanel is rendered inline inside ProjectsSection now; manifest
 // stays exported from HeartbeatsSection so searches still find it.
 import { HEARTBEATS_MANIFEST } from './sections/HeartbeatsSection'
+import { WakeSchedulerSection, WAKE_SCHEDULER_MANIFEST } from './sections/WakeSchedulerSection'
 
 // ── Section nav items ────────────────────────────────────────────────
 const SECTIONS: { id: SettingsSection; label: string; agenticOnly?: boolean }[] = [
@@ -30,6 +31,7 @@ const SECTIONS: { id: SettingsSection; label: string; agenticOnly?: boolean }[] 
   { id: 'keybindings', label: 'Keybindings' },
   { id: 'timer', label: 'Timer' },
   { id: 'companion', label: 'Mobile Companion' },
+  { id: 'wake-scheduler', label: 'Wake Scheduler', agenticOnly: true },
 ]
 
 // ── Main Settings component ──────────────────────────────────────────
@@ -60,9 +62,16 @@ export default function Settings(): React.JSX.Element {
       ...KEYBINDINGS_MANIFEST,
       ...TIMER_MANIFEST,
       ...COMPANION_MANIFEST,
+      ...WAKE_SCHEDULER_MANIFEST,
     ]
     if (agenticEnabled) return combined
-    return combined.filter((e) => e.section !== 'workspace-states' && e.section !== 'agent-skills' && e.section !== 'heartbeats')
+    return combined.filter(
+      (e) =>
+        e.section !== 'workspace-states' &&
+        e.section !== 'agent-skills' &&
+        e.section !== 'heartbeats' &&
+        e.section !== 'wake-scheduler'
+    )
   }, [agenticEnabled])
 
   useEffect(() => {
@@ -180,6 +189,11 @@ export default function Settings(): React.JSX.Element {
         {activeSection === 'agent-skills' && (
           <SectionErrorBoundary>
             <AgentSkillsSection />
+          </SectionErrorBoundary>
+        )}
+        {activeSection === 'wake-scheduler' && (
+          <SectionErrorBoundary>
+            <WakeSchedulerSection />
           </SectionErrorBoundary>
         )}
       </div>

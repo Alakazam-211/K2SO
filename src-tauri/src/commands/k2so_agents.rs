@@ -3147,14 +3147,88 @@ pub fn k2so_agents_install_heartbeat(
             .map_err(|e| e.to_string())?;
     }
 
-    // Install platform scheduler
+    // Install platform scheduler. Interval + wake-from-sleep come
+    // from the user's Settings > Wake Scheduler panel; defaults are
+    // 5-minute cadence with wake_system=false.
     #[cfg(target_os = "macos")]
-    install_heartbeat_launchd(&script_path)?;
+    {
+        let settings = crate::commands::settings::read_settings();
+        let interval_secs = settings.wake_scheduler.interval_minutes.max(1) as u32 * 60;
+        install_heartbeat_launchd(
+            &script_path,
+            interval_secs,
+            settings.wake_scheduler.wake_system,
+        )?;
+    }
 
     #[cfg(target_os = "linux")]
     install_heartbeat_cron(&script_path)?;
 
     Ok(())
+}
+
+/// Apply the wake-scheduler settings stored in `AppSettings.wake_scheduler`.
+///
+/// Dispatches based on `.mode`:
+/// - `"off"`: no heartbeat plist, no daemon wakes.
+/// - `"on_demand"`: uninstall heartbeat plist; daemon still fires when
+///   launched by Tauri app lifecycle but system stays asleep.
+/// - `"heartbeat"`: install heartbeat plist with user's interval +
+///   optional `WakeSystem: true` for lid-closed overnight fires.
+///
+/// Called from Settings > Wake Scheduler after the user clicks Apply.
+/// Idempotent — safe to call on every Apply click even if nothing
+/// changed. Also called on app startup so the plist matches settings
+/// even after a manual edit to settings.json.
+#[tauri::command]
+pub fn k2so_agents_apply_wake_scheduler() -> Result<String, String> {
+    let settings = crate::commands::settings::read_settings();
+    let cfg = &settings.wake_scheduler;
+
+    let k2so_home = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".k2so");
+    let script_path = k2so_home.join("heartbeat.sh");
+
+    match cfg.mode.as_str() {
+        "off" | "on_demand" => {
+            #[cfg(target_os = "macos")]
+            {
+                let _ = uninstall_heartbeat_launchd();
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let _ = uninstall_heartbeat_cron();
+            }
+            Ok(format!("Wake scheduler set to '{}' — heartbeat plist removed.", cfg.mode))
+        }
+        "heartbeat" => {
+            if !script_path.exists() {
+                return Err(format!(
+                    "Cannot install wake scheduler: heartbeat.sh not generated yet. \
+                     Enable heartbeat on at least one project first, then apply."
+                ));
+            }
+            let interval_secs = cfg.interval_minutes.max(1) as u32 * 60;
+            #[cfg(target_os = "macos")]
+            install_heartbeat_launchd(&script_path, interval_secs, cfg.wake_system)?;
+            #[cfg(target_os = "linux")]
+            install_heartbeat_cron(&script_path)?;
+            Ok(format!(
+                "Wake scheduler set: every {} min{}.",
+                cfg.interval_minutes,
+                if cfg.wake_system {
+                    " (wakes system from sleep)"
+                } else {
+                    ""
+                }
+            ))
+        }
+        other => Err(format!(
+            "Unknown wake scheduler mode '{}'. Expected 'off', 'on_demand', or 'heartbeat'.",
+            other
+        )),
+    }
 }
 
 /// Uninstall the heartbeat scheduler.
@@ -3206,11 +3280,23 @@ pub fn k2so_agents_update_heartbeat_projects(
         #[cfg(target_os = "linux")]
         { let _ = uninstall_heartbeat_cron(); }
     } else {
-        // Ensure scheduler is installed (idempotent — unloads before loading)
+        // Ensure scheduler is installed (idempotent — unloads before
+        // loading). Pulls interval + wake_system from user settings
+        // so a Settings > Wake Scheduler toggle is reflected on the
+        // next project-list refresh without a manual reinstall.
         let script_path = k2so_home.join("heartbeat.sh");
         if script_path.exists() {
             #[cfg(target_os = "macos")]
-            { let _ = install_heartbeat_launchd(&script_path); }
+            {
+                let settings = crate::commands::settings::read_settings();
+                let interval_secs =
+                    settings.wake_scheduler.interval_minutes.max(1) as u32 * 60;
+                let _ = install_heartbeat_launchd(
+                    &script_path,
+                    interval_secs,
+                    settings.wake_scheduler.wake_system,
+                );
+            }
             #[cfg(target_os = "linux")]
             { let _ = install_heartbeat_cron(&script_path); }
         }
@@ -3312,8 +3398,23 @@ fi
 "##, home = home)
 }
 
+/// Install (or reinstall) the heartbeat launchd plist with a
+/// user-configurable interval + optional wake-from-sleep behavior.
+/// - `interval_seconds` maps to `StartInterval` (60 = every minute,
+///   300 = every 5 minutes, etc.).
+/// - `wake_system` sets `WakeSystem: true` so launchd wakes a
+///   sleeping machine — the mechanism that makes lid-closed overnight
+///   agent work possible.
+///
+/// Idempotent: unloads any existing plist with the same label before
+/// writing, then loads the new one. Safe to call repeatedly with
+/// different settings.
 #[cfg(target_os = "macos")]
-fn install_heartbeat_launchd(script_path: &Path) -> Result<(), String> {
+fn install_heartbeat_launchd(
+    script_path: &Path,
+    interval_seconds: u32,
+    wake_system: bool,
+) -> Result<(), String> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
     let plist_path = home.join("Library/LaunchAgents/com.k2so.agent-heartbeat.plist");
 
@@ -3329,6 +3430,12 @@ fn install_heartbeat_launchd(script_path: &Path) -> Result<(), String> {
             .output();
     }
 
+    let wake_key = if wake_system {
+        "\n    <key>WakeSystem</key>\n    <true/>"
+    } else {
+        ""
+    };
+
     let plist = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -3341,7 +3448,7 @@ fn install_heartbeat_launchd(script_path: &Path) -> Result<(), String> {
         <string>{script}</string>
     </array>
     <key>StartInterval</key>
-    <integer>60</integer>
+    <integer>{interval}</integer>{wake_key}
     <key>RunAtLoad</key>
     <false/>
     <key>StandardErrorPath</key>
@@ -3349,6 +3456,8 @@ fn install_heartbeat_launchd(script_path: &Path) -> Result<(), String> {
 </dict>
 </plist>"#,
         script = script_path.to_string_lossy(),
+        interval = interval_seconds,
+        wake_key = wake_key,
         home = home.to_string_lossy(),
     );
 
