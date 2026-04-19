@@ -260,8 +260,10 @@ export default function AgentsPanel(): React.JSX.Element {
                 onClick={async () => {
                   if (!activeProject) return
                   try {
-                    // Generate workspace CLAUDE.md which auto-creates the agent
-                    await invoke('k2so_agents_generate_workspace_claude_md', { projectPath: activeProject.path })
+                    // Regenerate the workspace SKILL.md (also auto-
+                    // scaffolds `.k2so/` layout + manager/k2so-agent
+                    // dirs on first call).
+                    await invoke('k2so_agents_regenerate_workspace_skill', { projectPath: activeProject.path })
                     await fetchAgents()
                   } catch (e) {
                     console.error('[agents] Setup failed:', e)

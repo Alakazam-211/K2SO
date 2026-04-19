@@ -1111,6 +1111,12 @@ pub fn run() {
             commands::k2so_agents::k2so_agents_work_move,
             commands::k2so_agents::k2so_agents_get_profile,
             commands::k2so_agents::k2so_agents_update_profile,
+            commands::k2so_agents::k2so_agents_regenerate_agent_context,
+            commands::k2so_agents::k2so_agents_preview_agent_context,
+            commands::k2so_agents::k2so_agents_regenerate_workspace_skill,
+            // Back-compat aliases — retained during the 0.33.0 rename window so
+            // stale React `invoke()` names keep working until every call site
+            // has migrated to the canonical new names above.
             commands::k2so_agents::k2so_agents_generate_claude_md,
             commands::k2so_agents::k2so_agents_teardown_workspace,
             commands::k2so_agents::k2so_agents_preview_workspace_ingest,

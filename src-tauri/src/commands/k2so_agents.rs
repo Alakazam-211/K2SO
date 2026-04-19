@@ -1416,21 +1416,41 @@ pub fn k2so_agents_unlock(project_path: String, agent_name: String) -> Result<()
 
 // `is_agent_locked` moved to k2so_core::agents::scheduler (re-exported).
 
-// ── CLAUDE.md Generator ─────────────────────────────────────────────────
+// ── Agent context / SKILL.md regen ─────────────────────────────────────
+//
+// Pre-0.33.0 these commands were `k2so_agents_*_claude_md`, which was
+// honest when CLAUDE.md was the canonical per-agent system prompt file.
+// Phase 1a (0.32.x) made SKILL.md the harness-agnostic source of truth
+// and turned CLAUDE.md into a symlink-or-copy for Claude Code's auto-
+// discovery; these commands regenerate BOTH but "context" is the
+// honest name for what they return. The legacy `_claude_md` aliases
+// are retained as thin forwards in the same module for back-compat.
 
-/// Generate a CLAUDE.md for an agent and write it to the agent's directory.
-/// Returns the generated content.
+/// Regenerate an agent's context bundle: the full `--append-system-
+/// prompt` body returned to the caller AND a fresh SKILL.md +
+/// CLAUDE.md written to the agent's directory. Same as calling
+/// `k2so_agents_preview_agent_context` followed by an atomic write.
+#[tauri::command]
+pub fn k2so_agents_regenerate_agent_context(
+    project_path: String,
+    agent_name: String,
+) -> Result<String, String> {
+    let md = generate_agent_claude_md_content(&project_path, &agent_name, None)?;
+    let claude_md_path = agent_dir(&project_path, &agent_name).join("CLAUDE.md");
+    atomic_write(&claude_md_path, &md)?;
+    Ok(md)
+}
+
+/// Back-compat alias for [`k2so_agents_regenerate_agent_context`].
+/// Kept so React components that still invoke the old name keep
+/// working during the rename window. New code should use the new
+/// name.
 #[tauri::command]
 pub fn k2so_agents_generate_claude_md(
     project_path: String,
     agent_name: String,
 ) -> Result<String, String> {
-    let md = generate_agent_claude_md_content(&project_path, &agent_name, None)?;
-
-    let claude_md_path = agent_dir(&project_path, &agent_name).join("CLAUDE.md");
-    atomic_write(&claude_md_path, &md)?;
-
-    Ok(md)
+    k2so_agents_regenerate_agent_context(project_path, agent_name)
 }
 
 /// Full-fat wake-launch builder (UI "Launch" button +
@@ -1771,11 +1791,19 @@ Run `k2so heartbeat --help` for the full surface.
 
 // `priority_rank` moved to k2so_core::agents::scheduler (re-exported).
 
-/// Generate a comprehensive CLAUDE.md for the workspace root.
-/// This is the lead agent's complete operating manual for K2SO.
-/// Written to `<project-root>/CLAUDE.md` so Claude Code auto-discovers it.
+/// Regenerate the workspace-root SKILL.md — the lead agent's complete
+/// operating manual. Written to `<project-root>/SKILL.md` with a
+/// matching `<project-root>/CLAUDE.md` symlink so Claude Code auto-
+/// discovers it. The SKILL.md is the canonical source of truth;
+/// CLAUDE.md is a harness-specific entry point.
+///
+/// Also auto-scaffolds the `.k2so/` layout on first call (manager +
+/// k2so-agent dirs, inbox/active/done folders, prds/, PROJECT.md).
+///
+/// Pre-0.33.0 this was `k2so_agents_generate_workspace_claude_md` —
+/// back-compat alias below.
 #[tauri::command]
-pub fn k2so_agents_generate_workspace_claude_md(
+pub fn k2so_agents_regenerate_workspace_skill(
     project_path: String,
 ) -> Result<String, String> {
     let project_name = std::path::Path::new(&project_path)
@@ -2223,7 +2251,19 @@ Sub-agents use `k2so agent complete` which auto-merges or submits for review acc
     Ok(md)
 }
 
-/// Remove or disable the workspace CLAUDE.md (when Agent toggle is turned off).
+/// Back-compat alias for [`k2so_agents_regenerate_workspace_skill`].
+/// Pre-0.33.0 name. Kept so existing Rust callers (and any React
+/// `invoke('k2so_agents_generate_workspace_claude_md')` sites not yet
+/// updated) keep working during the rename window.
+#[tauri::command]
+pub fn k2so_agents_generate_workspace_claude_md(
+    project_path: String,
+) -> Result<String, String> {
+    k2so_agents_regenerate_workspace_skill(project_path)
+}
+
+/// Remove or disable the workspace SKILL.md + CLAUDE.md symlink
+/// (when the Agent toggle is turned off).
 #[tauri::command]
 pub fn k2so_agents_disable_workspace_claude_md(project_path: String) -> Result<(), String> {
     let claude_md = PathBuf::from(&project_path).join("CLAUDE.md");
@@ -3612,10 +3652,15 @@ pub fn k2so_agents_get_editor_context(
     }))
 }
 
-/// Preview the generated CLAUDE.md for an agent (without writing to disk).
-/// Returns the content that would be injected at launch, plus the on-disk CLAUDE.md if it exists.
+/// Preview the agent's context bundle without writing to disk.
+/// Returns `{ generated, onDisk, contextPath }`: the freshly-composed
+/// system-prompt body, the current on-disk CLAUDE.md content (if any —
+/// may contain user edits), and the CLAUDE.md path for caller-side
+/// diff UIs. The JSON field is still `claudeMdPath` for back-compat
+/// with the React AgentPersonaEditor; new UIs should read
+/// `contextPath` once populated.
 #[tauri::command]
-pub fn k2so_agents_preview_claude_md(
+pub fn k2so_agents_preview_agent_context(
     project_path: String,
     agent_name: String,
 ) -> Result<serde_json::Value, String> {
@@ -3633,21 +3678,32 @@ pub fn k2so_agents_preview_claude_md(
     Ok(serde_json::json!({
         "generated": generated,
         "onDisk": on_disk,
+        "contextPath": on_disk_path.to_string_lossy(),
+        // Legacy field — React still reads `claudeMdPath` at some
+        // call sites. Emit both during the rename window; drop the
+        // legacy field once every UI call site has migrated.
         "claudeMdPath": on_disk_path.to_string_lossy(),
     }))
 }
 
-/// Regenerate and write CLAUDE.md for an agent (resets to generated defaults).
+/// Back-compat alias for [`k2so_agents_preview_agent_context`].
+#[tauri::command]
+pub fn k2so_agents_preview_claude_md(
+    project_path: String,
+    agent_name: String,
+) -> Result<serde_json::Value, String> {
+    k2so_agents_preview_agent_context(project_path, agent_name)
+}
+
+/// Back-compat alias. Pre-0.33.0 this was a separate fn from
+/// `generate_claude_md` even though they did identical work; merged
+/// into [`k2so_agents_regenerate_agent_context`] during the rename.
 #[tauri::command]
 pub fn k2so_agents_regenerate_claude_md(
     project_path: String,
     agent_name: String,
 ) -> Result<String, String> {
-    let generated = generate_agent_claude_md_content(&project_path, &agent_name, None)?;
-    let dir = agent_dir(&project_path, &agent_name);
-    let claude_md_path = dir.join("CLAUDE.md");
-    atomic_write(&claude_md_path, &generated)?;
-    Ok(generated)
+    k2so_agents_regenerate_agent_context(project_path, agent_name)
 }
 
 /// Save an agent's agent.md file, creating a timestamped backup of the previous version.

@@ -325,7 +325,11 @@ function AgentPaneInner({ agentName, projectPath }: AgentPaneProps): React.JSX.E
   const fetchClaudeMd = useCallback(async () => {
     if (isWorkspaceBoard) return
     try {
-      setClaudeMd(await invoke<string>('k2so_agents_generate_claude_md', { projectPath, agentName }))
+      // Regenerates SKILL.md + writes CLAUDE.md harness fallback, returns
+      // the full context body. Pre-0.33.0 this was called
+      // `k2so_agents_generate_claude_md` — the old name still forwards
+      // here but is scheduled for removal.
+      setClaudeMd(await invoke<string>('k2so_agents_regenerate_agent_context', { projectPath, agentName }))
     } catch { setClaudeMd('') }
   }, [projectPath, agentName, isWorkspaceBoard])
 

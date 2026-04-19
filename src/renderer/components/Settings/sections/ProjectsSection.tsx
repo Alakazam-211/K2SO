@@ -1314,7 +1314,7 @@ function ProjectDetail({
                     await invoke('projects_update', { id: project.id, agentMode: mode })
 
                     if (mode === 'agent' || mode === 'manager') {
-                      await invoke('k2so_agents_generate_workspace_claude_md', {
+                      await invoke('k2so_agents_regenerate_workspace_skill', {
                         projectPath: project.path,
                       }).catch(console.error)
                     }

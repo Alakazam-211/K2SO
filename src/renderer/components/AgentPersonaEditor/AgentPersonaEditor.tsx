@@ -30,9 +30,18 @@ interface EditorContext {
   agentDir: string
 }
 
-interface ClaudeMdPreview {
+/**
+ * Shape returned by the `k2so_agents_preview_agent_context` Tauri
+ * command. `contextPath` is the new canonical field; `claudeMdPath`
+ * is emitted alongside for back-compat during the 0.33.0 rename
+ * window — both point at the same `<agent>/CLAUDE.md` file.
+ */
+interface AgentContextPreview {
   generated: string
   onDisk: string | null
+  /** CLAUDE.md path — canonical field going forward. */
+  contextPath?: string
+  /** @deprecated use `contextPath` — kept for 0.33.0 back-compat. */
   claudeMdPath: string
 }
 
@@ -101,17 +110,18 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
           setWakeupContent('')
         }
 
-        // Fetch CLAUDE.md preview
+        // Fetch agent context preview (SKILL.md body + co-written
+        // CLAUDE.md harness fallback).
         try {
-          const preview = await invoke<ClaudeMdPreview>('k2so_agents_preview_claude_md', {
-            projectPath,
-            agentName,
-          })
+          const preview = await invoke<AgentContextPreview>(
+            'k2so_agents_preview_agent_context',
+            { projectPath, agentName }
+          )
           setClaudeMdGenerated(preview.generated)
           setClaudeMdContent(preview.onDisk ?? preview.generated)
-          setClaudeMdPath(preview.claudeMdPath)
+          setClaudeMdPath(preview.contextPath ?? preview.claudeMdPath)
         } catch {
-          // CLAUDE.md preview not available — non-fatal
+          // Context preview not available — non-fatal
         }
 
         // Load workspace root CLAUDE.md
@@ -180,11 +190,11 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
     onClose()
   }, [projectPath, agentName, agentMdPath, onClose])
 
-  // Regenerate CLAUDE.md to defaults
+  // Regenerate agent context (SKILL.md + co-written CLAUDE.md) to defaults
   const handleRegenerate = useCallback(async () => {
     setRegenerating(true)
     try {
-      const content = await invoke<string>('k2so_agents_regenerate_claude_md', {
+      const content = await invoke<string>('k2so_agents_regenerate_agent_context', {
         projectPath,
         agentName,
       })
