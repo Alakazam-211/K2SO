@@ -1,6 +1,6 @@
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
-use std::sync::Mutex;
 use std::time::Instant;
 
 /// Core state for the companion API proxy.

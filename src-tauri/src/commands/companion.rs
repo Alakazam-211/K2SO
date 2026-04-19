@@ -36,14 +36,14 @@ pub fn companion_set_password(app: AppHandle, password: String) -> Result<(), St
 /// Disconnect a specific companion session.
 #[tauri::command]
 pub fn companion_disconnect_session(session_token: String) -> Result<(), String> {
-    let guard = crate::companion::STATE.lock().unwrap();
+    let guard = crate::companion::STATE.lock();
     let state = guard.as_ref().ok_or("Companion is not running")?;
 
     // Remove session
-    state.sessions.lock().unwrap().remove(&session_token);
+    state.sessions.lock().remove(&session_token);
 
     // Remove associated WebSocket clients
-    state.ws_clients.lock().unwrap().retain(|c| c.session_token != session_token);
+    state.ws_clients.lock().retain(|c| c.session_token != session_token);
 
     Ok(())
 }

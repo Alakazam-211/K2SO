@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::process::Command;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -90,13 +90,9 @@ fn detect_all() -> Vec<EditorInfo> {
 // ── Public API ───────────────────────────────────────────────────────────
 
 pub fn get_all_editors() -> Vec<EditorInfo> {
-    let mut cache = match EDITOR_CACHE.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            log_debug!("Failed to lock editor cache: {e}");
-            return vec![];
-        }
-    };
+    // parking_lot::Mutex never poisons, so `.lock()` always returns a
+    // guard directly — no error branch needed.
+    let mut cache = EDITOR_CACHE.lock();
     if cache.is_none() {
         *cache = Some(detect_all());
     }
@@ -111,14 +107,7 @@ pub fn get_installed_editors() -> Vec<EditorInfo> {
 }
 
 pub fn clear_editor_cache() -> Vec<EditorInfo> {
-    {
-        match EDITOR_CACHE.lock() {
-            Ok(mut cache) => { *cache = None; }
-            Err(e) => {
-                log_debug!("Failed to lock editor cache for clearing: {e}");
-            }
-        }
-    }
+    *EDITOR_CACHE.lock() = None;
     get_all_editors()
 }
 

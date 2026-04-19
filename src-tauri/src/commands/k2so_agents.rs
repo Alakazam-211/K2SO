@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::db::schema::{AgentHeartbeat, AgentSession, HeartbeatFire, WorkspaceRelation};
+use crate::fs_atomic::{self, atomic_symlink, atomic_write_str, log_if_err, unique_archive_path};
 
 // ── DB helpers (standalone connection, no AppState needed) ──────────────
 
@@ -157,10 +158,11 @@ fn ensure_agent_wakeup(project_path: &str, agent_name: &str, agent_type: &str) {
     if hb_default.exists() {
         return;
     }
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _ = fs::write(&path, template);
+    log_if_err(
+        "ensure_agent_wakeup",
+        &path,
+        atomic_write_str(&path, template),
+    );
 }
 
 /// Create the workspace-level `wakeup.md` (used by `__lead__`) from
@@ -170,10 +172,11 @@ fn ensure_workspace_wakeup(project_path: &str) {
     if path.exists() {
         return;
     }
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _ = fs::write(&path, WAKEUP_TEMPLATE_WORKSPACE);
+    log_if_err(
+        "ensure_workspace_wakeup",
+        &path,
+        atomic_write_str(&path, WAKEUP_TEMPLATE_WORKSPACE),
+    );
 }
 
 /// Determine an agent's type from its `agent.md` frontmatter. Returns
@@ -197,7 +200,8 @@ fn agent_type_for(project_path: &str, agent_name: &str) -> String {
 /// agent has no heartbeats configured — callers should fall back to
 /// the shipped template in that case.
 pub fn default_heartbeat_wakeup_abs(project_path: &str, _agent_name: &str) -> Option<String> {
-    let conn = rusqlite::Connection::open(k2so_db_path()).ok()?;
+    let db = crate::db::shared();
+    let conn = db.lock();
     let project_id = resolve_project_id(&conn, project_path)?;
     let rows = crate::db::schema::AgentHeartbeat::list_enabled(&conn, &project_id).ok()?;
     let hb = rows.iter().find(|h| h.name == "triage").or_else(|| rows.first())?;
@@ -277,17 +281,17 @@ pub fn find_primary_agent(project_path: &str) -> Option<String> {
     // prevents alphabetical scan order from picking a stale orphan
     // (e.g. returning pod-leader before sarah when the workspace is
     // actually a Custom agent workspace for sarah).
-    let declared_mode: Option<String> = rusqlite::Connection::open(k2so_db_path())
+    let declared_mode: Option<String> = {
+        let db = crate::db::shared();
+        let conn = db.lock();
+        conn.query_row(
+            "SELECT agent_mode FROM projects WHERE path = ?1",
+            rusqlite::params![project_path],
+            |row| row.get::<_, Option<String>>(0),
+        )
         .ok()
-        .and_then(|conn| {
-            conn.query_row(
-                "SELECT agent_mode FROM projects WHERE path = ?1",
-                rusqlite::params![project_path],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .ok()
-            .flatten()
-        });
+        .flatten()
+    };
 
     let type_for_mode = |mode: &str| match mode {
         "custom" => "custom",
@@ -347,7 +351,8 @@ pub fn k2so_heartbeat_add(
     spec_json: String,
 ) -> Result<serde_json::Value, String> {
     AgentHeartbeat::validate_name(&name).map_err(|e| e.to_string())?;
-    let conn = rusqlite::Connection::open(k2so_db_path()).map_err(|e| e.to_string())?;
+    let db = crate::db::shared();
+    let conn = db.lock();
     let project_id = resolve_project_id(&conn, &project_path)
         .ok_or_else(|| format!("Project not found: {}", project_path))?;
 
@@ -401,7 +406,8 @@ pub fn k2so_heartbeat_add(
 
 #[tauri::command]
 pub fn k2so_heartbeat_list(project_path: String) -> Result<Vec<AgentHeartbeat>, String> {
-    let conn = rusqlite::Connection::open(k2so_db_path()).map_err(|e| e.to_string())?;
+    let db = crate::db::shared();
+    let conn = db.lock();
     let project_id = resolve_project_id(&conn, &project_path)
         .ok_or_else(|| format!("Project not found: {}", project_path))?;
     AgentHeartbeat::list_by_project(&conn, &project_id).map_err(|e| e.to_string())
@@ -412,7 +418,8 @@ pub fn k2so_heartbeat_remove(
     project_path: String,
     name: String,
 ) -> Result<(), String> {
-    let conn = rusqlite::Connection::open(k2so_db_path()).map_err(|e| e.to_string())?;
+    let db = crate::db::shared();
+    let conn = db.lock();
     let project_id = resolve_project_id(&conn, &project_path)
         .ok_or_else(|| format!("Project not found: {}", project_path))?;
     let agent_name = find_primary_agent(&project_path)
@@ -435,7 +442,8 @@ pub fn k2so_heartbeat_set_enabled(
     name: String,
     enabled: bool,
 ) -> Result<(), String> {
-    let conn = rusqlite::Connection::open(k2so_db_path()).map_err(|e| e.to_string())?;
+    let db = crate::db::shared();
+    let conn = db.lock();
     let project_id = resolve_project_id(&conn, &project_path)
         .ok_or_else(|| format!("Project not found: {}", project_path))?;
     AgentHeartbeat::set_enabled(&conn, &project_id, &name, enabled)
@@ -450,7 +458,8 @@ pub fn k2so_heartbeat_edit(
     frequency: String,
     spec_json: String,
 ) -> Result<(), String> {
-    let conn = rusqlite::Connection::open(k2so_db_path()).map_err(|e| e.to_string())?;
+    let db = crate::db::shared();
+    let conn = db.lock();
     let project_id = resolve_project_id(&conn, &project_path)
         .ok_or_else(|| format!("Project not found: {}", project_path))?;
     AgentHeartbeat::update_schedule(&conn, &project_id, &name, &frequency, &spec_json)
@@ -477,7 +486,8 @@ pub struct HeartbeatFireCandidate {
 /// skipped_schedule) so `k2so heartbeat status <name>` can show what
 /// happened.
 pub fn k2so_agents_heartbeat_tick(project_path: &str) -> Vec<HeartbeatFireCandidate> {
-    let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) else { return vec![] };
+    let db = crate::db::shared();
+    let conn = db.lock();
     let Some(project_id) = resolve_project_id(&conn, project_path) else { return vec![] };
     let heartbeats = AgentHeartbeat::list_enabled(&conn, &project_id).unwrap_or_default();
     if heartbeats.is_empty() {
@@ -535,7 +545,8 @@ pub fn k2so_agents_heartbeat_tick(project_path: &str) -> Vec<HeartbeatFireCandid
 /// AFTER spawn_wake_pty succeeds. Silent no-op when the row is gone
 /// (heartbeat removed mid-run) — audit rows survive independently.
 pub fn stamp_heartbeat_fired(project_path: &str, heartbeat_name: &str) {
-    let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) else { return };
+    let db = crate::db::shared();
+    let conn = db.lock();
     let Some(project_id) = resolve_project_id(&conn, project_path) else { return };
     let _ = AgentHeartbeat::stamp_last_fired(&conn, &project_id, heartbeat_name);
 }
@@ -550,7 +561,8 @@ pub fn k2so_heartbeat_rename(
     new_name: String,
 ) -> Result<(), String> {
     AgentHeartbeat::validate_name(&new_name).map_err(|e| e.to_string())?;
-    let conn = rusqlite::Connection::open(k2so_db_path()).map_err(|e| e.to_string())?;
+    let db = crate::db::shared();
+    let conn = db.lock();
     let project_id = resolve_project_id(&conn, &project_path)
         .ok_or_else(|| format!("Project not found: {}", project_path))?;
     let hb = AgentHeartbeat::get_by_name(&conn, &project_id, &old_name)
@@ -602,7 +614,8 @@ pub fn k2so_heartbeat_fires_list(
     project_path: String,
     limit: Option<i64>,
 ) -> Result<Vec<HeartbeatFire>, String> {
-    let conn = rusqlite::Connection::open(k2so_db_path()).map_err(|e| e.to_string())?;
+    let db = crate::db::shared();
+    let conn = db.lock();
     let project_id = resolve_project_id(&conn, &project_path)
         .ok_or_else(|| format!("Project not found: {}", project_path))?;
     HeartbeatFire::list_by_project(&conn, &project_id, limit.unwrap_or(50))
@@ -655,9 +668,11 @@ pub fn archive_orphan_top_tier_agents(project_path: &str) -> Vec<String> {
     }
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
 
-    let project_id = rusqlite::Connection::open(k2so_db_path())
-        .ok()
-        .and_then(|c| resolve_project_id(&c, project_path));
+    let project_id = {
+        let db = crate::db::shared();
+        let conn = db.lock();
+        resolve_project_id(&conn, project_path)
+    };
 
     for orphan in orphans {
         let src = agents_root.join(&orphan);
@@ -666,7 +681,9 @@ pub fn archive_orphan_top_tier_agents(project_path: &str) -> Vec<String> {
             continue;
         }
         if let Some(ref pid) = project_id {
-            if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
+            {
+        let db = crate::db::shared();
+        let conn = db.lock();
                 let _ = AgentSession::delete(&conn, pid, &orphan);
                 let prefix = format!(".k2so/agents/{}/", orphan);
                 let _ = conn.execute(
@@ -690,7 +707,8 @@ pub fn archive_orphan_top_tier_agents(project_path: &str) -> Vec<String> {
 /// startup after `promote_legacy_heartbeat`. Idempotent: no-op when
 /// all rows already point at the correct agent.
 pub fn repair_mismigrated_heartbeats(project_path: &str) {
-    let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) else { return };
+    let db = crate::db::shared();
+    let conn = db.lock();
     let Some(project_id) = resolve_project_id(&conn, project_path) else { return };
     let Ok(rows) = AgentHeartbeat::list_by_project(&conn, &project_id) else { return };
     if rows.is_empty() {
@@ -777,7 +795,11 @@ pub fn repair_mismigrated_heartbeats(project_path: &str) {
                 Edit this file with the instructions this heartbeat should run.\n",
                 hb.name
             );
-            let _ = fs::write(&correct_wakeup, template);
+            log_if_err(
+                "heartbeat-repair synth-wakeup",
+                &correct_wakeup,
+                atomic_write_str(&correct_wakeup, &template),
+            );
         }
 
         let new_relative = correct_wakeup
@@ -804,7 +826,8 @@ pub fn repair_mismigrated_heartbeats(project_path: &str) {
 /// `heartbeats/default/wakeup.md` so everything lives under a consistent
 /// hierarchy post-migration.
 pub fn promote_legacy_heartbeat(project_path: &str) {
-    let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) else { return };
+    let db = crate::db::shared();
+    let conn = db.lock();
     let Some(project_id) = resolve_project_id(&conn, project_path) else { return };
 
     // Idempotency: skip if any heartbeat row exists for this project.
@@ -854,9 +877,16 @@ pub fn promote_legacy_heartbeat(project_path: &str) {
     let new_wakeup = default_dir.join("WAKEUP.md");
     if legacy_wakeup.exists() && !new_wakeup.exists() {
         // Follow symlinks by copying content rather than renaming the link.
+        // Atomic write ensures a crash between copy-source-read and commit
+        // can't leave the new_wakeup half-written + the legacy still present;
+        // we only remove the legacy once the new is fully on disk.
         if let Ok(content) = fs::read_to_string(&legacy_wakeup) {
-            if fs::write(&new_wakeup, content).is_ok() {
-                let _ = fs::remove_file(&legacy_wakeup);
+            if atomic_write_str(&new_wakeup, &content).is_ok() {
+                log_if_err(
+                    "promote_legacy_heartbeat legacy remove",
+                    &legacy_wakeup,
+                    fs::remove_file(&legacy_wakeup),
+                );
             }
         }
     } else if !new_wakeup.exists() {
@@ -867,7 +897,11 @@ pub fn promote_legacy_heartbeat(project_path: &str) {
             This heartbeat was auto-created by the migration from the legacy single-slot\n\
             heartbeat system. Edit this file to define what happens when this agent wakes.\n"
         );
-        let _ = fs::write(&new_wakeup, template);
+        log_if_err(
+            "promote_legacy_heartbeat scaffold",
+            &new_wakeup,
+            atomic_write_str(&new_wakeup, &template),
+        );
     }
 
     let workspace_relative = new_wakeup
@@ -995,7 +1029,9 @@ pub fn migrate_filenames_to_uppercase(project_path: &str) {
     // Migrate DB rows: agent_heartbeats.wakeup_path entries that reference
     // lowercase `wakeup.md` → UPPERCASE. This matters on case-sensitive
     // filesystems (Linux); case-insensitive FS would tolerate either.
-    if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
+    {
+        let db = crate::db::shared();
+        let conn = db.lock();
         if let Some(project_id) = resolve_project_id(&conn, project_path) {
             let _ = conn.execute(
                 "UPDATE agent_heartbeats \
@@ -1054,7 +1090,12 @@ fn case_rename(from: &std::path::Path, to: &std::path::Path) {
 /// Idempotent: bails immediately if `__lead__` already has any
 /// heartbeat row, or if the project isn't in manager mode.
 pub fn migrate_or_scaffold_lead_heartbeat(project_path: &str) {
-    let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) else { return };
+    // Reentrant lock lets this function hold the guard while calling
+    // `k2so_heartbeat_add` below — which itself locks the same Mutex.
+    // A plain Mutex would deadlock here (observed as a macOS beachball
+    // during startup).
+    let db = crate::db::shared();
+    let conn = db.lock();
     let Some(project_id) = resolve_project_id(&conn, project_path) else { return };
 
     let agent_mode: Option<String> = conn.query_row(
@@ -1130,7 +1171,11 @@ pub fn migrate_or_scaffold_lead_heartbeat(project_path: &str) {
                 .join("heartbeats")
                 .join("triage")
                 .join("WAKEUP.md");
-            let _ = fs::write(&wake_path, &wake_body);
+            log_if_err(
+                "migrate lead-heartbeat wakeup",
+                &wake_path,
+                atomic_write_str(&wake_path, &wake_body),
+            );
 
             if migrated_content.is_some() {
                 let migrated_to = legacy_path.with_file_name("wakeup.md.migrated");
@@ -1331,7 +1376,11 @@ fn ensure_skill_up_to_date(
     }
     if !skill_path.exists() {
         let wrapped = wrap_managed_skill(skill_type, current_version, fresh_body, extra_frontmatter);
-        let _ = fs::write(skill_path, wrapped);
+        log_if_err(
+            "ensure_skill_up_to_date create",
+            skill_path,
+            atomic_write_str(skill_path, &wrapped),
+        );
         return SkillUpgradeOutcome::Created;
     }
 
@@ -1380,7 +1429,11 @@ fn ensure_skill_up_to_date(
             // the managed region.
             format!("{}\n{}\n", wrapped.trim_end(), after_fm.trim_end())
         };
-        let _ = fs::write(skill_path, final_content);
+        log_if_err(
+            "ensure_skill_up_to_date migrate legacy",
+            skill_path,
+            atomic_write_str(skill_path, &final_content),
+        );
         return SkillUpgradeOutcome::MigratedLegacy;
     }
 
@@ -1398,7 +1451,11 @@ fn ensure_skill_up_to_date(
         } else {
             format!("{}\n{}\n", wrapped.trim_end(), tail)
         };
-        let _ = fs::write(skill_path, final_content);
+        log_if_err(
+            "ensure_skill_up_to_date upgrade",
+            skill_path,
+            atomic_write_str(skill_path, &final_content),
+        );
         return SkillUpgradeOutcome::Upgraded;
     }
 
@@ -1407,7 +1464,11 @@ fn ensure_skill_up_to_date(
     // merge when they're ready.
     let proposed_path = skill_path.with_extension("md.proposed");
     let wrapped = wrap_managed_skill(skill_type, current_version, fresh_body, extra_frontmatter);
-    let _ = fs::write(&proposed_path, wrapped);
+    log_if_err(
+        "ensure_skill_up_to_date propose",
+        &proposed_path,
+        atomic_write_str(&proposed_path, &wrapped),
+    );
     log_debug!(
         "[skill-upgrade] {} user-modified; wrote {} alongside",
         skill_path.display(),
@@ -1487,22 +1548,14 @@ fn count_md_files(dir: &Path) -> usize {
 /// Prevents memory exhaustion from malicious or corrupted files.
 const MAX_FILE_SIZE: u64 = 1_048_576;
 
-/// Atomic file write: write to a temp file in the same directory, then rename.
-/// This prevents partial/corrupted files if the process crashes during write.
-/// (Zed pattern: NamedTempFile + persist for atomic rename)
+/// Thin wrapper around [`crate::fs_atomic::atomic_write_str`] preserving
+/// the `Result<(), String>` signature the existing callers propagate with
+/// `?` and `.map_err(|e| e.to_string())`. The heavy lifting (PID+nanos
+/// tempfile naming, fsync before rename, cleanup on failure) lives in the
+/// shared module so every caller — here and in fs_atomic's unit tests —
+/// gets the same guarantees.
 fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
-    let parent = path.parent().unwrap_or(Path::new("."));
-    let tmp_path = parent.join(format!(".{}.tmp", path.file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "k2so".to_string())));
-    fs::write(&tmp_path, content)
-        .map_err(|e| format!("Failed to write temp file: {}", e))?;
-    fs::rename(&tmp_path, path)
-        .map_err(|e| {
-            // Clean up temp file if rename fails
-            let _ = fs::remove_file(&tmp_path);
-            format!("Failed to rename temp file: {}", e)
-        })
+    atomic_write_str(path, content).map_err(|e| format!("atomic write failed: {}", e))
 }
 
 /// Read a file with size limit check to prevent OOM from large/malicious files.
@@ -2038,10 +2091,10 @@ pub fn k2so_agents_delegate(
 
     // Register the worktree as a workspace in the DB so it appears in the sidebar.
     // Uses the same schema as git_create_worktree: (id, project_id, name, type, branch, tab_order, worktree_path)
-    if let Some(home) = dirs::home_dir() {
-        let db_path = home.join(".k2so").join("k2so.db");
-        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;").ok();
+    {
+        let db = crate::db::shared();
+        let conn = db.lock();
+        {
             if let Ok(project_id) = conn.query_row(
                 "SELECT id FROM projects WHERE path = ?1",
                 rusqlite::params![project_path],
@@ -2287,7 +2340,9 @@ pub fn k2so_agents_lock(
     owner: Option<String>,
 ) -> Result<(), String> {
     // DB tracking (best-effort)
-    if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
+    {
+        let db = crate::db::shared();
+        let conn = db.lock();
         if let Some(project_id) = resolve_project_id(&conn, &project_path) {
             let session_uuid = uuid::Uuid::new_v4().to_string();
             let owner_val = owner.as_deref().unwrap_or("system");
@@ -2318,7 +2373,9 @@ pub fn k2so_agents_lock(
 #[tauri::command]
 pub fn k2so_agents_unlock(project_path: String, agent_name: String) -> Result<(), String> {
     // DB tracking (best-effort)
-    if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
+    {
+        let db = crate::db::shared();
+        let conn = db.lock();
         if let Some(project_id) = resolve_project_id(&conn, &project_path) {
             let _ = AgentSession::update_status(&conn, &project_id, &agent_name, "sleeping");
         }
@@ -2336,7 +2393,9 @@ pub fn k2so_agents_unlock(project_path: String, agent_name: String) -> Result<()
 /// Tries DB first, falls back to .lock file.
 pub fn is_agent_locked(project_path: &str, agent_name: &str) -> bool {
     // Try DB first
-    if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
+    {
+        let db = crate::db::shared();
+        let conn = db.lock();
         if let Some(project_id) = resolve_project_id(&conn, project_path) {
             if let Ok(Some(session)) = AgentSession::get_by_agent(&conn, &project_id, agent_name) {
                 if session.status == "running" {
@@ -2477,7 +2536,9 @@ pub fn k2so_agents_build_launch(
     // save path. See k2so_agents_save_session_id for the write path.
     let agent_cwd = agent_dir(&project_path, &agent_name);
     let resume_session = (|| -> Option<String> {
-        if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
+        {
+        let db = crate::db::shared();
+        let conn = db.lock();
             if let Some(project_id) = resolve_project_id(&conn, &project_path) {
                 if let Ok(Some(session)) = AgentSession::get_by_agent(&conn, &project_id, &agent_name) {
                     if let Some(sid) = session.session_id {
@@ -2556,7 +2617,8 @@ pub fn k2so_agents_build_launch(
     // proactive lightweight trigger before that point.
     const WAKES_PER_COMPACT: i64 = 20;
     let should_compact = (|| -> Option<bool> {
-        let conn = rusqlite::Connection::open(k2so_db_path()).ok()?;
+        let db = crate::db::shared();
+        let conn = db.lock();
         let pid = resolve_project_id(&conn, &project_path)?;
         let n = AgentSession::bump_wake_counter(&conn, &pid, &agent_name).ok()?;
         if n >= WAKES_PER_COMPACT {
@@ -3143,7 +3205,11 @@ fn generate_agent_claude_md_content(
 
     // Write SKILL.md to agent directory
     let skill_path = agent_dir(project_path, agent_name).join("SKILL.md");
-    let _ = fs::write(&skill_path, &skill_content);
+    log_if_err(
+        "agent skill write",
+        &skill_path,
+        atomic_write_str(&skill_path, &skill_content),
+    );
 
     // Inject skill content directly into the system prompt so it's always available
     // (no extra tool call needed to read SKILL.md)
@@ -3197,7 +3263,9 @@ fn generate_manager_skill_content(project_path: &str, project_name: &str) -> Str
     skill.push_str(&format!("# K2SO Workspace Manager Skill\n\nYou are the Workspace Manager for **{}**.\n\n", project_name));
 
     // Read workspace state from DB
-    if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
+    {
+        let db = crate::db::shared();
+        let conn = db.lock();
         if let Some(project_id) = resolve_project_id(&conn, project_path) {
             // Get workspace state
             let state_info: Option<(String, String)> = conn.query_row(
@@ -3744,7 +3812,12 @@ pub fn k2so_agents_generate_workspace_claude_md(
             "---\nname: manager\nrole: {}\ntype: manager\nmanager: true\n---\n\n{}\n",
             manager_role, manager_body
         );
-        let _ = fs::write(manager_dir.join("AGENT.md"), &manager_md);
+        let manager_md_path = manager_dir.join("AGENT.md");
+        log_if_err(
+            "auto-scaffold manager AGENT.md",
+            &manager_md_path,
+            atomic_write_str(&manager_md_path, &manager_md),
+        );
         write_agent_skill_file(&project_path, "manager", "manager");
     }
 
@@ -3760,7 +3833,12 @@ pub fn k2so_agents_generate_workspace_claude_md(
             "---\nname: k2so-agent\nrole: {}\ntype: k2so\n---\n\n{}\n",
             k2so_role, k2so_body
         );
-        let _ = fs::write(k2so_agent_dir.join("AGENT.md"), &k2so_md);
+        let k2so_md_path = k2so_agent_dir.join("AGENT.md");
+        log_if_err(
+            "auto-scaffold k2so-agent AGENT.md",
+            &k2so_md_path,
+            atomic_write_str(&k2so_md_path, &k2so_md),
+        );
         write_agent_skill_file(&project_path, "k2so-agent", "k2so");
     }
 
@@ -3807,19 +3885,16 @@ pub fn k2so_agents_generate_workspace_claude_md(
 
     // Detect mode — read from DB, fall back to filesystem
     let is_manager_mode = {
-        // Try reading from DB first
-        let db_mode = dirs::home_dir()
-            .and_then(|h| {
-                let db_path = h.join(".k2so").join("k2so.db");
-                rusqlite::Connection::open(&db_path).ok()
-            })
-            .and_then(|conn| {
-                conn.query_row(
-                    "SELECT agent_mode FROM projects WHERE path = ?1",
-                    rusqlite::params![project_path],
-                    |row| row.get::<_, String>(0),
-                ).ok()
-            });
+        // Try reading from DB first — shared process-wide connection.
+        let db_mode: Option<String> = {
+            let db = crate::db::shared();
+            let conn = db.lock();
+            conn.query_row(
+                "SELECT agent_mode FROM projects WHERE path = ?1",
+                rusqlite::params![project_path],
+                |row| row.get::<_, String>(0),
+            ).ok()
+        };
 
         match db_mode.as_deref() {
             Some("manager") | Some("coordinator") | Some("pod") => true,
@@ -4516,15 +4591,13 @@ pub fn k2so_agents_review_approve(
         let _ = crate::git::remove_worktree(&project_path, &wt_path, true);
 
         // Remove the workspace DB record so it disappears from the UI
-        if let Some(home) = dirs::home_dir() {
-            let db_path = home.join(".k2so").join("k2so.db");
-            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-                let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
-                let _ = conn.execute(
-                    "DELETE FROM workspaces WHERE worktree_path = ?1",
-                    rusqlite::params![wt_path],
-                );
-            }
+        {
+            let db = crate::db::shared();
+            let conn = db.lock();
+            let _ = conn.execute(
+                "DELETE FROM workspaces WHERE worktree_path = ?1",
+                rusqlite::params![wt_path],
+            );
         }
     }
 
@@ -4582,15 +4655,13 @@ pub fn k2so_agents_review_reject(
             log_debug!("[review-reject] Failed to delete branch {}: {}", wt.branch, e);
         }
         // Remove workspace DB record
-        if let Some(home) = dirs::home_dir() {
-            let db_path = home.join(".k2so").join("k2so.db");
-            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-                let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
-                let _ = conn.execute(
-                    "DELETE FROM workspaces WHERE worktree_path = ?1",
-                    rusqlite::params![wt_path],
-                );
-            }
+        {
+            let db = crate::db::shared();
+            let conn = db.lock();
+            let _ = conn.execute(
+                "DELETE FROM workspaces WHERE worktree_path = ?1",
+                rusqlite::params![wt_path],
+            );
         }
     }
 
@@ -4664,10 +4735,8 @@ pub fn k2so_agents_review_request_changes(
 
 /// Read the workspace state for a project, returning the state or None if unset.
 fn get_workspace_state(project_path: &str) -> Option<crate::db::schema::WorkspaceState> {
-    let db_path = dirs::home_dir()?.join(".k2so").join("k2so.db");
-    let conn = rusqlite::Connection::open(&db_path).ok()?;
-    // Safety: read-only access from background threads — set WAL mode and busy timeout
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA query_only=ON;").ok()?;
+    let db = crate::db::shared();
+    let conn = db.lock();
     let state_id: Option<String> = conn.query_row(
         "SELECT tier_id FROM projects WHERE path = ?1",
         rusqlite::params![project_path],
@@ -5057,32 +5126,33 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
 
     // Look up project row up-front so audit writes have a project_id to
     // hang on. Audit rows without a project_id are dropped silently.
-    let project_row: Option<(String, String, Option<String>, Option<String>)> =
-        rusqlite::Connection::open(&db_path)
-            .ok()
-            .and_then(|conn| {
-                conn.query_row(
-                    "SELECT id, heartbeat_mode, heartbeat_schedule, heartbeat_last_fire \
-                     FROM projects WHERE path = ?1",
-                    rusqlite::params![project_path],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )
-                .ok()
-            });
+    let project_row: Option<(String, String, Option<String>, Option<String>)> = {
+        let db = crate::db::shared();
+        let conn = db.lock();
+        conn.query_row(
+            "SELECT id, heartbeat_mode, heartbeat_schedule, heartbeat_last_fire \
+             FROM projects WHERE path = ?1",
+            rusqlite::params![project_path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .ok()
+    };
 
     // Helper: write one audit row. Silently drops writes if project_id
-    // isn't resolved (we'd have nothing to attach to anyway).
+    // isn't resolved (we'd have nothing to attach to anyway). Routes
+    // through the shared connection; the closure captures the Arc handle
+    // so it stays valid for the lifetime of the surrounding function.
     let resolved_project_id: Option<String> = project_row.as_ref().map(|r| r.0.clone());
     let audit = |agent: Option<&str>, mode: &str, decision: &str, reason: Option<&str>,
                  inbox_priority: Option<&str>, inbox_count: Option<i64>| {
         if let Some(pid) = resolved_project_id.as_deref() {
-            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-                let _ = HeartbeatFire::insert(
-                    &conn, pid, agent, mode, decision, reason,
-                    inbox_priority, inbox_count,
-                    Some(tick_start.elapsed().as_millis() as i64),
-                );
-            }
+            let db = crate::db::shared();
+            let conn = db.lock();
+            let _ = HeartbeatFire::insert(
+                &conn, pid, agent, mode, decision, reason,
+                inbox_priority, inbox_count,
+                Some(tick_start.elapsed().as_millis() as i64),
+            );
         }
     };
 
@@ -5109,7 +5179,9 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
             }
             // Record that the schedule opened. We only stamp last_fire
             // here (not for "heartbeat" mode, which fires every tick).
-            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+            {
+                let db = crate::db::shared();
+                let conn = db.lock();
                 let _ = conn.execute(
                     "UPDATE projects SET heartbeat_last_fire = ?1 WHERE id = ?2",
                     rusqlite::params![chrono::Local::now().to_rfc3339(), project_id],
@@ -5165,13 +5237,13 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
 
             // Safety: skip agents whose terminal is being used interactively by the user
             if let Some(ref pid) = resolved_project_id {
-                if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-                    if let Ok(Some(session)) = AgentSession::get_by_agent(&conn, pid, &name) {
-                        if session.owner == "user" && session.status == "running" {
-                            audit(Some(&name), &mode_str, "skipped_user_session",
-                                  Some("user is driving this agent's terminal"), None, None);
-                            continue;
-                        }
+                let db = crate::db::shared();
+                let conn = db.lock();
+                if let Ok(Some(session)) = AgentSession::get_by_agent(&conn, pid, &name) {
+                    if session.owner == "user" && session.status == "running" {
+                        audit(Some(&name), &mode_str, "skipped_user_session",
+                              Some("user is driving this agent's terminal"), None, None);
+                        continue;
                     }
                 }
             }
@@ -5315,8 +5387,8 @@ pub fn k2so_agents_save_session_id(
         return Err(format!("Agent '{}' does not exist", agent_name));
     }
 
-    let conn = rusqlite::Connection::open(k2so_db_path())
-        .map_err(|e| format!("Failed to open DB: {}", e))?;
+    let db = crate::db::shared();
+    let conn = db.lock();
     let project_id = resolve_project_id(&conn, &project_path)
         .ok_or_else(|| format!("Project not found: {}", project_path))?;
     AgentSession::update_session_id(&conn, &project_id, &agent_name, &session_id)
@@ -5330,7 +5402,9 @@ pub fn k2so_agents_clear_session_id(
     project_path: String,
     agent_name: String,
 ) -> Result<(), String> {
-    if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
+    {
+        let db = crate::db::shared();
+        let conn = db.lock();
         if let Some(project_id) = resolve_project_id(&conn, &project_path) {
             let _ = AgentSession::clear_session_id(&conn, &project_id, &agent_name);
         }
@@ -5370,7 +5444,9 @@ pub fn k2so_agents_heartbeat_noop(
     // do"). Previously this only deleted the legacy `.last_session` file
     // and left the DB's session_id stale, so the next wake still tried
     // --resume on a pruned session. Now we clear the DB directly.
-    if let Ok(conn) = rusqlite::Connection::open(k2so_db_path()) {
+    {
+        let db = crate::db::shared();
+        let conn = db.lock();
         if let Some(project_id) = resolve_project_id(&conn, &project_path) {
             let _ = AgentSession::clear_session_id(&conn, &project_id, &agent_name);
         }
@@ -6370,38 +6446,36 @@ const K2SO_SECTION_END: &str = "<!-- K2SO:END -->";
 
 /// Append or update a K2SO section in a shared file using markers.
 /// If the file doesn't exist, creates it. If markers exist, replaces content between them.
+/// Atomic writes — a crash mid-update can't corrupt existing user content.
 fn upsert_k2so_section(file_path: &std::path::Path, content: &str) {
     let section = format!("{}\n{}\n{}", K2SO_SECTION_BEGIN, content, K2SO_SECTION_END);
 
     let existing = fs::read_to_string(file_path).unwrap_or_default();
-    if let (Some(start), Some(end)) = (existing.find(K2SO_SECTION_BEGIN), existing.find(K2SO_SECTION_END)) {
-        // Replace existing K2SO section
+    let composed = if let (Some(start), Some(end)) =
+        (existing.find(K2SO_SECTION_BEGIN), existing.find(K2SO_SECTION_END))
+    {
         let before = &existing[..start];
         let after = &existing[end + K2SO_SECTION_END.len()..];
-        let _ = fs::write(file_path, format!("{}{}{}", before, section, after));
+        format!("{}{}{}", before, section, after)
     } else if existing.is_empty() {
-        let _ = fs::write(file_path, &section);
+        section.clone()
     } else {
-        // Append to existing content
-        let _ = fs::write(file_path, format!("{}\n\n{}", existing.trim_end(), section));
-    }
+        format!("{}\n\n{}", existing.trim_end(), section)
+    };
+    log_if_err(
+        "upsert_k2so_section",
+        file_path,
+        atomic_write_str(file_path, &composed),
+    );
 }
 
 /// Create a symlink, removing any existing file/link at the target first.
 fn force_symlink(source: &std::path::Path, target: &std::path::Path) {
-    // Remove existing file or symlink at target
-    if target.exists() || target.symlink_metadata().is_ok() {
-        let _ = fs::remove_file(target);
-    }
-    #[cfg(unix)]
-    {
-        let _ = std::os::unix::fs::symlink(source, target);
-    }
-    #[cfg(not(unix))]
-    {
-        // Windows fallback: copy instead of symlink
-        let _ = fs::copy(source, target);
-    }
+    // Atomic create-or-replace: writes the new symlink at a sibling tempfile
+    // then renames into place, so concurrent readers never see a missing
+    // file mid-swap. Previously this did remove+create, which opened a
+    // window where readers got ENOENT.
+    log_if_err("force_symlink", target, atomic_symlink(source, target));
 }
 
 /// Write the canonical SKILL.md and symlink from all harness discovery paths.
@@ -6505,6 +6579,21 @@ pub fn write_workspace_skill_file_with_body(project_path: &str, base_body: Optio
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "workspace".to_string());
 
+    // Crash-detection marker: the regen is a multi-step commit (adopt
+    // sources, write canonical, append SOURCE regions, fan out to harness
+    // targets, stamp sentinel). True filesystem rollback is impossible
+    // without a CoW snapshot, but by stamping `.regen-in-flight` at entry
+    // and clearing it at the end, a subsequent boot can detect that a
+    // previous regen didn't complete cleanly and surface a diagnostic.
+    let regen_marker = PathBuf::from(project_path)
+        .join(".k2so")
+        .join(".regen-in-flight");
+    log_if_err(
+        "regen-in-flight stamp",
+        &regen_marker,
+        fs_atomic::atomic_write(&regen_marker, b""),
+    );
+
     // Step 1: Adoption sweep — commit any SOURCE-region drift back to source
     // files before we regenerate SKILL.md.
     adopt_workspace_skill_drift(project_path);
@@ -6563,12 +6652,59 @@ pub fn write_workspace_skill_file_with_body(project_path: &str, base_body: Optio
     migrate_and_symlink_root_claude_md(&canonical, &root_claude, project_path);
     write_workspace_harness_discovery_targets(project_path, &canonical);
 
-    // Step 8: Stamp last-regen marker for mtime-based drift resolution.
-    let stamp_path = PathBuf::from(project_path).join(".k2so").join(".last-skill-regen");
-    if let Some(parent) = stamp_path.parent() {
-        let _ = fs::create_dir_all(parent);
+    // Step 8: Stamp last-regen with the current source-content hashes.
+    // Used by the next regen's adopt_workspace_skill_drift to distinguish
+    // "user edited source" from "agent wrote to SKILL.md" without relying
+    // on mtime (which is unreliable across clock skew and rsync).
+    let mut hashes: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let project_md_path = PathBuf::from(project_path).join(".k2so").join("PROJECT.md");
+    let project_hash = content_hash_of(&project_md_path);
+    if !project_hash.is_empty() {
+        hashes.insert("project_md".to_string(), project_hash);
     }
-    let _ = fs::write(&stamp_path, b"");
+    if let Some(primary) = find_primary_agent(project_path) {
+        let agent_md_path = agent_dir(project_path, &primary).join("AGENT.md");
+        let agent_hash = content_hash_of(&agent_md_path);
+        if !agent_hash.is_empty() {
+            hashes.insert(format!("agent_md::{}", primary), agent_hash);
+        }
+    }
+    write_regen_hashes(project_path, &hashes);
+
+    // All steps committed — clear the in-flight marker. If the process
+    // dies before this point, the next boot sees the marker and knows a
+    // regen was interrupted (see detect_interrupted_regen).
+    log_if_err(
+        "regen-in-flight clear",
+        &regen_marker,
+        fs::remove_file(&regen_marker),
+    );
+}
+
+/// Startup check: warn the user if a previous regen didn't clear its
+/// in-flight marker. Doesn't auto-repair — a regen is idempotent, so the
+/// next real regen will overwrite any partial state — but surfaces the
+/// situation so the user can check `.k2so/migration/` for stale archives
+/// if they hit unexpected data loss.
+pub fn detect_interrupted_regen(project_path: &str) -> bool {
+    let marker = PathBuf::from(project_path)
+        .join(".k2so")
+        .join(".regen-in-flight");
+    if !marker.exists() {
+        return false;
+    }
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stderr(),
+        "k2so: previous SKILL.md regeneration at {} did not complete cleanly. \
+         The next regen will overwrite any partial state; check .k2so/migration/ \
+         if your workspace context looks unexpectedly stale.",
+        project_path
+    );
+    // Clear the marker so the warning fires exactly once per incident.
+    log_if_err("clear stale regen marker", &marker, fs::remove_file(&marker));
+    true
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -6632,11 +6768,68 @@ fn mtime_secs(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// Content hash of a file path, suitable for drift detection. Returns an
+/// empty string on read failure (callers treat empty == "no stored hash"
+/// and fall back to mtime comparison).
+fn content_hash_of(path: &Path) -> String {
+    match fs::read(path) {
+        Ok(bytes) => skill_checksum_hex(&bytes),
+        Err(_) => String::new(),
+    }
+}
+
+/// Read the `.last-skill-regen` JSON payload, which stores the content
+/// hashes of every source file at the time of the last regen. Used by
+/// drift adoption to tell "source was edited since last regen" apart
+/// from "SKILL.md was edited since last regen" — compared to the old
+/// mtime-based heuristic this is immune to clock skew, NTP jumps, and
+/// cross-machine rsync mtime quirks.
+///
+/// Returns an empty map if the file is missing, unreadable, or contains
+/// legacy empty-file content (pre-0.32.9 stamp format). Callers fall
+/// back to mtime comparison in that case, which still works correctly
+/// for the common single-machine path.
+fn read_regen_hashes(project_path: &str) -> std::collections::HashMap<String, String> {
+    let stamp_path = PathBuf::from(project_path).join(".k2so").join(".last-skill-regen");
+    let Ok(raw) = fs::read_to_string(&stamp_path) else {
+        return std::collections::HashMap::new();
+    };
+    if raw.trim().is_empty() {
+        return std::collections::HashMap::new();
+    }
+    serde_json::from_str::<std::collections::HashMap<String, String>>(&raw)
+        .unwrap_or_default()
+}
+
+/// Persist the content hashes of every source file that participates in
+/// drift detection. Called at the end of a successful regen so the next
+/// regen has a baseline for comparison. Atomic write — a crash mid-stamp
+/// leaves either the old hashes or the new ones, never a truncated file
+/// that would force every source into the fallback mtime path.
+fn write_regen_hashes(
+    project_path: &str,
+    hashes: &std::collections::HashMap<String, String>,
+) {
+    let stamp_path = PathBuf::from(project_path).join(".k2so").join(".last-skill-regen");
+    let payload = serde_json::to_string(hashes).unwrap_or_else(|_| "{}".to_string());
+    log_if_err(
+        "write_regen_hashes",
+        &stamp_path,
+        atomic_write_str(&stamp_path, &payload),
+    );
+}
+
 /// Walk the existing canonical SKILL.md and adopt any SOURCE-region drift
 /// back into its canonical source file (PROJECT.md or the primary agent's
 /// AGENT.md). Uses the `.k2so/.last-skill-regen` stamp to differentiate
 /// between user-initiated edits to the source file (source wins) and
 /// agent-initiated writes into the SKILL.md symlink (SKILL wins).
+///
+/// Conflict resolution uses content hashes when available (hash stored
+/// at last regen vs current on-disk hash) — immune to clock skew,
+/// cross-machine rsync mtime coercion, and NTP jumps. Falls back to
+/// mtime comparison only when no hash snapshot has been written yet
+/// (first regen after upgrade from pre-0.32.9).
 fn adopt_workspace_skill_drift(project_path: &str) {
     let canonical = PathBuf::from(project_path).join(".k2so/skills/k2so/SKILL.md");
     let Ok(skill_content) = fs::read_to_string(&canonical) else {
@@ -6644,6 +6837,24 @@ fn adopt_workspace_skill_drift(project_path: &str) {
     };
     let stamp_path = PathBuf::from(project_path).join(".k2so").join(".last-skill-regen");
     let last_regen = mtime_secs(&stamp_path);
+    let stored_hashes = read_regen_hashes(project_path);
+
+    // Helper: decide whether the source file was touched since the last
+    // regen. Returns true when the user modified the source (so SKILL
+    // divergence is an agent write we should drop), false when SKILL is
+    // the newer side (so we adopt into the source). Preference order:
+    //   1. Hash comparison — precise, clock-skew-free, the right answer
+    //      whenever a prior regen has written a hash snapshot.
+    //   2. Mtime comparison — backward-compat fallback for workspaces
+    //      upgraded from pre-0.32.9 stamps (empty file).
+    let source_touched_since_regen = |source_path: &Path, key: &str| -> bool {
+        if let Some(stored) = stored_hashes.get(key) {
+            let current = content_hash_of(source_path);
+            !current.is_empty() && current.as_str() != stored.as_str()
+        } else {
+            mtime_secs(source_path) > last_regen
+        }
+    };
 
     // PROJECT.md adoption
     if let Some(region_body) = extract_source_region(
@@ -6657,12 +6868,15 @@ fn adopt_workspace_skill_drift(project_path: &str) {
             .map(|raw| strip_frontmatter(&raw).trim().to_string())
             .unwrap_or_default();
         if region_stripped.trim() != file_body.trim() {
-            let source_mtime = mtime_secs(&project_md);
-            let source_touched_since_regen = source_mtime > last_regen;
-            if source_touched_since_regen {
+            if source_touched_since_regen(&project_md, "project_md") {
+                // User edited PROJECT.md since the last regen. Source is
+                // authoritative — the next regen step overwrites every
+                // downstream SKILL.md / harness symlink with the new
+                // PROJECT.md content. Nothing to adopt here; just note
+                // that we saw the edit.
                 log_adoption_event(
                     project_path,
-                    "CONFLICT PROJECT.md: source edited since last regen AND SKILL.md diverged — keeping source, dropping SKILL.md divergence",
+                    "PROJECT.md: user edit detected — downstream SKILL.md + harness files will pick up the new content on this regen",
                 );
             } else if !region_stripped.trim().is_empty() {
                 // Agent wrote into the SKILL.md SOURCE region; adopt into PROJECT.md.
@@ -6678,14 +6892,16 @@ fn adopt_workspace_skill_drift(project_path: &str) {
                     Some(fm) => format!("{}\n\n{}\n", fm.trim_end(), region_stripped.trim()),
                     None => format!("{}\n", region_stripped.trim()),
                 };
-                if let Some(parent) = project_md.parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-                if fs::write(&project_md, &new_contents).is_ok() {
-                    log_adoption_event(
+                match atomic_write_str(&project_md, &new_contents) {
+                    Ok(()) => log_adoption_event(
                         project_path,
                         "ADOPTED PROJECT.md: SKILL.md SOURCE region committed back to .k2so/PROJECT.md",
-                    );
+                    ),
+                    Err(e) => log_if_err::<(), _>(
+                        "adopt PROJECT.md",
+                        &project_md,
+                        Err::<(), _>(e),
+                    ),
                 }
             }
         }
@@ -6708,13 +6924,12 @@ fn adopt_workspace_skill_drift(project_path: &str) {
                     .map(|raw| strip_frontmatter(&raw).trim().to_string())
                     .unwrap_or_default();
                 if region_stripped.trim() != file_body.trim() {
-                    let source_mtime = mtime_secs(&agent_md);
-                    let source_touched_since_regen = source_mtime > last_regen;
-                    if source_touched_since_regen {
+                    let key = format!("agent_md::{}", primary_agent);
+                    if source_touched_since_regen(&agent_md, &key) {
                         log_adoption_event(
                             project_path,
                             &format!(
-                                "CONFLICT AGENT.md ({}): source edited since last regen AND SKILL.md diverged — keeping source, dropping SKILL.md divergence",
+                                "AGENT.md ({}): user edit detected — downstream SKILL.md + harness files will pick up the new content on this regen",
                                 primary_agent
                             ),
                         );
@@ -6730,17 +6945,19 @@ fn adopt_workspace_skill_drift(project_path: &str) {
                             Some(fm) => format!("{}\n\n{}\n", fm.trim_end(), region_stripped.trim()),
                             None => format!("{}\n", region_stripped.trim()),
                         };
-                        if let Some(parent) = agent_md.parent() {
-                            let _ = fs::create_dir_all(parent);
-                        }
-                        if fs::write(&agent_md, &new_contents).is_ok() {
-                            log_adoption_event(
+                        match atomic_write_str(&agent_md, &new_contents) {
+                            Ok(()) => log_adoption_event(
                                 project_path,
                                 &format!(
                                     "ADOPTED AGENT.md ({}): SKILL.md SOURCE region committed back to agent file",
                                     primary_agent
                                 ),
-                            );
+                            ),
+                            Err(e) => log_if_err::<(), _>(
+                                "adopt AGENT.md",
+                                &agent_md,
+                                Err::<(), _>(e),
+                            ),
                         }
                     }
                 }
@@ -6776,9 +6993,16 @@ fn strip_workspace_skill_tail(project_path: &str) -> Option<String> {
     });
 
     // Truncate canonical to everything up to and including the END marker,
-    // plus a single trailing newline.
+    // plus a single trailing newline. Atomic: a crash between here and
+    // append_workspace_source_regions cannot corrupt the canonical file —
+    // a reader sees either the pre-strip content or the post-strip content
+    // in full.
     let truncated = format!("{}\n", &content[..after_end_start]);
-    let _ = fs::write(&canonical, truncated);
+    log_if_err(
+        "strip_workspace_skill_tail write",
+        &canonical,
+        atomic_write_str(&canonical, &truncated),
+    );
 
     // Discard any occurrences of our own placeholder comment, empty lines
     // at the edges, and the migration banner prefix fragments that end up
@@ -6864,7 +7088,11 @@ fn append_workspace_source_regions(project_path: &str, preserved_freeform: Optio
         }
     }
 
-    let _ = fs::write(&canonical, content);
+    log_if_err(
+        "append_workspace_source_regions",
+        &canonical,
+        atomic_write_str(&canonical, &content),
+    );
 }
 
 /// CLAUDE.md migration helper for the 0.32.7 transition. See
@@ -6905,11 +7133,15 @@ fn migrate_and_symlink_root_claude_md(canonical: &Path, root_claude: &Path, proj
                     &archive_display,
                 );
             }
-            // Take over the file — symlink replaces it. Archive is the
-            // safety net; the symlink makes sure Claude Code picks up the
-            // K2SO context on next session.
-            let _ = fs::remove_file(root_claude);
-            force_symlink(canonical, root_claude);
+            // Take over the file — atomic_symlink renames over the old
+            // regular file in one step, so Claude Code never sees a
+            // missing CLAUDE.md between remove and create. Archive is
+            // the safety net.
+            log_if_err(
+                "migrate_and_symlink_root_claude_md",
+                root_claude,
+                atomic_symlink(canonical, root_claude),
+            );
             if let Some(archive_path) = archived {
                 inject_first_migration_banner(project_path, &[archive_path]);
             }
@@ -6971,7 +7203,11 @@ fn import_claude_md_into_user_notes(
         );
         let mut out = existing;
         out.push_str(&import_block);
-        let _ = fs::write(&canonical, out);
+        log_if_err(
+            "import_claude_md fallback append",
+            &canonical,
+            atomic_write_str(&canonical, &out),
+        );
         return;
     };
     // Splice right after the placeholder comment so imports collect in a
@@ -6991,7 +7227,11 @@ fn import_claude_md_into_user_notes(
     out.push_str(&existing[..insertion_anchor]);
     out.push_str(&import_block);
     out.push_str(&existing[insertion_anchor..]);
-    let _ = fs::write(&canonical, out);
+    log_if_err(
+        "import_claude_md_into_user_notes",
+        &canonical,
+        atomic_write_str(&canonical, &out),
+    );
     log_adoption_event(
         project_path,
         &format!(
@@ -7018,6 +7258,7 @@ pub fn harvest_per_agent_claude_md_files(project_path: &str) {
 
     let agents_root = PathBuf::from(project_path).join(".k2so").join("agents");
     let mut archived_paths: Vec<PathBuf> = Vec::new();
+    let mut any_failure = false;
     if let Ok(read_dir) = fs::read_dir(&agents_root) {
         for entry in read_dir.flatten() {
             let path = entry.path();
@@ -7026,24 +7267,52 @@ pub fn harvest_per_agent_claude_md_files(project_path: &str) {
             if name.starts_with('.') { continue } // skip .archive etc.
             let claude_md = path.join("CLAUDE.md");
             if !claude_md.is_file() { continue }
-            if let Some(archive_path) = archive_claude_md_file(
+            match archive_claude_md_file(
                 project_path,
                 &claude_md,
                 &format!("agents/{}/CLAUDE.md", name),
             ) {
-                let _ = fs::remove_file(&claude_md);
-                archived_paths.push(archive_path);
+                Some(archive_path) => {
+                    // Only remove the original if the archive write succeeded.
+                    // If the remove itself fails, DO NOT stamp the sentinel —
+                    // the orphan would otherwise get skipped on every future
+                    // boot, leaving a pre-0.32.7 CLAUDE.md duplicating the
+                    // symlinked one.
+                    if let Err(e) = fs::remove_file(&claude_md) {
+                        log_if_err::<(), _>(
+                            "harvest remove original",
+                            &claude_md,
+                            Err::<(), _>(e),
+                        );
+                        any_failure = true;
+                    }
+                    archived_paths.push(archive_path);
+                }
+                None => {
+                    // archive_claude_md_file already logged the failure.
+                    any_failure = true;
+                }
             }
         }
     }
     if !archived_paths.is_empty() {
         inject_first_migration_banner(project_path, &archived_paths);
     }
-    // Stamp sentinel unconditionally so we don't repeat the dir walk.
-    if let Some(parent) = sentinel.parent() {
-        let _ = fs::create_dir_all(parent);
+    // Stamp the sentinel only when the harvest fully succeeded. A partial
+    // failure should retry on next boot so orphan originals get cleaned.
+    if !any_failure {
+        log_if_err(
+            "harvest sentinel",
+            &sentinel,
+            fs_atomic::atomic_write(&sentinel, b""),
+        );
+    } else {
+        log_if_err::<(), _>(
+            "harvest incomplete — sentinel not stamped",
+            &sentinel,
+            Err::<(), &str>("retry on next boot"),
+        );
     }
-    let _ = fs::write(&sentinel, b"");
 }
 
 /// Copy a file to `.k2so/migration/<relative>-<timestamp>.<ext>`. Returns the
@@ -7056,10 +7325,6 @@ fn archive_claude_md_file(
     relative_id: &str,
 ) -> Option<PathBuf> {
     let content = fs::read_to_string(source).ok()?;
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
     // Split relative_id into parent subdir (if any) and leaf filename.
     let (subdir, leaf) = match relative_id.rsplit_once('/') {
         Some((parent, leaf)) => (Some(parent), leaf),
@@ -7069,16 +7334,28 @@ fn archive_claude_md_file(
     if let Some(sub) = subdir {
         target_dir = target_dir.join(sub);
     }
-    let _ = fs::create_dir_all(&target_dir);
+    if let Err(e) = fs::create_dir_all(&target_dir) {
+        log_if_err::<(), _>(
+            "archive_claude_md_file create_dir",
+            &target_dir,
+            Err::<(), _>(e),
+        );
+        return None;
+    }
     // Preserve original extension. Leading-dot names (.goosehints) have
     // no real extension — treat the whole name as the stem.
     let (leaf_stem, leaf_ext) = match leaf.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), format!(".{}", ext)),
         _ => (leaf.to_string(), String::new()),
     };
-    let archive_name = format!("{}-{}{}", leaf_stem, ts, leaf_ext);
-    let archive_path = target_dir.join(archive_name);
-    fs::write(&archive_path, content).ok()?;
+    // Nanosecond timestamp + per-process counter — collision-free under
+    // first-run harvest bursts where multiple archives can otherwise fall
+    // in the same wall-clock second.
+    let archive_path = unique_archive_path(&target_dir, &leaf_stem, &leaf_ext);
+    if let Err(e) = fs_atomic::atomic_write(&archive_path, content.as_bytes()) {
+        log_if_err::<(), _>("archive_claude_md_file write", &archive_path, Err::<(), _>(e));
+        return None;
+    }
     log_adoption_event(
         project_path,
         &format!(
@@ -7126,10 +7403,11 @@ fn inject_first_migration_banner(project_path: &str, archived_paths: &[PathBuf])
         "<!-- K2SO:MIGRATION_BANNER:0.32.7 -->\n# ⚠️  K2SO 0.32.7 Migration Notice\n\nK2SO archived your pre-existing CLAUDE.md file(s) when unifying workspace context into a single canonical `SKILL.md`. Your original content is safe at:\n\n{archives}\nReview those archives and move anything worth keeping into one of:\n\n- `.k2so/PROJECT.md` — workspace-level context shared by every agent\n- `.k2so/agents/<name>/AGENT.md` — per-agent persona + standing orders\n- The `<!-- K2SO:USER_NOTES -->` section at the bottom of `SKILL.md` — freeform workspace notes, preserved across regenerations\n\nOnce you've reviewed, `.k2so/migration/` can be safely deleted — and so can this file.\n",
         archives = archive_list,
     );
-    if let Some(parent) = notice_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _ = fs::write(&notice_path, body);
+    log_if_err(
+        "migration banner",
+        &notice_path,
+        atomic_write_str(&notice_path, &body),
+    );
     log_adoption_event(
         project_path,
         &format!(
@@ -7185,7 +7463,8 @@ fn safe_symlink_harness_file(
                     &archive_display,
                 );
             }
-            let _ = fs::remove_file(target);
+            // atomic_symlink renames over the regular file in one step —
+            // no remove needed, and no window where target is missing.
             force_symlink(canonical, target);
             if let Some(p) = archived {
                 inject_first_migration_banner(project_path, &[p]);
@@ -7293,7 +7572,11 @@ fn write_cursor_rules_mdc(project_path: &str, canonical: &Path) {
         signature = K2SO_MDC_SIGNATURE,
         body = body,
     );
-    let _ = fs::write(&target, mdc);
+    log_if_err(
+        "write_cursor_rules_mdc",
+        &target,
+        atomic_write_str(&target, &mdc),
+    );
 }
 
 /// Scaffold `./.aider.conf.yml` with `read: [SKILL.md]` so Aider pulls
@@ -7304,9 +7587,13 @@ fn write_cursor_rules_mdc(project_path: &str, canonical: &Path) {
 fn scaffold_aider_conf(project_path: &str) {
     let path = PathBuf::from(project_path).join(".aider.conf.yml");
     if !path.exists() {
-        let _ = fs::write(
+        log_if_err(
+            "scaffold_aider_conf create",
             &path,
-            "# K2SO: ship workspace context to Aider on every session.\nread:\n  - SKILL.md\n",
+            atomic_write_str(
+                &path,
+                "# K2SO: ship workspace context to Aider on every session.\nread:\n  - SKILL.md\n",
+            ),
         );
         return;
     }
@@ -7352,7 +7639,11 @@ fn scaffold_aider_conf(project_path: &str) {
     }
     let mut final_out = out.join("\n");
     if !final_out.ends_with('\n') { final_out.push('\n'); }
-    let _ = fs::write(&path, final_out);
+    log_if_err(
+        "scaffold_aider_conf merge",
+        &path,
+        atomic_write_str(&path, &final_out),
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -7429,60 +7720,75 @@ pub fn teardown_workspace_harness_files(
 
         match mode {
             TeardownMode::KeepCurrent => {
-                // Replace the symlink with a real file containing the
-                // current merged SKILL.md body. Tool keeps working with
-                // the context frozen at this moment.
-                let _ = fs::remove_file(&path);
-                if fs::write(&path, &current_body).is_ok() {
-                    results.push(TeardownResult {
+                // Atomic replace: write the frozen body to a sibling
+                // tempfile, then rename over the symlink in one step. If
+                // the write fails, the original symlink is untouched — no
+                // window where the path is missing. This fixes C2 from
+                // the resilience review: the previous remove-then-write
+                // could leave the file neither a symlink nor a real file
+                // if the write step failed partway.
+                match atomic_write_str(&path, &current_body) {
+                    Ok(()) => results.push(TeardownResult {
                         action: "froze".to_string(),
                         path: rel.to_string(),
                         note: "Replaced symlink with a frozen snapshot of the current SKILL.md. Tool will keep reading this context.".to_string(),
-                    });
-                } else {
-                    results.push(TeardownResult {
+                    }),
+                    Err(e) => results.push(TeardownResult {
                         action: "failed".to_string(),
                         path: rel.to_string(),
-                        note: "Could not write frozen snapshot — file may still be a dangling symlink.".to_string(),
-                    });
+                        note: format!(
+                            "Could not write frozen snapshot ({}); original symlink left intact.",
+                            e
+                        ),
+                    }),
                 }
             }
             TeardownMode::RestoreOriginal => {
                 // Look for the most recent archive for this file under
-                // .k2so/migration/. If found, copy it back. If not, the
-                // file was K2SO-created and has no original — delete.
-                let original = find_latest_archive(project_path, rel);
-                let _ = fs::remove_file(&path);
-                if let Some(archive_path) = original {
-                    match fs::read_to_string(&archive_path) {
-                        Ok(body) => {
-                            let _ = fs::write(&path, body);
-                            results.push(TeardownResult {
+                // .k2so/migration/. If found, atomic-write it back (so a
+                // crash mid-restore leaves either the old symlink or the
+                // fully-restored file, never a truncated in-between). If
+                // not, the file was K2SO-created and has no original —
+                // only then do we delete.
+                match find_latest_archive(project_path, rel) {
+                    Some(archive_path) => match fs::read_to_string(&archive_path) {
+                        Ok(body) => match atomic_write_str(&path, &body) {
+                            Ok(()) => results.push(TeardownResult {
                                 action: "restored".to_string(),
                                 path: rel.to_string(),
                                 note: format!(
                                     "Restored from archive: {}",
                                     archive_path.display()
                                 ),
-                            });
-                        }
-                        Err(_) => {
-                            results.push(TeardownResult {
-                                action: "removed".to_string(),
+                            }),
+                            Err(e) => results.push(TeardownResult {
+                                action: "failed".to_string(),
                                 path: rel.to_string(),
                                 note: format!(
-                                    "Archive unreadable ({}); removed the symlink without restore.",
-                                    archive_path.display()
+                                    "Found archive {} but write failed: {}; symlink left intact.",
+                                    archive_path.display(),
+                                    e
                                 ),
-                            });
-                        }
+                            }),
+                        },
+                        Err(e) => results.push(TeardownResult {
+                            action: "failed".to_string(),
+                            path: rel.to_string(),
+                            note: format!(
+                                "Archive unreadable ({}): {}; symlink left intact.",
+                                archive_path.display(),
+                                e
+                            ),
+                        }),
+                    },
+                    None => {
+                        log_if_err("restore_original remove symlink", &path, fs::remove_file(&path));
+                        results.push(TeardownResult {
+                            action: "removed".to_string(),
+                            path: rel.to_string(),
+                            note: "No prior archive — K2SO created this file fresh; removed cleanly.".to_string(),
+                        });
                     }
-                } else {
-                    results.push(TeardownResult {
-                        action: "removed".to_string(),
-                        path: rel.to_string(),
-                        note: "No prior archive — K2SO created this file fresh; removed cleanly.".to_string(),
-                    });
                 }
             }
         }
@@ -7494,18 +7800,33 @@ pub fn teardown_workspace_harness_files(
     if matches!(mode, TeardownMode::RestoreOriginal) {
         let aider_path = root.join(".aider.conf.yml");
         if let Some(archive) = find_latest_archive(project_path, ".aider.conf.yml") {
-            if let Ok(body) = fs::read_to_string(&archive) {
-                let _ = fs::write(&aider_path, body);
-                results.push(TeardownResult {
-                    action: "restored".to_string(),
+            match fs::read_to_string(&archive) {
+                Ok(body) => match atomic_write_str(&aider_path, &body) {
+                    Ok(()) => results.push(TeardownResult {
+                        action: "restored".to_string(),
+                        path: ".aider.conf.yml".to_string(),
+                        note: format!("Restored from archive: {}", archive.display()),
+                    }),
+                    Err(e) => results.push(TeardownResult {
+                        action: "failed".to_string(),
+                        path: ".aider.conf.yml".to_string(),
+                        note: format!(
+                            "Archive {} read ok but restore write failed: {}",
+                            archive.display(),
+                            e
+                        ),
+                    }),
+                },
+                Err(e) => results.push(TeardownResult {
+                    action: "failed".to_string(),
                     path: ".aider.conf.yml".to_string(),
-                    note: format!("Restored from archive: {}", archive.display()),
-                });
+                    note: format!("Archive unreadable: {}", e),
+                }),
             }
         } else if aider_path.exists() {
             // K2SO created it fresh with only the SKILL.md read entry.
             // Remove it cleanly.
-            let _ = fs::remove_file(&aider_path);
+            log_if_err("teardown remove aider.conf.yml", &aider_path, fs::remove_file(&aider_path));
             results.push(TeardownResult {
                 action: "removed".to_string(),
                 path: ".aider.conf.yml".to_string(),
@@ -7545,7 +7866,15 @@ fn find_latest_archive(project_path: &str, rel: &str) -> Option<PathBuf> {
         _ => (leaf.clone(), String::new()),
     };
 
-    let mut best: Option<(u64, PathBuf)> = None;
+    // Accept both archive naming schemes:
+    //   old: "<stem>-<unix_secs><ext>"              (pre-fs_atomic)
+    //   new: "<stem>-<unix_nanos>-<seq:04><ext>"    (collision-free)
+    // Sort key uses the leading numeric field; nanos-vs-secs is an
+    // apples-to-oranges comparison in absolute value, but "newest wins"
+    // still holds because new-format writes always have larger numeric
+    // prefixes than same-run old-format legacy archives would (nanos ≫
+    // secs for every real timestamp since 1970).
+    let mut best: Option<(u128, PathBuf)> = None;
     if let Ok(entries) = fs::read_dir(&search_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -7557,11 +7886,13 @@ fn find_latest_archive(project_path: &str, rel: &str) -> Option<PathBuf> {
             let prefix = format!("{}-", leaf_stem);
             if !name.starts_with(&prefix) { continue }
             if !leaf_ext.is_empty() && !name.ends_with(&leaf_ext) { continue }
-            // Parse the numeric timestamp between prefix and leaf_ext.
             let rest = &name[prefix.len()..];
             let rest = if leaf_ext.is_empty() { rest } else { rest.trim_end_matches(&leaf_ext[..]) };
+            // Leading contiguous digits = the timestamp. We intentionally
+            // don't care whether they're seconds or nanoseconds — we only
+            // need a monotonic ordering for "most recent".
             let ts_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            let Ok(ts) = ts_str.parse::<u64>() else { continue };
+            let Ok(ts) = ts_str.parse::<u128>() else { continue };
             match &best {
                 Some((existing_ts, _)) if ts <= *existing_ts => {}
                 _ => best = Some((ts, path.clone())),
@@ -8527,5 +8858,228 @@ mod migration_safety_tests {
             .unwrap_or(0);
         assert_eq!(entries_count, 0, "symlink-to-symlink re-run must not produce spurious archive entries");
         fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn completed_regen_clears_in_flight_marker() {
+        // Contract: a successful write_workspace_skill_file_with_body leaves
+        // no `.regen-in-flight` marker behind. If this regresses, every
+        // startup will log a false-positive "interrupted regen" warning.
+        let proj = mock_multi_harness_workspace();
+        let project_path = proj.to_str().unwrap();
+        write_workspace_skill_file_with_body(project_path, None);
+        let marker = proj.join(".k2so/.regen-in-flight");
+        assert!(!marker.exists(), "regen marker must be cleared on successful completion");
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn detect_interrupted_regen_flags_stale_marker_once() {
+        // Simulate a crashed regen by stamping the marker manually. First
+        // detect_interrupted_regen call should return true AND clear the
+        // marker; second call should return false (the warning is a one-
+        // shot, not a permanent nag).
+        let proj = scratch_project();
+        let project_path = proj.to_str().unwrap();
+        let k2so_dir = proj.join(".k2so");
+        fs::create_dir_all(&k2so_dir).unwrap();
+        let marker = k2so_dir.join(".regen-in-flight");
+        fs::write(&marker, b"").unwrap();
+        assert!(detect_interrupted_regen(project_path), "must flag the stale marker");
+        assert!(!marker.exists(), "must clear the marker after surfacing the warning");
+        assert!(!detect_interrupted_regen(project_path), "must not re-fire after the marker is cleared");
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn detect_interrupted_regen_is_silent_when_no_marker() {
+        // Clean workspaces must not produce false positives. This is the
+        // common case — should be a cheap stat + return false.
+        let proj = scratch_project();
+        fs::create_dir_all(proj.join(".k2so")).unwrap();
+        assert!(!detect_interrupted_regen(proj.to_str().unwrap()));
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn archive_names_never_collide_under_rapid_fire() {
+        // Regression for the pre-0.32.9 seconds-granularity timestamp bug.
+        // A first-run harvest can fire 5+ archives within a single
+        // wall-clock second; the old `{name}-{unix_secs}.md` scheme would
+        // silently clobber earlier archives. New unique_archive_path uses
+        // nanoseconds + per-process counter.
+        let proj = scratch_project();
+        let project_path = proj.to_str().unwrap();
+        let agents = proj.join(".k2so/agents");
+        fs::create_dir_all(&agents).unwrap();
+        // Create 10 agents each with a CLAUDE.md, then harvest — they all
+        // get archived in the same tight loop.
+        for i in 0..10 {
+            let agent_dir = agents.join(format!("agent-{}", i));
+            fs::create_dir_all(&agent_dir).unwrap();
+            fs::write(agent_dir.join("CLAUDE.md"), format!("body for agent-{}", i)).unwrap();
+        }
+        harvest_per_agent_claude_md_files(project_path);
+
+        // Every agent's content must be archived to a distinct path.
+        let mut archive_bodies = std::collections::HashSet::new();
+        let migration_root = proj.join(".k2so/migration/agents");
+        for i in 0..10 {
+            let sub = migration_root.join(format!("agent-{}", i));
+            let mut count = 0;
+            if let Ok(entries) = fs::read_dir(&sub) {
+                for e in entries.flatten() {
+                    if let Ok(body) = fs::read_to_string(e.path()) {
+                        assert!(archive_bodies.insert(body), "duplicate archive body found");
+                        count += 1;
+                    }
+                }
+            }
+            assert_eq!(count, 1, "agent-{}: expected 1 archive, got {}", i, count);
+        }
+        assert_eq!(archive_bodies.len(), 10, "all 10 agents must have distinct archives");
+
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn teardown_keep_current_leaves_file_usable_even_on_tight_retries() {
+        // Regression for C2: the old keep_current did remove+write, so a
+        // write failure left the user with neither a symlink nor a real
+        // file. The new code uses atomic_write_str (rename over), so the
+        // file is always readable — either as the old symlink if the swap
+        // fails, or as the new frozen body on success. Run teardown N
+        // times in tight succession to stress the atomic-replace path.
+        let proj = mock_multi_harness_workspace();
+        let project_path = proj.to_str().unwrap();
+        write_workspace_skill_file_with_body(project_path, None);
+
+        // First teardown converts symlinks to real files.
+        let _ = teardown_workspace_harness_files(project_path, TeardownMode::KeepCurrent);
+        let claude = proj.join("CLAUDE.md");
+        assert!(claude.exists(), "CLAUDE.md must exist after first keep_current");
+        let first_body = fs::read_to_string(&claude).unwrap();
+        assert!(!first_body.is_empty());
+
+        // Subsequent teardowns are no-ops (target is no longer a symlink)
+        // but must not corrupt the frozen body.
+        for _ in 0..5 {
+            let _ = teardown_workspace_harness_files(project_path, TeardownMode::KeepCurrent);
+        }
+        let final_body = fs::read_to_string(&claude).unwrap();
+        assert_eq!(first_body, final_body, "repeated no-op teardowns must not mutate the frozen body");
+
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn regen_stamps_content_hashes_for_drift_detection() {
+        // After a successful regen, `.last-skill-regen` must contain a
+        // JSON snapshot of every source file's content hash. This is the
+        // baseline the next regen uses to detect drift; absence of a
+        // snapshot forces the fallback mtime path (still works but is
+        // clock-skew vulnerable).
+        let proj = mock_multi_harness_workspace();
+        let project_path = proj.to_str().unwrap();
+        write_workspace_skill_file_with_body(project_path, None);
+
+        let stamp_path = proj.join(".k2so/.last-skill-regen");
+        let body = fs::read_to_string(&stamp_path).expect("stamp must exist");
+        assert!(!body.trim().is_empty(), "stamp must no longer be empty (hash JSON required)");
+        let parsed: std::collections::HashMap<String, String> =
+            serde_json::from_str(&body).expect("stamp must parse as JSON hash map");
+        assert!(parsed.contains_key("project_md"), "PROJECT.md hash must be recorded: {:?}", parsed);
+
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn drift_adoption_prefers_content_hash_over_mtime() {
+        // Two-phase scenario:
+        //   1. Regen stamps a hash for PROJECT.md.
+        //   2. Touch PROJECT.md to force mtime > last_regen, but keep
+        //      content identical.
+        //   3. Next adoption call must NOT treat this as a user edit —
+        //      the content hash shows the file is unchanged.
+        let proj = mock_multi_harness_workspace();
+        let project_path = proj.to_str().unwrap();
+        write_workspace_skill_file_with_body(project_path, None);
+
+        // Force mtime to be AFTER the stamp but without changing content.
+        let project_md = proj.join(".k2so/PROJECT.md");
+        let original = fs::read_to_string(&project_md).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::write(&project_md, &original).unwrap();
+        assert!(
+            mtime_secs(&project_md) > mtime_secs(&proj.join(".k2so/.last-skill-regen")),
+            "test setup: source mtime must be newer than regen stamp"
+        );
+
+        // The hash helper must see this as unchanged → touched=false.
+        let hashes = read_regen_hashes(project_path);
+        let stored = hashes.get("project_md").cloned().unwrap_or_default();
+        let current = content_hash_of(&project_md);
+        assert_eq!(stored, current, "hash-based drift detection must ignore identical content");
+
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn drift_adoption_detects_real_content_change() {
+        // Opposite of the mtime-tolerance test: genuine user edits
+        // (content hash changes) must flip the touched-since-regen
+        // signal to true, regardless of mtime direction.
+        let proj = mock_multi_harness_workspace();
+        let project_path = proj.to_str().unwrap();
+        write_workspace_skill_file_with_body(project_path, None);
+
+        let project_md = proj.join(".k2so/PROJECT.md");
+        fs::write(&project_md, "completely different body\n").unwrap();
+
+        let hashes = read_regen_hashes(project_path);
+        let stored = hashes.get("project_md").cloned().unwrap_or_default();
+        let current = content_hash_of(&project_md);
+        assert_ne!(stored, current, "hash-based drift detection must flag modified content");
+
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn try_acquire_running_returns_false_when_already_running() {
+        // CAS semantics: the first call wins; concurrent / subsequent
+        // calls observe status='running' and bail out. Previous code
+        // could produce duplicate PTY spawns because the check-then-
+        // spawn sequence wasn't atomic.
+        let _db = crate::db::init_for_tests();
+        let conn_lock = crate::db::shared();
+        let conn = conn_lock.lock();
+        // Seed a project row so the session FK resolves.
+        let pid = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO projects (id, path, name) VALUES (?1, ?2, ?3)",
+            rusqlite::params![pid, format!("/tmp/cas-test-{}", pid), "cas-test"],
+        ).expect("seed project");
+
+        let sid1 = uuid::Uuid::new_v4().to_string();
+        let first = crate::db::schema::AgentSession::try_acquire_running(
+            &conn, &sid1, &pid, "agent-a", Some("term-1"), "claude", "system",
+        ).expect("first acquire");
+        assert!(first, "first caller must acquire the lock");
+
+        let sid2 = uuid::Uuid::new_v4().to_string();
+        let second = crate::db::schema::AgentSession::try_acquire_running(
+            &conn, &sid2, &pid, "agent-a", Some("term-2"), "claude", "system",
+        ).expect("second acquire");
+        assert!(!second, "second caller must be rejected while first holds the lock");
+
+        // Release the lock by updating status, then the next acquire
+        // must succeed — confirms the gate isn't permanently sticky.
+        crate::db::schema::AgentSession::update_status(&conn, &pid, "agent-a", "sleeping")
+            .expect("release lock");
+        let sid3 = uuid::Uuid::new_v4().to_string();
+        let third = crate::db::schema::AgentSession::try_acquire_running(
+            &conn, &sid3, &pid, "agent-a", Some("term-3"), "claude", "system",
+        ).expect("third acquire");
+        assert!(third, "acquire after release must succeed");
     }
 }

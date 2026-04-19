@@ -1017,6 +1017,74 @@ impl AgentSession {
         )
     }
 
+    /// Try to atomically acquire the "running" lock for an agent. Returns
+    /// `Ok(true)` if this call was the one that took the lock (and thus
+    /// the caller should proceed to spawn the PTY). Returns `Ok(false)`
+    /// if the agent was already running (caller must NOT spawn — the
+    /// existing session owns the terminal).
+    ///
+    /// This replaces the pre-0.32.9 `is_agent_locked() → spawn → upsert`
+    /// sequence, which had a TOCTOU race: two heartbeats firing at
+    /// roughly the same time could both observe `is_locked=false` and
+    /// both spawn, producing duplicate PTYs and a stale row.
+    ///
+    /// Implementation: BEGIN IMMEDIATE takes the database write lock
+    /// before any reads, so concurrent callers serialize. Inside the
+    /// transaction we check for an existing running session; if present
+    /// we rollback (no change) and return false. If not, we INSERT/
+    /// UPDATE the session row with status='running' and COMMIT.
+    pub fn try_acquire_running(
+        conn: &Connection,
+        session_id: &str,
+        project_id: &str,
+        agent_name: &str,
+        terminal_id: Option<&str>,
+        harness: &str,
+        owner: &str,
+    ) -> Result<bool> {
+        // IMMEDIATE upgrades the connection to a write lock at BEGIN
+        // time rather than deferring to the first write — this prevents
+        // two concurrent readers from both thinking they can proceed.
+        conn.execute_batch("BEGIN IMMEDIATE;")?;
+
+        // Check existing status.
+        let existing: Option<String> = conn.query_row(
+            "SELECT status FROM agent_sessions WHERE project_id = ?1 AND agent_name = ?2",
+            params![project_id, agent_name],
+            |row| row.get::<_, String>(0),
+        ).ok();
+
+        if matches!(existing.as_deref(), Some("running")) {
+            conn.execute_batch("ROLLBACK;")?;
+            return Ok(false);
+        }
+
+        // Acquire: upsert with status='running'. Mirrors Self::upsert's
+        // schema so downstream reads see the same shape.
+        let result = conn.execute(
+            "INSERT INTO agent_sessions (id, project_id, agent_name, terminal_id, session_id, harness, owner, status, created_at) \
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, 'running', unixepoch()) \
+             ON CONFLICT(project_id, agent_name) DO UPDATE SET \
+               terminal_id = excluded.terminal_id, \
+               harness = excluded.harness, \
+               owner = excluded.owner, \
+               status = 'running', \
+               last_activity_at = unixepoch()",
+            params![session_id, project_id, agent_name, terminal_id, harness, owner],
+        );
+
+        match result {
+            Ok(_) => {
+                conn.execute_batch("COMMIT;")?;
+                Ok(true)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                Err(e)
+            }
+        }
+    }
+
     pub fn update_status_message(conn: &Connection, project_id: &str, agent_name: &str, message: &str) -> Result<usize> {
         conn.execute(
             "UPDATE agent_sessions SET status_message = ?1, last_activity_at = unixepoch() WHERE project_id = ?2 AND agent_name = ?3",

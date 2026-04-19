@@ -20,6 +20,7 @@ mod commands;
 mod companion;
 mod db;
 mod editors;
+mod fs_atomic;
 mod git;
 mod llm;
 mod menu;
@@ -90,7 +91,7 @@ pub fn run() {
     // first TLS use unless a provider is explicitly installed.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let conn = match db::init_database() {
+    let db_handle = match db::init_database() {
         Ok(c) => c,
         Err(e) => {
             log_debug!("[k2so] FATAL: Failed to initialize database: {}", e);
@@ -100,7 +101,10 @@ pub fn run() {
     };
 
     let app_state = AppState {
-        db: Mutex::new(conn),
+        // Same Arc lives in AppState and in db::SHARED — Tauri commands
+        // and HTTP endpoints take the same write lock on the same
+        // physical SQLite connection.
+        db: db_handle,
         terminal_manager: Mutex::new(terminal::TerminalManager::new()),
         llm_manager: Mutex::new(llm::LlmManager::new()),
         watchers: Mutex::new(HashMap::new()),
@@ -347,9 +351,12 @@ pub fn run() {
                     }
                 });
             }
-            // Start agent lifecycle notification server and register hooks
-            {
-                let hook_port = agent_hooks::start_server(app.handle().clone());
+            // Start agent lifecycle notification server and register hooks.
+            // Bind failure used to panic and abort the whole app — now we
+            // log the diagnostic, emit a frontend event, and keep booting
+            // the UI so the user at least sees a recoverable error state.
+            let hook_port_result = agent_hooks::start_server(app.handle().clone());
+            if let Ok(hook_port) = hook_port_result {
                 match agent_hooks::write_hook_script(hook_port) {
                     Ok(script_path) => {
                         agent_hooks::register_all_hooks(&app.handle().clone(), &script_path);
@@ -365,6 +372,18 @@ pub fn run() {
                         );
                     }
                 }
+            } else {
+                let e = hook_port_result.as_ref().err().cloned().unwrap_or_default();
+                log_debug!("[agent-hooks] Failed to start notification server: {}", e);
+                let _ = app.handle().emit(
+                    "hook-injection-failed",
+                    serde_json::json!({
+                        "failures": [{"cli": "notify-server", "error": e}]
+                    }),
+                );
+            }
+            {
+                let hook_port = hook_port_result.unwrap_or(0);
 
                 // Clean stale port file on startup — if K2SO crashed previously,
                 // the old port file persists and CLI/heartbeat scripts connect to a dead port.
@@ -479,6 +498,12 @@ pub fn run() {
                             // find the UPPERCASE filenames on disk. Idempotent.
                             crate::commands::k2so_agents::migrate_filenames_to_uppercase(&project.path);
                             // 0.32.7 CLAUDE.md harvest: archive any per-agent
+                            // Detect whether a previous SKILL.md regen crashed
+                            // mid-way. Doesn't auto-repair — subsequent regens
+                            // are idempotent — but surfaces a diagnostic so the
+                            // user can inspect .k2so/migration/ if they hit
+                            // unexpected staleness.
+                            crate::commands::k2so_agents::detect_interrupted_regen(&project.path);
                             // CLAUDE.md files left behind by the pre-0.32.7
                             // generator into .k2so/migration/ so nothing the
                             // user (or Claude `# memory`) authored is lost.
@@ -892,7 +917,16 @@ pub fn run() {
             commands::companion::companion_disconnect_session,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building K2SO")
+        .unwrap_or_else(|e| {
+            // Pre-webview failure — we can't show a GUI error, so write to
+            // stderr (visible in Console.app when launched from Finder) and
+            // exit non-zero so the OS reports the crash cleanly. Previously
+            // this used .expect which panicked and aborted with a stderr
+            // message that failed on some sandboxes.
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "K2SO failed to build Tauri context: {}", e);
+            std::process::exit(1);
+        })
         .run(|app, event| {
             match event {
                 tauri::RunEvent::Exit => {
@@ -930,14 +964,8 @@ pub fn run() {
 /// quits normally — we don't force the user to Cmd+Q unless they're
 /// actually relying on autonomous wakes.
 fn any_heartbeat_enabled() -> bool {
-    let db_path = match dirs::home_dir() {
-        Some(h) => h.join(".k2so/k2so.db"),
-        None => return false,
-    };
-    let conn = match rusqlite::Connection::open(&db_path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
+    let db = crate::db::shared();
+    let conn = db.lock();
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM projects WHERE heartbeat_enabled = 1",

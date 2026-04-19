@@ -1,10 +1,137 @@
 pub mod schema;
 
+use parking_lot::ReentrantMutex;
 use rusqlite::{params, Connection, Result};
+use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
-/// Open (or create) the K2SO database at ~/.k2so/k2so.db,
-/// run all migrations, and seed default data.
-pub fn init_database() -> Result<Connection> {
+/// Process-wide SQLite handle. Populated exactly once by
+/// [`init_database`] during app startup and accessed from any thread via
+/// [`shared`]. The `Arc<ReentrantMutex<Connection>>` shape means `AppState.db`
+/// and every ad-hoc command-handler/HTTP-thread caller can clone the
+/// same handle — there is only one physical connection (and therefore
+/// only one write lock queue) for the lifetime of the process.
+///
+/// Rationale: rusqlite connections are not `Sync`, so they must sit
+/// behind a mutex. A SINGLE connection is the right call here because
+/// WAL mode already serializes writes at the database level — spinning
+/// up multiple connections just multiplies the places the `SQLITE_BUSY`
+/// error can surface without buying parallelism. Parallel-reader code
+/// paths are rare in K2SO (most work is write-heavy: agent sessions,
+/// work items, heartbeats). When that changes, swap this for an
+/// `r2d2::Pool<SqliteConnectionManager>` — the public API stays the same.
+static SHARED: OnceLock<Arc<ReentrantMutex<Connection>>> = OnceLock::new();
+
+/// Path of the on-disk database file. Derivable from the home dir, but
+/// hoisted into a helper so tests can stub via a known path.
+pub fn db_path() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".k2so")
+        .join("k2so.db")
+}
+
+/// Open a SQLite connection with K2SO's standard resilience PRAGMAs:
+/// - WAL mode (set once per database — readers don't block writers)
+/// - busy_timeout 5000ms (waits on contention instead of SQLITE_BUSY-
+///   failing immediately, which was the silent-write-loss class)
+/// - foreign_keys ON (matches init_database)
+///
+/// **Only use this for standalone tools or migration scripts.** Runtime
+/// code should always access the shared connection via [`shared`] so it
+/// isn't racing against the AppState connection for write slots.
+pub fn open_with_resilience<P: AsRef<Path>>(path: P) -> Result<Connection> {
+    let conn = Connection::open(path)?;
+    // Wait up to 5s on a busy lock rather than returning SQLITE_BUSY
+    // immediately. Avoids the silent-drop class where a write was
+    // mid-flight on another connection.
+    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    // WAL is per-database-file and persists once set; foreign_keys is
+    // per-connection. Errors here are informational — the connection is
+    // still usable without them.
+    let _ = conn.execute_batch("PRAGMA journal_mode = WAL;");
+    let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
+    Ok(conn)
+}
+
+/// Clone a handle to the process-wide SQLite connection. In production
+/// builds this panics (with a diagnostic) if called before
+/// [`init_database`] — which would only happen via a programming error,
+/// not a user-reachable path. All startup flows call init_database
+/// before the first command handler or HTTP endpoint can fire.
+///
+/// Under `#[cfg(test)]` this lazily initializes to an in-memory SQLite
+/// on first call, so unit tests that exercise code paths touching the DB
+/// don't need to wire up the full Tauri startup. Production builds do
+/// NOT get this lazy-init — missing startup initialization must be a
+/// hard error, not a silent fallback to an ephemeral DB.
+///
+/// Usage pattern:
+///   let db = crate::db::shared();
+///   let conn = db.lock();
+///   conn.execute(...)?;
+///
+/// The returned `Arc` is cheap to clone but the lock must be acquired
+/// before each SQL operation. Hold the lock for the duration of a
+/// transaction block, then drop the guard to release the write queue.
+pub fn shared() -> Arc<ReentrantMutex<Connection>> {
+    if let Some(handle) = SHARED.get() {
+        return handle.clone();
+    }
+    #[cfg(test)]
+    {
+        return init_for_tests();
+    }
+    #[cfg(not(test))]
+    {
+        panic!("db::init_database must run before db::shared()");
+    }
+}
+
+/// Test-only: populate SHARED with an in-memory SQLite that's been
+/// through the full migration + seed sequence. Idempotent across test
+/// threads because OnceLock::set is atomic — losers drop their handle
+/// and clone the winner's.
+///
+/// Caveat: every unit test in the process shares this one in-memory DB.
+/// Tests that expect isolated DB state must either (a) clean up their
+/// rows on exit, or (b) use a scratch_project() directory pattern that
+/// keeps filesystem state separate even when DB state overlaps.
+#[cfg(test)]
+pub fn init_for_tests() -> Arc<ReentrantMutex<Connection>> {
+    if let Some(handle) = SHARED.get() {
+        return handle.clone();
+    }
+    let conn = Connection::open(":memory:")
+        .expect("in-memory SQLite open failed");
+    conn.busy_timeout(std::time::Duration::from_millis(5000))
+        .expect("set busy_timeout");
+    let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
+    run_migrations(&conn).expect("test migrations");
+    seed_agent_presets(&conn).expect("test seed");
+    let handle = Arc::new(ReentrantMutex::new(conn));
+    match SHARED.set(handle.clone()) {
+        Ok(()) => handle,
+        Err(_) => SHARED.get().expect("SHARED populated").clone(),
+    }
+}
+
+/// Open (or create) the K2SO database at ~/.k2so/k2so.db, run all
+/// migrations, seed default data, and populate the process-wide
+/// [`SHARED`] connection. Returns an `Arc` handle so the caller can
+/// store it in `AppState.db` AND the shared static points at the same
+/// physical connection.
+///
+/// Safe to call exactly once per process. A second call returns the
+/// already-initialized handle (tests that reuse the binary hit this).
+pub fn init_database() -> Result<Arc<ReentrantMutex<Connection>>> {
+    // Fast path for tests that re-invoke the init (or if somewhere in
+    // startup accidentally re-initializes): just clone the existing
+    // handle rather than opening another connection.
+    if let Some(existing) = SHARED.get() {
+        return Ok(existing.clone());
+    }
+
     let db_dir = dirs::home_dir()
         .ok_or_else(|| rusqlite::Error::InvalidParameterName("Could not determine home directory".to_string()))?
         .join(".k2so");
@@ -12,17 +139,19 @@ pub fn init_database() -> Result<Connection> {
         .map_err(|e| rusqlite::Error::InvalidParameterName(format!("Could not create ~/.k2so directory: {}", e)))?;
 
     let db_path = db_dir.join("k2so.db");
-    let conn = Connection::open(db_path)?;
-
-    // Enable WAL mode for better concurrent read performance
-    conn.execute_batch("PRAGMA journal_mode = WAL;")?;
-    // Enable foreign key enforcement
-    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    let conn = open_with_resilience(&db_path)?;
 
     run_migrations(&conn)?;
     seed_agent_presets(&conn)?;
 
-    Ok(conn)
+    let handle = Arc::new(ReentrantMutex::new(conn));
+    // Race-free publish: whoever wins gets their handle stored, losers
+    // drop theirs and return the winner's. In practice only one thread
+    // calls init_database during startup.
+    match SHARED.set(handle.clone()) {
+        Ok(()) => Ok(handle),
+        Err(_) => Ok(SHARED.get().expect("SHARED just populated").clone()),
+    }
 }
 
 /// Simple migration runner using a _migrations table to track applied migrations.

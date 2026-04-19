@@ -50,7 +50,7 @@ pub fn handle_ws_upgrade(
 
     // Register client
     {
-        let mut clients = state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
+        let mut clients = state.ws_clients.lock();
         clients.push(WsClient {
             client_id: client_id.clone(),
             session_token: client_token.clone(),
@@ -100,7 +100,7 @@ pub fn handle_ws_upgrade(
 
                     // Update last_seen
                     {
-                        let mut clients = reader_state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut clients = reader_state.ws_clients.lock();
                         if let Some(client) = clients.iter_mut().find(|c| c.session_token == session_token) {
                             client.last_seen = Instant::now();
                         }
@@ -118,7 +118,7 @@ pub fn handle_ws_upgrade(
                                 authenticated = true;
                                 session_token = token.to_string();
                                 // Update client's token and auth status
-                                let mut clients = reader_state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
+                                let mut clients = reader_state.ws_clients.lock();
                                 if let Some(client) = clients.iter_mut().find(|c| c.client_id == client_id) {
                                     client.session_token = session_token.clone();
                                     client.authenticated = true;
@@ -162,7 +162,7 @@ pub fn handle_ws_upgrade(
                                 _ => None,
                             };
 
-                            let mut clients = reader_state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut clients = reader_state.ws_clients.lock();
                             if let Some(client) = clients.iter_mut().find(|c| c.client_id == client_id) {
                                 client.subscribed_terminals.insert(terminal_id.to_string());
                                 if dims.is_some() {
@@ -187,7 +187,7 @@ pub fn handle_ws_upgrade(
                         if terminal_id.is_empty() || cols == 0 || rows == 0 {
                             send_response(&tx, id.as_deref(), Err("Missing terminalId, cols, or rows".to_string()));
                         } else {
-                            let mut clients = reader_state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut clients = reader_state.ws_clients.lock();
                             if let Some(client) = clients.iter_mut().find(|c| c.client_id == client_id) {
                                 client.mobile_dims = Some((cols, rows));
                             }
@@ -201,7 +201,7 @@ pub fn handle_ws_upgrade(
                     if method == "terminal.unsubscribe" {
                         let terminal_id = params.get("terminalId").and_then(|v| v.as_str()).unwrap_or("");
                         if !terminal_id.is_empty() {
-                            let mut clients = reader_state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut clients = reader_state.ws_clients.lock();
                             if let Some(client) = clients.iter_mut().find(|c| c.session_token == session_token) {
                                 client.subscribed_terminals.remove(terminal_id);
                             }
@@ -215,7 +215,7 @@ pub fn handle_ws_upgrade(
                     if msg_type == "subscribe" || msg_type == "unsubscribe" {
                         let terminal_id = msg.get("terminalId").and_then(|t| t.as_str()).unwrap_or("");
                         if !terminal_id.is_empty() {
-                            let mut clients = reader_state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut clients = reader_state.ws_clients.lock();
                             if let Some(client) = clients.iter_mut().find(|c| c.session_token == session_token) {
                                 if msg_type == "subscribe" {
                                     client.subscribed_terminals.insert(terminal_id.to_string());
@@ -248,7 +248,7 @@ pub fn handle_ws_upgrade(
         }
 
         // Remove client on disconnect
-        let mut clients = reader_state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
+        let mut clients = reader_state.ws_clients.lock();
         clients.retain(|c| c.client_id != client_id);
         log_debug!("[companion-ws] Client disconnected");
     });
@@ -277,7 +277,7 @@ fn send_response(tx: &mpsc::Sender<String>, id: Option<&str>, result: Result<ser
 
 /// Broadcast a push event to all authenticated WebSocket clients.
 pub fn broadcast_event(state: &CompanionState, event_json: &str) {
-    let clients = state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
+    let clients = state.ws_clients.lock();
     for client in clients.iter() {
         if client.authenticated {
             let _ = client.sender.send(event_json.to_string());
@@ -299,7 +299,7 @@ pub fn broadcast_terminal_scrollback(state: &CompanionState, terminal_id: &str, 
     });
     let event_str = event.to_string();
 
-    let clients = state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
+    let clients = state.ws_clients.lock();
     for client in clients.iter() {
         if client.authenticated && client.subscribed_terminals.contains(terminal_id) {
             let _ = client.sender.send(event_str.clone());
@@ -319,7 +319,7 @@ pub fn broadcast_terminal_output(state: &CompanionState, terminal_id: &str, line
     });
     let event_str = event.to_string();
 
-    let clients = state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
+    let clients = state.ws_clients.lock();
     for client in clients.iter() {
         if client.authenticated && client.subscribed_terminals.contains(terminal_id) {
             let _ = client.sender.send(event_str.clone());
@@ -330,7 +330,7 @@ pub fn broadcast_terminal_output(state: &CompanionState, terminal_id: &str, line
 /// Broadcast a CompactLine grid update to subscribed clients.
 /// If a client has mobile_dims set, the grid is reflowed to those dimensions.
 pub fn broadcast_terminal_grid(state: &CompanionState, terminal_id: &str, grid: &crate::terminal::grid_types::GridUpdate) {
-    let clients = state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
+    let clients = state.ws_clients.lock();
 
     // Cache the desktop JSON (no reflow) — only computed if needed
     let mut desktop_json: Option<String> = None;

@@ -1505,6 +1505,52 @@ else
     fail "claude-md-symlink: K2SO Agent tab missing" "Expected SKILL_TABS entry with key 'k2so_agent'"
 fi
 
+# Agent Skills: tab order must be Custom → K2SO → Manager → Template.
+# The tabs are rendered in array order, so the order is purely the order
+# of entries in SKILL_TABS. A regression here puts the less-common tiers
+# in front of the most-common ones.
+SKILLS_SRC="$PROJECT_ROOT/src/renderer/components/Settings/sections/AgentSkillsSection.tsx"
+if awk '/const SKILL_TABS:/,/^\]/' "$SKILLS_SRC" | awk '/key: '"'"'/{print NR":"$0}' | \
+   awk -F: 'NR==1 && !/custom_agent/ {exit 1} NR==2 && !/k2so_agent/ {exit 1} NR==3 && !/manager/ {exit 1} NR==4 && !/agent_template/ {exit 1}'; then
+    pass "agent-skills: SKILL_TABS ordered Custom → K2SO → Manager → Template"
+else
+    fail "agent-skills: SKILL_TABS order wrong" "Expected Custom Agent first, then K2SO Agent, Workspace Manager, Agent Template"
+fi
+
+# Default tab must be custom_agent (matches the "first in the list" UX).
+if grep -q "useState<SkillTier>('custom_agent')" "$SKILLS_SRC"; then
+    pass "agent-skills: default tab is Custom Agent"
+else
+    fail "agent-skills: default tab regressed" "Expected useState<SkillTier>('custom_agent')"
+fi
+
+# Inline expand/collapse — no more split right-side preview panel. Signs
+# of the old layout: `selectedLayer` state, `previewContent` state, a
+# `w-64 flex-shrink-0` preview column. If any of those strings come back,
+# we've regressed to the old two-pane view.
+if ! grep -q 'selectedLayer' "$SKILLS_SRC" && \
+   ! grep -q 'previewContent' "$SKILLS_SRC" && \
+   ! grep -q 'w-64 flex-shrink-0 border' "$SKILLS_SRC"; then
+    pass "agent-skills: no right-side preview panel (single-column collapsible layout)"
+else
+    fail "agent-skills: right-side preview panel present" "Expected inline-expand rows, not selectedLayer/previewContent split layout"
+fi
+
+# Context stack explanation block must exist — it's the "what IS this?"
+# copy that replaced the lost-looking preview tooltip.
+if grep -q 'context stack' "$SKILLS_SRC"; then
+    pass "agent-skills: context-stack explanation block present"
+else
+    fail "agent-skills: context-stack explanation missing" "Expected 'context stack' explanation copy in AgentSkillsSection.tsx"
+fi
+
+# Per-tier blurbs required so the explanation specializes per tab.
+if grep -q 'TIER_BLURB' "$SKILLS_SRC"; then
+    pass "agent-skills: per-tier explanation blurbs present"
+else
+    fail "agent-skills: TIER_BLURB missing" "Expected TIER_BLURB map keyed by SkillTier"
+fi
+
 # ═══════════════════════════════════════════════════════════════════════
 section "3.13: Phase 7c — SOURCE region markers + drift adoption"
 # ═══════════════════════════════════════════════════════════════════════
@@ -1778,12 +1824,15 @@ else
     fail "migration-safety: banner target missing" "Expected MIGRATION-0.32.7.md path"
 fi
 
-# archive_claude_md_file must COPY, not rename — the test module verifies this,
-# but keep a static assertion for the method used.
-if grep -q 'fs::write(&archive_path, content)' "$AGENTS_SRC"; then
-    pass "migration-safety: archive uses copy (fs::write), never fs::rename"
+# archive_claude_md_file must COPY, not rename — it writes a fresh file
+# at archive_path with the user's content, leaving the original intact for
+# downstream symlink replacement. Since the fs_atomic refactor the write
+# goes through atomic_write (sibling tempfile + rename into archive_path),
+# but the source file is still untouched — never moved.
+if grep -q 'fs_atomic::atomic_write(&archive_path' "$AGENTS_SRC"; then
+    pass "migration-safety: archive uses atomic copy, source file untouched"
 else
-    fail "migration-safety: archive may be destructive" "Expected fs::write, not fs::rename, in archive_claude_md_file"
+    fail "migration-safety: archive may be destructive" "Expected fs_atomic::atomic_write(&archive_path, ...) in archive_claude_md_file"
 fi
 
 # Rust unit tests for migration safety must be present.
@@ -1983,11 +2032,14 @@ else
     fail "phase-7e: remove endpoint missing mode plumbing" "Expected mode parameter in /cli/workspace/remove handler"
 fi
 
-# Archive helper must preserve original file extension (Aider .yml, Cursor .mdc, etc.)
-if grep -q 'leaf_ext' "$AGENTS_SRC" && grep -q '{leaf_stem}-{}{leaf_ext}\|{}-{}{}' "$AGENTS_SRC"; then
+# Archive helper must preserve original file extension (Aider .yml, Cursor
+# .mdc, .goosehints no-ext etc). The naming format string moved into the
+# fs_atomic::unique_archive_path helper in 0.32.9, so the stem+ext split
+# is what we assert on.
+if grep -q 'leaf_ext' "$AGENTS_SRC" && grep -q 'unique_archive_path(&target_dir, &leaf_stem, &leaf_ext)' "$AGENTS_SRC"; then
     pass "phase-7e: archive filenames preserve original extension"
 else
-    fail "phase-7e: archive ext preservation missing" "Expected leaf_ext-based archive naming"
+    fail "phase-7e: archive ext preservation missing" "Expected unique_archive_path(&target_dir, &leaf_stem, &leaf_ext)"
 fi
 
 # Cursor MDC writer must mark its own output to avoid self-re-archive loop
@@ -2025,6 +2077,311 @@ do
         pass "migration-safety: invariant covered — ${invariant}"
     else
         fail "migration-safety: invariant missing — ${invariant}" "Expected unit test ${invariant}"
+    fi
+done
+
+# ═══════════════════════════════════════════════════════════════════════
+# SECTION 3.20: Resilience invariants (fs_atomic + atomic migration writes)
+# ═══════════════════════════════════════════════════════════════════════
+
+section "Resilience: atomic writes + collision-free archives"
+
+FS_ATOMIC_SRC="$PROJECT_ROOT/src-tauri/src/fs_atomic.rs"
+
+# The fs_atomic module must exist with the three public entry points every
+# critical-write path relies on.
+if [ -f "$FS_ATOMIC_SRC" ]; then
+    pass "resilience: fs_atomic module present"
+else
+    fail "resilience: fs_atomic module missing" "Expected src-tauri/src/fs_atomic.rs"
+fi
+
+if [ -f "$FS_ATOMIC_SRC" ] && \
+   grep -q 'pub fn atomic_write(path: &Path' "$FS_ATOMIC_SRC" && \
+   grep -q 'pub fn atomic_write_str' "$FS_ATOMIC_SRC" && \
+   grep -q 'pub fn atomic_symlink' "$FS_ATOMIC_SRC" && \
+   grep -q 'pub fn unique_archive_path' "$FS_ATOMIC_SRC"; then
+    pass "resilience: fs_atomic exposes atomic_write / atomic_symlink / unique_archive_path"
+else
+    fail "resilience: fs_atomic API missing" "Expected atomic_write, atomic_write_str, atomic_symlink, unique_archive_path"
+fi
+
+# Nanosecond timestamps + per-process counter → archives created in the
+# same wall-clock second must still land on distinct paths. This used to
+# be seconds-granularity timestamps, which silently clobbered under
+# first-run harvest bursts.
+if [ -f "$FS_ATOMIC_SRC" ] && \
+   grep -q 'as_nanos()' "$FS_ATOMIC_SRC" && \
+   grep -q 'COUNTER.fetch_add' "$FS_ATOMIC_SRC"; then
+    pass "resilience: unique_archive_path uses nanos + per-process counter (no same-second collisions)"
+else
+    fail "resilience: archive naming is collision-prone" "Expected nanosecond timestamp + AtomicU64 counter"
+fi
+
+# Atomic write path: tempfile in same parent, sync_all before rename.
+if [ -f "$FS_ATOMIC_SRC" ] && grep -q 'sync_all()' "$FS_ATOMIC_SRC"; then
+    pass "resilience: atomic_write fsyncs tempfile before rename"
+else
+    fail "resilience: atomic_write skips fsync" "Expected sync_all() before rename in atomic_write"
+fi
+
+# Critical migration paths must now route writes through fs_atomic.
+# force_symlink: previously remove+create, now one atomic rename.
+if grep -q 'fn force_symlink.*{' "$AGENTS_SRC" && \
+   awk '/fn force_symlink/,/^}/' "$AGENTS_SRC" | grep -q 'atomic_symlink'; then
+    pass "resilience: force_symlink uses atomic_symlink (no remove+create window)"
+else
+    fail "resilience: force_symlink still racy" "Expected atomic_symlink inside force_symlink"
+fi
+
+# strip_workspace_skill_tail: in-place truncate was the canonical-loss
+# vector in the review; it must now go through atomic_write_str.
+if awk '/fn strip_workspace_skill_tail/,/^}/' "$AGENTS_SRC" | grep -q 'atomic_write_str'; then
+    pass "resilience: strip_workspace_skill_tail writes atomically"
+else
+    fail "resilience: strip_workspace_skill_tail direct-writes" "Expected atomic_write_str in strip path"
+fi
+
+# teardown_workspace_harness_files: keep_current previously did
+# remove_file → write and could leave the path missing on failure.
+if awk '/fn teardown_workspace_harness_files/,/^}/' "$AGENTS_SRC" | grep -q 'atomic_write_str(&path, &current_body)'; then
+    pass "resilience: teardown keep_current uses atomic replace (no missing-file window)"
+else
+    fail "resilience: teardown keep_current still racy" "Expected atomic_write_str in KeepCurrent branch"
+fi
+
+# harvest sentinel must only stamp on full success; partial failures
+# must retry on next boot instead of leaving orphans.
+if awk '/fn harvest_per_agent_claude_md_files/,/^}/' "$AGENTS_SRC" | grep -q 'any_failure'; then
+    pass "resilience: harvest sentinel gated on full-success retry semantics"
+else
+    fail "resilience: harvest sentinel stamps unconditionally" "Expected any_failure guard before sentinel write"
+fi
+
+# companion + terminal + agent_hooks must use parking_lot::Mutex exclusively.
+# std::sync::Mutex poisons on panic, cascading a single bug into system-wide
+# lock failures. parking_lot never poisons, so a panic in one critical
+# section doesn't permanently break every future lock attempt.
+for src in src-tauri/src/companion/mod.rs \
+           src-tauri/src/companion/types.rs \
+           src-tauri/src/companion/auth.rs \
+           src-tauri/src/companion/proxy.rs \
+           src-tauri/src/companion/websocket.rs \
+           src-tauri/src/commands/companion.rs \
+           src-tauri/src/terminal/alacritty_backend.rs \
+           src-tauri/src/agent_hooks.rs \
+           src-tauri/src/editors.rs; do
+    f="$PROJECT_ROOT/$src"
+    if [ -f "$f" ] && grep -q 'std::sync::Mutex' "$f"; then
+        fail "resilience: $src still uses std::sync::Mutex" "Expected parking_lot::Mutex — std::sync::Mutex poisons on panic"
+    else
+        pass "resilience: $src free of std::sync::Mutex (no poison cascade)"
+    fi
+done
+
+# Tier-A panic paths must be gone: the HTTP hook server, Tauri build, and
+# bound-port read previously used .expect/.unwrap, which would abort the
+# whole app on any fluke (port exhaustion, sandbox denial, missing tauri
+# context). They must now return/handle errors so the user sees a usable
+# UI even when the notification server can't bind.
+HOOKS_SRC_FILE="$PROJECT_ROOT/src-tauri/src/agent_hooks.rs"
+LIB_SRC="$PROJECT_ROOT/src-tauri/src/lib.rs"
+
+if grep -q 'pub fn start_server(app_handle: AppHandle) -> Result<u16, String>' "$HOOKS_SRC_FILE"; then
+    pass "resilience: start_server returns Result (no panic on port bind failure)"
+else
+    fail "resilience: start_server still panics on bind" "Expected start_server returning Result<u16, String>"
+fi
+
+if grep -q 'expect("Failed to bind notification server")' "$HOOKS_SRC_FILE"; then
+    fail "resilience: start_server still uses .expect on bind" "Expected map_err/? instead of .expect"
+else
+    pass "resilience: start_server bind path does not .expect"
+fi
+
+if grep -q 'expect("error while building K2SO")' "$LIB_SRC"; then
+    fail "resilience: Tauri build still uses .expect" "Expected unwrap_or_else + graceful exit"
+else
+    pass "resilience: Tauri build surfaces errors without .expect"
+fi
+
+# Scaffolding writes (wakeup templates, AGENT.md, skill files) must route
+# through atomic_write_str + log_if_err instead of silent let _ = fs::write.
+# A partial-write leaving a broken persona or heartbeat wakeup mid-launch
+# would look like a first-class bug to the user; silent failure turns it
+# into a ghost.
+SCAFFOLD_WRITES=(
+    "ensure_agent_wakeup"
+    "ensure_workspace_wakeup"
+    "auto-scaffold manager AGENT.md"
+    "auto-scaffold k2so-agent AGENT.md"
+    "agent skill write"
+    "ensure_skill_up_to_date create"
+    "ensure_skill_up_to_date upgrade"
+    "ensure_skill_up_to_date migrate legacy"
+)
+for label in "${SCAFFOLD_WRITES[@]}"; do
+    if grep -q "\"$label\"" "$AGENTS_SRC"; then
+        pass "resilience: scaffolding write '$label' uses log_if_err + atomic_write_str"
+    else
+        fail "resilience: scaffolding write '$label' missing" "Expected log_if_err(\"$label\", ...) in k2so_agents.rs"
+    fi
+done
+
+# Multi-step skill regeneration is not filesystem-transactional (no CoW on
+# POSIX), but it MUST stamp an `.regen-in-flight` marker on entry and
+# clear it on success. The startup loop checks this marker and surfaces a
+# diagnostic if a previous regen crashed mid-way. Three assertions:
+#   1. The marker is written on entry.
+#   2. The marker is cleared at the end.
+#   3. The startup detector is wired in lib.rs.
+if awk '/fn write_workspace_skill_file_with_body/,/^}/' "$AGENTS_SRC" | grep -q '\.regen-in-flight'; then
+    pass "resilience: skill regen stamps crash-detection marker"
+else
+    fail "resilience: skill regen missing crash marker" "Expected .regen-in-flight marker in write_workspace_skill_file_with_body"
+fi
+
+if grep -q 'fn detect_interrupted_regen' "$AGENTS_SRC"; then
+    pass "resilience: detect_interrupted_regen exists"
+else
+    fail "resilience: detect_interrupted_regen missing" "Expected pub fn detect_interrupted_regen"
+fi
+
+if grep -q 'detect_interrupted_regen(&project.path)' "$LIB_SRC"; then
+    pass "resilience: startup loop surfaces interrupted-regen diagnostic"
+else
+    fail "resilience: startup loop missing regen diagnostic" "Expected detect_interrupted_regen call in lib.rs startup migration loop"
+fi
+
+# SQLite resilience: shared connection pattern (Zed-inspired). Previously
+# 60+ ad-hoc `rusqlite::Connection::open(...)` calls spun up transient
+# connections, defeating WAL write serialization and producing silent
+# SQLITE_BUSY drops under parallel delegations. The refactor consolidates
+# onto one `Arc<Mutex<Connection>>` shared between AppState.db and all
+# ad-hoc callers via `crate::db::shared()`.
+DB_MOD="$PROJECT_ROOT/src-tauri/src/db/mod.rs"
+STATE_SRC="$PROJECT_ROOT/src-tauri/src/state.rs"
+
+if [ -f "$DB_MOD" ] && grep -q 'static SHARED:.*OnceLock<Arc<ReentrantMutex<Connection>>>' "$DB_MOD"; then
+    pass "resilience: shared SQLite handle stored in OnceLock<Arc<ReentrantMutex<Connection>>>"
+else
+    fail "resilience: shared SQLite handle missing" "Expected static SHARED: OnceLock<Arc<ReentrantMutex<Connection>>> in db/mod.rs"
+fi
+
+if grep -q 'pub fn shared() -> Arc<ReentrantMutex<Connection>>' "$DB_MOD"; then
+    pass "resilience: db::shared() getter exposes process-wide handle"
+else
+    fail "resilience: db::shared() missing" "Expected pub fn shared() -> Arc<ReentrantMutex<Connection>>"
+fi
+
+if grep -q 'pub fn init_database() -> Result<Arc<ReentrantMutex<Connection>>>' "$DB_MOD"; then
+    pass "resilience: init_database returns Arc so AppState and SHARED hold same handle"
+else
+    fail "resilience: init_database signature regressed" "Expected pub fn init_database() -> Result<Arc<ReentrantMutex<Connection>>>"
+fi
+
+if grep -q 'pub fn open_with_resilience' "$DB_MOD" && grep -q 'busy_timeout' "$DB_MOD"; then
+    pass "resilience: open_with_resilience helper exists with busy_timeout"
+else
+    fail "resilience: open_with_resilience missing/incomplete" "Expected pub fn open_with_resilience with busy_timeout"
+fi
+
+if grep -q 'pub db: Arc<ReentrantMutex<rusqlite::Connection>>' "$STATE_SRC"; then
+    pass "resilience: AppState.db is Arc<ReentrantMutex<Connection>> (same-thread re-entry safe)"
+else
+    fail "resilience: AppState.db type regressed" "Expected pub db: Arc<ReentrantMutex<rusqlite::Connection>> — plain Mutex deadlocks on helper-calls-helper patterns"
+fi
+
+# ReentrantMutex is load-bearing: helper functions in k2so_agents.rs call
+# each other while holding the DB lock (e.g., migrate_or_scaffold_lead_
+# heartbeat → k2so_heartbeat_add). A plain Mutex would deadlock startup
+# and appear as a beachball to the user. Tripping this assertion means
+# we've regressed the lock type and need either to switch back to
+# ReentrantMutex or audit every caller for reentrant lock acquires.
+if grep -q 'use parking_lot::ReentrantMutex' "$DB_MOD"; then
+    pass "resilience: db::shared uses ReentrantMutex (re-entry safe across helper calls)"
+else
+    fail "resilience: db::shared not ReentrantMutex" "Expected parking_lot::ReentrantMutex import in db/mod.rs"
+fi
+
+# Zero ad-hoc connection opens remaining in runtime paths. chat_history.rs
+# has legitimate opens against third-party SQLite files (Claude/Cursor
+# chat histories); those use Connection::open_with_flags and are exempt.
+# Using `|| true` guards against grep -c returning non-zero when no
+# matches are present (set -e would otherwise abort).
+TOTAL_ADHOC=0
+for src in "$PROJECT_ROOT/src-tauri/src/agent_hooks.rs" \
+           "$PROJECT_ROOT/src-tauri/src/commands/k2so_agents.rs" \
+           "$PROJECT_ROOT/src-tauri/src/lib.rs"; do
+    if [ -f "$src" ]; then
+        n=$(grep -c 'rusqlite::Connection::open(' "$src" 2>/dev/null || echo 0)
+        # Strip any trailing newlines and coerce to integer.
+        n=${n//[^0-9]/}
+        TOTAL_ADHOC=$((TOTAL_ADHOC + ${n:-0}))
+    fi
+done
+if [ "$TOTAL_ADHOC" -eq 0 ]; then
+    pass "resilience: zero ad-hoc Connection::open calls in agent_hooks/k2so_agents/lib (all route through db::shared())"
+else
+    fail "resilience: $TOTAL_ADHOC ad-hoc Connection::open calls remain" "Route them through crate::db::shared()"
+fi
+
+# Rust unit tests must cover: marker cleared on success, one-shot warning,
+# no false positives, collision-free harvests, retry-safe keep_current.
+RESILIENCE_INVARIANTS=(
+    "completed_regen_clears_in_flight_marker"
+    "detect_interrupted_regen_flags_stale_marker_once"
+    "detect_interrupted_regen_is_silent_when_no_marker"
+    "archive_names_never_collide_under_rapid_fire"
+    "teardown_keep_current_leaves_file_usable_even_on_tight_retries"
+    "regen_stamps_content_hashes_for_drift_detection"
+    "drift_adoption_prefers_content_hash_over_mtime"
+    "drift_adoption_detects_real_content_change"
+    "try_acquire_running_returns_false_when_already_running"
+)
+for t in "${RESILIENCE_INVARIANTS[@]}"; do
+    if grep -q "fn $t" "$AGENTS_SRC"; then
+        pass "resilience: invariant covered — $t"
+    else
+        fail "resilience: invariant missing — $t" "Expected unit test $t"
+    fi
+done
+
+# Heartbeat CAS: try_acquire_running must exist in the schema so the
+# check-then-spawn TOCTOU can't produce duplicate PTY sessions.
+SCHEMA_SRC="$PROJECT_ROOT/src-tauri/src/db/schema.rs"
+if grep -q 'pub fn try_acquire_running' "$SCHEMA_SRC" && \
+   grep -q 'BEGIN IMMEDIATE' "$SCHEMA_SRC"; then
+    pass "resilience: AgentSession::try_acquire_running uses BEGIN IMMEDIATE (atomic CAS)"
+else
+    fail "resilience: heartbeat CAS missing" "Expected try_acquire_running with BEGIN IMMEDIATE in db/schema.rs"
+fi
+
+# Drift adoption: content-hash stamp must be written on successful regen
+# (not an empty file). Hash comparison is clock-skew-proof.
+if grep -q 'fn read_regen_hashes' "$AGENTS_SRC" && \
+   grep -q 'fn write_regen_hashes' "$AGENTS_SRC" && \
+   grep -q 'fn content_hash_of' "$AGENTS_SRC"; then
+    pass "resilience: drift adoption uses content hashes (read/write/hash helpers present)"
+else
+    fail "resilience: drift hash helpers missing" "Expected read_regen_hashes + write_regen_hashes + content_hash_of"
+fi
+
+# No bare .lock().unwrap() in the critical paths — parking_lot's .lock()
+# returns the guard directly, so these patterns would mean we mixed the
+# two kinds of Mutex (latent bug) or forgot to strip the poison handling.
+for src in src-tauri/src/companion/mod.rs \
+           src-tauri/src/companion/auth.rs \
+           src-tauri/src/companion/proxy.rs \
+           src-tauri/src/companion/websocket.rs \
+           src-tauri/src/commands/companion.rs \
+           src-tauri/src/terminal/alacritty_backend.rs \
+           src-tauri/src/agent_hooks.rs; do
+    f="$PROJECT_ROOT/$src"
+    if [ -f "$f" ] && grep -Eq '\.lock\(\)\.unwrap\(\)|\.lock\(\)\.unwrap_or_else' "$f"; then
+        fail "resilience: $src still has poison-handling on .lock()" "parking_lot::Mutex guards don't need .unwrap()"
+    else
+        pass "resilience: $src .lock() calls are parking_lot-clean"
     fi
 done
 

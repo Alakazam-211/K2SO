@@ -41,13 +41,13 @@ pub fn create_session(remote_addr: &str) -> Session {
 /// Validate a Bearer token against active sessions.
 /// Returns the session token if valid, error message if not.
 pub fn validate_bearer(token: &str, state: &CompanionState) -> Result<String, &'static str> {
-    let mut sessions = state.sessions.lock().unwrap();
+    let mut sessions = state.sessions.lock();
     let session = sessions.get_mut(token).ok_or("Invalid session token")?;
 
     if session.is_expired() {
         drop(sessions);
         // Remove expired session
-        state.sessions.lock().unwrap().remove(token);
+        state.sessions.lock().remove(token);
         return Err("Session expired");
     }
 

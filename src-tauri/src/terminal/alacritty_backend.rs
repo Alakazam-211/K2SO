@@ -1,8 +1,9 @@
+use parking_lot::Mutex;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::os::unix::io::AsRawFd;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -805,7 +806,7 @@ impl TerminalManager {
         // Set the force-full-render flag so emission loop does full snapshot
         instance.force_full_render.store(true, std::sync::atomic::Ordering::Relaxed);
         // Also set on bitmap_state for backward compat (if bitmap loop is running)
-        instance.bitmap_state.lock().unwrap().force_full_render = true;
+        instance.bitmap_state.lock().force_full_render = true;
 
         // Send wakeup through the same channel as PTY events
         // This ensures the frame goes through the emission loop → event system,
@@ -825,7 +826,7 @@ impl TerminalManager {
             .ok_or_else(|| format!("Terminal {} not found", id))?;
 
         let term = instance.term.lock_unfair();
-        let mut bstate = instance.bitmap_state.lock().unwrap();
+        let mut bstate = instance.bitmap_state.lock();
         Ok(render_full_bitmap(&term, &instance.palette, &mut bstate))
     }
 
@@ -836,7 +837,7 @@ impl TerminalManager {
             .get(id)
             .ok_or_else(|| format!("Terminal {} not found", id))?;
 
-        let mut bstate = instance.bitmap_state.lock().unwrap();
+        let mut bstate = instance.bitmap_state.lock();
         bstate.glyph_cache.set_font_size(font_size, dpr);
 
         let logical_w = bstate.glyph_cache.logical_cell_width();
@@ -862,7 +863,7 @@ impl TerminalManager {
             .get(id)
             .ok_or_else(|| format!("Terminal {} not found", id))?;
 
-        let bstate = instance.bitmap_state.lock().unwrap();
+        let bstate = instance.bitmap_state.lock();
         let term = instance.term.lock_unfair();
         let grid = term.grid();
 
@@ -881,7 +882,7 @@ impl TerminalManager {
             .get(id)
             .ok_or_else(|| format!("Terminal {} not found", id))?;
 
-        let mut bstate = instance.bitmap_state.lock().unwrap();
+        let mut bstate = instance.bitmap_state.lock();
         bstate.focused = focused;
         bstate.cursor_blink_visible = true; // reset blink on focus change
 
@@ -1490,7 +1491,7 @@ fn bitmap_emission_loop(
 
         {
             let mut term = term.lock_unfair();
-            let mut bstate = bitmap_state.lock().unwrap();
+            let mut bstate = bitmap_state.lock();
 
             let grid = term.grid();
             let cols = grid.columns();

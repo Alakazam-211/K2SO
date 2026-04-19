@@ -14,9 +14,9 @@ pub mod proxy;
 pub mod types;
 pub mod websocket;
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Listener};
 use ngrok::config::ForwarderBuilder;
 use ngrok::tunnel::EndpointInfo;
@@ -93,7 +93,7 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
         hook_token: hook_token.to_string(),
         _tunnel_keepalive: Mutex::new(Some(keepalive_tx)),
     };
-    *STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(state);
+    *STATE.lock() = Some(state);
     RUNNING.store(true, Ordering::Relaxed);
 
     // Spawn the local companion HTTP server (handles auth + proxying)
@@ -115,8 +115,8 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(300));
             if !RUNNING.load(Ordering::Relaxed) { break; }
-            if let Some(ref state) = *STATE.lock().unwrap_or_else(|e| e.into_inner()) {
-                let mut sessions = state.sessions.lock().unwrap();
+            if let Some(ref state) = *STATE.lock() {
+                let mut sessions = state.sessions.lock();
                 sessions.retain(|_, s| !s.is_expired());
             }
         }
@@ -186,21 +186,21 @@ pub fn stop_companion() -> Result<(), String> {
 
     // Signal shutdown and drop keepalive
     {
-        let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = STATE.lock();
         if let Some(ref state) = *guard {
             state.shutdown.store(true, Ordering::Relaxed);
-            *state._tunnel_keepalive.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            *state.tunnel_url.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            state.ws_clients.lock().unwrap_or_else(|e| e.into_inner()).clear();
-            state.sessions.lock().unwrap_or_else(|e| e.into_inner()).clear();
+            *state._tunnel_keepalive.lock() = None;
+            *state.tunnel_url.lock() = None;
+            state.ws_clients.lock().clear();
+            state.sessions.lock().clear();
         }
     }
 
     // Clear the state entirely so a fresh one can be created on restart
-    *STATE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *STATE.lock() = None;
 
     // Drop the forwarder to stop ngrok from forwarding traffic
-    *NGROK_FORWARDER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *NGROK_FORWARDER.lock() = None;
 
     // Session kept alive in NGROK_SESSION — closed on next start.
 
@@ -221,10 +221,12 @@ pub fn companion_status() -> serde_json::Value {
         });
     }
 
-    // Use try_lock to avoid blocking the UI thread if the companion thread holds the lock
+    // Use try_lock to avoid blocking the UI thread if the companion thread
+    // holds the lock. parking_lot::Mutex::try_lock returns Option (not
+    // Result like std::sync), so pattern-match on Some/None.
     let guard = match STATE.try_lock() {
-        Ok(g) => g,
-        Err(_) => {
+        Some(g) => g,
+        None => {
             // Lock contended — return minimal status without blocking
             return serde_json::json!({
                 "running": true,
@@ -236,7 +238,7 @@ pub fn companion_status() -> serde_json::Value {
     };
 
     if let Some(ref state) = *guard {
-        let url = state.tunnel_url.try_lock().ok().and_then(|u| u.clone());
+        let url = state.tunnel_url.try_lock().and_then(|u| u.clone());
         let session_list: Vec<serde_json::Value> = state.sessions.try_lock()
             .map(|sessions| sessions.values().map(|s| {
                 serde_json::json!({
@@ -290,7 +292,7 @@ fn start_ngrok_tunnel(ngrok_token: &str, ngrok_domain: &str, local_port: u16) ->
         // active for the forwarder's lifetime.
         rt.block_on(async {
             // Close any existing session
-            if let Some(mut old_session) = NGROK_SESSION.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            if let Some(mut old_session) = NGROK_SESSION.lock().take() {
                 log_debug!("[companion] Closing previous ngrok session...");
                 let _ = old_session.close().await;
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -318,8 +320,8 @@ fn start_ngrok_tunnel(ngrok_token: &str, ngrok_domain: &str, local_port: u16) ->
                     .map_err(|e| format!("ngrok tunnel failed: {}", e))?;
 
                 let url = listener.url().to_string();
-                NGROK_SESSION.lock().unwrap_or_else(|e| e.into_inner()).replace(session);
-                NGROK_FORWARDER.lock().unwrap_or_else(|e| e.into_inner()).replace(listener);
+                NGROK_SESSION.lock().replace(session);
+                NGROK_FORWARDER.lock().replace(listener);
 
                 Ok(url)
             }.await;
@@ -374,7 +376,7 @@ fn run_local_listener(listener: std::net::TcpListener) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // Check shutdown
             {
-                let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                let guard = STATE.lock();
                 if let Some(ref state) = *guard {
                     if state.shutdown.load(Ordering::Relaxed) { return false; }
                 }
@@ -406,7 +408,7 @@ fn run_local_listener(listener: std::net::TcpListener) {
                     .unwrap_or("/companion/ws");
                 let path = path.to_string();
                 // Pass unread stream to tungstenite — it reads the upgrade request itself
-                let ws_guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                let ws_guard = STATE.lock();
                 if let Some(ref ws_state) = *ws_guard {
                     let state_ptr = ws_state as *const CompanionState;
                     drop(ws_guard);
@@ -432,7 +434,7 @@ fn run_local_listener(listener: std::net::TcpListener) {
 
             let headers = proxy::parse_headers(&request);
 
-            let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = STATE.lock();
             if let Some(ref state) = *guard {
                 proxy::handle_request(&mut stream, state, method, path, &headers, &request, &remote_addr);
             }
@@ -489,7 +491,7 @@ fn handle_auth_inline(state: &CompanionState, headers: &HashMap<String, String>,
     let session = auth::create_session(remote_addr);
     let token = session.token.clone();
     let expires_at = session.expires_at.to_rfc3339();
-    state.sessions.lock().unwrap().insert(token.clone(), session);
+    state.sessions.lock().insert(token.clone(), session);
 
     format_response(200, &serde_json::json!({
         "ok": true,
@@ -504,7 +506,7 @@ fn register_event_listeners(app_handle: &AppHandle) {
     for event_name in &events {
         let name = event_name.to_string();
         app_handle.listen(event_name.to_string(), move |event| {
-            if let Some(ref state) = *STATE.lock().unwrap_or_else(|e| e.into_inner()) {
+            if let Some(ref state) = *STATE.lock() {
                 let payload = event.payload();
                 let ws_event = serde_json::json!({
                     "event": name,
@@ -533,7 +535,7 @@ fn run_terminal_polling(app_handle: &AppHandle) {
 
         if !RUNNING.load(Ordering::Relaxed) { break; }
 
-        let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = STATE.lock();
         let state = match guard.as_ref() {
             Some(s) => s,
             None => break,
@@ -541,7 +543,7 @@ fn run_terminal_polling(app_handle: &AppHandle) {
 
         // Collect all subscribed terminal IDs
         let terminal_ids: Vec<String> = {
-            let clients = state.ws_clients.lock().unwrap_or_else(|e| e.into_inner());
+            let clients = state.ws_clients.lock();
             let mut ids = std::collections::HashSet::new();
             for client in clients.iter() {
                 if client.authenticated {

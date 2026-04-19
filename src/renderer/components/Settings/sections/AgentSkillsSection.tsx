@@ -24,11 +24,24 @@ interface SkillLayerInfo {
 }
 
 const SKILL_TABS: { key: SkillTier; label: string }[] = [
-  { key: 'manager', label: 'Workspace Manager' },
-  { key: 'k2so_agent', label: 'K2SO Agent' },
-  { key: 'agent_template', label: 'Agent Template' },
   { key: 'custom_agent', label: 'Custom Agent' },
+  { key: 'k2so_agent', label: 'K2SO Agent' },
+  { key: 'manager', label: 'Workspace Manager' },
+  { key: 'agent_template', label: 'Agent Template' },
 ]
+
+/// Per-tier tagline surfaced in the "context stack" explanation block so
+/// the user sees at-a-glance what this bundle gets injected into.
+const TIER_BLURB: Record<SkillTier, string> = {
+  custom_agent:
+    'every Custom-mode agent K2SO launches (single-agent workspaces that operate autonomously on their own inbox)',
+  k2so_agent:
+    'the K2SO planner agent — the workspace-local agent that builds PRDs, milestones, and technical plans',
+  manager:
+    'the workspace manager — the top-of-stack agent that triages inboxes and delegates to sub-agents',
+  agent_template:
+    'every sub-agent (frontend-eng, rust-eng, qa-eng, etc.) K2SO delegates work to under a manager',
+}
 
 const LOCKED_LAYERS: Record<SkillTier, string[]> = {
   manager: [
@@ -79,15 +92,20 @@ const LOCKED_LAYER_DESCRIPTIONS: Record<string, string> = {
 }
 
 export function AgentSkillsSection(): React.JSX.Element {
-  const [activeTier, setActiveTier] = useState<SkillTier>('manager')
+  const [activeTier, setActiveTier] = useState<SkillTier>('custom_agent')
   const [layers, setLayers] = useState<SkillLayerInfo[]>([])
   const [adding, setAdding] = useState(false)
   const [newName, setNewName] = useState('')
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
-  const [selectedLayer, setSelectedLayer] = useState<{ type: 'locked' | 'user'; name: string; filename?: string } | null>(null)
-  const [previewContent, setPreviewContent] = useState<string>('')
+  // Expanded section keys (stable: `locked:<name>` or `user:<filename>`).
+  // Multiple rows can be open at once so the user can diff two layers
+  // side by side without losing their place. Cleared on tab change.
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  // Resolved user-layer body cache so expanding a layer twice doesn't
+  // re-fetch from disk each time.
+  const [userContent, setUserContent] = useState<Record<string, string>>({})
 
   const loadLayers = useCallback(async (tier: SkillTier) => {
     try {
@@ -147,32 +165,47 @@ export function AgentSkillsSection(): React.JSX.Element {
     })
   }, [])
 
-  // Load preview content when a layer is selected
+  // Clear open sections + cached user bodies on tier change so stale
+  // content doesn't leak between tabs.
   useEffect(() => {
-    if (!selectedLayer) { setPreviewContent(''); return }
-    if (selectedLayer.type === 'locked') {
-      setPreviewContent(LOCKED_LAYER_DESCRIPTIONS[selectedLayer.name] || `*Auto-generated section: ${selectedLayer.name}*`)
-    } else if (selectedLayer.filename) {
-      invoke<string>('skill_layers_get_content', { tier: activeTier, filename: selectedLayer.filename })
-        .then((content) => setPreviewContent(content || '*Empty layer — click Edit to add content.*'))
-        .catch(() => setPreviewContent('*Failed to load content.*'))
-    }
-  }, [selectedLayer, activeTier])
+    setExpanded(new Set())
+    setUserContent({})
+  }, [activeTier])
 
-  // Clear selection on tier change
-  useEffect(() => { setSelectedLayer(null) }, [activeTier])
+  const toggleExpanded = useCallback((key: string, layer?: SkillLayerInfo) => {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) {
+        next.delete(key)
+        return next
+      }
+      next.add(key)
+      // If this is a user layer and we haven't cached its body yet,
+      // fetch on open. Locked layers use the in-module description map.
+      if (layer && userContent[layer.filename] === undefined) {
+        invoke<string>('skill_layers_get_content', { tier: activeTier, filename: layer.filename })
+          .then((content) => setUserContent((c) => ({
+            ...c,
+            [layer.filename]: content || '*Empty layer — click Edit to add content.*',
+          })))
+          .catch(() => setUserContent((c) => ({ ...c, [layer.filename]: '*Failed to load content.*' })))
+      }
+      return next
+    })
+  }, [activeTier, userContent])
 
   const locked = LOCKED_LAYERS[activeTier]
+  const activeLabel = SKILL_TABS.find((t) => t.key === activeTier)?.label ?? 'this tier'
 
   return (
     <div className="max-w-3xl">
       <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-1">Agent Skills</h2>
       <p className="text-xs text-[var(--color-text-muted)] mb-4">
-        Skill layers are injected into agent system prompts. Click a layer to preview its content.
+        Every K2SO agent is launched with a composed system prompt — the auto layers below plus any custom layers you add. Pick a tab to see what's shipped to that specific kind of agent.
       </p>
 
       {/* Tier tabs */}
-      <div className="flex gap-1 mb-4">
+      <div className="flex gap-1 mb-4 flex-wrap">
         {SKILL_TABS.map(({ key, label }) => (
           <button
             key={key}
@@ -192,89 +225,144 @@ export function AgentSkillsSection(): React.JSX.Element {
           file ends up at launch / wake. */}
       <AgentContextDiagram tier={activeTier} />
 
-      {/* Split layout: layer list + preview */}
-      <div className="flex gap-3">
-        {/* Left: Hamburger layer list */}
-        <div className="border border-[var(--color-border)] flex-1 min-w-0">
-        {/* Locked layers */}
-        {locked.map((name, i) => {
-          const isSelected = selectedLayer?.type === 'locked' && selectedLayer.name === name
-          return (
-          <div
-            key={`locked-${i}`}
-            className={`flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)] last:border-b-0 cursor-pointer transition-colors ${
-              isSelected ? 'bg-white/[0.06] text-[var(--color-text-secondary)]' : 'text-[var(--color-text-muted)] opacity-50 hover:opacity-70'
-            }`}
-            onClick={() => setSelectedLayer({ type: 'locked', name })}
-          >
-            <div className="flex items-center gap-2">
-              <span className="w-1 h-4 bg-[var(--color-text-muted)]/30 rounded-sm flex-shrink-0" />
-              <span className="text-xs">{name}</span>
-            </div>
-            <span className="text-[10px] italic">auto</span>
-          </div>
-          )
-        })}
+      {/* Context-stack explanation. Replaces the prior "click a layer to
+          preview" tooltip with a per-tier description so the first thing a
+          user reads on this tab explains *what* they're configuring. */}
+      <div className="border border-[var(--color-border)] bg-[var(--color-bg-elevated)]/30 px-3 py-2.5 mb-3 text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
+        <div className="font-medium text-[var(--color-text-primary)] mb-1">
+          {activeLabel} context stack
+        </div>
+        <p>
+          This is the stack of layers K2SO composes into the system prompt for{' '}
+          <span className="text-[var(--color-text-primary)]">{TIER_BLURB[activeTier]}</span>.
+          Auto layers are always included and regenerated on every launch. Custom layers
+          — markdown files under <code className="text-[10px] bg-[var(--color-bg-elevated)] px-1 py-0.5 rounded">~/.k2so/templates/</code> — stack on top, so
+          anything you add here applies to every workspace that ships a{' '}
+          {activeLabel.toLowerCase()}. Click a layer to expand its content inline.
+        </p>
+      </div>
 
-        {/* User layers */}
-        {layers.map((layer) => {
-          const isSelected = selectedLayer?.type === 'user' && selectedLayer.filename === layer.filename
+      {/* Single-column collapsible layer list. Clicking a row toggles
+          inline expansion — no more right-side preview panel. Multiple
+          rows can be expanded at once for side-by-side comparison. */}
+      <div className="border border-[var(--color-border)]">
+        {/* Locked (auto-composed) layers */}
+        {locked.map((name, i) => {
+          const key = `locked:${name}`
+          const isOpen = expanded.has(key)
+          const description = LOCKED_LAYER_DESCRIPTIONS[name] || `*Auto-generated section: ${name}*`
           return (
-          <div
-            key={layer.filename}
-            className={`flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)] last:border-b-0 cursor-pointer transition-colors ${
-              isSelected ? 'bg-white/[0.06]' : 'hover:bg-white/[0.03]'
-            }`}
-            onClick={() => setSelectedLayer({ type: 'user', name: layer.title, filename: layer.filename })}
-          >
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="w-1 h-4 bg-[var(--color-accent)] rounded-sm flex-shrink-0" />
-              <div className="min-w-0">
-                <span className="text-xs text-[var(--color-text-primary)] block truncate">{layer.title}</span>
-                {layer.preview && (
-                  <span className="text-[10px] text-[var(--color-text-muted)] block truncate">{layer.preview}</span>
-                )}
-              </div>
-            </div>
-            <div className="flex items-center gap-2 flex-shrink-0">
-              {confirmDelete === layer.filename ? (
-                <>
-                  <span className="text-[10px] text-[var(--color-text-muted)]">Delete?</span>
-                  <button
-                    onClick={() => handleDelete(layer.filename)}
-                    className="text-[10px] text-red-400 hover:text-red-300 no-drag cursor-pointer"
+            <div key={`locked-${i}`} className="border-b border-[var(--color-border)] last:border-b-0">
+              <button
+                type="button"
+                onClick={() => toggleExpanded(key)}
+                className="w-full flex items-center justify-between px-3 py-2 text-left text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-white/[0.03] no-drag cursor-pointer transition-colors"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <span
+                    className={`inline-block text-[10px] text-[var(--color-text-muted)] transition-transform flex-shrink-0 w-3 ${
+                      isOpen ? 'rotate-90' : ''
+                    }`}
                   >
-                    Yes
-                  </button>
-                  <button
-                    onClick={() => setConfirmDelete(null)}
-                    className="text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] no-drag cursor-pointer"
-                  >
-                    No
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button
-                    onClick={() => handleEdit(layer)}
-                    className="text-[10px] text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] no-drag cursor-pointer"
-                  >
-                    Edit
-                  </button>
-                  <button
-                    onClick={() => setConfirmDelete(layer.filename)}
-                    className="text-[10px] text-red-400 hover:text-red-300 no-drag cursor-pointer"
-                  >
-                    Delete
-                  </button>
-                </>
+                    ▸
+                  </span>
+                  <span className="w-1 h-4 bg-[var(--color-text-muted)]/30 rounded-sm flex-shrink-0" />
+                  <span className="text-xs truncate">{name}</span>
+                </div>
+                <span className="text-[10px] italic flex-shrink-0">auto</span>
+              </button>
+              {isOpen && (
+                <div className="px-3 pb-3 pt-1 border-t border-[var(--color-border)]/50 bg-black/[0.15]">
+                  <div className="prose prose-invert prose-xs max-w-none text-xs text-[var(--color-text-secondary)] leading-relaxed">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{description}</ReactMarkdown>
+                  </div>
+                </div>
               )}
             </div>
-          </div>
           )
         })}
 
-        {/* Add layer inline input */}
+        {/* Custom (user-authored) layers */}
+        {layers.map((layer) => {
+          const key = `user:${layer.filename}`
+          const isOpen = expanded.has(key)
+          const body = userContent[layer.filename]
+          return (
+            <div key={layer.filename} className="border-b border-[var(--color-border)] last:border-b-0">
+              <div
+                className={`flex items-center justify-between px-3 py-2 no-drag cursor-pointer transition-colors ${
+                  isOpen ? 'bg-white/[0.03]' : 'hover:bg-white/[0.03]'
+                }`}
+                onClick={() => toggleExpanded(key, layer)}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <span
+                    className={`inline-block text-[10px] text-[var(--color-text-muted)] transition-transform flex-shrink-0 w-3 ${
+                      isOpen ? 'rotate-90' : ''
+                    }`}
+                  >
+                    ▸
+                  </span>
+                  <span className="w-1 h-4 bg-[var(--color-accent)] rounded-sm flex-shrink-0" />
+                  <div className="min-w-0">
+                    <span className="text-xs text-[var(--color-text-primary)] block truncate">{layer.title}</span>
+                    {layer.preview && (
+                      <span className="text-[10px] text-[var(--color-text-muted)] block truncate">{layer.preview}</span>
+                    )}
+                  </div>
+                </div>
+                <div
+                  className="flex items-center gap-2 flex-shrink-0"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {confirmDelete === layer.filename ? (
+                    <>
+                      <span className="text-[10px] text-[var(--color-text-muted)]">Delete?</span>
+                      <button
+                        onClick={() => handleDelete(layer.filename)}
+                        className="text-[10px] text-red-400 hover:text-red-300 no-drag cursor-pointer"
+                      >
+                        Yes
+                      </button>
+                      <button
+                        onClick={() => setConfirmDelete(null)}
+                        className="text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] no-drag cursor-pointer"
+                      >
+                        No
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => handleEdit(layer)}
+                        className="text-[10px] text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] no-drag cursor-pointer"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => setConfirmDelete(layer.filename)}
+                        className="text-[10px] text-red-400 hover:text-red-300 no-drag cursor-pointer"
+                      >
+                        Delete
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+              {isOpen && (
+                <div className="px-3 pb-3 pt-1 border-t border-[var(--color-border)]/50 bg-black/[0.15]">
+                  <div className="prose prose-invert prose-xs max-w-none text-xs text-[var(--color-text-secondary)] leading-relaxed">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {body ?? '*Loading...*'}
+                    </ReactMarkdown>
+                  </div>
+                </div>
+              )}
+            </div>
+          )
+        })}
+
+        {/* Add-layer inline input / trigger */}
         {adding ? (
           <div className="flex items-center gap-2 px-3 py-2 border-b border-[var(--color-border)] last:border-b-0">
             <input
@@ -310,43 +398,6 @@ export function AgentSkillsSection(): React.JSX.Element {
             + Add Layer
           </button>
         )}
-        </div>
-
-        {/* Right: Preview panel */}
-        <div className="w-64 flex-shrink-0 border border-[var(--color-border)] flex flex-col min-h-[300px]">
-          {selectedLayer ? (
-            <>
-              <div className="px-3 py-2 border-b border-[var(--color-border)] flex items-center justify-between flex-shrink-0">
-                <div>
-                  <span className="text-xs font-medium text-[var(--color-text-primary)]">{selectedLayer.name}</span>
-                  <span className={`ml-2 text-[10px] ${selectedLayer.type === 'locked' ? 'text-[var(--color-text-muted)] italic' : 'text-[var(--color-accent)]'}`}>
-                    {selectedLayer.type === 'locked' ? 'auto' : 'custom'}
-                  </span>
-                </div>
-                {selectedLayer.type === 'user' && selectedLayer.filename && (
-                  <button
-                    onClick={() => {
-                      const layer = layers.find((l) => l.filename === selectedLayer.filename)
-                      if (layer) handleEdit(layer)
-                    }}
-                    className="px-2 py-0.5 text-[10px] text-white bg-[var(--color-accent)] hover:opacity-90 no-drag cursor-pointer"
-                  >
-                    Edit
-                  </button>
-                )}
-              </div>
-              <div className="flex-1 overflow-y-auto px-3 py-2">
-                <div className="prose prose-invert prose-xs max-w-none text-xs text-[var(--color-text-secondary)] leading-relaxed">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{previewContent}</ReactMarkdown>
-                </div>
-              </div>
-            </>
-          ) : (
-            <div className="flex items-center justify-center h-full text-[10px] text-[var(--color-text-muted)]">
-              Click a layer to preview
-            </div>
-          )}
-        </div>
       </div>
 
       {/* Toast */}

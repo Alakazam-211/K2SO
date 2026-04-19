@@ -360,7 +360,7 @@ fn handle_auth(
     let token = session.token.clone();
     let expires_at = session.expires_at.to_rfc3339();
 
-    state.sessions.lock().unwrap().insert(token.clone(), session);
+    state.sessions.lock().insert(token.clone(), session);
 
     send_response(stream, 200, &serde_json::json!({
         "ok": true,

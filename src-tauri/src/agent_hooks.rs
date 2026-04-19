@@ -8,7 +8,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::{Mutex, OnceLock};
+use parking_lot::Mutex;
+use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter, Manager};
 
 static HOOK_PORT: AtomicU16 = AtomicU16::new(0);
@@ -44,7 +45,7 @@ fn record_recent_event(raw: &str, canonical: Option<&str>, pane_id: &str, tab_id
         tab_id: tab_id.to_string(),
         matched: canonical.is_some(),
     };
-    let mut buf = recent_events().lock().unwrap_or_else(|e| e.into_inner());
+    let mut buf = recent_events().lock();
     if buf.len() >= RECENT_EVENTS_CAP {
         buf.pop_front();
     }
@@ -269,9 +270,8 @@ pub fn k2so_heartbeat_force_fire(
 ) -> Result<String, String> {
     use crate::db::schema::{AgentHeartbeat, HeartbeatFire};
 
-    let conn = rusqlite::Connection::open(
-        dirs::home_dir().ok_or("No home dir")?.join(".k2so/k2so.db")
-    ).map_err(|e| e.to_string())?;
+    let db = crate::db::shared();
+    let conn = db.lock();
     let project_id: String = conn.query_row(
         "SELECT id FROM projects WHERE path = ?1",
         rusqlite::params![project_path],
@@ -350,7 +350,7 @@ pub fn push_agent_event(project_path: &str, agent_name: &str, event_type: &str, 
         priority: priority.to_string(),
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
-    let mut queues = event_queues().lock().unwrap_or_else(|e| e.into_inner());
+    let mut queues = event_queues().lock();
     let queue = queues.entry(key).or_insert_with(VecDeque::new);
     queue.push_back(event);
     // Cap queue size
@@ -362,7 +362,7 @@ pub fn push_agent_event(project_path: &str, agent_name: &str, event_type: &str, 
 /// Drain all pending events for an agent (returns them and clears the queue).
 fn drain_agent_events(project_path: &str, agent_name: &str) -> Vec<ChannelEvent> {
     let key = format!("{}:{}", project_path, agent_name);
-    let mut queues = event_queues().lock().unwrap_or_else(|e| e.into_inner());
+    let mut queues = event_queues().lock();
     queues.remove(&key).map(|q| q.into_iter().collect()).unwrap_or_default()
 }
 
@@ -526,10 +526,18 @@ fn gather_git_context(project_path: &str) -> serde_json::Value {
     })
 }
 
-/// Start the notification server on a random port. Returns the port.
-pub fn start_server(app_handle: AppHandle) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind notification server");
-    let port = listener.local_addr().unwrap().port();
+/// Start the notification server on a random port. Returns the port, or
+/// an error describing why the bind failed (e.g., port exhaustion, sandbox
+/// restrictions). Previously panicked on bind failure, which would kill
+/// the whole Tauri process; now the caller can surface a diagnostic and
+/// continue launching the UI without the HTTP endpoint.
+pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("bind notification server on 127.0.0.1: {}", e))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("read bound port: {}", e))?
+        .port();
     HOOK_PORT.store(port, Ordering::Relaxed);
 
     let token = generate_token();
@@ -626,15 +634,13 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                         _ => None,
                     };
                     if let Some(new_status) = new_status {
-                        if let Ok(conn) = rusqlite::Connection::open(
-                            dirs::home_dir().map(|h| h.join(".k2so/k2so.db")).unwrap_or_default()
-                        ) {
-                            if let Ok(Some(s)) = crate::db::schema::AgentSession::get_by_terminal_id(&conn, &pane_id) {
-                                if s.status != new_status {
-                                    let _ = crate::db::schema::AgentSession::update_status(
-                                        &conn, &s.project_id, &s.agent_name, new_status,
-                                    );
-                                }
+                        let db = crate::db::shared();
+                        let conn = db.lock();
+                        if let Ok(Some(s)) = crate::db::schema::AgentSession::get_by_terminal_id(&conn, &pane_id) {
+                            if s.status != new_status {
+                                let _ = crate::db::schema::AgentSession::update_status(
+                                    &conn, &s.project_id, &s.agent_name, new_status,
+                                );
                             }
                         }
                     }
@@ -894,7 +900,7 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                         } else {
                             // Concurrency guard: skip if triage already running for this project
                             let already_running = {
-                                let mut in_flight = triage_lock().lock().unwrap_or_else(|e| e.into_inner());
+                                let mut in_flight = triage_lock().lock();
                                 if in_flight.contains(&project_path) {
                                     true
                                 } else {
@@ -948,7 +954,7 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
 
                                 // Release the triage lock
                                 {
-                                    let mut in_flight = triage_lock().lock().unwrap_or_else(|e| e.into_inner());
+                                    let mut in_flight = triage_lock().lock();
                                     in_flight.remove(&project_path);
                                 }
 
@@ -962,8 +968,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             let db_path = dirs::home_dir()
                                 .unwrap_or_else(|| std::path::PathBuf::from("."))
                                 .join(".k2so/k2so.db");
-                            let conn = rusqlite::Connection::open(&db_path)
-                                .map_err(|e| format!("DB open failed: {}", e))?;
+                            let db = crate::db::shared();
+                            let conn = db.lock();
 
                             if let Some(mode) = params.get("mode").cloned() {
                                 let schedule = params.get("schedule").cloned();
@@ -1177,7 +1183,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                         } else {
                             (|| -> Result<String, String> {
                                 let db_path = dirs::home_dir().map(|h| h.join(".k2so/k2so.db")).ok_or("No home dir")?;
-                                let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+                                let db = crate::db::shared();
+                                let conn = db.lock();
                                 let project_id: String = conn.query_row(
                                     "SELECT id FROM projects WHERE path = ?1",
                                     rusqlite::params![project_path], |row| row.get(0),
@@ -1204,7 +1211,7 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                         (|| -> Result<String, String> {
                             let injections = check_hook_injections();
                             let events: Vec<RecentEvent> = {
-                                let buf = recent_events().lock().unwrap_or_else(|e| e.into_inner());
+                                let buf = recent_events().lock();
                                 buf.iter().rev().take(limit).cloned().collect()
                             };
                             let payload = serde_json::json!({
@@ -1232,8 +1239,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             let db_path = dirs::home_dir()
                                 .map(|h| h.join(".k2so/k2so.db"))
                                 .ok_or("No home dir")?;
-                            let conn = rusqlite::Connection::open(&db_path)
-                                .map_err(|e| format!("DB open failed: {}", e))?;
+                            let db = crate::db::shared();
+                            let conn = db.lock();
                             let project_id: String = conn
                                 .query_row(
                                     "SELECT id FROM projects WHERE path = ?1",
@@ -1257,7 +1264,7 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                         // previous tick is still auditing). Skipped ticks are visible
                         // in `heartbeat_fires` so users aren't left guessing.
                         let already_running = {
-                            let mut in_flight = triage_lock().lock().unwrap_or_else(|e| e.into_inner());
+                            let mut in_flight = triage_lock().lock();
                             if in_flight.contains(&project_path) {
                                 true
                             } else {
@@ -1359,7 +1366,7 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
 
                             // Release triage lock
                             {
-                                let mut in_flight = triage_lock().lock().unwrap_or_else(|e| e.into_inner());
+                                let mut in_flight = triage_lock().lock();
                                 in_flight.remove(&project_path);
                             }
 
@@ -1606,8 +1613,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                 let db_path = dirs::home_dir()
                                     .ok_or("No home dir")?
                                     .join(".k2so/k2so.db");
-                                let conn = rusqlite::Connection::open(&db_path)
-                                    .map_err(|e| format!("DB open failed: {}", e))?;
+                                let db = crate::db::shared();
+                                let conn = db.lock();
                                 let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
 
                                 let project_id: String = conn.query_row(
@@ -1840,8 +1847,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                 let db_path = dirs::home_dir()
                                     .ok_or("No home dir")?
                                     .join(".k2so/k2so.db");
-                                let conn = rusqlite::Connection::open(&db_path)
-                                    .map_err(|e| format!("DB open failed: {}", e))?;
+                                let db = crate::db::shared();
+                                let conn = db.lock();
                                 let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
 
                                 let project_id: String = conn.query_row(
@@ -1870,8 +1877,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                 let db_path = dirs::home_dir()
                                     .ok_or("No home dir")?
                                     .join(".k2so/k2so.db");
-                                let conn = rusqlite::Connection::open(&db_path)
-                                    .map_err(|e| format!("DB open failed: {}", e))?;
+                                let db = crate::db::shared();
+                                let conn = db.lock();
                                 let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
 
                                 let project_id: String = conn.query_row(
@@ -1926,8 +1933,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                 let db_path = dirs::home_dir()
                                     .ok_or("No home dir")?
                                     .join(".k2so/k2so.db");
-                                let conn = rusqlite::Connection::open(&db_path)
-                                    .map_err(|e| format!("DB open failed: {}", e))?;
+                                let db = crate::db::shared();
+                                let conn = db.lock();
                                 let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
 
                                 let project_id: String = conn.query_row(
@@ -2143,8 +2150,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                 let db_path = dirs::home_dir()
                                     .ok_or("No home dir")?
                                     .join(".k2so/k2so.db");
-                                let conn = rusqlite::Connection::open(&db_path)
-                                    .map_err(|e| format!("DB open failed: {}", e))?;
+                                let db = crate::db::shared();
+                                let conn = db.lock();
                                 let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
 
                                 let project_id: String = conn.query_row(
@@ -2214,8 +2221,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                                 let db_path = dirs::home_dir()
                                     .ok_or("No home dir")?
                                     .join(".k2so/k2so.db");
-                                let conn = rusqlite::Connection::open(&db_path)
-                                    .map_err(|e| format!("DB open failed: {}", e))?;
+                                let db = crate::db::shared();
+                                let conn = db.lock();
                                 let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
 
                                 let project_id: String = conn.query_row(
@@ -2281,8 +2288,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             let db_path = dirs::home_dir()
                                 .ok_or("No home dir")?
                                 .join(".k2so/k2so.db");
-                            let conn = rusqlite::Connection::open(&db_path)
-                                .map_err(|e| format!("DB open failed: {}", e))?;
+                            let db = crate::db::shared();
+                            let conn = db.lock();
                             let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
 
                             let project_id: String = conn.query_row(
@@ -2433,8 +2440,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             let db_path = dirs::home_dir()
                                 .ok_or("No home dir")?
                                 .join(".k2so/k2so.db");
-                            let conn = rusqlite::Connection::open(&db_path)
-                                .map_err(|e| format!("DB open failed: {}", e))?;
+                            let db = crate::db::shared();
+                            let conn = db.lock();
                             let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
 
                             let project_id: String = conn.query_row(
@@ -2470,8 +2477,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             let db_path = dirs::home_dir()
                                 .ok_or("No home dir")?
                                 .join(".k2so/k2so.db");
-                            let conn = rusqlite::Connection::open(&db_path)
-                                .map_err(|e| format!("DB open failed: {}", e))?;
+                            let db = crate::db::shared();
+                            let conn = db.lock();
                             let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
 
                             let mut stmt = conn.prepare(
@@ -2516,8 +2523,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             let db_path = dirs::home_dir()
                                 .ok_or("No home dir")?
                                 .join(".k2so/k2so.db");
-                            let conn = rusqlite::Connection::open(&db_path)
-                                .map_err(|e| format!("DB open failed: {}", e))?;
+                            let db = crate::db::shared();
+                            let conn = db.lock();
                             let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
 
                             let mut stmt = conn.prepare(
@@ -2590,8 +2597,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             let db_path = dirs::home_dir()
                                 .ok_or("No home dir")?
                                 .join(".k2so/k2so.db");
-                            let conn = rusqlite::Connection::open(&db_path)
-                                .map_err(|e| format!("DB open failed: {}", e))?;
+                            let db = crate::db::shared();
+                            let conn = db.lock();
                             let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
 
                             let mut stmt = conn.prepare(
@@ -2688,8 +2695,8 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                             let db_path = dirs::home_dir()
                                 .ok_or("No home dir")?
                                 .join(".k2so/k2so.db");
-                            let conn = rusqlite::Connection::open(&db_path)
-                                .map_err(|e| format!("DB open failed: {}", e))?;
+                            let db = crate::db::shared();
+                            let conn = db.lock();
                             let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
 
                             let mut stmt = conn.prepare(
@@ -2738,7 +2745,7 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
         }
     });
 
-    port
+    Ok(port)
 }
 
 // ── CLI DB Helpers ──────────────────────────────────────────────────────
@@ -2751,10 +2758,10 @@ fn cli_update_project_setting(project_path: &str, field: &str, value: &str) -> R
         .ok_or("No home dir")?
         .join(".k2so")
         .join("k2so.db");
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("Failed to open DB: {}", e))?;
-    // Safety pragmas for CLI DB connections (Zed pattern: WAL + busy_timeout + query safety)
-    let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+    // Shared process-wide connection — WAL + busy_timeout are already
+    // enabled by db::init_database, so no per-call PRAGMA setup needed.
+    let db = crate::db::shared();
+    let conn = db.lock();
 
     // Validate field name to prevent SQL injection
     let allowed = ["agent_mode", "worktree_mode", "heartbeat_enabled", "agent_enabled", "pinned", "tier_id"];
@@ -2789,9 +2796,8 @@ fn cli_register_workspace(path: &str, app_handle: &tauri::AppHandle) -> Result<S
         .ok_or("No home dir")?
         .join(".k2so")
         .join("k2so.db");
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("Failed to open DB: {}", e))?;
-    let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+    let db = crate::db::shared();
+    let conn = db.lock();
 
     // Check if already registered
     let exists: bool = conn.query_row(
@@ -2872,9 +2878,8 @@ fn cli_remove_workspace(
         .ok_or("No home dir")?
         .join(".k2so")
         .join("k2so.db");
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("Failed to open DB: {}", e))?;
-    let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+    let db = crate::db::shared();
+    let conn = db.lock();
 
     // Find the project ID
     let project_id: String = conn.query_row(
@@ -2924,9 +2929,8 @@ fn cli_cleanup_stale_workspaces(app_handle: &tauri::AppHandle) -> Result<String,
     let db_path = dirs::home_dir()
         .ok_or("No home dir")?
         .join(".k2so").join("k2so.db");
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("Failed to open DB: {}", e))?;
-    let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+    let db = crate::db::shared();
+    let conn = db.lock();
 
     let mut stmt = conn.prepare(
         "SELECT id, worktree_path FROM workspaces WHERE worktree_path IS NOT NULL AND worktree_path != ''"
@@ -2954,10 +2958,11 @@ fn cli_get_project_settings(project_path: &str) -> Result<serde_json::Value, Str
         .ok_or("No home dir")?
         .join(".k2so")
         .join("k2so.db");
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("Failed to open DB: {}", e))?;
-    // Safety pragmas: WAL for concurrent reads, busy_timeout for lock contention, query_only for safety
-    let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA query_only=ON;");
+    // Read-only path — the shared connection is writable, so we can't
+    // use PRAGMA query_only=ON without affecting concurrent writers.
+    // The query below is a single SELECT which is intrinsically safe.
+    let db = crate::db::shared();
+    let conn = db.lock();
 
     conn.query_row(
         "SELECT agent_mode, worktree_mode, heartbeat_enabled, agent_enabled, pinned, name, tier_id FROM projects WHERE path = ?1",
@@ -3318,24 +3323,24 @@ pub fn register_all_hooks(app_handle: &AppHandle, hook_script: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    /// Ring-buffer tests share global state — serialize them.
+    /// Ring-buffer tests share global state — serialize them. Uses the
+    /// super's `parking_lot::Mutex` (import inherited via `use super::*`).
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn reset_recent_events() {
-        let mut buf = recent_events().lock().unwrap_or_else(|e| e.into_inner());
+        let mut buf = recent_events().lock();
         buf.clear();
     }
 
     fn snapshot_recent_events() -> Vec<RecentEvent> {
-        let buf = recent_events().lock().unwrap_or_else(|e| e.into_inner());
+        let buf = recent_events().lock();
         buf.iter().cloned().collect()
     }
 
     #[test]
     fn ring_buffer_records_matched_events() {
-        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TEST_LOCK.lock();
         reset_recent_events();
         record_recent_event("UserPromptSubmit", Some("start"), "pane-1", "tab-1");
         let events = snapshot_recent_events();
@@ -3349,7 +3354,7 @@ mod tests {
 
     #[test]
     fn ring_buffer_records_unmatched_events() {
-        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TEST_LOCK.lock();
         reset_recent_events();
         record_recent_event("NoSuchEvent", None, "pane-2", "tab-2");
         let events = snapshot_recent_events();
@@ -3360,7 +3365,7 @@ mod tests {
 
     #[test]
     fn ring_buffer_caps_at_limit() {
-        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TEST_LOCK.lock();
         reset_recent_events();
         for i in 0..RECENT_EVENTS_CAP + 10 {
             record_recent_event(
