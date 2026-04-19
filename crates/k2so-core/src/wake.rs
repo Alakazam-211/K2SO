@@ -184,11 +184,18 @@ pub fn launchctl_unload(plist_path: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-/// Install: write the plist + load it. Caller should call this from
-/// the `install_daemon_plist_v1` code migration wired in during the
-/// 0.33.0 upgrade flow.
+/// Install: write the plist + load it. Idempotent — if a plist with
+/// the same label is already loaded (e.g. user upgrading over an
+/// existing 0.33.x install, or rolling back + re-installing), we
+/// best-effort unload first so `launchctl load -w` doesn't fail with
+/// "already loaded." The unload's own errors are swallowed because a
+/// fresh-install `unload` call on a non-existent label is a harmless
+/// no-op (launchctl_unload treats that case as Ok).
 pub fn install(plist: &DaemonPlist) -> Result<PathBuf, String> {
     let target = plist.write()?;
+    // Best-effort unload of any stale plist already claiming this
+    // label. Ignored on fresh installs.
+    let _ = launchctl_unload(&target);
     launchctl_load(&target)?;
     Ok(target)
 }

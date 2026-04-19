@@ -50,14 +50,14 @@ found.
   in via trait parameters, not `try_state`. This IS the next
   substantial commit; user has explicitly OK'd multi-day scope.
 
-### 4. `companion` still in src-tauri
-- **Where:** `src-tauri/src/companion/` (2,525 lines across 6 files).
-- **Why cut:** same shape as agent_hooks — `mod.rs` has 11 tauri
-  refs. The five sibling files (auth, keychain, proxy, types,
-  websocket) have zero coupling, so most of the code is pure.
-- **Do it right:** `CompanionEventSink` trait + relocate the WS loop
-  + tunnel lifecycle. Lower complexity than agent_hooks; doing this
-  next in sequence.
+### 4. `companion` still in src-tauri — **CLOSED 2026-04-19**
+- **Where:** was `src-tauri/src/companion/`, now
+  `crates/k2so-core/src/companion/`.
+- **Resolution:** full module migrated. Four bridges
+  (`settings_bridge`, `terminal_bridge`, `event_sink`,
+  `app_event_source`) decouple mod.rs from Tauri completely. Tauri
+  app registers impls in `setup()` via `companion_host::register()`
+  + `TauriCompanionSettingsProvider`.
 
 ### 5. `watcher.rs` stayed in src-tauri
 - **Where:** `src-tauri/src/watcher.rs` (135 lines).
@@ -105,16 +105,11 @@ found.
   - On first launch of the signed build, `launchctl list | grep k2so-daemon`
     shows the daemon loaded
 
-### 9. No plist-conflict handling on install
-- **Where:** `k2so_core::wake::install` +
-  `install_daemon_plist_v1` migration in `src-tauri/src/lib.rs`.
-- **Why cut:** `launchctl load -w` errors if a plist with the same
-  label is already loaded. Common when a user upgrades over an
-  existing 0.33.x install or rolls back + re-installs.
-- **Do it right:** before `launchctl load`, try `launchctl unload -w`
-  as a best-effort. If the plist isn't loaded, unload fails quietly
-  (we already swallow that error in `launchctl_unload`). Low-risk
-  fix; just hasn't been wired.
+### 9. No plist-conflict handling on install — **CLOSED 2026-04-19**
+- **Where:** `k2so_core::wake::install`.
+- **Resolution:** `install()` now calls `launchctl_unload` as a
+  best-effort prelude; the unload function already treats
+  "not loaded" as Ok. Fresh installs + upgrades both work.
 
 ## Schema / migrations
 
@@ -131,26 +126,19 @@ found.
   or add a pre-commit hook that copies root → crates on every
   drizzle-kit run. Either solves the drift risk.
 
-### 11. `db::init_for_tests` no longer `#[cfg(test)]`-gated
+### 11. `db::init_for_tests` no longer `#[cfg(test)]`-gated — **CLOSED 2026-04-19**
 - **Where:** `crates/k2so-core/src/db/mod.rs`.
-- **Why cut:** src-tauri's test binary is a downstream consumer of
-  k2so-core, where `cfg(test)` in core isn't active. Dropping the
-  gate was the smallest diff.
-- **Do it right:** the function body is inert in prod (nobody calls
-  it) but it IS reachable from release code. Prefer gating on the
-  existing `test-util` feature flag instead, same as `FakeFs` now
-  does.
+- **Resolution:** re-gated behind `cfg(any(test, feature = "test-util"))`.
+  Production builds compile it out again; src-tauri's test binary
+  still reaches it via the existing dev-dependency features entry.
 
 ## Dead code / hygiene
 
-### 12. `bitmap_renderer.rs` dead code
-- **Where:** `crates/k2so-core/src/terminal/bitmap_renderer.rs`
-  (414 lines). ~15 "never used" warnings.
-- **Why cut:** pre-existing. The DOM-text-grid IPC shipped in 0.32.x
-  deprecated bitmap rendering, but the file was left in place. Not
-  from this session's work.
-- **Do it right:** delete the file; remove `mod bitmap_renderer;`
-  from `terminal/mod.rs`. Low-risk, ~1 commit.
+### 12. `bitmap_renderer.rs` dead code — **CLOSED 2026-04-19**
+- **Where:** `crates/k2so-core/src/terminal/bitmap_renderer.rs`.
+- **Resolution:** deleted. `mod bitmap_renderer;` removed from
+  `terminal/mod.rs`. The 414-line file plus ~15 dead-code warnings
+  are gone.
 
 ### 13. `fs_abstract.rs` was added as an untracked file
 - **Where:** `src-tauri/src/fs_abstract.rs` at v0.32.13, then moved
