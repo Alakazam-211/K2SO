@@ -1,8 +1,31 @@
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::io::Write;
+use std::net::{IpAddr, Ipv4Addr, TcpStream};
 use super::auth;
 use super::types::CompanionState;
+
+/// Extract the real client IP from X-Forwarded-For (ngrok sets this). Falls
+/// back to the raw TCP peer address, which will be 127.0.0.1 once traffic
+/// arrives through the local ngrok forwarder. Only processes that already
+/// have local execution can spoof XFF, and at that point they are past the
+/// trust boundary anyway — honest fallback is fine.
+pub fn client_ip(headers: &HashMap<String, String>, remote_addr: &str) -> IpAddr {
+    if let Some(xff) = headers.get("x-forwarded-for") {
+        if let Some(first) = xff.split(',').next() {
+            if let Ok(ip) = first.trim().parse::<IpAddr>() {
+                return ip;
+            }
+        }
+    }
+    remote_addr
+        .rsplit_once(':')
+        .map(|(ip, _)| ip)
+        .unwrap_or(remote_addr)
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+        .unwrap_or(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)))
+}
 
 /// Route mapping: companion endpoint → (internal route, allowed methods)
 fn map_route(method: &str, path: &str) -> Option<&'static str> {
@@ -182,8 +205,107 @@ fn urlencode(s: &str) -> String {
     result
 }
 
-/// Send a JSON response with the companion envelope format.
-pub fn send_response(stream: &mut TcpStream, status: u16, body: &serde_json::Value) {
+/// Decide whether a WebSocket upgrade should be accepted based on its Origin
+/// header. Called before `tungstenite::accept` so we can reject with a plain
+/// HTTP 403 before the protocol handshake.
+///
+/// Policy:
+///   - Missing / empty Origin → allow (native mobile apps don't set Origin)
+///   - Origin equals the current tunnel URL (scheme://host) → allow
+///   - Origin exactly matches an entry in `cors_origins` → allow
+///   - Origin is loopback (http://127.0.0.1, http://localhost[:port]) → allow
+///   - Anything else → reject
+pub fn ws_origin_allowed(
+    request_origin: Option<&str>,
+    tunnel_url: Option<&str>,
+    allowlist: &[String],
+) -> bool {
+    let origin = match request_origin {
+        Some(s) => s.trim(),
+        None => return true,
+    };
+    if origin.is_empty() {
+        return true;
+    }
+
+    if let Some(tunnel) = tunnel_url {
+        if origin_matches(origin, tunnel) {
+            return true;
+        }
+    }
+
+    if allowlist.iter().any(|allowed| origin_matches(origin, allowed)) {
+        return true;
+    }
+
+    is_loopback_origin(origin)
+}
+
+/// Compare two origin strings scheme+host+port, ignoring path + trailing slash.
+fn origin_matches(a: &str, b: &str) -> bool {
+    normalize_origin(a) == normalize_origin(b)
+}
+
+fn normalize_origin(s: &str) -> String {
+    let trimmed = s.trim().trim_end_matches('/');
+    // Strip any trailing path — keep scheme://host[:port].
+    if let Some(scheme_end) = trimmed.find("://") {
+        let after_scheme = &trimmed[scheme_end + 3..];
+        let host_end = after_scheme.find('/').unwrap_or(after_scheme.len());
+        format!("{}://{}", &trimmed[..scheme_end], &after_scheme[..host_end]).to_lowercase()
+    } else {
+        trimmed.to_lowercase()
+    }
+}
+
+fn is_loopback_origin(origin: &str) -> bool {
+    let norm = normalize_origin(origin);
+    let host_part = match norm.split_once("://") {
+        Some((_, rest)) => rest,
+        None => return false,
+    };
+    // Bracketed IPv6 looks like `[::1]:9000` or `[::1]`. Non-bracketed split
+    // on the first `:` gives us host-vs-port.
+    let host = if host_part.starts_with('[') {
+        match host_part.find(']') {
+            Some(end) => &host_part[1..end],
+            None => return false,
+        }
+    } else {
+        host_part.split(':').next().unwrap_or("")
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+/// Resolve the CORS `Access-Control-Allow-Origin` value for a request.
+/// Returns Some(origin) iff the request's `Origin` header matches an entry in
+/// the allowlist. Returns None otherwise — caller must not emit CORS headers
+/// (browser will block the response; native apps don't care).
+pub fn allowed_cors_origin(
+    request_origin: Option<&str>,
+    allowlist: &[String],
+) -> Option<String> {
+    let origin = request_origin?.trim();
+    if origin.is_empty() || allowlist.is_empty() {
+        return None;
+    }
+    if allowlist.iter().any(|allowed| allowed == origin) {
+        Some(origin.to_string())
+    } else {
+        None
+    }
+}
+
+/// Send a JSON response. CORS headers are emitted only if `cors_origin` is
+/// Some (caller resolved via `allowed_cors_origin`). Other hardening headers
+/// (X-Frame-Options, X-Content-Type-Options, Referrer-Policy) are always set
+/// since the API serves JSON and is never meant to be framed.
+pub fn send_response(
+    stream: &mut TcpStream,
+    status: u16,
+    body: &serde_json::Value,
+    cors_origin: Option<&str>,
+) {
     let body_str = serde_json::to_string(body).unwrap_or_else(|_| "{}".to_string());
     let status_text = match status {
         200 => "OK",
@@ -194,11 +316,33 @@ pub fn send_response(stream: &mut TcpStream, status: u16, body: &serde_json::Val
         429 => "Too Many Requests",
         _ => "Error",
     };
-    let response = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Authorization, Content-Type\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\n\r\n{}",
-        status, status_text, body_str.len(), body_str
+
+    let mut headers = format!(
+        "HTTP/1.1 {} {}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         X-Frame-Options: DENY\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         Referrer-Policy: no-referrer\r\n",
+        status, status_text, body_str.len()
     );
-    let _ = stream.write_all(response.as_bytes());
+
+    if let Some(origin) = cors_origin {
+        // Reflect the validated origin. `Vary: Origin` tells caches this
+        // response is origin-specific.
+        headers.push_str(&format!(
+            "Access-Control-Allow-Origin: {}\r\n\
+             Access-Control-Allow-Headers: Authorization, Content-Type\r\n\
+             Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+             Access-Control-Allow-Credentials: true\r\n\
+             Vary: Origin\r\n",
+            origin
+        ));
+    }
+
+    headers.push_str("\r\n");
+    headers.push_str(&body_str);
+    let _ = stream.write_all(headers.as_bytes());
 }
 
 /// Forward a validated companion request to the internal K2SO HTTP server.
@@ -207,7 +351,7 @@ pub fn proxy_to_internal(
     state: &CompanionState,
     method: &str,
     path: &str,
-    headers: &HashMap<String, String>,
+    _headers: &HashMap<String, String>,
     request: &str,
     project: &str,
 ) -> Result<serde_json::Value, String> {
@@ -279,23 +423,30 @@ pub fn handle_request(
     remote_addr: &str,
 ) {
     let clean_path = path.split('?').next().unwrap_or("");
+    let request_origin = headers.get("origin").map(|s| s.as_str());
+    let cors = allowed_cors_origin(request_origin, &state.cors_origins);
+    let cors_ref = cors.as_deref();
 
     // OPTIONS (CORS preflight)
     if method == "OPTIONS" {
-        send_response(stream, 200, &serde_json::json!({"ok": true}));
+        send_response(stream, 200, &serde_json::json!({"ok": true}), cors_ref);
         return;
     }
 
     // Auth endpoint — no Bearer token needed, uses Basic Auth
     if clean_path == "/companion/auth" && method == "POST" {
-        handle_auth(stream, state, headers, remote_addr);
+        handle_auth(stream, state, headers, remote_addr, cors_ref);
         return;
     }
 
     // WebSocket upgrade — handled separately
     if clean_path == "/companion/ws" {
-        // WebSocket upgrade is handled at the caller level before this function
-        send_response(stream, 400, &serde_json::json!({"ok": false, "error": "WebSocket upgrade must use GET with Upgrade header"}));
+        send_response(
+            stream,
+            400,
+            &serde_json::json!({"ok": false, "error": "WebSocket upgrade must use GET with Upgrade header"}),
+            cors_ref,
+        );
         return;
     }
 
@@ -304,7 +455,12 @@ pub fn handle_request(
     let token = match auth::parse_bearer(&auth_header) {
         Some(t) => t,
         None => {
-            send_response(stream, 401, &serde_json::json!({"ok": false, "error": "Missing Authorization: Bearer <token>"}));
+            send_response(
+                stream,
+                401,
+                &serde_json::json!({"ok": false, "error": "Missing Authorization: Bearer <token>"}),
+                cors_ref,
+            );
             return;
         }
     };
@@ -312,7 +468,12 @@ pub fn handle_request(
     // Validate session + rate limit
     if let Err(msg) = auth::validate_bearer(&token, state) {
         let status = if msg.contains("Rate limit") { 429 } else { 401 };
-        send_response(stream, status, &serde_json::json!({"ok": false, "error": msg}));
+        send_response(
+            stream,
+            status,
+            &serde_json::json!({"ok": false, "error": msg}),
+            cors_ref,
+        );
         return;
     }
 
@@ -322,8 +483,13 @@ pub fn handle_request(
 
     // Proxy to internal server
     match proxy_to_internal(state, method, path, headers, request, &project) {
-        Ok(data) => send_response(stream, 200, &data),
-        Err(e) => send_response(stream, 400, &serde_json::json!({"ok": false, "error": e})),
+        Ok(data) => send_response(stream, 200, &data, cors_ref),
+        Err(e) => send_response(
+            stream,
+            400,
+            &serde_json::json!({"ok": false, "error": e}),
+            cors_ref,
+        ),
     }
 }
 
@@ -333,12 +499,40 @@ fn handle_auth(
     state: &CompanionState,
     headers: &HashMap<String, String>,
     remote_addr: &str,
+    cors: Option<&str>,
 ) {
+    // Per-IP rate limit — mitigates password brute-force over the tunnel.
+    let client = client_ip(headers, remote_addr);
+    let limiter_decision = state.auth_limiter.lock().check_and_record(client);
+    if let Err(retry_after) = limiter_decision {
+        log_debug!(
+            "[companion] Auth rate-limited: ip={} retry_after={}s",
+            client,
+            retry_after
+        );
+        send_response(
+            stream,
+            429,
+            &serde_json::json!({
+                "ok": false,
+                "error": "Too many auth attempts — retry later",
+                "retryAfterSeconds": retry_after,
+            }),
+            cors,
+        );
+        return;
+    }
+
     let auth_header = headers.get("authorization").cloned().unwrap_or_default();
     let (username, password) = match auth::parse_basic_auth(&auth_header) {
         Some(creds) => creds,
         None => {
-            send_response(stream, 401, &serde_json::json!({"ok": false, "error": "Missing Authorization: Basic <credentials>"}));
+            send_response(
+                stream,
+                401,
+                &serde_json::json!({"ok": false, "error": "Missing Authorization: Basic <credentials>"}),
+                cors,
+            );
             return;
         }
     };
@@ -346,12 +540,22 @@ fn handle_auth(
     // Read settings to validate credentials
     let settings = crate::commands::settings::read_settings();
     if username != settings.companion.username {
-        send_response(stream, 401, &serde_json::json!({"ok": false, "error": "Invalid credentials"}));
+        send_response(
+            stream,
+            401,
+            &serde_json::json!({"ok": false, "error": "Invalid credentials"}),
+            cors,
+        );
         return;
     }
 
     if !auth::verify_password(&password, &settings.companion.password_hash) {
-        send_response(stream, 401, &serde_json::json!({"ok": false, "error": "Invalid credentials"}));
+        send_response(
+            stream,
+            401,
+            &serde_json::json!({"ok": false, "error": "Invalid credentials"}),
+            cors,
+        );
         return;
     }
 
@@ -362,11 +566,201 @@ fn handle_auth(
 
     state.sessions.lock().insert(token.clone(), session);
 
-    send_response(stream, 200, &serde_json::json!({
-        "ok": true,
-        "data": {
-            "token": token,
-            "expiresAt": expires_at,
+    send_response(
+        stream,
+        200,
+        &serde_json::json!({
+            "ok": true,
+            "data": {
+                "token": token,
+                "expiresAt": expires_at,
+            }
+        }),
+        cors,
+    );
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    // ── CORS ──
+
+    #[test]
+    fn cors_empty_allowlist_returns_none() {
+        assert!(allowed_cors_origin(Some("https://example.com"), &[]).is_none());
+    }
+
+    #[test]
+    fn cors_missing_origin_returns_none() {
+        let allowlist = vec!["https://example.com".to_string()];
+        assert!(allowed_cors_origin(None, &allowlist).is_none());
+    }
+
+    #[test]
+    fn cors_exact_match_reflects_origin() {
+        let allowlist = vec!["https://companion.example.com".to_string()];
+        assert_eq!(
+            allowed_cors_origin(Some("https://companion.example.com"), &allowlist),
+            Some("https://companion.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn cors_mismatched_origin_returns_none() {
+        let allowlist = vec!["https://companion.example.com".to_string()];
+        assert!(
+            allowed_cors_origin(Some("https://evil.example.com"), &allowlist).is_none()
+        );
+    }
+
+    // ── WS Origin ──
+
+    #[test]
+    fn ws_missing_origin_allowed() {
+        // Native mobile clients don't send Origin.
+        assert!(ws_origin_allowed(None, Some("https://x.ngrok.app"), &[]));
+    }
+
+    #[test]
+    fn ws_empty_origin_allowed() {
+        assert!(ws_origin_allowed(Some(""), Some("https://x.ngrok.app"), &[]));
+    }
+
+    #[test]
+    fn ws_tunnel_origin_allowed() {
+        assert!(ws_origin_allowed(
+            Some("https://x.ngrok.app"),
+            Some("https://x.ngrok.app"),
+            &[],
+        ));
+    }
+
+    #[test]
+    fn ws_tunnel_with_trailing_slash_normalized() {
+        assert!(ws_origin_allowed(
+            Some("https://x.ngrok.app/"),
+            Some("https://x.ngrok.app"),
+            &[],
+        ));
+    }
+
+    #[test]
+    fn ws_allowlisted_origin_allowed() {
+        let allow = vec!["https://companion.example.com".to_string()];
+        assert!(ws_origin_allowed(
+            Some("https://companion.example.com"),
+            None,
+            &allow,
+        ));
+    }
+
+    #[test]
+    fn ws_loopback_always_allowed() {
+        assert!(ws_origin_allowed(Some("http://127.0.0.1:3000"), None, &[]));
+        assert!(ws_origin_allowed(Some("http://localhost:8080"), None, &[]));
+        assert!(ws_origin_allowed(Some("http://[::1]:9000"), None, &[]));
+    }
+
+    #[test]
+    fn ws_hostile_origin_rejected() {
+        let allow = vec!["https://companion.example.com".to_string()];
+        assert!(!ws_origin_allowed(
+            Some("https://evil.example.com"),
+            Some("https://x.ngrok.app"),
+            &allow,
+        ));
+    }
+
+    #[test]
+    fn ws_near_miss_subdomain_rejected() {
+        // Guard against naive substring match — a.example.com must not match example.com
+        assert!(!ws_origin_allowed(
+            Some("https://attacker-example.com"),
+            Some("https://example.com"),
+            &[],
+        ));
+    }
+
+    // ── client_ip extraction ──
+
+    #[test]
+    fn client_ip_prefers_xff_first_value() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "x-forwarded-for".to_string(),
+            "203.0.113.42, 10.0.0.1".to_string(),
+        );
+        assert_eq!(
+            client_ip(&headers, "127.0.0.1:54321"),
+            "203.0.113.42".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn client_ip_falls_back_to_peer() {
+        let headers = HashMap::new();
+        assert_eq!(
+            client_ip(&headers, "127.0.0.1:54321"),
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
+        );
+    }
+
+    #[test]
+    fn client_ip_handles_ipv6_peer() {
+        let headers = HashMap::new();
+        // IPv6 peer_addr format is [::1]:port
+        assert_eq!(
+            client_ip(&headers, "[::1]:54321"),
+            "::1".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn client_ip_ignores_malformed_xff() {
+        let mut headers = HashMap::new();
+        headers.insert("x-forwarded-for".to_string(), "not-an-ip".to_string());
+        assert_eq!(
+            client_ip(&headers, "127.0.0.1:54321"),
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
+        );
+    }
+
+    // ── Rate limiter ──
+
+    #[test]
+    fn rate_limiter_allows_under_threshold() {
+        use super::super::types::AuthRateLimiter;
+        let mut limiter = AuthRateLimiter::new();
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        for _ in 0..AuthRateLimiter::MINUTE_LIMIT {
+            assert!(limiter.check_and_record(ip).is_ok());
         }
-    }));
+    }
+
+    #[test]
+    fn rate_limiter_blocks_over_threshold() {
+        use super::super::types::AuthRateLimiter;
+        let mut limiter = AuthRateLimiter::new();
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        for _ in 0..AuthRateLimiter::MINUTE_LIMIT {
+            let _ = limiter.check_and_record(ip);
+        }
+        // Next attempt must be blocked.
+        assert!(limiter.check_and_record(ip).is_err());
+    }
+
+    #[test]
+    fn rate_limiter_is_per_ip() {
+        use super::super::types::AuthRateLimiter;
+        let mut limiter = AuthRateLimiter::new();
+        let ip_a = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        let ip_b = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2));
+        for _ in 0..AuthRateLimiter::MINUTE_LIMIT {
+            let _ = limiter.check_and_record(ip_a);
+        }
+        assert!(limiter.check_and_record(ip_a).is_err());
+        // Different IP must not share the budget.
+        assert!(limiter.check_and_record(ip_b).is_ok());
+    }
 }

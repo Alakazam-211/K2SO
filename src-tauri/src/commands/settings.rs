@@ -1,3 +1,10 @@
+// The `unexpected_cfgs` allowance silences `cfg(cargo-clippy)` gates
+// that the `objc::msg_send!` macro expands to under recent Rust (the
+// objc crate hasn't updated its macros for the stricter cfg check).
+// `deprecated` silences the cocoa→objc2 migration warnings — that
+// migration is its own follow-up.
+#![allow(deprecated, unexpected_cfgs)]
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -119,6 +126,7 @@ pub struct AppSettings {
     /// Deprecated: workspace layouts now stored in SQLite workspace_sessions table.
     /// Kept for deserialization compat with old settings.json files; skipped on write.
     #[serde(default, skip_serializing)]
+    #[allow(dead_code)] // deserialize-only: consumed by old settings.json, never read.
     pub workspace_layouts: HashMap<String, serde_json::Value>,
     #[serde(default = "default_agent")]
     pub default_agent: String,
@@ -156,6 +164,12 @@ pub struct CompanionSettings {
     pub ngrok_auth_token: String,
     #[serde(default)]
     pub ngrok_domain: String,
+    /// Allowlist of browser origins permitted to use the companion API.
+    /// Empty by default — native mobile apps don't enforce CORS, so blocking
+    /// browsers shuts down XHR/fetch from arbitrary pages. Add exact origins
+    /// (e.g. "https://companion.example.com") here to opt in.
+    #[serde(default)]
+    pub cors_origins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,6 +330,8 @@ pub(crate) fn read_settings() -> AppSettings {
     if !file.exists() {
         return AppSettings::default();
     }
+    // One-shot migration: tighten mode on pre-0.32.12 settings files.
+    restrict_settings_mode_if_wider(&file);
     match fs::read_to_string(&file) {
         Ok(raw) => {
             match serde_json::from_str::<serde_json::Value>(&raw) {
@@ -346,10 +362,43 @@ fn write_settings(settings: &AppSettings) {
     let tmp = file.with_extension("json.tmp");
     if let Ok(json) = serde_json::to_string_pretty(settings) {
         if fs::write(&tmp, &json).is_ok() {
-            fs::rename(&tmp, &file).ok();
+            if fs::rename(&tmp, &file).is_ok() {
+                restrict_settings_mode(&file);
+            }
         }
     }
 }
+
+/// Restrict settings.json to owner read/write only (0o600).
+/// Contains password hash + ngrok token — must not be world-readable.
+#[cfg(unix)]
+fn restrict_settings_mode(file: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = fs::set_permissions(file, fs::Permissions::from_mode(0o600)) {
+        log_debug!("[settings] Failed to chmod 0o600 on {}: {}", file.display(), e);
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_settings_mode(_file: &Path) {}
+
+#[cfg(unix)]
+fn restrict_settings_mode_if_wider(file: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = fs::metadata(file) {
+        let mode = meta.permissions().mode() & 0o777;
+        if mode != 0o600 {
+            if let Err(e) = fs::set_permissions(file, fs::Permissions::from_mode(0o600)) {
+                log_debug!("[settings] Failed to tighten mode on {}: {}", file.display(), e);
+            } else {
+                log_debug!("[settings] Tightened {} from {:o} to 0o600", file.display(), mode);
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_settings_mode_if_wider(_file: &Path) {}
 
 // ── Tauri Commands ──────────────────────────────────────────────────────
 
@@ -564,7 +613,7 @@ pub fn set_relaunch_mode() {
 /// 2. Metal SIGABRT from std::process::exit() running __cxa_finalize_ranges
 /// 3. Tauri's built-in relaunch spawning a bare binary (not a .app bundle)
 #[tauri::command]
-pub fn relaunch_via_open(app: AppHandle) {
+pub fn relaunch_via_open(_app: AppHandle) {
     #[cfg(target_os = "macos")]
     {
         let pid = std::process::id();
@@ -605,6 +654,7 @@ pub fn relaunch_via_open(app: AppHandle) {
 
 /// Set the macOS window close button dot (document edited indicator).
 #[tauri::command]
+#[allow(unexpected_cfgs)]
 pub fn set_document_edited(app: AppHandle, edited: bool) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {

@@ -1,6 +1,6 @@
 [package]
 name = "k2so"
-version = "0.32.8"
+version = "0.32.11"
 edition = "2021"
 description = "Developer workspace with terminals, git worktrees, and agent presets"
 license = "MIT"
@@ -56,6 +56,7 @@ getrandom = "0.2"
 futures = "0.3"
 ngrok = "0.18"
 argon2 = "0.5"
+subtle = "2.6"
 tungstenite = "0.24"
 
 # Alacritty terminal backend
@@ -92,3 +93,11 @@ opt-level = 1
 strip = true
 lto = true
 codegen-units = 1
+
+# The `objc` crate's `msg_send!` macro expands to `#[cfg(cargo-clippy)]`
+# gates that the newer Rust `unexpected_cfgs` lint doesn't recognize.
+# Declaring `cargo-clippy` as an expected cfg value silences the
+# warnings cleanly; upstream objc is frozen at a version that pre-dates
+# the stricter cfg check. Replace with objc2 migration as a follow-up.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }

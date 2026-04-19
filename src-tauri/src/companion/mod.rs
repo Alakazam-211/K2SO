@@ -17,11 +17,11 @@ pub mod websocket;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{AppHandle, Emitter, Listener};
+use tauri::{AppHandle, Listener};
 use ngrok::config::ForwarderBuilder;
 use ngrok::tunnel::EndpointInfo;
 
-use types::CompanionState;
+use types::{AuthRateLimiter, CompanionState};
 
 /// Module-level companion state. Mutex<Option> allows stop + restart (unlike OnceLock).
 pub(crate) static STATE: Mutex<Option<CompanionState>> = Mutex::new(None);
@@ -91,6 +91,8 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
         shutdown: AtomicBool::new(false),
         hook_port,
         hook_token: hook_token.to_string(),
+        cors_origins: companion.cors_origins.clone(),
+        auth_limiter: Mutex::new(AuthRateLimiter::new()),
         _tunnel_keepalive: Mutex::new(Some(keepalive_tx)),
     };
     *STATE.lock() = Some(state);
@@ -306,7 +308,6 @@ fn start_ngrok_tunnel(ngrok_token: &str, ngrok_domain: &str, local_port: u16) ->
                     .await
                     .map_err(|e| format!("ngrok connect failed: {}", e))?;
 
-                use ngrok::config::TunnelBuilder;
                 let forward_url = url::Url::parse(&format!("http://localhost:{}", local_port))
                     .map_err(|e| format!("Invalid forward URL: {}", e))?;
 
@@ -361,7 +362,7 @@ static NGROK_FORWARDER: Mutex<Option<ngrok::forwarder::Forwarder<ngrok::tunnel::
 /// Local companion HTTP server — accepts connections from ngrok (forwarded via listen_and_forward).
 /// Same blocking TCP pattern as agent_hooks.rs.
 fn run_local_listener(listener: std::net::TcpListener) {
-    use std::io::{Read, Write};
+    use std::io::Read;
 
     // Set a timeout so the listener doesn't block forever on accept —
     // allows periodic shutdown checks even when no connections arrive.
@@ -407,6 +408,52 @@ fn run_local_listener(listener: std::net::TcpListener) {
                     .and_then(|line| line.split_whitespace().nth(1))
                     .unwrap_or("/companion/ws");
                 let path = path.to_string();
+
+                // Parse Origin from the upgrade request and enforce policy
+                // before handing the stream to tungstenite. A rejected upgrade
+                // gets a plain HTTP 403 and we drop the stream.
+                let headers = proxy::parse_headers(&peek_str);
+                let request_origin = headers.get("origin").map(|s| s.as_str());
+
+                let (allowed, tunnel_snapshot, allowlist_snapshot) = {
+                    let guard = STATE.lock();
+                    match guard.as_ref() {
+                        Some(state) => {
+                            let tunnel = state.tunnel_url.try_lock().and_then(|u| u.clone());
+                            let allowlist = state.cors_origins.clone();
+                            let ok = proxy::ws_origin_allowed(
+                                request_origin,
+                                tunnel.as_deref(),
+                                &allowlist,
+                            );
+                            (ok, tunnel, allowlist)
+                        }
+                        None => (false, None, Vec::new()),
+                    }
+                };
+                let _ = (tunnel_snapshot, allowlist_snapshot);
+
+                if !allowed {
+                    use std::io::Write;
+                    let body = b"{\"ok\":false,\"error\":\"WebSocket Origin not allowed\"}";
+                    let response = format!(
+                        "HTTP/1.1 403 Forbidden\r\n\
+                         Content-Type: application/json\r\n\
+                         Content-Length: {}\r\n\
+                         X-Frame-Options: DENY\r\n\
+                         X-Content-Type-Options: nosniff\r\n\
+                         \r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.write_all(body);
+                    log_debug!(
+                        "[companion-ws] Rejected WS upgrade — Origin {:?} not allowed",
+                        request_origin
+                    );
+                    return true;
+                }
+
                 // Pass unread stream to tungstenite — it reads the upgrade request itself
                 let ws_guard = STATE.lock();
                 if let Some(ref ws_state) = *ws_guard {
@@ -457,46 +504,6 @@ fn run_local_listener(listener: std::net::TcpListener) {
 
     log_debug!("[companion] Local listener ended after {} requests", request_count);
     RUNNING.store(false, Ordering::Relaxed);
-}
-
-/// Format an HTTP response string.
-fn format_response(status: u16, body: &serde_json::Value) -> String {
-    let body_str = serde_json::to_string(body).unwrap_or_else(|_| "{}".to_string());
-    let status_text = match status {
-        200 => "OK", 400 => "Bad Request", 401 => "Unauthorized",
-        429 => "Too Many Requests", _ => "Error",
-    };
-    format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Authorization, Content-Type\r\n\r\n{}",
-        status, status_text, body_str.len(), body_str
-    )
-}
-
-/// Inline auth handler for ngrok connections (can't use TcpStream directly).
-fn handle_auth_inline(state: &CompanionState, headers: &HashMap<String, String>, remote_addr: &str) -> String {
-    let auth_header = headers.get("authorization").cloned().unwrap_or_default();
-    let (username, password) = match auth::parse_basic_auth(&auth_header) {
-        Some(creds) => creds,
-        None => return format_response(401, &serde_json::json!({"ok": false, "error": "Missing Basic Auth"})),
-    };
-
-    let settings = crate::commands::settings::read_settings();
-    if username != settings.companion.username {
-        return format_response(401, &serde_json::json!({"ok": false, "error": "Invalid credentials"}));
-    }
-    if !auth::verify_password(&password, &settings.companion.password_hash) {
-        return format_response(401, &serde_json::json!({"ok": false, "error": "Invalid credentials"}));
-    }
-
-    let session = auth::create_session(remote_addr);
-    let token = session.token.clone();
-    let expires_at = session.expires_at.to_rfc3339();
-    state.sessions.lock().insert(token.clone(), session);
-
-    format_response(200, &serde_json::json!({
-        "ok": true,
-        "data": { "token": token, "expiresAt": expires_at }
-    }))
 }
 
 /// Register Tauri event listeners to broadcast to WebSocket clients.

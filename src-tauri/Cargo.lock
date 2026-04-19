@@ -2670,7 +2670,7 @@ dependencies = [
 
 [[package]]
 name = "k2so"
-version = "0.32.8"
+version = "0.32.11"
 dependencies = [
  "alacritty_terminal",
  "argon2",
@@ -2704,6 +2704,7 @@ dependencies = [
  "serde_json",
  "signal-hook 0.3.18",
  "signal-hook-mio",
+ "subtle",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",

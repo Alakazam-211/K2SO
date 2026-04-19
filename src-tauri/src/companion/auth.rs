@@ -40,14 +40,34 @@ pub fn create_session(remote_addr: &str) -> Session {
 
 /// Validate a Bearer token against active sessions.
 /// Returns the session token if valid, error message if not.
+///
+/// Uses constant-time comparison (subtle::ConstantTimeEq) against every stored
+/// token rather than HashMap::get(), which would reveal bucket-collision timing
+/// and leak via byte-wise String equality on the final compare. O(n) over active
+/// sessions, which is bounded to a handful in practice.
 pub fn validate_bearer(token: &str, state: &CompanionState) -> Result<String, &'static str> {
+    use subtle::ConstantTimeEq;
+    let token_bytes = token.as_bytes();
+
     let mut sessions = state.sessions.lock();
-    let session = sessions.get_mut(token).ok_or("Invalid session token")?;
+
+    // Find the matching session via constant-time scan.
+    let mut matched_key: Option<String> = None;
+    for key in sessions.keys() {
+        if key.as_bytes().ct_eq(token_bytes).into() {
+            matched_key = Some(key.clone());
+            break;
+        }
+    }
+    let matched_key = matched_key.ok_or("Invalid session token")?;
+
+    let session = sessions
+        .get_mut(&matched_key)
+        .ok_or("Invalid session token")?;
 
     if session.is_expired() {
         drop(sessions);
-        // Remove expired session
-        state.sessions.lock().remove(token);
+        state.sessions.lock().remove(&matched_key);
         return Err("Session expired");
     }
 
@@ -56,7 +76,7 @@ pub fn validate_bearer(token: &str, state: &CompanionState) -> Result<String, &'
     }
 
     session.last_active = chrono::Utc::now();
-    Ok(token.to_string())
+    Ok(matched_key)
 }
 
 /// Parse Basic Auth header: "Basic base64(username:password)"
