@@ -44,6 +44,9 @@ cat "$PROJECT_ROOT/src-tauri/src/commands/k2so_agents.rs" \
     "$PROJECT_ROOT/crates/k2so-core/src/agents/skill.rs" \
     "$PROJECT_ROOT/crates/k2so-core/src/agents/skill_content.rs" \
     "$PROJECT_ROOT/crates/k2so-core/src/agents/work_item.rs" \
+    "$PROJECT_ROOT/crates/k2so-core/src/agents/build_launch.rs" \
+    "$PROJECT_ROOT/crates/k2so-core/src/agents/delegate.rs" \
+    "$PROJECT_ROOT/crates/k2so-core/src/agents/workspace_regen.rs" \
     > "$HEARTBEAT_SRC" 2>/dev/null
 cp "$HEARTBEAT_SRC" "$AGENTS_SRC"
 
