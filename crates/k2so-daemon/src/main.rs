@@ -253,6 +253,20 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             // Unauthenticated. Smallest liveness check.
             send_response(&mut stream, "200 OK", "text/plain; charset=utf-8", BANNER).await;
         }
+        "/health" => {
+            // Unauthenticated liveness probe the behavior test suite
+            // polls before it does anything. Mirrors the body shape
+            // src-tauri's agent_hooks server returns so tests can talk
+            // to either process without branching.
+            let _ = stream.read(&mut buf).await;
+            send_response(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                r#"{"status":"ok"}"#,
+            )
+            .await;
+        }
         "/status" => {
             let _ = stream.read(&mut buf).await;
             // Token-gated. Returns a small JSON blob describing the
@@ -323,14 +337,14 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
                 .await;
                 return;
             }
-            let project_path = match params.get("project_path") {
-                Some(p) if !p.is_empty() => p.clone(),
-                _ => {
+            let project_path = match project_param(&params) {
+                Some(p) => p,
+                None => {
                     send_response(
                         &mut stream,
                         "400 Bad Request",
                         "application/json",
-                        r#"{"error":"Missing project_path"}"#,
+                        r#"{"error":"Missing project (or project_path) parameter"}"#,
                     )
                     .await;
                     return;
@@ -357,14 +371,14 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
                 .await;
                 return;
             }
-            let project_path = match params.get("project_path") {
-                Some(p) if !p.is_empty() => p.clone(),
-                _ => {
+            let project_path = match project_param(&params) {
+                Some(p) => p,
+                None => {
                     send_response(
                         &mut stream,
                         "400 Bad Request",
                         "application/json",
-                        r#"{"error":"Missing project_path"}"#,
+                        r#"{"error":"Missing project (or project_path) parameter"}"#,
                     )
                     .await;
                     return;
@@ -396,14 +410,14 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
                 .await;
                 return;
             }
-            let project_path = match params.get("project_path") {
-                Some(p) if !p.is_empty() => p.clone(),
-                _ => {
+            let project_path = match project_param(&params) {
+                Some(p) => p,
+                None => {
                     send_response(
                         &mut stream,
                         "400 Bad Request",
                         "application/json",
-                        r#"{"error":"Missing project_path"}"#,
+                        r#"{"error":"Missing project (or project_path) parameter"}"#,
                     )
                     .await;
                     return;
@@ -533,6 +547,24 @@ async fn run_heartbeat_port_watchdog(
 
         sleep(Duration::from_secs(INTERVAL_SECS)).await;
     }
+}
+
+/// Extract the project directory from query params. Accepts BOTH
+/// `project=<path>` (the short form src-tauri's agent_hooks server
+/// uses and the k2so CLI sends) and `project_path=<path>` (the long
+/// form earlier daemon routes adopted). Empty values are treated the
+/// same as missing.
+fn project_param(
+    params: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    for key in &["project_path", "project"] {
+        if let Some(v) = params.get(*key) {
+            if !v.is_empty() {
+                return Some(v.clone());
+            }
+        }
+    }
+    None
 }
 
 /// Reassemble a full `path?query` URL and hand off to k2so_core's
