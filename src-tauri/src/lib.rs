@@ -823,6 +823,8 @@ pub fn run() {
             commands::k2so_agents::k2so_agents_update_profile,
             commands::k2so_agents::k2so_agents_generate_claude_md,
             commands::k2so_agents::k2so_agents_teardown_workspace,
+            commands::k2so_agents::k2so_agents_preview_workspace_ingest,
+            commands::k2so_agents::k2so_agents_run_workspace_ingest,
             commands::k2so_agents::k2so_agents_generate_workspace_claude_md,
             commands::k2so_agents::k2so_agents_disable_workspace_claude_md,
             commands::k2so_agents::k2so_agents_build_launch,

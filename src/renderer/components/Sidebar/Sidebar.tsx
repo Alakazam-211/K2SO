@@ -9,6 +9,8 @@ import { useToastStore } from '@/stores/toast'
 import { useActiveAgentsStore } from '@/stores/active-agents'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import { useCommandPaletteStore } from '@/stores/command-palette'
+import { useAddWorkspaceDialogStore, type WorkspacePreviewEntry } from '@/stores/add-workspace-dialog'
+import { useRemoveWorkspaceDialogStore } from '@/stores/remove-workspace-dialog'
 import { invoke } from '@tauri-apps/api/core'
 import { showContextMenu } from '@/lib/context-menu'
 import { useGitInfo, useGitChanges } from '@/hooks/useGit'
@@ -905,9 +907,27 @@ export default function Sidebar(): React.JSX.Element {
 
   const handleAddProject = useCallback(async () => {
     const folderPath = await invoke<string | null>('projects_pick_folder')
-    if (folderPath) {
-      await addProject(folderPath)
+    if (!folderPath) return
+    let preview: WorkspacePreviewEntry[] = []
+    try {
+      preview = await invoke<WorkspacePreviewEntry[]>('k2so_agents_preview_workspace_ingest', {
+        projectPath: folderPath,
+      })
+    } catch (err) {
+      console.warn('[add-workspace] preview failed, continuing without it:', err)
     }
+    useAddWorkspaceDialogStore.getState().open({
+      path: folderPath,
+      preview,
+      onConfirm: async () => {
+        await addProject(folderPath)
+        try {
+          await invoke('k2so_agents_run_workspace_ingest', { projectPath: folderPath })
+        } catch (err) {
+          console.warn('[add-workspace] run ingest failed:', err)
+        }
+      },
+    })
   }, [addProject])
 
   const handleContextMenu = useCallback(
@@ -1001,10 +1021,14 @@ export default function Sidebar(): React.JSX.Element {
         )
         useProjectsStore.setState({ projects: updated })
       } else if (clickedId === 'remove') {
-        await removeProject(projectId)
+        useRemoveWorkspaceDialogStore.getState().open({
+          projectId,
+          projectName: project.name,
+          projectPath: project.path,
+        })
       }
     },
-    [projects, removeProject, renameProject, fetchProjects, createSection]
+    [projects, renameProject, fetchProjects, createSection]
   )
 
   return (

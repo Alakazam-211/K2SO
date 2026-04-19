@@ -6,6 +6,8 @@ import { useSettingsStore } from '../../stores/settings'
 import { useActiveAgentsStore } from '../../stores/active-agents'
 import { useTabsStore } from '../../stores/tabs'
 import { useCommandPaletteStore } from '../../stores/command-palette'
+import { useAddWorkspaceDialogStore, type WorkspacePreviewEntry } from '../../stores/add-workspace-dialog'
+import { useRemoveWorkspaceDialogStore } from '../../stores/remove-workspace-dialog'
 import { useGitInfo, useGitChanges } from '../../hooks/useGit'
 import { invoke } from '@tauri-apps/api/core'
 import { showContextMenu } from '../../lib/context-menu'
@@ -151,9 +153,33 @@ export default function IconRail(): React.JSX.Element {
 
   const handleAddProject = useCallback(async () => {
     const folderPath = await invoke<string | null>('projects_pick_folder')
-    if (folderPath) {
-      await addProject(folderPath)
+    if (!folderPath) return
+    // Preview what K2SO will do to the workspace before committing. If the
+    // preview fails (e.g. permissions), fall through to the add — the add
+    // itself has no destructive effects since skill generation runs on
+    // next boot.
+    let preview: WorkspacePreviewEntry[] = []
+    try {
+      preview = await invoke<WorkspacePreviewEntry[]>('k2so_agents_preview_workspace_ingest', {
+        projectPath: folderPath,
+      })
+    } catch (err) {
+      console.warn('[add-workspace] preview failed, continuing without it:', err)
     }
+    useAddWorkspaceDialogStore.getState().open({
+      path: folderPath,
+      preview,
+      onConfirm: async () => {
+        await addProject(folderPath)
+        // Trigger the skill write immediately so the user sees the effect
+        // of the migration without having to restart K2SO.
+        try {
+          await invoke('k2so_agents_run_workspace_ingest', { projectPath: folderPath })
+        } catch (err) {
+          console.warn('[add-workspace] run ingest failed:', err)
+        }
+      },
+    })
   }, [addProject])
 
   const handleProjectClick = useCallback(
@@ -212,10 +238,16 @@ export default function IconRail(): React.JSX.Element {
         const editorId = clickedId.replace('editor:', '')
         await invoke('projects_open_in_editor', { editorId, path: project.path })
       } else if (clickedId === 'remove') {
-        await removeProject(projectId)
+        // Open the teardown confirmation dialog; it handles the actual
+        // removeProject call after the user picks a mode (or deregister-only).
+        useRemoveWorkspaceDialogStore.getState().open({
+          projectId,
+          projectName: project.name,
+          projectPath: project.path,
+        })
       }
     },
-    [projects, removeProject, expand]
+    [projects, expand]
   )
 
   return (

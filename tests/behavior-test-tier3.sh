@@ -1867,6 +1867,108 @@ else
     fail "phase-7e: preview dispatch missing" "Expected 'preview)' case in workspace subcommand dispatch"
 fi
 
+# ═══════════════════════════════════════════════════════════════════════
+section "3.19: Phase 7f — Add / Remove workspace UI surface"
+# ═══════════════════════════════════════════════════════════════════════
+
+# Tauri commands for preview + ingest-on-demand
+if grep -q 'pub fn k2so_agents_preview_workspace_ingest' "$AGENTS_SRC"; then
+    pass "phase-7f: preview Tauri command present"
+else
+    fail "phase-7f: preview command missing" "Expected pub fn k2so_agents_preview_workspace_ingest"
+fi
+
+if grep -q 'pub fn k2so_agents_run_workspace_ingest' "$AGENTS_SRC"; then
+    pass "phase-7f: run-ingest Tauri command present"
+else
+    fail "phase-7f: run-ingest missing" "Expected pub fn k2so_agents_run_workspace_ingest"
+fi
+
+if grep -q 'k2so_agents_preview_workspace_ingest' "$PROJECT_ROOT/src-tauri/src/lib.rs" && \
+   grep -q 'k2so_agents_run_workspace_ingest' "$PROJECT_ROOT/src-tauri/src/lib.rs"; then
+    pass "phase-7f: new commands wired into Tauri handler registry"
+else
+    fail "phase-7f: commands not registered" "Expected both commands in lib.rs invoke_handler"
+fi
+
+# UI component files exist
+ADD_DIALOG="$PROJECT_ROOT/src/renderer/components/AddWorkspaceDialog/AddWorkspaceDialog.tsx"
+REMOVE_DIALOG="$PROJECT_ROOT/src/renderer/components/RemoveWorkspaceDialog/RemoveWorkspaceDialog.tsx"
+
+if [ -f "$ADD_DIALOG" ]; then
+    pass "phase-7f: AddWorkspaceDialog component exists"
+else
+    fail "phase-7f: AddWorkspaceDialog missing" "Expected $ADD_DIALOG"
+fi
+
+if [ -f "$REMOVE_DIALOG" ]; then
+    pass "phase-7f: RemoveWorkspaceDialog component exists"
+else
+    fail "phase-7f: RemoveWorkspaceDialog missing" "Expected $REMOVE_DIALOG"
+fi
+
+# AddWorkspace: "Why?" expander explaining multi-LLM context sharing
+if grep -q 'Why does K2SO do this' "$ADD_DIALOG" && grep -q 'different file' "$ADD_DIALOG"; then
+    pass "phase-7f: AddWorkspace dialog explains multi-LLM context sharing"
+else
+    fail "phase-7f: Why expander missing" "Expected 'Why does K2SO do this' + multi-LLM explanation"
+fi
+
+# RemoveWorkspace: three mode options visible
+if grep -q 'keep_current' "$REMOVE_DIALOG" && \
+   grep -q 'restore_original' "$REMOVE_DIALOG" && \
+   grep -q 'deregister_only' "$REMOVE_DIALOG"; then
+    pass "phase-7f: RemoveWorkspace dialog exposes all three teardown modes"
+else
+    fail "phase-7f: modes incomplete" "Expected keep_current / restore_original / deregister_only"
+fi
+
+# Zustand stores exist
+if [ -f "$PROJECT_ROOT/src/renderer/stores/add-workspace-dialog.ts" ]; then
+    pass "phase-7f: add-workspace dialog store present"
+else
+    fail "phase-7f: add-workspace store missing" "Expected stores/add-workspace-dialog.ts"
+fi
+
+if [ -f "$PROJECT_ROOT/src/renderer/stores/remove-workspace-dialog.ts" ]; then
+    pass "phase-7f: remove-workspace dialog store present"
+else
+    fail "phase-7f: remove-workspace store missing" "Expected stores/remove-workspace-dialog.ts"
+fi
+
+# IconRail / Sidebar route through the dialog (not direct removeProject calls)
+ICONRAIL="$PROJECT_ROOT/src/renderer/components/Sidebar/IconRail.tsx"
+SIDEBAR="$PROJECT_ROOT/src/renderer/components/Sidebar/Sidebar.tsx"
+
+if grep -q 'useRemoveWorkspaceDialogStore' "$ICONRAIL" && grep -q 'useRemoveWorkspaceDialogStore' "$SIDEBAR"; then
+    pass "phase-7f: Remove Workspace context menu routes through dialog (both IconRail + Sidebar)"
+else
+    fail "phase-7f: dialog not wired from context menu" "Expected useRemoveWorkspaceDialogStore import in IconRail + Sidebar"
+fi
+
+if grep -q 'useAddWorkspaceDialogStore' "$ICONRAIL" && grep -q 'useAddWorkspaceDialogStore' "$SIDEBAR"; then
+    pass "phase-7f: Add Workspace click routes through dialog (both IconRail + Sidebar)"
+else
+    fail "phase-7f: add dialog not wired" "Expected useAddWorkspaceDialogStore import in IconRail + Sidebar"
+fi
+
+# App.tsx mounts both dialogs
+if grep -q '<AddWorkspaceDialog />' "$PROJECT_ROOT/src/renderer/App.tsx" && \
+   grep -q '<RemoveWorkspaceDialog />' "$PROJECT_ROOT/src/renderer/App.tsx"; then
+    pass "phase-7f: both dialogs mounted in App.tsx"
+else
+    fail "phase-7f: dialogs not mounted" "Expected both dialogs as mount points in App.tsx"
+fi
+
+# Stray per-agent CLAUDE.md write at line 2465 was removed
+if awk '/\/\/ Case 3: No work/,/k2so_agents_generate_workspace_claude_md/' "$AGENTS_SRC" | \
+   grep -qE 'fs::write\(&claude_md_path.*&claude_md\)'; then
+    fail "phase-7f: stale per-agent CLAUDE.md write still present" \
+         "Expected the Case 3 launch-in-project-root path to no longer write per-agent CLAUDE.md"
+else
+    pass "phase-7f: stale per-agent CLAUDE.md write removed from Case 3 launch path"
+fi
+
 # HTTP endpoint accepts mode
 HOOKS_SRC="$PROJECT_ROOT/src-tauri/src/agent_hooks.rs"
 if grep -q '/cli/workspace/remove' "$HOOKS_SRC" && awk '/\/cli\/workspace\/remove/,/}/' "$HOOKS_SRC" | grep -q 'mode'; then

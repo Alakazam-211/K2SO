@@ -2459,13 +2459,15 @@ pub fn k2so_agents_build_launch(
         }
     }
 
-    // Case 3: No work — launch in project root with general context
+    // Case 3: No work — launch in project root with general context.
+    // The composed body is passed to --append-system-prompt below; no
+    // file write needed (Phase 1a retired per-agent CLAUDE.md side-effects).
     let claude_md = generate_agent_claude_md_content(&project_path, &agent_name, None)?;
-    let claude_md_path = agent_dir(&project_path, &agent_name).join("CLAUDE.md");
-    fs::write(&claude_md_path, &claude_md).ok();
 
-    // Also regenerate the workspace root CLAUDE.md so the user's Claude session
-    // (which launches from the workspace root) has the latest CLI tools and docs
+    // Regenerate the canonical workspace SKILL.md so the user's Claude
+    // session (which launches from the workspace root) picks up the latest
+    // CLI tools, PROJECT.md, and primary agent persona via the symlinked
+    // ./CLAUDE.md → SKILL.md discovery path.
     let _ = k2so_agents_generate_workspace_claude_md(project_path.clone());
 
     // Check for previous session to resume (avoids cold-start context reload).
@@ -2585,6 +2587,10 @@ pub fn k2so_agents_build_launch(
     // Use project root as CWD so the agent has access to the codebase
     let launch_cwd = project_path.clone();
 
+    // Phase 1a: root CLAUDE.md is now a symlink to canonical SKILL.md.
+    // Point the launch result at it so UI callers that surface the path
+    // (for "view context" features) still work.
+    let claude_md_path = PathBuf::from(&launch_cwd).join("CLAUDE.md");
     Ok(serde_json::json!({
         "command": command,
         "args": args,
@@ -7579,6 +7585,144 @@ pub fn k2so_agents_teardown_workspace(
         other => return Err(format!("unknown teardown mode: {}", other)),
     };
     Ok(teardown_workspace_harness_files(&project_path, m))
+}
+
+/// One entry in the Add-Workspace preview. Mirrors what the CLI's
+/// `k2so workspace preview` reports, but structured for the UI.
+#[derive(serde::Serialize, Debug)]
+pub struct WorkspacePreviewEntry {
+    pub path: String,
+    pub action: String,  // "archive_and_import" | "refresh" | "create" | "marker_injected"
+    pub size_bytes: Option<u64>,
+    pub note: String,
+}
+
+/// Inspect a workspace path WITHOUT mutating anything. Returns a list
+/// of entries describing what K2SO will do on add — archive + import,
+/// refresh in place, create fresh, or marker-inject. Backs the UI's
+/// add-workspace explanation card and the CLI's `k2so workspace preview`.
+#[tauri::command]
+pub fn k2so_agents_preview_workspace_ingest(
+    project_path: String,
+) -> Result<Vec<WorkspacePreviewEntry>, String> {
+    let root = PathBuf::from(&project_path);
+    let mut entries: Vec<WorkspacePreviewEntry> = Vec::new();
+
+    // Collision-prone files: pre-existing user content → archive + import + symlink
+    let collision_targets: &[(&str, &str)] = &[
+        ("CLAUDE.md", "Claude Code memory"),
+        ("GEMINI.md", "Gemini CLI instructions"),
+        ("AGENT.md", "Code Puppy agent file"),
+        (".goosehints", "Goose hints"),
+        (".cursor/rules/k2so.mdc", "Cursor rule"),
+    ];
+    for (rel, label) in collision_targets {
+        let path = root.join(rel);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                entries.push(WorkspacePreviewEntry {
+                    path: rel.to_string(),
+                    action: "refresh".to_string(),
+                    size_bytes: None,
+                    note: format!("{} — already symlinked to K2SO canonical (will refresh)", label),
+                });
+            }
+            Ok(meta) if meta.file_type().is_file() => {
+                // Detect our own generated Cursor MDC via sentinel.
+                let is_ours = fs::read_to_string(&path)
+                    .map(|s| s.contains("k2so_generated: true"))
+                    .unwrap_or(false);
+                if is_ours {
+                    entries.push(WorkspacePreviewEntry {
+                        path: rel.to_string(),
+                        action: "refresh".to_string(),
+                        size_bytes: Some(meta.len()),
+                        note: format!("{} — K2SO-generated, will refresh in place", label),
+                    });
+                } else {
+                    entries.push(WorkspacePreviewEntry {
+                        path: rel.to_string(),
+                        action: "archive_and_import".to_string(),
+                        size_bytes: Some(meta.len()),
+                        note: format!("{} — archive → import body into SKILL.md USER_NOTES → symlink", label),
+                    });
+                }
+            }
+            _ => {
+                entries.push(WorkspacePreviewEntry {
+                    path: rel.to_string(),
+                    action: "create".to_string(),
+                    size_bytes: None,
+                    note: format!("{} — no prior file, will create symlink", label),
+                });
+            }
+        }
+    }
+
+    // Aider config: merge if exists, scaffold if not.
+    let aider_path = root.join(".aider.conf.yml");
+    if aider_path.is_file() {
+        let already = fs::read_to_string(&aider_path)
+            .map(|s| s.contains("SKILL.md"))
+            .unwrap_or(false);
+        let size = fs::metadata(&aider_path).ok().map(|m| m.len());
+        if already {
+            entries.push(WorkspacePreviewEntry {
+                path: ".aider.conf.yml".to_string(),
+                action: "refresh".to_string(),
+                size_bytes: size,
+                note: "Aider config — already references SKILL.md, no change".to_string(),
+            });
+        } else {
+            entries.push(WorkspacePreviewEntry {
+                path: ".aider.conf.yml".to_string(),
+                action: "archive_and_import".to_string(),
+                size_bytes: size,
+                note: "Aider config — archive → merge SKILL.md into read: list (preserves other keys)".to_string(),
+            });
+        }
+    } else {
+        entries.push(WorkspacePreviewEntry {
+            path: ".aider.conf.yml".to_string(),
+            action: "create".to_string(),
+            size_bytes: None,
+            note: "Aider config — scaffold fresh with read: [SKILL.md]".to_string(),
+        });
+    }
+
+    // Marker-injected files: AGENTS.md, .github/copilot-instructions.md
+    let marker_targets: &[(&str, &str)] = &[
+        ("AGENTS.md", "Codex / OpenCode / Pi"),
+        (".github/copilot-instructions.md", "GitHub Copilot"),
+    ];
+    for (rel, label) in marker_targets {
+        let path = root.join(rel);
+        let size = fs::metadata(&path).ok().map(|m| m.len());
+        let action = if path.exists() { "marker_injected" } else { "create" };
+        let note = if path.exists() {
+            format!("{} — K2SO block inserted between markers, your content preserved", label)
+        } else {
+            format!("{} — will create with K2SO block only", label)
+        };
+        entries.push(WorkspacePreviewEntry {
+            path: rel.to_string(),
+            action: action.to_string(),
+            size_bytes: size,
+            note,
+        });
+    }
+
+    Ok(entries)
+}
+
+/// Trigger the workspace skill write for a single project on demand.
+/// Used by the Add-Workspace dialog to run migration immediately after
+/// the user confirms, rather than waiting for the next app boot.
+#[tauri::command]
+pub fn k2so_agents_run_workspace_ingest(project_path: String) -> Result<(), String> {
+    harvest_per_agent_claude_md_files(&project_path);
+    write_workspace_skill_file(&project_path);
+    Ok(())
 }
 
 /// Write a single agent's SKILL.md. Used internally during launch.

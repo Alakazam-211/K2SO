@@ -13,6 +13,8 @@ import TabbedPanel from './components/TabbedPanel/TabbedPanel'
 import { TerminalArea } from './components/Terminal/TerminalArea'
 import Settings from './components/Settings/Settings'
 import GitInitDialog from './components/GitInitDialog/GitInitDialog'
+import AddWorkspaceDialog from './components/AddWorkspaceDialog/AddWorkspaceDialog'
+import RemoveWorkspaceDialog from './components/RemoveWorkspaceDialog/RemoveWorkspaceDialog'
 import WorktreeBar from './components/FocusWindow/WorktreeBar'
 import CommandPalette from './components/CommandPalette/CommandPalette'
 import ContextMenu from './components/ContextMenu/ContextMenu'
@@ -158,6 +160,8 @@ function FocusModeContent({ activeProject, cwd }: { activeProject: any; cwd: str
         )}
       </FocusLayout>
       <GitInitDialog />
+      <AddWorkspaceDialog />
+      <RemoveWorkspaceDialog />
       <CommandPalette />
       <ReviewQueueModal />
       <RunningAgentsPanel />
@@ -594,6 +598,8 @@ export default function App(): React.JSX.Element {
           </div>
         </div>
         <GitInitDialog />
+      <AddWorkspaceDialog />
+      <RemoveWorkspaceDialog />
         <CommandPalette />
         <ContextMenu />
         <ConfirmDialog />
@@ -638,6 +644,8 @@ export default function App(): React.JSX.Element {
         )}
       </Layout>
       <GitInitDialog />
+      <AddWorkspaceDialog />
+      <RemoveWorkspaceDialog />
       <CommandPalette />
       <ReviewQueueModal />
       <RunningAgentsPanel />
