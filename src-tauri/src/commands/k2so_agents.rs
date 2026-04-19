@@ -78,45 +78,20 @@ pub struct WorkItem {
 // intentionally excluded — they're dispatched with explicit orders by
 // their manager and never wake autonomously.
 
-const WAKEUP_TEMPLATE_WORKSPACE: &str = include_str!("../../wakeup_templates/workspace.md");
-const WAKEUP_TEMPLATE_MANAGER: &str = include_str!("../../wakeup_templates/manager.md");
-const WAKEUP_TEMPLATE_CUSTOM: &str = include_str!("../../wakeup_templates/custom.md");
-const WAKEUP_TEMPLATE_K2SO: &str = include_str!("../../wakeup_templates/k2so.md");
-
-/// Resolve the wake-up template content for a given agent type.
-/// Returns `None` for agent types that don't use wake-up at all
-/// (currently just `agent-template`, which is always dispatched with
-/// explicit orders by a manager).
-fn wakeup_template_for(agent_type: &str) -> Option<&'static str> {
-    match agent_type {
-        "manager" | "coordinator" | "pod-leader" => Some(WAKEUP_TEMPLATE_MANAGER),
-        "custom" => Some(WAKEUP_TEMPLATE_CUSTOM),
-        "k2so" => Some(WAKEUP_TEMPLATE_K2SO),
-        _ => None,
-    }
-}
-
-fn agent_wakeup_path(project_path: &str, agent_name: &str) -> PathBuf {
-    // UPPERCASE as of 0.32.7 (ecosystem convention: CLAUDE.md, AGENTS.md, etc.).
-    // Reads tolerate both via read_wakeup_md shim during the transition window.
-    agent_dir(project_path, agent_name).join("WAKEUP.md")
-}
-
-fn workspace_wakeup_path(project_path: &str) -> PathBuf {
-    PathBuf::from(project_path).join(".k2so").join("WAKEUP.md")
-}
-
-/// Read `wakeup.md` for an agent, falling back to the shipped template
-/// if the file doesn't exist or is empty. Returns `None` for agent
-/// types that don't use wake-up (agent-template and unknown types).
-fn read_agent_wakeup(project_path: &str, agent_name: &str, agent_type: &str) -> Option<String> {
-    let template = wakeup_template_for(agent_type)?;
-    let path = agent_wakeup_path(project_path, agent_name);
-    match fs::read_to_string(&path) {
-        Ok(s) if !s.trim().is_empty() => Some(s),
-        _ => Some(template.to_string()),
-    }
-}
+// Wakeup templates + resolvers + composers moved to
+// k2so_core::agents::wake. The re-exports below keep the historical
+// paths valid: `WAKEUP_TEMPLATE_*`, `wakeup_template_for`,
+// `agent_wakeup_path`, `workspace_wakeup_path`, `read_agent_wakeup`,
+// `strip_frontmatter`, the four `compose_*` helpers, and
+// `default_heartbeat_wakeup_abs` all resolve to the core versions.
+pub use k2so_core::agents::wake::{
+    agent_wakeup_path, compose_agent_wake_from_body, compose_manager_wake_from_body,
+    compose_wake_prompt_for_agent, compose_wake_prompt_for_lead,
+    compose_wake_prompt_from_path, default_heartbeat_wakeup_abs, read_agent_wakeup,
+    strip_frontmatter, wakeup_template_for, workspace_wakeup_path,
+    WAKEUP_TEMPLATE_CUSTOM, WAKEUP_TEMPLATE_K2SO, WAKEUP_TEMPLATE_MANAGER,
+    WAKEUP_TEMPLATE_WORKSPACE,
+};
 
 /// Create `wakeup.md` from the matching template if it doesn't exist.
 /// No-op if the file already exists (never overwrite user edits) or if
@@ -149,92 +124,9 @@ fn ensure_agent_wakeup(project_path: &str, agent_name: &str, agent_type: &str) {
 
 // `agent_type_for` moved to k2so_core::agents (re-exported above).
 
-/// Resolve the absolute filesystem path of the primary heartbeat's
-/// wakeup.md for the given agent. Prefers a row named `"triage"`
-/// (the one `migrate_or_scaffold_lead_heartbeat` creates for manager
-/// mode); falls back to the first enabled row. Returns `None` if the
-/// agent has no heartbeats configured — callers should fall back to
-/// the shipped template in that case.
-pub fn default_heartbeat_wakeup_abs(project_path: &str, _agent_name: &str) -> Option<String> {
-    let db = crate::db::shared();
-    let conn = db.lock();
-    let project_id = resolve_project_id(&conn, project_path)?;
-    let rows = crate::db::schema::AgentHeartbeat::list_enabled(&conn, &project_id).ok()?;
-    let hb = rows.iter().find(|h| h.name == "triage").or_else(|| rows.first())?;
-    let abs = std::path::Path::new(project_path).join(&hb.wakeup_path);
-    Some(abs.to_string_lossy().to_string())
-}
-
-/// Compose the `--append-system-prompt` text for `__lead__` at wake time.
-/// Pulls the wakeup.md from the default heartbeat row (migrated there by
-/// `migrate_or_scaffold_lead_heartbeat`); falls back to the shipped
-/// manager template if no row exists yet (freshly-created workspace
-/// that hasn't been through the migration pass).
-///
-/// Used only by the `/cli/checkin` response builder — all actual wake
-/// *launches* for `__lead__` now go through `k2so_agents_build_launch`
-/// with the per-row wakeup_override so SKILL.md / PROJECT.md / --resume
-/// / session-continuity all apply uniformly.
-/// Pure composer for the Workspace Manager wake prompt. Given an
-/// optional raw wakeup body (as read from disk), produces the full
-/// wake message — frontmatter stripped, fallback to
-/// WAKEUP_TEMPLATE_WORKSPACE if the body is empty or missing.
-///
-/// Split out from `compose_wake_prompt_for_lead` so every branch
-/// (body present / body empty / body missing) is unit-testable
-/// without scaffolding a filesystem.
-pub fn compose_manager_wake_from_body(raw_body: Option<&str>) -> String {
-    let wakeup_body = raw_body
-        .map(|s| strip_frontmatter(s).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| WAKEUP_TEMPLATE_WORKSPACE.trim().to_string());
-    format!(
-        "# K2SO Heartbeat Wake — Workspace Manager\n\n\
-         The heartbeat scheduler woke you because new work has arrived in the \
-         workspace inbox. Your wake-up instructions are below; follow them \
-         and exit when done.\n\n\
-         ----\n\n{}",
-        wakeup_body
-    )
-}
-
-pub fn compose_wake_prompt_for_lead(project_path: &str) -> String {
-    let raw = default_heartbeat_wakeup_abs(project_path, "__lead__")
-        .and_then(|p| fs::read_to_string(&p).ok());
-    compose_manager_wake_from_body(raw.as_deref())
-}
-
-/// Pure composer for a regular agent wake prompt. Given the raw
-/// wakeup body string (already read from disk), produces the full
-/// wake message. Returns None when the input is None, matching the
-/// "no wake for agent-template" semantic.
-pub fn compose_agent_wake_from_body(raw_body: Option<&str>) -> Option<String> {
-    let body = raw_body?;
-    Some(format!(
-        "# K2SO Heartbeat Wake\n\n\
-         The heartbeat scheduler woke you. Your wake-up instructions are below; \
-         follow them and exit when done.\n\n\
-         ----\n\n{}",
-        body.trim()
-    ))
-}
-
-/// Compose the `--append-system-prompt` text for a regular agent
-/// woken by the heartbeat scheduler. Returns `None` for agent types
-/// that don't have wake-up semantics (agent-template).
-pub fn compose_wake_prompt_for_agent(project_path: &str, agent_name: &str) -> Option<String> {
-    let agent_type = agent_type_for(project_path, agent_name);
-    let wakeup = read_agent_wakeup(project_path, agent_name, &agent_type)?;
-    compose_agent_wake_from_body(Some(&wakeup))
-}
-
-/// Compose the wake prompt from an explicit wakeup file path. Used by
-/// the multi-heartbeat scheduler — each heartbeat row stores the path
-/// it should read rather than relying on a naming convention.
-pub fn compose_wake_prompt_from_path(wakeup_path: &std::path::Path) -> Option<String> {
-    let content = std::fs::read_to_string(wakeup_path).ok()?;
-    compose_agent_wake_from_body(Some(&content))
-}
+// `default_heartbeat_wakeup_abs` + the four `compose_*` wake-prompt
+// composers moved to k2so_core::agents::wake (re-exported at the top
+// of this file).
 
 /// Find the workspace's primary scheduleable agent. A workspace is one-of
 /// Custom / K2SO Agent / Workspace Manager (mutually exclusive by design),
@@ -2542,15 +2434,7 @@ fn extract_section(content: &str, heading: &str) -> Option<String> {
     }
 }
 
-/// Strip YAML frontmatter (--- delimited) from markdown content, returning just the body.
-fn strip_frontmatter(content: &str) -> String {
-    if content.starts_with("---") {
-        if let Some(end) = content[3..].find("---") {
-            return content[3 + end + 3..].trim().to_string();
-        }
-    }
-    content.trim().to_string()
-}
+// `strip_frontmatter` moved to k2so_core::agents::wake (re-exported).
 
 /// Generate the CLAUDE.md content for an agent, optionally focused on a specific task.
 fn generate_agent_claude_md_content(
