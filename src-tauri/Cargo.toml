@@ -94,24 +94,6 @@ harness = false
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
-# Optimize hot-path crates even in dev builds — bitmap rendering
-# and QOI encoding are 10-30x slower without optimizations.
-[profile.dev.package.qoi]
-opt-level = 3
-
-[profile.dev.package.fontdue]
-opt-level = 3
-
-# Note: Can't set opt-level for k2so itself due to linker issues with Tauri.
-# The hot-path crates (fontdue, qoi) are optimized which covers most of the cost.
-[profile.dev]
-opt-level = 1
-
-[profile.release]
-strip = true
-lto = true
-codegen-units = 1
-
 # The `objc` crate's `msg_send!` macro expands to `#[cfg(cargo-clippy)]`
 # gates that the newer Rust `unexpected_cfgs` lint doesn't recognize.
 # Declaring `cargo-clippy` as an expected cfg value silences the
