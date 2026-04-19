@@ -10,6 +10,28 @@ mod bitmap_renderer;
 pub use alacritty_backend::TerminalManager;
 pub use event_sink::TerminalEventSink;
 
+use parking_lot::Mutex;
+use std::sync::{Arc, OnceLock};
+
+/// Process-wide singleton TerminalManager. Mirrors the `db::shared()`
+/// pattern so any module — src-tauri's AppState, core's companion,
+/// the future daemon — gets the same handle and therefore the same
+/// live HashMap of terminal instances.
+static SHARED: OnceLock<Arc<Mutex<TerminalManager>>> = OnceLock::new();
+
+/// Return (and lazy-initialize) the shared TerminalManager. Callers
+/// clone the Arc freely; the Mutex serializes writes to the inner
+/// HashMap. Previous design had AppState own a `Mutex<TerminalManager>`
+/// directly, which meant agent_hooks and companion needed AppState
+/// access to spawn or inspect terminals — a strong coupling that
+/// blocked moving those modules into k2so-core. Now everyone shares
+/// this singleton.
+pub fn shared() -> Arc<Mutex<TerminalManager>> {
+    SHARED
+        .get_or_init(|| Arc::new(Mutex::new(TerminalManager::new())))
+        .clone()
+}
+
 // ── Shared utilities ───────────────────────────────────────────────────────
 
 /// Ignore SIGPIPE at process startup so writing to a dead PTY returns EPIPE

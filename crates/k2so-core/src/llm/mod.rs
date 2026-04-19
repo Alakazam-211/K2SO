@@ -2,7 +2,9 @@ pub mod download;
 pub mod file_index;
 pub mod tools;
 
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
@@ -10,6 +12,20 @@ use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
+
+/// Process-wide singleton LlmManager. Same shape as
+/// `crate::terminal::shared()` / `crate::db::shared()` — one handle,
+/// one underlying instance, accessible from anywhere in k2so-core.
+static SHARED: OnceLock<Arc<Mutex<LlmManager>>> = OnceLock::new();
+
+/// Return (and lazy-initialize) the shared LlmManager. AppState holds
+/// a clone of the same Arc so every caller sees the same in-flight
+/// model load + download state.
+pub fn shared() -> Arc<Mutex<LlmManager>> {
+    SHARED
+        .get_or_init(|| Arc::new(Mutex::new(LlmManager::new())))
+        .clone()
+}
 
 /// Manages a local LLM for workspace orchestration.
 pub struct LlmManager {

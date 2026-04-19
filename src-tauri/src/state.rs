@@ -21,7 +21,11 @@ use std::sync::Arc;
 /// so `ReentrantMutex`'s read-only guard suffices.
 pub struct AppState {
     pub db: Arc<ReentrantMutex<rusqlite::Connection>>,
-    pub terminal_manager: Mutex<crate::terminal::TerminalManager>,
-    pub llm_manager: Mutex<crate::llm::LlmManager>,
+    /// Shared handle to `k2so_core::terminal::shared()`. Cloned so
+    /// AppState and any in-core caller (companion, future agent_hooks)
+    /// lock the same Mutex around the same TerminalManager instance.
+    pub terminal_manager: Arc<Mutex<crate::terminal::TerminalManager>>,
+    /// Same pattern: Arc clone of `k2so_core::llm::shared()`.
+    pub llm_manager: Arc<Mutex<crate::llm::LlmManager>>,
     pub watchers: Mutex<HashMap<String, notify::RecommendedWatcher>>,
 }

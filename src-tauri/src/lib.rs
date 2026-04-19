@@ -145,8 +145,11 @@ pub fn run() {
         // and HTTP endpoints take the same write lock on the same
         // physical SQLite connection.
         db: db_handle,
-        terminal_manager: Mutex::new(terminal::TerminalManager::new()),
-        llm_manager: Mutex::new(llm::LlmManager::new()),
+        // Arc clone of the k2so-core singletons. AppState is now a
+        // handle collection, not the owner — companion + future
+        // agent_hooks in core see the same underlying managers.
+        terminal_manager: terminal::shared(),
+        llm_manager: llm::shared(),
         watchers: Mutex::new(HashMap::new()),
     };
 
