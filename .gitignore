@@ -1,6 +1,10 @@
 node_modules/
 out/
 dist/
+# Cargo workspace output — the workspace root moved in 0.33.x, so target/
+# lives at the repo root now. Keep src-tauri/target/ ignored too for any
+# stale per-package builds from older checkouts.
+target/
 src-tauri/target/
 *.dmg
 *.zip

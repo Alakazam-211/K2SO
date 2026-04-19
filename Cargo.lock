@@ -2961,6 +2961,8 @@ name = "k2so-core"
 version = "0.33.0-dev"
 dependencies = [
  "alacritty_terminal",
+ "argon2",
+ "base64 0.22.1",
  "chrono",
  "dirs 5.0.1",
  "encoding_rs",
@@ -2980,6 +2982,8 @@ dependencies = [
  "serde_json",
  "signal-hook 0.3.18",
  "signal-hook-mio",
+ "subtle",
+ "tungstenite",
  "uuid",
 ]
 

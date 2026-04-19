@@ -9,11 +9,10 @@
 //! - Supports WebSocket for real-time event push
 //! - Tokio runtime kept alive for the tunnel's lifetime
 
-pub mod auth;
-pub mod keychain;
-pub mod proxy;
-pub mod types;
-pub mod websocket;
+// Pure sub-modules live in k2so-core now. Re-export from there so
+// existing `crate::companion::auth::*` / `::types::*` etc. paths keep
+// working for src-tauri's commands/companion.rs and any other caller.
+pub use k2so_core::companion::{auth, keychain, proxy, types, websocket};
 
 use parking_lot::Mutex;
 use std::collections::HashMap;

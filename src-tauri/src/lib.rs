@@ -43,6 +43,9 @@ mod state;
 // in-process. Small for now (ping + status); grows as daemon handlers
 // land.
 mod daemon_client;
+// Tauri-backed provider for k2so-core::companion::settings_bridge,
+// registered in setup() before the companion module reads credentials.
+mod companion_settings_provider;
 // `terminal` now lives in k2so-core. Re-exported so existing
 // `crate::terminal::*` paths keep working.
 pub use k2so_core::terminal;
@@ -111,6 +114,13 @@ pub fn run() {
     // (via ngrok) into the binary; it refuses to auto-pick and panics on
     // first TLS use unless a provider is explicitly installed.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    // Wire up k2so-core's companion settings bridge to this app's
+    // settings.json. Must happen before the companion tunnel ever
+    // starts or any WS client authenticates.
+    k2so_core::companion::settings_bridge::set_provider(Box::new(
+        companion_settings_provider::TauriCompanionSettingsProvider,
+    ));
 
     let db_handle = perf_timer!("startup_db_init", {
         match db::init_database() {

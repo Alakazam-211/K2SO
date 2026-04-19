@@ -37,8 +37,8 @@ pub fn load_password_hash() -> Option<String> {
     }
 
     // Fallback + migration for pre-0.32.12 installs.
-    let settings = crate::commands::settings::read_settings();
-    let legacy = settings.companion.password_hash.clone();
+    let snap = super::settings_bridge::read_settings();
+    let legacy = snap.password_hash.clone();
     if legacy.is_empty() {
         return None;
     }
@@ -46,10 +46,10 @@ pub fn load_password_hash() -> Option<String> {
     // Try to migrate: Keychain first, then clear from disk.
     let migrated = keychain::write_password_hash(&legacy).is_ok();
     if migrated {
-        crate::commands::settings::clear_companion_password_hash_after_migration();
-        log_debug!("[companion] Migrated password hash from settings.json to Keychain");
+        super::settings_bridge::clear_password_hash_after_migration();
+        crate::log_debug!("[companion] Migrated password hash from settings.json to Keychain");
     } else {
-        log_debug!("[companion] Keychain unavailable — continuing to read from settings.json");
+        crate::log_debug!("[companion] Keychain unavailable — continuing to read from settings.json");
     }
     Some(legacy)
 }
@@ -60,8 +60,8 @@ pub fn has_password() -> bool {
     if keychain::read_password_hash().is_some() {
         return true;
     }
-    let settings = crate::commands::settings::read_settings();
-    settings.companion.password_set || !settings.companion.password_hash.is_empty()
+    let snap = super::settings_bridge::read_settings();
+    snap.password_set || !snap.password_hash.is_empty()
 }
 
 /// Create a new authenticated session with 24hr expiry.

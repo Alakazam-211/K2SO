@@ -664,9 +664,10 @@ fn handle_auth(
         }
     };
 
-    // Read settings to validate the username.
-    let settings = crate::commands::settings::read_settings();
-    if username != settings.companion.username {
+    // Read settings (via the core-side settings bridge; the Tauri app
+    // registers the provider at startup) to validate the username.
+    let snap = super::settings_bridge::read_settings();
+    if username != snap.username {
         send_response(
             stream,
             401,

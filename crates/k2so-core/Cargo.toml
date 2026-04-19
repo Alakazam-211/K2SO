@@ -68,3 +68,11 @@ rustix = { version = "1", features = ["termios", "process"] }
 mio = { version = "1", features = ["os-poll", "os-ext"] }
 signal-hook = "0.3"
 signal-hook-mio = { version = "0.2", features = ["support-v1_0"] }
+
+# Companion WS + auth + HTTP proxy — pulled over from src-tauri along
+# with crates/k2so-core/src/companion/. argon2 + subtle cover the
+# companion password hash + constant-time equality.
+argon2 = "0.5"
+base64 = "0.22"
+subtle = "2.6"
+tungstenite = "0.24"

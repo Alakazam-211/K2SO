@@ -28,6 +28,7 @@ macro_rules! log_debug {
     }};
 }
 
+pub mod companion;
 pub mod db;
 pub mod editors;
 pub mod fs_abstract;
