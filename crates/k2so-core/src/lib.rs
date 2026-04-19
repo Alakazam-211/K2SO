@@ -29,11 +29,13 @@ macro_rules! log_debug {
 }
 
 pub mod db;
+pub mod editors;
 pub mod fs_abstract;
 pub mod fs_atomic;
 pub mod hook_config;
 pub mod llm;
 pub mod perf;
+pub mod project_config;
 pub mod push;
 pub mod terminal;
 pub mod wake;

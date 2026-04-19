@@ -23,11 +23,11 @@ mod companion;
 // `crate::db::shared()` etc. unchanged. Migrations are bundled into the
 // k2so-core binary via include_str! from crates/k2so-core/drizzle_sql/.
 pub use k2so_core::db;
-mod editors;
-// `fs_abstract` + `fs_atomic` now live in k2so-core (pure std; no Tauri dep).
-// Re-exported so existing `crate::fs_abstract::*` / `crate::fs_atomic::*`
-// call sites keep working.
-pub use k2so_core::{fs_abstract, fs_atomic};
+// `editors`, `fs_abstract`, `fs_atomic`, `project_config` now live in
+// k2so-core (pure std + serde; no Tauri dep). Re-exported so existing
+// `crate::editors::*` / `crate::fs_abstract::*` / etc. call sites keep
+// working unchanged.
+pub use k2so_core::{editors, fs_abstract, fs_atomic, project_config};
 mod git;
 // `llm` now lives in k2so-core. Downstream callers keep their
 // `crate::llm::*` paths working through this re-export.
@@ -37,7 +37,6 @@ mod menu;
 // `crate::perf_timer!` / `crate::perf_hist!` / `crate::perf::*` call sites
 // keep working unchanged. See crates/k2so-core/src/perf.rs.
 pub use k2so_core::{perf, perf_hist, perf_timer};
-mod project_config;
 mod state;
 // `terminal` now lives in k2so-core. Re-exported so existing
 // `crate::terminal::*` paths keep working.
