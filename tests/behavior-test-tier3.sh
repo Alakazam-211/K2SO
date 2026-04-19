@@ -42,6 +42,8 @@ cat "$PROJECT_ROOT/src-tauri/src/commands/k2so_agents.rs" \
     "$PROJECT_ROOT/crates/k2so-core/src/agents/wake.rs" \
     "$PROJECT_ROOT/crates/k2so-core/src/agents/session.rs" \
     "$PROJECT_ROOT/crates/k2so-core/src/agents/skill.rs" \
+    "$PROJECT_ROOT/crates/k2so-core/src/agents/skill_content.rs" \
+    "$PROJECT_ROOT/crates/k2so-core/src/agents/work_item.rs" \
     > "$HEARTBEAT_SRC" 2>/dev/null
 cp "$HEARTBEAT_SRC" "$AGENTS_SRC"
 
@@ -1397,14 +1399,16 @@ else
     fail "hamburger: k2so-agent still has --agent <template>" "K2SO Agent is a planner, not a manager — delegation to templates is manager-tier"
 fi
 
-# K2SO Agent skill: planning guidance (PRDs, milestones) is present
-if awk '/fn generate_k2so_agent_skill_content/,/^fn generate_template_skill_content/' "$AGENTS_SRC" | grep -q -- '--type prd'; then
+# K2SO Agent skill: planning guidance (PRDs, milestones) is present.
+# Uses `^(pub )?fn` so the check works both pre- and post-skill_content
+# migration (functions are now `pub fn` in k2so_core::agents::skill_content).
+if awk '/^(pub )?fn generate_k2so_agent_skill_content/,/^(pub )?fn generate_template_skill_content/' "$AGENTS_SRC" | grep -q -- '--type prd'; then
     pass "hamburger: k2so-agent skill covers PRD creation"
 else
     fail "hamburger: k2so-agent PRD guidance missing" "Expected --type prd in generate_k2so_agent_skill_content"
 fi
 
-if awk '/fn generate_k2so_agent_skill_content/,/^fn generate_template_skill_content/' "$AGENTS_SRC" | grep -q -- '--type milestone'; then
+if awk '/^(pub )?fn generate_k2so_agent_skill_content/,/^(pub )?fn generate_template_skill_content/' "$AGENTS_SRC" | grep -q -- '--type milestone'; then
     pass "hamburger: k2so-agent skill covers milestone creation"
 else
     fail "hamburger: k2so-agent milestone guidance missing" "Expected --type milestone in generate_k2so_agent_skill_content"

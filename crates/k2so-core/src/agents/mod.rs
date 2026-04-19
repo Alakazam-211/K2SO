@@ -25,7 +25,9 @@ pub mod heartbeat;
 pub mod scheduler;
 pub mod session;
 pub mod skill;
+pub mod skill_content;
 pub mod wake;
+pub mod work_item;
 
 /// Resolve a project's primary-key id from its filesystem path. `None`
 /// when the project hasn't been registered via `projects` yet.
