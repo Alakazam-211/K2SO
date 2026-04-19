@@ -80,6 +80,17 @@ async fn main() {
         std::process::exit(2);
     }
 
+    // Open (or create) ~/.k2so/k2so.db and populate k2so_core's process-
+    // wide shared connection. Every migrated hook handler (e.g.
+    // handle_hook_complete) reads via db::shared(), so this has to run
+    // before any route accepts traffic. Both the Tauri app and the
+    // daemon can hold their own handles to the same file — SQLite's WAL
+    // mode coordinates multi-writer access.
+    if let Err(e) = k2so_core::db::init_database() {
+        log_debug!("[daemon] FATAL: db::init_database: {e}");
+        std::process::exit(2);
+    }
+
     let listener = match TcpListener::bind("127.0.0.1:0").await {
         Ok(l) => l,
         Err(e) => {
@@ -255,6 +266,32 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
                 state.port,
             );
             send_response(&mut stream, "200 OK", "application/json", &body).await;
+        }
+        "/hook/complete" => {
+            // Agent-lifecycle hook endpoint. URL-encoded query params
+            // carry paneId / tabId / eventType / token. Business logic
+            // (ring buffer, emit, AgentSession.status sync) lives in
+            // k2so_core so src-tauri's existing server hits the same
+            // code path.
+            let _ = stream.read(&mut buf).await;
+            let path_and_query = match query.is_empty() {
+                true => path.clone(),
+                false => format!("{}?{}", path, query),
+            };
+            let params = k2so_core::agent_hooks::parse_query_params(&path_and_query);
+            let req_token = params.get("token").cloned().unwrap_or_default();
+            if req_token != *state.token {
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"Invalid or missing auth token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body = k2so_core::agent_hooks::handle_hook_complete(&params);
+            send_response(&mut stream, "200 OK", "application/json", body).await;
         }
         "/events" => {
             // Token check BEFORE the upgrade so unauthenticated clients

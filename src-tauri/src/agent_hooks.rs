@@ -21,9 +21,13 @@ static TRIAGE_IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 // Ring buffer + canonical event mapping + URL query parsing now live
 // in k2so-core so the daemon can share them. Everything is imported
 // unqualified so the in-file call sites don't change.
+// Route handlers + helpers. The test module still uses map_event_type,
+// record_recent_event, AgentLifecycleEvent, and urldecode, so they're
+// imported behind a cfg-test gate to keep release builds warning-clean.
+use k2so_core::agent_hooks::{get_recent_events, parse_query_params, RecentEvent};
+#[cfg(test)]
 use k2so_core::agent_hooks::{
-    get_recent_events, map_event_type, parse_query_params, record_recent_event,
-    urldecode, AgentLifecycleEvent, RecentEvent,
+    map_event_type, record_recent_event, urldecode, AgentLifecycleEvent,
 };
 const RECENT_EVENTS_CAP: usize = 50;
 
@@ -510,53 +514,11 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                     let _ = stream.write_all(resp.as_bytes());
                     continue;
                 }
-                let pane_id = params.get("paneId").cloned().unwrap_or_default();
-                let tab_id = params.get("tabId").cloned().unwrap_or_default();
-                let raw_event = params.get("eventType").cloned().unwrap_or_default();
 
-                let canonical_opt = map_event_type(&raw_event);
-                record_recent_event(&raw_event, canonical_opt, &pane_id, &tab_id);
-
-                if let Some(canonical) = canonical_opt {
-                    let event = AgentLifecycleEvent {
-                        pane_id: pane_id.clone(),
-                        tab_id: tab_id.clone(),
-                        event_type: canonical.to_string(),
-                    };
-
-                    log_debug!("[agent-hooks] {} → {} (pane={}, tab={})", raw_event, canonical, pane_id, tab_id);
-                    k2so_core::agent_hooks::emit(
-                        k2so_core::agent_hooks::HookEvent::AgentLifecycle,
-                        serde_json::to_value(&event).unwrap_or(serde_json::Value::Null),
-                    );
-
-                    // Sync AgentSession.status so the scheduler's
-                    // is_agent_locked check reflects reality. Without
-                    // this, a single wake leaves status='running'
-                    // forever and every subsequent heartbeat silently
-                    // skips the agent. Resolved via terminal_id lookup
-                    // — pane_id is the K2SO_PANE_ID env var we set at
-                    // PTY creation.
-                    let new_status: Option<&str> = match canonical {
-                        "start" => Some("running"),
-                        "stop" => Some("sleeping"),
-                        "permission" => Some("permission"),
-                        _ => None,
-                    };
-                    if let Some(new_status) = new_status {
-                        let db = crate::db::shared();
-                        let conn = db.lock();
-                        if let Ok(Some(s)) = crate::db::schema::AgentSession::get_by_terminal_id(&conn, &pane_id) {
-                            if s.status != new_status {
-                                let _ = crate::db::schema::AgentSession::update_status(
-                                    &conn, &s.project_id, &s.agent_name, new_status,
-                                );
-                            }
-                        }
-                    }
-                }
-
-                let body = r#"{"success":true}"#;
+                // Delegate the actual lifecycle bookkeeping (ring buffer,
+                // AgentLifecycleEvent emit, AgentSession.status sync) to
+                // k2so_core so the daemon can call the identical path.
+                let body = k2so_core::agent_hooks::handle_hook_complete(&params);
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
                     body.len(),
