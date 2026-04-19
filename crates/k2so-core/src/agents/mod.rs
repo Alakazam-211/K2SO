@@ -22,7 +22,9 @@ use std::fs;
 use std::path::PathBuf;
 
 pub mod build_launch;
+pub mod commands;
 pub mod delegate;
+pub mod events;
 pub mod heartbeat;
 pub mod scheduler;
 pub mod session;

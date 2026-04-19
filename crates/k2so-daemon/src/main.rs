@@ -26,6 +26,7 @@
 //! binary, plist is loadable, port file discoverable, token-auth path
 //! exercised) without yet taking responsibility for agent state.
 
+mod cli;
 mod events;
 
 use std::fs;
@@ -315,129 +316,20 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             let body = k2so_core::agent_hooks::handle_hook_complete(&params);
             send_response(&mut stream, "200 OK", "application/json", body).await;
         }
-        // Heartbeat CRUD + fire-audit — fires while the Tauri app is
-        // quit, so the daemon has to own these routes for the
-        // persistent-agents feature to mean anything.
-        // Triage: decide which agents to wake AND spawn PTYs for them.
-        // The workhorse route for the persistent-agents feature.
-        // launchd's com.k2so.agent-heartbeat plist fires this via the
-        // CLI bridge; every step runs entirely inside the daemon so a
-        // lid-closed laptop with the Tauri app quit still fires agents.
-        "/cli/agents/triage" => {
+        // Unified /cli/* dispatch. Auth + param validation +
+        // per-route handler all live in `cli::dispatch`; main.rs
+        // just translates the CliResponse into bytes.
+        p if p.starts_with("/cli/") => {
             let _ = stream.read(&mut buf).await;
             let params = parse_params(&path, &query);
             let req_token = params.get("token").cloned().unwrap_or_default();
             if req_token != *state.token {
-                send_response(
-                    &mut stream,
-                    "403 Forbidden",
-                    "application/json",
-                    r#"{"error":"Invalid or missing auth token"}"#,
-                )
-                .await;
+                let r = cli::CliResponse::forbidden();
+                send_response(&mut stream, r.status, r.content_type, &r.body).await;
                 return;
             }
-            let project_path = match project_param(&params) {
-                Some(p) => p,
-                None => {
-                    send_response(
-                        &mut stream,
-                        "400 Bad Request",
-                        "application/json",
-                        r#"{"error":"Missing project (or project_path) parameter"}"#,
-                    )
-                    .await;
-                    return;
-                }
-            };
-            let body = handle_agents_triage(&project_path);
-            send_response(&mut stream, "200 OK", "application/json", &body).await;
-        }
-        // Scheduler tick: decides which agents are ready to wake.
-        // Returns the ordered list of agent names. Pure decision —
-        // does NOT spawn PTYs. Used for diagnostics + by /cli/agents/
-        // triage which does spawn.
-        "/cli/scheduler-tick" => {
-            let _ = stream.read(&mut buf).await;
-            let params = parse_params(&path, &query);
-            let req_token = params.get("token").cloned().unwrap_or_default();
-            if req_token != *state.token {
-                send_response(
-                    &mut stream,
-                    "403 Forbidden",
-                    "application/json",
-                    r#"{"error":"Invalid or missing auth token"}"#,
-                )
-                .await;
-                return;
-            }
-            let project_path = match project_param(&params) {
-                Some(p) => p,
-                None => {
-                    send_response(
-                        &mut stream,
-                        "400 Bad Request",
-                        "application/json",
-                        r#"{"error":"Missing project (or project_path) parameter"}"#,
-                    )
-                    .await;
-                    return;
-                }
-            };
-            match k2so_core::agents::scheduler::k2so_agents_scheduler_tick(project_path) {
-                Ok(agents) => {
-                    let body = serde_json::to_string(&agents).unwrap_or_else(|_| "[]".to_string());
-                    send_response(&mut stream, "200 OK", "application/json", &body).await
-                }
-                Err(e) => {
-                    let body = serde_json::json!({"error": e}).to_string();
-                    send_response(&mut stream, "400 Bad Request", "application/json", &body)
-                        .await
-                }
-            }
-        }
-        p if p.starts_with("/cli/heartbeat/") || p == "/cli/heartbeat-log" => {
-            let _ = stream.read(&mut buf).await;
-            let params = parse_params(&path, &query);
-            let req_token = params.get("token").cloned().unwrap_or_default();
-            if req_token != *state.token {
-                send_response(
-                    &mut stream,
-                    "403 Forbidden",
-                    "application/json",
-                    r#"{"error":"Invalid or missing auth token"}"#,
-                )
-                .await;
-                return;
-            }
-            let project_path = match project_param(&params) {
-                Some(p) => p,
-                None => {
-                    send_response(
-                        &mut stream,
-                        "400 Bad Request",
-                        "application/json",
-                        r#"{"error":"Missing project (or project_path) parameter"}"#,
-                    )
-                    .await;
-                    return;
-                }
-            };
-            let result = if p == "/cli/heartbeat-log" {
-                handle_cli_heartbeat_log(&project_path, &params)
-            } else {
-                handle_cli_heartbeat(p, &project_path, &params)
-            };
-            match result {
-                Ok(body) => {
-                    send_response(&mut stream, "200 OK", "application/json", &body).await
-                }
-                Err(msg) => {
-                    let body = serde_json::json!({"error": msg}).to_string();
-                    send_response(&mut stream, "400 Bad Request", "application/json", &body)
-                        .await
-                }
-            }
+            let resp = cli::dispatch(p, &params);
+            send_response(&mut stream, resp.status, resp.content_type, &resp.body).await;
         }
         "/events" => {
             // Token check BEFORE the upgrade so unauthenticated clients

@@ -32,22 +32,13 @@ use k2so_core::agent_hooks::{
 const RECENT_EVENTS_CAP: usize = 50;
 
 /// Event queue for channel-based agents. Key: "project_path:agent_name"
-static EVENT_QUEUES: OnceLock<Mutex<HashMap<String, VecDeque<ChannelEvent>>>> = OnceLock::new();
+// `EVENT_QUEUES` moved to k2so_core::agents::events.
 
-const MAX_EVENTS_PER_QUEUE: usize = 100;
+// `MAX_EVENTS_PER_QUEUE` moved to k2so_core::agents::events.
 
-#[derive(Clone, serde::Serialize)]
-struct ChannelEvent {
-    #[serde(rename = "type")]
-    event_type: String,
-    message: String,
-    priority: String,
-    timestamp: String,
-}
+// `ChannelEvent` struct moved to k2so_core::agents::events.
 
-fn event_queues() -> &'static Mutex<HashMap<String, VecDeque<ChannelEvent>>> {
-    EVENT_QUEUES.get_or_init(|| Mutex::new(HashMap::new()))
-}
+// `event_queues()` accessor moved to k2so_core::agents::events.
 
 /// Spawn an autonomous agent wake PTY directly from Rust.
 ///
@@ -321,30 +312,9 @@ pub fn k2so_heartbeat_force_fire(
     Ok(terminal_id)
 }
 
-/// Push an event into an agent's channel event queue.
-pub fn push_agent_event(project_path: &str, agent_name: &str, event_type: &str, message: &str, priority: &str) {
-    let key = format!("{}:{}", project_path, agent_name);
-    let event = ChannelEvent {
-        event_type: event_type.to_string(),
-        message: message.to_string(),
-        priority: priority.to_string(),
-        timestamp: chrono::Utc::now().to_rfc3339(),
-    };
-    let mut queues = event_queues().lock();
-    let queue = queues.entry(key).or_insert_with(VecDeque::new);
-    queue.push_back(event);
-    // Cap queue size
-    while queue.len() > MAX_EVENTS_PER_QUEUE {
-        queue.pop_front();
-    }
-}
+// `push_agent_event` moved to k2so_core::agents::events.
 
-/// Drain all pending events for an agent (returns them and clears the queue).
-fn drain_agent_events(project_path: &str, agent_name: &str) -> Vec<ChannelEvent> {
-    let key = format!("{}:{}", project_path, agent_name);
-    let mut queues = event_queues().lock();
-    queues.remove(&key).map(|q| q.into_iter().collect()).unwrap_or_default()
-}
+// `drain_agent_events` moved to k2so_core::agents::events.
 
 fn triage_lock() -> &'static Mutex<HashSet<String>> {
     TRIAGE_IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
@@ -940,7 +910,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                     "/cli/events" => {
                         // Drain pending events for a channel-based agent
                         let agent = params.get("agent").cloned().unwrap_or("__lead__".to_string());
-                        let events = drain_agent_events(&project_path, &agent);
+                        let events = k2so_core::agents::events::drain_agent_events(&project_path, &agent);
                         Ok(serde_json::to_string(&events).unwrap_or("[]".to_string()))
                     }
                     "/cli/agent/reply" => {

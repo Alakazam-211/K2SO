@@ -31,18 +31,7 @@ pub use k2so_core::agents::scheduler::{
 
 // ── Types ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct K2soAgentInfo {
-    pub name: String,
-    pub role: String,
-    pub inbox_count: usize,
-    pub active_count: usize,
-    pub done_count: usize,
-    pub is_manager: bool,
-    /// Agent type: "k2so", "custom", "manager", "agent-template"
-    pub agent_type: String,
-}
+// `K2soAgentInfo` struct moved to k2so_core::agents::commands (re-exported).
 
 // `WorkItem` struct moved to k2so_core::agents::work_item. Re-exported
 // here so external callers (agent_hooks.rs, commands/review.rs, etc.)
@@ -96,6 +85,135 @@ pub use k2so_core::agents::skill_writer::{
     K2SO_SECTION_END,
 };
 
+// Agent CRUD + work queue + workspace inbox + channel events moved
+// wholesale to k2so_core::agents::{commands, events} so the daemon
+// can serve the same /cli/* routes headlessly.
+pub use k2so_core::agents::commands::{
+    cleanup_agent_backups, ensure_agent_wakeup, update_agent_md_field, K2soAgentInfo,
+};
+pub use k2so_core::agents::events::{
+    drain_agent_events, push_agent_event, ChannelEvent, MAX_EVENTS_PER_QUEUE,
+};
+
+#[tauri::command]
+pub fn k2so_agents_list(project_path: String) -> Result<Vec<K2soAgentInfo>, String> {
+    k2so_core::agents::commands::list(project_path)
+}
+
+#[tauri::command]
+pub fn k2so_agents_create(
+    project_path: String,
+    name: String,
+    role: String,
+    prompt: Option<String>,
+    agent_type: Option<String>,
+) -> Result<K2soAgentInfo, String> {
+    k2so_core::agents::commands::create(project_path, name, role, prompt, agent_type)
+}
+
+#[tauri::command]
+pub fn k2so_agents_delete(project_path: String, name: String) -> Result<(), String> {
+    k2so_core::agents::commands::delete(project_path, name)
+}
+
+pub fn k2so_agents_delete_inner(
+    project_path: &str,
+    name: &str,
+    force: bool,
+) -> Result<(), String> {
+    k2so_core::agents::commands::delete_inner(project_path, name, force)
+}
+
+#[tauri::command]
+pub fn k2so_agents_update_field(
+    project_path: String,
+    name: String,
+    field: String,
+    value: String,
+) -> Result<String, String> {
+    k2so_core::agents::commands::update_field(project_path, name, field, value)
+}
+
+#[tauri::command]
+pub fn k2so_agents_get_profile(
+    project_path: String,
+    agent_name: String,
+) -> Result<String, String> {
+    k2so_core::agents::commands::get_profile(project_path, agent_name)
+}
+
+#[tauri::command]
+pub fn k2so_agents_update_profile(
+    project_path: String,
+    agent_name: String,
+    content: String,
+) -> Result<(), String> {
+    k2so_core::agents::commands::update_profile(project_path, agent_name, content)
+}
+
+#[tauri::command]
+pub fn k2so_agents_work_list(
+    project_path: String,
+    agent_name: String,
+    folder: Option<String>,
+) -> Result<Vec<WorkItem>, String> {
+    k2so_core::agents::commands::work_list(project_path, agent_name, folder)
+}
+
+#[tauri::command]
+pub fn k2so_agents_work_create(
+    project_path: String,
+    agent_name: Option<String>,
+    title: String,
+    body: String,
+    priority: Option<String>,
+    item_type: Option<String>,
+    source: Option<String>,
+) -> Result<WorkItem, String> {
+    k2so_core::agents::commands::work_create(
+        project_path, agent_name, title, body, priority, item_type, source,
+    )
+}
+
+#[tauri::command]
+pub fn k2so_agents_work_move(
+    project_path: String,
+    agent_name: String,
+    filename: String,
+    from_folder: String,
+    to_folder: String,
+) -> Result<(), String> {
+    k2so_core::agents::commands::work_move(
+        project_path,
+        agent_name,
+        filename,
+        from_folder,
+        to_folder,
+    )
+}
+
+#[tauri::command]
+pub fn k2so_agents_workspace_inbox_list(
+    project_path: String,
+) -> Result<Vec<WorkItem>, String> {
+    k2so_core::agents::commands::workspace_inbox_list(project_path)
+}
+
+#[tauri::command]
+pub fn k2so_agents_workspace_inbox_create(
+    workspace_path: String,
+    title: String,
+    body: String,
+    priority: Option<String>,
+    item_type: Option<String>,
+    assigned_by: Option<String>,
+    source: Option<String>,
+) -> Result<WorkItem, String> {
+    k2so_core::agents::commands::workspace_inbox_create(
+        workspace_path, title, body, priority, item_type, assigned_by, source,
+    )
+}
+
 // ── Path helpers ────────────────────────────────────────────────────────
 //
 // `agents_dir` + `agent_dir` now live in k2so_core::agents (re-exported
@@ -130,34 +248,7 @@ pub use k2so_core::agents::wake::{
     WAKEUP_TEMPLATE_WORKSPACE,
 };
 
-/// Create `wakeup.md` from the matching template if it doesn't exist.
-/// No-op if the file already exists (never overwrite user edits) or if
-/// the agent type doesn't use wake-up. Silently returns on any error —
-/// missing wakeup.md is not fatal.
-fn ensure_agent_wakeup(project_path: &str, agent_name: &str, agent_type: &str) {
-    let Some(template) = wakeup_template_for(agent_type) else { return };
-    let path = agent_wakeup_path(project_path, agent_name);
-    if path.exists() {
-        return;
-    }
-    // Multi-heartbeat lives at heartbeats/<name>/wakeup.md — if any
-    // heartbeat folder already exists for this agent, we're past the
-    // legacy single-slot world and the agent-root wakeup.md is no
-    // longer the source of truth. Skip scaffolding to avoid tricking
-    // the repair pass into clobbering real content.
-    let hb_default = agent_dir(project_path, agent_name)
-        .join("heartbeats")
-        .join("default")
-        .join("WAKEUP.md");
-    if hb_default.exists() {
-        return;
-    }
-    log_if_err(
-        "ensure_agent_wakeup",
-        &path,
-        atomic_write_str(&path, template),
-    );
-}
+// `ensure_agent_wakeup` moved to k2so_core::agents::commands (re-exported).
 
 // `agent_type_for` moved to k2so_core::agents (re-exported above).
 
@@ -878,393 +969,21 @@ pub use k2so_core::agents::skill::{
 
 // ── Tauri Commands ──────────────────────────────────────────────────────
 
-/// List all K2SO agents in a project.
-#[tauri::command]
-pub fn k2so_agents_list(project_path: String) -> Result<Vec<K2soAgentInfo>, String> {
-    let dir = agents_dir(&project_path);
-    if !dir.exists() {
-        return Ok(vec![]);
-    }
+// `k2so_agents_list` moved to k2so_core::agents::commands (re-exported).
 
-    let mut agents = Vec::new();
-    let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
+// `k2so_agents_create` moved to k2so_core::agents::commands (re-exported).
 
-    for entry in entries.flatten() {
-        if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let agent_md = entry.path().join("AGENT.md");
+// `k2so_agents_delete` moved to k2so_core::agents::commands (re-exported).
 
-        let (role, is_manager, agent_type) = if agent_md.exists() {
-            let content = fs::read_to_string(&agent_md).unwrap_or_default();
-            let fm = parse_frontmatter(&content);
-            let role = fm.get("role").cloned().unwrap_or_default();
-            // Support old ("pod_leader", "coordinator") and new ("manager") frontmatter keys
-            let is_mgr = fm.get("pod_leader").map(|v| v == "true").unwrap_or(false)
-                || fm.get("coordinator").map(|v| v == "true").unwrap_or(false)
-                || fm.get("manager").map(|v| v == "true").unwrap_or(false);
-            let agent_type = fm.get("type").cloned().map(|t| {
-                // Migrate old type values to new ones
-                match t.as_str() {
-                    "pod-leader" | "coordinator" => "manager".to_string(),
-                    "pod-member" => "agent-template".to_string(),
-                    other => other.to_string(),
-                }
-            }).unwrap_or_else(|| {
-                if is_mgr { "manager".to_string() } else { "agent-template".to_string() }
-            });
-            (role, is_mgr, agent_type)
-        } else {
-            (String::new(), false, "agent-template".to_string())
-        };
+// `k2so_agents_delete_inner` moved to k2so_core::agents::commands (re-exported).
 
-        let inbox_count = count_md_files(&agent_work_dir(&project_path, &name, "inbox"));
-        let active_count = count_md_files(&agent_work_dir(&project_path, &name, "active"));
-        let done_count = count_md_files(&agent_work_dir(&project_path, &name, "done"));
+// `update_agent_md_field` moved to k2so_core::agents::commands (re-exported).
 
-        agents.push(K2soAgentInfo {
-            name,
-            role,
-            inbox_count,
-            active_count,
-            done_count,
-            is_manager,
-            agent_type,
-        });
-    }
+// `k2so_agents_update_field` moved to k2so_core::agents::commands (re-exported).
 
-    agents.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(agents)
-}
+// `k2so_agents_work_list` moved to k2so_core::agents::commands (re-exported).
 
-/// Create a new K2SO agent with directory structure.
-/// `agent_type` can be: "k2so", "custom", "manager", "agent-template" (defaults to "agent-template").
-#[tauri::command]
-pub fn k2so_agents_create(
-    project_path: String,
-    name: String,
-    role: String,
-    prompt: Option<String>,
-    agent_type: Option<String>,
-) -> Result<K2soAgentInfo, String> {
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-        return Err("Agent name must be alphanumeric (hyphens and underscores allowed)".to_string());
-    }
-
-    let dir = agent_dir(&project_path, &name);
-    if dir.exists() {
-        return Err(format!("Agent '{}' already exists", name));
-    }
-
-    let agent_type = agent_type.unwrap_or_else(|| "agent-template".to_string());
-    let is_manager = agent_type == "manager" || agent_type == "coordinator";
-
-    fs::create_dir_all(agent_work_dir(&project_path, &name, "inbox"))
-        .map_err(|e| format!("Failed to create inbox: {}", e))?;
-    fs::create_dir_all(agent_work_dir(&project_path, &name, "active"))
-        .map_err(|e| format!("Failed to create active: {}", e))?;
-    fs::create_dir_all(agent_work_dir(&project_path, &name, "done"))
-        .map_err(|e| format!("Failed to create done: {}", e))?;
-    let _ = fs::create_dir_all(workspace_inbox_dir(&project_path));
-
-    let agent_md = dir.join("AGENT.md");
-    let mut frontmatter = format!("name: {}\nrole: {}\ntype: {}", name, role, agent_type);
-    if is_manager {
-        frontmatter.push_str("\nmanager: true");
-    }
-
-    // Build type-appropriate default body if no custom prompt provided
-    let body = if let Some(ref p) = prompt {
-        if !p.is_empty() { p.clone() } else { generate_default_agent_body(&agent_type, &name, &role, &project_path) }
-    } else {
-        generate_default_agent_body(&agent_type, &name, &role, &project_path)
-    };
-
-    let content = format!("---\n{}\n---\n\n{}\n", frontmatter, body);
-    atomic_write(&agent_md, &content)?;
-
-    // Generate SKILL.md for the new agent
-    write_agent_skill_file(&project_path, &name, &agent_type);
-
-    // Scaffold wakeup.md from the matching template (no-op for
-    // agent-template type — they're dispatched with explicit orders).
-    ensure_agent_wakeup(&project_path, &name, &agent_type);
-
-    Ok(K2soAgentInfo {
-        name,
-        role,
-        inbox_count: 0,
-        active_count: 0,
-        done_count: 0,
-        is_manager,
-        agent_type,
-    })
-}
-
-/// Delete a K2SO agent and its directory.
-#[tauri::command]
-pub fn k2so_agents_delete(project_path: String, name: String) -> Result<(), String> {
-    k2so_agents_delete_inner(&project_path, &name, false)
-}
-
-/// Delete an agent with optional force flag.
-/// - Refuses to delete manager/coordinator (unless force)
-/// - Refuses to delete if agent has active work (unless force)
-/// - Removes .k2so/agents/<name>/ directory
-pub fn k2so_agents_delete_inner(project_path: &str, name: &str, force: bool) -> Result<(), String> {
-    let dir = agent_dir(project_path, name);
-    if !dir.exists() {
-        return Err(format!("Agent '{}' does not exist", name));
-    }
-
-    // Read agent type to check if it's a manager/coordinator
-    let agent_md = dir.join("AGENT.md");
-    if agent_md.exists() {
-        let content = fs::read_to_string(&agent_md).unwrap_or_default();
-        let fm = parse_frontmatter(&content);
-        if fm.get("type").map_or(false, |t| t == "manager" || t == "coordinator" || t == "pod-leader") && !force {
-            return Err("Cannot delete manager agent. Use --force to override.".to_string());
-        }
-    }
-
-    // Check for active work items
-    if !force {
-        let active_dir = agent_work_dir(project_path, name, "active");
-        if active_dir.exists() {
-            let active_count = fs::read_dir(&active_dir)
-                .map_err(|e| format!("Cannot check active work for '{}': {}", name, e))?
-                .flatten()
-                .count();
-            if active_count > 0 {
-                return Err(format!(
-                    "Agent '{}' has {} active work item(s). Use --force to delete anyway.",
-                    name, active_count
-                ));
-            }
-        }
-    }
-
-    fs::remove_dir_all(&dir).map_err(|e| format!("Failed to delete agent: {}", e))?;
-    Ok(())
-}
-
-/// Update a specific field in an agent's frontmatter (or a markdown section in the body).
-/// `field` can be a frontmatter key (e.g. "role") or a section name (e.g. "Work Sources").
-/// For frontmatter fields, `value` replaces the existing value.
-/// For body sections (## heading), `value` replaces everything from ## heading to the next ## heading.
-///
-/// This is the pure, I/O-free core of `k2so_agents_update_field` — so
-/// every parsing edge case can be unit-tested without scaffolding a
-/// filesystem. Returns the rewritten markdown on success. The command
-/// wrapper handles disk I/O (read → this → backup + atomic_write).
-pub fn update_agent_md_field(content: &str, field: &str, value: &str) -> Result<String, String> {
-    if !content.starts_with("---") {
-        return Err("agent.md missing frontmatter".to_string());
-    }
-    let end_idx = content[3..]
-        .find("---")
-        .ok_or_else(|| "Invalid frontmatter in agent.md".to_string())?;
-    let frontmatter = &content[3..3 + end_idx];
-    let body = &content[3 + end_idx + 3..];
-
-    // Check if it's a frontmatter field
-    let fm_keys: Vec<&str> = frontmatter
-        .lines()
-        .filter_map(|l| l.split_once(':').map(|(k, _)| k.trim()))
-        .collect();
-
-    if fm_keys.contains(&field) {
-        // Update frontmatter field
-        let updated_fm: String = frontmatter
-            .lines()
-            .map(|line| {
-                if let Some((key, _)) = line.split_once(':') {
-                    if key.trim() == field {
-                        return format!("{}: {}", field, value);
-                    }
-                }
-                line.to_string()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Ok(format!("---\n{}\n---{}", updated_fm.trim(), body));
-    }
-
-    // Try to find and replace a markdown section (## heading)
-    let section_header = format!("## {}", field);
-    if let Some(start) = body.find(&section_header) {
-        let after_header = start + section_header.len();
-        // Find the next ## heading or end of body
-        let end = body[after_header..]
-            .find("\n## ")
-            .map(|pos| after_header + pos)
-            .unwrap_or(body.len());
-        let mut new_body = String::new();
-        new_body.push_str(&body[..start]);
-        new_body.push_str(&section_header);
-        new_body.push_str("\n\n");
-        new_body.push_str(value);
-        new_body.push_str("\n\n");
-        new_body.push_str(body[end..].trim_start());
-        Ok(format!("---\n{}\n---{}", frontmatter.trim(), new_body))
-    } else {
-        // Section doesn't exist — append it
-        let mut new_body = body.to_string();
-        if !new_body.ends_with('\n') {
-            new_body.push('\n');
-        }
-        new_body.push_str(&format!("\n## {}\n\n{}\n", field, value));
-        Ok(format!("---\n{}\n---{}", frontmatter.trim(), new_body))
-    }
-}
-
-#[tauri::command]
-pub fn k2so_agents_update_field(
-    project_path: String,
-    name: String,
-    field: String,
-    value: String,
-) -> Result<String, String> {
-    let dir = agent_dir(&project_path, &name);
-    if !dir.exists() {
-        return Err(format!("Agent '{}' does not exist", name));
-    }
-
-    let md_path = dir.join("AGENT.md");
-    let content = fs::read_to_string(&md_path)
-        .map_err(|e| format!("Failed to read agent.md: {}", e))?;
-
-    let updated = update_agent_md_field(&content, &field, &value)?;
-
-    // Backup before writing
-    let backup_dir = dir.join("agent-backups");
-    let _ = fs::create_dir_all(&backup_dir);
-    let backup_name = format!("agent-{}.md", simple_date().replace(' ', "_").replace(':', "-"));
-    let _ = fs::copy(&md_path, backup_dir.join(&backup_name));
-    cleanup_agent_backups(&backup_dir, 20);
-
-    atomic_write(&md_path, &updated)?;
-
-    Ok(updated)
-}
-
-/// Get work items for a K2SO agent.
-#[tauri::command]
-pub fn k2so_agents_work_list(
-    project_path: String,
-    agent_name: String,
-    folder: Option<String>,
-) -> Result<Vec<WorkItem>, String> {
-    let folders = match folder.as_deref() {
-        Some(f) => vec![f.to_string()],
-        None => vec!["inbox".to_string(), "active".to_string(), "done".to_string()],
-    };
-
-    let mut items = Vec::new();
-    for f in &folders {
-        let dir = agent_work_dir(&project_path, &agent_name, f);
-        if !dir.exists() {
-            continue;
-        }
-        for entry in fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
-            let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "md") {
-                if let Some(item) = read_work_item(&path, f) {
-                    items.push(item);
-                }
-            }
-        }
-    }
-
-    Ok(items)
-}
-
-/// Create a work item in a K2SO agent's inbox (or unassigned).
-#[tauri::command]
-pub fn k2so_agents_work_create(
-    project_path: String,
-    agent_name: Option<String>,
-    title: String,
-    body: String,
-    priority: Option<String>,
-    item_type: Option<String>,
-    source: Option<String>,
-) -> Result<WorkItem, String> {
-    let target_dir = match &agent_name {
-        Some(name) => {
-            let dir = agent_work_dir(&project_path, name, "inbox");
-            if !dir.exists() {
-                return Err(format!("Agent '{}' does not exist", name));
-            }
-            dir
-        }
-        None => {
-            let dir = workspace_inbox_dir(&project_path);
-            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            dir
-        }
-    };
-
-    let priority = priority.unwrap_or_else(|| "normal".to_string());
-    let item_type = item_type.unwrap_or_else(|| "task".to_string());
-    let source = source.unwrap_or_else(|| "manual".to_string());
-
-    let slug: String = title
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<&str>>()
-        .join("-");
-    let slug = &slug[..slug.len().min(60)];
-    let filename = format!("{}.md", slug);
-
-    let now = simple_date();
-    let content = format!(
-        "---\ntitle: {}\npriority: {}\nassigned_by: user\ncreated: {}\ntype: {}\nsource: {}\n---\n\n{}\n",
-        title, priority, now, item_type, source, body
-    );
-
-    let path = target_dir.join(&filename);
-    atomic_write(&path, &content)?;
-
-    let body_preview = { let trimmed = body.trim(); let preview: String = trimmed.chars().take(120).collect(); if trimmed.chars().count() > 120 { format!("{}...", preview.trim()) } else { preview } };
-
-    // Push channel event for persistent agents
-    if let Some(ref agent) = agent_name {
-        crate::agent_hooks::push_agent_event(
-            &project_path,
-            agent,
-            "work-item",
-            &format!("New work item in your inbox: \"{}\" (priority: {})", title, priority),
-            &priority,
-        );
-    } else {
-        // Workspace inbox — notify the lead agent
-        crate::agent_hooks::push_agent_event(
-            &project_path,
-            "__lead__",
-            "work-item",
-            &format!("New item in workspace inbox: \"{}\" (priority: {})", title, priority),
-            &priority,
-        );
-    }
-
-    Ok(WorkItem {
-        filename,
-        title,
-        priority,
-        assigned_by: "user".to_string(),
-        created: now,
-        item_type,
-        folder: if agent_name.is_some() { "inbox".to_string() } else { "workspace-inbox".to_string() },
-        body_preview,
-        source,
-    })
-}
+// `k2so_agents_work_create` moved to k2so_core::agents::commands (re-exported).
 
 /// Delegate a work item to an agent — creates a worktree,
 /// registers it, moves the item to active, writes CLAUDE.md.
@@ -1278,129 +997,17 @@ pub fn k2so_agents_delegate(
     k2so_core::agents::delegate::k2so_agents_delegate(project_path, target_agent, source_file)
 }
 
-/// Move a work item between folders (inbox → active, active → done, etc.)
-#[tauri::command]
-pub fn k2so_agents_work_move(
-    project_path: String,
-    agent_name: String,
-    filename: String,
-    from_folder: String,
-    to_folder: String,
-) -> Result<(), String> {
-    let source = agent_work_dir(&project_path, &agent_name, &from_folder).join(&filename);
-    let target_dir = agent_work_dir(&project_path, &agent_name, &to_folder);
-    let target = target_dir.join(&filename);
+// `k2so_agents_work_move` moved to k2so_core::agents::commands (re-exported).
 
-    if !source.exists() {
-        return Err(format!("Work item not found: {}/{}", from_folder, filename));
-    }
-    if !target_dir.exists() {
-        fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
-    }
+// `k2so_agents_get_profile` moved to k2so_core::agents::commands (re-exported).
 
-    fs::rename(&source, &target).map_err(|e| format!("Failed to move work item: {}", e))?;
-    Ok(())
-}
-
-/// Read an agent's agent.md content.
-#[tauri::command]
-pub fn k2so_agents_get_profile(project_path: String, agent_name: String) -> Result<String, String> {
-    let path = agent_dir(&project_path, &agent_name).join("AGENT.md");
-    if !path.exists() {
-        return Err(format!("Agent '{}' does not exist", agent_name));
-    }
-    fs::read_to_string(&path).map_err(|e| e.to_string())
-}
-
-/// Update an agent's agent.md content.
-#[tauri::command]
-pub fn k2so_agents_update_profile(
-    project_path: String,
-    agent_name: String,
-    content: String,
-) -> Result<(), String> {
-    let dir = agent_dir(&project_path, &agent_name);
-    if !dir.exists() {
-        return Err(format!("Agent '{}' does not exist", agent_name));
-    }
-    let path = dir.join("AGENT.md");
-    atomic_write(&path, &content)
-}
+// `k2so_agents_update_profile` moved to k2so_core::agents::commands (re-exported).
 
 // ── Workspace Inbox ─────────────────────────────────────────────────────
 
-/// List items in the workspace-level inbox.
-#[tauri::command]
-pub fn k2so_agents_workspace_inbox_list(project_path: String) -> Result<Vec<WorkItem>, String> {
-    let dir = workspace_inbox_dir(&project_path);
-    if !dir.exists() {
-        return Ok(vec![]);
-    }
-    let mut items = Vec::new();
-    for entry in fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
-        let path = entry.path();
-        if path.extension().map_or(false, |ext| ext == "md") {
-            if let Some(item) = read_work_item(&path, "inbox") {
-                items.push(item);
-            }
-        }
-    }
-    Ok(items)
-}
+// `k2so_agents_workspace_inbox_list` moved to k2so_core::agents::commands (re-exported).
 
-/// Create a work item in a workspace inbox (for cross-workspace delegation).
-#[tauri::command]
-pub fn k2so_agents_workspace_inbox_create(
-    workspace_path: String,
-    title: String,
-    body: String,
-    priority: Option<String>,
-    item_type: Option<String>,
-    assigned_by: Option<String>,
-    source: Option<String>,
-) -> Result<WorkItem, String> {
-    let dir = workspace_inbox_dir(&workspace_path);
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-
-    let priority = priority.unwrap_or_else(|| "normal".to_string());
-    let item_type = item_type.unwrap_or_else(|| "task".to_string());
-    let assigned_by = assigned_by.unwrap_or_else(|| "external".to_string());
-    let source = source.unwrap_or_else(|| "manual".to_string());
-
-    let slug: String = title
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<&str>>()
-        .join("-");
-    let slug = &slug[..slug.len().min(60)];
-    let filename = format!("{}.md", slug);
-
-    let now = simple_date();
-    let content = format!(
-        "---\ntitle: {}\npriority: {}\nassigned_by: {}\ncreated: {}\ntype: {}\nsource: {}\n---\n\n{}\n",
-        title, priority, assigned_by, now, item_type, source, body
-    );
-
-    let path = dir.join(&filename);
-    atomic_write(&path, &content)?;
-
-    let body_preview = { let trimmed = body.trim(); let preview: String = trimmed.chars().take(120).collect(); if trimmed.chars().count() > 120 { format!("{}...", preview.trim()) } else { preview } };
-    Ok(WorkItem {
-        filename,
-        title,
-        priority,
-        assigned_by,
-        created: now,
-        item_type,
-        folder: "workspace-inbox".to_string(),
-        body_preview,
-        source,
-    })
-}
+// `k2so_agents_workspace_inbox_create` moved to k2so_core::agents::commands (re-exported).
 
 // ── Lock Files ──────────────────────────────────────────────────────────
 
@@ -3527,22 +3134,7 @@ pub fn k2so_agents_save_agent_md(
     atomic_write(&agent_md_path, &content)
 }
 
-/// Remove oldest backups, keeping only the most recent `keep` files.
-fn cleanup_agent_backups(backup_dir: &std::path::Path, keep: usize) {
-    if let Ok(entries) = fs::read_dir(backup_dir) {
-        let mut files: Vec<std::path::PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().map_or(false, |ext| ext == "md"))
-            .collect();
-        files.sort();
-        if files.len() > keep {
-            for old in &files[..files.len() - keep] {
-                fs::remove_file(old).ok();
-            }
-        }
-    }
-}
+// `cleanup_agent_backups` moved to k2so_core::agents::commands (re-exported).
 
 // ── Agent Sessions (DB-tracked) ──────────────────────────────────────────
 
