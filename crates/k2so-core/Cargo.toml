@@ -76,3 +76,9 @@ argon2 = "0.5"
 base64 = "0.22"
 subtle = "2.6"
 tungstenite = "0.24"
+
+# Companion tunnel (ngrok) + its supporting async stack. Moved over
+# from src-tauri along with the orchestrator.
+ngrok = "0.18"
+tokio = { version = "1", features = ["full"] }
+url = "2"

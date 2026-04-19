@@ -14,7 +14,10 @@ static RELAUNCH_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 
 mod agent_hooks;
 mod commands;
-mod companion;
+// `companion` now lives in k2so-core. Re-exported so existing
+// `crate::companion::*` paths (commands/companion.rs, agent_hooks.rs,
+// commands/settings.rs) keep working.
+pub use k2so_core::companion;
 // Modules opened for the benches at src-tauri/benches/perf.rs — the k2so_lib
 // crate is not published, so this is a no-op for real consumers. Revert to
 // `mod` once the perf pass is over if we decide the benches' existence
