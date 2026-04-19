@@ -1854,6 +1854,19 @@ else
     fail "phase-7e: CLI --mode missing" "Expected --mode flag on k2so workspace remove"
 fi
 
+# CLI preview surface: k2so workspace preview shows what WILL happen without mutating
+if grep -q 'cmd_workspace_preview' "$PROJECT_ROOT/cli/k2so"; then
+    pass "phase-7e: CLI workspace preview command present"
+else
+    fail "phase-7e: preview command missing" "Expected cmd_workspace_preview for dry-run inspection"
+fi
+
+if grep -q 'preview)' "$PROJECT_ROOT/cli/k2so"; then
+    pass "phase-7e: CLI preview routed in workspace dispatcher"
+else
+    fail "phase-7e: preview dispatch missing" "Expected 'preview)' case in workspace subcommand dispatch"
+fi
+
 # HTTP endpoint accepts mode
 HOOKS_SRC="$PROJECT_ROOT/src-tauri/src/agent_hooks.rs"
 if grep -q '/cli/workspace/remove' "$HOOKS_SRC" && awk '/\/cli\/workspace\/remove/,/}/' "$HOOKS_SRC" | grep -q 'mode'; then

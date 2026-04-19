@@ -1660,6 +1660,63 @@ cmd_workspace_create() {
     cli_request "/cli/workspace/create" "path=$(urlencode "$target_path")"
 }
 
+cmd_workspace_preview() {
+    local target_path="${1:-}"
+    if [ -z "$target_path" ]; then
+        target_path="$PWD"
+    fi
+    if [ -d "$target_path" ]; then
+        target_path="$(cd "$target_path" && pwd)"
+    fi
+    echo "Preview: what K2SO will do if you add $target_path"
+    echo ""
+    echo "Collision-prone files K2SO takes over (archive → import body into SKILL.md → symlink):"
+    local any_found=false
+    for rel in "CLAUDE.md" "GEMINI.md" "AGENT.md" ".goosehints" ".cursor/rules/k2so.mdc"; do
+        if [ -f "$target_path/$rel" ] && [ ! -L "$target_path/$rel" ]; then
+            # If this is K2SO's own generated file, don't report it as user content.
+            if grep -q "k2so_generated: true" "$target_path/$rel" 2>/dev/null; then
+                printf "  %-30s  K2SO-generated (will refresh in place)\n" "$rel"
+            else
+                local size
+                size=$(wc -c < "$target_path/$rel" 2>/dev/null | tr -d ' ')
+                printf "  %-30s  %s bytes → will archive + import\n" "$rel" "$size"
+                any_found=true
+            fi
+        fi
+    done
+    if [ -f "$target_path/.aider.conf.yml" ] && [ ! -L "$target_path/.aider.conf.yml" ]; then
+        if grep -q "SKILL.md" "$target_path/.aider.conf.yml" 2>/dev/null; then
+            echo "  .aider.conf.yml               already references SKILL.md (no change)"
+        else
+            echo "  .aider.conf.yml               will archive + merge SKILL.md into read: list"
+        fi
+        any_found=true
+    fi
+    if [ "$any_found" = "false" ]; then
+        echo "  (none — workspace is clean for first-time setup)"
+    fi
+    echo ""
+    echo "Files K2SO will create fresh (no pre-existing file):"
+    for rel in "SKILL.md" "CLAUDE.md" "GEMINI.md" "AGENT.md" ".goosehints" ".cursor/rules/k2so.mdc" ".aider.conf.yml" ".opencode/agent/k2so.md" ".pi/skills/k2so/SKILL.md"; do
+        if [ ! -e "$target_path/$rel" ]; then
+            printf "  %s\n" "$rel"
+        fi
+    done
+    echo ""
+    echo "Marker-injected (preserves your existing content, K2SO adds its own block):"
+    for rel in "AGENTS.md" ".github/copilot-instructions.md"; do
+        if [ -f "$target_path/$rel" ]; then
+            echo "  $rel  (exists — K2SO block inserted between markers)"
+        else
+            echo "  $rel  (will create)"
+        fi
+    done
+    echo ""
+    echo "Nothing is destroyed — archives land in .k2so/migration/ and can be restored via"
+    echo "  k2so workspace remove $target_path --mode restore-original"
+}
+
 cmd_workspace_remove() {
     local target_path="" mode=""
     while [ $# -gt 0 ]; do
@@ -2306,11 +2363,12 @@ case "${1:-help}" in
         ;;
     workspace)
         case "${2:-}" in
-            create) shift 2; cmd_workspace_create "$@" ;;
-            open)   shift 2; cmd_workspace_open "$@" ;;
-            remove) shift 2; cmd_workspace_remove "$@" ;;
+            create)  shift 2; cmd_workspace_create "$@" ;;
+            open)    shift 2; cmd_workspace_open "$@" ;;
+            remove)  shift 2; cmd_workspace_remove "$@" ;;
+            preview) shift 2; cmd_workspace_preview "$@" ;;
             cleanup) cmd_workspace_cleanup ;;
-            *)      echo "Usage: k2so workspace <create|open|remove|cleanup> <path>" >&2; exit 1 ;;
+            *)       echo "Usage: k2so workspace <create|open|remove|preview|cleanup> [path]" >&2; exit 1 ;;
         esac
         ;;
     mode)
