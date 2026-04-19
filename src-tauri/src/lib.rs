@@ -244,6 +244,73 @@ pub fn run() {
                 }
             });
 
+            // Install the k2so-daemon launchd agent if it isn't already
+            // installed AND the daemon binary is bundled next to us.
+            // Gated via `code_migrations` so this runs exactly once per
+            // upgrade. In debug builds we opt out by default — the
+            // `target/debug/k2so-daemon` path is volatile, and a dev
+            // with `K2SO_INSTALL_DAEMON=1` can override.
+            perf_timer!("startup_install_daemon_plist", {
+                const MIGRATION_ID: &str = "install_daemon_plist_v1";
+                let needs_run = {
+                    let state = app.state::<AppState>();
+                    let db = state.db.lock();
+                    !db::has_code_migration_applied(&db, MIGRATION_ID)
+                };
+                let opted_in = !cfg!(debug_assertions)
+                    || std::env::var("K2SO_INSTALL_DAEMON").is_ok();
+                if needs_run && opted_in {
+                    // Locate k2so-daemon next to the current Tauri binary
+                    // (inside K2SO.app/Contents/MacOS/). Skip install if
+                    // it isn't bundled yet — earlier 0.33.x dev builds
+                    // may ship without it.
+                    let maybe_daemon = std::env::current_exe()
+                        .ok()
+                        .and_then(|p| p.parent().map(|d| d.join("k2so-daemon")))
+                        .filter(|p| p.exists());
+                    match maybe_daemon {
+                        Some(daemon_bin) => {
+                            let plist = k2so_core::wake::DaemonPlist::canonical(daemon_bin.clone());
+                            match k2so_core::wake::install(&plist) {
+                                Ok(path) => {
+                                    log_debug!(
+                                        "[k2so] installed daemon plist at {} pointing at {}",
+                                        path.display(),
+                                        daemon_bin.display()
+                                    );
+                                    let state = app.state::<AppState>();
+                                    let db = state.db.lock();
+                                    db::mark_code_migration_applied(
+                                        &db,
+                                        MIGRATION_ID,
+                                        Some(&format!("installed from {}", daemon_bin.display())),
+                                    );
+                                }
+                                Err(e) => {
+                                    // Don't mark applied — next launch will
+                                    // retry. Common failure: launchctl
+                                    // complaining about "Load failed: 5:
+                                    // Input/output error" which usually
+                                    // means a stale plist is already
+                                    // loaded. User can resolve via
+                                    // `launchctl unload ~/Library/LaunchAgents/com.k2so.k2so-daemon.plist`.
+                                    log_debug!("[k2so] daemon plist install failed: {e}");
+                                }
+                            }
+                        }
+                        None => {
+                            // Bundled daemon missing — common in pre-0.33
+                            // dev builds. Leave the migration unapplied
+                            // so a later launch (with the daemon bundled)
+                            // completes it.
+                            log_debug!(
+                                "[k2so] daemon binary not found next to current exe; skipping plist install"
+                            );
+                        }
+                    }
+                }
+            });
+
             // SKILL.md regeneration for all workspaces. 0.32.13 changes:
             //
             // 1. Version gate — only regen when the project's last-regen
