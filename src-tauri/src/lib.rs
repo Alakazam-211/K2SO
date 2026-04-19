@@ -478,6 +478,13 @@ pub fn run() {
                             // Must run BEFORE the heartbeat migrations below so those
                             // find the UPPERCASE filenames on disk. Idempotent.
                             crate::commands::k2so_agents::migrate_filenames_to_uppercase(&project.path);
+                            // 0.32.7 CLAUDE.md harvest: archive any per-agent
+                            // CLAUDE.md files left behind by the pre-0.32.7
+                            // generator into .k2so/migration/ so nothing the
+                            // user (or Claude `# memory`) authored is lost.
+                            // Root ./CLAUDE.md is handled by the workspace
+                            // skill writer later in the boot path. Idempotent.
+                            crate::commands::k2so_agents::harvest_per_agent_claude_md_files(&project.path);
                             // Multi-heartbeat migration / scaffold for __lead__. Must run
                             // before `ensure_workspace_wakeups` so the legacy
                             // `.k2so/wakeup.md` content gets picked up before any new
@@ -815,6 +822,7 @@ pub fn run() {
             commands::k2so_agents::k2so_agents_get_profile,
             commands::k2so_agents::k2so_agents_update_profile,
             commands::k2so_agents::k2so_agents_generate_claude_md,
+            commands::k2so_agents::k2so_agents_teardown_workspace,
             commands::k2so_agents::k2so_agents_generate_workspace_claude_md,
             commands::k2so_agents::k2so_agents_disable_workspace_claude_md,
             commands::k2so_agents::k2so_agents_build_launch,

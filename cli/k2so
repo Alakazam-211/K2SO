@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.32.5"
+K2SO_CLI_VERSION="0.32.6"
 
 set -euo pipefail
 
@@ -1661,16 +1661,36 @@ cmd_workspace_create() {
 }
 
 cmd_workspace_remove() {
-    local target_path="${1:-}"
+    local target_path="" mode=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --mode) mode="$2"; shift 2 ;;
+            --mode=*) mode="${1#--mode=}"; shift ;;
+            -*) echo "Unknown flag: $1" >&2; exit 1 ;;
+            *) if [ -z "$target_path" ]; then target_path="$1"; fi; shift ;;
+        esac
+    done
     if [ -z "$target_path" ]; then
-        echo "Usage: k2so workspace remove <path>" >&2
+        echo "Usage: k2so workspace remove <path> [--mode keep-current|restore-original]" >&2
+        echo "" >&2
+        echo "  --mode keep-current      Freeze the current SKILL.md body into each harness file so" >&2
+        echo "                           every CLI LLM keeps working after K2SO disconnects." >&2
+        echo "  --mode restore-original  Restore pre-K2SO files from .k2so/migration/; files K2SO" >&2
+        echo "                           created fresh are removed. .k2so/ stays intact for reconnect." >&2
+        echo "  (no mode)                DB-only deregister; filesystem untouched (symlinks remain)." >&2
         exit 1
     fi
     # Resolve to absolute path
     if [ -d "$target_path" ]; then
         target_path="$(cd "$target_path" && pwd)"
     fi
-    cli_request "/cli/workspace/remove" "path=$(urlencode "$target_path")"
+    if [ -n "$mode" ]; then
+        cli_request "/cli/workspace/remove" \
+            "path=$(urlencode "$target_path")" \
+            "mode=$(urlencode "$mode")"
+    else
+        cli_request "/cli/workspace/remove" "path=$(urlencode "$target_path")"
+    fi
 }
 
 cmd_workspace_open() {
@@ -2159,7 +2179,7 @@ cmd_update() {
 
     # Extract the version from the remote script
     local remote_version
-    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.32.5"//')
+    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.32.6"//')
     if [ -z "$remote_version" ]; then
         echo "Error: Could not parse remote version." >&2
         exit 1

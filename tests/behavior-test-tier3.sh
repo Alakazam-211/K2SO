@@ -1392,12 +1392,520 @@ else
     fail "hamburger: template skill has stray ### headings" "Standardize on ## to match other skill generators"
 fi
 
-# Per-heartbeat wakeup.md scaffold must happen when k2so_heartbeat_add fires
-if grep -A 30 'pub fn k2so_heartbeat_add' "$AGENTS_SRC" | grep -q 'wakeup.md'; then
-    pass "hamburger: k2so_heartbeat_add scaffolds per-row wakeup.md"
+# Per-heartbeat WAKEUP.md scaffold must happen when k2so_heartbeat_add fires
+if grep -A 30 'pub fn k2so_heartbeat_add' "$AGENTS_SRC" | grep -qi 'WAKEUP.md'; then
+    pass "hamburger: k2so_heartbeat_add scaffolds per-row WAKEUP.md"
 else
-    fail "hamburger: heartbeat add missing wakeup scaffold" "Expected wakeup.md write in k2so_heartbeat_add"
+    fail "hamburger: heartbeat add missing wakeup scaffold" "Expected WAKEUP.md write in k2so_heartbeat_add"
 fi
+
+# ═══════════════════════════════════════════════════════════════════════
+section "3.11: 0.32.7 Filename Standardization (UPPERCASE)"
+# ═══════════════════════════════════════════════════════════════════════
+
+# Path helpers must emit UPPERCASE
+if grep -q 'fn agent_wakeup_path.*\n.*"WAKEUP\.md"' "$AGENTS_SRC" 2>/dev/null || \
+   awk '/fn agent_wakeup_path/,/^}/' "$AGENTS_SRC" | grep -q '"WAKEUP.md"'; then
+    pass "uppercase: agent_wakeup_path emits WAKEUP.md"
+else
+    fail "uppercase: agent_wakeup_path still lowercase" "Expected '\"WAKEUP.md\"' inside agent_wakeup_path"
+fi
+
+if awk '/fn workspace_wakeup_path/,/^}/' "$AGENTS_SRC" | grep -q '"WAKEUP.md"'; then
+    pass "uppercase: workspace_wakeup_path emits WAKEUP.md"
+else
+    fail "uppercase: workspace_wakeup_path still lowercase" "Expected '\"WAKEUP.md\"' inside workspace_wakeup_path"
+fi
+
+# No lowercase .join("agent.md") / .join("wakeup.md") code patterns in
+# Rust source. Doc comments referencing the legacy filename (e.g. to
+# explain the migration) are allowed — we only grep for the code usage
+# pattern, not the literal string anywhere.
+LOWERCASE_AGENT=$(grep -c '\.join("agent\.md")' "$AGENTS_SRC" 2>/dev/null || true)
+LOWERCASE_WAKEUP=$(grep -c '\.join("wakeup\.md")' "$AGENTS_SRC" 2>/dev/null || true)
+LOWERCASE_AGENT=${LOWERCASE_AGENT:-0}
+LOWERCASE_WAKEUP=${LOWERCASE_WAKEUP:-0}
+# Allow the rename migration itself to reference lowercase sources.
+# The legitimate uses are exactly two .join("agent.md") inside
+# migrate_filenames_to_uppercase + case_rename, and same for wakeup.md.
+if [ "$LOWERCASE_AGENT" -le 2 ]; then
+    pass "uppercase: no stray lowercase .join(\"agent.md\") calls outside the rename migration ($LOWERCASE_AGENT allowed)"
+else
+    fail "uppercase: $LOWERCASE_AGENT lowercase .join(\"agent.md\") calls remain" "Expected ≤2 (migration only)"
+fi
+if [ "$LOWERCASE_WAKEUP" -le 3 ]; then
+    pass "uppercase: no stray lowercase .join(\"wakeup.md\") calls outside the rename migration ($LOWERCASE_WAKEUP allowed)"
+else
+    fail "uppercase: $LOWERCASE_WAKEUP lowercase .join(\"wakeup.md\") calls remain" "Expected ≤3 (migration only)"
+fi
+
+# Startup migration function exists + is wired into lib.rs
+if grep -q 'pub fn migrate_filenames_to_uppercase' "$AGENTS_SRC"; then
+    pass "uppercase: migrate_filenames_to_uppercase function present"
+else
+    fail "uppercase: rename migration missing" "Expected migrate_filenames_to_uppercase in k2so_agents.rs"
+fi
+
+if grep -q 'migrate_filenames_to_uppercase' "$PROJECT_ROOT/src-tauri/src/lib.rs"; then
+    pass "uppercase: rename migration wired into startup loop"
+else
+    fail "uppercase: migration not called on startup" "Expected migrate_filenames_to_uppercase in lib.rs startup pass"
+fi
+
+# Migration function updates DB heartbeat paths as well (not just filenames)
+if grep -A 80 'pub fn migrate_filenames_to_uppercase' "$AGENTS_SRC" | grep -q "UPDATE agent_heartbeats"; then
+    pass "uppercase: rename migration updates agent_heartbeats.wakeup_path in DB"
+else
+    fail "uppercase: DB wakeup_path migration missing" "Expected UPDATE agent_heartbeats statement inside migrate_filenames_to_uppercase"
+fi
+
+# Two-step rename for case-insensitive filesystem compatibility (HFS+/APFS)
+if grep -q 'fn case_rename' "$AGENTS_SRC" && \
+   awk '/fn case_rename/,/^}$/' "$AGENTS_SRC" | grep -q 'tmp-case-rename'; then
+    pass "uppercase: case_rename helper uses tmp-name two-step pattern"
+else
+    fail "uppercase: case_rename helper missing or wrong shape" "Expected fn case_rename with tmp-case-rename intermediate"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
+section "3.12: CLAUDE.md → SKILL.md symlink unification"
+# ═══════════════════════════════════════════════════════════════════════
+
+# SKILL_VERSION_WORKSPACE bumped so existing canonical SKILL.md files regen
+if grep -qE 'SKILL_VERSION_WORKSPACE: u32 = [4-9]' "$AGENTS_SRC"; then
+    pass "claude-md-symlink: SKILL_VERSION_WORKSPACE bumped to ≥4"
+else
+    fail "claude-md-symlink: workspace skill version not bumped" "Expected SKILL_VERSION_WORKSPACE ≥ 4 so canonical SKILL.md regenerates for Phase 7c"
+fi
+
+# New variant that takes base body
+if grep -q 'pub fn write_workspace_skill_file_with_body' "$AGENTS_SRC"; then
+    pass "claude-md-symlink: write_workspace_skill_file_with_body accepts rich body"
+else
+    fail "claude-md-symlink: variant missing" "Expected write_workspace_skill_file_with_body(project_path, Option<&str>)"
+fi
+
+# CLAUDE.md migration helper + call from the generator
+if grep -q 'fn migrate_and_symlink_root_claude_md' "$AGENTS_SRC"; then
+    pass "claude-md-symlink: migrate_and_symlink_root_claude_md helper present"
+else
+    fail "claude-md-symlink: migration helper missing" "Expected migrate_and_symlink_root_claude_md in k2so_agents.rs"
+fi
+
+# K2SO Agent tab on Agent Skills page
+if grep -q "key: 'k2so_agent'" "$PROJECT_ROOT/src/renderer/components/Settings/sections/AgentSkillsSection.tsx"; then
+    pass "claude-md-symlink: Agent Skills has K2SO Agent tab"
+else
+    fail "claude-md-symlink: K2SO Agent tab missing" "Expected SKILL_TABS entry with key 'k2so_agent'"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
+section "3.13: Phase 7c — SOURCE region markers + drift adoption"
+# ═══════════════════════════════════════════════════════════════════════
+
+# SOURCE sub-region marker constants
+if grep -q 'SKILL_SOURCE_PROJECT_MD_BEGIN: &str = "<!-- K2SO:SOURCE:PROJECT_MD:BEGIN -->"' "$AGENTS_SRC"; then
+    pass "phase-7c: SKILL_SOURCE_PROJECT_MD_BEGIN constant present"
+else
+    fail "phase-7c: PROJECT_MD BEGIN marker missing" "Expected const SKILL_SOURCE_PROJECT_MD_BEGIN"
+fi
+
+if grep -q 'fn skill_source_agent_md_begin' "$AGENTS_SRC"; then
+    pass "phase-7c: skill_source_agent_md_begin helper present"
+else
+    fail "phase-7c: AGENT_MD marker helper missing" "Expected fn skill_source_agent_md_begin(name: &str) -> String"
+fi
+
+# USER_NOTES sentinel for freeform preservation
+if grep -q 'SKILL_USER_NOTES_SENTINEL: &str = "<!-- K2SO:USER_NOTES -->"' "$AGENTS_SRC"; then
+    pass "phase-7c: USER_NOTES sentinel declared"
+else
+    fail "phase-7c: USER_NOTES sentinel missing" "Expected const SKILL_USER_NOTES_SENTINEL"
+fi
+
+# Adoption sweep
+if grep -q 'fn adopt_workspace_skill_drift' "$AGENTS_SRC"; then
+    pass "phase-7c: adopt_workspace_skill_drift implemented"
+else
+    fail "phase-7c: drift adoption missing" "Expected fn adopt_workspace_skill_drift(project_path: &str)"
+fi
+
+# Tail strip + source region append
+if grep -q 'fn strip_workspace_skill_tail' "$AGENTS_SRC"; then
+    pass "phase-7c: strip_workspace_skill_tail implemented"
+else
+    fail "phase-7c: tail strip missing" "Expected fn strip_workspace_skill_tail"
+fi
+
+if grep -q 'fn append_workspace_source_regions' "$AGENTS_SRC"; then
+    pass "phase-7c: append_workspace_source_regions implemented"
+else
+    fail "phase-7c: region append missing" "Expected fn append_workspace_source_regions"
+fi
+
+# Conflict logging
+if grep -q 'fn log_adoption_event' "$AGENTS_SRC" && grep -q 'adoption-conflicts.log' "$AGENTS_SRC"; then
+    pass "phase-7c: conflict logging wired to .k2so/logs/adoption-conflicts.log"
+else
+    fail "phase-7c: conflict logging missing" "Expected log_adoption_event + adoption-conflicts.log"
+fi
+
+# Last-regen stamp for mtime comparison
+if grep -q '\.last-skill-regen' "$AGENTS_SRC"; then
+    pass "phase-7c: .last-skill-regen stamp used for drift mtime comparison"
+else
+    fail "phase-7c: regen stamp missing" "Expected .k2so/.last-skill-regen write"
+fi
+
+# mtime guard helper
+if grep -q 'fn mtime_secs' "$AGENTS_SRC"; then
+    pass "phase-7c: mtime_secs helper present"
+else
+    fail "phase-7c: mtime helper missing" "Expected fn mtime_secs(path: &Path) -> u64"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
+section "3.14: Phase 7d — Safe first-run CLAUDE.md harvest"
+# ═══════════════════════════════════════════════════════════════════════
+
+# Archive helper — copies, never destroys
+if grep -q 'fn archive_claude_md_file' "$AGENTS_SRC"; then
+    pass "phase-7d: archive_claude_md_file helper present"
+else
+    fail "phase-7d: archive helper missing" "Expected fn archive_claude_md_file(project_path, source, relative_id)"
+fi
+
+# Per-agent harvester
+if grep -q 'pub fn harvest_per_agent_claude_md_files' "$AGENTS_SRC"; then
+    pass "phase-7d: harvest_per_agent_claude_md_files implemented"
+else
+    fail "phase-7d: harvester missing" "Expected pub fn harvest_per_agent_claude_md_files(project_path: &str)"
+fi
+
+# Wired into startup loop
+if grep -q 'harvest_per_agent_claude_md_files' "$PROJECT_ROOT/src-tauri/src/lib.rs"; then
+    pass "phase-7d: harvester invoked from startup migration loop"
+else
+    fail "phase-7d: harvester not wired into startup" "Expected call in src-tauri/src/lib.rs migration loop"
+fi
+
+# Migration banner injection
+if grep -q 'fn inject_first_migration_banner' "$AGENTS_SRC"; then
+    pass "phase-7d: migration banner injector present"
+else
+    fail "phase-7d: banner injector missing" "Expected fn inject_first_migration_banner"
+fi
+
+# Banner sentinel so it injects exactly once
+if grep -q 'K2SO:MIGRATION_BANNER:0.32.7' "$AGENTS_SRC"; then
+    pass "phase-7d: migration banner idempotent via sentinel"
+else
+    fail "phase-7d: banner sentinel missing" "Expected idempotent sentinel K2SO:MIGRATION_BANNER:0.32.7"
+fi
+
+# Migration archive path uses .k2so/migration/ (not a destructive rename)
+if grep -q '\.k2so.*migration' "$AGENTS_SRC"; then
+    pass "phase-7d: archives land in .k2so/migration/"
+else
+    fail "phase-7d: migration archive path missing" "Expected .k2so/migration/ in archive helper"
+fi
+
+# .gitignore excludes migration archives + logs
+if grep -q '\.k2so/migration/' "$PROJECT_ROOT/.gitignore"; then
+    pass "phase-7d: .gitignore excludes .k2so/migration/"
+else
+    fail "phase-7d: .gitignore missing migration exclusion" "Expected .k2so/migration/ entry"
+fi
+
+if grep -q '\.k2so/logs/' "$PROJECT_ROOT/.gitignore"; then
+    pass "phase-7d: .gitignore excludes .k2so/logs/"
+else
+    fail "phase-7d: .gitignore missing logs exclusion" "Expected .k2so/logs/ entry"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
+section "3.15: Phase 7b — Extended harness file-discovery coverage"
+# ═══════════════════════════════════════════════════════════════════════
+
+# Workspace harness writer + safe-archive helper
+if grep -q 'fn write_workspace_harness_discovery_targets' "$AGENTS_SRC"; then
+    pass "phase-7b: write_workspace_harness_discovery_targets implemented"
+else
+    fail "phase-7b: harness writer missing" "Expected fn write_workspace_harness_discovery_targets"
+fi
+
+if grep -q 'fn safe_symlink_harness_file' "$AGENTS_SRC"; then
+    pass "phase-7b: safe_symlink_harness_file archives before linking"
+else
+    fail "phase-7b: safe symlink helper missing" "Expected fn safe_symlink_harness_file"
+fi
+
+# GEMINI.md, root AGENT.md, .goosehints symlink targets
+if grep -q '"GEMINI.md"' "$AGENTS_SRC"; then
+    pass "phase-7b: GEMINI.md symlink target declared"
+else
+    fail "phase-7b: GEMINI.md target missing" "Expected root GEMINI.md symlink"
+fi
+
+if grep -q 'join("AGENT.md")' "$AGENTS_SRC" && grep -q 'safe_symlink_harness_file' "$AGENTS_SRC"; then
+    pass "phase-7b: root AGENT.md symlink target declared (Code Puppy)"
+else
+    fail "phase-7b: root AGENT.md missing" "Expected root AGENT.md symlink via safe_symlink_harness_file"
+fi
+
+if grep -q '"\.goosehints"' "$AGENTS_SRC"; then
+    pass "phase-7b: .goosehints symlink target declared"
+else
+    fail "phase-7b: .goosehints missing" "Expected .goosehints symlink"
+fi
+
+# Cursor MDC generator
+if grep -q 'fn write_cursor_rules_mdc' "$AGENTS_SRC"; then
+    pass "phase-7b: write_cursor_rules_mdc generator present"
+else
+    fail "phase-7b: Cursor MDC generator missing" "Expected fn write_cursor_rules_mdc"
+fi
+
+if grep -q 'k2so.mdc' "$AGENTS_SRC" && grep -q 'alwaysApply: true' "$AGENTS_SRC"; then
+    pass "phase-7b: Cursor MDC emits k2so.mdc with alwaysApply: true frontmatter"
+else
+    fail "phase-7b: Cursor MDC contract incomplete" "Expected .cursor/rules/k2so.mdc with alwaysApply: true"
+fi
+
+# Aider scaffold
+if grep -q 'fn scaffold_aider_conf' "$AGENTS_SRC"; then
+    pass "phase-7b: scaffold_aider_conf present"
+else
+    fail "phase-7b: Aider scaffold missing" "Expected fn scaffold_aider_conf"
+fi
+
+if grep -q '\.aider\.conf\.yml' "$AGENTS_SRC"; then
+    pass "phase-7b: .aider.conf.yml path wired"
+else
+    fail "phase-7b: .aider.conf.yml path missing" "Expected .aider.conf.yml write path"
+fi
+
+# .gitignore covers derived harness artifacts
+for artifact in "CLAUDE.md" "GEMINI.md" "/AGENT.md" "\.goosehints" "\.cursor/rules/k2so\.mdc"; do
+    if grep -q "^${artifact}\$" "$PROJECT_ROOT/.gitignore"; then
+        pass "phase-7b: .gitignore excludes ${artifact}"
+    else
+        fail "phase-7b: .gitignore missing ${artifact}" "Expected ${artifact} entry in .gitignore"
+    fi
+done
+
+# ═══════════════════════════════════════════════════════════════════════
+section "3.16: Phase 7a — Agent Context Diagram three-author model"
+# ═══════════════════════════════════════════════════════════════════════
+
+DIAGRAM_SRC="$PROJECT_ROOT/src/renderer/components/Settings/sections/AgentContextDiagram.tsx"
+
+# Single canonical SKILL.md in the middle column
+if grep -q "K2SO composes — 1 file" "$DIAGRAM_SRC"; then
+    pass "phase-7a: diagram middle column shows single canonical artifact"
+else
+    fail "phase-7a: middle column label not updated" "Expected 'K2SO composes — 1 file' header"
+fi
+
+# Three file types label on left column
+if grep -q "You edit — 3 file types" "$DIAGRAM_SRC"; then
+    pass "phase-7a: diagram left column labels three-file-type contract"
+else
+    fail "phase-7a: three-file-type label missing" "Expected 'You edit — 3 file types' header"
+fi
+
+# Two delivery channels on right column
+if grep -q "Reaches agents — 2 channels" "$DIAGRAM_SRC"; then
+    pass "phase-7a: diagram right column labels two delivery channels"
+else
+    fail "phase-7a: two-channel label missing" "Expected 'Reaches agents — 2 channels' header"
+fi
+
+# File-discovery channel lists the new harness paths
+if grep -q "GEMINI.md" "$DIAGRAM_SRC" && grep -q "goosehints" "$DIAGRAM_SRC"; then
+    pass "phase-7a: file-discovery channel enumerates GEMINI.md + .goosehints"
+else
+    fail "phase-7a: harness list incomplete" "Expected GEMINI.md and .goosehints in FILE_DISCOVERY.reaches"
+fi
+
+if grep -q "k2so.mdc" "$DIAGRAM_SRC"; then
+    pass "phase-7a: file-discovery channel enumerates Cursor k2so.mdc"
+else
+    fail "phase-7a: Cursor MDC missing from channel list" "Expected .cursor/rules/k2so.mdc reference"
+fi
+
+if grep -q "aider\.conf\.yml" "$DIAGRAM_SRC"; then
+    pass "phase-7a: file-discovery channel enumerates .aider.conf.yml"
+else
+    fail "phase-7a: Aider config missing from channel list" "Expected .aider.conf.yml reference"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
+section "3.17: Migration-safety invariants (Phase 7c/7d)"
+# ═══════════════════════════════════════════════════════════════════════
+
+# Harvest must be gated by a sentinel so re-generated files aren't re-harvested.
+if grep -q 'harvest-0.32.7-done' "$AGENTS_SRC"; then
+    pass "migration-safety: harvest gated by .harvest-0.32.7-done sentinel"
+else
+    fail "migration-safety: harvest sentinel missing" "Expected harvest sentinel to prevent re-harvest"
+fi
+
+# strip_workspace_skill_tail must use rfind to collapse stacked sentinels.
+if grep -q 'rfind(SKILL_USER_NOTES_SENTINEL)' "$AGENTS_SRC"; then
+    pass "migration-safety: tail strip uses rfind to collapse stacked sentinels"
+else
+    fail "migration-safety: stacking fix missing" "Expected rfind(SKILL_USER_NOTES_SENTINEL) in strip_workspace_skill_tail"
+fi
+
+# USER_NOTES_PLACEHOLDER must be a single constant so strip can discard it.
+if grep -q 'USER_NOTES_PLACEHOLDER' "$AGENTS_SRC"; then
+    pass "migration-safety: placeholder constant present for strip-time discard"
+else
+    fail "migration-safety: placeholder constant missing" "Expected USER_NOTES_PLACEHOLDER constant"
+fi
+
+# Migration banner must be a standalone file, not a SKILL.md injection.
+if grep -q 'MIGRATION-0.32.7.md' "$AGENTS_SRC"; then
+    pass "migration-safety: banner written to standalone .k2so/MIGRATION-0.32.7.md"
+else
+    fail "migration-safety: banner target missing" "Expected MIGRATION-0.32.7.md path"
+fi
+
+# archive_claude_md_file must COPY, not rename — the test module verifies this,
+# but keep a static assertion for the method used.
+if grep -q 'fs::write(&archive_path, content)' "$AGENTS_SRC"; then
+    pass "migration-safety: archive uses copy (fs::write), never fs::rename"
+else
+    fail "migration-safety: archive may be destructive" "Expected fs::write, not fs::rename, in archive_claude_md_file"
+fi
+
+# Rust unit tests for migration safety must be present.
+if grep -q 'mod migration_safety_tests' "$AGENTS_SRC"; then
+    pass "migration-safety: Rust unit test module present"
+else
+    fail "migration-safety: test module missing" "Expected mod migration_safety_tests in k2so_agents.rs"
+fi
+
+# Pre-existing CLAUDE.md body must be imported into SKILL.md USER_NOTES
+# (not just archived). This is the "compile into SKILL.md" invariant the
+# user called out explicitly.
+if grep -q 'fn import_claude_md_into_user_notes' "$AGENTS_SRC"; then
+    pass "migration-safety: import_claude_md_into_user_notes brings archived content into the live SKILL.md tail"
+else
+    fail "migration-safety: importer missing" "Expected fn import_claude_md_into_user_notes"
+fi
+
+# Importer must key its idempotency sentinel off the archive path so
+# repeated migrations of the same archive don't duplicate.
+if grep -q 'K2SO:IMPORT:CLAUDE_MD archive=' "$AGENTS_SRC"; then
+    pass "migration-safety: import sentinel keyed off archive path for idempotency"
+else
+    fail "migration-safety: import idempotency sentinel missing" "Expected K2SO:IMPORT:CLAUDE_MD archive= sentinel"
+fi
+
+# projects_delete must NOT mutate the filesystem — only the DB. This
+# guarantees that remove-then-re-add is lossless (no FS destruction).
+PROJECTS_SRC="$PROJECT_ROOT/src-tauri/src/commands/projects.rs"
+if grep -q 'fn projects_delete' "$PROJECTS_SRC"; then
+    # Inspect the function body — no fs:: calls after the Project::delete line.
+    if awk '/pub fn projects_delete/,/^}/' "$PROJECTS_SRC" | grep -qE 'fs::(remove|write|rename)'; then
+        fail "migration-safety: projects_delete touches FS" "Expected DB-only delete (no fs:: mutations)"
+    else
+        pass "migration-safety: projects_delete is DB-only (safe for remove+re-add)"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
+section "3.18: Phase 7e — Generalized ingest + workspace teardown"
+# ═══════════════════════════════════════════════════════════════════════
+
+# Teardown function + modes
+if grep -q 'pub fn teardown_workspace_harness_files' "$AGENTS_SRC"; then
+    pass "phase-7e: teardown_workspace_harness_files implemented"
+else
+    fail "phase-7e: teardown function missing" "Expected pub fn teardown_workspace_harness_files"
+fi
+
+if grep -q 'enum TeardownMode' "$AGENTS_SRC" && grep -q 'KeepCurrent' "$AGENTS_SRC" && grep -q 'RestoreOriginal' "$AGENTS_SRC"; then
+    pass "phase-7e: TeardownMode enum with KeepCurrent + RestoreOriginal"
+else
+    fail "phase-7e: TeardownMode enum incomplete" "Expected both KeepCurrent and RestoreOriginal variants"
+fi
+
+# Tauri command exposed for UI
+if grep -q 'pub fn k2so_agents_teardown_workspace' "$AGENTS_SRC"; then
+    pass "phase-7e: Tauri command k2so_agents_teardown_workspace registered"
+else
+    fail "phase-7e: Tauri teardown command missing" "Expected #[tauri::command] k2so_agents_teardown_workspace"
+fi
+
+# Command must be wired into the command registry
+if grep -q 'k2so_agents_teardown_workspace' "$PROJECT_ROOT/src-tauri/src/lib.rs"; then
+    pass "phase-7e: teardown command wired into Tauri handler"
+else
+    fail "phase-7e: teardown command not registered" "Expected entry in lib.rs invoke_handler"
+fi
+
+# CLI surface: k2so workspace remove --mode
+if grep -q '\-\-mode' "$PROJECT_ROOT/cli/k2so" && grep -q 'cmd_workspace_remove' "$PROJECT_ROOT/cli/k2so"; then
+    pass "phase-7e: CLI workspace remove supports --mode flag"
+else
+    fail "phase-7e: CLI --mode missing" "Expected --mode flag on k2so workspace remove"
+fi
+
+# HTTP endpoint accepts mode
+HOOKS_SRC="$PROJECT_ROOT/src-tauri/src/agent_hooks.rs"
+if grep -q '/cli/workspace/remove' "$HOOKS_SRC" && awk '/\/cli\/workspace\/remove/,/}/' "$HOOKS_SRC" | grep -q 'mode'; then
+    pass "phase-7e: /cli/workspace/remove endpoint threads mode through to teardown"
+else
+    fail "phase-7e: remove endpoint missing mode plumbing" "Expected mode parameter in /cli/workspace/remove handler"
+fi
+
+# Archive helper must preserve original file extension (Aider .yml, Cursor .mdc, etc.)
+if grep -q 'leaf_ext' "$AGENTS_SRC" && grep -q '{leaf_stem}-{}{leaf_ext}\|{}-{}{}' "$AGENTS_SRC"; then
+    pass "phase-7e: archive filenames preserve original extension"
+else
+    fail "phase-7e: archive ext preservation missing" "Expected leaf_ext-based archive naming"
+fi
+
+# Cursor MDC writer must mark its own output to avoid self-re-archive loop
+if grep -q 'k2so_generated: true' "$AGENTS_SRC"; then
+    pass "phase-7e: Cursor MDC writer uses self-identifying sentinel"
+else
+    fail "phase-7e: Cursor MDC self-mark missing" "Expected k2so_generated: true frontmatter key"
+fi
+
+# Aider merge preserves existing read: entries
+if grep -q 'fn scaffold_aider_conf' "$AGENTS_SRC" && awk '/fn scaffold_aider_conf/,/^}/' "$AGENTS_SRC" | grep -q 'trim_start'; then
+    pass "phase-7e: Aider scaffold parses existing read: list for merge"
+else
+    fail "phase-7e: Aider merge logic missing" "Expected indent-preserving read: merge in scaffold_aider_conf"
+fi
+
+# Key invariant tests present.
+for invariant in \
+    "archive_claude_md_never_deletes_source" \
+    "harvest_per_agent_claude_md_archives_then_removes_source" \
+    "harvest_is_idempotent_even_if_file_regenerated_later" \
+    "strip_tail_preserves_user_freeform_but_discards_placeholders" \
+    "safe_symlink_archives_existing_regular_file" \
+    "import_claude_md_lands_in_user_notes_and_is_idempotent" \
+    "workspace_remove_then_readd_leaves_data_intact" \
+    "add_workspace_ingests_all_harness_files_into_skill_and_archives" \
+    "add_workspace_is_idempotent_second_launch_imports_nothing_new" \
+    "teardown_keep_current_freezes_symlinks_into_real_files" \
+    "teardown_restore_original_brings_back_every_archive" \
+    "reconnect_after_restore_original_reingests_cleanly" \
+    "teardown_leaves_k2so_dir_fully_intact" \
+    "aider_conf_merge_preserves_user_reads_and_archives_original"
+do
+    if grep -q "fn ${invariant}" "$AGENTS_SRC"; then
+        pass "migration-safety: invariant covered — ${invariant}"
+    else
+        fail "migration-safety: invariant missing — ${invariant}" "Expected unit test ${invariant}"
+    fi
+done
 
 # ═══════════════════════════════════════════════════════════════════════
 # Results

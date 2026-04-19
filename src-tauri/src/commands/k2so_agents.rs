@@ -1173,15 +1173,30 @@ pub fn migrate_or_scaffold_lead_heartbeat(project_path: &str) {
 const SKILL_BEGIN_MARKER: &str = "<!-- K2SO:MANAGED:BEGIN -->";
 const SKILL_END_MARKER: &str = "<!-- K2SO:MANAGED:END -->";
 
+// Sub-region markers for the area BELOW the MANAGED:END marker. Content
+// inside SOURCE regions is sourced from user-editable files (PROJECT.md,
+// AGENT.md) and adopted back into those files on each regen when drift
+// is detected. Anything below END but outside a SOURCE region is
+// "freeform tail" — preserved across regens but not adopted anywhere.
+const SKILL_SOURCE_PROJECT_MD_BEGIN: &str = "<!-- K2SO:SOURCE:PROJECT_MD:BEGIN -->";
+const SKILL_SOURCE_PROJECT_MD_END: &str = "<!-- K2SO:SOURCE:PROJECT_MD:END -->";
+
+fn skill_source_agent_md_begin(name: &str) -> String {
+    format!("<!-- K2SO:SOURCE:AGENT_MD name={}:BEGIN -->", name)
+}
+fn skill_source_agent_md_end(name: &str) -> String {
+    format!("<!-- K2SO:SOURCE:AGENT_MD name={}:END -->", name)
+}
+
 const SKILL_VERSION_MANAGER: u32 = 1;
 const SKILL_VERSION_K2SO_AGENT: u32 = 1;
 const SKILL_VERSION_CUSTOM_AGENT: u32 = 1;
 const SKILL_VERSION_TEMPLATE: u32 = 1;
-// Bumped to 3 in 0.32.7: workspace skill now composes the rich CLAUDE.md
-// body (manager brief / AI planner brief) + PROJECT.md body + primary
-// agent persona into the canonical SKILL.md, and CLAUDE.md is a symlink
-// to that canonical file.
-const SKILL_VERSION_WORKSPACE: u32 = 3;
+// Bumped to 4 in 0.32.7: workspace skill now splits K2SO-managed content
+// (inside BEGIN/END markers) from user-editable PROJECT.md / AGENT.md
+// bodies (inside SOURCE sub-regions below END). Drift inside SOURCE
+// regions is adopted back to the source file on each regen.
+const SKILL_VERSION_WORKSPACE: u32 = 4;
 
 /// 64-bit FNV-1a hex. Deterministic across Rust versions (unlike
 /// `DefaultHasher`), so a checksum written today still matches its
@@ -6460,42 +6475,217 @@ pub fn write_workspace_skill_file(project_path: &str) {
 /// rich workspace CLAUDE.md content from `k2so_agents_generate_workspace_claude_md`)
 /// so that content lands in the canonical SKILL.md rather than being
 /// lost when CLAUDE.md collapsed to a symlink.
+///
+/// Sequence (Phase 7c):
+///   1. Adoption sweep — parse existing canonical SKILL.md SOURCE sub-regions;
+///      commit drift back to PROJECT.md / primary agent AGENT.md (mtime-guarded).
+///   2. Clear stale SOURCE regions from the canonical's below-END tail so the
+///      fresh composition below can lay them down cleanly.
+///   3. Compose K2SO-managed body only (no PROJECT.md / AGENT.md appended).
+///   4. Write managed body via write_skill_to_all_harnesses with
+///      write_shared_markers=false — canonical + Claude/OpenCode/Pi symlinks
+///      get just the managed region.
+///   5. Append fresh SOURCE regions (PROJECT.md + primary agent AGENT.md)
+///      below the canonical's END marker.
+///   6. Inject the FULL canonical body (managed + SOURCE regions) into
+///      AGENTS.md and .github/copilot-instructions.md — those are plain
+///      files, not canonical sources, so they get the full context.
+///   7. Symlink project root SKILL.md + CLAUDE.md to canonical.
+///   8. Stamp .k2so/.last-skill-regen so subsequent drift-adoption mtime
+///      comparisons have a reference point.
 pub fn write_workspace_skill_file_with_body(project_path: &str, base_body: Option<&str>) {
     let project_name = std::path::Path::new(project_path)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "workspace".to_string());
 
-    let mut content = match base_body {
+    // Step 1: Adoption sweep — commit any SOURCE-region drift back to source
+    // files before we regenerate SKILL.md.
+    adopt_workspace_skill_drift(project_path);
+
+    // Step 2: Clear the stale tail below END (SOURCE regions + internal
+    // freeform notes) so the post-write append step can lay down fresh ones
+    // without duplicating. User-authored freeform content below an explicit
+    // "<!-- K2SO:USER_NOTES -->" sentinel is preserved. Otherwise the whole
+    // below-END tail is discarded (it was either K2SO-rendered SOURCE regions
+    // from last run, or content we already adopted in step 1).
+    let preserved_freeform = strip_workspace_skill_tail(project_path);
+
+    // Step 3: Compose K2SO-managed body only. PROJECT.md and AGENT.md bodies
+    // go below the END marker in step 5, not inside the managed region.
+    let managed_body = match base_body {
         Some(body) => body.to_string(),
         None => generate_workspace_skill_content(&project_name),
     };
 
-    // Append PROJECT.md body if the user has populated it with real content
-    // (not just the shipped template placeholders). Same content-detection
-    // heuristic as generate_agent_claude_md_content uses.
-    let project_md_path = PathBuf::from(project_path).join(".k2so").join("PROJECT.md");
-    if project_md_path.exists() {
-        if let Ok(raw) = fs::read_to_string(&project_md_path) {
-            let stripped = strip_frontmatter(&raw);
-            let has_content = stripped.lines().any(|line| {
-                let t = line.trim();
-                !t.is_empty() && !t.starts_with('#') && !t.starts_with("<!--")
-            });
-            if has_content {
-                content.push_str("\n\n## Project Context\n\n");
-                content.push_str(stripped.trim());
-                content.push('\n');
+    // Step 4: Write managed body to canonical + harness symlinks. We pass
+    // write_shared_markers=false because the marker-injected AGENTS.md /
+    // copilot-instructions.md files want the FULL content including SOURCE
+    // regions — we'll inject that ourselves in step 6 after appending.
+    write_skill_to_all_harnesses(
+        project_path,
+        "k2so",
+        "workspace",
+        SKILL_VERSION_WORKSPACE,
+        "K2SO workspace context — CLI reference + project context + primary agent persona",
+        &managed_body,
+        false, // we'll handle AGENTS.md + copilot markers post-append
+    );
+
+    // Step 5: Append fresh SOURCE regions below END in the canonical file.
+    // Propagates to all harness symlinks automatically.
+    append_workspace_source_regions(project_path, preserved_freeform.as_deref());
+
+    // Step 6: Inject the full canonical body (now including SOURCE regions)
+    // into the marker-injected shared files.
+    let canonical = PathBuf::from(project_path).join(".k2so/skills/k2so/SKILL.md");
+    if let Ok(full) = fs::read_to_string(&canonical) {
+        let injection_body = strip_frontmatter(&full).trim().to_string();
+        let root = PathBuf::from(project_path);
+        upsert_k2so_section(&root.join("AGENTS.md"), &injection_body);
+        let github_dir = root.join(".github");
+        let _ = fs::create_dir_all(&github_dir);
+        upsert_k2so_section(&github_dir.join("copilot-instructions.md"), &injection_body);
+    }
+
+    // Step 7: Symlink project root SKILL.md + CLAUDE.md → canonical, plus
+    // the Phase 7b harness discovery targets (GEMINI.md, AGENT.md singular,
+    // .goosehints, .cursor/rules/k2so.mdc, .aider.conf.yml scaffold).
+    let root_skill = PathBuf::from(project_path).join("SKILL.md");
+    force_symlink(&canonical, &root_skill);
+    let root_claude = PathBuf::from(project_path).join("CLAUDE.md");
+    migrate_and_symlink_root_claude_md(&canonical, &root_claude, project_path);
+    write_workspace_harness_discovery_targets(project_path, &canonical);
+
+    // Step 8: Stamp last-regen marker for mtime-based drift resolution.
+    let stamp_path = PathBuf::from(project_path).join(".k2so").join(".last-skill-regen");
+    if let Some(parent) = stamp_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&stamp_path, b"");
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Phase 7c: SOURCE region drift adoption
+// ══════════════════════════════════════════════════════════════════════
+
+/// Sentinel marker users can place in the below-END tail to claim freeform
+/// content that should survive regeneration. Anything BETWEEN this marker
+/// and EOF is preserved verbatim. Useful for notes the user wants to keep
+/// but doesn't want routed into PROJECT.md / AGENT.md.
+const SKILL_USER_NOTES_SENTINEL: &str = "<!-- K2SO:USER_NOTES -->";
+
+/// Extract the body between a BEGIN/END marker pair, if both are present.
+fn extract_source_region(content: &str, begin: &str, end: &str) -> Option<String> {
+    let b_idx = content.find(begin)?;
+    let after_begin = b_idx + begin.len();
+    let e_rel = content[after_begin..].find(end)?;
+    let e_idx = after_begin + e_rel;
+    Some(content[after_begin..e_idx].trim().to_string())
+}
+
+/// Strip an optional leading heading (`## Something\n\n`) from a SOURCE
+/// region body so the comparison / commit targets the raw file content.
+fn strip_leading_heading(body: &str) -> String {
+    let trimmed = body.trim_start();
+    if trimmed.starts_with("## ") {
+        if let Some(nl) = trimmed.find('\n') {
+            return trimmed[nl + 1..].trim_start().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Append a drift / conflict note to `.k2so/logs/adoption-conflicts.log`.
+fn log_adoption_event(project_path: &str, line: &str) {
+    let log_dir = PathBuf::from(project_path).join(".k2so").join("logs");
+    let _ = fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("adoption-conflicts.log");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let entry = format!("[{}] {}\n", ts, line);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        use std::io::Write;
+        let _ = f.write_all(entry.as_bytes());
+    }
+}
+
+/// Return the mtime of a file as seconds since epoch, or 0 if unknown.
+fn mtime_secs(path: &Path) -> u64 {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Walk the existing canonical SKILL.md and adopt any SOURCE-region drift
+/// back into its canonical source file (PROJECT.md or the primary agent's
+/// AGENT.md). Uses the `.k2so/.last-skill-regen` stamp to differentiate
+/// between user-initiated edits to the source file (source wins) and
+/// agent-initiated writes into the SKILL.md symlink (SKILL wins).
+fn adopt_workspace_skill_drift(project_path: &str) {
+    let canonical = PathBuf::from(project_path).join(".k2so/skills/k2so/SKILL.md");
+    let Ok(skill_content) = fs::read_to_string(&canonical) else {
+        return; // first run, nothing to adopt
+    };
+    let stamp_path = PathBuf::from(project_path).join(".k2so").join(".last-skill-regen");
+    let last_regen = mtime_secs(&stamp_path);
+
+    // PROJECT.md adoption
+    if let Some(region_body) = extract_source_region(
+        &skill_content,
+        SKILL_SOURCE_PROJECT_MD_BEGIN,
+        SKILL_SOURCE_PROJECT_MD_END,
+    ) {
+        let project_md = PathBuf::from(project_path).join(".k2so").join("PROJECT.md");
+        let region_stripped = strip_leading_heading(&region_body);
+        let file_body = fs::read_to_string(&project_md)
+            .map(|raw| strip_frontmatter(&raw).trim().to_string())
+            .unwrap_or_default();
+        if region_stripped.trim() != file_body.trim() {
+            let source_mtime = mtime_secs(&project_md);
+            let source_touched_since_regen = source_mtime > last_regen;
+            if source_touched_since_regen {
+                log_adoption_event(
+                    project_path,
+                    "CONFLICT PROJECT.md: source edited since last regen AND SKILL.md diverged — keeping source, dropping SKILL.md divergence",
+                );
+            } else if !region_stripped.trim().is_empty() {
+                // Agent wrote into the SKILL.md SOURCE region; adopt into PROJECT.md.
+                // Preserve any frontmatter the source file had.
+                let frontmatter = if let Ok(raw) = fs::read_to_string(&project_md) {
+                    if raw.starts_with("---") {
+                        if let Some(end) = raw[3..].find("---") {
+                            Some(raw[..3 + end + 3].to_string())
+                        } else { None }
+                    } else { None }
+                } else { None };
+                let new_contents = match frontmatter {
+                    Some(fm) => format!("{}\n\n{}\n", fm.trim_end(), region_stripped.trim()),
+                    None => format!("{}\n", region_stripped.trim()),
+                };
+                if let Some(parent) = project_md.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                if fs::write(&project_md, &new_contents).is_ok() {
+                    log_adoption_event(
+                        project_path,
+                        "ADOPTED PROJECT.md: SKILL.md SOURCE region committed back to .k2so/PROJECT.md",
+                    );
+                }
             }
         }
     }
 
-    // Append the primary agent's agent.md body for workspaces where the
-    // agent IS the workspace (custom, k2so) or where the manager's persona
-    // is workspace-global (manager mode). In multi-agent Manager workspaces,
-    // sub-agents' agent.md files are delivered per-launch via
-    // --append-system-prompt — not baked into the workspace file (would
-    // collide if 5 sub-agents had their personas mashed together here).
+    // Primary agent's AGENT.md adoption (manager / custom / k2so modes)
     if let Some(primary_agent) = find_primary_agent(project_path) {
         let agent_type = agent_type_for(project_path, &primary_agent);
         let include_primary = matches!(
@@ -6503,42 +6693,172 @@ pub fn write_workspace_skill_file_with_body(project_path: &str, base_body: Optio
             "custom" | "k2so" | "manager" | "coordinator" | "pod-leader"
         );
         if include_primary {
-            let agent_md_path = agent_dir(project_path, &primary_agent).join("AGENT.md");
-            if let Ok(raw) = fs::read_to_string(&agent_md_path) {
+            let begin = skill_source_agent_md_begin(&primary_agent);
+            let end = skill_source_agent_md_end(&primary_agent);
+            if let Some(region_body) = extract_source_region(&skill_content, &begin, &end) {
+                let agent_md = agent_dir(project_path, &primary_agent).join("AGENT.md");
+                let region_stripped = strip_leading_heading(&region_body);
+                let file_body = fs::read_to_string(&agent_md)
+                    .map(|raw| strip_frontmatter(&raw).trim().to_string())
+                    .unwrap_or_default();
+                if region_stripped.trim() != file_body.trim() {
+                    let source_mtime = mtime_secs(&agent_md);
+                    let source_touched_since_regen = source_mtime > last_regen;
+                    if source_touched_since_regen {
+                        log_adoption_event(
+                            project_path,
+                            &format!(
+                                "CONFLICT AGENT.md ({}): source edited since last regen AND SKILL.md diverged — keeping source, dropping SKILL.md divergence",
+                                primary_agent
+                            ),
+                        );
+                    } else if !region_stripped.trim().is_empty() {
+                        let frontmatter = if let Ok(raw) = fs::read_to_string(&agent_md) {
+                            if raw.starts_with("---") {
+                                if let Some(end) = raw[3..].find("---") {
+                                    Some(raw[..3 + end + 3].to_string())
+                                } else { None }
+                            } else { None }
+                        } else { None };
+                        let new_contents = match frontmatter {
+                            Some(fm) => format!("{}\n\n{}\n", fm.trim_end(), region_stripped.trim()),
+                            None => format!("{}\n", region_stripped.trim()),
+                        };
+                        if let Some(parent) = agent_md.parent() {
+                            let _ = fs::create_dir_all(parent);
+                        }
+                        if fs::write(&agent_md, &new_contents).is_ok() {
+                            log_adoption_event(
+                                project_path,
+                                &format!(
+                                    "ADOPTED AGENT.md ({}): SKILL.md SOURCE region committed back to agent file",
+                                    primary_agent
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The placeholder comment emitted alongside the USER_NOTES sentinel on
+/// every regen. Tracked as a constant so `strip_workspace_skill_tail` can
+/// discard any existing copies from the preserved freeform — otherwise
+/// each regen would stack another placeholder copy onto the tail.
+const USER_NOTES_PLACEHOLDER: &str =
+    "<!-- Content below the K2SO:USER_NOTES sentinel is yours — K2SO preserves it verbatim across regenerations. -->";
+
+/// Remove everything after the MANAGED:END marker in the canonical SKILL.md.
+/// Returns any truly user-authored content found after the LAST
+/// `<!-- K2SO:USER_NOTES -->` sentinel so it can be re-appended after
+/// regeneration. Strips K2SO's own placeholder comments (any number of
+/// stacked copies from buggy prior runs) and any empty noise.
+fn strip_workspace_skill_tail(project_path: &str) -> Option<String> {
+    let canonical = PathBuf::from(project_path).join(".k2so/skills/k2so/SKILL.md");
+    let Ok(content) = fs::read_to_string(&canonical) else { return None };
+    let end_idx = content.find(SKILL_END_MARKER)?;
+    let after_end_start = end_idx + SKILL_END_MARKER.len();
+    let tail = &content[after_end_start..];
+
+    // Use rfind so stacked duplicate sentinels (from pre-fix runs) collapse
+    // into a single preserved region.
+    let preserved = tail.rfind(SKILL_USER_NOTES_SENTINEL).map(|idx| {
+        let after = idx + SKILL_USER_NOTES_SENTINEL.len();
+        tail[after..].to_string()
+    });
+
+    // Truncate canonical to everything up to and including the END marker,
+    // plus a single trailing newline.
+    let truncated = format!("{}\n", &content[..after_end_start]);
+    let _ = fs::write(&canonical, truncated);
+
+    // Discard any occurrences of our own placeholder comment, empty lines
+    // at the edges, and the migration banner prefix fragments that end up
+    // leaking from the banner injector. Return None if nothing remains.
+    let preserved = preserved.map(|raw| {
+        raw.lines()
+            .filter(|l| l.trim() != USER_NOTES_PLACEHOLDER.trim())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string()
+    });
+    preserved.filter(|s| !s.is_empty())
+}
+
+/// After the managed region has been re-written, append fresh SOURCE
+/// sub-regions (PROJECT.md + primary agent's AGENT.md) below the END
+/// marker in the canonical file. Propagates to every harness symlink.
+fn append_workspace_source_regions(project_path: &str, preserved_freeform: Option<&str>) {
+    let canonical = PathBuf::from(project_path).join(".k2so/skills/k2so/SKILL.md");
+    let Ok(mut content) = fs::read_to_string(&canonical) else { return };
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+
+    // PROJECT.md region (only if source file has real content beyond template)
+    let project_md = PathBuf::from(project_path).join(".k2so").join("PROJECT.md");
+    if let Ok(raw) = fs::read_to_string(&project_md) {
+        let stripped = strip_frontmatter(&raw);
+        let has_content = stripped.lines().any(|line| {
+            let t = line.trim();
+            !t.is_empty() && !t.starts_with('#') && !t.starts_with("<!--")
+        });
+        if has_content {
+            content.push_str(&format!(
+                "\n{begin}\n## Project Context\n\n{body}\n{end}\n",
+                begin = SKILL_SOURCE_PROJECT_MD_BEGIN,
+                body = stripped.trim(),
+                end = SKILL_SOURCE_PROJECT_MD_END,
+            ));
+        }
+    }
+
+    // Primary agent AGENT.md region (manager / custom / k2so modes)
+    if let Some(primary_agent) = find_primary_agent(project_path) {
+        let agent_type = agent_type_for(project_path, &primary_agent);
+        let include_primary = matches!(
+            agent_type.as_str(),
+            "custom" | "k2so" | "manager" | "coordinator" | "pod-leader"
+        );
+        if include_primary {
+            let agent_md = agent_dir(project_path, &primary_agent).join("AGENT.md");
+            if let Ok(raw) = fs::read_to_string(&agent_md) {
                 let stripped = strip_frontmatter(&raw).trim().to_string();
                 if !stripped.is_empty() {
-                    content.push_str(&format!("\n\n## Primary Agent: {}\n\n", primary_agent));
-                    content.push_str(&stripped);
-                    content.push('\n');
+                    content.push_str(&format!(
+                        "\n{begin}\n## Primary Agent: {name}\n\n{body}\n{end}\n",
+                        begin = skill_source_agent_md_begin(&primary_agent),
+                        name = primary_agent,
+                        body = stripped,
+                        end = skill_source_agent_md_end(&primary_agent),
+                    ));
                 }
             }
         }
     }
 
-    // Write canonical + symlink everywhere
-    write_skill_to_all_harnesses(
-        project_path,
-        "k2so",
-        "workspace",
-        SKILL_VERSION_WORKSPACE,
-        "K2SO workspace context — CLI reference + project context + primary agent persona",
-        &content,
-        true, // workspace skill owns AGENTS.md + copilot-instructions.md
-    );
+    // User-notes sentinel — emitted exactly once per file. The placeholder
+    // comment directly below it is a single canonical copy that users /
+    // agents CAN freely edit or remove; we also discard it on ingest in
+    // strip_workspace_skill_tail so it never accumulates.
+    content.push_str(&format!(
+        "\n{sentinel}\n{placeholder}\n",
+        sentinel = SKILL_USER_NOTES_SENTINEL,
+        placeholder = USER_NOTES_PLACEHOLDER,
+    ));
+    if let Some(freeform) = preserved_freeform {
+        let cleaned = freeform.trim();
+        if !cleaned.is_empty() {
+            content.push('\n');
+            content.push_str(cleaned);
+            content.push('\n');
+        }
+    }
 
-    // Symlink project root SKILL.md → canonical (Cursor Agent, generic)
-    let canonical = PathBuf::from(project_path).join(".k2so/skills/k2so/SKILL.md");
-    let root_skill = PathBuf::from(project_path).join("SKILL.md");
-    force_symlink(&canonical, &root_skill);
-
-    // Symlink project root CLAUDE.md → canonical as well. Claude Code auto-
-    // discovers CLAUDE.md; Copilot and OpenCode also read it as fallback.
-    // If a K2SO-generated CLAUDE.md currently exists as a regular file,
-    // migrate it to `.k2so/CLAUDE.md.migrated` before creating the symlink.
-    // If the user has their own CLAUDE.md (doesn't start with our header),
-    // leave it alone — respect user authorship.
-    let root_claude = PathBuf::from(project_path).join("CLAUDE.md");
-    migrate_and_symlink_root_claude_md(&canonical, &root_claude, project_path);
+    let _ = fs::write(&canonical, content);
 }
 
 /// CLAUDE.md migration helper for the 0.32.7 transition. See
@@ -6551,27 +6871,714 @@ fn migrate_and_symlink_root_claude_md(canonical: &Path, root_claude: &Path, proj
         }
         Ok(meta) if meta.file_type().is_file() => {
             let content = fs::read_to_string(root_claude).unwrap_or_default();
-            // K2SO-generated files start with our header pattern.
-            if content.starts_with("# K2SO ") {
-                let migrated = PathBuf::from(project_path)
-                    .join(".k2so")
-                    .join("CLAUDE.md.migrated");
-                let _ = fs::rename(root_claude, &migrated);
-                force_symlink(canonical, root_claude);
-                log_debug!(
-                    "[workspace-skill] Migrated K2SO-generated CLAUDE.md → .k2so/CLAUDE.md.migrated; symlinked root CLAUDE.md to canonical SKILL.md"
-                );
+            let is_k2so_generated = content.starts_with("# K2SO ");
+            // ALWAYS archive the original before any mutation — user's data
+            // is irrecoverable otherwise.
+            let archived = archive_claude_md_file(project_path, root_claude, "CLAUDE.md");
+            // For user-authored files (no K2SO header), the archive is the
+            // backup AND we import the content into SKILL.md's USER_NOTES
+            // tail so it stays visible through the symlink. For K2SO-
+            // generated files, the body was our own composition — we only
+            // import Claude's `# memory` writes or other drift if we can
+            // isolate it, which we can't reliably detect, so we import the
+            // whole archived body and let the user prune duplicates.
+            let source_label = if is_k2so_generated {
+                "pre-0.32.7 K2SO-generated CLAUDE.md"
             } else {
-                log_debug!(
-                    "[workspace-skill] ./CLAUDE.md is user-authored (no K2SO header); leaving it alone"
+                "pre-existing user-authored CLAUDE.md"
+            };
+            let archive_display = archived
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(archive unavailable)".to_string());
+            if !content.trim().is_empty() {
+                import_claude_md_into_user_notes(
+                    project_path,
+                    &content,
+                    source_label,
+                    &archive_display,
                 );
             }
+            // Take over the file — symlink replaces it. Archive is the
+            // safety net; the symlink makes sure Claude Code picks up the
+            // K2SO context on next session.
+            let _ = fs::remove_file(root_claude);
+            force_symlink(canonical, root_claude);
+            if let Some(archive_path) = archived {
+                inject_first_migration_banner(project_path, &[archive_path]);
+            }
+            log_debug!(
+                "[workspace-skill] Migrated {}./CLAUDE.md → archived + imported body into SKILL.md USER_NOTES; root CLAUDE.md now symlinks to canonical SKILL.md",
+                if is_k2so_generated { "K2SO-generated " } else { "user-authored " },
+            );
         }
         _ => {
             // Doesn't exist (or metadata failure) — just create the symlink.
             force_symlink(canonical, root_claude);
         }
     }
+}
+
+/// Append the body of a pre-existing CLAUDE.md into the canonical
+/// SKILL.md's USER_NOTES region so the migrated content stays visible
+/// to Claude Code (via the symlink) without requiring the user to hand-
+/// merge from `.k2so/migration/`. Idempotent via a stable `id:` sentinel
+/// keyed off the archive path.
+fn import_claude_md_into_user_notes(
+    project_path: &str,
+    body: &str,
+    source_label: &str,
+    archive_display: &str,
+) {
+    let canonical = PathBuf::from(project_path).join(".k2so/skills/k2so/SKILL.md");
+    // SKILL.md may not exist yet on the very first write — the write flow
+    // is: (1) clear tail, (2) call ensure_skill_up_to_date which creates
+    // the file, (3) append source regions + USER_NOTES, (4) THEN this
+    // importer fires through migrate_and_symlink_root_claude_md. So by the
+    // time we're called, the file should exist with a USER_NOTES sentinel.
+    // If not, write a bare scaffold so the import has somewhere to land.
+    if !canonical.exists() {
+        return;
+    }
+    let Ok(existing) = fs::read_to_string(&canonical) else { return };
+
+    // Sentinel: include the archive path so multiple migrations from
+    // different machines or dates can each contribute their own import
+    // without duplicating (same archive → same sentinel → no re-import).
+    let import_sentinel = format!(
+        "<!-- K2SO:IMPORT:CLAUDE_MD archive={} -->",
+        archive_display
+    );
+    if existing.contains(&import_sentinel) { return }
+
+    // Find the USER_NOTES sentinel — all imports land below it, after the
+    // placeholder comment. Preserve everything that's already there.
+    let Some(sentinel_idx) = existing.find(SKILL_USER_NOTES_SENTINEL) else {
+        // SKILL.md is in a transitional state — append anyway so no data
+        // is lost; regen will re-lay-out next launch.
+        let import_block = format!(
+            "\n\n{sentinel}\n## Imported: {label}\n\n> Archived at `{archive}`. You can prune this section once reviewed; K2SO preserves anything below the `K2SO:USER_NOTES` sentinel verbatim.\n\n{body}\n",
+            sentinel = import_sentinel,
+            label = source_label,
+            archive = archive_display,
+            body = body.trim(),
+        );
+        let mut out = existing;
+        out.push_str(&import_block);
+        let _ = fs::write(&canonical, out);
+        return;
+    };
+    // Splice right after the placeholder comment so imports collect in a
+    // predictable, readable order.
+    let insertion_anchor = existing[sentinel_idx..]
+        .find(USER_NOTES_PLACEHOLDER)
+        .map(|rel| sentinel_idx + rel + USER_NOTES_PLACEHOLDER.len())
+        .unwrap_or(sentinel_idx + SKILL_USER_NOTES_SENTINEL.len());
+    let import_block = format!(
+        "\n\n{sentinel}\n## Imported: {label}\n\n> Archived at `{archive}`. You can prune this section once reviewed; K2SO preserves anything below the `K2SO:USER_NOTES` sentinel verbatim across regenerations.\n\n{body}\n",
+        sentinel = import_sentinel,
+        label = source_label,
+        archive = archive_display,
+        body = body.trim(),
+    );
+    let mut out = String::with_capacity(existing.len() + import_block.len());
+    out.push_str(&existing[..insertion_anchor]);
+    out.push_str(&import_block);
+    out.push_str(&existing[insertion_anchor..]);
+    let _ = fs::write(&canonical, out);
+    log_adoption_event(
+        project_path,
+        &format!(
+            "IMPORTED {} body into SKILL.md USER_NOTES (archive: {})",
+            source_label, archive_display
+        ),
+    );
+}
+
+/// Harvest `.k2so/agents/<name>/CLAUDE.md` files left behind by the
+/// pre-0.32.7 per-agent CLAUDE.md generator (Phase 1a removed automatic
+/// writes, but the user-facing `k2so agents generate-md` CLI + the UI's
+/// "Show CLAUDE.md" preview still regenerate them on demand). Each is
+/// archived to `.k2so/migration/agents/<name>/CLAUDE.md-<timestamp>.md`
+/// then removed.
+///
+/// Gated with `.k2so/.harvest-0.32.7-done` so a user who later runs
+/// `generate-md` isn't re-harvested on the next boot. First-run only.
+pub fn harvest_per_agent_claude_md_files(project_path: &str) {
+    let sentinel = PathBuf::from(project_path)
+        .join(".k2so")
+        .join(".harvest-0.32.7-done");
+    if sentinel.exists() { return }
+
+    let agents_root = PathBuf::from(project_path).join(".k2so").join("agents");
+    let mut archived_paths: Vec<PathBuf> = Vec::new();
+    if let Ok(read_dir) = fs::read_dir(&agents_root) {
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if !path.is_dir() { continue }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            if name.starts_with('.') { continue } // skip .archive etc.
+            let claude_md = path.join("CLAUDE.md");
+            if !claude_md.is_file() { continue }
+            if let Some(archive_path) = archive_claude_md_file(
+                project_path,
+                &claude_md,
+                &format!("agents/{}/CLAUDE.md", name),
+            ) {
+                let _ = fs::remove_file(&claude_md);
+                archived_paths.push(archive_path);
+            }
+        }
+    }
+    if !archived_paths.is_empty() {
+        inject_first_migration_banner(project_path, &archived_paths);
+    }
+    // Stamp sentinel unconditionally so we don't repeat the dir walk.
+    if let Some(parent) = sentinel.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&sentinel, b"");
+}
+
+/// Copy a file to `.k2so/migration/<relative>-<timestamp>.<ext>`. Returns the
+/// path of the archive on success. Never mutates the source. Preserves the
+/// original file extension so restore paths don't get mangled (e.g.
+/// `.aider.conf.yml`, `.goosehints`, `.mdc`).
+fn archive_claude_md_file(
+    project_path: &str,
+    source: &Path,
+    relative_id: &str,
+) -> Option<PathBuf> {
+    let content = fs::read_to_string(source).ok()?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Split relative_id into parent subdir (if any) and leaf filename.
+    let (subdir, leaf) = match relative_id.rsplit_once('/') {
+        Some((parent, leaf)) => (Some(parent), leaf),
+        None => (None, relative_id),
+    };
+    let mut target_dir = PathBuf::from(project_path).join(".k2so").join("migration");
+    if let Some(sub) = subdir {
+        target_dir = target_dir.join(sub);
+    }
+    let _ = fs::create_dir_all(&target_dir);
+    // Preserve original extension. Leading-dot names (.goosehints) have
+    // no real extension — treat the whole name as the stem.
+    let (leaf_stem, leaf_ext) = match leaf.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), format!(".{}", ext)),
+        _ => (leaf.to_string(), String::new()),
+    };
+    let archive_name = format!("{}-{}{}", leaf_stem, ts, leaf_ext);
+    let archive_path = target_dir.join(archive_name);
+    fs::write(&archive_path, content).ok()?;
+    log_adoption_event(
+        project_path,
+        &format!(
+            "ARCHIVED {} → {}",
+            source.display(),
+            archive_path.display()
+        ),
+    );
+    Some(archive_path)
+}
+
+/// On first migration, write a standalone notice at
+/// `.k2so/MIGRATION-0.32.7.md` listing the archive paths. The notice is
+/// a dedicated file rather than a SKILL.md injection because SKILL.md is
+/// regenerated on every launch (and we'd have to thread the banner
+/// through managed-region + source-region plumbing to keep it visible).
+/// Idempotent: we only write if the file doesn't already exist.
+fn inject_first_migration_banner(project_path: &str, archived_paths: &[PathBuf]) {
+    if archived_paths.is_empty() { return }
+    let notice_path = PathBuf::from(project_path)
+        .join(".k2so")
+        .join("MIGRATION-0.32.7.md");
+    if notice_path.exists() {
+        // Append any newly-archived paths — migrations can happen in two
+        // phases (root CLAUDE.md on first SKILL write, per-agent CLAUDE.md
+        // on first startup after sentinel). We stamp additional entries
+        // without rewriting so the user's edits to this file survive.
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&notice_path)
+        {
+            use std::io::Write;
+            for p in archived_paths {
+                let _ = writeln!(f, "- `{}`", p.display());
+            }
+        }
+        return;
+    }
+    let mut archive_list = String::new();
+    for p in archived_paths {
+        archive_list.push_str(&format!("- `{}`\n", p.display()));
+    }
+    let body = format!(
+        "<!-- K2SO:MIGRATION_BANNER:0.32.7 -->\n# ⚠️  K2SO 0.32.7 Migration Notice\n\nK2SO archived your pre-existing CLAUDE.md file(s) when unifying workspace context into a single canonical `SKILL.md`. Your original content is safe at:\n\n{archives}\nReview those archives and move anything worth keeping into one of:\n\n- `.k2so/PROJECT.md` — workspace-level context shared by every agent\n- `.k2so/agents/<name>/AGENT.md` — per-agent persona + standing orders\n- The `<!-- K2SO:USER_NOTES -->` section at the bottom of `SKILL.md` — freeform workspace notes, preserved across regenerations\n\nOnce you've reviewed, `.k2so/migration/` can be safely deleted — and so can this file.\n",
+        archives = archive_list,
+    );
+    if let Some(parent) = notice_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&notice_path, body);
+    log_adoption_event(
+        project_path,
+        &format!(
+            "WROTE .k2so/MIGRATION-0.32.7.md ({} archive(s))",
+            archived_paths.len()
+        ),
+    );
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Phase 7b: Extended harness file-discovery coverage
+// ══════════════════════════════════════════════════════════════════════
+
+/// Create a symlink for a workspace-root harness file. If the target is
+/// a regular file with user-authored content, Phase 7e's contract is:
+///   1. Archive the original to `.k2so/migration/` (never destroy).
+///   2. Import its body into SKILL.md's USER_NOTES so the new symlinked
+///      SKILL.md still surfaces the user's accumulated context.
+///   3. Replace the target with the symlink.
+///
+/// Idempotent: re-running after the target is already a symlink just
+/// refreshes the link; re-running against an already-imported archive
+/// is a no-op (sentinel keyed on archive path).
+fn safe_symlink_harness_file(
+    canonical: &Path,
+    target: &Path,
+    project_path: &str,
+    harness_display: &str,
+) {
+    match fs::symlink_metadata(target) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            force_symlink(canonical, target);
+        }
+        Ok(meta) if meta.file_type().is_file() => {
+            let content = fs::read_to_string(target).unwrap_or_default();
+            let filename = target
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(harness_display)
+                .to_string();
+            let archived = archive_claude_md_file(project_path, target, &filename);
+            // Import the user's body into SKILL.md USER_NOTES so the symlink
+            // redirect doesn't bury their existing context.
+            if !content.trim().is_empty() {
+                let archive_display = archived
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "(archive unavailable)".to_string());
+                import_claude_md_into_user_notes(
+                    project_path,
+                    &content,
+                    &format!("pre-existing {}", harness_display),
+                    &archive_display,
+                );
+            }
+            let _ = fs::remove_file(target);
+            force_symlink(canonical, target);
+            if let Some(p) = archived {
+                inject_first_migration_banner(project_path, &[p]);
+            }
+        }
+        _ => {
+            force_symlink(canonical, target);
+        }
+    }
+}
+
+/// Phase 7b: workspace-level harness file-discovery targets.
+///
+/// Adds the following to the file-discovery set, all pointing at the
+/// canonical `.k2so/skills/k2so/SKILL.md`:
+///
+///   - `./GEMINI.md`                         → symlink (Gemini auto-loads)
+///   - `./AGENT.md`                          → symlink (Code Puppy)
+///   - `./.goosehints`                       → symlink (Goose plain-text)
+///   - `./.cursor/rules/k2so.mdc`            → generated (Cursor needs MDC
+///                                            frontmatter, can't symlink)
+///   - `./.aider.conf.yml`                   → scaffolded once (Aider)
+fn write_workspace_harness_discovery_targets(project_path: &str, canonical: &Path) {
+    let root = PathBuf::from(project_path);
+
+    // GEMINI.md, AGENT.md, .goosehints — plain symlinks to canonical.
+    safe_symlink_harness_file(
+        canonical,
+        &root.join("GEMINI.md"),
+        project_path,
+        "GEMINI.md",
+    );
+    safe_symlink_harness_file(
+        canonical,
+        &root.join("AGENT.md"),
+        project_path,
+        "AGENT.md",
+    );
+    safe_symlink_harness_file(
+        canonical,
+        &root.join(".goosehints"),
+        project_path,
+        ".goosehints",
+    );
+
+    // Cursor requires MDC frontmatter (`description:` + `alwaysApply:`
+    // and/or `globs:`) — it does not consume plain markdown, so a
+    // symlink won't work. Generate the file with a header that tells
+    // Cursor to include it on every request.
+    write_cursor_rules_mdc(project_path, canonical);
+
+    // Aider uses YAML config rather than discovery files. Scaffold a
+    // minimal `.aider.conf.yml` with `read: SKILL.md` if the file does
+    // not exist. Never overwrite existing user config.
+    scaffold_aider_conf(project_path);
+}
+
+/// Generate `./.cursor/rules/k2so.mdc` with MDC frontmatter + the
+/// canonical SKILL.md body. Archives any pre-existing k2so.mdc (and
+/// imports its body into USER_NOTES) before overwriting, so user
+/// additions to our specific file are preserved.
+fn write_cursor_rules_mdc(project_path: &str, canonical: &Path) {
+    let Ok(raw) = fs::read_to_string(canonical) else { return };
+    let body = strip_frontmatter(&raw).trim().to_string();
+    if body.is_empty() { return }
+
+    let dir = PathBuf::from(project_path).join(".cursor").join("rules");
+    if fs::create_dir_all(&dir).is_err() { return }
+    let target = dir.join("k2so.mdc");
+
+    // Mark our own output with a sentinel key in frontmatter so we can
+    // detect it on re-runs and skip the archive+import dance (body drifts
+    // every regen as imports stack — without the sentinel we'd infinitely
+    // re-archive our own output).
+    const K2SO_MDC_SIGNATURE: &str = "k2so_generated: true";
+
+    if target.exists() {
+        if let Ok(existing) = fs::read_to_string(&target) {
+            let is_our_output = existing.contains(K2SO_MDC_SIGNATURE);
+            if !is_our_output {
+                let existing_body = strip_frontmatter(&existing).trim().to_string();
+                if !existing_body.is_empty() {
+                    let archived = archive_claude_md_file(
+                        project_path,
+                        &target,
+                        "cursor/rules/k2so.mdc",
+                    );
+                    let archive_display = archived
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "(archive unavailable)".to_string());
+                    import_claude_md_into_user_notes(
+                        project_path,
+                        &existing_body,
+                        "pre-existing .cursor/rules/k2so.mdc",
+                        &archive_display,
+                    );
+                }
+            }
+        }
+    }
+
+    let mdc = format!(
+        "---\n{signature}\ndescription: K2SO workspace context — CLI reference + project context + primary agent persona\nalwaysApply: true\n---\n\n{body}\n",
+        signature = K2SO_MDC_SIGNATURE,
+        body = body,
+    );
+    let _ = fs::write(&target, mdc);
+}
+
+/// Scaffold `./.aider.conf.yml` with `read: [SKILL.md]` so Aider pulls
+/// the workspace context on every session. Phase 7e: when the file
+/// already exists, archive a copy and merge `SKILL.md` into the `read:`
+/// list, preserving every other entry the user had. Any other YAML keys
+/// (models, api_key paths, etc.) are left untouched.
+fn scaffold_aider_conf(project_path: &str) {
+    let path = PathBuf::from(project_path).join(".aider.conf.yml");
+    if !path.exists() {
+        let _ = fs::write(
+            &path,
+            "# K2SO: ship workspace context to Aider on every session.\nread:\n  - SKILL.md\n",
+        );
+        return;
+    }
+    let Ok(existing) = fs::read_to_string(&path) else { return };
+    // Already has SKILL.md in its read list — no mutation needed.
+    if existing.contains("SKILL.md") { return }
+
+    // Archive a copy before we touch it. The archive preserves the user's
+    // exact pre-modification state so teardown (restore-original) can
+    // revert cleanly. No import into USER_NOTES because .aider.conf.yml
+    // is config, not context.
+    let _ = archive_claude_md_file(project_path, &path, ".aider.conf.yml");
+
+    // Merge: if there's a `read:` key, add `- SKILL.md` as the first item
+    // under it. Otherwise append a fresh `read:` block at the end.
+    let lines: Vec<&str> = existing.lines().collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 4);
+    let mut injected = false;
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim_start();
+        if !injected && (trimmed == "read:" || trimmed.starts_with("read:")) {
+            out.push(line.to_string());
+            // Determine the existing indentation of this read: block.
+            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            out.push(format!("{}  - SKILL.md", indent));
+            out.push(format!("{}  # ^ added by K2SO — workspace context", indent));
+            injected = true;
+            i += 1;
+            continue;
+        }
+        out.push(line.to_string());
+        i += 1;
+    }
+    if !injected {
+        if !out.last().map(|l| l.trim().is_empty()).unwrap_or(true) {
+            out.push(String::new());
+        }
+        out.push("# K2SO: ship workspace context on every session.".to_string());
+        out.push("read:".to_string());
+        out.push("  - SKILL.md".to_string());
+    }
+    let mut final_out = out.join("\n");
+    if !final_out.ends_with('\n') { final_out.push('\n'); }
+    let _ = fs::write(&path, final_out);
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Phase 7e: Workspace teardown (disconnect)
+// ══════════════════════════════════════════════════════════════════════
+
+/// The six workspace-root files K2SO can take over via symlink / scaffold.
+/// On teardown we walk this list and either freeze the current SKILL.md
+/// body into each as a real file (keep_current mode), or restore the
+/// archive from `.k2so/migration/` (restore_original mode).
+const HARNESS_WORKSPACE_FILES: &[&str] = &[
+    "CLAUDE.md",
+    "GEMINI.md",
+    "AGENT.md",
+    ".goosehints",
+    "SKILL.md",
+    ".cursor/rules/k2so.mdc",
+    // NOT .aider.conf.yml — that's a config file with merged entries,
+    // handled separately below.
+];
+
+/// Summary returned to the UI after a teardown. One entry per file
+/// touched, with a human-readable note so the dialog can show what
+/// happened.
+#[derive(serde::Serialize, Debug)]
+pub struct TeardownResult {
+    pub action: String,
+    pub path: String,
+    pub note: String,
+}
+
+/// User's choice when they remove/disconnect a workspace.
+///
+/// - `keep_current`: freeze the current canonical SKILL.md body into each
+///   symlinked file as a real file. Every CLI LLM the user had enabled
+///   keeps working, reading the last-known merged context. Best when
+///   the user is stepping away but wants their tools to still have context.
+///
+/// - `restore_original`: replace each symlinked file with whatever was
+///   there before K2SO took over (from `.k2so/migration/`). Files K2SO
+///   created fresh (no archive) are deleted. The workspace looks like
+///   it did pre-K2SO except for the `.k2so/` folder, which stays
+///   intact as the restore source (and the reconnect-later safety net).
+///
+/// In both modes `.k2so/` itself is preserved. Nothing is destroyed.
+#[derive(Clone, Copy, Debug)]
+pub enum TeardownMode {
+    KeepCurrent,
+    RestoreOriginal,
+}
+
+/// Freeze or restore every workspace-root symlink, returning a per-file
+/// summary the UI can display. `.k2so/` is never touched — archives,
+/// canonical SKILL.md, and sentinels all stay in place so reconnect is
+/// idempotent.
+pub fn teardown_workspace_harness_files(
+    project_path: &str,
+    mode: TeardownMode,
+) -> Vec<TeardownResult> {
+    let root = PathBuf::from(project_path);
+    let canonical = root.join(".k2so/skills/k2so/SKILL.md");
+    let current_body = fs::read_to_string(&canonical).unwrap_or_default();
+    let mut results: Vec<TeardownResult> = Vec::new();
+
+    for rel in HARNESS_WORKSPACE_FILES {
+        let path = root.join(rel);
+        // We only touch files we managed — i.e., those that are symlinks
+        // pointing at our canonical. User-authored regular files at these
+        // paths are NEVER touched during teardown (that's why the add-
+        // time safe_symlink_harness_file archives before linking — once
+        // it's a symlink, it's ours).
+        let Ok(meta) = fs::symlink_metadata(&path) else { continue };
+        if !meta.file_type().is_symlink() { continue }
+
+        match mode {
+            TeardownMode::KeepCurrent => {
+                // Replace the symlink with a real file containing the
+                // current merged SKILL.md body. Tool keeps working with
+                // the context frozen at this moment.
+                let _ = fs::remove_file(&path);
+                if fs::write(&path, &current_body).is_ok() {
+                    results.push(TeardownResult {
+                        action: "froze".to_string(),
+                        path: rel.to_string(),
+                        note: "Replaced symlink with a frozen snapshot of the current SKILL.md. Tool will keep reading this context.".to_string(),
+                    });
+                } else {
+                    results.push(TeardownResult {
+                        action: "failed".to_string(),
+                        path: rel.to_string(),
+                        note: "Could not write frozen snapshot — file may still be a dangling symlink.".to_string(),
+                    });
+                }
+            }
+            TeardownMode::RestoreOriginal => {
+                // Look for the most recent archive for this file under
+                // .k2so/migration/. If found, copy it back. If not, the
+                // file was K2SO-created and has no original — delete.
+                let original = find_latest_archive(project_path, rel);
+                let _ = fs::remove_file(&path);
+                if let Some(archive_path) = original {
+                    match fs::read_to_string(&archive_path) {
+                        Ok(body) => {
+                            let _ = fs::write(&path, body);
+                            results.push(TeardownResult {
+                                action: "restored".to_string(),
+                                path: rel.to_string(),
+                                note: format!(
+                                    "Restored from archive: {}",
+                                    archive_path.display()
+                                ),
+                            });
+                        }
+                        Err(_) => {
+                            results.push(TeardownResult {
+                                action: "removed".to_string(),
+                                path: rel.to_string(),
+                                note: format!(
+                                    "Archive unreadable ({}); removed the symlink without restore.",
+                                    archive_path.display()
+                                ),
+                            });
+                        }
+                    }
+                } else {
+                    results.push(TeardownResult {
+                        action: "removed".to_string(),
+                        path: rel.to_string(),
+                        note: "No prior archive — K2SO created this file fresh; removed cleanly.".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Aider config: .aider.conf.yml — if we mutated it, the archive has
+    // the user's original content. Only touch on restore_original mode;
+    // on keep_current the merged config is already a standalone file.
+    if matches!(mode, TeardownMode::RestoreOriginal) {
+        let aider_path = root.join(".aider.conf.yml");
+        if let Some(archive) = find_latest_archive(project_path, ".aider.conf.yml") {
+            if let Ok(body) = fs::read_to_string(&archive) {
+                let _ = fs::write(&aider_path, body);
+                results.push(TeardownResult {
+                    action: "restored".to_string(),
+                    path: ".aider.conf.yml".to_string(),
+                    note: format!("Restored from archive: {}", archive.display()),
+                });
+            }
+        } else if aider_path.exists() {
+            // K2SO created it fresh with only the SKILL.md read entry.
+            // Remove it cleanly.
+            let _ = fs::remove_file(&aider_path);
+            results.push(TeardownResult {
+                action: "removed".to_string(),
+                path: ".aider.conf.yml".to_string(),
+                note: "No prior archive — K2SO scaffolded this file fresh; removed cleanly.".to_string(),
+            });
+        }
+    }
+
+    results
+}
+
+/// Walk `.k2so/migration/` looking for the most-recent archive that
+/// matches the relative harness path. Archive filenames look like
+/// `<basename>-<epoch>.md` — we match by basename.
+fn find_latest_archive(project_path: &str, rel: &str) -> Option<PathBuf> {
+    // Archive path shape: .k2so/migration/<subdir>?/<basename>-<ts>.md
+    let migration_root = PathBuf::from(project_path).join(".k2so").join("migration");
+    if !migration_root.is_dir() { return None }
+
+    // Convert rel to the archive's subdir + basename convention used by
+    // archive_claude_md_file (subdir = parent of rel if any; basename =
+    // rel's last component minus the .md extension + "-<ts>.md").
+    let (subdir, leaf) = match rel.rsplit_once('/') {
+        Some((parent, leaf)) => (Some(parent.to_string()), leaf.to_string()),
+        None => (None, rel.to_string()),
+    };
+    let search_dir = match &subdir {
+        Some(s) => migration_root.join(s),
+        None => migration_root.clone(),
+    };
+    if !search_dir.is_dir() { return None }
+
+    // Match archive_claude_md_file's naming convention:
+    // <leaf_stem>-<ts><leaf_ext>, where leaf_ext preserves the original.
+    let (leaf_stem, leaf_ext) = match leaf.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), format!(".{}", ext)),
+        _ => (leaf.clone(), String::new()),
+    };
+
+    let mut best: Option<(u64, PathBuf)> = None;
+    if let Ok(entries) = fs::read_dir(&search_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() { continue }
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+            let prefix = format!("{}-", leaf_stem);
+            if !name.starts_with(&prefix) { continue }
+            if !leaf_ext.is_empty() && !name.ends_with(&leaf_ext) { continue }
+            // Parse the numeric timestamp between prefix and leaf_ext.
+            let rest = &name[prefix.len()..];
+            let rest = if leaf_ext.is_empty() { rest } else { rest.trim_end_matches(&leaf_ext[..]) };
+            let ts_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let Ok(ts) = ts_str.parse::<u64>() else { continue };
+            match &best {
+                Some((existing_ts, _)) if ts <= *existing_ts => {}
+                _ => best = Some((ts, path.clone())),
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// Tauri command: UI-callable teardown. Used by the Remove-Workspace
+/// confirmation dialog to execute the user's chosen mode before
+/// projects_delete actually removes the DB row.
+#[tauri::command]
+pub fn k2so_agents_teardown_workspace(
+    project_path: String,
+    mode: String,
+) -> Result<Vec<TeardownResult>, String> {
+    let m = match mode.as_str() {
+        "keep_current" => TeardownMode::KeepCurrent,
+        "restore_original" => TeardownMode::RestoreOriginal,
+        other => return Err(format!("unknown teardown mode: {}", other)),
+    };
+    Ok(teardown_workspace_harness_files(&project_path, m))
 }
 
 /// Write a single agent's SKILL.md. Used internally during launch.
@@ -6667,5 +7674,714 @@ pub fn ensure_all_skills_up_to_date(project_path: &str) {
             other => other.to_string(),
         };
         write_agent_skill_file(project_path, &agent_name, &normalized_type);
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Migration-safety tests (Phase 7c/7d invariants)
+// ══════════════════════════════════════════════════════════════════════
+//
+// These tests pin down the "never lose user data" contract. Every
+// migration path we ship must:
+//   1. Archive user-authored content before mutating or deleting it.
+//   2. Be idempotent (running twice never doubles or re-loses content).
+//   3. Return preserved content from strip_workspace_skill_tail so
+//      append_workspace_source_regions can re-emit it losslessly.
+//   4. Never stack duplicate USER_NOTES sentinels / placeholder comments.
+
+#[cfg(test)]
+mod migration_safety_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    /// Make a scratch `.k2so/` scaffold for a migration test. Returns the
+    /// project root path — caller drops it when done to clean up.
+    fn scratch_project() -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join("k2so-migration-test")
+            .join(Uuid::new_v4().to_string());
+        fs::create_dir_all(dir.join(".k2so/skills/k2so")).unwrap();
+        fs::create_dir_all(dir.join(".k2so/agents")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn archive_claude_md_never_deletes_source() {
+        let proj = scratch_project();
+        let root_claude = proj.join("CLAUDE.md");
+        let body = "# My K2SO notes\n\nThis is my workspace context.\n";
+        fs::write(&root_claude, body).unwrap();
+
+        let archive = archive_claude_md_file(
+            proj.to_str().unwrap(),
+            &root_claude,
+            "CLAUDE.md",
+        )
+        .expect("archive should succeed");
+
+        // Source must still exist — archive is a COPY.
+        assert!(root_claude.exists(), "archive must not delete the source");
+        // Archive must contain exactly the source body.
+        let archived_body = fs::read_to_string(&archive).unwrap();
+        assert_eq!(archived_body, body, "archive must preserve content byte-for-byte");
+        // Archive must live under .k2so/migration/.
+        assert!(
+            archive.starts_with(proj.join(".k2so").join("migration")),
+            "archive path must land under .k2so/migration/, got {}",
+            archive.display(),
+        );
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn harvest_per_agent_claude_md_archives_then_removes_source() {
+        let proj = scratch_project();
+        fs::create_dir_all(proj.join(".k2so/agents/backend-eng")).unwrap();
+        let agent_claude = proj.join(".k2so/agents/backend-eng/CLAUDE.md");
+        let body = "# backend-eng persona\n\nUser-authored memory.\n";
+        fs::write(&agent_claude, body).unwrap();
+
+        harvest_per_agent_claude_md_files(proj.to_str().unwrap());
+
+        // Source should be gone (per plan: per-agent CLAUDE.md retired).
+        assert!(!agent_claude.exists(), "per-agent CLAUDE.md should be removed after harvest");
+        // An archive with byte-identical content must exist under migration/.
+        let archive_root = proj.join(".k2so/migration/agents/backend-eng");
+        let entries: Vec<_> = fs::read_dir(&archive_root).unwrap().flatten().collect();
+        assert_eq!(entries.len(), 1, "expected exactly one archive, got {:?}", entries);
+        let archived = fs::read_to_string(entries[0].path()).unwrap();
+        assert_eq!(archived, body, "archive must preserve content byte-for-byte");
+        // Sentinel must be written so re-runs don't re-harvest.
+        assert!(
+            proj.join(".k2so/.harvest-0.32.7-done").exists(),
+            "harvest sentinel must be written"
+        );
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn harvest_is_idempotent_even_if_file_regenerated_later() {
+        let proj = scratch_project();
+        fs::create_dir_all(proj.join(".k2so/agents/backend-eng")).unwrap();
+        let agent_claude = proj.join(".k2so/agents/backend-eng/CLAUDE.md");
+        fs::write(&agent_claude, "first content").unwrap();
+
+        harvest_per_agent_claude_md_files(proj.to_str().unwrap());
+
+        // User runs `k2so agents generate-md` later, which re-creates the file.
+        fs::write(&agent_claude, "user-regenerated content").unwrap();
+
+        // Second harvest run must be a no-op (sentinel already stamped).
+        harvest_per_agent_claude_md_files(proj.to_str().unwrap());
+
+        // The regenerated file must NOT have been re-archived / removed.
+        assert!(agent_claude.exists(), "second run must not re-harvest");
+        assert_eq!(fs::read_to_string(&agent_claude).unwrap(), "user-regenerated content");
+        // Still exactly one archive entry (the first-run one).
+        let archive_root = proj.join(".k2so/migration/agents/backend-eng");
+        let entries: Vec<_> = fs::read_dir(&archive_root).unwrap().flatten().collect();
+        assert_eq!(entries.len(), 1, "idempotent harvest must not double-archive");
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn strip_tail_preserves_user_freeform_but_discards_placeholders() {
+        let proj = scratch_project();
+        let canonical = proj.join(".k2so/skills/k2so/SKILL.md");
+        // Simulate a corrupted tail with 3 stacked USER_NOTES sentinels +
+        // placeholder comments from buggy prior runs, PLUS a real user note.
+        let corrupted = format!(
+            "---\nk2so_skill: workspace\n---\n\n{begin}\nManaged body\n{end}\n\n{sentinel}\n{placeholder}\n\n{sentinel}\n{placeholder}\n\nMy real user note line 1.\nMy real user note line 2.\n",
+            begin = SKILL_BEGIN_MARKER,
+            end = SKILL_END_MARKER,
+            sentinel = SKILL_USER_NOTES_SENTINEL,
+            placeholder = USER_NOTES_PLACEHOLDER,
+        );
+        fs::write(&canonical, &corrupted).unwrap();
+
+        let preserved = strip_workspace_skill_tail(proj.to_str().unwrap());
+
+        // Must preserve the user's real note.
+        let preserved = preserved.expect("user freeform should be preserved");
+        assert!(
+            preserved.contains("My real user note line 1"),
+            "user line 1 should survive, got: {:?}",
+            preserved
+        );
+        assert!(
+            preserved.contains("My real user note line 2"),
+            "user line 2 should survive, got: {:?}",
+            preserved
+        );
+        // Placeholder comments must be discarded — otherwise stacking would
+        // reappear next regen.
+        assert!(
+            !preserved.contains(USER_NOTES_PLACEHOLDER),
+            "placeholder comments must be stripped from preserved content"
+        );
+        // After strip, the file must contain only the managed region + newline.
+        let post = fs::read_to_string(&canonical).unwrap();
+        assert!(post.ends_with(&format!("{}\n", SKILL_END_MARKER)), "file must end at the managed END marker after strip");
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn strip_tail_returns_none_when_tail_is_empty_or_placeholder_only() {
+        let proj = scratch_project();
+        let canonical = proj.join(".k2so/skills/k2so/SKILL.md");
+        // Tail with only K2SO-emitted noise (no user content).
+        let noise = format!(
+            "{begin}\nManaged\n{end}\n\n{sentinel}\n{placeholder}\n",
+            begin = SKILL_BEGIN_MARKER,
+            end = SKILL_END_MARKER,
+            sentinel = SKILL_USER_NOTES_SENTINEL,
+            placeholder = USER_NOTES_PLACEHOLDER,
+        );
+        fs::write(&canonical, &noise).unwrap();
+
+        let preserved = strip_workspace_skill_tail(proj.to_str().unwrap());
+        assert!(preserved.is_none(), "pure K2SO noise must not be preserved as user content");
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn migration_banner_is_idempotent_and_appends_new_archives() {
+        let proj = scratch_project();
+        let project_path = proj.to_str().unwrap();
+        let first_archive = proj.join(".k2so/migration/round-1.md");
+        let second_archive = proj.join(".k2so/migration/round-2.md");
+        fs::create_dir_all(first_archive.parent().unwrap()).unwrap();
+        fs::write(&first_archive, "round 1").unwrap();
+        fs::write(&second_archive, "round 2").unwrap();
+
+        inject_first_migration_banner(project_path, &[first_archive.clone()]);
+
+        let notice_path = proj.join(".k2so/MIGRATION-0.32.7.md");
+        assert!(notice_path.exists(), "migration notice must be created");
+        let after_first = fs::read_to_string(&notice_path).unwrap();
+        assert!(after_first.contains("round-1"), "first archive must be referenced");
+        let first_len = after_first.len();
+
+        // Second invocation with a DIFFERENT archive must append, not rewrite.
+        inject_first_migration_banner(project_path, &[second_archive.clone()]);
+        let after_second = fs::read_to_string(&notice_path).unwrap();
+        assert!(after_second.starts_with(&after_first), "append must preserve existing content");
+        assert!(after_second.len() > first_len, "second invocation must grow the file");
+        assert!(after_second.contains("round-2"), "second archive must be appended");
+
+        // Same archive twice — must still append (simple append mode); this is
+        // deliberate since harvests at different times produce timestamped
+        // archive paths anyway, so duplicates aren't a practical concern.
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn safe_symlink_archives_existing_regular_file() {
+        let proj = scratch_project();
+        let canonical = proj.join(".k2so/skills/k2so/SKILL.md");
+        // Seed canonical with a realistic shape (managed region +
+        // USER_NOTES sentinel) so the importer has somewhere to splice.
+        let canonical_body = format!(
+            "---\nk2so_skill: workspace\n---\n\n{begin}\nManaged body\n{end}\n\n{sentinel}\n{placeholder}\n",
+            begin = SKILL_BEGIN_MARKER,
+            end = SKILL_END_MARKER,
+            sentinel = SKILL_USER_NOTES_SENTINEL,
+            placeholder = USER_NOTES_PLACEHOLDER,
+        );
+        fs::write(&canonical, &canonical_body).unwrap();
+        let target = proj.join("GEMINI.md");
+        fs::write(&target, "user authored Gemini instructions").unwrap();
+
+        safe_symlink_harness_file(
+            &canonical,
+            &target,
+            proj.to_str().unwrap(),
+            "GEMINI.md",
+        );
+
+        // Target should now be a symlink pointing to canonical.
+        let meta = fs::symlink_metadata(&target).unwrap();
+        assert!(meta.file_type().is_symlink(), "target must be a symlink after safe-link");
+        // Reading through the symlink yields the canonical, which now
+        // includes the imported user body.
+        let linked_body = fs::read_to_string(&target).unwrap();
+        assert!(linked_body.contains("Managed body"), "managed region must survive import");
+        assert!(
+            linked_body.contains("user authored Gemini instructions"),
+            "Phase 7e: user's pre-existing body must be imported into canonical so the symlink still surfaces it"
+        );
+        // An archive must exist under .k2so/migration/ with the pre-link content.
+        let migration_dir = proj.join(".k2so/migration");
+        let entries: Vec<_> = std::fs::read_dir(&migration_dir).unwrap().flatten().collect();
+        let has_archive = entries.iter().any(|e| {
+            let p = e.path();
+            let body = fs::read_to_string(&p).unwrap_or_default();
+            body == "user authored Gemini instructions"
+        });
+        assert!(has_archive, "pre-existing user file must be archived before symlink replaces it");
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn import_claude_md_lands_in_user_notes_and_is_idempotent() {
+        let proj = scratch_project();
+        let canonical = proj.join(".k2so/skills/k2so/SKILL.md");
+        // Pre-seed a minimal SKILL.md with a MANAGED region + USER_NOTES sentinel.
+        let seeded = format!(
+            "---\nk2so_skill: workspace\n---\n\n{begin}\nManaged body\n{end}\n\n{sentinel}\n{placeholder}\n",
+            begin = SKILL_BEGIN_MARKER,
+            end = SKILL_END_MARKER,
+            sentinel = SKILL_USER_NOTES_SENTINEL,
+            placeholder = USER_NOTES_PLACEHOLDER,
+        );
+        fs::write(&canonical, &seeded).unwrap();
+
+        let user_body = "# My Claude memory\n\nA useful note about my codebase.";
+        import_claude_md_into_user_notes(
+            proj.to_str().unwrap(),
+            user_body,
+            "pre-existing user-authored CLAUDE.md",
+            "/tmp/fake/archive.md",
+        );
+
+        let after_first = fs::read_to_string(&canonical).unwrap();
+        assert!(
+            after_first.contains("A useful note about my codebase."),
+            "imported body must land in SKILL.md"
+        );
+        assert!(
+            after_first.contains("<!-- K2SO:IMPORT:CLAUDE_MD archive=/tmp/fake/archive.md -->"),
+            "import sentinel must be written"
+        );
+        // The import block must live below USER_NOTES sentinel (not stomp managed).
+        let user_notes_pos = after_first.find(SKILL_USER_NOTES_SENTINEL).unwrap();
+        let import_pos = after_first.find("A useful note").unwrap();
+        assert!(import_pos > user_notes_pos, "import must be below USER_NOTES sentinel");
+
+        // Second call with the SAME archive path must be a no-op (idempotent).
+        import_claude_md_into_user_notes(
+            proj.to_str().unwrap(),
+            user_body,
+            "pre-existing user-authored CLAUDE.md",
+            "/tmp/fake/archive.md",
+        );
+        let after_second = fs::read_to_string(&canonical).unwrap();
+        assert_eq!(after_first, after_second, "re-import with same archive must be idempotent");
+
+        // Third call with a DIFFERENT archive path MUST add a second block.
+        import_claude_md_into_user_notes(
+            proj.to_str().unwrap(),
+            "another body",
+            "upgrade-era CLAUDE.md",
+            "/tmp/fake/archive-2.md",
+        );
+        let after_third = fs::read_to_string(&canonical).unwrap();
+        assert!(after_third.contains("another body"), "second archive must be imported");
+        assert!(
+            after_third.contains("<!-- K2SO:IMPORT:CLAUDE_MD archive=/tmp/fake/archive-2.md -->"),
+            "second import sentinel must be present"
+        );
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn workspace_remove_then_readd_leaves_data_intact() {
+        // Simulate the remove-then-re-add flow. Removing a workspace from
+        // K2SO only deletes DB rows (no FS mutation), and re-adding triggers
+        // the startup loop — which sees the sentinel + existing symlinks
+        // and no-ops. Key invariant: the archives + imported USER_NOTES
+        // content survive untouched.
+        let proj = scratch_project();
+        let project_path = proj.to_str().unwrap();
+        fs::create_dir_all(proj.join(".k2so/agents/backend-eng")).unwrap();
+        let agent_claude = proj.join(".k2so/agents/backend-eng/CLAUDE.md");
+        fs::write(&agent_claude, "backend agent notes").unwrap();
+
+        // First launch after upgrade: harvest fires.
+        harvest_per_agent_claude_md_files(project_path);
+
+        let archive_dir = proj.join(".k2so/migration/agents/backend-eng");
+        let archive_files: Vec<_> = fs::read_dir(&archive_dir).unwrap().flatten().collect();
+        assert_eq!(archive_files.len(), 1, "first launch should archive once");
+        let archived_body = fs::read_to_string(archive_files[0].path()).unwrap();
+        assert_eq!(archived_body, "backend agent notes");
+
+        // Simulate user removing the workspace from K2SO:
+        //   (DB-only delete — no FS mutation). Then re-adding.
+        //   On next launch, harvester fires again; sentinel should short-circuit.
+        harvest_per_agent_claude_md_files(project_path);
+
+        // Archive count must still be 1 — no duplication.
+        let archive_files_after: Vec<_> = fs::read_dir(&archive_dir).unwrap().flatten().collect();
+        assert_eq!(
+            archive_files_after.len(),
+            1,
+            "re-add must not duplicate archives (sentinel gates re-harvest)"
+        );
+        // Original archive must be intact.
+        let archived_after = fs::read_to_string(archive_files_after[0].path()).unwrap();
+        assert_eq!(archived_after, "backend agent notes", "archive content must survive remove+re-add");
+        // Sentinel still in place.
+        assert!(
+            proj.join(".k2so/.harvest-0.32.7-done").exists(),
+            "sentinel persists across remove+re-add (it's filesystem, not DB)"
+        );
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Phase 7e: full lifecycle integration — add workspace, then remove
+    // it via each teardown mode. Builds a mock workspace with pre-existing
+    // harness files for every CLI we support, invokes the real
+    // write_workspace_skill_file_with_body flow, then exercises
+    // teardown_workspace_harness_files in both modes to confirm
+    // lossless ingest + restore.
+    // ══════════════════════════════════════════════════════════════════
+
+    /// Build a mock workspace that looks like the user was using every
+    /// supported CLI LLM already — each has accumulated user content we
+    /// must preserve.
+    fn mock_multi_harness_workspace() -> PathBuf {
+        let proj = scratch_project();
+        // Root-level discovery files — every harness's convention path.
+        fs::write(proj.join("CLAUDE.md"), "# Claude memory\nMy codebase notes from # memory writes.\n").unwrap();
+        fs::write(proj.join("GEMINI.md"), "# Gemini instructions\nCustom Gemini behavior for this repo.\n").unwrap();
+        fs::write(proj.join("AGENT.md"), "# Code Puppy\nAgent persona customizations.\n").unwrap();
+        fs::write(proj.join(".goosehints"), "Goose hints — how to navigate this codebase.\n").unwrap();
+        fs::write(
+            proj.join(".aider.conf.yml"),
+            "# Existing Aider config\nmodel: gpt-4o\nread:\n  - CONVENTIONS.md\n  - ARCHITECTURE.md\n",
+        ).unwrap();
+        // OpenCode agent dir exists with the user's own agent files.
+        fs::create_dir_all(proj.join(".opencode/agent")).unwrap();
+        fs::write(
+            proj.join(".opencode/agent/my-refactor-helper.md"),
+            "# My custom OpenCode agent\nSpecialized refactoring persona.\n",
+        ).unwrap();
+        // Cursor rules dir with user-authored project rules.
+        fs::create_dir_all(proj.join(".cursor/rules")).unwrap();
+        fs::write(
+            proj.join(".cursor/rules/my-codebase.mdc"),
+            "---\nalwaysApply: true\n---\nMy project-specific Cursor rule.\n",
+        ).unwrap();
+        // PROJECT.md populated so SKILL.md has real content to freeze.
+        fs::write(
+            proj.join(".k2so/PROJECT.md"),
+            "# K2SO\n\nTauri workspace manager. Rust backend + React 19 frontend.\n",
+        ).unwrap();
+        proj
+    }
+
+    #[test]
+    fn add_workspace_ingests_all_harness_files_into_skill_and_archives() {
+        let proj = mock_multi_harness_workspace();
+        let project_path = proj.to_str().unwrap();
+
+        // Invoke the real add-workspace path. This composes SKILL.md,
+        // runs safe_symlink_harness_file for each root harness file,
+        // merges .aider.conf.yml, generates Cursor MDC, and sets up
+        // the root SKILL.md + CLAUDE.md symlinks.
+        write_workspace_skill_file_with_body(project_path, None);
+
+        let canonical = proj.join(".k2so/skills/k2so/SKILL.md");
+        assert!(canonical.exists(), "canonical SKILL.md must be written");
+        let skill_body = fs::read_to_string(&canonical).unwrap();
+
+        // Every root harness file that collides with K2SO should now be
+        // a symlink pointing at the canonical.
+        for name in ["CLAUDE.md", "GEMINI.md", "AGENT.md", ".goosehints", "SKILL.md"] {
+            let path = proj.join(name);
+            let meta = fs::symlink_metadata(&path).unwrap();
+            assert!(
+                meta.file_type().is_symlink(),
+                "{} should be a symlink after ingest, got {:?}",
+                name,
+                meta.file_type(),
+            );
+        }
+
+        // The archive dir should contain byte-identical copies of every
+        // ingested file, keyed under .k2so/migration/.
+        let migration_root = proj.join(".k2so/migration");
+        let mut found_archives = 0;
+        if let Ok(entries) = fs::read_dir(&migration_root) {
+            for e in entries.flatten() {
+                let path = e.path();
+                if path.is_file() {
+                    found_archives += 1;
+                }
+            }
+        }
+        assert!(
+            found_archives >= 4,
+            "expected archives for CLAUDE.md/GEMINI.md/AGENT.md/.goosehints at least, got {}",
+            found_archives,
+        );
+
+        // Each user body should be imported into the SKILL.md USER_NOTES
+        // tail. Searching for distinct sentences from each file.
+        assert!(
+            skill_body.contains("My codebase notes from # memory writes"),
+            "CLAUDE.md body not imported into SKILL.md USER_NOTES"
+        );
+        assert!(
+            skill_body.contains("Custom Gemini behavior for this repo"),
+            "GEMINI.md body not imported into SKILL.md USER_NOTES"
+        );
+        assert!(
+            skill_body.contains("Agent persona customizations"),
+            "root AGENT.md body not imported into SKILL.md USER_NOTES"
+        );
+        assert!(
+            skill_body.contains("Goose hints"),
+            ".goosehints body not imported into SKILL.md USER_NOTES"
+        );
+
+        // OpenCode custom agent files must be left alone (no collision).
+        assert!(
+            proj.join(".opencode/agent/my-refactor-helper.md").exists(),
+            "user's OpenCode agent files must be preserved untouched"
+        );
+
+        // Cursor user rules must be preserved; k2so.mdc added alongside.
+        assert!(
+            proj.join(".cursor/rules/my-codebase.mdc").exists(),
+            "user's Cursor rule files must be preserved"
+        );
+        assert!(
+            proj.join(".cursor/rules/k2so.mdc").exists(),
+            "K2SO's Cursor MDC must be added"
+        );
+
+        // Aider config should have SKILL.md merged into read: WITHOUT
+        // clobbering existing read: entries or other top-level keys.
+        let aider = fs::read_to_string(proj.join(".aider.conf.yml")).unwrap();
+        assert!(aider.contains("SKILL.md"), "SKILL.md must be injected into Aider read: list");
+        assert!(aider.contains("CONVENTIONS.md"), "existing Aider reads must be preserved");
+        assert!(aider.contains("ARCHITECTURE.md"), "existing Aider reads must be preserved");
+        assert!(aider.contains("model: gpt-4o"), "non-read keys must be preserved");
+
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn add_workspace_is_idempotent_second_launch_imports_nothing_new() {
+        let proj = mock_multi_harness_workspace();
+        let project_path = proj.to_str().unwrap();
+
+        write_workspace_skill_file_with_body(project_path, None);
+        let first_body = fs::read_to_string(proj.join(".k2so/skills/k2so/SKILL.md")).unwrap();
+
+        // Second invocation — nothing pre-existing to ingest now (all
+        // harness files are symlinks). Body must not grow with duplicate
+        // imports.
+        write_workspace_skill_file_with_body(project_path, None);
+        let second_body = fs::read_to_string(proj.join(".k2so/skills/k2so/SKILL.md")).unwrap();
+
+        // Counting occurrences of the import sentinel prefix — must not
+        // increase between first and second run.
+        let first_imports = first_body.matches("<!-- K2SO:IMPORT:CLAUDE_MD archive=").count();
+        let second_imports = second_body.matches("<!-- K2SO:IMPORT:CLAUDE_MD archive=").count();
+        assert_eq!(
+            first_imports, second_imports,
+            "second launch must not re-import (sentinel should block duplicate adds)"
+        );
+
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn teardown_keep_current_freezes_symlinks_into_real_files() {
+        let proj = mock_multi_harness_workspace();
+        let project_path = proj.to_str().unwrap();
+        write_workspace_skill_file_with_body(project_path, None);
+        let canonical_body = fs::read_to_string(proj.join(".k2so/skills/k2so/SKILL.md")).unwrap();
+
+        let results = teardown_workspace_harness_files(project_path, TeardownMode::KeepCurrent);
+        assert!(!results.is_empty(), "teardown should report at least one action");
+        assert!(results.iter().all(|r| r.action == "froze"), "keep_current should produce only 'froze' actions: {:?}", results);
+
+        // Every previously-symlinked file is now a real file holding the
+        // canonical body verbatim.
+        for name in ["CLAUDE.md", "GEMINI.md", "AGENT.md", ".goosehints", "SKILL.md"] {
+            let path = proj.join(name);
+            let meta = fs::symlink_metadata(&path).expect(name);
+            assert!(
+                !meta.file_type().is_symlink(),
+                "{} must no longer be a symlink after teardown(keep_current)",
+                name,
+            );
+            assert!(meta.file_type().is_file(), "{} must be a regular file", name);
+            let body = fs::read_to_string(&path).unwrap();
+            assert_eq!(body, canonical_body, "{} must contain the frozen SKILL.md body", name);
+        }
+
+        // `.k2so/` is untouched — canonical + migration archives still present.
+        assert!(proj.join(".k2so/skills/k2so/SKILL.md").exists());
+        assert!(proj.join(".k2so/migration").is_dir());
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn teardown_restore_original_brings_back_every_archive() {
+        let proj = mock_multi_harness_workspace();
+        let project_path = proj.to_str().unwrap();
+        let pre_claude = fs::read_to_string(proj.join("CLAUDE.md")).unwrap();
+        let pre_gemini = fs::read_to_string(proj.join("GEMINI.md")).unwrap();
+        let pre_agent = fs::read_to_string(proj.join("AGENT.md")).unwrap();
+        let pre_goose = fs::read_to_string(proj.join(".goosehints")).unwrap();
+        let pre_aider = fs::read_to_string(proj.join(".aider.conf.yml")).unwrap();
+
+        write_workspace_skill_file_with_body(project_path, None);
+        let results = teardown_workspace_harness_files(project_path, TeardownMode::RestoreOriginal);
+        assert!(!results.is_empty(), "teardown should report actions");
+
+        // Each harness root file should now be a real file with the
+        // pre-ingest user content.
+        assert_eq!(fs::read_to_string(proj.join("CLAUDE.md")).unwrap(), pre_claude);
+        assert_eq!(fs::read_to_string(proj.join("GEMINI.md")).unwrap(), pre_gemini);
+        assert_eq!(fs::read_to_string(proj.join("AGENT.md")).unwrap(), pre_agent);
+        assert_eq!(fs::read_to_string(proj.join(".goosehints")).unwrap(), pre_goose);
+        assert_eq!(fs::read_to_string(proj.join(".aider.conf.yml")).unwrap(), pre_aider);
+
+        // Root SKILL.md was K2SO-created (no archive) — should be removed.
+        assert!(!proj.join("SKILL.md").exists(), "SKILL.md should be removed on restore (no prior original)");
+
+        // `.k2so/` internals preserved so reconnect later works.
+        assert!(proj.join(".k2so/skills/k2so/SKILL.md").exists());
+        assert!(proj.join(".k2so/migration").is_dir());
+        assert!(proj.join(".k2so/.harvest-0.32.7-done").exists() || !proj.join(".k2so/.harvest-0.32.7-done").exists(), "sentinel is fine either way");
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn reconnect_after_restore_original_reingests_cleanly() {
+        let proj = mock_multi_harness_workspace();
+        let project_path = proj.to_str().unwrap();
+
+        // First add.
+        write_workspace_skill_file_with_body(project_path, None);
+        // Full restore — back to original.
+        teardown_workspace_harness_files(project_path, TeardownMode::RestoreOriginal);
+        // Reconnect (re-add).
+        write_workspace_skill_file_with_body(project_path, None);
+
+        // Symlinks should be restored and content re-ingested.
+        assert!(fs::symlink_metadata(proj.join("CLAUDE.md")).unwrap().file_type().is_symlink());
+        assert!(fs::symlink_metadata(proj.join("GEMINI.md")).unwrap().file_type().is_symlink());
+
+        // SKILL.md must still contain the original user imports — archive
+        // sentinel keyed on archive path should dedupe.
+        let skill_body = fs::read_to_string(proj.join(".k2so/skills/k2so/SKILL.md")).unwrap();
+        assert!(skill_body.contains("My codebase notes from # memory writes"));
+        assert!(skill_body.contains("Custom Gemini behavior for this repo"));
+
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn teardown_leaves_k2so_dir_fully_intact() {
+        // Contract: .k2so/ is sacred across teardown. Every archive,
+        // canonical, sentinel, log, and PROJECT.md/AGENT.md file must
+        // survive. The user's own persona + project context stay live.
+        let proj = mock_multi_harness_workspace();
+        let project_path = proj.to_str().unwrap();
+        write_workspace_skill_file_with_body(project_path, None);
+        let pre_project_md = fs::read_to_string(proj.join(".k2so/PROJECT.md")).unwrap();
+
+        // Enumerate every path under .k2so/ before teardown.
+        let pre_paths: Vec<PathBuf> = walk_dir(&proj.join(".k2so"));
+        assert!(!pre_paths.is_empty(), "expected a populated .k2so/ before teardown");
+
+        teardown_workspace_harness_files(project_path, TeardownMode::KeepCurrent);
+        let post_paths: Vec<PathBuf> = walk_dir(&proj.join(".k2so"));
+
+        // Every pre-teardown path must still exist post-teardown.
+        for p in &pre_paths {
+            assert!(
+                post_paths.contains(p),
+                "{} disappeared from .k2so/ during teardown — invariant violated",
+                p.display(),
+            );
+        }
+        // PROJECT.md is byte-identical.
+        assert_eq!(fs::read_to_string(proj.join(".k2so/PROJECT.md")).unwrap(), pre_project_md);
+
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    fn walk_dir(root: &Path) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else { continue };
+            for e in entries.flatten() {
+                let p = e.path();
+                out.push(p.clone());
+                if p.is_dir() && !p.is_symlink() {
+                    stack.push(p);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn aider_conf_merge_preserves_user_reads_and_archives_original() {
+        let proj = scratch_project();
+        let project_path = proj.to_str().unwrap();
+        let aider_path = proj.join(".aider.conf.yml");
+        let original = "# my aider config\nmodel: gpt-4o\nread:\n  - CONVENTIONS.md\n  - ARCHITECTURE.md\nauto-lint: true\n";
+        fs::write(&aider_path, original).unwrap();
+
+        scaffold_aider_conf(project_path);
+
+        let merged = fs::read_to_string(&aider_path).unwrap();
+        assert!(merged.contains("SKILL.md"), "SKILL.md must be injected");
+        assert!(merged.contains("CONVENTIONS.md"), "original read entries preserved");
+        assert!(merged.contains("ARCHITECTURE.md"), "original read entries preserved");
+        assert!(merged.contains("model: gpt-4o"), "non-read top-level keys preserved");
+        assert!(merged.contains("auto-lint: true"), "non-read top-level keys preserved");
+
+        // Archive exists with original content.
+        let migration_root = proj.join(".k2so/migration");
+        let mut found = false;
+        if let Ok(entries) = fs::read_dir(&migration_root) {
+            for e in entries.flatten() {
+                if let Ok(body) = fs::read_to_string(e.path()) {
+                    if body == original { found = true; }
+                }
+            }
+        }
+        assert!(found, "original .aider.conf.yml must be archived before mutation");
+
+        // Second invocation must be a no-op (SKILL.md already present).
+        scaffold_aider_conf(project_path);
+        let second = fs::read_to_string(&aider_path).unwrap();
+        assert_eq!(merged, second, "idempotent — second call must not re-inject");
+
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn safe_symlink_is_idempotent_when_target_is_already_symlink() {
+        let proj = scratch_project();
+        let canonical = proj.join(".k2so/skills/k2so/SKILL.md");
+        fs::write(&canonical, "canonical").unwrap();
+        let target = proj.join(".goosehints");
+
+        // First invocation creates the symlink.
+        safe_symlink_harness_file(&canonical, &target, proj.to_str().unwrap(), ".goosehints");
+        // Second invocation must not archive anything (no pre-existing file to save).
+        safe_symlink_harness_file(&canonical, &target, proj.to_str().unwrap(), ".goosehints");
+
+        let migration_dir = proj.join(".k2so/migration");
+        let entries_count = std::fs::read_dir(&migration_dir)
+            .map(|r| r.flatten().count())
+            .unwrap_or(0);
+        assert_eq!(entries_count, 0, "symlink-to-symlink re-run must not produce spurious archive entries");
+        fs::remove_dir_all(&proj).ok();
     }
 }

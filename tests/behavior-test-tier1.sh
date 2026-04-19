@@ -174,43 +174,52 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════
-section "1.4: Session Resume Flag"
+section "1.4: Session Resume (DB-Backed)"
 # ═══════════════════════════════════════════════════════════════════════
+# Session IDs moved from `.last_session` files to the agent_sessions DB
+# table in the v0.26 refactor. These tests seed a row, call heartbeat
+# noop, and verify the `session_id` column was cleared.
 
-run agent create resume-test --role "Session resume test" > /dev/null
+DB_PATH="$HOME/.k2so/k2so.db"
+PROJECT_ID=$(sqlite3 "$DB_PATH" "SELECT id FROM projects WHERE path='$TEST_WORKSPACE' LIMIT 1" 2>/dev/null || echo "")
 
-# Write a fake session ID
-mkdir -p "$TEST_WORKSPACE/.k2so/agents/resume-test/work/inbox"
-echo "test-session-abc123" > "$TEST_WORKSPACE/.k2so/agents/resume-test/.last_session"
-
-if [ -f "$TEST_WORKSPACE/.k2so/agents/resume-test/.last_session" ]; then
-    pass "resume: session ID file created"
+if [ -z "$PROJECT_ID" ]; then
+    skip "resume: project row not found in DB (test workspace not registered)"
+    skip "resume: noop clears session_id"
+    skip "resume: no stale session after pruning"
 else
-    fail "resume: session file" "File not created"
-fi
+    run agent create resume-test --role "Session resume test" > /dev/null
 
-# Verify the session file is read by the system (file exists = resume will be used)
-SESSION_CONTENT=$(cat "$TEST_WORKSPACE/.k2so/agents/resume-test/.last_session" 2>/dev/null || echo "")
-if [ "$SESSION_CONTENT" = "test-session-abc123" ]; then
-    pass "resume: session ID file readable with correct content"
-else
-    fail "resume: session content" "Expected 'test-session-abc123', got '$SESSION_CONTENT'"
-fi
+    # Seed an agent_sessions row with a fake session_id.
+    sqlite3 "$DB_PATH" \
+        "INSERT OR REPLACE INTO agent_sessions (project_id, agent_name, session_id, created_at, updated_at) VALUES ('$PROJECT_ID', 'resume-test', 'test-session-abc123', strftime('%s','now'), strftime('%s','now'))" \
+        2>/dev/null
 
-# Noop should delete the session file
-run heartbeat noop --agent resume-test > /dev/null
-if [ ! -f "$TEST_WORKSPACE/.k2so/agents/resume-test/.last_session" ]; then
-    pass "resume: noop deletes session ID (transcript pruning)"
-else
-    fail "resume: transcript pruning" ".last_session still exists after noop"
-fi
+    SEEDED=$(sqlite3 "$DB_PATH" "SELECT session_id FROM agent_sessions WHERE project_id='$PROJECT_ID' AND agent_name='resume-test'" 2>/dev/null)
+    if [ "$SEEDED" = "test-session-abc123" ]; then
+        pass "resume: session_id seeded in agent_sessions table"
+    else
+        fail "resume: seed" "Expected seeded session_id, got '$SEEDED'"
+    fi
 
-# Session file should be gone — next launch would start fresh
-SESSION_CONTENT=$(cat "$TEST_WORKSPACE/.k2so/agents/resume-test/.last_session" 2>/dev/null || echo "DELETED")
-if [ "$SESSION_CONTENT" = "DELETED" ]; then
-    pass "resume: no stale session after pruning (file deleted)"
-else
-    fail "resume: stale session" "Session file still contains: $SESSION_CONTENT"
+    # heartbeat noop should clear session_id (set to NULL).
+    run heartbeat noop --agent resume-test > /dev/null
+
+    POST_NOOP=$(sqlite3 "$DB_PATH" "SELECT IFNULL(session_id,'NULL') FROM agent_sessions WHERE project_id='$PROJECT_ID' AND agent_name='resume-test'" 2>/dev/null)
+    if [ "$POST_NOOP" = "NULL" ] || [ -z "$POST_NOOP" ]; then
+        pass "resume: noop clears session_id in agent_sessions table"
+    else
+        fail "resume: transcript pruning" "session_id still present: '$POST_NOOP'"
+    fi
+
+    # No-ops should make the next wake start a fresh session — verify by
+    # querying the DB one more time and confirming it's still NULL.
+    RECHECK=$(sqlite3 "$DB_PATH" "SELECT IFNULL(session_id,'NULL') FROM agent_sessions WHERE project_id='$PROJECT_ID' AND agent_name='resume-test'" 2>/dev/null)
+    if [ "$RECHECK" = "NULL" ] || [ -z "$RECHECK" ]; then
+        pass "resume: no stale session after pruning"
+    else
+        fail "resume: stale session" "session_id reappeared: '$RECHECK'"
+    fi
 fi
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -288,26 +297,35 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════
-section "1.7: No-Op Transcript Pruning"
+section "1.7: No-Op Transcript Pruning (DB-Backed)"
 # ═══════════════════════════════════════════════════════════════════════
+# Clean standalone test mirroring 1.4 but with a different agent name so
+# the prior test's cleanup can't mask regressions.
 
-# Already tested in 1.4 but let's do a clean standalone test
-run agent create prune-test --role "Pruning test" > /dev/null
-mkdir -p "$TEST_WORKSPACE/.k2so/agents/prune-test/work/inbox"
-echo "session-to-prune" > "$TEST_WORKSPACE/.k2so/agents/prune-test/.last_session"
-
-if [ -f "$TEST_WORKSPACE/.k2so/agents/prune-test/.last_session" ]; then
-    pass "pruning: session file exists before noop"
+if [ -z "$PROJECT_ID" ]; then
+    skip "pruning: session row clear after noop"
 else
-    fail "pruning: setup" "Session file not created"
-fi
+    run agent create prune-test --role "Pruning test" > /dev/null
 
-run heartbeat noop --agent prune-test > /dev/null
+    sqlite3 "$DB_PATH" \
+        "INSERT OR REPLACE INTO agent_sessions (project_id, agent_name, session_id, created_at, updated_at) VALUES ('$PROJECT_ID', 'prune-test', 'session-to-prune', strftime('%s','now'), strftime('%s','now'))" \
+        2>/dev/null
 
-if [ ! -f "$TEST_WORKSPACE/.k2so/agents/prune-test/.last_session" ]; then
-    pass "pruning: session file deleted after noop"
-else
-    fail "pruning: delete" "Session file still exists"
+    SEEDED=$(sqlite3 "$DB_PATH" "SELECT session_id FROM agent_sessions WHERE project_id='$PROJECT_ID' AND agent_name='prune-test'" 2>/dev/null)
+    if [ "$SEEDED" = "session-to-prune" ]; then
+        pass "pruning: session_id seeded before noop"
+    else
+        fail "pruning: setup" "Expected seeded session_id, got '$SEEDED'"
+    fi
+
+    run heartbeat noop --agent prune-test > /dev/null
+
+    POST=$(sqlite3 "$DB_PATH" "SELECT IFNULL(session_id,'NULL') FROM agent_sessions WHERE project_id='$PROJECT_ID' AND agent_name='prune-test'" 2>/dev/null)
+    if [ "$POST" = "NULL" ] || [ -z "$POST" ]; then
+        pass "pruning: session_id cleared after noop"
+    else
+        fail "pruning: delete" "session_id still present: '$POST'"
+    fi
 fi
 
 # ═══════════════════════════════════════════════════════════════════════

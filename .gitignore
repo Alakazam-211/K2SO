@@ -12,6 +12,13 @@ src-tauri/target/
 drizzle/meta/
 .claude/
 SKILL.md
+CLAUDE.md
+GEMINI.md
+/AGENT.md
+AGENTS.md
+.goosehints
+.cursor/rules/k2so.mdc
+.github/copilot-instructions.md
 .opencode/agent/k2so*.md
 .pi/skills/k2so/
 .env
@@ -19,3 +26,6 @@ SKILL.md
 *.key
 *.key.pub
 .worktrees/
+.k2so/migration/
+.k2so/logs/
+.k2so/.last-skill-regen

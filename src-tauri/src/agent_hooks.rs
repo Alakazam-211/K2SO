@@ -1487,12 +1487,19 @@ pub fn start_server(app_handle: AppHandle) -> u16 {
                         }
                     }
                     "/cli/workspace/remove" => {
-                        // Deregister a workspace (remove from DB, keep files)
+                        // Deregister a workspace. If `mode` is passed,
+                        // runs the teardown (keep_current | restore_original)
+                        // BEFORE the DB row is deleted, so symlinks are
+                        // resolved first. Without `mode`, behavior matches
+                        // the pre-0.32.7 contract: DB-only delete, files
+                        // left as-is (symlinks stay, pointing at the still-
+                        // intact canonical SKILL.md).
                         let target = params.get("path").cloned().unwrap_or_default();
+                        let mode = params.get("mode").cloned();
                         if target.is_empty() {
                             Err("Missing 'path' parameter".to_string())
                         } else {
-                            cli_remove_workspace(&target, &app_handle)
+                            cli_remove_workspace(&target, mode.as_deref(), &app_handle)
                         }
                     }
                     "/cli/workspace/cleanup" => {
@@ -2856,7 +2863,11 @@ fn cli_register_workspace(path: &str, app_handle: &tauri::AppHandle) -> Result<S
 }
 
 /// Remove a workspace from K2SO's DB (deregister). Does NOT delete files on disk.
-fn cli_remove_workspace(path: &str, app_handle: &tauri::AppHandle) -> Result<String, String> {
+fn cli_remove_workspace(
+    path: &str,
+    mode: Option<&str>,
+    app_handle: &tauri::AppHandle,
+) -> Result<String, String> {
     let db_path = dirs::home_dir()
         .ok_or("No home dir")?
         .join(".k2so")
@@ -2872,6 +2883,29 @@ fn cli_remove_workspace(path: &str, app_handle: &tauri::AppHandle) -> Result<Str
         |row| row.get(0),
     ).map_err(|_| format!("Workspace not found: {}", path))?;
 
+    // Phase 7e: if the caller specified a teardown mode, resolve the
+    // workspace-root symlinks first so downstream CLIs keep working or
+    // the workspace fully reverts. `.k2so/` is always preserved.
+    let teardown = match mode {
+        Some("keep_current") | Some("keep-current") => Some(
+            crate::commands::k2so_agents::teardown_workspace_harness_files(
+                path,
+                crate::commands::k2so_agents::TeardownMode::KeepCurrent,
+            ),
+        ),
+        Some("restore_original") | Some("restore-original") => Some(
+            crate::commands::k2so_agents::teardown_workspace_harness_files(
+                path,
+                crate::commands::k2so_agents::TeardownMode::RestoreOriginal,
+            ),
+        ),
+        Some(other) => return Err(format!(
+            "Unknown teardown mode '{}'. Expected 'keep_current' or 'restore_original'.",
+            other
+        )),
+        None => None,
+    };
+
     // Delete workspaces first (foreign key)
     conn.execute("DELETE FROM workspaces WHERE project_id = ?1", rusqlite::params![project_id])
         .map_err(|e| format!("Failed to delete workspaces: {}", e))?;
@@ -2879,7 +2913,11 @@ fn cli_remove_workspace(path: &str, app_handle: &tauri::AppHandle) -> Result<Str
         .map_err(|e| format!("Failed to delete project: {}", e))?;
 
     let _ = app_handle.emit("sync:projects", ());
-    Ok(serde_json::json!({ "success": true, "removed": path }).to_string())
+    Ok(serde_json::json!({
+        "success": true,
+        "removed": path,
+        "teardown": teardown,
+    }).to_string())
 }
 
 fn cli_cleanup_stale_workspaces(app_handle: &tauri::AppHandle) -> Result<String, String> {
