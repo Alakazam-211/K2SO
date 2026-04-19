@@ -28,6 +28,14 @@ pub struct CompanionState {
     pub allow_remote_spawn: bool,
     /// Per-IP rate limiter gating /companion/auth attempts.
     pub auth_limiter: Mutex<AuthRateLimiter>,
+    /// Cache for reflowed grid JSON strings, keyed by
+    /// `(terminal_id, (cols, rows))`. Value is `(seqno, serialized_json)`.
+    /// Hit when the stored seqno matches the current grid seqno — the
+    /// reflow+serialize is reused instead of recomputed per-tick. Entries
+    /// for a terminal are auto-invalidated on the next tick whose seqno
+    /// is newer: the old string is simply overwritten. Bounded in practice
+    /// by active mobile client count (a handful per session).
+    pub reflow_cache: Mutex<std::collections::HashMap<(String, (u16, u16)), (u64, String)>>,
     /// Keeps the ngrok runtime thread alive — drop this to stop the tunnel
     pub _tunnel_keepalive: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }

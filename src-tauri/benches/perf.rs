@@ -71,6 +71,7 @@ fn make_grid(cols: u16, rows: u16) -> GridUpdate {
         display_offset: 0,
         selection: None,
         perf: None,
+        seqno: 1,
     }
 }
 

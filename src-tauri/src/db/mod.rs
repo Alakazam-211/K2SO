@@ -231,6 +231,8 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
         ("0027_wakes_since_compact", include_str!("../../drizzle_sql/0027_wakes_since_compact.sql")),
         ("0028_agent_heartbeats", include_str!("../../drizzle_sql/0028_agent_heartbeats.sql")),
         ("0029_heartbeat_fires_schedule_name", include_str!("../../drizzle_sql/0029_heartbeat_fires_schedule_name.sql")),
+        ("0030_code_migrations", include_str!("../../drizzle_sql/0030_code_migrations.sql")),
+        ("0031_skill_regen_version", include_str!("../../drizzle_sql/0031_skill_regen_version.sql")),
     ];
 
     for (name, sql) in migrations {
@@ -295,6 +297,38 @@ fn run_single_migration(conn: &Connection, name: &str, sql: &str) -> Result<()> 
     )?;
     conn.execute_batch("COMMIT;")?;
     Ok(())
+}
+
+/// Check whether a code-side migration with the given id has been recorded.
+///
+/// "Code migrations" are one-time runtime passes (filesystem rewrites,
+/// legacy-type coercion, etc.) whose only job is to get from state A to
+/// state B. Gating them behind this check turns every launch after the
+/// first into a no-op for that pass, instead of re-scanning the whole
+/// workspace tree to confirm there's nothing to do.
+///
+/// The table (`code_migrations`, added in migration 0030) is created
+/// lazily at startup; callers before migration 0030 has run see `false`
+/// and safely fall through to running the migration.
+pub fn has_code_migration_applied(conn: &Connection, id: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM code_migrations WHERE id = ?1 LIMIT 1",
+        params![id],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+/// Record that a code migration completed successfully. Idempotent
+/// (INSERT OR IGNORE) so repeat callers during a partial-completion
+/// scenario don't error. Takes a free-form `notes` string for future
+/// debugging — store counts, version numbers, anything small.
+pub fn mark_code_migration_applied(conn: &Connection, id: &str, notes: Option<&str>) {
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO code_migrations (id, applied_at, notes) \
+         VALUES (?1, unixepoch(), ?2)",
+        params![id, notes],
+    );
 }
 
 /// Seed built-in agent presets. Uses INSERT OR IGNORE so new presets

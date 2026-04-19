@@ -18,10 +18,8 @@ use alacritty_terminal::tty;
 use alacritty_terminal::Term;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Rgb};
 
-use base64::Engine;
 use tauri::{AppHandle, Emitter};
 
-use super::bitmap_renderer::{self, BitmapBuffer, CellInfo, CursorInfo, CursorShape};
 use super::font_renderer::GlyphCache;
 use super::grid_types::*;
 
@@ -215,19 +213,15 @@ fn flags_to_u8(flags: CellFlags) -> u8 {
     out
 }
 
-// ── Bitmap State ────────────────────────────────────────────────────────
+// ── Glyph State ─────────────────────────────────────────────────────────
 
-/// Per-terminal rendering state shared between the main thread and emission thread.
-pub struct BitmapState {
+/// Per-terminal glyph cache wrapper. Tracks font-size + DPR scaling and
+/// derived cell metrics used by the grid emission loop for layout. Was
+/// previously `GlyphState` when K2SO also shipped an experimental GPU
+/// bitmap renderer — that code was removed in 0.32.11; this struct only
+/// retains the cell-metrics glyph cache that the DOM grid path still uses.
+pub struct GlyphState {
     pub glyph_cache: GlyphCache,
-    pub bitmap: BitmapBuffer,
-    pub focused: bool,
-    pub cursor_blink_visible: bool,
-    pub cached_b64: Option<String>,
-    /// When true, the emission loop does a full render (all rows) instead
-    /// of relying on damage tracking. Set by scroll() since scroll_display
-    /// doesn't reliably produce damage.
-    pub force_full_render: bool,
 }
 
 // ── Terminal Instance ────────────────────────────────────────────────────
@@ -235,12 +229,17 @@ pub struct BitmapState {
 struct AlacrittyTerminalInstance {
     term: Arc<FairMutex<Term<K2SOListener>>>,
     event_loop_sender: EventLoopSender,
+    /// Stored for future use — emission threads receive their own clone.
+    /// Keeping the handle on the Instance means lifecycle paths that
+    /// need to emit lifecycle events ("terminal about to die", etc.)
+    /// don't need to thread a separate handle through every method.
+    #[allow(dead_code)]
     app_handle: AppHandle,
     cwd: String,
     pty_raw_fd: i32,
     child_pid: Option<u32>,
     palette: [Option<Rgb>; 269],
-    bitmap_state: Arc<Mutex<BitmapState>>,
+    glyph_state: Arc<Mutex<GlyphState>>,
     /// Atomic flag for grid emission loop — set by scroll() to force full re-snapshot.
     force_full_render: Arc<std::sync::atomic::AtomicBool>,
     /// Channel to send manual wakeups to the emission loop
@@ -248,6 +247,14 @@ struct AlacrittyTerminalInstance {
     wakeup_tx: Option<mpsc::Sender<()>>,
     /// Handle for the grid emission thread, joined on kill.
     grid_thread_handle: Option<thread::JoinHandle<()>>,
+    /// Monotonic counter bumped every time the grid emission loop fires an
+    /// update. Consumers (the companion poll loop, the frontend) compare
+    /// this value against their last-seen value to decide whether to
+    /// re-broadcast. Starts at 1 so `0` remains a sentinel meaning "never
+    /// observed". Incremented with Relaxed ordering — we only need
+    /// monotonic-per-writer and visibility; no happens-before constraint
+    /// with other state.
+    seqno: Arc<std::sync::atomic::AtomicU64>,
 }
 
 // ── Terminal Manager ─────────────────────────────────────────────────────
@@ -433,26 +440,15 @@ impl TerminalManager {
 
         let palette = default_color_palette();
 
-        // Initialize bitmap rendering state
+        // Initialize glyph cache (used for cell-metrics lookup by the
+        // DOM grid emission loop + set_font_size command).
         let font_size = 13.0f32; // matches TERMINAL_FONT_SIZE_DEFAULT
         let dpr = 1.0f32; // updated by frontend on first connect
         let glyph_cache = GlyphCache::new(font_size, dpr);
-        let bitmap = BitmapBuffer::new(
-            c as u16,
-            r as u16,
-            glyph_cache.cell_width,
-            glyph_cache.cell_height,
-        );
-        let bitmap_state = Arc::new(Mutex::new(BitmapState {
-            glyph_cache,
-            bitmap,
-            focused: true,
-            cursor_blink_visible: true,
-            cached_b64: None,
-            force_full_render: false,
-        }));
+        let glyph_state = Arc::new(Mutex::new(GlyphState { glyph_cache }));
 
         let force_full_render = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seqno = Arc::new(std::sync::atomic::AtomicU64::new(1));
 
         // Spawn grid (DOM text) emission thread
         let term_for_grid = Arc::clone(&term);
@@ -460,6 +456,7 @@ impl TerminalManager {
         let id_for_grid = id.clone();
         let grid_palette = palette;
         let force_full_for_grid = Arc::clone(&force_full_render);
+        let seqno_for_grid = Arc::clone(&seqno);
 
         let grid_thread_handle = thread::spawn(move || {
             grid_emission_loop(
@@ -469,6 +466,7 @@ impl TerminalManager {
                 wakeup_rx,
                 grid_palette,
                 force_full_for_grid,
+                seqno_for_grid,
             );
         });
 
@@ -480,10 +478,11 @@ impl TerminalManager {
             pty_raw_fd: raw_fd,
             child_pid: Some(child_pid),
             palette,
-            bitmap_state,
+            glyph_state,
             force_full_render,
             wakeup_tx: Some(scroll_wakeup_tx),
             grid_thread_handle: Some(grid_thread_handle),
+            seqno,
         };
 
         self.terminals.insert(id.clone(), instance);
@@ -696,12 +695,6 @@ impl TerminalManager {
         self.terminals.contains_key(id)
     }
 
-    pub fn get_buffer(&self, _id: &str) -> Result<String, String> {
-        // In alacritty backend, scrollback is managed by the Term.
-        // Reattach uses get_grid() instead. Return empty for backward compat.
-        Ok(String::new())
-    }
-
     /// Read the last N lines of text from the terminal buffer (visible screen).
     /// Uses the same grid access pattern as snapshot_grid for correctness.
     pub fn read_lines(&self, id: &str, count: usize) -> Result<Vec<String>, String> {
@@ -776,6 +769,11 @@ impl TerminalManager {
     }
 
     /// Get a full grid snapshot for the terminal.
+    ///
+    /// The returned `GridUpdate.seqno` reflects the latest value bumped by
+    /// the emission loop. Consumers (the companion poll loop) compare this
+    /// against their last-seen seqno to skip all downstream work when the
+    /// grid hasn't changed since the last broadcast.
     pub fn get_grid(&self, id: &str) -> Result<GridUpdate, String> {
         let instance = self
             .terminals
@@ -783,7 +781,9 @@ impl TerminalManager {
             .ok_or_else(|| format!("Terminal {} not found", id))?;
 
         let term = instance.term.lock_unfair();
-        Ok(snapshot_grid(&term, &instance.palette, true))
+        let mut update = snapshot_grid(&term, &instance.palette, true);
+        update.seqno = instance.seqno.load(std::sync::atomic::Ordering::Relaxed);
+        Ok(update)
     }
 
     /// Scroll the terminal display.
@@ -805,8 +805,6 @@ impl TerminalManager {
 
         // Set the force-full-render flag so emission loop does full snapshot
         instance.force_full_render.store(true, std::sync::atomic::Ordering::Relaxed);
-        // Also set on bitmap_state for backward compat (if bitmap loop is running)
-        instance.bitmap_state.lock().force_full_render = true;
 
         // Send wakeup through the same channel as PTY events
         // This ensures the frame goes through the emission loop → event system,
@@ -818,42 +816,16 @@ impl TerminalManager {
         Ok(())
     }
 
-    /// Get a full bitmap frame for tab-switch reattach.
-    pub fn get_frame(&self, id: &str) -> Result<BitmapUpdate, String> {
-        let instance = self
-            .terminals
-            .get(id)
-            .ok_or_else(|| format!("Terminal {} not found", id))?;
-
-        let term = instance.term.lock_unfair();
-        let mut bstate = instance.bitmap_state.lock();
-        Ok(render_full_bitmap(&term, &instance.palette, &mut bstate))
-    }
-
-    /// Set font size and DPR — invalidates glyph cache, resizes bitmap, returns new cell metrics.
+    /// Set font size and DPR — invalidates glyph cache, returns new logical cell metrics.
     pub fn set_font_size(&self, id: &str, font_size: f32, dpr: f32) -> Result<(u32, u32), String> {
         let instance = self
             .terminals
             .get(id)
             .ok_or_else(|| format!("Terminal {} not found", id))?;
 
-        let mut bstate = instance.bitmap_state.lock();
+        let mut bstate = instance.glyph_state.lock();
         bstate.glyph_cache.set_font_size(font_size, dpr);
-
-        let logical_w = bstate.glyph_cache.logical_cell_width();
-        let logical_h = bstate.glyph_cache.logical_cell_height();
-
-        // Resize bitmap
-        let term = instance.term.lock_unfair();
-        let grid = term.grid();
-        bstate.bitmap = BitmapBuffer::new(
-            grid.columns() as u16,
-            grid.screen_lines() as u16,
-            bstate.glyph_cache.cell_width,
-            bstate.glyph_cache.cell_height,
-        );
-
-        Ok((logical_w, logical_h))
+        Ok((bstate.glyph_cache.logical_cell_width(), bstate.glyph_cache.logical_cell_height()))
     }
 
     /// Get logical cell metrics for mouse coordinate mapping.
@@ -863,7 +835,7 @@ impl TerminalManager {
             .get(id)
             .ok_or_else(|| format!("Terminal {} not found", id))?;
 
-        let bstate = instance.bitmap_state.lock();
+        let bstate = instance.glyph_state.lock();
         let term = instance.term.lock_unfair();
         let grid = term.grid();
 
@@ -875,17 +847,16 @@ impl TerminalManager {
         ))
     }
 
-    /// Set terminal focus state (controls cursor blink).
-    pub fn set_focus(&self, id: &str, focused: bool) -> Result<(), String> {
-        let instance = self
-            .terminals
-            .get(id)
-            .ok_or_else(|| format!("Terminal {} not found", id))?;
-
-        let mut bstate = instance.bitmap_state.lock();
-        bstate.focused = focused;
-        bstate.cursor_blink_visible = true; // reset blink on focus change
-
+    /// Set terminal focus state. Historically this controlled cursor
+    /// blink state on the experimental bitmap renderer (since removed
+    /// in 0.32.11); the DOM grid emission loop relies on the frontend
+    /// for focus visuals. Kept as a stable Tauri-command surface so
+    /// the frontend's `terminal_set_focus` call continues to resolve
+    /// while the bitmap path is reintroduced in a future release.
+    pub fn set_focus(&self, id: &str, _focused: bool) -> Result<(), String> {
+        if !self.terminals.contains_key(id) {
+            return Err(format!("Terminal {} not found", id));
+        }
         Ok(())
     }
 
@@ -965,10 +936,6 @@ impl TerminalManager {
             .values()
             .filter(|inst| inst.cwd.starts_with(path))
             .count() as i32
-    }
-
-    pub fn get_active_count(&self) -> i32 {
-        self.terminals.len() as i32
     }
 
     pub fn kill_all(&mut self) {
@@ -1210,6 +1177,10 @@ fn snapshot_grid(
             text_bytes,
             span_count,
         }),
+        // `0` signals "seqno not stamped by this path". Callers that own a
+        // TerminalInstance (get_grid, the emission loop) overwrite this
+        // with the current atomic value.
+        seqno: 0,
     }
 }
 
@@ -1290,363 +1261,7 @@ fn snapshot_damaged(
             text_bytes,
             span_count,
         }),
-    }
-}
-
-// ── Bitmap Rendering Helpers ─────────────────────────────────────────────
-
-/// Extract cell info from an alacritty row for bitmap rendering.
-fn extract_row_cells(
-    row: &alacritty_terminal::grid::Row<alacritty_terminal::term::cell::Cell>,
-    cols: usize,
-    palette: &[Option<Rgb>; 269],
-) -> Vec<CellInfo> {
-    let mut cells = Vec::with_capacity(cols);
-    for col_idx in 0..cols {
-        let cell = &row[Column(col_idx)];
-        cells.push(CellInfo {
-            ch: cell.c,
-            fg: resolve_color(&cell.fg, palette),
-            bg: resolve_color(&cell.bg, palette),
-            flags: flags_to_u8(cell.flags),
-        });
-    }
-    cells
-}
-
-
-/// Render the full terminal grid to bitmap and return a BitmapUpdate.
-fn render_full_bitmap(
-    term: &Term<K2SOListener>,
-    palette: &[Option<Rgb>; 269],
-    bstate: &mut BitmapState,
-) -> BitmapUpdate {
-    let render_start = std::time::Instant::now();
-
-    let grid = term.grid();
-    let cols = grid.columns();
-    let rows = grid.screen_lines();
-    let cursor = grid.cursor.point;
-    let cursor_visible = term.mode().contains(alacritty_terminal::term::TermMode::SHOW_CURSOR);
-
-    // Ensure bitmap is correctly sized
-    if bstate.bitmap.needs_resize(cols as u16, rows as u16, bstate.glyph_cache.cell_width, bstate.glyph_cache.cell_height) {
-        bstate.bitmap = BitmapBuffer::new(
-            cols as u16,
-            rows as u16,
-            bstate.glyph_cache.cell_width,
-            bstate.glyph_cache.cell_height,
-        );
-    }
-
-    // Destructure to satisfy borrow checker
-    let BitmapState { ref mut glyph_cache, ref mut bitmap, cursor_blink_visible, .. } = *bstate;
-
-    // Render all rows — offset by display_offset to read scrolled viewport
-    let display_offset = grid.display_offset();
-    for row_idx in 0..rows {
-        let line = Line(row_idx as i32 - display_offset as i32);
-        let row = &grid[line];
-        let cells = extract_row_cells(row, cols, palette);
-
-        let cursor_info = if cursor_visible && display_offset == 0 && cursor.line.0 == row_idx as i32 && cursor_blink_visible {
-            Some(CursorInfo {
-                col: cursor.column.0 as u16,
-                shape: CursorShape::Bar,
-                visible: true,
-            })
-        } else {
-            None
-        };
-
-        bitmap_renderer::render_row(
-            bitmap,
-            row_idx,
-            &cells,
-            glyph_cache,
-            cursor_info.as_ref(),
-        );
-    }
-
-    let render_elapsed = render_start.elapsed();
-
-    // QOI encode
-    let qoi_start = std::time::Instant::now();
-    let qoi_bytes = match qoi::encode_to_vec(
-        &bitmap.pixels,
-        bitmap.width,
-        bitmap.height,
-    ) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            log_debug!("[terminal/bitmap] QOI encode failed: {:?} ({}x{})", e, bitmap.width, bitmap.height);
-            return BitmapUpdate::default();
-        }
-    };
-    let qoi_elapsed = qoi_start.elapsed();
-
-    // Base64 encode
-    let image_b64 = base64::engine::general_purpose::STANDARD.encode(&qoi_bytes);
-
-    BitmapUpdate {
-        image_b64,
-        width: bitmap.width,
-        height: bitmap.height,
-        cols: cols as u16,
-        rows: rows as u16,
-        cell_width: glyph_cache.logical_cell_width(),
-        cell_height: glyph_cache.logical_cell_height(),
-        cursor_col: cursor.column.0 as u16,
-        cursor_row: cursor.line.0 as u16,
-        cursor_visible,
-        mode: term.mode().bits(),
-        display_offset: grid.display_offset(),
-        perf: Some(BitmapPerfInfo {
-            render_us: render_elapsed.as_micros() as u64,
-            qoi_us: qoi_elapsed.as_micros() as u64,
-            qoi_bytes: qoi_bytes.len() as u32,
-            damaged_rows: rows as u16,
-        }),
-    }
-}
-
-// ── Bitmap Emission Loop ────────────────────────────────────────────────
-
-/// Background thread that renders terminal content to bitmaps and emits
-/// them to the frontend. Replaces the old JSON grid emission loop.
-///
-/// Rate-limited to ~60fps. Renders only damaged rows into an existing
-/// RGBA buffer, then QOI-compresses and base64-encodes for IPC.
-fn bitmap_emission_loop(
-    id: &str,
-    term: &Arc<FairMutex<Term<K2SOListener>>>,
-    app_handle: &AppHandle,
-    wakeup_rx: mpsc::Receiver<()>,
-    _manual_wakeup_rx: mpsc::Receiver<()>,  // unused — scroll uses same channel via K2SOListener's tx
-    palette: [Option<Rgb>; 269],
-    bitmap_state: Arc<Mutex<BitmapState>>,
-) {
-    let event_name = format!("terminal:bitmap:{}", id);
-    let min_frame_interval = Duration::from_millis(16);
-    let mut last_emit = std::time::Instant::now() - min_frame_interval;
-
-    loop {
-        // Block on single wakeup channel — both PTY events and scroll use this
-        match wakeup_rx.recv() {
-            Ok(()) => {}
-            Err(_) => break,
-        }
-
-        // Rate limit: ensure at least 16ms between emissions
-        let since_last = last_emit.elapsed();
-        if since_last < min_frame_interval {
-            let wait = min_frame_interval - since_last;
-            let deadline = std::time::Instant::now() + wait;
-            loop {
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero() { break; }
-                match wakeup_rx.recv_timeout(remaining) {
-                    Ok(()) => continue,
-                    Err(mpsc::RecvTimeoutError::Timeout) => break,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
-                }
-            }
-        }
-
-        // Adaptive batch window: 4ms normally, extended during high-throughput.
-        // Count how many wakeups arrive during the batch to detect bursts.
-        let mut wakeup_count = 0u32;
-        let batch_deadline = std::time::Instant::now() + Duration::from_millis(4);
-        loop {
-            let remaining = batch_deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() { break; }
-            match wakeup_rx.recv_timeout(remaining) {
-                Ok(()) => { wakeup_count += 1; continue; }
-                Err(mpsc::RecvTimeoutError::Timeout) => break,
-                Err(mpsc::RecvTimeoutError::Disconnected) => return,
-            }
-        }
-
-        // During high-throughput bursts (many wakeups in 4ms), skip this frame
-        // to let the terminal accumulate more changes. This dramatically reduces
-        // the number of QOI encodes during large session loads.
-        if wakeup_count > 10 {
-            // Drain remaining wakeups for another 30ms, then render
-            let burst_deadline = std::time::Instant::now() + Duration::from_millis(30);
-            loop {
-                let remaining = burst_deadline.saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero() { break; }
-                match wakeup_rx.recv_timeout(remaining) {
-                    Ok(()) => continue,
-                    Err(mpsc::RecvTimeoutError::Timeout) => break,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
-                }
-            }
-        }
-
-        let blink_fired = false;
-
-        // Render bitmap
-        let render_start = std::time::Instant::now();
-
-        {
-            let mut term = term.lock_unfair();
-            let mut bstate = bitmap_state.lock();
-
-            let grid = term.grid();
-            let cols = grid.columns();
-            let rows = grid.screen_lines();
-            let display_offset = grid.display_offset();
-            let cursor = grid.cursor.point;
-            let cursor_visible = term.mode().contains(alacritty_terminal::term::TermMode::SHOW_CURSOR);
-            let term_mode = term.mode().bits();
-
-            // Log display offset to debug scroll
-            if display_offset > 0 || bstate.force_full_render {
-                log_debug!("[emit] display_offset={} force_full={} rows={}", display_offset, bstate.force_full_render, rows);
-            }
-
-            // Ensure bitmap is correctly sized
-            if bstate.bitmap.needs_resize(cols as u16, rows as u16, bstate.glyph_cache.cell_width, bstate.glyph_cache.cell_height) {
-                bstate.bitmap = BitmapBuffer::new(
-                    cols as u16,
-                    rows as u16,
-                    bstate.glyph_cache.cell_width,
-                    bstate.glyph_cache.cell_height,
-                );
-            }
-
-            // Check if scroll requested a full render
-            let force_full = bstate.force_full_render;
-            if force_full {
-                bstate.force_full_render = false;
-            }
-
-            // Get damaged rows (or all rows if forced by scroll)
-            let all_damaged: Vec<usize> = if force_full {
-                // Consume and discard damage to reset tracking
-                let _ = term.damage();
-                (0..rows).collect()
-            } else {
-                let damage = term.damage();
-                match damage {
-                    alacritty_terminal::term::TermDamage::Full => {
-                        (0..rows).collect()
-                    }
-                    alacritty_terminal::term::TermDamage::Partial(iter) => {
-                        iter.filter(|d| d.is_damaged())
-                            .map(|d| d.line)
-                            .collect()
-                    }
-                }
-            };
-
-            if all_damaged.is_empty() {
-                term.reset_damage();
-            } else {
-                let damaged_count = all_damaged.len();
-
-                // Re-borrow grid after damage()
-                let grid = term.grid();
-                let display_offset = grid.display_offset();
-
-                // Destructure to satisfy borrow checker
-                let BitmapState { ref mut glyph_cache, ref mut bitmap, .. } = *bstate;
-
-                // Render damaged rows.
-                // CRITICAL: When scrolled, display_offset > 0 means the viewport
-                // is shifted up into history. Line(0) is always the live bottom line,
-                // so we must subtract display_offset to read the scrolled viewport.
-                // Line(-(display_offset as i32)) = top of visible viewport when scrolled.
-                for &row_idx in &all_damaged {
-                    if row_idx >= rows { continue; }
-                    let line = Line(row_idx as i32 - display_offset as i32);
-                    let row = &grid[line];
-                    let cells = extract_row_cells(row, cols, &palette);
-
-                    let cursor_on_row = if cursor_visible && display_offset == 0 && cursor.line.0 == row_idx as i32 {
-                        Some(bitmap_renderer::CursorInfo {
-                            col: cursor.column.0 as u16,
-                            shape: bitmap_renderer::CursorShape::Bar,
-                            visible: true,
-                        })
-                    } else {
-                        None
-                    };
-
-                    bitmap_renderer::render_row(
-                        bitmap,
-                        row_idx,
-                        &cells,
-                        glyph_cache,
-                        cursor_on_row.as_ref(),
-                    );
-                }
-
-                term.reset_damage();
-
-                let render_elapsed = render_start.elapsed();
-
-                // QOI encode full buffer
-                let qoi_start = std::time::Instant::now();
-                let qoi_bytes = match qoi::encode_to_vec(
-                    &bitmap.pixels,
-                    bitmap.width,
-                    bitmap.height,
-                ) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        log_debug!("[terminal/bitmap] QOI encode failed in emission loop: {:?}", e);
-                        continue;
-                    }
-                };
-                let qoi_elapsed = qoi_start.elapsed();
-
-                let image_b64 = base64::engine::general_purpose::STANDARD.encode(&qoi_bytes);
-
-                // Lightweight perf logging (Rust-side only, no JS overhead)
-                let total_ms = render_start.elapsed().as_millis();
-                if total_ms > 5 || damaged_count > 10 {
-                    log_debug!(
-                        "[perf] id={} rows={}/{} render={}us qoi={}us size={}KB total={}ms",
-                        id, damaged_count, rows,
-                        render_elapsed.as_micros(),
-                        qoi_elapsed.as_micros(),
-                        image_b64.len() / 1024,
-                        total_ms,
-                    );
-                }
-
-                {
-                    let update = BitmapUpdate {
-                        image_b64,
-                        width: bitmap.width,
-                        height: bitmap.height,
-                        cols: cols as u16,
-                        rows: rows as u16,
-                        cell_width: glyph_cache.logical_cell_width(),
-                        cell_height: glyph_cache.logical_cell_height(),
-                        cursor_col: cursor.column.0 as u16,
-                        cursor_row: cursor.line.0 as u16,
-                        cursor_visible,
-                        mode: term_mode,
-                        display_offset,
-                        perf: Some(BitmapPerfInfo {
-                            render_us: render_elapsed.as_micros() as u64,
-                            qoi_us: qoi_elapsed.as_micros() as u64,
-                            qoi_bytes: qoi_bytes.len() as u32,
-                            damaged_rows: damaged_count as u16,
-                        }),
-                    };
-
-                    drop(bstate);
-                    drop(term);
-                    let _ = app_handle.emit(&event_name, &update);
-                }
-            }
-        }
-
-        last_emit = std::time::Instant::now();
+        seqno: 0, // stamped by the emission loop after this returns
     }
 }
 
@@ -1662,6 +1277,7 @@ fn grid_emission_loop(
     wakeup_rx: mpsc::Receiver<()>,
     palette: [Option<Rgb>; 269],
     force_full_render: Arc<std::sync::atomic::AtomicBool>,
+    seqno: Arc<std::sync::atomic::AtomicU64>,
 ) {
     let event_name = format!("terminal:grid:{}", id);
     let min_frame_interval = Duration::from_millis(16);
@@ -1720,7 +1336,7 @@ fn grid_emission_loop(
         // Snapshot the grid
         let force_full = force_full_render.swap(false, std::sync::atomic::Ordering::Relaxed);
 
-        let update = {
+        let mut update = {
             let mut term = term.lock_unfair();
 
             if force_full {
@@ -1735,6 +1351,11 @@ fn grid_emission_loop(
 
         // Only emit if there are lines to send
         if !update.lines.is_empty() {
+            // Bump + stamp seqno. This is the single source of truth for
+            // "grid has been updated" — the companion poll loop compares
+            // against its last-seen seqno to gate all subsequent work.
+            let next = seqno.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            update.seqno = next;
             let _ = app_handle.emit(&event_name, &update);
         }
 

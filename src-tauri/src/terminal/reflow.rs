@@ -68,6 +68,10 @@ pub fn reflow_grid(grid: &GridUpdate, target_cols: u16, target_rows: u16) -> Gri
         display_offset: start,
         selection: None,
         perf: None,
+        // Reflowed grid inherits its source's seqno — if the source hasn't
+        // changed, neither has the reflow, which is exactly the invariant
+        // P2.3's reflow cache relies on for key equality.
+        seqno: grid.seqno,
     }
 }
 
@@ -241,7 +245,7 @@ mod tests {
             cursor_visible: true, cursor_shape: "block".into(),
             lines: vec![line(0, "hello world", false)],
             full: true, mode: 0, display_offset: 0,
-            selection: None, perf: None,
+            selection: None, perf: None, seqno: 1,
         };
         let result = reflow_grid(&grid, 50, 20);
         assert_eq!(result.lines.len(), 1);
@@ -292,7 +296,7 @@ mod tests {
                 line(2, "xyz", false),           // separate logical line
             ],
             full: true, mode: 0, display_offset: 0,
-            selection: None, perf: None,
+            selection: None, perf: None, seqno: 1,
         };
         let result = reflow_grid(&grid, 5, 20);
         // "abcdefghijklmno" at width 5 → "abcde", "fghij", "klmno"
@@ -319,7 +323,7 @@ mod tests {
             cursor_visible: true, cursor_shape: "block".into(),
             lines: vec![line(0, &padded, false)],
             full: true, mode: 0, display_offset: 0,
-            selection: None, perf: None,
+            selection: None, perf: None, seqno: 1,
         };
         let result = reflow_grid(&grid, 50, 20);
         // Should fit in one line after trimming (23 chars < 50 cols)
@@ -343,7 +347,7 @@ mod tests {
                 line(1, &row2, false), // end
             ],
             full: true, mode: 0, display_offset: 0,
-            selection: None, perf: None,
+            selection: None, perf: None, seqno: 1,
         };
         let result = reflow_grid(&grid, 50, 20);
         // Joined: "bypass permissions on - 1 monitor" (trimmed, ~33 chars)
@@ -362,7 +366,7 @@ mod tests {
             cursor_visible: true, cursor_shape: "block".into(),
             lines: vec![colored_line(0, "hello world!", false, 0xff0000)],
             full: true, mode: 0, display_offset: 0,
-            selection: None, perf: None,
+            selection: None, perf: None, seqno: 1,
         };
         let result = reflow_grid(&grid, 5, 20);
         // "hello world!" → "hello", " worl", "d!"

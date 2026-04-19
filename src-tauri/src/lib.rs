@@ -165,76 +165,163 @@ pub fn run() {
                 let _ = std::fs::create_dir_all(templates.join("custom-agent"));
             }
 
-            // Migrate legacy agent types in agent.md files (pod-member → agent-template, pod-leader → manager)
-            {
-                let paths: Vec<String> = {
+            // Migrate legacy agent types in AGENT.md files (pod-member → agent-template,
+            // pod-leader → manager). Gated via the `code_migrations` table so this
+            // only runs the first time post-upgrade; subsequent launches skip entirely
+            // instead of rescanning every AGENT.md in every project.
+            perf_timer!("startup_migrate_legacy_agent_types", {
+                const MIGRATION_ID: &str = "legacy_agent_types_v1";
+                let needs_run = {
                     let state = app.state::<AppState>();
                     let db = state.db.lock();
-                    let mut p = Vec::new();
-                    if let Ok(mut stmt) = db.prepare("SELECT path FROM projects") {
-                        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
-                            for row in rows.flatten() { p.push(row); }
-                        }
-                    }
-                    p
+                    !db::has_code_migration_applied(&db, MIGRATION_ID)
                 };
-                for path in &paths {
-                    let agents_dir = std::path::PathBuf::from(path).join(".k2so/agents");
-                    if !agents_dir.exists() { continue; }
-                    if let Ok(entries) = std::fs::read_dir(&agents_dir) {
-                        for entry in entries.flatten() {
-                            let agent_md = entry.path().join("AGENT.md");
-                            if !agent_md.exists() { continue; }
-                            if let Ok(content) = std::fs::read_to_string(&agent_md) {
-                                let mut updated = content.clone();
-                                let mut changed = false;
-                                if updated.contains("type: pod-member") {
-                                    updated = updated.replace("type: pod-member", "type: agent-template");
-                                    changed = true;
-                                }
-                                if updated.contains("type: pod-leader") {
-                                    updated = updated.replace("type: pod-leader", "type: manager");
-                                    changed = true;
-                                }
-                                if updated.contains("pod_leader: true") {
-                                    updated = updated.replace("pod_leader: true", "manager: true");
-                                    changed = true;
-                                }
-                                if changed {
-                                    let _ = std::fs::write(&agent_md, &updated);
+                if needs_run {
+                    let paths: Vec<String> = {
+                        let state = app.state::<AppState>();
+                        let db = state.db.lock();
+                        let mut p = Vec::new();
+                        if let Ok(mut stmt) = db.prepare("SELECT path FROM projects") {
+                            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                                for row in rows.flatten() { p.push(row); }
+                            }
+                        }
+                        p
+                    };
+                    let mut rewritten_count = 0usize;
+                    for path in &paths {
+                        let agents_dir = std::path::PathBuf::from(path).join(".k2so/agents");
+                        if !agents_dir.exists() { continue; }
+                        if let Ok(entries) = std::fs::read_dir(&agents_dir) {
+                            for entry in entries.flatten() {
+                                let agent_md = entry.path().join("AGENT.md");
+                                if !agent_md.exists() { continue; }
+                                if let Ok(content) = std::fs::read_to_string(&agent_md) {
+                                    let mut updated = content.clone();
+                                    let mut changed = false;
+                                    if updated.contains("type: pod-member") {
+                                        updated = updated.replace("type: pod-member", "type: agent-template");
+                                        changed = true;
+                                    }
+                                    if updated.contains("type: pod-leader") {
+                                        updated = updated.replace("type: pod-leader", "type: manager");
+                                        changed = true;
+                                    }
+                                    if updated.contains("pod_leader: true") {
+                                        updated = updated.replace("pod_leader: true", "manager: true");
+                                        changed = true;
+                                    }
+                                    if changed {
+                                        let _ = std::fs::write(&agent_md, &updated);
+                                        rewritten_count += 1;
+                                    }
                                 }
                             }
                         }
                     }
+                    // Record completion — idempotent via INSERT OR IGNORE.
+                    let state = app.state::<AppState>();
+                    let db = state.db.lock();
+                    db::mark_code_migration_applied(
+                        &db,
+                        MIGRATION_ID,
+                        Some(&format!("rewrote {} AGENT.md files", rewritten_count)),
+                    );
+                    log_debug!(
+                        "[k2so] legacy_agent_types_v1: rewrote {} AGENT.md files; future launches will skip this scan",
+                        rewritten_count
+                    );
                 }
-            }
+            });
 
-            // Regenerate SKILL.md files for all workspaces (v0.26 migration)
-            perf_timer!("startup_skill_regen_loop", {
-                let all_projects: Vec<(String, String)> = {
+            // SKILL.md regeneration for all workspaces. 0.32.13 changes:
+            //
+            // 1. Version gate — only regen when the project's last-regen
+            //    K2SO version differs from the current binary. Binary
+            //    upgrades trigger one regen; subsequent launches at the
+            //    same version skip the entire pass (baseline: 3.8 s →
+            //    ~few ms for the DB read).
+            // 2. Background deferral — the queue of projects that do
+            //    need regen runs on a post-UI thread. The window shows
+            //    immediately; skill writes complete asynchronously and
+            //    emit `startup:skill_regen_complete` when done.
+            perf_timer!("startup_skill_regen_gate", {
+                const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+                let stale_projects: Vec<(String, String)> = {
                     let state = app.state::<AppState>();
                     let db = state.db.lock();
                     let mut projects = Vec::new();
-                    if let Ok(mut stmt) = db.prepare("SELECT path, agent_mode FROM projects") {
+                    if let Ok(mut stmt) = db.prepare(
+                        "SELECT path, agent_mode, skill_regen_version FROM projects",
+                    ) {
                         if let Ok(rows) = stmt.query_map([], |row| {
-                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                            let path: String = row.get(0)?;
+                            let mode: String = row.get(1)?;
+                            let last_ver: Option<String> = row.get(2)?;
+                            Ok((path, mode, last_ver))
                         }) {
                             for row in rows.flatten() {
-                                projects.push(row);
+                                let (path, mode, last_ver) = row;
+                                // Stale if never regen'd OR the binary
+                                // version has moved since last regen.
+                                let stale = last_ver
+                                    .as_deref()
+                                    .map(|v| v != CURRENT_VERSION)
+                                    .unwrap_or(true);
+                                if stale {
+                                    projects.push((path, mode));
+                                }
                             }
                         }
                     }
                     projects
                 };
-                for (path, mode) in &all_projects {
-                    // Agent-enabled workspaces: regenerate per-agent SKILL.md + CLAUDE.md
-                    if mode != "off" {
-                        let _ = commands::k2so_agents::k2so_agents_regenerate_skills(path.clone());
-                        // Regenerate workspace root CLAUDE.md with current skill protocol
-                        let _ = commands::k2so_agents::k2so_agents_generate_workspace_claude_md(path.clone());
-                    }
-                    // All workspaces: write workspace-level skill to all harness locations
-                    commands::k2so_agents::write_workspace_skill_file(path);
+
+                if stale_projects.is_empty() {
+                    log_debug!(
+                        "[k2so] SKILL regen: all projects current at {} — skipping",
+                        CURRENT_VERSION
+                    );
+                } else {
+                    log_debug!(
+                        "[k2so] SKILL regen: {} project(s) stale, deferring to background",
+                        stale_projects.len()
+                    );
+                    let handle_for_thread = app.handle().clone();
+                    std::thread::spawn(move || {
+                        let bg_start = std::time::Instant::now();
+                        for (path, mode) in &stale_projects {
+                            if mode != "off" {
+                                let _ = commands::k2so_agents::k2so_agents_regenerate_skills(path.clone());
+                                let _ = commands::k2so_agents::k2so_agents_generate_workspace_claude_md(path.clone());
+                            }
+                            commands::k2so_agents::write_workspace_skill_file(path);
+                            // Record completion for this project so the
+                            // next launch skips it.
+                            let state = handle_for_thread.state::<AppState>();
+                            let db = state.db.lock();
+                            let _ = db.execute(
+                                "UPDATE projects SET skill_regen_version = ?1 WHERE path = ?2",
+                                rusqlite::params![CURRENT_VERSION, path],
+                            );
+                        }
+                        if crate::perf::is_enabled() {
+                            use std::io::Write;
+                            let _ = writeln!(
+                                std::io::stderr(),
+                                "[perf] startup_skill_regen_background — {}µs ({} projects)",
+                                bg_start.elapsed().as_micros(),
+                                stale_projects.len()
+                            );
+                        }
+                        let _ = handle_for_thread.emit(
+                            "startup:skill_regen_complete",
+                            serde_json::json!({
+                                "projectCount": stale_projects.len(),
+                                "durationMs": bg_start.elapsed().as_millis(),
+                            }),
+                        );
+                    });
                 }
             });
 

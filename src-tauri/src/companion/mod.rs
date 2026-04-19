@@ -95,6 +95,7 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
         cors_origins: companion.cors_origins.clone(),
         allow_remote_spawn: companion.allow_remote_spawn,
         auth_limiter: Mutex::new(AuthRateLimiter::new()),
+        reflow_cache: Mutex::new(HashMap::new()),
         _tunnel_keepalive: Mutex::new(Some(keepalive_tx)),
     };
     *STATE.lock() = Some(state);
@@ -594,10 +595,17 @@ fn register_event_listeners(app_handle: &AppHandle) {
 
 /// Poll terminal grids for subscribed WebSocket clients.
 /// Reads CompactLine data directly from the terminal manager (no HTTP roundtrip).
-/// Broadcasts both legacy plain-text format and rich CompactLine grid updates.
+/// Broadcasts both rich CompactLine grid updates and full scrollback.
+///
+/// Change detection: each grid carries a monotonic `seqno` bumped by the
+/// alacritty backend on every emission. We cache the last-broadcast seqno
+/// per terminal and skip all downstream work (reflow, JSON encode, emit)
+/// when seqno is unchanged. Before 0.32.13 this used an ahash content hash,
+/// which needed to iterate every line on every poll — criterion benches
+/// show the seqno compare is ~1000× faster than the hash path.
 fn run_terminal_polling(app_handle: &AppHandle) {
     use tauri::Manager;
-    let mut last_hashes: HashMap<String, u64> = HashMap::new();
+    let mut last_seqnos: HashMap<String, u64> = HashMap::new();
 
     loop {
         // 100ms interval = ~10fps (throttled for mobile bandwidth)
@@ -637,28 +645,18 @@ fn run_terminal_polling(app_handle: &AppHandle) {
 
         for tid in &terminal_ids {
             if let Ok(grid) = manager.get_grid(tid) {
-                // Simple change detection: hash the grid with a fast
-                // non-cryptographic hasher. We only need "did this grid
-                // change?" — ahash is ~3× faster than SipHash on our grid
-                // sizes (criterion benchmarks in src-tauri/benches/perf.rs).
-                // P2.1 will replace this with seqno-based damage tracking,
-                // which is O(1) and doesn't hash at all.
-                let hash = {
-                    let _h = crate::perf_hist!("grid_hash");
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = ahash::AHasher::default();
-                    for line in &grid.lines {
-                        line.text.hash(&mut hasher);
-                        line.row.hash(&mut hasher);
-                    }
-                    grid.cursor_col.hash(&mut hasher);
-                    grid.cursor_row.hash(&mut hasher);
-                    hasher.finish()
-                };
-
-                let prev_hash = last_hashes.get(tid).copied().unwrap_or(0);
-                if hash == prev_hash { continue; }
-                last_hashes.insert(tid.clone(), hash);
+                // Seqno-based change detection: compare the grid's monotonic
+                // counter against what we last broadcast. Constant-time,
+                // no iteration over lines. A seqno of 0 means "unstamped"
+                // (shouldn't happen for a terminal created post-0.32.13
+                // but guard anyway — treat 0 as always-dirty).
+                let _h = crate::perf_hist!("grid_hash");
+                let prev_seqno = last_seqnos.get(tid).copied().unwrap_or(0);
+                if grid.seqno != 0 && grid.seqno == prev_seqno {
+                    continue;
+                }
+                last_seqnos.insert(tid.clone(), grid.seqno);
+                drop(_h);
 
                 // Broadcast rich CompactLine grid update (reflowed per-client if mobile dims set)
                 websocket::broadcast_terminal_grid(state, tid, &grid);

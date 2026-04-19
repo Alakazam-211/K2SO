@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
@@ -114,9 +113,57 @@ pub fn search_files(workspace_root: &str, query: &str) -> String {
     let query_lower = query.to_lowercase();
     let query_parts: Vec<&str> = query_lower.split_whitespace().collect();
 
+    // `ignore::WalkBuilder` reads `.gitignore`, `.ignore`, and global
+    // excludes; much more correct than our old hand-rolled SKIP_DIRS
+    // list for arbitrary projects. `filter_entry` keeps SKIP_DIRS as a
+    // belt-and-suspenders fallback for repos that don't ship a
+    // .gitignore. Sequential (`build()`, not `build_parallel()`) —
+    // criterion benchmarks showed parallel is 8× slower on our tree
+    // size; work-stealing overhead dominates for <1000-file walks.
     let mut matches: Vec<(String, bool, u64, u32)> = Vec::new(); // (rel_path, is_dir, modified, score)
-    let mut visited_inodes = HashSet::new();
-    search_walk(root, root, 0, &query_parts, &mut matches, &mut visited_inodes);
+    let walker = ignore::WalkBuilder::new(root)
+        .max_depth(Some(SEARCH_MAX_DEPTH))
+        .follow_links(false)
+        .hidden(true)
+        .filter_entry(|entry| {
+            if entry.depth() == 0 {
+                return true;
+            }
+            let name = entry.file_name().to_string_lossy();
+            !SKIP_DIRS.iter().any(|&s| s.eq_ignore_ascii_case(&name))
+        })
+        .build();
+
+    for entry in walker {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if entry.depth() == 0 {
+            continue; // skip the workspace root itself
+        }
+
+        let path = entry.path();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+
+        let relative = match path.strip_prefix(root) {
+            Ok(rel) => rel.to_string_lossy().to_string(),
+            Err(_) => continue,
+        };
+
+        let modified = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let score = fuzzy_score(&relative, &query_parts);
+        if score > 0 {
+            matches.push((relative, is_dir, modified, score));
+        }
+    }
 
     if matches.is_empty() {
         return format!("No files matching \"{query}\"");
@@ -149,73 +196,12 @@ pub fn search_files(workspace_root: &str, query: &str) -> String {
     output
 }
 
-/// Recursively walk and collect fuzzy matches with symlink cycle detection.
-fn search_walk(
-    root: &Path,
-    dir: &Path,
-    depth: usize,
-    query_parts: &[&str],
-    matches: &mut Vec<(String, bool, u64, u32)>,
-    visited_inodes: &mut HashSet<u64>,
-) {
-    if depth > SEARCH_MAX_DEPTH {
-        return;
-    }
-
-    // Track visited directories by inode to prevent symlink cycles
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if let Ok(meta) = std::fs::metadata(dir) {
-            if !visited_inodes.insert(meta.ino()) {
-                return; // Already visited — symlink cycle
-            }
-        }
-    }
-
-    let read_dir = match std::fs::read_dir(dir) {
-        Ok(rd) => rd,
-        Err(_) => return,
-    };
-
-    for entry in read_dir.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-
-        if name.starts_with('.') {
-            continue;
-        }
-
-        let path = entry.path();
-        let is_dir = path.is_dir();
-
-        if is_dir && SKIP_DIRS.iter().any(|&s| s.eq_ignore_ascii_case(&name)) {
-            continue;
-        }
-
-        let relative = match path.strip_prefix(root) {
-            Ok(rel) => rel.to_string_lossy().to_string(),
-            Err(_) => continue,
-        };
-
-        let modified = entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
-        // Score: how well does this path match the query?
-        let score = fuzzy_score(&relative, query_parts);
-        if score > 0 {
-            matches.push((relative, is_dir, modified, score));
-        }
-
-        if is_dir {
-            search_walk(root, &path, depth + 1, query_parts, matches, visited_inodes);
-        }
-    }
-}
+// `search_walk` (hand-rolled recursive `fs::read_dir` with inode-based
+// symlink cycle detection) was retired in 0.32.13 when `search_files`
+// adopted `ignore::WalkBuilder`. The `ignore` crate handles symlink
+// cycles + .gitignore parsing + standard hidden-file exclusion
+// natively. Recover the old implementation from `git show v0.32.12:
+// src-tauri/src/llm/file_index.rs` if needed.
 
 /// Simple fuzzy scoring: each query part that appears as a substring in the
 /// path (case-insensitive) adds points. Exact filename match scores highest.
