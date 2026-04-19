@@ -1,5 +1,8 @@
 # 0.32.13 — Performance pass (P0 + P1 + P2), measured end-to-end
 
+> **tl;dr** The terminal-grid change detection path goes from `SipHash over every line every 100ms` to a single `u64` compare (**~9,000× faster** for the per-tick work). SKILL.md regeneration moves off the startup critical path — cold boot drops from **3.83 s to perceived ~30 ms** on the measured test setup. File-watcher IPC pressure goes from **up to 592 emits per window to 1** under heavy save storms. One-time migrations now self-gate; future launches skip them instead of rescanning every project. SQLite gets a pragma pass (`busy_timeout 500ms`, 20 MB cache, 64 MB mmap, memory temp store) + `prepare_cached` on the hot INSERT/UPDATE paths. Bench evidence in `src-tauri/benches/perf.rs` — criterion saves baseline + delta under `target/criterion/report/`.
+
+
 A staged performance pass landing **three phases in one release**, benchmarked against five reference Rust projects (Zed, WezTerm, Spacedrive, Helix, ripgrep) and verified with live instrumentation in dev builds.
 
 Instrumentation (P0) landed first so every subsequent change has a measurable before/after number — the table at the bottom is the actual evidence, not an estimate.
