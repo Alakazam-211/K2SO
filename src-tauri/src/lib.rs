@@ -2,18 +2,15 @@
 #[macro_use]
 extern crate objc;
 
+// Bring k2so-core's `log_debug!` + `perf_timer!` + `perf_hist!` into scope
+// across every child module, matching the previous behavior of having
+// them defined inline in this file.
+#[macro_use]
+extern crate k2so_core;
+
 /// Flag to skip _exit(0) during relaunch (set by the frontend before process::relaunch)
 static RELAUNCH_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Safe eprintln that silently ignores write failures.
-/// When launched from Finder (no tty), stderr writes can fail and the default
-/// `eprintln!` panics, which cascades into abort(). This macro catches that.
-macro_rules! log_debug {
-    ($($arg:tt)*) => {{
-        use std::io::Write;
-        let _ = writeln!(std::io::stderr(), $($arg)*);
-    }};
-}
 
 mod agent_hooks;
 mod commands;
@@ -22,7 +19,10 @@ mod companion;
 // crate is not published, so this is a no-op for real consumers. Revert to
 // `mod` once the perf pass is over if we decide the benches' existence
 // doesn't justify open modules.
-pub mod db;
+// `db` now lives in k2so-core. Re-exported so callers can keep using
+// `crate::db::shared()` etc. unchanged. Migrations are bundled into the
+// k2so-core binary via include_str! from crates/k2so-core/drizzle_sql/.
+pub use k2so_core::db;
 mod editors;
 mod fs_abstract;
 mod fs_atomic;

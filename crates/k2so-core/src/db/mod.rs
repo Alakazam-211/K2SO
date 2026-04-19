@@ -82,11 +82,11 @@ pub fn shared() -> Arc<ReentrantMutex<Connection>> {
     if let Some(handle) = SHARED.get() {
         return handle.clone();
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     {
         return init_for_tests();
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-util")))]
     {
         panic!("db::init_database must run before db::shared()");
     }
@@ -101,7 +101,11 @@ pub fn shared() -> Arc<ReentrantMutex<Connection>> {
 /// Tests that expect isolated DB state must either (a) clean up their
 /// rows on exit, or (b) use a scratch_project() directory pattern that
 /// keeps filesystem state separate even when DB state overlaps.
-#[cfg(test)]
+///
+/// Not gated on `#[cfg(test)]` because src-tauri's test binary is a
+/// downstream consumer of k2so-core — `cfg(test)` there doesn't flip
+/// cfg(test) here. Function body is inert in release builds (no caller
+/// in production code).
 pub fn init_for_tests() -> Arc<ReentrantMutex<Connection>> {
     if let Some(handle) = SHARED.get() {
         return handle.clone();

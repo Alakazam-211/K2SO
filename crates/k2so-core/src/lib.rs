@@ -13,6 +13,22 @@
 //!
 //! Module migration from src-tauri lands incrementally.
 
+/// Safe `eprintln!` replacement that silently ignores stderr write
+/// failures. When K2SO is launched from Finder there's no tty attached and
+/// the default `eprintln!` panics on broken-pipe, which then cascades into
+/// abort(). This macro swallows the write result instead.
+///
+/// `#[macro_export]` so both k2so-core-internal modules and downstream
+/// crates (src-tauri, k2so-daemon) can share one definition.
+#[macro_export]
+macro_rules! log_debug {
+    ($($arg:tt)*) => {{
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
+pub mod db;
 pub mod perf;
 pub mod push;
 

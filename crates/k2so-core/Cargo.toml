@@ -8,7 +8,31 @@ description = "K2SO device-local core library: db, llm, terminal, companion, sch
 [lib]
 path = "src/lib.rs"
 
+[features]
+# Enables db::shared()'s automatic in-memory-DB fallback for downstream
+# crates' test binaries. Without this, cfg(test) in k2so-core is only
+# active when k2so-core's own tests run — src-tauri's test binary would
+# panic with "db::init_database must run before db::shared()".
+# Enable in src-tauri's [dev-dependencies] entry; NOT a runtime feature.
+test-util = []
+
 [dependencies]
-# perf.rs uses parking_lot::Mutex for the global histogram registry.
-# Cross-platform dep; will host SQLite/terminal/etc. migrations later.
+# Shared primitive deps.
 parking_lot = "0.12"
+
+# DB layer (migrations live in crates/k2so-core/drizzle_sql/, loaded via
+# include_str!). Bundled SQLite so every platform ships the same version.
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Serialization: used across db, push, eventually companion and scheduler.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Time handling in the activity feed + heartbeat audit rows.
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUIDs for agent sessions, heartbeat fires, etc.
+uuid = { version = "1", features = ["v4"] }
+
+# Home-directory lookup for ~/.k2so/k2so.db.
+dirs = "5"
