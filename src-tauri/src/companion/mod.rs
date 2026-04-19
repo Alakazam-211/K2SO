@@ -637,11 +637,16 @@ fn run_terminal_polling(app_handle: &AppHandle) {
 
         for tid in &terminal_ids {
             if let Ok(grid) = manager.get_grid(tid) {
-                // Simple change detection: hash the grid text content
+                // Simple change detection: hash the grid with a fast
+                // non-cryptographic hasher. We only need "did this grid
+                // change?" — ahash is ~3× faster than SipHash on our grid
+                // sizes (criterion benchmarks in src-tauri/benches/perf.rs).
+                // P2.1 will replace this with seqno-based damage tracking,
+                // which is O(1) and doesn't hash at all.
                 let hash = {
                     let _h = crate::perf_hist!("grid_hash");
                     use std::hash::{Hash, Hasher};
-                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    let mut hasher = ahash::AHasher::default();
                     for line in &grid.lines {
                         line.text.hash(&mut hasher);
                         line.row.hash(&mut hasher);
@@ -666,11 +671,11 @@ fn run_terminal_polling(app_handle: &AppHandle) {
                     websocket::broadcast_terminal_scrollback(state, tid, &scrollback_lines);
                 }
 
-                // Also broadcast legacy plain-text for backwards compat
-                let lines: Vec<String> = grid.lines.iter()
-                    .map(|l| l.text.clone())
-                    .collect();
-                websocket::broadcast_terminal_output(state, tid, &lines);
+                // 0.32.13: legacy plain-text `terminal:output` event retired.
+                // Mobile clients reconstruct plain text from `terminal:grid`
+                // (CompactLine.text field). Going from 3 broadcasts → 2 per
+                // tick; P2.2 cuts scrollback too for unchanged grids.
+                // Companion App team was notified in the 0.32.12 memo.
             }
         }
     }

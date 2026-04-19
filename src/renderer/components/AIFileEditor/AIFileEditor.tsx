@@ -246,7 +246,11 @@ export function AIFileEditor({
       console.warn('[ai-editor] Failed to start watcher:', err)
     })
 
-    listen<{ path: string; kind: string }>('fs://change', () => {
+    // Accept either single-event (pre-0.32.13) or batched-array payloads.
+    // This editor just debounces a reload on any change, so we don't need
+    // to inspect the batch contents — just knowing "something changed"
+    // is enough.
+    listen<Array<{ path: string; kind: string }> | { path: string; kind: string }>('fs://change', () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
       debounceRef.current = setTimeout(findAndRead, 300)
     }).then((fn) => { unlisten = fn })

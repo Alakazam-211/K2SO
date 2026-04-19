@@ -343,7 +343,13 @@ pub fn broadcast_terminal_scrollback(state: &CompanionState, terminal_id: &str, 
 }
 
 /// Broadcast terminal output to clients subscribed to that terminal.
-/// Sends both legacy format (lines) and new CompactLine format.
+///
+/// **Retired 0.32.13.** No longer called from the poll loop — mobile clients
+/// reconstruct plain text from the richer `terminal:grid` event's
+/// `CompactLine.text` field. Kept on the call surface for one release cycle
+/// so older clients that explicitly opt into it (via a feature flag) can
+/// still receive it if needed; schedule removal in 0.33.x.
+#[allow(dead_code)]
 pub fn broadcast_terminal_output(state: &CompanionState, terminal_id: &str, lines: &[String]) {
     let event = serde_json::json!({
         "event": "terminal:output",

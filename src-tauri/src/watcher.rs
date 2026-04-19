@@ -91,14 +91,22 @@ pub fn fs_watch_dir(app: tauri::AppHandle, path: String) -> Result<(), String> {
                 }
             }
 
-            // Emit one event per unique path (deduplicated)
-            let batch_size = coalesced.len();
-            for (path, kind) in &coalesced {
-                let payload = FsChangePayload {
-                    path: path.clone(),
-                    kind: kind.clone(),
-                };
-                let _ = app_handle.emit("fs://change", &payload);
+            // Emit once per debounce window with the full batch — one IPC
+            // crossing per window instead of one per path. Live baseline
+            // measured windows of up to 592 paths; this collapses those
+            // into a single emit.
+            //
+            // Frontend listener receives a Vec<FsChangePayload>. The same
+            // pattern survives the eventual Tauri-app → daemon split (P4):
+            // `ipc_channel.send("fs://change", Vec<FsChangePayload>)`
+            // across a Unix socket carries the same shape.
+            let batch: Vec<FsChangePayload> = coalesced
+                .into_iter()
+                .map(|(path, kind)| FsChangePayload { path, kind })
+                .collect();
+            let batch_size = batch.len();
+            if !batch.is_empty() {
+                let _ = app_handle.emit("fs://change", &batch);
             }
             if crate::perf::is_enabled() {
                 use std::io::Write;
@@ -106,7 +114,7 @@ pub fn fs_watch_dir(app: tauri::AppHandle, path: String) -> Result<(), String> {
                     std::io::stderr(),
                     "[perf] fs_watcher_batch — batch_size={} emit_count={}",
                     batch_size,
-                    batch_size,
+                    if batch_size == 0 { 0 } else { 1 },
                 );
             }
         }

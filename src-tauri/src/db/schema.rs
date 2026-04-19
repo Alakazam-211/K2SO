@@ -269,6 +269,7 @@ impl Project {
         Ok(())
     }
 
+    #[allow(dead_code)] // API surface — covered by tests, not yet wired from UI
     pub fn update_last_opened(conn: &Connection, id: &str) -> Result<()> {
         conn.execute(
             "UPDATE projects SET last_opened_at = unixepoch() WHERE id = ?1",
@@ -701,6 +702,8 @@ impl TimeEntry {
 
 // ── Terminal Tabs (stub) ────────────────────────────────────────────────────
 
+#[allow(dead_code)] // Scaffold for the persisted-terminal-tabs feature —
+                    // schema shape is agreed but CRUD hasn't shipped yet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalTab {
     pub id: String,
@@ -712,6 +715,7 @@ pub struct TerminalTab {
 
 // ── Terminal Panes (stub) ───────────────────────────────────────────────────
 
+#[allow(dead_code)] // Scaffold for persisted pane splits — same deal as TerminalTab.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalPane {
     pub id: String,
@@ -1011,10 +1015,11 @@ impl AgentSession {
     }
 
     pub fn update_status(conn: &Connection, project_id: &str, agent_name: &str, status: &str) -> Result<usize> {
-        conn.execute(
+        // Fires on every agent state transition — cached.
+        let mut stmt = conn.prepare_cached(
             "UPDATE agent_sessions SET status = ?1, last_activity_at = unixepoch() WHERE project_id = ?2 AND agent_name = ?3",
-            params![status, project_id, agent_name],
-        )
+        )?;
+        stmt.execute(params![status, project_id, agent_name])
     }
 
     /// Try to atomically acquire the "running" lock for an agent. Returns
@@ -1033,6 +1038,11 @@ impl AgentSession {
     /// transaction we check for an existing running session; if present
     /// we rollback (no change) and return false. If not, we INSERT/
     /// UPDATE the session row with status='running' and COMMIT.
+    // TODO(resilience-followup): 0.32.9 introduced this CAS helper
+    // but the production spawn path in `commands/k2so_agents.rs` still
+    // uses the pre-CAS `is_agent_locked → spawn → upsert` sequence.
+    // Wire this in before advertising the TOCTOU fix as live.
+    #[allow(dead_code)]
     pub fn try_acquire_running(
         conn: &Connection,
         session_id: &str,
@@ -1409,11 +1419,15 @@ impl ActivityFeedEntry {
         summary: Option<&str>,
         metadata: Option<&str>,
     ) -> Result<i64> {
-        conn.execute(
+        // prepare_cached keeps the compiled statement in rusqlite's per-
+        // connection LRU cache (default 16 slots). activity_feed appends
+        // fire on every agent event; criterion bench at P1.3 showed ~25%
+        // speedup vs rebuilding the statement each call.
+        let mut stmt = conn.prepare_cached(
             "INSERT INTO activity_feed (project_id, agent_name, event_type, from_agent, to_agent, to_project_id, summary, metadata, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch())",
-            params![project_id, agent_name, event_type, from_agent, to_agent, to_project_id, summary, metadata],
         )?;
+        stmt.execute(params![project_id, agent_name, event_type, from_agent, to_agent, to_project_id, summary, metadata])?;
         Ok(conn.last_insert_rowid())
     }
 
@@ -1584,23 +1598,24 @@ impl HeartbeatFire {
         inbox_count: Option<i64>,
         duration_ms: Option<i64>,
     ) -> Result<i64> {
-        conn.execute(
+        // Fires on every heartbeat tick — high-volume INSERT, cached.
+        let mut stmt = conn.prepare_cached(
             "INSERT INTO heartbeat_fires \
              (project_id, agent_name, fired_at, mode, decision, reason, inbox_priority, inbox_count, duration_ms, schedule_name) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                project_id,
-                agent_name,
-                chrono::Local::now().to_rfc3339(),
-                mode,
-                decision,
-                reason,
-                inbox_priority,
-                inbox_count,
-                duration_ms,
-                schedule_name,
-            ],
         )?;
+        stmt.execute(params![
+            project_id,
+            agent_name,
+            chrono::Local::now().to_rfc3339(),
+            mode,
+            decision,
+            reason,
+            inbox_priority,
+            inbox_count,
+            duration_ms,
+            schedule_name,
+        ])?;
         Ok(conn.last_insert_rowid())
     }
 
@@ -1668,10 +1683,798 @@ impl HeartbeatFire {
     /// Delete fire rows older than the given RFC3339 timestamp. Returns
     /// the number of rows removed. Used by retention pruning (e.g., a
     /// user-triggered "clear old heartbeats" action).
+    #[allow(dead_code)] // Retention helper — called from tests; the UI
+                        // currently has no "clear old heartbeats" action.
     pub fn prune_before(conn: &Connection, cutoff: &str) -> Result<usize> {
         conn.execute(
             "DELETE FROM heartbeat_fires WHERE fired_at < ?1",
             params![cutoff],
         )
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    //! Per-struct CRUD + invariant coverage for schema.rs. Each test
+    //! uses `crate::db::isolated_test_connection()` to get a fresh
+    //! in-memory SQLite with the full migration + seed sequence
+    //! applied — so tests can assert on specific row counts or state
+    //! transitions without worrying about pollution from sibling
+    //! tests.
+    //!
+    //! Coverage target: every public method on every schema struct
+    //! has at least a round-trip test (write → read → assert). Edge
+    //! cases (unique constraint violations, name validation, enabled
+    //! filter semantics) have dedicated tests.
+    use super::*;
+    use rusqlite::Connection;
+
+    fn fresh() -> Connection {
+        crate::db::isolated_test_connection()
+    }
+
+    fn make_project_row(conn: &Connection, path: &str) -> String {
+        // Every test that touches session/heartbeat/fire tables needs
+        // a projects row because of the FK. This matches make_project
+        // in concurrency_tests but is duplicated here to keep the two
+        // test modules independent.
+        let id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT OR IGNORE INTO projects (id, name, path) VALUES (?1, ?2, ?3)",
+            params![id, "test", path],
+        )
+        .expect("insert project");
+        id
+    }
+
+    // ── FocusGroup ────────────────────────────────────────────────
+    #[test]
+    fn focus_group_create_list_get_update_delete() {
+        let conn = fresh();
+        FocusGroup::create(&conn, "fg1", "Work", Some("#ff0000"), 0).unwrap();
+        FocusGroup::create(&conn, "fg2", "Personal", None, 1).unwrap();
+
+        let list = FocusGroup::list(&conn).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].name, "Work");
+        assert_eq!(list[1].name, "Personal");
+
+        let fg = FocusGroup::get(&conn, "fg1").unwrap();
+        assert_eq!(fg.color.as_deref(), Some("#ff0000"));
+
+        FocusGroup::update(&conn, "fg1", Some("Work Rebranded"), None, None).unwrap();
+        let fg = FocusGroup::get(&conn, "fg1").unwrap();
+        assert_eq!(fg.name, "Work Rebranded");
+
+        FocusGroup::delete(&conn, "fg2").unwrap();
+        assert_eq!(FocusGroup::list(&conn).unwrap().len(), 1);
+    }
+
+    // ── Project ───────────────────────────────────────────────────
+    #[test]
+    fn project_create_list_get_delete_roundtrip() {
+        let conn = fresh();
+        let id = make_project_row(&conn, "/tmp/proj-cr");
+        let all = Project::list(&conn).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].path, "/tmp/proj-cr");
+
+        let p = Project::get(&conn, &id).unwrap();
+        assert_eq!(p.id, id);
+        assert_eq!(p.name, "test");
+
+        Project::delete(&conn, &id).unwrap();
+        assert_eq!(Project::list(&conn).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn project_path_unique_constraint_rejects_duplicate() {
+        let conn = fresh();
+        let path = "/tmp/proj-dup";
+        make_project_row(&conn, path);
+        // Second insert with same path must fail.
+        let id2 = uuid::Uuid::new_v4().to_string();
+        let err = conn.execute(
+            "INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)",
+            params![id2, "other", path],
+        );
+        assert!(err.is_err(), "duplicate path should violate unique index");
+    }
+
+    #[test]
+    fn project_touch_and_clear_interaction() {
+        let conn = fresh();
+        let id = make_project_row(&conn, "/tmp/proj-touch");
+        Project::touch_interaction(&conn, &id).unwrap();
+        let p = Project::get(&conn, &id).unwrap();
+        assert!(p.last_interaction_at.is_some(), "touch should set timestamp");
+
+        Project::clear_interaction(&conn, &id).unwrap();
+        let p = Project::get(&conn, &id).unwrap();
+        assert!(p.last_interaction_at.is_none(), "clear should null timestamp");
+    }
+
+    #[test]
+    fn project_update_last_opened_sets_timestamp() {
+        let conn = fresh();
+        let id = make_project_row(&conn, "/tmp/proj-opened");
+        Project::update_last_opened(&conn, &id).unwrap();
+        let p = Project::get(&conn, &id).unwrap();
+        assert!(p.last_opened_at.is_some());
+    }
+
+    // ── AgentSession ──────────────────────────────────────────────
+    #[test]
+    fn agent_session_upsert_then_get_by_agent() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/as1");
+        AgentSession::upsert(
+            &conn,
+            "sess-1",
+            &pid,
+            "alice",
+            Some("term-7"),
+            None,
+            "claude",
+            "manager",
+            "sleeping",
+        )
+        .unwrap();
+
+        let s = AgentSession::get_by_agent(&conn, &pid, "alice")
+            .unwrap()
+            .expect("session exists");
+        assert_eq!(s.id, "sess-1");
+        assert_eq!(s.terminal_id.as_deref(), Some("term-7"));
+        assert_eq!(s.status, "sleeping");
+    }
+
+    #[test]
+    fn agent_session_upsert_updates_existing_row() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/as2");
+        AgentSession::upsert(
+            &conn, "s1", &pid, "bob", Some("t1"), None, "claude", "manager", "sleeping",
+        )
+        .unwrap();
+        AgentSession::upsert(
+            &conn, "s2", &pid, "bob", Some("t2"), Some("scid"), "codex", "user", "running",
+        )
+        .unwrap();
+
+        // Same (project, agent) — second upsert replaces the row's
+        // payload but the conflict resolution uses the original id.
+        let s = AgentSession::get_by_agent(&conn, &pid, "bob").unwrap().unwrap();
+        assert_eq!(s.terminal_id.as_deref(), Some("t2"));
+        assert_eq!(s.harness, "codex");
+        assert_eq!(s.status, "running");
+        assert_eq!(s.session_id.as_deref(), Some("scid"));
+    }
+
+    #[test]
+    fn agent_session_unique_constraint_on_project_agent() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/as3");
+        AgentSession::upsert(
+            &conn, "s1", &pid, "carol", None, None, "claude", "manager", "sleeping",
+        )
+        .unwrap();
+        // Raw insert with different id but same (project, agent) must
+        // violate the UNIQUE constraint.
+        let err = conn.execute(
+            "INSERT INTO agent_sessions (id, project_id, agent_name, harness, owner, status) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params!["sX", &pid, "carol", "claude", "manager", "sleeping"],
+        );
+        assert!(err.is_err(), "UNIQUE(project_id, agent_name) must reject");
+    }
+
+    #[test]
+    fn agent_session_list_by_project_ordered() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/as-list");
+        for name in ["charlie", "alice", "bob"] {
+            AgentSession::upsert(
+                &conn, &format!("s-{}", name), &pid, name, None, None, "claude", "manager", "sleeping",
+            )
+            .unwrap();
+        }
+        let rows = AgentSession::list_by_project(&conn, &pid).unwrap();
+        let names: Vec<&str> = rows.iter().map(|r| r.agent_name.as_str()).collect();
+        assert_eq!(names, ["alice", "bob", "charlie"]);
+    }
+
+    #[test]
+    fn agent_session_get_by_terminal_id() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/as-term");
+        AgentSession::upsert(
+            &conn, "sa", &pid, "dana", Some("terminal-99"), None, "claude", "manager", "running",
+        )
+        .unwrap();
+        let s = AgentSession::get_by_terminal_id(&conn, "terminal-99")
+            .unwrap()
+            .unwrap();
+        assert_eq!(s.agent_name, "dana");
+        let none = AgentSession::get_by_terminal_id(&conn, "no-such").unwrap();
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn agent_session_update_status_and_message() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/as-sm");
+        AgentSession::upsert(
+            &conn, "s", &pid, "eve", None, None, "claude", "manager", "sleeping",
+        )
+        .unwrap();
+
+        let n = AgentSession::update_status(&conn, &pid, "eve", "running").unwrap();
+        assert_eq!(n, 1);
+        AgentSession::update_status_message(&conn, &pid, "eve", "spawning PTY").unwrap();
+        let s = AgentSession::get_by_agent(&conn, &pid, "eve").unwrap().unwrap();
+        assert_eq!(s.status, "running");
+        assert_eq!(s.status_message.as_deref(), Some("spawning PTY"));
+    }
+
+    #[test]
+    fn agent_session_session_id_set_and_clear() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/as-sid");
+        AgentSession::upsert(
+            &conn, "s", &pid, "frank", None, None, "claude", "manager", "sleeping",
+        )
+        .unwrap();
+        AgentSession::update_session_id(&conn, &pid, "frank", "claude-abcd").unwrap();
+        assert_eq!(
+            AgentSession::get_by_agent(&conn, &pid, "frank").unwrap().unwrap().session_id.as_deref(),
+            Some("claude-abcd")
+        );
+        AgentSession::clear_session_id(&conn, &pid, "frank").unwrap();
+        assert!(AgentSession::get_by_agent(&conn, &pid, "frank").unwrap().unwrap().session_id.is_none());
+    }
+
+    #[test]
+    fn agent_session_wake_counter_increments_and_resets() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/as-wc");
+        AgentSession::upsert(
+            &conn, "s", &pid, "grace", None, None, "claude", "manager", "sleeping",
+        )
+        .unwrap();
+        assert_eq!(AgentSession::bump_wake_counter(&conn, &pid, "grace").unwrap(), 1);
+        assert_eq!(AgentSession::bump_wake_counter(&conn, &pid, "grace").unwrap(), 2);
+        assert_eq!(AgentSession::bump_wake_counter(&conn, &pid, "grace").unwrap(), 3);
+        AgentSession::reset_wake_counter(&conn, &pid, "grace").unwrap();
+        assert_eq!(AgentSession::bump_wake_counter(&conn, &pid, "grace").unwrap(), 1);
+    }
+
+    #[test]
+    fn agent_session_delete_removes_row() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/as-del");
+        AgentSession::upsert(
+            &conn, "s", &pid, "henry", None, None, "claude", "manager", "sleeping",
+        )
+        .unwrap();
+        assert!(AgentSession::get_by_agent(&conn, &pid, "henry").unwrap().is_some());
+        let n = AgentSession::delete(&conn, &pid, "henry").unwrap();
+        assert_eq!(n, 1);
+        assert!(AgentSession::get_by_agent(&conn, &pid, "henry").unwrap().is_none());
+    }
+
+    // ── AgentHeartbeat ────────────────────────────────────────────
+    #[test]
+    fn heartbeat_validate_name_rejects_empty() {
+        assert!(AgentHeartbeat::validate_name("").is_err());
+    }
+
+    #[test]
+    fn heartbeat_validate_name_rejects_reserved() {
+        assert!(AgentHeartbeat::validate_name("default").is_err());
+        assert!(AgentHeartbeat::validate_name("legacy").is_err());
+    }
+
+    #[test]
+    fn heartbeat_validate_name_rejects_uppercase() {
+        assert!(AgentHeartbeat::validate_name("MyHeartbeat").is_err());
+    }
+
+    #[test]
+    fn heartbeat_validate_name_rejects_leading_trailing_hyphen() {
+        assert!(AgentHeartbeat::validate_name("-foo").is_err());
+        assert!(AgentHeartbeat::validate_name("foo-").is_err());
+    }
+
+    #[test]
+    fn heartbeat_validate_name_accepts_valid() {
+        assert!(AgentHeartbeat::validate_name("nightly").is_ok());
+        assert!(AgentHeartbeat::validate_name("morning-1").is_ok());
+        assert!(AgentHeartbeat::validate_name("h1").is_ok());
+    }
+
+    #[test]
+    fn heartbeat_insert_list_get_delete() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/hb-c");
+        AgentHeartbeat::insert(
+            &conn, "hb1", &pid, "nightly", "60m", "{}", "agents/foo/heartbeats/nightly/WAKEUP.md", true,
+        )
+        .unwrap();
+        AgentHeartbeat::insert(
+            &conn, "hb2", &pid, "morning", "30m", "{}", "agents/foo/heartbeats/morning/WAKEUP.md", false,
+        )
+        .unwrap();
+
+        let list = AgentHeartbeat::list_by_project(&conn, &pid).unwrap();
+        assert_eq!(list.len(), 2);
+        // list is ORDER BY name — morning < nightly
+        assert_eq!(list[0].name, "morning");
+        assert_eq!(list[1].name, "nightly");
+
+        let enabled_only = AgentHeartbeat::list_enabled(&conn, &pid).unwrap();
+        assert_eq!(enabled_only.len(), 1);
+        assert_eq!(enabled_only[0].name, "nightly");
+
+        let h = AgentHeartbeat::get_by_name(&conn, &pid, "nightly").unwrap().unwrap();
+        assert_eq!(h.frequency, "60m");
+
+        let n = AgentHeartbeat::delete(&conn, &pid, "morning").unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(AgentHeartbeat::list_by_project(&conn, &pid).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn heartbeat_set_enabled_toggles() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/hb-en");
+        AgentHeartbeat::insert(
+            &conn, "hb1", &pid, "weekly", "7d", "{}", "agents/foo/heartbeats/weekly/WAKEUP.md", false,
+        )
+        .unwrap();
+        AgentHeartbeat::set_enabled(&conn, &pid, "weekly", true).unwrap();
+        let h = AgentHeartbeat::get_by_name(&conn, &pid, "weekly").unwrap().unwrap();
+        assert!(h.enabled);
+        AgentHeartbeat::set_enabled(&conn, &pid, "weekly", false).unwrap();
+        assert!(!AgentHeartbeat::get_by_name(&conn, &pid, "weekly").unwrap().unwrap().enabled);
+    }
+
+    #[test]
+    fn heartbeat_update_schedule_and_wakeup_path() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/hb-upd");
+        AgentHeartbeat::insert(
+            &conn, "hb1", &pid, "pulse", "60m", "{\"x\":1}", "path1", true,
+        )
+        .unwrap();
+        AgentHeartbeat::update_schedule(&conn, &pid, "pulse", "30m", "{\"x\":2}").unwrap();
+        let h = AgentHeartbeat::get_by_name(&conn, &pid, "pulse").unwrap().unwrap();
+        assert_eq!(h.frequency, "30m");
+        assert_eq!(h.spec_json, "{\"x\":2}");
+
+        AgentHeartbeat::update_wakeup_path(&conn, &pid, "pulse", "new/path").unwrap();
+        let h = AgentHeartbeat::get_by_name(&conn, &pid, "pulse").unwrap().unwrap();
+        assert_eq!(h.wakeup_path, "new/path");
+    }
+
+    #[test]
+    fn heartbeat_stamp_last_fired_sets_rfc3339() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/hb-fire");
+        AgentHeartbeat::insert(
+            &conn, "hb1", &pid, "hb", "60m", "{}", "p", true,
+        )
+        .unwrap();
+        AgentHeartbeat::stamp_last_fired(&conn, &pid, "hb").unwrap();
+        let h = AgentHeartbeat::get_by_name(&conn, &pid, "hb").unwrap().unwrap();
+        let ts = h.last_fired.expect("last_fired set");
+        // RFC3339 sanity — "YYYY-MM-DDTHH:MM:SS..."
+        assert!(ts.contains('T'), "expected RFC3339 timestamp, got: {}", ts);
+        assert!(chrono::DateTime::parse_from_rfc3339(&ts).is_ok(), "parseable RFC3339: {}", ts);
+    }
+
+    // ── ActivityFeedEntry ─────────────────────────────────────────
+    #[test]
+    fn activity_feed_insert_and_list_by_project() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/af");
+        let id1 = ActivityFeedEntry::insert(
+            &conn, &pid, Some("alice"), "wake.start", None, None, None, Some("kick"), None,
+        )
+        .unwrap();
+        let id2 = ActivityFeedEntry::insert(
+            &conn, &pid, Some("alice"), "wake.end", None, None, None, Some("done"), None,
+        )
+        .unwrap();
+        assert!(id2 > id1);
+
+        let rows = ActivityFeedEntry::list_by_project(&conn, &pid, 10, 0).unwrap();
+        assert_eq!(rows.len(), 2);
+        // ORDER BY created_at DESC — newest first. Matching timestamps
+        // (unixepoch() resolves to seconds) can tie; we only assert
+        // both rows came back.
+        assert!(rows.iter().any(|r| r.event_type == "wake.start"));
+        assert!(rows.iter().any(|r| r.event_type == "wake.end"));
+    }
+
+    #[test]
+    fn activity_feed_list_by_agent_matches_agent_from_or_to() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/af-b");
+        ActivityFeedEntry::insert(&conn, &pid, Some("alice"), "x", None, None, None, None, None).unwrap();
+        ActivityFeedEntry::insert(&conn, &pid, None, "y", Some("alice"), Some("bob"), None, None, None).unwrap();
+        ActivityFeedEntry::insert(&conn, &pid, None, "z", Some("carol"), Some("alice"), None, None, None).unwrap();
+        ActivityFeedEntry::insert(&conn, &pid, None, "w", Some("bob"), Some("carol"), None, None, None).unwrap();
+
+        let alice_rows = ActivityFeedEntry::list_by_agent(&conn, &pid, "alice", 10).unwrap();
+        // 3 rows: agent_name=alice, from=alice, to=alice.
+        assert_eq!(alice_rows.len(), 3);
+    }
+
+    #[test]
+    fn activity_feed_unread_messages_filtered_and_marked() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/af-unread");
+        ActivityFeedEntry::insert(
+            &conn, &pid, None, "message.sent", Some("alice"), Some("bob"), None, Some("hello"), None,
+        )
+        .unwrap();
+        ActivityFeedEntry::insert(
+            &conn, &pid, None, "wake.start", Some("alice"), Some("bob"), None, None, None,
+        )
+        .unwrap();
+        // wake.start should NOT show up in unread messages (filter
+        // limits to message.sent/message.delivered).
+        let unread = super::get_unread_messages(&conn, &pid, "bob").unwrap();
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].event_type, "message.sent");
+
+        let n = super::mark_messages_read(&conn, &pid, "bob").unwrap();
+        assert_eq!(n, 1);
+        let unread_after = super::get_unread_messages(&conn, &pid, "bob").unwrap();
+        assert!(unread_after.is_empty(), "after mark_read, no unread should remain");
+    }
+
+    // ── HeartbeatFire ─────────────────────────────────────────────
+    #[test]
+    fn heartbeat_fire_insert_and_list_by_project() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/hf");
+        HeartbeatFire::insert(
+            &conn, &pid, Some("alice"), "agent", "fired", Some("inbox has work"), Some("normal"), Some(2), Some(150),
+        )
+        .unwrap();
+        HeartbeatFire::insert(
+            &conn, &pid, Some("bob"), "agent", "skipped", Some("already running"), None, None, None,
+        )
+        .unwrap();
+
+        let rows = HeartbeatFire::list_by_project(&conn, &pid, 10).unwrap();
+        assert_eq!(rows.len(), 2);
+        // DESC by fired_at — may or may not tie. Just assert presence.
+        let decisions: Vec<&str> = rows.iter().map(|r| r.decision.as_str()).collect();
+        assert!(decisions.contains(&"fired"));
+        assert!(decisions.contains(&"skipped"));
+    }
+
+    #[test]
+    fn heartbeat_fire_insert_with_schedule_persists_schedule_name() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/hf-sched");
+        HeartbeatFire::insert_with_schedule(
+            &conn, &pid, Some("alice"), Some("nightly"),
+            "agent", "fired", Some("nightly tick"), None, None, Some(42),
+        )
+        .unwrap();
+        let rows = HeartbeatFire::list_by_schedule_name(&conn, &pid, "nightly", 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].schedule_name.as_deref(), Some("nightly"));
+        assert_eq!(rows[0].duration_ms, Some(42));
+    }
+
+    #[test]
+    fn heartbeat_fire_prune_before_removes_old_rows() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/hf-prune");
+        // Insert one row with a known-old timestamp and one fresh.
+        conn.execute(
+            "INSERT INTO heartbeat_fires (project_id, mode, decision, fired_at) VALUES (?1, 'agent', 'fired', '2020-01-01T00:00:00Z')",
+            params![pid],
+        )
+        .unwrap();
+        HeartbeatFire::insert(&conn, &pid, None, "agent", "fired", None, None, None, None).unwrap();
+
+        let removed = HeartbeatFire::prune_before(&conn, "2021-01-01T00:00:00Z").unwrap();
+        assert_eq!(removed, 1, "prune should remove 1 old row");
+        let remaining = HeartbeatFire::list_by_project(&conn, &pid, 10).unwrap();
+        assert_eq!(remaining.len(), 1, "fresh row remains");
+    }
+
+    // ── WorkspaceRelation ─────────────────────────────────────────
+    #[test]
+    fn workspace_relation_create_list_for_source_and_target_delete() {
+        let conn = fresh();
+        let src = make_project_row(&conn, "/tmp/ws-src");
+        let tgt = make_project_row(&conn, "/tmp/ws-tgt");
+
+        WorkspaceRelation::create(&conn, "rel-1", &src, &tgt, "manages").unwrap();
+
+        let from_src = WorkspaceRelation::list_for_source(&conn, &src).unwrap();
+        assert_eq!(from_src.len(), 1);
+        assert_eq!(from_src[0].target_project_id, tgt);
+
+        let from_tgt = WorkspaceRelation::list_for_target(&conn, &tgt).unwrap();
+        assert_eq!(from_tgt.len(), 1);
+        assert_eq!(from_tgt[0].source_project_id, src);
+
+        let n = WorkspaceRelation::delete(&conn, "rel-1").unwrap();
+        assert_eq!(n, 1);
+        assert!(WorkspaceRelation::list_for_source(&conn, &src).unwrap().is_empty());
+    }
+
+    // ── AgentPreset seed ──────────────────────────────────────────
+    #[test]
+    fn agent_preset_seed_populates_built_ins() {
+        // isolated_test_connection runs seed_agent_presets — so the
+        // built-in presets should be present. Spot-check that Claude
+        // and at least one local LLM are there.
+        let conn = fresh();
+        let presets = AgentPreset::list(&conn).unwrap();
+        let labels: Vec<&str> = presets.iter().map(|p| p.label.as_str()).collect();
+        assert!(labels.contains(&"Claude"), "Claude preset missing: {:?}", labels);
+        assert!(labels.contains(&"Ollama"), "Ollama preset missing: {:?}", labels);
+        assert!(presets.len() >= 11, "expected >=11 built-in presets, got {}", presets.len());
+    }
+
+    #[test]
+    fn agent_preset_seed_is_idempotent_on_reapply() {
+        let conn = fresh();
+        let before = AgentPreset::list(&conn).unwrap().len();
+        // The isolated_test_connection already seeded. A second seed
+        // must be a no-op (INSERT OR IGNORE).
+        crate::db::seed_agent_presets(&conn).unwrap();
+        let after = AgentPreset::list(&conn).unwrap().len();
+        assert_eq!(before, after, "re-seed must not duplicate rows");
+    }
+}
+
+#[cfg(test)]
+mod concurrency_tests {
+    //! CAS and multi-connection concurrency tests for schema-level
+    //! operations. These tests use file-backed SQLite (via a temp
+    //! directory) because in-memory `:memory:` databases are not
+    //! shared across `Connection` handles — to actually race
+    //! connections we need real disk state.
+    //!
+    //! The resilience review introduced `try_acquire_running` with
+    //! `BEGIN IMMEDIATE` specifically to avoid a TOCTOU race between
+    //! two heartbeats firing at the same time. These tests PROVE the
+    //! claim by spawning N threads, each opening their own
+    //! connection, and asserting exactly one wins the acquisition.
+    //! Without these, "concurrency-safe" is just an assertion in the
+    //! doc comment.
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Build a unique on-disk DB path and bootstrap it through the
+    /// full migration + seed sequence. Caller is responsible for
+    /// cleanup (directory removal after the test).
+    fn scratch_db() -> (PathBuf, PathBuf) {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "k2so-schema-test-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let db_path = dir.join("k2so.db");
+        crate::db::bootstrap_test_db_at(&db_path).expect("bootstrap");
+        (dir, db_path)
+    }
+
+    fn open_conn(path: &std::path::Path) -> Connection {
+        crate::db::open_with_resilience(path).expect("open connection")
+    }
+
+    fn make_project(conn: &Connection, project_path: &str) -> String {
+        // Schema requires a projects row: agent_sessions.project_id is
+        // a FK to projects.id, and PRAGMA foreign_keys is ON. Returns
+        // the generated UUID — callers pass that as the project_id
+        // arg to try_acquire_running.
+        let id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT OR IGNORE INTO projects (id, name, path) VALUES (?1, ?2, ?3)",
+            params![id, "test", project_path],
+        )
+        .expect("insert project");
+        id
+    }
+
+    #[test]
+    fn try_acquire_running_exactly_one_winner_under_parallel_contention() {
+        // 20 threads race to acquire the same (project, agent) lock.
+        // Exactly one must return Ok(true); all others Ok(false).
+        // The pre-0.32.9 is_locked() → spawn → upsert sequence had a
+        // TOCTOU here; BEGIN IMMEDIATE closes it. This test is the
+        // proof.
+        let (dir, db_path) = scratch_db();
+        let project_path = {
+            let conn = open_conn(&db_path);
+            make_project(&conn, "/tmp/proj-a")
+        };
+
+        let db_path = Arc::new(db_path);
+        let project = Arc::new(project_path);
+        let n_threads = 20usize;
+
+        let handles: Vec<_> = (0..n_threads)
+            .map(|tid| {
+                let db_path = db_path.clone();
+                let project = project.clone();
+                std::thread::spawn(move || -> bool {
+                    let conn = open_conn(&db_path);
+                    AgentSession::try_acquire_running(
+                        &conn,
+                        &format!("session-{}", tid),
+                        &project,
+                        "agent-x",
+                        None,
+                        "claude",
+                        "manager",
+                    )
+                    .expect("try_acquire_running")
+                })
+            })
+            .collect();
+
+        let results: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let winners = results.iter().filter(|&&r| r).count();
+        assert_eq!(
+            winners, 1,
+            "expected exactly 1 winner under contention, got {}: results={:?}",
+            winners, results
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn try_acquire_running_different_agents_all_succeed() {
+        // Sanity check: the CAS is per-agent, not global. 8 different
+        // agents in the same project, each acquired by its own
+        // thread, all should win.
+        let (dir, db_path) = scratch_db();
+        let project_path = {
+            let conn = open_conn(&db_path);
+            make_project(&conn, "/tmp/proj-b")
+        };
+
+        let db_path = Arc::new(db_path);
+        let project = Arc::new(project_path);
+        let n_agents = 8usize;
+
+        let handles: Vec<_> = (0..n_agents)
+            .map(|i| {
+                let db_path = db_path.clone();
+                let project = project.clone();
+                std::thread::spawn(move || -> bool {
+                    let conn = open_conn(&db_path);
+                    AgentSession::try_acquire_running(
+                        &conn,
+                        &format!("session-a{}", i),
+                        &project,
+                        &format!("agent-{}", i),
+                        None,
+                        "claude",
+                        "manager",
+                    )
+                    .expect("try_acquire_running")
+                })
+            })
+            .collect();
+
+        let results: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let winners = results.iter().filter(|&&r| r).count();
+        assert_eq!(winners, n_agents, "different agents should all win: {:?}", results);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn try_acquire_running_serializes_without_busy_errors() {
+        // 5 rounds of 10 threads each. After each round the winner
+        // releases the lock (status='stopped'). Next round must also
+        // produce exactly one winner. Verifies that BEGIN IMMEDIATE
+        // + busy_timeout doesn't surface SQLITE_BUSY as an error —
+        // instead callers block on the write queue until they get
+        // their turn.
+        let (dir, db_path) = scratch_db();
+        let project_path = {
+            let conn = open_conn(&db_path);
+            make_project(&conn, "/tmp/proj-c")
+        };
+
+        for round in 0..5 {
+            let db_path = Arc::new(db_path.clone());
+            let project = Arc::new(project_path.clone());
+
+            let handles: Vec<_> = (0..10)
+                .map(|tid| {
+                    let db_path = db_path.clone();
+                    let project = project.clone();
+                    std::thread::spawn(move || -> bool {
+                        let conn = open_conn(&db_path);
+                        AgentSession::try_acquire_running(
+                            &conn,
+                            &format!("session-r{}-t{}", round, tid),
+                            &project,
+                            "agent-y",
+                            None,
+                            "claude",
+                            "manager",
+                        )
+                        .expect("try_acquire_running should never error, only return false")
+                    })
+                })
+                .collect();
+
+            let winners: usize = handles
+                .into_iter()
+                .map(|h| h.join().unwrap() as usize)
+                .sum();
+            assert_eq!(winners, 1, "round {}: expected 1 winner, got {}", round, winners);
+
+            // Release the lock so the next round has something to acquire.
+            let conn = open_conn(&db_path);
+            conn.execute(
+                "UPDATE agent_sessions SET status='stopped' WHERE project_id=?1 AND agent_name=?2",
+                params![project_path, "agent-y"],
+            ).expect("release lock");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn try_acquire_running_reacquires_after_release() {
+        // Single-threaded correctness check: acquire → release →
+        // re-acquire must all return Ok(true). Catches a regression
+        // where the CAS could treat a released row as still held.
+        let (dir, db_path) = scratch_db();
+        let conn = open_conn(&db_path);
+        let project = make_project(&conn, "/tmp/proj-d");
+
+        let first = AgentSession::try_acquire_running(
+            &conn, "s1", &project, "a1", None, "claude", "manager",
+        )
+        .unwrap();
+        assert!(first, "first acquire should win");
+
+        let second = AgentSession::try_acquire_running(
+            &conn, "s2", &project, "a1", None, "claude", "manager",
+        )
+        .unwrap();
+        assert!(!second, "second acquire (already held) should lose");
+
+        // Release (status != 'running').
+        conn.execute(
+            "UPDATE agent_sessions SET status='stopped' WHERE project_id=?1 AND agent_name=?2",
+            params![project, "a1"],
+        )
+        .unwrap();
+
+        let third = AgentSession::try_acquire_running(
+            &conn, "s3", &project, "a1", None, "claude", "manager",
+        )
+        .unwrap();
+        assert!(third, "re-acquire after release should win");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -59,6 +59,14 @@ argon2 = "0.5"
 subtle = "2.6"
 tungstenite = "0.24"
 
+# Non-cryptographic hash used on hot paths (terminal grid change detection
+# pre-seqno, future caching keys). Picked over FxHash for SIMD acceleration.
+ahash = "0.8"
+
+# Work-stealing parallel directory walker respecting .gitignore / .k2soignore.
+# Replaces the single-threaded recursion in llm::file_index::search_walk.
+ignore = "0.4"
+
 # Alacritty terminal backend
 alacritty_terminal = "0.26.0-rc1"
 parking_lot = "0.12"
@@ -72,6 +80,16 @@ qoi = "0.4"
 
 [features]
 default = []
+
+[dev-dependencies]
+# Benchmark framework for src-tauri/benches/*.rs. Dev-only; never ships in
+# release binaries. Provides baseline-vs-current comparison + statistical
+# significance reporting (mean, stddev, p99, outlier rejection).
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "perf"
+harness = false
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

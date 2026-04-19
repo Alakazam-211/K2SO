@@ -686,29 +686,40 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
       console.warn('[filetree] Failed to start watcher:', err)
     })
 
-    // Listen for FS change events and refresh affected directories
+    // Listen for FS change events and refresh affected directories.
+    // 0.32.13+ the backend emits a batched payload (Vec<FsChangePayload>)
+    // per debounce window instead of one-emit-per-path. We accept either
+    // shape so older backend builds still work — single objects are
+    // wrapped into a one-element array.
     let unlisten: (() => void) | null = null
-    listen<{ path: string; kind: string }>('fs://change', (event) => {
-      const changedPath = event.payload.path
-      // Refresh the parent directory of the changed path
-      const dir = parentDir(changedPath)
-      // Only refresh directories we've already loaded and have expanded
+    listen<Array<{ path: string; kind: string }> | { path: string; kind: string }>('fs://change', (event) => {
+      const batch = Array.isArray(event.payload) ? event.payload : [event.payload]
+      // Collect unique parent dirs from the batch so we reload each once
+      // even when many paths share a directory.
+      const dirsToRefresh = new Set<string>()
+      let refreshEnv = false
+      let refreshAiConfig = false
+      for (const change of batch) {
+        const dir = parentDir(change.path)
+        dirsToRefresh.add(dir)
+        const changedName = change.path.split('/').pop() || ''
+        if (dir === rootPath && changedName.startsWith('.env')) {
+          refreshEnv = true
+        }
+        if (dir === rootPath && AI_CONFIG_PATTERNS.some((p) => p.match({ name: changedName, path: change.path, isDirectory: false, size: 0, modifiedAt: 0 }) || p.match({ name: changedName, path: change.path, isDirectory: true, size: 0, modifiedAt: 0 }))) {
+          refreshAiConfig = true
+        }
+      }
       setCache((prev) => {
-        if (prev.has(dir)) {
-          // Debounced: just trigger a reload
-          loadDir(dir, true)
+        for (const dir of dirsToRefresh) {
+          if (prev.has(dir)) {
+            loadDir(dir, true)
+          }
         }
         return prev
       })
-      // Refresh env files section when a .env* file changes in root
-      const changedName = changedPath.split('/').pop() || ''
-      if (dir === rootPath && changedName.startsWith('.env')) {
-        loadEnvFiles()
-      }
-      // Refresh AI config section when relevant files/dirs change in root
-      if (dir === rootPath && AI_CONFIG_PATTERNS.some((p) => p.match({ name: changedName, path: changedPath, isDirectory: false, size: 0, modifiedAt: 0 }) || p.match({ name: changedName, path: changedPath, isDirectory: true, size: 0, modifiedAt: 0 }))) {
-        loadAiConfig()
-      }
+      if (refreshEnv) loadEnvFiles()
+      if (refreshAiConfig) loadAiConfig()
     }).then((fn) => { unlisten = fn })
 
     return () => {

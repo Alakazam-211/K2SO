@@ -18,17 +18,21 @@ macro_rules! log_debug {
 mod agent_hooks;
 mod commands;
 mod companion;
-mod db;
+// Modules opened for the benches at src-tauri/benches/perf.rs — the k2so_lib
+// crate is not published, so this is a no-op for real consumers. Revert to
+// `mod` once the perf pass is over if we decide the benches' existence
+// doesn't justify open modules.
+pub mod db;
 mod editors;
 mod fs_abstract;
 mod fs_atomic;
 mod git;
-mod llm;
+pub mod llm;
 mod menu;
-mod perf;
+pub mod perf;
 mod project_config;
 mod state;
-mod terminal;
+pub mod terminal;
 mod watcher;
 mod window;
 
