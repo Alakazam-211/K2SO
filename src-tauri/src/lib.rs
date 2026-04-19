@@ -38,6 +38,11 @@ mod menu;
 // keep working unchanged. See crates/k2so-core/src/perf.rs.
 pub use k2so_core::{perf, perf_hist, perf_timer};
 mod state;
+// Tauri-side HTTP client for the k2so-daemon. Routes state-mutating
+// commands through the daemon's loopback HTTP instead of running them
+// in-process. Small for now (ping + status); grows as daemon handlers
+// land.
+mod daemon_client;
 // `terminal` now lives in k2so-core. Re-exported so existing
 // `crate::terminal::*` paths keep working.
 pub use k2so_core::terminal;
