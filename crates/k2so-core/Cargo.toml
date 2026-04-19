@@ -36,3 +36,18 @@ uuid = { version = "1", features = ["v4"] }
 
 # Home-directory lookup for ~/.k2so/k2so.db.
 dirs = "5"
+
+# Local LLM inference (llama.cpp bindings with Metal acceleration).
+llama-cpp-2 = { version = "0.1", features = ["metal", "sampler"] }
+
+# Blocking HTTP client for llm::download (reqwest with rustls — same
+# stack src-tauri uses).
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+
+# Parallel work-stealing directory walker respecting .gitignore /
+# .k2soignore — llm::file_index::search_walk uses it for fuzzy file find.
+ignore = "0.4"
+
+# Character-encoding detection for llm::file_index when files are mixed
+# UTF-8 / UTF-16 / Latin-1.
+encoding_rs = "0.8"

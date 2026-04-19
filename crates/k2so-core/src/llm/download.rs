@@ -2,7 +2,6 @@ use serde::Serialize;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use tauri::{AppHandle, Emitter};
 
 /// Default model: Qwen2.5-1.5B-Instruct Q4_K_M (~1.1 GB)
 pub const DEFAULT_MODEL_URL: &str =
@@ -52,11 +51,18 @@ pub fn cleanup_stale_downloads() {
     }
 }
 
-/// Downloads a GGUF model file from a URL with progress events.
+/// Downloads a GGUF model file from a URL, reporting chunk-level progress
+/// through the supplied callback. Creates the destination directory if
+/// needed.
 ///
-/// Creates the destination directory if needed.
-/// Emits `assistant:download-progress` events to the frontend.
-pub fn download_model(url: &str, dest_path: &str, app_handle: AppHandle) -> Result<(), String> {
+/// The callback decouples this function from Tauri's event system — the
+/// Tauri app passes a closure that forwards to `AppHandle::emit`; the
+/// k2so-daemon can pass a closure that forwards to its WS broadcast or a
+/// `PushTarget` impl. This is what lets the module live in k2so-core.
+pub fn download_model<F>(url: &str, dest_path: &str, on_progress: F) -> Result<(), String>
+where
+    F: Fn(DownloadProgress),
+{
     // Ensure parent directory exists
     let dest = PathBuf::from(dest_path);
     if let Some(parent) = dest.parent() {
@@ -110,15 +116,14 @@ pub fn download_model(url: &str, dest_path: &str, app_handle: AppHandle) -> Resu
             0.0
         };
 
-        // Emit progress event (best-effort, don't fail on emit errors)
-        let _ = app_handle.emit(
-            "assistant:download-progress",
-            DownloadProgress {
-                percent,
-                bytes_downloaded,
-                total_bytes,
-            },
-        );
+        // Report progress (best-effort — callback is expected to swallow
+        // its own failures; we don't want a dead WS listener or dropped
+        // Tauri emit to fail the download).
+        on_progress(DownloadProgress {
+            percent,
+            bytes_downloaded,
+            total_bytes,
+        });
     }
 
     file.flush()

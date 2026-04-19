@@ -27,7 +27,9 @@ mod editors;
 mod fs_abstract;
 mod fs_atomic;
 mod git;
-pub mod llm;
+// `llm` now lives in k2so-core. Downstream callers keep their
+// `crate::llm::*` paths working through this re-export.
+pub use k2so_core::llm;
 mod menu;
 // `perf` now lives in the k2so-core crate. Re-exported so existing
 // `crate::perf_timer!` / `crate::perf_hist!` / `crate::perf::*` call sites
@@ -732,10 +734,13 @@ pub fn run() {
                                 Err(e) => { log_debug!("[llm] Error getting model path: {e}"); return; }
                             };
                             let dest_str = dest.to_string_lossy().to_string();
+                            let progress_app = app_handle_for_download.clone();
                             let result = llm::download::download_model(
                                 llm::download::DEFAULT_MODEL_URL,
                                 &dest_str,
-                                app_handle_for_download.clone(),
+                                move |p| {
+                                    let _ = progress_app.emit("assistant:download-progress", p);
+                                },
                             );
                             if let Some(state) = app_handle_for_download.try_state::<AppState>() {
                                 let mut manager = state.llm_manager.lock();

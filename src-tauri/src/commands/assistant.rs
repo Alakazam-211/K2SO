@@ -1,6 +1,6 @@
 use serde::Serialize;
 use std::sync::atomic::{AtomicU32, Ordering};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::llm::download;
 use crate::llm::file_index;
@@ -422,7 +422,10 @@ pub fn assistant_download_default_model(
     let state_handle = app.clone();
 
     std::thread::spawn(move || {
-        let result = download::download_model(&url, &dest_str, app);
+        let progress_app = app.clone();
+        let result = download::download_model(&url, &dest_str, move |p| {
+            let _ = progress_app.emit("assistant:download-progress", p);
+        });
 
         // Clear downloading flag
         if let Some(app_state) = state_handle.try_state::<AppState>() {
