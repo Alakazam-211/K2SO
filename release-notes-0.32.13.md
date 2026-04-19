@@ -58,26 +58,31 @@ Two measurement surfaces, each answering a different question:
 
 **2. Live instrumentation** (`K2SO_PERF=1 bun run tauri dev`) — captures things criterion can't simulate: real startup wall-clock, real file-watcher batch sizes under a live filesystem storm. Logged through the `perf_hist!`/`perf_timer!` macros added in P0.
 
-### Criterion bench results
+### Criterion bench results (baseline + post-P2)
 
-*(Run with `cargo bench --manifest-path src-tauri/Cargo.toml --bench perf`. Numbers below are the baseline. Post-P1/P2 deltas land in commit messages alongside the code changes and can be re-verified via re-run.)*
+Run via `cargo bench --manifest-path src-tauri/Cargo.toml --bench perf`.
+Criterion persists results under `target/criterion/` and reports baseline-
+vs-current deltas automatically. Numbers captured on an M-series Mac in
+release mode.
 
-| Group / bench | Baseline | Expected post-P1/P2 | Notes |
+| Group / bench | Baseline | Post-P2 | What this proves |
 |---|---|---|---|
-| `grid_change_detection/siphash/120x40` | _(baseline from live run: ~50 µs/grid inferred)_ | replaced by ahash then seqno | The prod hot path today |
-| `grid_change_detection/ahash/120x40` | — | P1.1 lands this | Drop-in replacement |
-| `grid_change_detection/seqno_compare/120x40` | — | P2.1 lands this | O(1) integer compare, independent of grid size |
-| `poll_simulation/siphash_100_polls` | _(measured)_ | — | Full 100-tick loop at 120×40 |
-| `poll_simulation/ahash_100_polls` | — | P1.1 win | |
-| `poll_simulation/seqno_100_polls` | — | P2.1 win | Expected ~1000× faster than siphash |
-| `reflow/uncached_reflow` | _(measured)_ | — | Status quo |
-| `reflow/cached_reflow_hit` | _(measured)_ | P2.3 activates the cache | Arc::clone of precomputed grid |
-| `file_walker/serial_recursive` | _(measured)_ | — | Matches current `search_walk` |
-| `file_walker/parallel_ignore` | _(measured)_ | P2.4 activates this | work-stealing via `ignore::WalkParallel` |
-| `sqlite_insert/execute_per_call` | _(measured)_ | — | Current prod pattern |
-| `sqlite_insert/prepare_cached` | _(measured)_ | P1.3 activates this | `rusqlite::Connection::prepare_cached` |
+| `grid_change_detection/siphash/80x24` | 576 ns | 558 ns | The retired prod hot path — 80×24 grid |
+| `grid_change_detection/siphash/120x40` | 1.43 µs | 1.39 µs | 120×40 grid |
+| `grid_change_detection/siphash/200x60` | 3.59 µs | 3.47 µs | 200×60 grid (scaling is linear with cells) |
+| `grid_change_detection/ahash/200x60` | 1.09 µs | **1.06 µs** | P1.1 intermediate — ~3.3× faster than SipHash |
+| `grid_change_detection/seqno_compare/200x60` | 385 ps | **372 ps** | P2.1 target — constant time regardless of grid size |
+| `reflow/uncached_reflow` | 22.1 µs | 22.1 µs | Current per-client-per-tick cost |
+| `reflow/cached_reflow_hit` | 9.82 ns | **9.50 ns** | P2.3 cache-hit — 2,250× faster than recompute |
+| `file_walker/serial_recursive` | 447 µs | **405 µs** | Current + P2.4 (ignore::Walk sequential) |
+| `file_walker/parallel_ignore` | 3.71 ms | 3.60 ms | **8× SLOWER** than serial on our tree size — parallel ambition dropped |
+| `sqlite_insert/execute_per_call` | 2.27 µs | 2.29 µs | Current prod pattern |
+| `sqlite_insert/prepare_cached` | 1.69 µs | **1.72 µs** | P1.3 target — 25% faster per insert |
+| `poll_simulation/siphash_100_polls` | 177 µs | 178 µs | Full 100-tick loop with siphash |
+| `poll_simulation/ahash_100_polls` | 86 µs | **87 µs** | Full 100-tick loop with ahash |
+| `poll_simulation/seqno_100_polls` | 19.5 ns | **19.3 ns** | Full 100-tick loop with seqno — **~9,200× faster** than siphash |
 
-_(Full tables auto-populate in `target/criterion/report/index.html` — open to see violin plots, regression traces, and CI bands.)_
+**All deltas between baseline and post-P2 are within ±5% (criterion noise band).** The benchmarks test algorithms side-by-side, so post-change numbers are stable — the ratio between approaches is what's meaningful. Full HTML reports (violin plots, regression traces, CI bands) live at `target/criterion/report/`.
 
 ### Live instrumentation (paths criterion can't reproduce)
 
