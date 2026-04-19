@@ -17,3 +17,8 @@ getrandom = "0.2"
 
 # Home-directory lookup for ~/.k2so/{daemon.port,daemon.token,daemon.log}.
 dirs = "5"
+
+# Async runtime. The daemon is async-first by convention — scheduler ticks,
+# companion WS, the HTTP server, and the future daemon->Tauri WS event
+# channel all live on the same multi-thread runtime.
+tokio = { version = "1", features = ["full"] }

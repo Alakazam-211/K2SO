@@ -2971,6 +2971,7 @@ dependencies = [
  "libc",
  "llama-cpp-2",
  "mio",
+ "ngrok",
  "parking_lot",
  "polling",
  "portable-pty",
@@ -2983,7 +2984,9 @@ dependencies = [
  "signal-hook 0.3.18",
  "signal-hook-mio",
  "subtle",
+ "tokio",
  "tungstenite",
+ "url",
  "uuid",
 ]
 
@@ -2994,6 +2997,7 @@ dependencies = [
  "dirs 5.0.1",
  "getrandom 0.2.17",
  "k2so-core",
+ "tokio",
 ]
 
 [[package]]

@@ -6,6 +6,15 @@
 //! the agent_hooks HTTP server — so that agents keep running while the
 //! Tauri app is quit and the laptop lid is closed.
 //!
+//! # Tokio runtime
+//!
+//! The binary is async-first: a multi-thread `#[tokio::main]` runtime hosts
+//! the HTTP accept loop and (as more modules migrate in) the scheduler
+//! ticks, companion WS, and the daemon→Tauri event channel. Each inbound
+//! connection is handled by its own `tokio::spawn` task so a slow or
+//! long-lived connection (future WS upgrades, streaming responses) never
+//! stalls the accept loop.
+//!
 //! # Scaffolding pass (0.33.0-dev)
 //!
 //! Binds a loopback TCP listener on a random port, writes the port +
@@ -18,20 +27,34 @@
 //! exercised) without yet taking responsibility for agent state.
 
 use std::fs;
-use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::broadcast;
 
 use k2so_core::log_debug;
 
 const BANNER: &str = concat!(
     "k2so-daemon ",
     env!("CARGO_PKG_VERSION"),
-    " — scaffolding build",
+    " — scaffolding build (tokio)",
 );
 
-fn main() {
+/// Shared per-process state pulled into every connection task. Cheap to
+/// clone: all fields are either `Copy`, `&'static`, or `Arc`-wrapped.
+#[derive(Clone)]
+struct DaemonState {
+    token: Arc<String>,
+    started_at: Instant,
+    port: u16,
+}
+
+#[tokio::main(flavor = "multi_thread")]
+async fn main() {
     // Force a reference to k2so-core so the crate boundary is exercised
     // at build-time until we actually use it for real work.
     k2so_core::__scaffolding_marker();
@@ -50,7 +73,7 @@ fn main() {
         std::process::exit(2);
     }
 
-    let listener = match TcpListener::bind("127.0.0.1:0") {
+    let listener = match TcpListener::bind("127.0.0.1:0").await {
         Ok(l) => l,
         Err(e) => {
             log_debug!("[daemon] FATAL: bind 127.0.0.1:0: {e}");
@@ -86,75 +109,121 @@ fn main() {
         k2so_dir.join("daemon.token").display()
     );
 
-    let started_at = Instant::now();
+    let state = DaemonState {
+        token: Arc::new(token),
+        started_at: Instant::now(),
+        port,
+    };
 
-    for stream in listener.incoming() {
-        let Ok(mut stream) = stream else { continue };
-        let mut buf = [0u8; 4096];
-        let n = match stream.read(&mut buf) {
-            Ok(n) if n > 0 => n,
-            _ => continue,
-        };
-        let req = String::from_utf8_lossy(&buf[..n]);
-
-        // Peek at the request line: "GET /path?query HTTP/1.1"
-        let first_line = req.lines().next().unwrap_or("");
-        let parts: Vec<&str> = first_line.split_whitespace().collect();
-        let (method, path_and_query) = match parts.as_slice() {
-            [m, p, ..] => (*m, *p),
-            _ => {
-                send_response(&mut stream, "400 Bad Request", "text/plain", "bad request\n");
-                continue;
-            }
-        };
-
-        if method != "GET" {
-            send_response(
-                &mut stream,
-                "405 Method Not Allowed",
-                "application/json",
-                r#"{"error":"only GET is supported"}"#,
-            );
-            continue;
+    // Graceful-shutdown channel. launchd sends SIGTERM on system shutdown
+    // or `launchctl unload`; Ctrl+C is the local-dev path. Both land on
+    // the same broadcast so in-flight handlers get a chance to flush.
+    let (shutdown_tx, _shutdown_rx) = broadcast::channel::<()>(1);
+    let shutdown_tx_for_signal = shutdown_tx.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            log_debug!("[daemon] Ctrl+C received, shutting down");
+            let _ = shutdown_tx_for_signal.send(());
         }
+    });
 
-        let (path, query) = match path_and_query.split_once('?') {
-            Some((p, q)) => (p, q),
-            None => (path_and_query, ""),
-        };
-
-        match path {
-            "/ping" => {
-                // Unauthenticated. Smallest liveness check.
-                send_response(&mut stream, "200 OK", "text/plain; charset=utf-8", BANNER);
-            }
-            "/status" => {
-                // Token-gated. Returns a small JSON blob describing
-                // the daemon's state so the Tauri app can verify it's
-                // talking to the right process.
-                if !token_ok(query, &token) {
-                    send_response(
-                        &mut stream,
-                        "403 Forbidden",
-                        "application/json",
-                        r#"{"error":"invalid or missing token"}"#,
-                    );
-                    continue;
+    let mut shutdown_rx = shutdown_tx.subscribe();
+    loop {
+        tokio::select! {
+            res = listener.accept() => {
+                match res {
+                    Ok((stream, _addr)) => {
+                        let st = state.clone();
+                        let mut shutdown = shutdown_tx.subscribe();
+                        tokio::spawn(async move {
+                            tokio::select! {
+                                _ = handle_connection(stream, st) => {}
+                                _ = shutdown.recv() => {}
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        log_debug!("[daemon] accept error: {e}");
+                    }
                 }
-                let uptime_secs = started_at.elapsed().as_secs();
-                let pid = std::process::id();
-                let body = format!(
-                    r#"{{"version":"{}","uptime_secs":{},"pid":{},"port":{}}}"#,
-                    env!("CARGO_PKG_VERSION"),
-                    uptime_secs,
-                    pid,
-                    port,
-                );
-                send_response(&mut stream, "200 OK", "application/json", &body);
             }
-            _ => {
-                send_response(&mut stream, "404 Not Found", "text/plain", "not found\n");
+            _ = shutdown_rx.recv() => {
+                log_debug!("[daemon] accept loop exiting");
+                break;
             }
+        }
+    }
+}
+
+/// Serve one connection. On any IO error or malformed request we drop the
+/// socket — every response also sets `Connection: close` so callers don't
+/// reuse the socket.
+async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
+    let mut buf = [0u8; 4096];
+    let n = match stream.read(&mut buf).await {
+        Ok(n) if n > 0 => n,
+        _ => return,
+    };
+    let req = String::from_utf8_lossy(&buf[..n]);
+
+    let first_line = req.lines().next().unwrap_or("");
+    let parts: Vec<&str> = first_line.split_whitespace().collect();
+    let (method, path_and_query) = match parts.as_slice() {
+        [m, p, ..] => (*m, *p),
+        _ => {
+            send_response(&mut stream, "400 Bad Request", "text/plain", "bad request\n").await;
+            return;
+        }
+    };
+
+    if method != "GET" {
+        send_response(
+            &mut stream,
+            "405 Method Not Allowed",
+            "application/json",
+            r#"{"error":"only GET is supported"}"#,
+        )
+        .await;
+        return;
+    }
+
+    let (path, query) = match path_and_query.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (path_and_query, ""),
+    };
+
+    match path {
+        "/ping" => {
+            // Unauthenticated. Smallest liveness check.
+            send_response(&mut stream, "200 OK", "text/plain; charset=utf-8", BANNER).await;
+        }
+        "/status" => {
+            // Token-gated. Returns a small JSON blob describing the
+            // daemon's state so the Tauri app can verify it's talking to
+            // the right process.
+            if !token_ok(query, state.token.as_str()) {
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let uptime_secs = state.started_at.elapsed().as_secs();
+            let pid = std::process::id();
+            let body = format!(
+                r#"{{"version":"{}","uptime_secs":{},"pid":{},"port":{}}}"#,
+                env!("CARGO_PKG_VERSION"),
+                uptime_secs,
+                pid,
+                state.port,
+            );
+            send_response(&mut stream, "200 OK", "application/json", &body).await;
+        }
+        _ => {
+            send_response(&mut stream, "404 Not Found", "text/plain", "not found\n").await;
         }
     }
 }
@@ -171,13 +240,13 @@ fn token_ok(query: &str, expected: &str) -> bool {
     false
 }
 
-fn send_response(stream: &mut std::net::TcpStream, status: &str, ct: &str, body: &str) {
+async fn send_response(stream: &mut TcpStream, status: &str, ct: &str, body: &str) {
     let resp = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body,
     );
-    let _ = stream.write_all(resp.as_bytes());
+    let _ = stream.write_all(resp.as_bytes()).await;
 }
 
 /// Write `contents` to `path` with permissions 0600 so other users on the
