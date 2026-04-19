@@ -28,6 +28,7 @@ pub mod events;
 pub mod heartbeat;
 pub mod scheduler;
 pub mod session;
+pub mod settings;
 pub mod skill;
 pub mod skill_content;
 pub mod skill_writer;

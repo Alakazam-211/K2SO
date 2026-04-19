@@ -279,6 +279,155 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
 
+        // ── Per-agent heartbeat control ─────────────────────────────
+        "/cli/agents/heartbeat" => match need_project(params) {
+            Ok(p) => {
+                let agent = str_param(params, "agent");
+                let interval = opt_param(params, "interval").and_then(|v| v.parse::<u64>().ok());
+                let phase = opt_param(params, "phase");
+                let mode = opt_param(params, "mode");
+                let cost_budget = opt_param(params, "cost_budget");
+                // If ANY mutation param is present → update; else → read.
+                if interval.is_some()
+                    || phase.is_some()
+                    || mode.is_some()
+                    || cost_budget.is_some()
+                {
+                    let force_wake = if params.contains_key("force_wake") {
+                        Some(bool_param(params, "force_wake"))
+                    } else {
+                        None
+                    };
+                    respond(k2so_core::agents::commands::set_heartbeat(
+                        p,
+                        agent,
+                        interval,
+                        phase,
+                        mode,
+                        cost_budget,
+                        force_wake,
+                    ))
+                } else {
+                    respond(k2so_core::agents::commands::get_heartbeat(p, agent))
+                }
+            }
+            Err(r) => r,
+        },
+        "/cli/agents/heartbeat/noop" => match need_project(params) {
+            Ok(p) => respond(k2so_core::agents::commands::heartbeat_noop(
+                p,
+                str_param(params, "agent"),
+            )),
+            Err(r) => r,
+        },
+        "/cli/agents/heartbeat/action" => match need_project(params) {
+            Ok(p) => respond(k2so_core::agents::commands::heartbeat_action(
+                p,
+                str_param(params, "agent"),
+            )),
+            Err(r) => r,
+        },
+
+        // ── Per-project mode + settings toggles ─────────────────────
+        "/cli/mode" => match need_project(params) {
+            Ok(p) => {
+                if let Some(mode) = opt_param(params, "set") {
+                    match k2so_core::agents::settings::update_project_setting(&p, "agent_mode", &mode) {
+                        Ok(()) => {
+                            k2so_core::agent_hooks::emit(
+                                k2so_core::agent_hooks::HookEvent::SyncProjects,
+                                serde_json::Value::Null,
+                            );
+                            CliResponse::ok_json(
+                                serde_json::json!({"success": true, "mode": mode}).to_string(),
+                            )
+                        }
+                        Err(e) => CliResponse::bad_request(e),
+                    }
+                } else {
+                    // Read current mode. Falls back to filesystem-
+                    // detection if DB has no row.
+                    match k2so_core::agents::settings::get_project_settings(&p) {
+                        Ok(settings) => CliResponse::ok_json(
+                            serde_json::to_string(&settings).unwrap_or_default(),
+                        ),
+                        Err(_) => {
+                            let k2so_dir = std::path::PathBuf::from(&p).join(".k2so");
+                            let agents_dir = k2so_dir.join("agents");
+                            let has_agents = agents_dir.exists()
+                                && std::fs::read_dir(&agents_dir)
+                                    .map(|e| e.count() > 0)
+                                    .unwrap_or(false);
+                            let claude_md =
+                                std::path::PathBuf::from(&p).join("CLAUDE.md");
+                            let mode = if !claude_md.exists() {
+                                "off"
+                            } else if has_agents {
+                                "manager"
+                            } else {
+                                "agent"
+                            };
+                            CliResponse::ok_json(
+                                serde_json::json!({"mode": mode}).to_string(),
+                            )
+                        }
+                    }
+                }
+            }
+            Err(r) => r,
+        },
+        "/cli/settings" => match need_project(params) {
+            Ok(p) => match k2so_core::agents::settings::get_project_settings(&p) {
+                Ok(s) => CliResponse::ok_json(serde_json::to_string(&s).unwrap_or_default()),
+                Err(e) => CliResponse::bad_request(e),
+            },
+            Err(r) => r,
+        },
+        "/cli/worktree" => match need_project(params) {
+            Ok(p) => {
+                let enable = bool_param(params, "enable");
+                let value = if enable { "1" } else { "0" };
+                match k2so_core::agents::settings::update_project_setting(&p, "worktree_mode", value) {
+                    Ok(()) => {
+                        k2so_core::agent_hooks::emit(
+                            k2so_core::agent_hooks::HookEvent::SyncProjects,
+                            serde_json::Value::Null,
+                        );
+                        CliResponse::ok_json(
+                            serde_json::json!({"success": true, "worktreeMode": enable})
+                                .to_string(),
+                        )
+                    }
+                    Err(e) => CliResponse::bad_request(e),
+                }
+            }
+            Err(r) => r,
+        },
+        "/cli/agentic" => {
+            // Global toggle, not project-specific.
+            if let Some(enable) = opt_param(params, "enable") {
+                let on = enable == "1" || enable == "true" || enable == "on";
+                match k2so_core::agents::settings::set_agentic_enabled(on) {
+                    Ok(()) => {
+                        k2so_core::agent_hooks::emit(
+                            k2so_core::agent_hooks::HookEvent::SyncSettings,
+                            serde_json::Value::Null,
+                        );
+                        CliResponse::ok_json(
+                            serde_json::json!({"success": true, "agenticEnabled": on})
+                                .to_string(),
+                        )
+                    }
+                    Err(e) => CliResponse::bad_request(e),
+                }
+            } else {
+                let enabled = k2so_core::agents::settings::get_agentic_enabled();
+                CliResponse::ok_json(
+                    serde_json::json!({"agenticEnabled": enabled}).to_string(),
+                )
+            }
+        }
+
         // ── Hook diagnostic ─────────────────────────────────────────
         "/cli/hooks/status" => {
             let limit = params

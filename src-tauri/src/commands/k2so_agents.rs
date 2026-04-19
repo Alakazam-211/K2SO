@@ -95,6 +95,56 @@ pub use k2so_core::agents::events::{
     drain_agent_events, push_agent_event, ChannelEvent, MAX_EVENTS_PER_QUEUE,
 };
 
+// Log-helper + per-agent heartbeat control moved to
+// k2so_core::agents::commands. Tauri command wrappers below keep the
+// React frontend's invoke() sites working.
+pub use k2so_core::agents::commands::log_agent_warning;
+
+#[tauri::command]
+pub fn k2so_agents_get_heartbeat(
+    project_path: String,
+    agent_name: String,
+) -> Result<AgentHeartbeatConfig, String> {
+    k2so_core::agents::commands::get_heartbeat(project_path, agent_name)
+}
+
+#[tauri::command]
+pub fn k2so_agents_set_heartbeat(
+    project_path: String,
+    agent_name: String,
+    interval: Option<u64>,
+    phase: Option<String>,
+    mode: Option<String>,
+    cost_budget: Option<String>,
+    force_wake: Option<bool>,
+) -> Result<AgentHeartbeatConfig, String> {
+    k2so_core::agents::commands::set_heartbeat(
+        project_path,
+        agent_name,
+        interval,
+        phase,
+        mode,
+        cost_budget,
+        force_wake,
+    )
+}
+
+#[tauri::command]
+pub fn k2so_agents_heartbeat_noop(
+    project_path: String,
+    agent_name: String,
+) -> Result<AgentHeartbeatConfig, String> {
+    k2so_core::agents::commands::heartbeat_noop(project_path, agent_name)
+}
+
+#[tauri::command]
+pub fn k2so_agents_heartbeat_action(
+    project_path: String,
+    agent_name: String,
+) -> Result<AgentHeartbeatConfig, String> {
+    k2so_core::agents::commands::heartbeat_action(project_path, agent_name)
+}
+
 #[tauri::command]
 pub fn k2so_agents_list(project_path: String) -> Result<Vec<K2soAgentInfo>, String> {
     k2so_core::agents::commands::list(project_path)
@@ -1101,15 +1151,7 @@ pub fn k2so_agents_build_launch(
 
 // `format_cap` moved to k2so_core::agents::skill_content (re-exported).
 
-/// Log a warning for an agent (appends to .k2so/agents/<name>/agent.log).
-fn log_agent_warning(project_path: &str, agent_name: &str, message: &str) {
-    let log_path = agent_dir(project_path, agent_name).join("agent.log");
-    let entry = format!("[{}] WARN: {}\n", simple_date(), message);
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-        use std::io::Write;
-        let _ = file.write_all(entry.as_bytes());
-    }
-}
+// `log_agent_warning` moved to k2so_core::agents::commands (re-exported).
 
 // `shorten_slug` moved to k2so_core::agents::delegate (re-exported).
 
@@ -2323,67 +2365,9 @@ pub fn k2so_agents_triage_decide(project_path: String) -> Result<Vec<String>, St
 
 // ── Adaptive Heartbeat Commands ──────────────────────────────────────────
 
-/// Get an agent's heartbeat configuration.
-#[tauri::command]
-pub fn k2so_agents_get_heartbeat(
-    project_path: String,
-    agent_name: String,
-) -> Result<AgentHeartbeatConfig, String> {
-    let dir = agent_dir(&project_path, &agent_name);
-    if !dir.exists() {
-        return Err(format!("Agent '{}' does not exist", agent_name));
-    }
-    Ok(read_heartbeat_config(&project_path, &agent_name))
-}
+// `k2so_agents_get_heartbeat` moved to k2so_core::agents::commands (re-exported).
 
-/// Update an agent's heartbeat configuration (partial update).
-/// Used by both the CLI (`k2so heartbeat set`) and the frontend settings UI.
-#[tauri::command]
-pub fn k2so_agents_set_heartbeat(
-    project_path: String,
-    agent_name: String,
-    interval: Option<u64>,
-    phase: Option<String>,
-    mode: Option<String>,
-    cost_budget: Option<String>,
-    force_wake: Option<bool>,
-) -> Result<AgentHeartbeatConfig, String> {
-    let dir = agent_dir(&project_path, &agent_name);
-    if !dir.exists() {
-        return Err(format!("Agent '{}' does not exist", agent_name));
-    }
-
-    let mut config = read_heartbeat_config(&project_path, &agent_name);
-
-    if let Some(interval) = interval {
-        // Clamp to min/max
-        config.interval_seconds = interval
-            .max(config.min_interval_seconds)
-            .min(config.max_interval_seconds);
-    }
-    if let Some(phase) = phase {
-        config.phase = phase;
-    }
-    if let Some(mode) = mode {
-        config.mode = mode;
-    }
-    if let Some(budget) = cost_budget {
-        config.cost_budget = budget;
-    }
-    config.updated_by = "agent".to_string();
-
-    // Recalculate next wake (or set to now if force_wake)
-    let now = chrono::Utc::now();
-    if force_wake.unwrap_or(false) {
-        config.next_wake = Some(now.to_rfc3339()); // Wake immediately on next tick
-        config.updated_by = "user".to_string();
-    } else {
-        config.next_wake = Some((now + chrono::Duration::seconds(config.interval_seconds as i64)).to_rfc3339());
-    }
-
-    write_heartbeat_config(&project_path, &agent_name, &config)?;
-    Ok(config)
-}
+// `k2so_agents_set_heartbeat` moved to k2so_core::agents::commands (re-exported).
 
 /// Scheduler tick: check all agents in a project and return those ready to wake.
 /// Called by the heartbeat script (via /cli/scheduler-tick).
@@ -2423,61 +2407,9 @@ pub fn k2so_agents_clear_session_id(
     k2so_core::agents::session::k2so_agents_clear_session_id(project_path, agent_name)
 }
 
-/// Record a no-op (agent woke up but had nothing to do) and apply auto-backoff.
-#[tauri::command]
-pub fn k2so_agents_heartbeat_noop(
-    project_path: String,
-    agent_name: String,
-) -> Result<AgentHeartbeatConfig, String> {
-    let mut config = read_heartbeat_config(&project_path, &agent_name);
-    config.consecutive_no_ops += 1;
+// `k2so_agents_heartbeat_noop` moved to k2so_core::agents::commands (re-exported).
 
-    // Auto-backoff: after 3 consecutive no-ops, increase interval by 1.5x
-    // Uses integer arithmetic (3/2) to avoid floating-point precision drift on repeated backoffs.
-    // Clamps to both min and max interval bounds.
-    if config.auto_backoff && config.consecutive_no_ops >= 3 {
-        let new_interval = config.interval_seconds.saturating_mul(3) / 2; // 1.5x without floats
-        config.interval_seconds = new_interval
-            .max(config.min_interval_seconds)
-            .min(config.max_interval_seconds);
-        log_agent_warning(
-            &project_path,
-            &agent_name,
-            &format!(
-                "Auto-backoff: {} consecutive no-ops, interval now {}s",
-                config.consecutive_no_ops, config.interval_seconds
-            ),
-        );
-    }
-
-    // Prune wasteful session: clear the saved session ID so next launch is
-    // fresh (no point resuming a session that was just "I have nothing to
-    // do"). Previously this only deleted the legacy `.last_session` file
-    // and left the DB's session_id stale, so the next wake still tried
-    // --resume on a pruned session. Now we clear the DB directly.
-    {
-        let db = crate::db::shared();
-        let conn = db.lock();
-        if let Some(project_id) = resolve_project_id(&conn, &project_path) {
-            let _ = AgentSession::clear_session_id(&conn, &project_id, &agent_name);
-        }
-    }
-
-    write_heartbeat_config(&project_path, &agent_name, &config)?;
-    Ok(config)
-}
-
-/// Record that an agent took action — reset consecutive_no_ops counter.
-#[tauri::command]
-pub fn k2so_agents_heartbeat_action(
-    project_path: String,
-    agent_name: String,
-) -> Result<AgentHeartbeatConfig, String> {
-    let mut config = read_heartbeat_config(&project_path, &agent_name);
-    config.consecutive_no_ops = 0;
-    write_heartbeat_config(&project_path, &agent_name, &config)?;
-    Ok(config)
-}
+// `k2so_agents_heartbeat_action` moved to k2so_core::agents::commands (re-exported).
 
 // `is_within_active_hours` moved to k2so_core::agents::scheduler
 // (re-exported at the top of this file).

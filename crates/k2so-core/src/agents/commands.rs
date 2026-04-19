@@ -28,12 +28,16 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::agents::events::push_agent_event;
-use crate::agents::scheduler::{agent_work_dir, count_md_files};
+use crate::agents::scheduler::{
+    agent_work_dir, count_md_files, read_heartbeat_config, write_heartbeat_config,
+    AgentHeartbeatConfig,
+};
 use crate::agents::session::simple_date;
 use crate::agents::skill_writer::{generate_default_agent_body, write_agent_skill_file};
 use crate::agents::wake::{agent_wakeup_path, wakeup_template_for};
 use crate::agents::work_item::{atomic_write, read_work_item, WorkItem};
-use crate::agents::{agent_dir, agents_dir, parse_frontmatter};
+use crate::agents::{agent_dir, agents_dir, parse_frontmatter, resolve_project_id};
+use crate::db::schema::AgentSession;
 use crate::fs_atomic::{atomic_write_str, log_if_err};
 
 /// Summary row the UI agent-list + `k2so agents list` CLI render.
@@ -690,4 +694,143 @@ mod tests {
     fn update_agent_md_field_rejects_missing_frontmatter() {
         assert!(update_agent_md_field("no fm", "role", "x").is_err());
     }
+}
+
+// ── Per-agent heartbeat control (adaptive backoff) ──────────────────
+
+/// Append a warning line to `<agent-dir>/agent.log`. Silent on any I/O
+/// failure — logging a warning shouldn't itself cause a crash.
+pub fn log_agent_warning(project_path: &str, agent_name: &str, message: &str) {
+    let log_path = agent_dir(project_path, agent_name).join("agent.log");
+    let entry = format!("[{}] WARN: {}\n", simple_date(), message);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        use std::io::Write;
+        let _ = file.write_all(entry.as_bytes());
+    }
+}
+
+/// Read an agent's current heartbeat config (from
+/// `<agent-dir>/heartbeat.json`). Returns the default config if the
+/// file doesn't exist yet.
+pub fn get_heartbeat(
+    project_path: String,
+    agent_name: String,
+) -> Result<AgentHeartbeatConfig, String> {
+    let dir = agent_dir(&project_path, &agent_name);
+    if !dir.exists() {
+        return Err(format!("Agent '{}' does not exist", agent_name));
+    }
+    Ok(read_heartbeat_config(&project_path, &agent_name))
+}
+
+/// Partial update of an agent's heartbeat config. Any field left
+/// `None` is preserved from the current on-disk config. `force_wake`
+/// sets `next_wake` to now so the scheduler's next tick fires the
+/// agent immediately; otherwise `next_wake` advances by the (new or
+/// existing) interval.
+pub fn set_heartbeat(
+    project_path: String,
+    agent_name: String,
+    interval: Option<u64>,
+    phase: Option<String>,
+    mode: Option<String>,
+    cost_budget: Option<String>,
+    force_wake: Option<bool>,
+) -> Result<AgentHeartbeatConfig, String> {
+    let dir = agent_dir(&project_path, &agent_name);
+    if !dir.exists() {
+        return Err(format!("Agent '{}' does not exist", agent_name));
+    }
+
+    let mut config = read_heartbeat_config(&project_path, &agent_name);
+
+    if let Some(interval) = interval {
+        config.interval_seconds = interval
+            .max(config.min_interval_seconds)
+            .min(config.max_interval_seconds);
+    }
+    if let Some(phase) = phase {
+        config.phase = phase;
+    }
+    if let Some(mode) = mode {
+        config.mode = mode;
+    }
+    if let Some(budget) = cost_budget {
+        config.cost_budget = budget;
+    }
+    config.updated_by = "agent".to_string();
+
+    let now = chrono::Utc::now();
+    if force_wake.unwrap_or(false) {
+        config.next_wake = Some(now.to_rfc3339());
+        config.updated_by = "user".to_string();
+    } else {
+        config.next_wake = Some(
+            (now + chrono::Duration::seconds(config.interval_seconds as i64)).to_rfc3339(),
+        );
+    }
+
+    write_heartbeat_config(&project_path, &agent_name, &config)?;
+    Ok(config)
+}
+
+/// Record a no-op wake (agent had nothing to do). Applies auto-backoff
+/// after 3 consecutive no-ops: multiplies interval by 1.5, clamped
+/// between min and max. Also clears the DB's saved session_id so the
+/// next wake starts a fresh session — there's no value in resuming a
+/// conversation that was just "nothing to do here."
+pub fn heartbeat_noop(
+    project_path: String,
+    agent_name: String,
+) -> Result<AgentHeartbeatConfig, String> {
+    let mut config = read_heartbeat_config(&project_path, &agent_name);
+    config.consecutive_no_ops += 1;
+
+    // Auto-backoff: 1.5x after 3 consecutive no-ops, integer math
+    // to avoid float drift across repeated backoffs.
+    if config.auto_backoff && config.consecutive_no_ops >= 3 {
+        let new_interval = config.interval_seconds.saturating_mul(3) / 2;
+        config.interval_seconds = new_interval
+            .max(config.min_interval_seconds)
+            .min(config.max_interval_seconds);
+        log_agent_warning(
+            &project_path,
+            &agent_name,
+            &format!(
+                "Auto-backoff: {} consecutive no-ops, interval now {}s",
+                config.consecutive_no_ops, config.interval_seconds
+            ),
+        );
+    }
+
+    // Clear saved session_id — the scheduler's next wake for this
+    // agent should start a fresh session, not --resume the "I had
+    // nothing to do" one.
+    {
+        let db = crate::db::shared();
+        let conn = db.lock();
+        if let Some(project_id) = resolve_project_id(&conn, &project_path) {
+            let _ = AgentSession::clear_session_id(&conn, &project_id, &agent_name);
+        }
+    }
+
+    write_heartbeat_config(&project_path, &agent_name, &config)?;
+    Ok(config)
+}
+
+/// Record that an agent took meaningful action this wake. Resets the
+/// consecutive-no-op counter so backoff doesn't trigger on the next
+/// wake.
+pub fn heartbeat_action(
+    project_path: String,
+    agent_name: String,
+) -> Result<AgentHeartbeatConfig, String> {
+    let mut config = read_heartbeat_config(&project_path, &agent_name);
+    config.consecutive_no_ops = 0;
+    write_heartbeat_config(&project_path, &agent_name, &config)?;
+    Ok(config)
 }
