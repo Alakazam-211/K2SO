@@ -38,6 +38,7 @@ pub mod skill_writer;
 pub mod wake;
 pub mod work_item;
 pub mod workspace_regen;
+pub mod workspaces;
 
 /// Resolve a project's primary-key id from its filesystem path. `None`
 /// when the project hasn't been registered via `projects` yet.

@@ -463,6 +463,46 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
 
+        // ── Workspace lifecycle ─────────────────────────────────────
+        "/cli/workspace/create" => {
+            let target = str_param(params, "path");
+            match k2so_core::agents::workspaces::create_workspace(&target) {
+                Ok(body) => CliResponse::ok_json(body),
+                Err(e) => CliResponse::bad_request(e),
+            }
+        }
+        "/cli/workspace/open" => {
+            let target = str_param(params, "path");
+            match k2so_core::agents::workspaces::open_workspace(&target) {
+                Ok(body) => CliResponse::ok_json(body),
+                Err(e) => CliResponse::bad_request(e),
+            }
+        }
+        "/cli/workspace/cleanup" => {
+            match k2so_core::agents::workspaces::cleanup_stale_workspaces() {
+                Ok(body) => CliResponse::ok_json(body),
+                Err(e) => CliResponse::bad_request(e),
+            }
+        }
+        "/cli/workspace/remove" => {
+            // Teardown modes (keep_current / restore_original) still
+            // live in src-tauri because they depend on
+            // HARNESS_WORKSPACE_FILES + find_latest_archive. The
+            // daemon serves the DB-only path; callers that pass a
+            // `mode` get a 400 telling them to run from the Tauri
+            // app until that helper is migrated.
+            if params.contains_key("mode") {
+                return CliResponse::bad_request(
+                    "Workspace teardown modes (keep_current/restore_original) must be run from the Tauri app — daemon serves DB-only remove.",
+                );
+            }
+            let target = str_param(params, "path");
+            match k2so_core::agents::workspaces::remove_workspace_db_only(&target) {
+                Ok(body) => CliResponse::ok_json(body),
+                Err(e) => CliResponse::bad_request(e),
+            }
+        }
+
         // ── Sub-agent completion ────────────────────────────────────
         "/cli/agent/complete" => match need_project(params) {
             Ok(p) => {

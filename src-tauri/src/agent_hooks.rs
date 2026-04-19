@@ -1271,18 +1271,8 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                         }).to_string())
                     }
                     "/cli/workspace/create" => {
-                        // Create a new folder + register as workspace
                         let target = params.get("path").cloned().unwrap_or_default();
-                        if target.is_empty() {
-                            Err("Missing 'path' parameter".to_string())
-                        } else if std::path::Path::new(&target).exists() {
-                            Err(format!("Directory already exists: {}", target))
-                        } else {
-                            match std::fs::create_dir_all(&target) {
-                                Ok(_) => cli_register_workspace(&target, &app_handle),
-                                Err(e) => Err(format!("Failed to create directory: {}", e)),
-                            }
-                        }
+                        k2so_core::agents::workspaces::create_workspace(&target)
                     }
                     "/cli/workspace/remove" => {
                         // Deregister a workspace. If `mode` is passed,
@@ -1301,19 +1291,11 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                         }
                     }
                     "/cli/workspace/cleanup" => {
-                        // Remove workspace DB records for worktrees that no longer exist on disk
-                        cli_cleanup_stale_workspaces(&app_handle)
+                        k2so_core::agents::workspaces::cleanup_stale_workspaces()
                     }
                     "/cli/workspace/open" => {
-                        // Register an existing folder as workspace
                         let target = params.get("path").cloned().unwrap_or_default();
-                        if target.is_empty() {
-                            Err("Missing 'path' parameter".to_string())
-                        } else if !std::path::Path::new(&target).is_dir() {
-                            Err(format!("Directory not found: {}", target))
-                        } else {
-                            cli_register_workspace(&target, &app_handle)
-                        }
+                        k2so_core::agents::workspaces::open_workspace(&target)
                     }
                     "/cli/agent/complete" => {
                         let agent = params.get("agent").cloned().unwrap_or_default();
@@ -2264,84 +2246,13 @@ fn cli_update_project_setting(project_path: &str, field: &str, value: &str) -> R
     Ok(())
 }
 
-/// Read current project settings from the DB.
-/// Register a directory as a new K2SO workspace (project + default workspace).
-fn cli_register_workspace(path: &str, app_handle: &tauri::AppHandle) -> Result<String, String> {
-    let db_path = dirs::home_dir()
-        .ok_or("No home dir")?
-        .join(".k2so")
-        .join("k2so.db");
-    let db = crate::db::shared();
-    let conn = db.lock();
-
-    // Check if already registered
-    let exists: bool = conn.query_row(
-        "SELECT COUNT(*) > 0 FROM projects WHERE path = ?1",
-        rusqlite::params![path],
-        |row| row.get(0),
-    ).unwrap_or(false);
-    if exists {
-        return Err(format!("Workspace already registered: {}", path));
-    }
-
-    let name = std::path::Path::new(path)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "workspace".to_string());
-
-    let project_id = uuid::Uuid::new_v4().to_string();
-    let workspace_id = uuid::Uuid::new_v4().to_string();
-
-    // Detect git branch
-    let branch = std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(path)
-        .output()
-        .ok()
-        .and_then(|o| if o.status.success() { Some(String::from_utf8_lossy(&o.stdout).trim().to_string()) } else { None })
-        .unwrap_or_else(|| "main".to_string());
-
-    let tab_order: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(tab_order), -1) + 1 FROM projects",
-        [],
-        |row| row.get(0),
-    ).unwrap_or(0);
-
-    conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
-
-    let insert_result = (|| -> Result<(), String> {
-        conn.execute(
-            "INSERT INTO projects (id, name, path, color, tab_order, worktree_mode, icon_url, focus_group_id) \
-             VALUES (?1, ?2, ?3, '#3b82f6', ?4, 0, NULL, NULL)",
-            rusqlite::params![project_id, name, path, tab_order],
-        ).map_err(|e| format!("Failed to create project: {}", e))?;
-
-        conn.execute(
-            "INSERT INTO workspaces (id, project_id, section_id, type, branch, name, tab_order, worktree_path) \
-             VALUES (?1, ?2, NULL, 'branch', ?3, ?3, 0, NULL)",
-            rusqlite::params![workspace_id, project_id, branch],
-        ).map_err(|e| format!("Failed to create workspace: {}", e))?;
-        Ok(())
-    })();
-
-    match insert_result {
-        Ok(_) => {
-            let _ = conn.execute_batch("COMMIT");
-            k2so_core::agent_hooks::emit(k2so_core::agent_hooks::HookEvent::SyncProjects, serde_json::Value::Null);
-            Ok(serde_json::json!({
-                "success": true,
-                "projectId": project_id,
-                "workspaceId": workspace_id,
-                "name": name,
-                "path": path,
-            }).to_string())
-        }
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(e)
-        }
-    }
-}
+// `cli_register_workspace` moved to k2so_core::agents::workspaces.
+// `cli_cleanup_stale_workspaces` moved to k2so_core::agents::workspaces.
+//
+// `cli_remove_workspace` kept below because the `mode` branch still
+// calls into src-tauri-only teardown helpers. Once
+// `teardown_workspace_harness_files` moves to core, the whole fn
+// collapses to `k2so_core::agents::workspaces::remove_workspace_db_only`.
 
 /// Remove a workspace from K2SO's DB (deregister). Does NOT delete files on disk.
 fn cli_remove_workspace(
@@ -2397,34 +2308,6 @@ fn cli_remove_workspace(
         "success": true,
         "removed": path,
         "teardown": teardown,
-    }).to_string())
-}
-
-fn cli_cleanup_stale_workspaces(app_handle: &tauri::AppHandle) -> Result<String, String> {
-    let db_path = dirs::home_dir()
-        .ok_or("No home dir")?
-        .join(".k2so").join("k2so.db");
-    let db = crate::db::shared();
-    let conn = db.lock();
-
-    let mut stmt = conn.prepare(
-        "SELECT id, worktree_path FROM workspaces WHERE worktree_path IS NOT NULL AND worktree_path != ''"
-    ).map_err(|e| e.to_string())?;
-    let stale: Vec<(String, String)> = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    }).map_err(|e| e.to_string())?
-    .filter_map(|r| r.ok())
-    .filter(|(_, path)| !std::path::Path::new(path).exists())
-    .collect();
-
-    let removed = stale.len();
-    for (id, _) in &stale {
-        let _ = conn.execute("DELETE FROM workspaces WHERE id = ?1", rusqlite::params![id]);
-    }
-    k2so_core::agent_hooks::emit(k2so_core::agent_hooks::HookEvent::SyncProjects, serde_json::Value::Null);
-    Ok(serde_json::json!({
-        "removed": removed,
-        "stale": stale.iter().map(|(_, p)| p.clone()).collect::<Vec<_>>()
     }).to_string())
 }
 
