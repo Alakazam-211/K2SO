@@ -19,9 +19,12 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::agents::{agent_dir, agent_type_for, resolve_project_id};
 use crate::db::schema::AgentHeartbeat;
+use crate::terminal::event_sink::TerminalEventSink;
+use crate::terminal::grid_types::GridUpdate;
 
 // Shipped templates. Built-in markdown copied from
 // `crates/k2so-core/wakeup_templates/*.md` at compile time. The
@@ -173,6 +176,122 @@ pub fn compose_wake_prompt_from_path(
 ) -> Option<String> {
     let content = std::fs::read_to_string(wakeup_path).ok()?;
     compose_agent_wake_from_body(Some(&content))
+}
+
+// ── Headless wake spawn ─────────────────────────────────────────────────
+//
+// Daemon-side entry point. The full `spawn_wake_pty` in
+// src-tauri/agent_hooks.rs composes per-agent CLAUDE.md + inspects
+// active worktrees + auto-saves the Claude session-ID 5 seconds later
+// by scanning ~/.claude/projects. That machinery is Tauri-app territory.
+//
+// The daemon doesn't need any of it for lid-closed wakes. The agent
+// just needs to launch `claude --dangerously-skip-permissions
+// --append-system-prompt <body>` in the project directory, with a PTY
+// so the TUI initializes. This helper is that minimal path.
+//
+// Design choices:
+// - NoOp `TerminalEventSink`. Lid-closed wakes have no UI consumer;
+//   when the Tauri app reopens, it learns about the running PTY via
+//   `HookEvent::CliTerminalSpawnBackground` (which propagates through
+//   the daemon's /events WS).
+// - `k2so_agents_lock` marks the session `running` so the scheduler's
+//   `is_agent_locked` check skips the agent on the next tick.
+// - Sensible default terminal dims (120×38) match the existing nudge
+//   size from src-tauri.
+//
+// This is intentionally simpler than `k2so_agents_build_launch` —
+// no worktree resume, no inbox delegate. Those paths remain Tauri-
+// only for v1; they involve user-facing decisions (new branches,
+// work-item moves) that belong in supervised sessions.
+
+/// `TerminalEventSink` impl that ignores every event. Lives alongside
+/// the wake path because that's currently its only consumer; if more
+/// host-less terminal use cases appear we can promote it to
+/// `k2so_core::terminal`.
+pub struct NoOpTerminalEventSink;
+
+impl TerminalEventSink for NoOpTerminalEventSink {
+    fn on_title(&self, _terminal_id: &str, _title: &str) {}
+    fn on_bell(&self, _terminal_id: &str) {}
+    fn on_exit(&self, _terminal_id: &str, _exit_code: i32) {}
+    fn on_grid_update(&self, _terminal_id: &str, _update: &GridUpdate) {}
+}
+
+/// Spawn a wake PTY headlessly from the daemon. Returns the generated
+/// terminal ID on success.
+///
+/// Side effects in order:
+/// 1. `TerminalManager::create` in `crate::terminal::shared()` — the
+///    PTY is owned by the daemon process, survives the Tauri app
+///    reopening/closing.
+/// 2. [`crate::agents::session::k2so_agents_lock`] — writes the
+///    `agent_sessions` row + legacy `.lock` file so subsequent
+///    scheduler ticks skip this agent.
+/// 3. `AgentHookEventSink` fires `HookEvent::CliTerminalSpawnBackground`
+///    — lets any connected Tauri UI create a tab for the new PTY via
+///    the daemon's /events WebSocket.
+pub fn spawn_wake_headless(
+    agent_name: &str,
+    project_path: &str,
+    wake_prompt: &str,
+) -> Result<String, String> {
+    let terminal_id = format!("wake-{}-{}", agent_name, uuid::Uuid::new_v4());
+
+    let args = vec![
+        "--dangerously-skip-permissions".to_string(),
+        "--append-system-prompt".to_string(),
+        wake_prompt.to_string(),
+    ];
+
+    let sink: Arc<dyn TerminalEventSink> = Arc::new(NoOpTerminalEventSink);
+    let manager = crate::terminal::shared();
+    let mut manager = manager.lock();
+    manager
+        .create(
+            terminal_id.clone(),
+            project_path.to_string(),
+            Some("claude".to_string()),
+            Some(args),
+            Some(120),
+            Some(38),
+            sink,
+        )
+        .map_err(|e| format!("spawn wake PTY: {e}"))?;
+    drop(manager);
+
+    crate::log_debug!(
+        "[daemon/wake] spawned PTY for {} in {} (id={})",
+        agent_name,
+        project_path,
+        terminal_id
+    );
+
+    // Mark the session running so the next scheduler tick skips it.
+    // Best-effort: don't fail the spawn if the DB write trips (PTY is
+    // already live and will run regardless).
+    let _ = crate::agents::session::k2so_agents_lock(
+        project_path.to_string(),
+        agent_name.to_string(),
+        Some(terminal_id.clone()),
+        Some("system".to_string()),
+    );
+
+    // Tell any connected UI. Wire format matches what the existing
+    // src-tauri spawn_wake_pty emits so the React frontend's listener
+    // doesn't need to branch on origin.
+    crate::agent_hooks::emit(
+        crate::agent_hooks::HookEvent::CliTerminalSpawnBackground,
+        serde_json::json!({
+            "terminalId": &terminal_id,
+            "command": "claude",
+            "cwd": project_path,
+            "projectPath": project_path,
+            "agentName": agent_name,
+        }),
+    );
+
+    Ok(terminal_id)
 }
 
 #[cfg(test)]

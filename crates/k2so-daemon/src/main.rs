@@ -292,11 +292,45 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         // Heartbeat CRUD + fire-audit — fires while the Tauri app is
         // quit, so the daemon has to own these routes for the
         // persistent-agents feature to mean anything.
+        // Triage: decide which agents to wake AND spawn PTYs for them.
+        // The workhorse route for the persistent-agents feature.
+        // launchd's com.k2so.agent-heartbeat plist fires this via the
+        // CLI bridge; every step runs entirely inside the daemon so a
+        // lid-closed laptop with the Tauri app quit still fires agents.
+        "/cli/agents/triage" => {
+            let _ = stream.read(&mut buf).await;
+            let params = parse_params(&path, &query);
+            let req_token = params.get("token").cloned().unwrap_or_default();
+            if req_token != *state.token {
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"Invalid or missing auth token"}"#,
+                )
+                .await;
+                return;
+            }
+            let project_path = match params.get("project_path") {
+                Some(p) if !p.is_empty() => p.clone(),
+                _ => {
+                    send_response(
+                        &mut stream,
+                        "400 Bad Request",
+                        "application/json",
+                        r#"{"error":"Missing project_path"}"#,
+                    )
+                    .await;
+                    return;
+                }
+            };
+            let body = handle_agents_triage(&project_path);
+            send_response(&mut stream, "200 OK", "application/json", &body).await;
+        }
         // Scheduler tick: decides which agents are ready to wake.
-        // Returns the ordered list of agent names. PTY spawning + wake
-        // prompt assembly is still caller-side (future daemon commit)
-        // but the core decision path already lives in
-        // k2so_core::agents::scheduler.
+        // Returns the ordered list of agent names. Pure decision —
+        // does NOT spawn PTYs. Used for diagnostics + by /cli/agents/
+        // triage which does spawn.
         "/cli/scheduler-tick" => {
             let _ = stream.read(&mut buf).await;
             let params = parse_params(&path, &query);
@@ -526,6 +560,104 @@ fn handle_cli_heartbeat(
         }
         _ => Err(format!("Unknown heartbeat route: {path}")),
     }
+}
+
+/// Serve `/cli/agents/triage`. Runs scheduler_tick to decide which
+/// agents to wake, composes each agent's wake prompt, and spawns a
+/// PTY per agent via `spawn_wake_headless`. Also runs the multi-
+/// heartbeat tick and spawns for each eligible `HeartbeatFireCandidate`.
+/// Writes the response body (always JSON, always 200 from the HTTP
+/// layer — errors are captured in the body's `error` field).
+///
+/// Intentionally simpler than src-tauri's agent_hooks triage path:
+/// skips the worktree-resume + inbox-delegate branches (those require
+/// k2so_agents_build_launch, which is still src-tauri-only). Lid-
+/// closed wakes get the "compose wakeup prompt + launch claude"
+/// behavior; resume + delegate stay supervised.
+fn handle_agents_triage(project_path: &str) -> String {
+    use k2so_core::agents::{heartbeat, scheduler, wake};
+
+    let launchable = match scheduler::k2so_agents_scheduler_tick(project_path.to_string()) {
+        Ok(v) => v,
+        Err(e) => {
+            return serde_json::json!({
+                "error": e,
+                "count": 0,
+                "launched": [],
+                "heartbeats": [],
+            })
+            .to_string()
+        }
+    };
+
+    let mut launched: Vec<String> = Vec::new();
+    for agent_name in &launchable {
+        // Compose the wake prompt per agent type. `__lead__` uses the
+        // workspace manager's wake template + default heartbeat body;
+        // other agents use their per-type wakeup.md.
+        let prompt = if agent_name == "__lead__" {
+            wake::compose_wake_prompt_for_lead(project_path)
+        } else {
+            match wake::compose_wake_prompt_for_agent(project_path, agent_name) {
+                Some(p) => p,
+                None => continue, // agent-template: never wakes autonomously
+            }
+        };
+        match wake::spawn_wake_headless(agent_name, project_path, &prompt) {
+            Ok(_tid) => launched.push(agent_name.clone()),
+            Err(e) => {
+                k2so_core::log_debug!(
+                    "[daemon/triage] spawn failed for {}: {}",
+                    agent_name,
+                    e
+                );
+            }
+        }
+    }
+
+    // Multi-heartbeat tick — each candidate carries its own explicit
+    // wakeup path so different heartbeats can fire different workflows.
+    let candidates = heartbeat::k2so_agents_heartbeat_tick(project_path);
+    let mut hb_fired: Vec<String> = Vec::new();
+    for cand in &candidates {
+        if scheduler::is_agent_locked(project_path, &cand.agent_name) {
+            k2so_core::log_debug!(
+                "[daemon/triage] skipped_locked hb={} agent={}",
+                cand.name,
+                cand.agent_name
+            );
+            continue;
+        }
+        let prompt = match wake::compose_wake_prompt_from_path(std::path::Path::new(
+            &cand.wakeup_path_abs,
+        )) {
+            Some(p) => p,
+            None => continue,
+        };
+        match wake::spawn_wake_headless(&cand.agent_name, project_path, &prompt) {
+            Ok(_tid) => {
+                heartbeat::stamp_heartbeat_fired(project_path, &cand.name);
+                hb_fired.push(cand.name.clone());
+            }
+            Err(e) => {
+                k2so_core::log_debug!(
+                    "[daemon/triage] hb spawn failed for {}/{}: {}",
+                    cand.agent_name,
+                    cand.name,
+                    e
+                );
+            }
+        }
+    }
+
+    let mut all = launched.clone();
+    all.extend(hb_fired.clone());
+    serde_json::json!({
+        "count": all.len(),
+        "launched": all,
+        "heartbeats": hb_fired,
+    })
+    .to_string()
 }
 
 /// Dispatch `/cli/heartbeat-log` (the "all recent fires" diagnostic
