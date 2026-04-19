@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+pub mod delegate;
 pub mod heartbeat;
 pub mod scheduler;
 pub mod session;

@@ -31,7 +31,11 @@ pub use k2so_core::db;
 // `crate::editors::*` / `crate::fs_abstract::*` / etc. call sites keep
 // working unchanged.
 pub use k2so_core::{editors, fs_abstract, fs_atomic, project_config};
-mod git;
+// `git` module (libgit2 wrappers, worktree/branch/diff/merge) moved to
+// k2so-core so k2so_agents_delegate + the daemon's future supervised-
+// launch path can share the same code. Re-exported at the historical
+// `crate::git::*` path so all existing call sites resolve unchanged.
+pub use k2so_core::git;
 // `llm` now lives in k2so-core. Downstream callers keep their
 // `crate::llm::*` paths working through this re-export.
 pub use k2so_core::llm;

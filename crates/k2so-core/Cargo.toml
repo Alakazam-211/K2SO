@@ -37,6 +37,16 @@ uuid = { version = "1", features = ["v4"] }
 # Home-directory lookup for ~/.k2so/k2so.db.
 dirs = "5"
 
+# libgit2 bindings — worktree creation + branch management + diff/merge.
+# `vendored-openssl` matches the flag src-tauri had been using so the
+# build doesn't start linking against system libssl. Used by the
+# delegate path + the UI review queue.
+git2 = { version = "0.19", features = ["vendored-openssl"] }
+
+# Move-to-trash semantics used when removing worktrees — users can
+# recover a reject-then-reject-again worktree from the Finder trash.
+trash = "5"
+
 # Local LLM inference (llama.cpp bindings with Metal acceleration).
 llama-cpp-2 = { version = "0.1", features = ["metal", "sampler"] }
 

@@ -75,6 +75,16 @@ pub use k2so_core::agents::skill_content::{
     generate_template_skill_content, load_custom_layers, CUSTOM_AGENT_HEARTBEAT_DOCS,
 };
 
+// Delegation path — worktree creation + work-item routing — moved to
+// k2so_core::agents::delegate. The `#[tauri::command]` wrapper below
+// is now a three-line forward; the four frontmatter helpers are
+// re-exported at their historical names so the 3 call sites elsewhere
+// in this file resolve unchanged.
+pub use k2so_core::agents::delegate::{
+    add_worktree_to_frontmatter, shorten_slug, strip_worktree_from_frontmatter,
+    update_assigned_by,
+};
+
 // ── Path helpers ────────────────────────────────────────────────────────
 //
 // `agents_dir` + `agent_dir` now live in k2so_core::agents (re-exported
@@ -1245,157 +1255,16 @@ pub fn k2so_agents_work_create(
     })
 }
 
-/// Delegate a work item to an agent — the all-in-one command.
-///
-/// This is the primary way the lead agent assigns work. In one step, K2SO:
-/// 1. Moves the work item to the target agent's active/ folder
-/// 2. Creates a worktree (branch: `agent/<name>/<task-slug>`)
-/// 3. Writes a task-specific CLAUDE.md into the worktree root
-/// 4. Updates the work item frontmatter with worktree_path and branch
-/// 5. Emits a `cli:agent-launch` event so the frontend opens a Claude terminal
-///
-/// Returns JSON with { worktreePath, branch, agentName, taskFile } for the frontend.
+/// Delegate a work item to an agent — creates a worktree,
+/// registers it, moves the item to active, writes CLAUDE.md.
+/// Body lives in k2so_core::agents::delegate.
 #[tauri::command]
 pub fn k2so_agents_delegate(
     project_path: String,
     target_agent: String,
     source_file: String,
 ) -> Result<serde_json::Value, String> {
-    let source = PathBuf::from(&source_file);
-    if !source.exists() {
-        return Err(format!("Source file does not exist: {}", source_file));
-    }
-
-    let agent_d = agent_dir(&project_path, &target_agent);
-    if !agent_d.exists() {
-        return Err(format!("Target agent '{}' does not exist", target_agent));
-    }
-
-    // Read the work item
-    let content = fs::read_to_string(&source).map_err(|e| e.to_string())?;
-    let item = read_work_item(&source, "inbox")
-        .ok_or_else(|| "Could not parse work item".to_string())?;
-
-    // 1. Create a worktree for this task
-    let full_slug = item.filename.trim_end_matches(".md");
-    let task_slug = shorten_slug(full_slug, 40);
-    let branch_name = format!("agent/{}/{}", target_agent, task_slug);
-    let worktree = crate::git::create_worktree(&project_path, &branch_name)
-        .map_err(|e| format!("Failed to create worktree: {}", e))?;
-
-    // Register the worktree as a workspace in the DB so it appears in the sidebar.
-    // Uses the same schema as git_create_worktree: (id, project_id, name, type, branch, tab_order, worktree_path)
-    {
-        let db = crate::db::shared();
-        let conn = db.lock();
-        {
-            if let Ok(project_id) = conn.query_row(
-                "SELECT id FROM projects WHERE path = ?1",
-                rusqlite::params![project_path],
-                |row| row.get::<_, String>(0),
-            ) {
-                let ws_id = uuid::Uuid::new_v4().to_string();
-                let max_order: i32 = conn.query_row(
-                    "SELECT COALESCE(MAX(tab_order), -1) + 1 FROM workspaces WHERE project_id = ?1",
-                    rusqlite::params![project_id],
-                    |row| row.get(0),
-                ).unwrap_or(0);
-                if let Err(e) = conn.execute(
-                    "INSERT INTO workspaces (id, project_id, name, type, branch, tab_order, worktree_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    rusqlite::params![ws_id, project_id, worktree.branch, "worktree", worktree.branch, max_order, worktree.path],
-                ) {
-                    log_debug!("[delegate] Failed to register worktree in DB: {}", e);
-                }
-            }
-        }
-    }
-
-    // 2. Move work item to agent's active/ folder with worktree info
-    let active_dir = agent_work_dir(&project_path, &target_agent, "active");
-    fs::create_dir_all(&active_dir).ok();
-    let updated = update_assigned_by(&content, "delegated");
-    let updated = add_worktree_to_frontmatter(&updated, &worktree.path, &worktree.branch);
-    let active_file = active_dir.join(&item.filename);
-    atomic_write(&active_file, &updated)?;
-    fs::remove_file(&source).map_err(|e| format!("Failed to remove source: {}", e))?;
-
-    // 3. Generate a task-specific CLAUDE.md and write it to the worktree root
-    let claude_md = generate_agent_claude_md_content(&project_path, &target_agent, Some(&item))?;
-    let claude_md_path = PathBuf::from(&worktree.path).join("CLAUDE.md");
-    atomic_write(&claude_md_path, &claude_md)?;
-
-    // 4. Build the launch command for the frontend
-    // Use --append-system-prompt with task instructions baked in (NOT -p which is non-interactive).
-    // The CLAUDE.md already contains agent identity + task context. We append the initial
-    // instructions so Claude starts in interactive mode with full context loaded.
-    // Determine completion protocol based on workspace state capability
-    let source = &item.source;
-    let capability = if let Some(ws_state) = get_workspace_state(&project_path) {
-        ws_state.capability_for_source(source).to_string()
-    } else {
-        "gated".to_string()
-    };
-
-    let completion_protocol = if capability == "auto" {
-        format!(
-            "When done:\n\
-            1. Commit all your changes to branch `{branch}`\n\
-            2. Run: `k2so agent complete --agent {agent} --file {filename}`\n\
-            This will automatically merge your branch into main and clean up the worktree.\n\
-            3. Notify the workspace manager that you're done:\n\
-            Run `k2so agents running` to find the manager's terminal ID (look for `.k2so/agents/manager` in the CWD),\n\
-            then run: `k2so terminal write <manager-terminal-id> \"Completed: {title}. Branch {branch} merged.\"`",
-            agent = target_agent, branch = worktree.branch, filename = item.filename, title = item.title,
-        )
-    } else {
-        format!(
-            "When done:\n\
-            1. Commit all your changes to branch `{branch}`\n\
-            2. Run: `k2so agent complete --agent {agent} --file {filename}`\n\
-            This will move your work to done and flag it for human review.\n\
-            3. Notify the workspace manager that your work is ready for review:\n\
-            Run `k2so agents running` to find the manager's terminal ID (look for `.k2so/agents/manager` in the CWD),\n\
-            then run: `k2so terminal write <manager-terminal-id> \"Ready for review: {title}. Branch: {branch}\"`",
-            agent = target_agent, branch = worktree.branch, filename = item.filename, title = item.title,
-        )
-    };
-
-    let task_instructions = format!(
-        "\n\n## Your Current Assignment\n\n\
-        You are working in a dedicated worktree at `{wt_path}` on branch `{branch}`.\n\n\
-        **{title}** (priority: {priority})\n\n\
-        Read the full task file at `.k2so/agents/{agent}/work/active/{filename}` for details and acceptance criteria.\n\n\
-        ## Completion Protocol\n\n\
-        {completion_protocol}",
-        agent = target_agent,
-        wt_path = worktree.path,
-        branch = worktree.branch,
-        title = item.title,
-        priority = item.priority,
-        filename = item.filename,
-        completion_protocol = completion_protocol,
-    );
-
-    // Append task instructions to the CLAUDE.md content for the system prompt
-    let full_system_prompt = format!("{}\n{}", claude_md, task_instructions);
-
-    // Initial message to kick off work (positional arg, NOT -p which is non-interactive)
-    let kickoff = format!(
-        "Read your task file at `{}` and begin implementing the fix. \
-        Commit your work as you go.",
-        agent_work_dir(&project_path, &target_agent, "active").join(&item.filename).to_string_lossy()
-    );
-
-    Ok(serde_json::json!({
-        "command": "claude",
-        "args": ["--dangerously-skip-permissions", "--append-system-prompt", full_system_prompt, kickoff],
-        "cwd": worktree.path,
-        "claudeMdPath": claude_md_path.to_string_lossy(),
-        "agentName": target_agent,
-        "worktreePath": worktree.path,
-        "branch": worktree.branch,
-        "taskFile": item.filename,
-    }))
+    k2so_core::agents::delegate::k2so_agents_delegate(project_path, target_agent, source_file)
 }
 
 /// Move a work item between folders (inbox → active, active → done, etc.)
@@ -1803,37 +1672,9 @@ pub fn k2so_agents_build_launch(
     }))
 }
 
-/// Add worktree_path and branch to a work item's frontmatter.
-fn add_worktree_to_frontmatter(content: &str, worktree_path: &str, branch: &str) -> String {
-    if content.starts_with("---") {
-        if let Some(end_idx) = content[3..].find("---") {
-            let frontmatter = &content[3..3 + end_idx];
-            let body = &content[3 + end_idx + 3..];
-            return format!(
-                "---\n{}worktree_path: {}\nbranch: {}\n---{}",
-                frontmatter, worktree_path, branch, body
-            );
-        }
-    }
-    content.to_string()
-}
+// `add_worktree_to_frontmatter` moved to k2so_core::agents::delegate (re-exported).
 
-/// Strip worktree_path and branch from a work item's frontmatter (used on rejection/retry).
-fn strip_worktree_from_frontmatter(content: &str) -> String {
-    if content.starts_with("---") {
-        if let Some(end_idx) = content[3..].find("---") {
-            let frontmatter = &content[3..3 + end_idx];
-            let body = &content[3 + end_idx + 3..];
-            let cleaned: String = frontmatter
-                .lines()
-                .filter(|line| !line.starts_with("worktree_path:") && !line.starts_with("branch:"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            return format!("---\n{}\n---{}", cleaned.trim(), body);
-        }
-    }
-    content.to_string()
-}
+// `strip_worktree_from_frontmatter` moved to k2so_core::agents::delegate (re-exported).
 
 /// Generate a default agent.md body based on agent type.
 /// This gives each agent a rich starting template that users (or AI) can refine via AIFileEditor.
@@ -2073,26 +1914,7 @@ fn log_agent_warning(project_path: &str, agent_name: &str, message: &str) {
     }
 }
 
-/// Shorten a slug to a maximum length, breaking at word boundaries.
-/// Strips common filler prefixes (bug-, feature-) and filler words.
-fn shorten_slug(slug: &str, max_len: usize) -> String {
-    // Strip common prefixes
-    let stripped = slug
-        .strip_prefix("bug-").or_else(|| slug.strip_prefix("feature-"))
-        .or_else(|| slug.strip_prefix("task-"))
-        .unwrap_or(slug);
-
-    if stripped.len() <= max_len {
-        return stripped.to_string();
-    }
-
-    // Truncate at a word boundary (hyphen)
-    let truncated = &stripped[..max_len];
-    match truncated.rfind('-') {
-        Some(pos) if pos > max_len / 2 => truncated[..pos].to_string(),
-        _ => truncated.to_string(),
-    }
-}
+// `shorten_slug` moved to k2so_core::agents::delegate (re-exported).
 
 // `extract_section` moved to k2so_core::agents::skill_content (re-exported).
 
@@ -3858,27 +3680,7 @@ fn is_leap(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
-fn update_assigned_by(content: &str, new_value: &str) -> String {
-    if content.starts_with("---") {
-        if let Some(end) = content[3..].find("---") {
-            let frontmatter = &content[3..3 + end];
-            let rest = &content[3 + end..];
-            let updated_fm: String = frontmatter
-                .lines()
-                .map(|line| {
-                    if line.starts_with("assigned_by:") {
-                        format!("assigned_by: {}", new_value)
-                    } else {
-                        line.to_string()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            return format!("---{}{}", updated_fm, rest);
-        }
-    }
-    content.to_string()
-}
+// `update_assigned_by` moved to k2so_core::agents::delegate (re-exported).
 
 // ── Agent Editor ───────────────────────────────────────────────────────
 
