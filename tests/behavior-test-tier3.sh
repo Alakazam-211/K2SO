@@ -1063,10 +1063,16 @@ else
     fail "Phase 2: manifest wiring" "Expected HEARTBEATS_MANIFEST exported from section and imported in Settings.tsx"
 fi
 
-if grep -q "id: 'heartbeats'" "$SETTINGS_ROUTER" && grep -q "activeSection === 'heartbeats'" "$SETTINGS_ROUTER"; then
-    pass "Phase 2: 'heartbeats' nav entry + router branch present"
+# 0.32.6 rework: Heartbeats moved out of Settings nav into the Workspace
+# panel aside (right column on the workspace page). The section's
+# HeartbeatsPanel is now imported from ProjectsSection, not from the
+# Settings router directly. Verify the panel export exists and is
+# consumed from the workspace-level surface.
+if grep -q 'HeartbeatsPanel' "$HB_SECTION" && \
+   grep -q 'HeartbeatsPanel' "$PROJECT_ROOT/src/renderer/components/Settings/sections/ProjectsSection.tsx"; then
+    pass "Phase 2 (updated): HeartbeatsPanel exported + consumed from workspace surface"
 else
-    fail "Phase 2: nav entry" "Expected 'heartbeats' in SECTIONS list + activeSection branch"
+    fail "Phase 2: panel wiring" "Expected HeartbeatsPanel exported from HeartbeatsSection + imported in ProjectsSection"
 fi
 
 if grep -q "'heartbeats'" "$PROJECT_ROOT/src/renderer/stores/settings.ts"; then
