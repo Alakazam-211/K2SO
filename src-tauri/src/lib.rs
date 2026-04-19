@@ -53,6 +53,10 @@ mod companion_settings_provider;
 // event-sink / app-event-source bridges. Needs an AppHandle so lives
 // behind a register() call in setup().
 mod companion_host;
+// Tauri-backed AgentHookEventSink impl registered in setup() — routes
+// agent-hook events (agent:lifecycle, agent:reply, sync:projects, …)
+// back onto Tauri's event bus.
+mod agent_hook_sink;
 // `terminal` now lives in k2so-core. Re-exported so existing
 // `crate::terminal::*` paths keep working.
 pub use k2so_core::terminal;
@@ -187,6 +191,13 @@ pub fn run() {
             // terminal / event-sink / app-event-source bridges. Must
             // happen before any companion code runs or subscribes.
             companion_host::register(app.handle().clone());
+
+            // Agent-hook event sink: routes k2so_core::agent_hooks::emit
+            // onto AppHandle::emit. Registered before any hook HTTP
+            // request can land.
+            k2so_core::agent_hooks::set_sink(Box::new(
+                agent_hook_sink::TauriAgentHookEventSink::new(app.handle().clone()),
+            ));
 
             // Migrate old JSON window state to SQLite (one-time migration)
             perf_timer!("startup_migrate_window_state", {

@@ -33,6 +33,7 @@ pub enum HookEvent {
     CliTerminalSpawn,
     CliTerminalSpawnBackground,
     CliAiCommit,
+    HookInjectionFailed,
 }
 
 impl HookEvent {
@@ -46,6 +47,7 @@ impl HookEvent {
             Self::CliTerminalSpawn => "cli:terminal-spawn",
             Self::CliTerminalSpawnBackground => "cli:terminal-spawn-background",
             Self::CliAiCommit => "cli:ai-commit",
+            Self::HookInjectionFailed => "hook-injection-failed",
         }
     }
 }

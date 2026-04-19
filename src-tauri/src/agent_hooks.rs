@@ -183,8 +183,8 @@ fn spawn_wake_pty(
     // Tab-creation event for any currently-open window. Uses the same
     // event name the companion-spawn path already emits so the frontend
     // discovery code doesn't need a second listener.
-    let _ = app_handle.emit(
-        "cli:terminal-spawn-background",
+    k2so_core::agent_hooks::emit(
+        k2so_core::agent_hooks::HookEvent::CliTerminalSpawnBackground,
         serde_json::json!({
             "terminalId": &terminal_id,
             "command": command,
@@ -525,7 +525,10 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                     };
 
                     log_debug!("[agent-hooks] {} → {} (pane={}, tab={})", raw_event, canonical, pane_id, tab_id);
-                    let _ = app_handle.emit("agent:lifecycle", &event);
+                    k2so_core::agent_hooks::emit(
+                        k2so_core::agent_hooks::HookEvent::AgentLifecycle,
+                        serde_json::to_value(&event).unwrap_or(serde_json::Value::Null),
+                    );
 
                     // Sync AgentSession.status so the scheduler's
                     // is_agent_locked check reflects reality. Without
@@ -625,7 +628,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                     .unwrap_or_default();
                                 let _ = spawn_wake_pty(&app_handle, &agent_name, &project_path, &command, args, &cwd);
                                 // Refresh sidebar — new worktree was registered in DB
-                                let _ = app_handle.emit("sync:projects", ());
+                                k2so_core::agent_hooks::emit(k2so_core::agent_hooks::HookEvent::SyncProjects, serde_json::Value::Null);
                                 Ok(serde_json::to_string(&launch_info).unwrap_or_default())
                             }
                             Err(e) => Err(e),
@@ -759,7 +762,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                         let _ = crate::commands::k2so_agents::k2so_agents_generate_workspace_claude_md(project_path.clone());
                                     }
                                     // Notify frontend to refresh
-                                    let _ = app_handle.emit("sync:projects", ());
+                                    k2so_core::agent_hooks::emit(k2so_core::agent_hooks::HookEvent::SyncProjects, serde_json::Value::Null);
                                     Ok(serde_json::json!({"success": true, "mode": mode}).to_string())
                                 }
                                 Err(e) => Err(e),
@@ -787,7 +790,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                         let value = if enable == "1" || enable == "true" || enable == "on" { "1" } else { "0" };
                         match cli_update_project_setting(&project_path, "worktree_mode", value) {
                             Ok(_) => {
-                                let _ = app_handle.emit("sync:projects", ());
+                                k2so_core::agent_hooks::emit(k2so_core::agent_hooks::HookEvent::SyncProjects, serde_json::Value::Null);
                                 Ok(serde_json::json!({"success": true, "worktreeMode": value == "1"}).to_string())
                             }
                             Err(e) => Err(e),
@@ -799,7 +802,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                             let value = if enable == "1" || enable == "true" || enable == "on" { "1" } else { "0" };
                             match cli_update_project_setting(&project_path, "heartbeat_enabled", value) {
                                 Ok(_) => {
-                                    let _ = app_handle.emit("sync:projects", ());
+                                    k2so_core::agent_hooks::emit(k2so_core::agent_hooks::HookEvent::SyncProjects, serde_json::Value::Null);
                                     Ok(serde_json::json!({"success": true, "heartbeatEnabled": value == "1"}).to_string())
                                 }
                                 Err(e) => Err(e),
@@ -887,7 +890,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                     rusqlite::params![mode, schedule, hb_enabled, project_path],
                                 ).map_err(|e| format!("DB update failed: {}", e))?;
 
-                                let _ = app_handle.emit("sync:projects", ());
+                                k2so_core::agent_hooks::emit(k2so_core::agent_hooks::HookEvent::SyncProjects, serde_json::Value::Null);
                                 let state = app_handle.state::<crate::state::AppState>();
                                 let _ = crate::commands::k2so_agents::k2so_agents_update_heartbeat_projects(state);
 
@@ -919,7 +922,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                         let wait = params.get("wait").map(|v| v == "1" || v == "true").unwrap_or(false);
                         let cwd = params.get("cwd").cloned().unwrap_or(project_path.clone());
 
-                        let _ = app_handle.emit("cli:terminal-spawn", serde_json::json!({
+                        k2so_core::agent_hooks::emit(k2so_core::agent_hooks::HookEvent::CliTerminalSpawn, serde_json::json!({
                             "agentName": agent,
                             "command": command,
                             "cwd": cwd,
@@ -983,7 +986,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                         let agent = params.get("agent").cloned().unwrap_or_default();
                         let message = params.get("message").cloned().unwrap_or_default();
                         // Emit to frontend so the UI can show it
-                        let _ = app_handle.emit("agent:reply", serde_json::json!({
+                        k2so_core::agent_hooks::emit(k2so_core::agent_hooks::HookEvent::AgentReply, serde_json::json!({
                             "agentName": agent,
                             "message": message,
                             "projectPath": &project_path,
@@ -1304,7 +1307,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                     rusqlite::params![if on { "1" } else { "0" }],
                                 );
                             }
-                            let _ = app_handle.emit("sync:settings", ());
+                            k2so_core::agent_hooks::emit(k2so_core::agent_hooks::HookEvent::SyncSettings, serde_json::Value::Null);
                             Ok(serde_json::json!({"success": true, "agenticEnabled": on}).to_string())
                         } else {
                             // Read current state
@@ -1353,7 +1356,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                         let state_id = params.get("state_id").cloned().unwrap_or_default();
                         match cli_update_project_setting(&project_path, "tier_id", &state_id) {
                             Ok(_) => {
-                                let _ = app_handle.emit("sync:projects", ());
+                                k2so_core::agent_hooks::emit(k2so_core::agent_hooks::HookEvent::SyncProjects, serde_json::Value::Null);
                                 Ok(serde_json::json!({"success": true, "stateId": state_id}).to_string())
                             }
                             Err(e) => Err(e),
@@ -1379,7 +1382,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                             "message": message,
                             "gitContext": git_context,
                         });
-                        let _ = app_handle.emit("cli:ai-commit", &event_payload);
+                        k2so_core::agent_hooks::emit(k2so_core::agent_hooks::HookEvent::CliAiCommit, event_payload.clone());
                         Ok(serde_json::json!({
                             "success": true,
                             "action": if include_merge { "commit-merge" } else { "commit" },
@@ -2759,7 +2762,7 @@ fn cli_register_workspace(path: &str, app_handle: &tauri::AppHandle) -> Result<S
     match insert_result {
         Ok(_) => {
             let _ = conn.execute_batch("COMMIT");
-            let _ = app_handle.emit("sync:projects", ());
+            k2so_core::agent_hooks::emit(k2so_core::agent_hooks::HookEvent::SyncProjects, serde_json::Value::Null);
             Ok(serde_json::json!({
                 "success": true,
                 "projectId": project_id,
@@ -2824,7 +2827,7 @@ fn cli_remove_workspace(
     conn.execute("DELETE FROM projects WHERE id = ?1", rusqlite::params![project_id])
         .map_err(|e| format!("Failed to delete project: {}", e))?;
 
-    let _ = app_handle.emit("sync:projects", ());
+    k2so_core::agent_hooks::emit(k2so_core::agent_hooks::HookEvent::SyncProjects, serde_json::Value::Null);
     Ok(serde_json::json!({
         "success": true,
         "removed": path,
@@ -2853,7 +2856,7 @@ fn cli_cleanup_stale_workspaces(app_handle: &tauri::AppHandle) -> Result<String,
     for (id, _) in &stale {
         let _ = conn.execute("DELETE FROM workspaces WHERE id = ?1", rusqlite::params![id]);
     }
-    let _ = app_handle.emit("sync:projects", ());
+    k2so_core::agent_hooks::emit(k2so_core::agent_hooks::HookEvent::SyncProjects, serde_json::Value::Null);
     Ok(serde_json::json!({
         "removed": removed,
         "stale": stale.iter().map(|(_, p)| p.clone()).collect::<Vec<_>>()
@@ -3220,8 +3223,8 @@ pub fn register_all_hooks(app_handle: &AppHandle, hook_script: &str) {
     }
 
     if !failures.is_empty() {
-        let _ = app_handle.emit(
-            "hook-injection-failed",
+        k2so_core::agent_hooks::emit(
+            k2so_core::agent_hooks::HookEvent::HookInjectionFailed,
             serde_json::json!({ "failures": failures }),
         );
     }
