@@ -1368,7 +1368,9 @@ fi
 # emits — if any of these disappear from the generator the agent loses
 # its playbook on wake.
 MANAGER_SECTIONS=("Connected Workspaces" "Your Team" "Standing Orders" "Decision Framework" "Delegation" "Reviewing Agent Work" "Communication")
-MANAGER_BODY=$(awk '/fn generate_manager_skill_content/,/^fn generate_custom_agent_skill_content/' "$AGENTS_SRC")
+# `^(pub )?fn` so the range works both pre- and post-skill_content
+# migration (the functions are now `pub fn` in core).
+MANAGER_BODY=$(awk '/^(pub )?fn generate_manager_skill_content/,/^(pub )?fn generate_custom_agent_skill_content/' "$AGENTS_SRC")
 for sec in "${MANAGER_SECTIONS[@]}"; do
     if echo "$MANAGER_BODY" | grep -q "## $sec"; then
         pass "hamburger: manager skill emits $sec section"
