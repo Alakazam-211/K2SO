@@ -36,6 +36,7 @@ pub mod llm;
 pub mod perf;
 pub mod push;
 pub mod terminal;
+pub mod wake;
 
 #[doc(hidden)]
 pub fn __scaffolding_marker() {}
