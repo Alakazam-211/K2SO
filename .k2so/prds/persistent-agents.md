@@ -430,3 +430,71 @@ The full 9-step lid-closed walkthrough from `happy-hatching-locket.md`. Run 3× 
 ## Open questions
 
 None after 2026-04-19 alignment. Green-lit for implementation.
+
+## Implementation status — 2026-04-19 (pre-compaction checkpoint)
+
+Branch: `feat/persistent-agents`, 32 commits off `v0.32.13`.
+Test suite: 62 src-tauri + 168 k2so-core = 230 lib tests green.
+
+### Shipped in this branch
+
+**Infrastructure.**
+- Cargo workspace: root `Cargo.toml` + `crates/k2so-core` + `crates/k2so-daemon`.
+- k2so-core crate hosts 14 modules (every module this PRD said would move).
+- k2so-daemon binary boots, writes `~/.k2so/daemon.{port,token}` 0600,
+  serves token-authed `/ping` + `/status` (JSON).
+- Release pipeline bundles the daemon into `K2SO.app/Contents/MacOS/`
+  with hardened-runtime codesign (`scripts/release.sh` Step 2.5).
+- `install_daemon_plist_v1` code migration auto-installs the launchd
+  plist on first 0.33.0 launch (release-build or `K2SO_INSTALL_DAEMON=1`).
+  Uses `wake::install()` which is idempotent (best-effort unload before
+  load — handles upgrade-over-install + rollback-then-reinstall).
+
+**Decoupling work.**
+- Four companion bridges in k2so-core let `companion::mod` live in core
+  with zero Tauri dep: `settings_bridge`, `terminal_bridge`, `event_sink`,
+  `app_event_source`. Tauri-side providers registered in `setup()` via
+  `companion_host::register()`.
+- `AgentHookEventSink` trait + `HookEvent` enum cover the 7 wire events
+  `src-tauri/agent_hooks.rs` emits. All 17 emit sites migrated to the
+  bridge. Tauri sink registered in setup.
+- Pure helpers extracted from agent_hooks to k2so-core: `map_event_type`,
+  `parse_query_params`, `urldecode`, ring buffer, `AgentLifecycleEvent`.
+  Daemon can import and reuse.
+- `TerminalManager`, `LlmManager`, DB all exposed as singletons
+  (`*::shared()` accessors). AppState holds Arc clones; any core module
+  can reach the same instances.
+
+**Ratified decisions, implemented.**
+- Decision #1 (no cloud): confirmed; push is opt-in via pluggable
+  `PushTarget` (NoOp default, Webhook + NtfySh wired with reqwest).
+- Decision #2 (`KeepAlive: true`): `DaemonPlist::canonical` emits this.
+- Decision #4 (HTTP JSON IPC): daemon serves HTTP on 127.0.0.1; Tauri
+  `DaemonClient` uses reqwest::blocking.
+- Decision #6 (`PushTarget` trait with `K2soCloud` deferred to v2): shape
+  ratified, `NoOp`/`Webhook`/`NtfySh` impls shipped.
+- Decision #7 (long-lived branch, commit-on-green): 32 commits in; every
+  one passes the lib test suite.
+
+### Intentionally deferred — tracked in `.k2so/notes/corners-cut-0.33.0.md`
+
+| Item | Status | Next-step pointer |
+|---|---|---|
+| Tokio-ize daemon runtime | open | Replace `std::net::TcpListener` in `crates/k2so-daemon/src/main.rs` with `tokio::net`; add shared `tokio::runtime::Runtime`. Prereq for concurrent connections. ~2h. |
+| Daemon binds `heartbeat.port` | open | Swap the write paths in `k2so-daemon/src/main.rs` from `daemon.port`/`daemon.token` to the canonical `heartbeat.port`/`heartbeat-token`. Requires coordinating with src-tauri's `agent_hooks::start_server` (either gate the Tauri server off when daemon is running, or delete it). ~2h. |
+| Daemon serves `/hook/*` + `/cli/*` routes | open | Port the route matching + body handling from `src-tauri/src/agent_hooks.rs:538-3200` into daemon. Business logic is now reusable via `k2so_core::agent_hooks::*`, `k2so_core::db::shared()`, `k2so_core::terminal::shared()`. ~1d focused. |
+| Daemon → Tauri UI event channel | open | Daemon hosts a WS endpoint (reuse companion's tokio/tungstenite stack); Tauri connects at startup; incoming events feed `AppHandle::emit`. ~4h. |
+| Wake-scheduler Settings UI | open | React Settings panel + `#[tauri::command] daemon_configure_wake(mode, minutes, wake_system)` → calls `wake::install()` with a customized `DaemonPlist`. ~4h (~2h React, ~2h Rust). |
+| Full tokio + Tauri-command proxy | open | Each state-mutating Tauri command forwards via `DaemonClient::post_cmd`. 199 commands total; realistic to ship 0.33.0 with this NOT done — the Tauri app already shares state with the daemon via the core singletons. Deferrable to 0.33.x+. |
+| 9-step lid-closed walkthrough | open | Manual run-through per the plan's acceptance criteria, on a real Mac, overnight on battery. Record 90-second demo. |
+| DMG-level daemon bundling verification | open | Cut a signed release; verify `launchctl list | grep k2so-daemon` shows loaded, daemon survives Tauri quit. |
+
+### Pattern reference (what's worked this branch)
+
+See `happy-hatching-locket.md` → "Strategies that have worked" for the
+9 proven patterns: ambient-singleton bridges, test-isolation locks,
+test-util feature, refactor-then-relocate, callback instead of
+AppHandle, git hygiene post-mess, `/target` gitignore gotcha,
+commit-on-green cadence, corners-cut-as-forcing-function. Copy these
+verbatim for the remaining work — they compressed weeks of theoretical
+refactor into 32 green commits.
