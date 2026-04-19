@@ -20,10 +20,13 @@
 use parking_lot::Mutex;
 use std::sync::OnceLock;
 
-use crate::terminal::grid_types::{CompactLine, GridUpdate};
+use crate::terminal::grid_types::GridUpdate;
 
 /// The two terminal operations companion needs. Kept minimal —
 /// a full `TerminalManager` API surface would over-couple.
+/// Note: scrollback returns `Vec<String>` (plain text lines), which
+/// matches the signature `TerminalManager::read_lines_with_scrollback`
+/// exposes today.
 pub trait TerminalProvider: Send + Sync {
     fn get_grid(&self, terminal_id: &str) -> Result<GridUpdate, String>;
     fn read_lines_with_scrollback(
@@ -31,7 +34,7 @@ pub trait TerminalProvider: Send + Sync {
         terminal_id: &str,
         limit: usize,
         include_scrollback: bool,
-    ) -> Result<Vec<CompactLine>, String>;
+    ) -> Result<Vec<String>, String>;
 }
 
 static PROVIDER: OnceLock<Mutex<Option<Box<dyn TerminalProvider>>>> = OnceLock::new();
@@ -56,7 +59,7 @@ pub fn read_lines_with_scrollback(
     terminal_id: &str,
     limit: usize,
     include_scrollback: bool,
-) -> Result<Vec<CompactLine>, String> {
+) -> Result<Vec<String>, String> {
     slot()
         .lock()
         .as_ref()
@@ -98,7 +101,7 @@ mod tests {
                 _id: &str,
                 _limit: usize,
                 _inc: bool,
-            ) -> Result<Vec<CompactLine>, String> {
+            ) -> Result<Vec<String>, String> {
                 Ok(vec![])
             }
         }

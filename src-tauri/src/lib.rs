@@ -46,6 +46,10 @@ mod daemon_client;
 // Tauri-backed provider for k2so-core::companion::settings_bridge,
 // registered in setup() before the companion module reads credentials.
 mod companion_settings_provider;
+// Tauri-backed providers for k2so-core::companion's terminal /
+// event-sink / app-event-source bridges. Needs an AppHandle so lives
+// behind a register() call in setup().
+mod companion_host;
 // `terminal` now lives in k2so-core. Re-exported so existing
 // `crate::terminal::*` paths keep working.
 pub use k2so_core::terminal;
@@ -172,6 +176,12 @@ pub fn run() {
                 }
             }
             let _setup_guard = SetupGuard(__setup_start);
+
+            // Register Tauri-side impls for k2so-core's companion
+            // terminal / event-sink / app-event-source bridges. Must
+            // happen before any companion code runs or subscribes.
+            companion_host::register(app.handle().clone());
+
             // Migrate old JSON window state to SQLite (one-time migration)
             perf_timer!("startup_migrate_window_state", {
                 window::migrate_json_window_state(app.handle());
