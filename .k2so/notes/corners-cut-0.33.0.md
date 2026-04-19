@@ -202,6 +202,34 @@ prerequisites for remaining corners.
 
 Commit `075ef534`. Details folded into corner #1 above.
 
+### Heartbeat slice migrated (9 fns + 6 daemon routes)
+
+Commit `cdf20a34`. Moved from `src-tauri/src/commands/k2so_agents.rs`
+into `k2so_core::agents`:
+
+- Helpers: `resolve_project_id`, `agents_dir`, `agent_dir`,
+  `parse_frontmatter`, `agent_type_for`, `find_primary_agent`.
+- Heartbeat CRUD + tick: `k2so_heartbeat_{add,list,remove,
+  set_enabled,edit,rename,fires_list}`, `k2so_agents_heartbeat_tick`,
+  `stamp_heartbeat_fired` + `HeartbeatFireCandidate` struct.
+
+src-tauri re-exports the helpers at their old paths so the 170+
+local call sites stay intact (no rename churn). The 7
+`#[tauri::command]` wrappers are now three-line forwards.
+
+Daemon picks up 6 `/cli/heartbeat/*` routes (add/list/remove/enable/
+edit/rename) sharing common auth + project_path extraction via new
+`parse_params` + `handle_cli_heartbeat` helpers. E2E verified against
+the live K2SO project: /cli/heartbeat/list returns the same JSON the
+Tauri app would.
+
+**This is the minimum surface the launchd heartbeat plist needs.**
+When the lid is closed and the Tauri app is quit, launchd wakes the
+laptop, fires `com.k2so.agent-heartbeat`, the CLI POSTs
+`/cli/heartbeat/list` + `/cli/heartbeat/tick` (tick route still
+pending) to whichever process owns the port file, and heartbeats
+fire from the daemon's process.
+
 ### First route migrated: /hook/complete
 
 Commit `a3136d74`. `k2so_core::agent_hooks::handle_hook_complete`
