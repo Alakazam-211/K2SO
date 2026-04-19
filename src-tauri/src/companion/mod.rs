@@ -17,10 +17,10 @@ pub use k2so_core::companion::{auth, keychain, proxy, types, websocket};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{AppHandle, Listener};
 use ngrok::config::ForwarderBuilder;
 use ngrok::tunnel::EndpointInfo;
 
+use k2so_core::companion::{app_event_source, event_sink, settings_bridge, terminal_bridge};
 use types::{AuthRateLimiter, CompanionState};
 
 /// Module-level companion state. Mutex<Option> allows stop + restart (unlike OnceLock).
@@ -33,7 +33,11 @@ static CANCEL_START: AtomicBool = AtomicBool::new(false);
 /// Start the companion API proxy.
 /// Reads settings for credentials + ngrok token, starts tunnel, spawns listener.
 /// Returns the public tunnel URL.
-pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
+/// Start the companion API proxy. Reads settings via the core
+/// `settings_bridge` (Tauri app registers `TauriCompanionSettingsProvider`
+/// at startup) and emits lifecycle events via `event_sink`. No Tauri
+/// dep — safe to move into k2so-core in the next commit.
+pub fn start_companion() -> Result<String, String> {
     // Clear any previous cancel signal
     CANCEL_START.store(false, Ordering::Relaxed);
 
@@ -41,8 +45,7 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
         return Err("Companion is already running".to_string());
     }
 
-    let settings = crate::commands::settings::read_settings();
-    let companion = &settings.companion;
+    let companion = settings_bridge::read_settings();
 
     if companion.username.is_empty() {
         return Err("Username is required".to_string());
@@ -54,8 +57,8 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
         return Err("ngrok auth token is required".to_string());
     }
 
-    let hook_port = crate::agent_hooks::get_port();
-    let hook_token = crate::agent_hooks::get_token();
+    let hook_port = k2so_core::hook_config::get_port();
+    let hook_token = k2so_core::hook_config::get_token();
 
     if hook_port == 0 || hook_token.is_empty() {
         return Err("K2SO internal server not ready yet".to_string());
@@ -137,9 +140,9 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
         if companion.cors_origins.is_empty() { "none (browser access blocked)".to_string() } else { companion.cors_origins.join(", ") },
     );
 
-    // Notify the UI so it can show a banner / toast.
-    use tauri::Emitter;
-    let _ = app_handle.emit(
+    // Notify the UI so it can show a banner / toast. Goes through the
+    // k2so-core event sink the Tauri app registered in setup().
+    event_sink::emit(
         "companion:tunnel_activated",
         serde_json::json!({
             "tunnelUrl": tunnel_url,
@@ -148,18 +151,18 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
         }),
     );
 
-    // Register Tauri event listeners for WebSocket broadcast
-    register_event_listeners(&app_handle);
+    // Subscribe to the host's app-event source for the events companion
+    // mirrors to WS clients.
+    register_event_listeners();
 
-    // Spawn terminal output polling thread
-    let poll_handle = app_handle.clone();
-    std::thread::spawn(move || {
-        run_terminal_polling(&poll_handle);
+    // Spawn terminal output polling thread. Pulls grids via
+    // terminal_bridge::get_grid (Tauri app registered the provider).
+    std::thread::spawn(|| {
+        run_terminal_polling();
     });
 
     // Spawn tunnel health check — restarts companion if local listener dies
     let health_port = local_port;
-    let health_handle = app_handle.clone();
     std::thread::spawn(move || {
         // Wait before first check to let everything settle
         std::thread::sleep(std::time::Duration::from_secs(30));
@@ -187,7 +190,7 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
                         // Stop and restart
                         let _ = stop_companion();
                         std::thread::sleep(std::time::Duration::from_secs(2));
-                        match start_companion(health_handle.clone()) {
+                        match start_companion() {
                             Ok(url) => log_debug!("[companion] Auto-restarted: {}", url),
                             Err(e) => log_debug!("[companion] Auto-restart failed: {}", e),
                         }
@@ -569,27 +572,27 @@ fn run_local_listener(listener: std::net::TcpListener) {
     RUNNING.store(false, Ordering::Relaxed);
 }
 
-/// Register Tauri event listeners to broadcast to WebSocket clients.
-fn register_event_listeners(app_handle: &AppHandle) {
-    // Forward agent/project events to all WS clients
-    let events = ["agent:lifecycle", "agent:reply", "sync:projects"];
-    for event_name in &events {
-        let name = event_name.to_string();
-        app_handle.listen(event_name.to_string(), move |event| {
+/// Subscribe to host app events so companion can mirror them to WS
+/// clients. Runs through the `app_event_source` bridge the Tauri app
+/// registered at startup, so no direct Tauri dep is taken here.
+fn register_event_listeners() {
+    let events: &[&'static str] = &["agent:lifecycle", "agent:reply", "sync:projects"];
+    app_event_source::subscribe(
+        events,
+        Box::new(|event_name, payload| {
             if let Some(ref state) = *STATE.lock() {
-                let payload = event.payload();
                 let ws_event = serde_json::json!({
-                    "event": name,
+                    "event": event_name,
                     "data": payload,
                 });
                 websocket::broadcast_event(state, &ws_event.to_string());
             }
-        });
-    }
+        }),
+    );
 
     // Terminal grid updates are handled by run_terminal_polling() which reads
-    // CompactLine data directly from the terminal manager at 10fps and broadcasts
-    // to subscribed WS clients. No Tauri event listener needed.
+    // CompactLine data directly via terminal_bridge at 10fps and broadcasts
+    // to subscribed WS clients. No event subscription needed.
 }
 
 /// Poll terminal grids for subscribed WebSocket clients.
@@ -602,8 +605,7 @@ fn register_event_listeners(app_handle: &AppHandle) {
 /// when seqno is unchanged. Before 0.32.13 this used an ahash content hash,
 /// which needed to iterate every line on every poll — criterion benches
 /// show the seqno compare is ~1000× faster than the hash path.
-fn run_terminal_polling(app_handle: &AppHandle) {
-    use tauri::Manager;
+fn run_terminal_polling() {
     let mut last_seqnos: HashMap<String, u64> = HashMap::new();
 
     loop {
@@ -612,7 +614,7 @@ fn run_terminal_polling(app_handle: &AppHandle) {
 
         if !RUNNING.load(Ordering::Relaxed) { break; }
 
-        let _poll_tick = crate::perf_hist!("terminal_poll_tick");
+        let _poll_tick = k2so_core::perf_hist!("terminal_poll_tick");
 
         let guard = STATE.lock();
         let state = match guard.as_ref() {
@@ -634,22 +636,14 @@ fn run_terminal_polling(app_handle: &AppHandle) {
 
         if terminal_ids.is_empty() { continue; }
 
-        // Get grid snapshots directly from terminal manager
-        let app_state = match app_handle.try_state::<crate::state::AppState>() {
-            Some(s) => s,
-            None => continue,
-        };
-
-        let manager = app_state.terminal_manager.lock();
-
         for tid in &terminal_ids {
-            if let Ok(grid) = manager.get_grid(tid) {
+            if let Ok(grid) = terminal_bridge::get_grid(tid) {
                 // Seqno-based change detection: compare the grid's monotonic
                 // counter against what we last broadcast. Constant-time,
                 // no iteration over lines. A seqno of 0 means "unstamped"
                 // (shouldn't happen for a terminal created post-0.32.13
                 // but guard anyway — treat 0 as always-dirty).
-                let _h = crate::perf_hist!("grid_hash");
+                let _h = k2so_core::perf_hist!("grid_hash");
                 let prev_seqno = last_seqnos.get(tid).copied().unwrap_or(0);
                 if grid.seqno != 0 && grid.seqno == prev_seqno {
                     continue;
@@ -664,7 +658,9 @@ fn run_terminal_polling(app_handle: &AppHandle) {
                 // This fires at the same frequency as terminal:grid (~10fps during
                 // active output) so the mobile app gets real-time push delivery
                 // of the full conversation thread — no request-response round-trip.
-                if let Ok(scrollback_lines) = manager.read_lines_with_scrollback(tid, 500, true) {
+                if let Ok(scrollback_lines) =
+                    terminal_bridge::read_lines_with_scrollback(tid, 500, true)
+                {
                     websocket::broadcast_terminal_scrollback(state, tid, &scrollback_lines);
                 }
 

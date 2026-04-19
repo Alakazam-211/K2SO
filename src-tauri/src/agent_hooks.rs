@@ -2416,7 +2416,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                         })()
                     }
                     "/cli/companion/start" => {
-                        match crate::companion::start_companion(app_handle.clone()) {
+                        match crate::companion::start_companion() {
                             Ok(url) => Ok(serde_json::json!({"ok": true, "url": url}).to_string()),
                             Err(e) => Err(e),
                         }

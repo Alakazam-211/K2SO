@@ -794,7 +794,7 @@ pub fn run() {
                                 log_debug!("[companion] Auto-start retry {} in {}s...", i + 1, delay);
                                 std::thread::sleep(std::time::Duration::from_secs(*delay));
                             }
-                            match companion::start_companion(handle.clone()) {
+                            match companion::start_companion() {
                                 Ok(url) => {
                                     log_debug!("[companion] Auto-started: {}", url);
                                     return;

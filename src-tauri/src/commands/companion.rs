@@ -2,8 +2,8 @@ use tauri::AppHandle;
 
 /// Start the companion API proxy. Returns the ngrok tunnel URL.
 #[tauri::command]
-pub fn companion_start(app: AppHandle) -> Result<String, String> {
-    crate::companion::start_companion(app)
+pub fn companion_start() -> Result<String, String> {
+    crate::companion::start_companion()
 }
 
 /// Stop the companion API proxy.
