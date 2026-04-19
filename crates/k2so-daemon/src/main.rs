@@ -3,18 +3,136 @@
 //! Launched by launchd (`~/Library/LaunchAgents/com.k2so.k2so-daemon.plist`,
 //! `KeepAlive: true`), this process owns the persistent-agent runtime —
 //! SQLite, the heartbeat scheduler, the companion WebSocket + ngrok tunnel,
-//! the agent_hooks HTTP server — so that agents keep running while the Tauri
-//! app is quit and the laptop lid is closed.
+//! the agent_hooks HTTP server — so that agents keep running while the
+//! Tauri app is quit and the laptop lid is closed.
 //!
-//! Implementation migrates in incrementally behind this entry point; this
-//! file is the placeholder for the workspace scaffolding commit.
+//! # Scaffolding pass (0.33.0-dev)
+//!
+//! Binds a loopback TCP listener on a random port, writes the port +
+//! freshly-generated auth token to `~/.k2so/daemon.port` and
+//! `~/.k2so/daemon.token` (note: **not** `heartbeat.port` yet — that's
+//! still owned by src-tauri's agent_hooks server; reconciliation comes
+//! when agent_hooks migrates into core), then answers `GET /ping` with a
+//! 200 OK. Enough to prove the lifecycle end-to-end (launchd spawns the
+//! binary, plist is loadable, port file discoverable, token-auth path
+//! exercised) without yet taking responsibility for agent state.
+
+use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::path::PathBuf;
+
+use k2so_core::log_debug;
+
+const BANNER: &str = concat!(
+    "k2so-daemon ",
+    env!("CARGO_PKG_VERSION"),
+    " — scaffolding build",
+);
 
 fn main() {
-    // Force the linker to keep k2so-core so `cargo build --workspace`
-    // exercises the crate boundary end-to-end from the scaffolding pass
-    // onward.
+    // Force a reference to k2so-core so the crate boundary is exercised
+    // at build-time until we actually use it for real work.
     k2so_core::__scaffolding_marker();
 
-    eprintln!("k2so-daemon 0.33.0-dev: scaffolding only. Not yet functional.");
-    std::process::exit(0);
+    log_debug!("[daemon] {}", BANNER);
+
+    let k2so_dir = match dirs::home_dir() {
+        Some(h) => h.join(".k2so"),
+        None => {
+            log_debug!("[daemon] FATAL: cannot determine home directory");
+            std::process::exit(2);
+        }
+    };
+    if let Err(e) = fs::create_dir_all(&k2so_dir) {
+        log_debug!("[daemon] FATAL: create ~/.k2so: {e}");
+        std::process::exit(2);
+    }
+
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(l) => l,
+        Err(e) => {
+            log_debug!("[daemon] FATAL: bind 127.0.0.1:0: {e}");
+            std::process::exit(2);
+        }
+    };
+    let port = match listener.local_addr() {
+        Ok(a) => a.port(),
+        Err(e) => {
+            log_debug!("[daemon] FATAL: local_addr: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    let token = generate_token();
+
+    if let Err(e) = write_restricted(&k2so_dir.join("daemon.port"), port.to_string().as_bytes()) {
+        log_debug!("[daemon] WARN: write daemon.port: {e}");
+    }
+    if let Err(e) = write_restricted(&k2so_dir.join("daemon.token"), token.as_bytes()) {
+        log_debug!("[daemon] WARN: write daemon.token: {e}");
+    }
+
+    // Publish port + token into the shared static so the rest of core
+    // (terminal, etc.) can inject them into spawned child-process envs.
+    k2so_core::hook_config::set_port(port);
+    k2so_core::hook_config::set_token(token.clone());
+
+    log_debug!(
+        "[daemon] Listening on 127.0.0.1:{} — port file {} token file {}",
+        port,
+        k2so_dir.join("daemon.port").display(),
+        k2so_dir.join("daemon.token").display()
+    );
+
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else { continue };
+        let mut buf = [0u8; 1024];
+        let n = match stream.read(&mut buf) {
+            Ok(n) if n > 0 => n,
+            _ => continue,
+        };
+        let req = String::from_utf8_lossy(&buf[..n]);
+
+        // Minimal HTTP parsing — just peek at the first line to decide
+        // whether this is /ping. Anything else gets 404.
+        let first_line = req.lines().next().unwrap_or("");
+        let is_ping = first_line.starts_with("GET /ping ");
+
+        let (status, body) = if is_ping {
+            ("200 OK", BANNER)
+        } else {
+            ("404 Not Found", "not found\n")
+        };
+
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(response.as_bytes());
+    }
+}
+
+/// Write `contents` to `path` with permissions 0600 so other users on the
+/// same machine can't read the auth token or port.
+fn write_restricted(path: &PathBuf, contents: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(contents)?;
+    Ok(())
+}
+
+/// 32-hex-char cryptographically random token. Same shape as the
+/// agent_hooks server's `generate_token` so a future unification is a
+/// trivial move.
+fn generate_token() -> String {
+    let mut buf = [0u8; 16];
+    getrandom::getrandom(&mut buf).expect("getrandom failed");
+    buf.iter().map(|b| format!("{:02x}", b)).collect()
 }

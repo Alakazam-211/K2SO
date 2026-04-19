@@ -11,3 +11,9 @@ path = "src/main.rs"
 
 [dependencies]
 k2so-core = { path = "../k2so-core" }
+
+# Cryptographic randomness for the per-boot hook auth token.
+getrandom = "0.2"
+
+# Home-directory lookup for ~/.k2so/{daemon.port,daemon.token,daemon.log}.
+dirs = "5"
