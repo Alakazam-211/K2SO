@@ -78,16 +78,51 @@ export APPLE_TEAM_ID="36B8R93HXV"
 bun run tauri build
 echo "  Build complete."
 
+# ── Step 2.5: Build + bundle k2so-daemon sidecar ──
+#
+# k2so-daemon is a peer binary to the main Tauri app that owns the
+# persistent-agent runtime (launched by launchd, outlives the Tauri
+# process). It needs to sit next to `k2so` inside `Contents/MacOS/`
+# so `std::env::current_exe()?.parent()?.join("k2so-daemon")` — used
+# by the `install_daemon_plist_v1` code migration — can find it on
+# first launch of a release build.
+#
+# We build it explicitly in release mode (cargo workspace builds it
+# alongside the Tauri crate, but `tauri build` copies only its own
+# primary bin into the bundle) then `cp` it in. Hardened-runtime
+# signing in Step 3 covers this binary too.
+echo ""
+echo "Step 2.5: Bundling k2so-daemon sidecar..."
+# cargo workspace root is the repo root — both `k2so` (Tauri) and
+# `k2so-daemon` build into `target/release/`. Tauri's bundler writes
+# only its own primary bin into the .app, so we copy k2so-daemon in
+# explicitly.
+cargo build --release -p k2so-daemon
+DAEMON_SRC="target/release/k2so-daemon"
+if [ ! -x "$DAEMON_SRC" ]; then
+    echo "  FATAL: k2so-daemon not at $DAEMON_SRC after cargo build" >&2
+    exit 1
+fi
+cp "$DAEMON_SRC" \
+    "src-tauri/target/release/bundle/macos/K2SO.app/Contents/MacOS/k2so-daemon"
+echo "  k2so-daemon copied into K2SO.app/Contents/MacOS/"
+
 # ── Step 3: Sign with hardened runtime ──
 echo ""
 echo "Step 3: Signing with hardened runtime..."
+# Inner binaries first (Apple requires sub-binaries signed before the
+# outer bundle, otherwise codesign rejects with 'resource fork … not
+# allowed').
 codesign --force --options runtime --timestamp \
     --sign "$SIGNING_IDENTITY" \
     "src-tauri/target/release/bundle/macos/K2SO.app/Contents/MacOS/k2so"
 codesign --force --options runtime --timestamp \
     --sign "$SIGNING_IDENTITY" \
+    "src-tauri/target/release/bundle/macos/K2SO.app/Contents/MacOS/k2so-daemon"
+codesign --force --options runtime --timestamp \
+    --sign "$SIGNING_IDENTITY" \
     "src-tauri/target/release/bundle/macos/K2SO.app"
-echo "  Signed."
+echo "  Signed (main + daemon + bundle)."
 
 # ── Step 4: Notarize app via ZIP ──
 echo ""
