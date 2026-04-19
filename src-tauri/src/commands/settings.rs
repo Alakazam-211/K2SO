@@ -158,8 +158,17 @@ pub struct CompanionSettings {
     pub auto_start: bool,
     #[serde(default)]
     pub username: String,
+    /// Legacy on-disk copy of the argon2 password hash. Post-0.32.12 the
+    /// canonical hash lives in the macOS Keychain; this field is cleared
+    /// after migration. Kept in the struct so older installs with an
+    /// on-disk hash still authenticate correctly during the transition.
     #[serde(default)]
     pub password_hash: String,
+    /// True once a companion password has been configured (either freshly
+    /// set, or migrated from legacy `password_hash`). The UI uses this to
+    /// show "password set" without reading the Keychain on every render.
+    #[serde(default)]
+    pub password_set: bool,
     #[serde(default)]
     pub ngrok_auth_token: String,
     #[serde(default)]
@@ -413,15 +422,50 @@ pub fn settings_update(app: AppHandle, updates: serde_json::Value) -> Result<App
     let mut current_val = serde_json::to_value(&current).map_err(|e| e.to_string())?;
     deep_merge(&mut current_val, &updates);
     let merged: AppSettings = serde_json::from_value(current_val).map_err(|e| e.to_string())?;
+
+    // If the companion password or username changed, kill every live session
+    // and force every connected mobile client to re-authenticate. Otherwise
+    // a rotated password would leave already-granted bearer tokens valid for
+    // the rest of their 24h TTL.
+    let creds_changed = current.companion.password_hash != merged.companion.password_hash
+        || current.companion.username != merged.companion.username;
+
     write_settings(&merged);
+
+    if creds_changed {
+        crate::companion::invalidate_all_sessions("credentials changed");
+        let _ = app.emit("companion:sessions_invalidated", ());
+    }
+
     let _ = app.emit("sync:settings", ());
     Ok(merged)
+}
+
+/// Called by companion::auth::load_password_hash once it has successfully
+/// written the legacy on-disk hash to the Keychain. Writes directly to
+/// settings.json — does NOT go through settings_update, so it cannot trip
+/// the credentials-changed branch and tear down the session the user is
+/// actively authenticating with.
+pub(crate) fn clear_companion_password_hash_after_migration() {
+    let mut settings = read_settings();
+    if settings.companion.password_hash.is_empty() && settings.companion.password_set {
+        return; // already migrated
+    }
+    settings.companion.password_hash.clear();
+    settings.companion.password_set = true;
+    write_settings(&settings);
 }
 
 #[tauri::command]
 pub fn settings_reset(app: AppHandle) -> Result<AppSettings, String> {
     let defaults = AppSettings::default();
     write_settings(&defaults);
+    // A reset clears everything — the Keychain password has to go too, or
+    // it becomes an undiscoverable secret that re-activates if the user
+    // reconfigures companion.
+    crate::companion::keychain::delete_password_hash();
+    crate::companion::invalidate_all_sessions("settings reset");
+    let _ = app.emit("companion:sessions_invalidated", ());
     let _ = app.emit("sync:settings", ());
     Ok(defaults)
 }

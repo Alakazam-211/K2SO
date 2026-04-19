@@ -10,6 +10,7 @@
 //! - Tokio runtime kept alive for the tunnel's lifetime
 
 pub mod auth;
+pub mod keychain;
 pub mod proxy;
 pub mod types;
 pub mod websocket;
@@ -47,7 +48,7 @@ pub fn start_companion(app_handle: AppHandle) -> Result<String, String> {
     if companion.username.is_empty() {
         return Err("Username is required".to_string());
     }
-    if companion.password_hash.is_empty() {
+    if !auth::has_password() {
         return Err("Password must be set before enabling companion".to_string());
     }
     if companion.ngrok_auth_token.is_empty() {
@@ -210,6 +211,39 @@ pub fn stop_companion() -> Result<(), String> {
     log_debug!("[companion] Stopped");
 
     Ok(())
+}
+
+/// Invalidate every active companion session + kick every connected WS client.
+///
+/// Called when the companion credentials (username / password hash) change,
+/// or on explicit settings reset. Idempotent: safe to call when the companion
+/// isn't running.
+pub fn invalidate_all_sessions(reason: &str) {
+    let guard = STATE.lock();
+    let state = match guard.as_ref() {
+        Some(s) => s,
+        None => return,
+    };
+    let removed = {
+        let mut sessions = state.sessions.lock();
+        let n = sessions.len();
+        sessions.clear();
+        n
+    };
+    let disconnected = {
+        let mut clients = state.ws_clients.lock();
+        let n = clients.len();
+        clients.clear();
+        n
+    };
+    if removed + disconnected > 0 {
+        log_debug!(
+            "[companion] Invalidated {} session(s) and {} WS client(s): {}",
+            removed,
+            disconnected,
+            reason
+        );
+    }
 }
 
 /// Get companion status. Non-blocking — uses try_lock to avoid blocking the main thread.

@@ -1,6 +1,7 @@
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
+use super::keychain;
 use super::types::{CompanionState, Session};
 
 /// Hash a password using argon2id.
@@ -22,6 +23,45 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
     Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok()
+}
+
+/// Load the companion password hash, preferring the macOS Keychain over the
+/// legacy on-disk copy. Performs opportunistic one-shot migration: if the
+/// hash lives only on disk, copy it to Keychain and clear it from
+/// settings.json so future verifications read from the Keychain only.
+///
+/// Returns None if no password is configured.
+pub fn load_password_hash() -> Option<String> {
+    if let Some(hash) = keychain::read_password_hash() {
+        return Some(hash);
+    }
+
+    // Fallback + migration for pre-0.32.12 installs.
+    let settings = crate::commands::settings::read_settings();
+    let legacy = settings.companion.password_hash.clone();
+    if legacy.is_empty() {
+        return None;
+    }
+
+    // Try to migrate: Keychain first, then clear from disk.
+    let migrated = keychain::write_password_hash(&legacy).is_ok();
+    if migrated {
+        crate::commands::settings::clear_companion_password_hash_after_migration();
+        log_debug!("[companion] Migrated password hash from settings.json to Keychain");
+    } else {
+        log_debug!("[companion] Keychain unavailable — continuing to read from settings.json");
+    }
+    Some(legacy)
+}
+
+/// Returns true iff a companion password has been configured (Keychain or
+/// legacy on-disk hash). Used by `start_companion` + UI state.
+pub fn has_password() -> bool {
+    if keychain::read_password_hash().is_some() {
+        return true;
+    }
+    let settings = crate::commands::settings::read_settings();
+    settings.companion.password_set || !settings.companion.password_hash.is_empty()
 }
 
 /// Create a new authenticated session with 24hr expiry.

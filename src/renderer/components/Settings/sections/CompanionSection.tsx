@@ -34,7 +34,10 @@ export function CompanionSection(): React.JSX.Element {
         const settings = await invoke<any>('settings_get')
         const c = settings?.companion || {}
         setUsername(c.username || '')
-        setPasswordSet(!!(c.passwordHash))
+        // Post-0.32.12 the hash itself moves to Keychain and passwordHash is
+        // blanked; `passwordSet` is the durable indicator. Fall back to the
+        // legacy field for installs that haven't migrated yet.
+        setPasswordSet(!!(c.passwordSet || c.passwordHash))
         setNgrokToken(c.ngrokAuthToken || '')
         setNgrokDomain(c.ngrokDomain || '')
         setAutoStart(c.autoStart || false)

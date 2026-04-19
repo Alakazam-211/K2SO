@@ -439,6 +439,14 @@ pub fn handle_request(
         return;
     }
 
+    // Logout — delete the caller's own session. Requires the Bearer token
+    // being revoked; we don't validate age/rate limit here since revocation
+    // is strictly safety-net — always fine to purge.
+    if clean_path == "/companion/auth/revoke" && method == "POST" {
+        handle_revoke(stream, state, headers, cors_ref);
+        return;
+    }
+
     // WebSocket upgrade — handled separately
     if clean_path == "/companion/ws" {
         send_response(
@@ -537,7 +545,7 @@ fn handle_auth(
         }
     };
 
-    // Read settings to validate credentials
+    // Read settings to validate the username.
     let settings = crate::commands::settings::read_settings();
     if username != settings.companion.username {
         send_response(
@@ -549,7 +557,21 @@ fn handle_auth(
         return;
     }
 
-    if !auth::verify_password(&password, &settings.companion.password_hash) {
+    // Load hash from Keychain (preferred) with lazy migration of any legacy
+    // on-disk hash. Returns None if no password is configured.
+    let hash = match auth::load_password_hash() {
+        Some(h) => h,
+        None => {
+            send_response(
+                stream,
+                401,
+                &serde_json::json!({"ok": false, "error": "Invalid credentials"}),
+                cors,
+            );
+            return;
+        }
+    };
+    if !auth::verify_password(&password, &hash) {
         send_response(
             stream,
             401,
@@ -578,6 +600,61 @@ fn handle_auth(
         }),
         cors,
     );
+}
+
+/// Handle POST /companion/auth/revoke — delete the caller's session.
+///
+/// Uses constant-time compare (matching `validate_bearer`) to find and purge
+/// the session without leaking which-bucket timing. Idempotent: a missing
+/// token still returns 200 so callers can safely retry. Returns 400 only if
+/// the Authorization header is malformed.
+fn handle_revoke(
+    stream: &mut TcpStream,
+    state: &CompanionState,
+    headers: &HashMap<String, String>,
+    cors: Option<&str>,
+) {
+    use subtle::ConstantTimeEq;
+    let auth_header = headers.get("authorization").cloned().unwrap_or_default();
+    let token = match auth::parse_bearer(&auth_header) {
+        Some(t) => t,
+        None => {
+            send_response(
+                stream,
+                400,
+                &serde_json::json!({
+                    "ok": false,
+                    "error": "Missing Authorization: Bearer <token>"
+                }),
+                cors,
+            );
+            return;
+        }
+    };
+
+    let mut sessions = state.sessions.lock();
+    let mut matched: Option<String> = None;
+    for key in sessions.keys() {
+        if key.as_bytes().ct_eq(token.as_bytes()).into() {
+            matched = Some(key.clone());
+            break;
+        }
+    }
+    if let Some(k) = matched {
+        sessions.remove(&k);
+    }
+    drop(sessions);
+
+    // Also disconnect any WS clients bound to this token.
+    {
+        let mut clients = state.ws_clients.lock();
+        clients.retain(|c| {
+            let matches: bool = c.session_token.as_bytes().ct_eq(token.as_bytes()).into();
+            !matches
+        });
+    }
+
+    send_response(stream, 200, &serde_json::json!({"ok": true}), cors);
 }
 
 #[cfg(test)]

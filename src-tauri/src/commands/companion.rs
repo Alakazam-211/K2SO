@@ -18,18 +18,39 @@ pub fn companion_status() -> Result<serde_json::Value, String> {
     Ok(crate::companion::companion_status())
 }
 
-/// Set the companion password. Hashes with argon2 and stores in settings.
+/// Set the companion password. Hashes with argon2, stores in the macOS
+/// Keychain (preferred), or falls back to settings.json on other platforms
+/// or if the Keychain is unavailable. Always invalidates any live sessions
+/// so a rotated password can't be used with a stale token.
 #[tauri::command]
 pub fn companion_set_password(app: AppHandle, password: String) -> Result<(), String> {
     let hash = crate::companion::auth::hash_password(&password)?;
 
-    // Update settings with the hashed password
-    let updates = serde_json::json!({
-        "companion": {
-            "passwordHash": hash,
-        }
-    });
+    // Try Keychain first. On success, clear the on-disk copy so only the
+    // Keychain entry is authoritative.
+    let keychain_ok = crate::companion::keychain::write_password_hash(&hash).is_ok();
+
+    let updates = if keychain_ok {
+        serde_json::json!({
+            "companion": {
+                "passwordHash": "",
+                "passwordSet": true,
+            }
+        })
+    } else {
+        // Fallback: store the hash on disk under 0o600.
+        serde_json::json!({
+            "companion": {
+                "passwordHash": hash,
+                "passwordSet": true,
+            }
+        })
+    };
     crate::commands::settings::settings_update(app, updates)?;
+
+    // settings_update already invalidates on password_hash change, but the
+    // Keychain path blanks password_hash first which skips that trigger.
+    crate::companion::invalidate_all_sessions("password changed");
     Ok(())
 }
 

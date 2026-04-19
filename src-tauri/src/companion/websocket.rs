@@ -145,6 +145,29 @@ pub fn handle_ws_upgrade(
                         continue;
                     }
 
+                    // Logout: purge the current session and close the socket.
+                    if method == "auth.revoke" {
+                        use subtle::ConstantTimeEq;
+                        {
+                            let mut sessions = reader_state.sessions.lock();
+                            let mut matched: Option<String> = None;
+                            for key in sessions.keys() {
+                                if key.as_bytes().ct_eq(session_token.as_bytes()).into() {
+                                    matched = Some(key.clone());
+                                    break;
+                                }
+                            }
+                            if let Some(k) = matched {
+                                sessions.remove(&k);
+                            }
+                        }
+                        send_response(&tx, id.as_deref(), Ok(serde_json::json!({"revoked": true})));
+                        // Tear this client down — next loop iteration will see
+                        // the send-channel drop and exit cleanly.
+                        let _ = ws.send(Message::Close(None));
+                        break;
+                    }
+
                     // Handle terminal subscribe/unsubscribe/resize
                     if method == "terminal.subscribe" {
                         let terminal_id = params.get("terminalId").and_then(|v| v.as_str()).unwrap_or("");
