@@ -202,6 +202,67 @@ prerequisites for remaining corners.
 
 Commit `075ef534`. Details folded into corner #1 above.
 
+### Skill system + content generators + chat_history into core
+
+Commits `fb1f38a8`, `a2f323e0`, `83ce9e7d`.
+
+**Skill infrastructure** (`k2so_core::agents::skill`):
+- Managed-region markers (`SKILL_BEGIN_MARKER`, `SKILL_END_MARKER`,
+  `SKILL_SOURCE_PROJECT_MD_*`, `skill_source_agent_md_*`).
+- Five per-tier version constants + FNV-1a `skill_checksum_hex`.
+- `wrap_managed_skill` + `parse_skill` + `ParsedSkill` + universal
+  `ensure_skill_up_to_date` with `SkillUpgradeOutcome` enum.
+
+**Skill content** (`k2so_core::agents::skill_content`):
+- All four tier generators (manager / custom_agent / k2so_agent /
+  template — ~450 lines total).
+- `compose_agent_wake_context` (renamed from
+  `generate_agent_claude_md_content` — honest name for the function
+  that returns the full `--append-system-prompt` string AND writes
+  SKILL.md as a side effect; legacy name kept as a pub alias).
+- `load_custom_layers` (user-editable ~/.k2so/templates/<tier>/*.md).
+- `extract_section`, `format_cap`, `CUSTOM_AGENT_HEARTBEAT_DOCS`.
+
+**Work item + safe IO** (`k2so_core::agents::work_item`):
+- `WorkItem` struct + `parse_work_item_content` + `read_work_item`.
+- `safe_read_to_string` + `MAX_FILE_SIZE` + `atomic_write`.
+
+**Chat history** (`k2so_core::chat_history`):
+- Claude + Cursor session-detect + `claude_session_file_exists` +
+  `detect_active_session` provider dispatcher.
+- `spawn_wake_headless` now fires a 5-second post-spawn detach
+  thread to persist the new session ID so the next heartbeat can
+  `--resume` into the same chat.
+
+**src-tauri net shrinkage**: 9093 → 7128 lines in
+`src-tauri/src/commands/k2so_agents.rs` (22% reduction).
+
+**Test coverage unchanged at 531/0** across all four behavioral
+suites. 264 Rust lib tests green.
+
+### Still in src-tauri (final detangle tail)
+
+Three items remain:
+
+1. **`k2so_agents_generate_workspace_claude_md`** (~1000 lines) —
+   workspace-root SKILL.md regen + auto-scaffolds `.k2so/` layout
+   on first call. Pulls in `generate_default_agent_body`,
+   `write_agent_skill_file`, and all the workspace-layout migration
+   helpers.
+2. **`k2so_agents_build_launch`** (~228 lines) — resume-into-worktree
+   + delegate-from-inbox + fresh-launch decision tree. Depends on
+   `k2so_agents_generate_workspace_claude_md` + `k2so_agents_delegate`.
+3. **`k2so_agents_delegate`** (~200 lines) — creates git worktrees +
+   moves inbox → active + writes task-specific CLAUDE.md. Depends
+   on `crate::git::create_worktree` (still in src-tauri — would
+   require migrating the entire git.rs / libgit2 surface).
+
+None of these are needed for the lid-closed heartbeat path (that
+uses `spawn_wake_headless` which composes its own minimal prompt).
+They're the supervised-launch + worktree creation surfaces. For a
+fully standalone daemon, the final move is to migrate git.rs as a
+prerequisite, then the three above cascade.
+
 ### Lid-closed fire works end-to-end — /cli/agents/triage
 
 Commit `68eb23a0`. The last mile: daemon can actually SPAWN claude
