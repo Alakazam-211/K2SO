@@ -14,6 +14,7 @@
 //! Module migration from src-tauri lands incrementally.
 
 pub mod perf;
+pub mod push;
 
 #[doc(hidden)]
 pub fn __scaffolding_marker() {}

@@ -2917,6 +2917,7 @@ dependencies = [
  "glob",
  "ignore",
  "image",
+ "k2so-core",
  "libc",
  "llama-cpp-2",
  "mio",
@@ -2958,6 +2959,9 @@ dependencies = [
 [[package]]
 name = "k2so-core"
 version = "0.33.0-dev"
+dependencies = [
+ "parking_lot",
+]
 
 [[package]]
 name = "k2so-daemon"
