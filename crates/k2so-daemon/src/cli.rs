@@ -463,6 +463,29 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
 
+        // ── Companion tunnel + globals ──────────────────────────────
+        "/cli/companion/start" => match k2so_core::companion::start_companion() {
+            Ok(url) => CliResponse::ok_json(
+                serde_json::json!({"ok": true, "url": url}).to_string(),
+            ),
+            Err(e) => CliResponse::bad_request(e),
+        },
+        "/cli/companion/stop" => match k2so_core::companion::stop_companion() {
+            Ok(()) => CliResponse::ok_json(r#"{"ok":true}"#.to_string()),
+            Err(e) => CliResponse::bad_request(e),
+        },
+        "/cli/companion/status" => {
+            CliResponse::ok_json(k2so_core::companion::companion_status().to_string())
+        }
+        "/cli/companion/presets" => match k2so_core::companion::cli_routes::list_presets() {
+            Ok(body) => CliResponse::ok_json(body),
+            Err(e) => CliResponse::bad_request(e),
+        },
+        "/cli/companion/projects" => match k2so_core::companion::cli_routes::list_projects() {
+            Ok(body) => CliResponse::ok_json(body),
+            Err(e) => CliResponse::bad_request(e),
+        },
+
         // ── Aggregated agent check-in ───────────────────────────────
         "/cli/checkin" => match need_project(params) {
             Ok(p) => {

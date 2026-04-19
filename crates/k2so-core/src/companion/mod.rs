@@ -15,6 +15,7 @@
 // stay Tauri-free.
 pub mod app_event_source;
 pub mod auth;
+pub mod cli_routes;
 pub mod event_sink;
 pub mod keychain;
 pub mod proxy;

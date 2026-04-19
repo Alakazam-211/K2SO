@@ -1700,50 +1700,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                         })()
                     }
                     "/cli/companion/projects" => {
-                        // List all registered workspaces (global — ignores project_path)
-                        (|| -> Result<String, String> {
-                            let db_path = dirs::home_dir()
-                                .ok_or("No home dir")?
-                                .join(".k2so/k2so.db");
-                            let db = crate::db::shared();
-                            let conn = db.lock();
-                            let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
-
-                            let mut stmt = conn.prepare(
-                                "SELECT p.id, p.name, p.path, p.color, p.icon_url, p.agent_mode, p.pinned, \
-                                 p.tab_order, p.focus_group_id, fg.name, fg.color \
-                                 FROM projects p \
-                                 LEFT JOIN focus_groups fg ON p.focus_group_id = fg.id \
-                                 ORDER BY p.pinned DESC, p.tab_order ASC, p.name ASC"
-                            ).map_err(|e| e.to_string())?;
-
-                            let projects: Vec<serde_json::Value> = stmt.query_map([], |row| {
-                                let fg_id: Option<String> = row.get(8)?;
-                                let fg_name: Option<String> = row.get(9)?;
-                                let fg_color: Option<String> = row.get(10)?;
-                                let focus_group = if let (Some(id), Some(name)) = (&fg_id, &fg_name) {
-                                    serde_json::json!({ "id": id, "name": name, "color": fg_color })
-                                } else {
-                                    serde_json::Value::Null
-                                };
-
-                                Ok(serde_json::json!({
-                                    "id": row.get::<_, String>(0)?,
-                                    "name": row.get::<_, String>(1)?,
-                                    "path": row.get::<_, String>(2)?,
-                                    "color": row.get::<_, String>(3)?,
-                                    "iconUrl": row.get::<_, Option<String>>(4)?,
-                                    "agentMode": row.get::<_, String>(5)?,
-                                    "pinned": row.get::<_, bool>(6)?,
-                                    "tabOrder": row.get::<_, i32>(7)?,
-                                    "focusGroup": focus_group,
-                                }))
-                            }).map_err(|e| e.to_string())?
-                            .filter_map(|r| r.ok())
-                            .collect();
-
-                            Ok(serde_json::to_string(&projects).unwrap_or("[]".to_string()))
-                        })()
+                        k2so_core::companion::cli_routes::list_projects()
                     }
                     "/cli/companion/sessions" => {
                         // All active agent sessions across ALL workspaces (global)
@@ -1918,32 +1875,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                         })()
                     }
                     "/cli/companion/presets" => {
-                        // List available CLI LLM tool presets (global)
-                        (|| -> Result<String, String> {
-                            let db_path = dirs::home_dir()
-                                .ok_or("No home dir")?
-                                .join(".k2so/k2so.db");
-                            let db = crate::db::shared();
-                            let conn = db.lock();
-                            let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
-
-                            let mut stmt = conn.prepare(
-                                "SELECT id, label, command, icon FROM agent_presets WHERE enabled = 1 ORDER BY sort_order ASC, label ASC"
-                            ).map_err(|e| e.to_string())?;
-
-                            let presets: Vec<serde_json::Value> = stmt.query_map([], |row| {
-                                Ok(serde_json::json!({
-                                    "id": row.get::<_, String>(0)?,
-                                    "name": row.get::<_, String>(1)?,
-                                    "command": row.get::<_, String>(2)?,
-                                    "icon": row.get::<_, Option<String>>(3)?,
-                                }))
-                            }).map_err(|e| e.to_string())?
-                            .filter_map(|r| r.ok())
-                            .collect();
-
-                            Ok(serde_json::to_string(&presets).unwrap_or("[]".to_string()))
-                        })()
+                        k2so_core::companion::cli_routes::list_presets()
                     }
                     _ => Err("Unknown CLI endpoint".to_string()),
                 };
