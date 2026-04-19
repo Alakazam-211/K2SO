@@ -24,8 +24,10 @@ mod companion;
 // k2so-core binary via include_str! from crates/k2so-core/drizzle_sql/.
 pub use k2so_core::db;
 mod editors;
-mod fs_abstract;
-mod fs_atomic;
+// `fs_abstract` + `fs_atomic` now live in k2so-core (pure std; no Tauri dep).
+// Re-exported so existing `crate::fs_abstract::*` / `crate::fs_atomic::*`
+// call sites keep working.
+pub use k2so_core::{fs_abstract, fs_atomic};
 mod git;
 // `llm` now lives in k2so-core. Downstream callers keep their
 // `crate::llm::*` paths working through this re-export.

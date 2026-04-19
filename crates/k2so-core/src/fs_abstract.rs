@@ -231,10 +231,14 @@ impl Fs for RealFs {
 // Test-only in-memory filesystem. Compiled only under `cfg(test)` —
 // lands in no production artifact.
 
-#[cfg(test)]
+// FakeFs is available whenever cfg(test) is active for k2so-core OR the
+// `test-util` feature is enabled — the latter lets downstream crates'
+// (src-tauri's) test binaries reach FakeFs even though cfg(test) in
+// k2so-core is off when compiled as a library dep.
+#[cfg(any(test, feature = "test-util"))]
 pub use fake::FakeFs;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 mod fake {
     use super::*;
     use parking_lot::Mutex;

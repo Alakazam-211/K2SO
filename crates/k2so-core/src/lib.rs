@@ -29,6 +29,8 @@ macro_rules! log_debug {
 }
 
 pub mod db;
+pub mod fs_abstract;
+pub mod fs_atomic;
 pub mod hook_config;
 pub mod llm;
 pub mod perf;
