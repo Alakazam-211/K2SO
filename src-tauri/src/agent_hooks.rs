@@ -18,40 +18,14 @@ use k2so_core::hook_config;
 /// Guard against concurrent triage runs for the same project path.
 static TRIAGE_IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
-/// Ring buffer of recent hook events for diagnostic purposes
-/// (surfaced via `k2so hooks status`). Capped at RECENT_EVENTS_CAP.
-static RECENT_EVENTS: OnceLock<Mutex<VecDeque<RecentEvent>>> = OnceLock::new();
+// Ring buffer + canonical event mapping + URL query parsing now live
+// in k2so-core so the daemon can share them. Everything is imported
+// unqualified so the in-file call sites don't change.
+use k2so_core::agent_hooks::{
+    get_recent_events, map_event_type, parse_query_params, record_recent_event,
+    urldecode, AgentLifecycleEvent, RecentEvent,
+};
 const RECENT_EVENTS_CAP: usize = 50;
-
-#[derive(Clone, serde::Serialize)]
-struct RecentEvent {
-    timestamp: String,
-    raw_event: String,
-    canonical: Option<String>,
-    pane_id: String,
-    tab_id: String,
-    matched: bool, // did the event produce a canonical type?
-}
-
-fn recent_events() -> &'static Mutex<VecDeque<RecentEvent>> {
-    RECENT_EVENTS.get_or_init(|| Mutex::new(VecDeque::with_capacity(RECENT_EVENTS_CAP)))
-}
-
-fn record_recent_event(raw: &str, canonical: Option<&str>, pane_id: &str, tab_id: &str) {
-    let event = RecentEvent {
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        raw_event: raw.to_string(),
-        canonical: canonical.map(String::from),
-        pane_id: pane_id.to_string(),
-        tab_id: tab_id.to_string(),
-        matched: canonical.is_some(),
-    };
-    let mut buf = recent_events().lock();
-    if buf.len() >= RECENT_EVENTS_CAP {
-        buf.pop_front();
-    }
-    buf.push_back(event);
-}
 
 /// Event queue for channel-based agents. Key: "project_path:agent_name"
 static EVENT_QUEUES: OnceLock<Mutex<HashMap<String, VecDeque<ChannelEvent>>>> = OnceLock::new();
@@ -392,81 +366,10 @@ fn generate_token() -> String {
 }
 
 /// Canonical agent lifecycle event types.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentLifecycleEvent {
-    pub pane_id: String,
-    pub tab_id: String,
-    pub event_type: String, // "start", "stop", "permission"
-}
-
-/// Map raw agent event names to canonical types.
-fn map_event_type(raw: &str) -> Option<&'static str> {
-    match raw {
-        // Start events
-        "Start" | "UserPromptSubmit" | "PostToolUse" | "PostToolUseFailure"
-        | "BeforeAgent" | "AfterTool" | "sessionStart" | "userPromptSubmitted"
-        | "postToolUse" | "beforeSubmitPrompt" => Some("start"),
-
-        // Stop events
-        "Stop" | "agent-turn-complete" | "AfterAgent" | "sessionEnd" | "stop" => Some("stop"),
-
-        // Permission request events
-        "PermissionRequest" | "Notification" | "preToolUse"
-        | "beforeShellExecution" | "beforeMCPExecution" => Some("permission"),
-
-        _ => None,
-    }
-}
-
-/// Parse query string from a URL path like `/hook/complete?paneId=...&tabId=...&eventType=...`
-fn parse_query_params(url: &str) -> std::collections::HashMap<String, String> {
-    let mut params = std::collections::HashMap::new();
-    if let Some(query) = url.split('?').nth(1) {
-        for pair in query.split('&') {
-            if let Some((key, value)) = pair.split_once('=') {
-                let decoded = urldecode(value);
-                params.insert(key.to_string(), decoded);
-            }
-        }
-    }
-    params
-}
-
-fn urldecode(s: &str) -> String {
-    // Decode percent-encoded bytes into a byte buffer first, then convert
-    // to UTF-8. This correctly handles multi-byte UTF-8 sequences like
-    // em dash (— = %E2%80%94) which span multiple percent-encoded bytes.
-    let mut bytes = Vec::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
-                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    bytes.push(byte);
-                } else {
-                    bytes.push(b'%');
-                    bytes.extend_from_slice(hex.as_bytes());
-                }
-            } else {
-                bytes.push(b'%');
-                bytes.extend_from_slice(hex.as_bytes());
-            }
-        } else if c == '+' {
-            bytes.push(b' ');
-        } else {
-            // Regular ASCII/UTF-8 chars — encode as UTF-8 bytes
-            let mut buf = [0u8; 4];
-            let encoded = c.encode_utf8(&mut buf);
-            bytes.extend_from_slice(encoded.as_bytes());
-        }
-    }
-    String::from_utf8(bytes).unwrap_or_else(|e| {
-        // Fallback: lossy conversion if somehow the result isn't valid UTF-8
-        String::from_utf8_lossy(e.into_bytes().as_slice()).into_owned()
-    })
-}
+// AgentLifecycleEvent / map_event_type / parse_query_params / urldecode
+// all moved to k2so_core::agent_hooks (imported at the top of this
+// file). The daemon's future HTTP handlers share the same helpers so
+// the canonical event bucket list can't drift between host and daemon.
 
 /// Shell-escape a string for safe interpolation into shell commands.
 /// Uses single-quote wrapping with escaped internal single quotes.
@@ -1215,10 +1118,9 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
 
                         (|| -> Result<String, String> {
                             let injections = check_hook_injections();
-                            let events: Vec<RecentEvent> = {
-                                let buf = recent_events().lock();
-                                buf.iter().rev().take(limit).cloned().collect()
-                            };
+                            let mut events: Vec<RecentEvent> = get_recent_events();
+                            events.reverse();
+                            events.truncate(limit);
                             let payload = serde_json::json!({
                                 "port": get_port(),
                                 "notify_script": dirs::home_dir()
@@ -3334,13 +3236,11 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn reset_recent_events() {
-        let mut buf = recent_events().lock();
-        buf.clear();
+        k2so_core::agent_hooks::clear_recent_events();
     }
 
     fn snapshot_recent_events() -> Vec<RecentEvent> {
-        let buf = recent_events().lock();
-        buf.iter().cloned().collect()
+        get_recent_events()
     }
 
     #[test]
