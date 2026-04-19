@@ -1,0 +1,338 @@
+//! Agent "channel" ops — status updates, done/blocked, reservations.
+//!
+//! These are the lightweight per-agent signals the CLI injects during
+//! a work session:
+//!
+//! - [`status`] — update the agent's `agent_sessions.status_message`.
+//!   Also writes a `status` activity-feed entry so the UI history
+//!   shows what the agent was doing at each tick.
+//! - [`done`] — mark the current active/ work item as complete:
+//!   move the file to done/, flip the session to `sleeping`, log
+//!   `task.done` (or `task.blocked` when the caller passes a reason).
+//! - [`reserve`] — claim a set of filesystem paths for exclusive
+//!   editing. Writes a JSON registry at `.k2so/reservations.json`.
+//!   Callers include a comma-separated path list; the function
+//!   returns `{ reserved: [...], conflicts: [...] }`.
+//! - [`release`] — drop reservations held by this agent (all or a
+//!   named subset).
+//!
+//! All four land in k2so-core so the daemon serves them headlessly.
+//! Tauri keeps its `#[tauri::command]` handlers as thin forwards.
+
+use std::fs;
+use std::path::PathBuf;
+
+use crate::agents::resolve_project_id;
+use crate::db::schema::{log_activity, AgentSession};
+
+fn open_project(project_path: &str) -> Result<String, String> {
+    let db = crate::db::shared();
+    let conn = db.lock();
+    resolve_project_id(&conn, project_path)
+        .ok_or_else(|| format!("Project not found: {}", project_path))
+}
+
+/// Update the agent's status message + log a `status` activity entry.
+pub fn status(
+    project_path: String,
+    agent: String,
+    message: String,
+) -> Result<serde_json::Value, String> {
+    if agent.is_empty() {
+        return Err("Missing 'agent' parameter".to_string());
+    }
+    let project_id = open_project(&project_path)?;
+
+    let db = crate::db::shared();
+    let conn = db.lock();
+
+    AgentSession::update_status_message(&conn, &project_id, &agent, &message)
+        .map_err(|e| format!("Failed to update status: {}", e))?;
+
+    log_activity(
+        &conn,
+        &project_id,
+        Some(&agent),
+        "status",
+        Some(&agent),
+        None,
+        None,
+        Some(&message),
+    );
+
+    Ok(serde_json::json!({ "success": true }))
+}
+
+/// Complete (or block) the agent's current active/ work item. Moves
+/// the first file from `active/` to `done/`, flips the session to
+/// `sleeping`, logs an activity entry. `blocked = Some(reason)` swaps
+/// the event type to `task.blocked`.
+pub fn done(
+    project_path: String,
+    agent: String,
+    blocked: Option<String>,
+) -> Result<serde_json::Value, String> {
+    if agent.is_empty() {
+        return Err("Missing 'agent' parameter".to_string());
+    }
+    let project_id = open_project(&project_path)?;
+
+    let active_dir = PathBuf::from(&project_path)
+        .join(".k2so/agents")
+        .join(&agent)
+        .join("work/active");
+    let done_dir = PathBuf::from(&project_path)
+        .join(".k2so/agents")
+        .join(&agent)
+        .join("work/done");
+
+    let mut moved_file = None;
+    if active_dir.is_dir() {
+        if let Some(Ok(entry)) = fs::read_dir(&active_dir)
+            .ok()
+            .and_then(|mut d| d.next())
+        {
+            let _ = fs::create_dir_all(&done_dir);
+            let dest = done_dir.join(entry.file_name());
+            if fs::rename(entry.path(), &dest).is_ok() {
+                moved_file = Some(entry.file_name().to_string_lossy().to_string());
+            }
+        }
+    }
+
+    let db = crate::db::shared();
+    let conn = db.lock();
+    let _ = AgentSession::update_status(&conn, &project_id, &agent, "sleeping");
+
+    let event_type = if blocked.is_some() {
+        "task.blocked"
+    } else {
+        "task.done"
+    };
+    let summary = moved_file.as_deref().unwrap_or("no active task");
+    log_activity(
+        &conn,
+        &project_id,
+        Some(&agent),
+        event_type,
+        Some(&agent),
+        None,
+        None,
+        Some(summary),
+    );
+
+    Ok(serde_json::json!({
+        "success": true,
+        "event": event_type,
+        "file": moved_file,
+    }))
+}
+
+fn reservations_path(project_path: &str) -> PathBuf {
+    PathBuf::from(project_path).join(".k2so/reservations.json")
+}
+
+fn read_reservations(
+    path: &std::path::Path,
+) -> serde_json::Map<String, serde_json::Value> {
+    if path.exists() {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    }
+}
+
+/// Claim a comma-separated list of paths for exclusive editing.
+/// Existing reservations by the same agent are idempotent; those
+/// held by another agent are reported as conflicts without being
+/// overwritten. `now` is taken from the local clock as ISO-8601.
+pub fn reserve(
+    project_path: String,
+    agent: String,
+    paths_str: String,
+) -> Result<serde_json::Value, String> {
+    if agent.is_empty() || paths_str.is_empty() {
+        return Err("Missing 'agent' or 'paths' parameter".to_string());
+    }
+    let project_id = open_project(&project_path)?;
+
+    let k2so_dir = PathBuf::from(&project_path).join(".k2so");
+    fs::create_dir_all(&k2so_dir).ok();
+
+    let path = reservations_path(&project_path);
+    let mut reservations = read_reservations(&path);
+
+    let now = chrono::Local::now().to_rfc3339();
+    let paths: Vec<&str> = paths_str.split(',').map(|s| s.trim()).collect();
+    let mut reserved = Vec::new();
+    let mut conflicts = Vec::new();
+
+    for p in &paths {
+        if let Some(existing) = reservations.get(*p) {
+            let existing_agent = existing
+                .get("agent")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if existing_agent != agent {
+                conflicts.push(serde_json::json!({
+                    "path": p,
+                    "heldBy": existing_agent,
+                }));
+                continue;
+            }
+        }
+        reservations.insert(
+            p.to_string(),
+            serde_json::json!({
+                "agent": agent,
+                "reason": "",
+                "timestamp": now,
+            }),
+        );
+        reserved.push(p.to_string());
+    }
+
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&reservations).unwrap_or_default(),
+    )
+    .map_err(|e| format!("Failed to write reservations: {}", e))?;
+
+    let db = crate::db::shared();
+    let conn = db.lock();
+    log_activity(
+        &conn,
+        &project_id,
+        Some(&agent),
+        "reserve",
+        Some(&agent),
+        None,
+        None,
+        Some(&format!("Reserved {} file(s)", reserved.len())),
+    );
+
+    Ok(serde_json::json!({
+        "success": true,
+        "reserved": reserved,
+        "conflicts": conflicts,
+    }))
+}
+
+/// Release reservations held by this agent. Empty `paths_str`
+/// releases all; otherwise releases the comma-separated subset that
+/// the agent currently holds.
+pub fn release(
+    project_path: String,
+    agent: String,
+    paths_str: String,
+) -> Result<serde_json::Value, String> {
+    if agent.is_empty() {
+        return Err("Missing 'agent' parameter".to_string());
+    }
+    let project_id = open_project(&project_path)?;
+
+    let path = reservations_path(&project_path);
+    if !path.exists() {
+        return Ok(serde_json::json!({"success": true, "released": 0}));
+    }
+
+    let mut reservations = read_reservations(&path);
+
+    let specific_paths: Vec<&str> = if paths_str.is_empty() {
+        vec![]
+    } else {
+        paths_str.split(',').map(|s| s.trim()).collect()
+    };
+
+    let keys_to_remove: Vec<String> = reservations
+        .iter()
+        .filter(|(key, val)| {
+            let held_by = val
+                .get("agent")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if held_by != agent {
+                return false;
+            }
+            if specific_paths.is_empty() {
+                return true;
+            }
+            specific_paths.contains(&key.as_str())
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+
+    let released = keys_to_remove.len();
+    for key in &keys_to_remove {
+        reservations.remove(key);
+    }
+
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&reservations).unwrap_or_default(),
+    )
+    .map_err(|e| format!("Failed to write reservations: {}", e))?;
+
+    let db = crate::db::shared();
+    let conn = db.lock();
+    log_activity(
+        &conn,
+        &project_id,
+        Some(&agent),
+        "release",
+        Some(&agent),
+        None,
+        None,
+        Some(&format!("Released {} file(s)", released)),
+    );
+
+    Ok(serde_json::json!({
+        "success": true,
+        "released": released,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn unique_tmp() -> PathBuf {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "k2so-channel-test-{}-{}",
+            std::process::id(),
+            n
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn read_reservations_missing_file_returns_empty_map() {
+        let tmp = unique_tmp();
+        let map = read_reservations(&tmp.join("no-such-file.json"));
+        assert!(map.is_empty());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn read_reservations_parses_existing_file() {
+        let tmp = unique_tmp();
+        let path = tmp.join("reservations.json");
+        fs::write(
+            &path,
+            r#"{"src/foo.rs":{"agent":"backend","reason":"","timestamp":"2026-04-19T00:00:00-07:00"}}"#,
+        )
+        .unwrap();
+        let map = read_reservations(&path);
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("src/foo.rs"));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+}

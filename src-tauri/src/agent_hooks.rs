@@ -1628,87 +1628,16 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                         }
                     }
                     "/cli/status" => {
-                        // Update agent status message
                         let agent = params.get("agent").cloned().unwrap_or_default();
                         let message = params.get("message").cloned().unwrap_or_default();
-                        if agent.is_empty() {
-                            Err("Missing 'agent' parameter".to_string())
-                        } else {
-                            (|| -> Result<String, String> {
-                                let db_path = dirs::home_dir()
-                                    .ok_or("No home dir")?
-                                    .join(".k2so/k2so.db");
-                                let db = crate::db::shared();
-                                let conn = db.lock();
-                                let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
-
-                                let project_id: String = conn.query_row(
-                                    "SELECT id FROM projects WHERE path = ?1",
-                                    rusqlite::params![project_path],
-                                    |row| row.get(0),
-                                ).map_err(|e| format!("Project not found: {}", e))?;
-
-                                crate::db::schema::AgentSession::update_status_message(&conn, &project_id, &agent, &message)
-                                    .map_err(|e| format!("Failed to update status: {}", e))?;
-
-                                crate::db::schema::log_activity(&conn, &project_id, Some(&agent), "status", Some(&agent), None, None, Some(&message));
-
-                                Ok(serde_json::json!({"success": true}).to_string())
-                            })()
-                        }
+                        k2so_core::agents::channel::status(project_path.to_string(), agent, message)
+                            .map(|v| v.to_string())
                     }
                     "/cli/done" => {
-                        // Complete agent's current task
                         let agent = params.get("agent").cloned().unwrap_or_default();
                         let blocked = params.get("blocked").cloned();
-                        if agent.is_empty() {
-                            Err("Missing 'agent' parameter".to_string())
-                        } else {
-                            (|| -> Result<String, String> {
-                                let db_path = dirs::home_dir()
-                                    .ok_or("No home dir")?
-                                    .join(".k2so/k2so.db");
-                                let db = crate::db::shared();
-                                let conn = db.lock();
-                                let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
-
-                                let project_id: String = conn.query_row(
-                                    "SELECT id FROM projects WHERE path = ?1",
-                                    rusqlite::params![project_path],
-                                    |row| row.get(0),
-                                ).map_err(|e| format!("Project not found: {}", e))?;
-
-                                // Move first file from active/ to done/
-                                let active_dir = std::path::PathBuf::from(&project_path)
-                                    .join(".k2so/agents").join(&agent).join("work/active");
-                                let done_dir = std::path::PathBuf::from(&project_path)
-                                    .join(".k2so/agents").join(&agent).join("work/done");
-                                let mut moved_file = None;
-
-                                if active_dir.is_dir() {
-                                    if let Some(Ok(entry)) = std::fs::read_dir(&active_dir).ok().and_then(|mut d| d.next()) {
-                                        let _ = std::fs::create_dir_all(&done_dir);
-                                        let dest = done_dir.join(entry.file_name());
-                                        if std::fs::rename(entry.path(), &dest).is_ok() {
-                                            moved_file = Some(entry.file_name().to_string_lossy().to_string());
-                                        }
-                                    }
-                                }
-
-                                // Update agent status to sleeping
-                                let _ = crate::db::schema::AgentSession::update_status(&conn, &project_id, &agent, "sleeping");
-
-                                let event_type = if blocked.is_some() { "task.blocked" } else { "task.done" };
-                                let summary = moved_file.as_deref().unwrap_or("no active task");
-                                crate::db::schema::log_activity(&conn, &project_id, Some(&agent), event_type, Some(&agent), None, None, Some(summary));
-
-                                Ok(serde_json::json!({
-                                    "success": true,
-                                    "event": event_type,
-                                    "file": moved_file,
-                                }).to_string())
-                            })()
-                        }
+                        k2so_core::agents::channel::done(project_path.to_string(), agent, blocked)
+                            .map(|v| v.to_string())
                     }
                     "/cli/msg" => {
                         // Send a message to another agent or workspace inbox
@@ -1931,146 +1860,16 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                         }
                     }
                     "/cli/reserve" => {
-                        // Claim files for exclusive editing
                         let agent = params.get("agent").cloned().unwrap_or_default();
                         let paths_str = params.get("paths").cloned().unwrap_or_default();
-                        if agent.is_empty() || paths_str.is_empty() {
-                            Err("Missing 'agent' or 'paths' parameter".to_string())
-                        } else {
-                            (|| -> Result<String, String> {
-                                let db_path = dirs::home_dir()
-                                    .ok_or("No home dir")?
-                                    .join(".k2so/k2so.db");
-                                let db = crate::db::shared();
-                                let conn = db.lock();
-                                let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
-
-                                let project_id: String = conn.query_row(
-                                    "SELECT id FROM projects WHERE path = ?1",
-                                    rusqlite::params![project_path],
-                                    |row| row.get(0),
-                                ).map_err(|e| format!("Project not found: {}", e))?;
-
-                                let reservations_path = std::path::PathBuf::from(&project_path)
-                                    .join(".k2so/reservations.json");
-                                let _ = std::fs::create_dir_all(std::path::PathBuf::from(&project_path).join(".k2so"));
-
-                                let mut reservations: serde_json::Map<String, serde_json::Value> = if reservations_path.exists() {
-                                    std::fs::read_to_string(&reservations_path).ok()
-                                        .and_then(|s| serde_json::from_str(&s).ok())
-                                        .unwrap_or_default()
-                                } else {
-                                    serde_json::Map::new()
-                                };
-
-                                let now = chrono::Local::now().to_rfc3339();
-                                let paths: Vec<&str> = paths_str.split(',').map(|s| s.trim()).collect();
-                                let mut reserved = Vec::new();
-                                let mut conflicts = Vec::new();
-
-                                for p in &paths {
-                                    if let Some(existing) = reservations.get(*p) {
-                                        let existing_agent = existing.get("agent").and_then(|v| v.as_str()).unwrap_or("");
-                                        if existing_agent != agent {
-                                            conflicts.push(serde_json::json!({"path": p, "heldBy": existing_agent}));
-                                            continue;
-                                        }
-                                    }
-                                    reservations.insert(p.to_string(), serde_json::json!({
-                                        "agent": agent,
-                                        "reason": "",
-                                        "timestamp": now,
-                                    }));
-                                    reserved.push(p.to_string());
-                                }
-
-                                std::fs::write(&reservations_path, serde_json::to_string_pretty(&reservations).unwrap_or_default())
-                                    .map_err(|e| format!("Failed to write reservations: {}", e))?;
-
-                                crate::db::schema::log_activity(
-                                    &conn, &project_id, Some(&agent), "reserve",
-                                    Some(&agent), None, None,
-                                    Some(&format!("Reserved {} file(s)", reserved.len())),
-                                );
-
-                                Ok(serde_json::json!({
-                                    "success": true,
-                                    "reserved": reserved,
-                                    "conflicts": conflicts,
-                                }).to_string())
-                            })()
-                        }
+                        k2so_core::agents::channel::reserve(project_path.to_string(), agent, paths_str)
+                            .map(|v| v.to_string())
                     }
                     "/cli/release" => {
-                        // Release file reservations
                         let agent = params.get("agent").cloned().unwrap_or_default();
                         let paths_str = params.get("paths").cloned().unwrap_or_default();
-                        if agent.is_empty() {
-                            Err("Missing 'agent' parameter".to_string())
-                        } else {
-                            (|| -> Result<String, String> {
-                                let db_path = dirs::home_dir()
-                                    .ok_or("No home dir")?
-                                    .join(".k2so/k2so.db");
-                                let db = crate::db::shared();
-                                let conn = db.lock();
-                                let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
-
-                                let project_id: String = conn.query_row(
-                                    "SELECT id FROM projects WHERE path = ?1",
-                                    rusqlite::params![project_path],
-                                    |row| row.get(0),
-                                ).map_err(|e| format!("Project not found: {}", e))?;
-
-                                let reservations_path = std::path::PathBuf::from(&project_path)
-                                    .join(".k2so/reservations.json");
-
-                                if !reservations_path.exists() {
-                                    return Ok(serde_json::json!({"success": true, "released": 0}).to_string());
-                                }
-
-                                let mut reservations: serde_json::Map<String, serde_json::Value> =
-                                    std::fs::read_to_string(&reservations_path).ok()
-                                        .and_then(|s| serde_json::from_str(&s).ok())
-                                        .unwrap_or_default();
-
-                                let specific_paths: Vec<&str> = if paths_str.is_empty() {
-                                    vec![]
-                                } else {
-                                    paths_str.split(',').map(|s| s.trim()).collect()
-                                };
-
-                                let mut released = 0;
-                                let keys_to_remove: Vec<String> = reservations.iter()
-                                    .filter(|(key, val)| {
-                                        let held_by = val.get("agent").and_then(|v| v.as_str()).unwrap_or("");
-                                        if held_by != agent { return false; }
-                                        if specific_paths.is_empty() { return true; }
-                                        specific_paths.contains(&key.as_str())
-                                    })
-                                    .map(|(key, _)| key.clone())
-                                    .collect();
-
-                                for key in &keys_to_remove {
-                                    reservations.remove(key);
-                                    released += 1;
-                                }
-
-                                std::fs::write(&reservations_path, serde_json::to_string_pretty(&reservations).unwrap_or_default())
-                                    .map_err(|e| format!("Failed to write reservations: {}", e))?;
-
-                                crate::db::schema::log_activity(
-                                    &conn, &project_id, Some(&agent), "release",
-                                    Some(&agent), None, None,
-                                    Some(&format!("Released {} file(s)", released)),
-                                );
-
-                                Ok(serde_json::json!({
-                                    "success": true,
-                                    "released": released,
-                                }).to_string())
-                            })()
-                        }
+                        k2so_core::agents::channel::release(project_path.to_string(), agent, paths_str)
+                            .map(|v| v.to_string())
                     }
                     "/cli/connections" => {
                         // List, create, or delete workspace relations

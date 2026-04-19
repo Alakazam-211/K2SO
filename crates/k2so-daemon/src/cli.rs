@@ -504,6 +504,40 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
 
+        // ── Agent channel ops (status / done / reserve / release) ──
+        "/cli/status" => match need_project(params) {
+            Ok(p) => respond(k2so_core::agents::channel::status(
+                p,
+                str_param(params, "agent"),
+                str_param(params, "message"),
+            )),
+            Err(r) => r,
+        },
+        "/cli/done" => match need_project(params) {
+            Ok(p) => respond(k2so_core::agents::channel::done(
+                p,
+                str_param(params, "agent"),
+                opt_param(params, "blocked"),
+            )),
+            Err(r) => r,
+        },
+        "/cli/reserve" => match need_project(params) {
+            Ok(p) => respond(k2so_core::agents::channel::reserve(
+                p,
+                str_param(params, "agent"),
+                str_param(params, "paths"),
+            )),
+            Err(r) => r,
+        },
+        "/cli/release" => match need_project(params) {
+            Ok(p) => respond(k2so_core::agents::channel::release(
+                p,
+                str_param(params, "agent"),
+                str_param(params, "paths"),
+            )),
+            Err(r) => r,
+        },
+
         // ── Skill fan-out ───────────────────────────────────────────
         "/cli/skills/regenerate" => match need_project(params) {
             Ok(p) => respond(k2so_core::agents::commands::regenerate_skills(p)),
