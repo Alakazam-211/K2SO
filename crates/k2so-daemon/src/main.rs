@@ -21,6 +21,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use k2so_core::log_debug;
 
@@ -85,33 +86,98 @@ fn main() {
         k2so_dir.join("daemon.token").display()
     );
 
+    let started_at = Instant::now();
+
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
-        let mut buf = [0u8; 1024];
+        let mut buf = [0u8; 4096];
         let n = match stream.read(&mut buf) {
             Ok(n) if n > 0 => n,
             _ => continue,
         };
         let req = String::from_utf8_lossy(&buf[..n]);
 
-        // Minimal HTTP parsing — just peek at the first line to decide
-        // whether this is /ping. Anything else gets 404.
+        // Peek at the request line: "GET /path?query HTTP/1.1"
         let first_line = req.lines().next().unwrap_or("");
-        let is_ping = first_line.starts_with("GET /ping ");
-
-        let (status, body) = if is_ping {
-            ("200 OK", BANNER)
-        } else {
-            ("404 Not Found", "not found\n")
+        let parts: Vec<&str> = first_line.split_whitespace().collect();
+        let (method, path_and_query) = match parts.as_slice() {
+            [m, p, ..] => (*m, *p),
+            _ => {
+                send_response(&mut stream, "400 Bad Request", "text/plain", "bad request\n");
+                continue;
+            }
         };
 
-        let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        let _ = stream.write_all(response.as_bytes());
+        if method != "GET" {
+            send_response(
+                &mut stream,
+                "405 Method Not Allowed",
+                "application/json",
+                r#"{"error":"only GET is supported"}"#,
+            );
+            continue;
+        }
+
+        let (path, query) = match path_and_query.split_once('?') {
+            Some((p, q)) => (p, q),
+            None => (path_and_query, ""),
+        };
+
+        match path {
+            "/ping" => {
+                // Unauthenticated. Smallest liveness check.
+                send_response(&mut stream, "200 OK", "text/plain; charset=utf-8", BANNER);
+            }
+            "/status" => {
+                // Token-gated. Returns a small JSON blob describing
+                // the daemon's state so the Tauri app can verify it's
+                // talking to the right process.
+                if !token_ok(query, &token) {
+                    send_response(
+                        &mut stream,
+                        "403 Forbidden",
+                        "application/json",
+                        r#"{"error":"invalid or missing token"}"#,
+                    );
+                    continue;
+                }
+                let uptime_secs = started_at.elapsed().as_secs();
+                let pid = std::process::id();
+                let body = format!(
+                    r#"{{"version":"{}","uptime_secs":{},"pid":{},"port":{}}}"#,
+                    env!("CARGO_PKG_VERSION"),
+                    uptime_secs,
+                    pid,
+                    port,
+                );
+                send_response(&mut stream, "200 OK", "application/json", &body);
+            }
+            _ => {
+                send_response(&mut stream, "404 Not Found", "text/plain", "not found\n");
+            }
+        }
     }
+}
+
+/// Parse `token=<value>` out of a URL-encoded query string and compare
+/// against the expected value. No full urlencoded decoding — the token
+/// is always 32 hex chars so there's nothing to decode.
+fn token_ok(query: &str, expected: &str) -> bool {
+    for pair in query.split('&') {
+        if let Some(v) = pair.strip_prefix("token=") {
+            return v == expected;
+        }
+    }
+    false
+}
+
+fn send_response(stream: &mut std::net::TcpStream, status: &str, ct: &str, body: &str) {
+    let resp = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body,
+    );
+    let _ = stream.write_all(resp.as_bytes());
 }
 
 /// Write `contents` to `path` with permissions 0600 so other users on the
