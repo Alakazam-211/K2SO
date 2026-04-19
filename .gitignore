@@ -13,7 +13,8 @@ src-tauri/target/
 *.db
 *.db-journal
 *.db-wal
-drizzle/meta/
+# drizzle-kit's snapshot metadata lives next to the emitted SQL now.
+crates/k2so-core/drizzle_sql/meta/
 .claude/
 SKILL.md
 CLAUDE.md

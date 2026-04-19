@@ -113,18 +113,15 @@ found.
 
 ## Schema / migrations
 
-### 10. drizzle_sql duplicated at repo root `drizzle/` AND
-         `crates/k2so-core/drizzle_sql/`
-- **Where:** repo `drizzle/` (drizzle-kit's canonical output, 32
-  files) vs `crates/k2so-core/drizzle_sql/` (what `include_str!`
-  reads from at build time, 32 files).
-- **Why cut:** predates this session. The mirror was maintained by
-  hand pre-0.33.0 and we didn't want to touch drizzle.config.ts
-  during the workspace split.
-- **Do it right:** point `drizzle.config.ts` `out` at
-  `crates/k2so-core/drizzle_sql` and delete the root `drizzle/` copy,
-  or add a pre-commit hook that copies root → crates on every
-  drizzle-kit run. Either solves the drift risk.
+### 10. drizzle_sql duplicated at repo root — **CLOSED 2026-04-19**
+- **Where:** was `drizzle/` at the repo root vs
+  `crates/k2so-core/drizzle_sql/`.
+- **Resolution:** `drizzle.config.ts` now writes directly to
+  `./crates/k2so-core/drizzle_sql`. Root `drizzle/` directory deleted
+  (its 4 .sql files were stale — drizzle-kit hadn't been re-run
+  against it since migration 0003). `.gitignore` updated so
+  `crates/k2so-core/drizzle_sql/meta/` (drizzle-kit's snapshot
+  metadata) is excluded instead of the old `drizzle/meta/`.
 
 ### 11. `db::init_for_tests` no longer `#[cfg(test)]`-gated — **CLOSED 2026-04-19**
 - **Where:** `crates/k2so-core/src/db/mod.rs`.
