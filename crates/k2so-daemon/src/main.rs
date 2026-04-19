@@ -133,6 +133,18 @@ async fn main() {
     let event_tx = Arc::new(event_tx);
     k2so_core::agent_hooks::set_sink(Box::new(DaemonBroadcastSink::new((*event_tx).clone())));
 
+    // heartbeat.port watchdog — see `run_heartbeat_port_watchdog` docs.
+    // The daemon takes over `~/.k2so/heartbeat.port` whenever Tauri
+    // isn't writing to it, so the CLI and launchd-triggered heartbeat
+    // script always find a reachable server.
+    {
+        let k2so_dir = k2so_dir.clone();
+        let token = token.clone();
+        tokio::spawn(async move {
+            run_heartbeat_port_watchdog(k2so_dir, port, token).await;
+        });
+    }
+
     let state = DaemonState {
         token: Arc::new(token),
         started_at: Instant::now(),
@@ -435,6 +447,91 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             let _ = stream.read(&mut buf).await;
             send_response(&mut stream, "404 Not Found", "text/plain", "not found\n").await;
         }
+    }
+}
+
+/// Claim `~/.k2so/heartbeat.port` when it's unowned.
+///
+/// The CLI (+ launchd's heartbeat script) reads `heartbeat.port` to
+/// find whatever K2SO server is alive. Pre-0.33.0 that was exclusively
+/// the Tauri app's `agent_hooks` server. With the daemon, there are
+/// now two potential writers:
+///
+/// - **Tauri running** — Tauri's existing startup writes its own port
+///   into `heartbeat.port` and removes it on graceful quit. CLI hits
+///   Tauri.
+/// - **Tauri quit** — no-one writes; CLI can't find a server. The
+///   daemon is running 24/7 via launchd but the CLI doesn't know which
+///   port without a published file.
+///
+/// The watchdog solves the second case without fighting Tauri for
+/// ownership of the first. Every `INTERVAL_SECS` seconds it:
+///
+/// 1. Reads `heartbeat.port`. Missing? → write own port + token.
+/// 2. Parses the port, tries a TCP connect to 127.0.0.1:<that_port>.
+///    - Connect succeeds → some server (probably Tauri) is live; leave
+///      it alone. Even if that port is ours, that just means we're
+///      already the owner.
+///    - Connect fails → stale file (writer crashed / Tauri got killed
+///      without its cleanup hook running). Claim ownership by
+///      overwriting.
+///
+/// This is a **clean-takeover model**: we never truncate a live server
+/// from `heartbeat.port`. Tauri's own startup overwrite + quit-time
+/// delete still works exactly as before; we just fill the gap.
+async fn run_heartbeat_port_watchdog(
+    k2so_dir: PathBuf,
+    own_port: u16,
+    own_token: String,
+) {
+    use tokio::net::TcpStream as TokioTcpStream;
+    use tokio::time::{sleep, timeout, Duration};
+
+    // Startup delay lets Tauri's own port-write land first if both
+    // came up at roughly the same moment — avoids a write race where
+    // the daemon's first-pass write beats Tauri's by milliseconds.
+    sleep(Duration::from_secs(2)).await;
+
+    const INTERVAL_SECS: u64 = 30;
+    const CONNECT_TIMEOUT_MS: u64 = 500;
+    let port_path = k2so_dir.join("heartbeat.port");
+    let token_path = k2so_dir.join("heartbeat.token");
+
+    loop {
+        let claim = match fs::read_to_string(&port_path) {
+            Ok(contents) => match contents.trim().parse::<u16>() {
+                Ok(current) => {
+                    // Is someone actually listening there?
+                    let conn = timeout(
+                        Duration::from_millis(CONNECT_TIMEOUT_MS),
+                        TokioTcpStream::connect(("127.0.0.1", current)),
+                    )
+                    .await;
+                    match conn {
+                        Ok(Ok(_)) => false, // live server holds the port
+                        _ => true,          // stale
+                    }
+                }
+                Err(_) => true, // malformed — claim
+            },
+            Err(_) => true, // missing — claim
+        };
+
+        if claim {
+            if let Err(e) = write_restricted(&port_path, own_port.to_string().as_bytes()) {
+                log_debug!("[daemon/watchdog] write heartbeat.port: {e}");
+            } else {
+                log_debug!(
+                    "[daemon/watchdog] claimed heartbeat.port -> {} (previous writer was gone)",
+                    own_port
+                );
+            }
+            if let Err(e) = write_restricted(&token_path, own_token.as_bytes()) {
+                log_debug!("[daemon/watchdog] write heartbeat.token: {e}");
+            }
+        }
+
+        sleep(Duration::from_secs(INTERVAL_SECS)).await;
     }
 }
 
