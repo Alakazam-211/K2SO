@@ -23,6 +23,7 @@ use std::path::PathBuf;
 
 pub mod build_launch;
 pub mod channel;
+pub mod checkin;
 pub mod commands;
 pub mod connections;
 pub mod delegate;

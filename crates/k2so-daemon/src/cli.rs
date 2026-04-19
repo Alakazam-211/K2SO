@@ -463,6 +463,18 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
 
+        // ── Aggregated agent check-in ───────────────────────────────
+        "/cli/checkin" => match need_project(params) {
+            Ok(p) => {
+                let agent = str_param(params, "agent");
+                match k2so_core::agents::checkin::checkin(&p, &agent) {
+                    Ok(body) => CliResponse::ok_json(body),
+                    Err(e) => CliResponse::bad_request(e),
+                }
+            }
+            Err(r) => r,
+        },
+
         // ── Workspace lifecycle ─────────────────────────────────────
         "/cli/workspace/create" => {
             let target = str_param(params, "path");
