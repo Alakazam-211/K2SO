@@ -292,7 +292,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         // Heartbeat CRUD + fire-audit — fires while the Tauri app is
         // quit, so the daemon has to own these routes for the
         // persistent-agents feature to mean anything.
-        p if p.starts_with("/cli/heartbeat/") => {
+        p if p.starts_with("/cli/heartbeat/") || p == "/cli/heartbeat-log" => {
             let _ = stream.read(&mut buf).await;
             let params = parse_params(&path, &query);
             let req_token = params.get("token").cloned().unwrap_or_default();
@@ -319,7 +319,11 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
                     return;
                 }
             };
-            let result = handle_cli_heartbeat(p, &project_path, &params);
+            let result = if p == "/cli/heartbeat-log" {
+                handle_cli_heartbeat_log(&project_path, &params)
+            } else {
+                handle_cli_heartbeat(p, &project_path, &params)
+            };
             match result {
                 Ok(body) => {
                     send_response(&mut stream, "200 OK", "application/json", &body).await
@@ -441,8 +445,64 @@ fn handle_cli_heartbeat(
             hb::k2so_heartbeat_rename(project_path.to_string(), old_name, new_name)
                 .map(|_| r#"{"success":true}"#.to_string())
         }
+        "/cli/heartbeat/status" => {
+            // Last N fires for a specific schedule name.
+            let name = params.get("name").cloned().unwrap_or_default();
+            let limit = params
+                .get("limit")
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(10)
+                .clamp(1, 200);
+            if name.is_empty() {
+                return Err("Missing 'name' parameter".to_string());
+            }
+            let db = k2so_core::db::shared();
+            let conn = db.lock();
+            let project_id = k2so_core::agents::resolve_project_id(&conn, project_path)
+                .ok_or_else(|| format!("Project not found: {project_path}"))?;
+            k2so_core::db::schema::HeartbeatFire::list_by_schedule_name(
+                &conn,
+                &project_id,
+                &name,
+                limit,
+            )
+            .map(|rows| serde_json::to_string(&rows).unwrap_or_default())
+            .map_err(|e| e.to_string())
+        }
+        "/cli/heartbeat/fires-list" => {
+            // Recent fires for the whole project. Powers the Settings
+            // History panel. Migrated alongside the rest of the
+            // heartbeat CRUD so the daemon serves the same surface
+            // src-tauri did.
+            let limit = params
+                .get("limit")
+                .and_then(|s| s.parse::<i64>().ok());
+            hb::k2so_heartbeat_fires_list(project_path.to_string(), limit)
+                .map(|rows| serde_json::to_string(&rows).unwrap_or_default())
+        }
         _ => Err(format!("Unknown heartbeat route: {path}")),
     }
+}
+
+/// Dispatch `/cli/heartbeat-log` (the "all recent fires" diagnostic
+/// route). Same pattern as handle_cli_heartbeat but factored out
+/// because the URL sits at /cli/heartbeat-log, not under /cli/heartbeat/.
+fn handle_cli_heartbeat_log(
+    project_path: &str,
+    params: &std::collections::HashMap<String, String>,
+) -> Result<String, String> {
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(50)
+        .clamp(1, 500);
+    let db = k2so_core::db::shared();
+    let conn = db.lock();
+    let project_id = k2so_core::agents::resolve_project_id(&conn, project_path)
+        .ok_or_else(|| format!("Project not found: {project_path}"))?;
+    k2so_core::db::schema::HeartbeatFire::list_by_project(&conn, &project_id, limit)
+        .map(|rows| serde_json::to_string(&rows).unwrap_or_default())
+        .map_err(|e| e.to_string())
 }
 
 /// Parse `token=<value>` out of a URL-encoded query string and compare
