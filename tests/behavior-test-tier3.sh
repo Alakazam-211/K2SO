@@ -41,6 +41,7 @@ cat "$PROJECT_ROOT/src-tauri/src/commands/k2so_agents.rs" \
     "$PROJECT_ROOT/crates/k2so-core/src/agents/scheduler.rs" \
     "$PROJECT_ROOT/crates/k2so-core/src/agents/wake.rs" \
     "$PROJECT_ROOT/crates/k2so-core/src/agents/session.rs" \
+    "$PROJECT_ROOT/crates/k2so-core/src/agents/skill.rs" \
     > "$HEARTBEAT_SRC" 2>/dev/null
 cp "$HEARTBEAT_SRC" "$AGENTS_SRC"
 

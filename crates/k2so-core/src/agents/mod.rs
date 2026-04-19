@@ -24,6 +24,7 @@ use std::path::PathBuf;
 pub mod heartbeat;
 pub mod scheduler;
 pub mod session;
+pub mod skill;
 pub mod wake;
 
 /// Resolve a project's primary-key id from its filesystem path. `None`
