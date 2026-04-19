@@ -57,6 +57,9 @@ mod companion_host;
 // agent-hook events (agent:lifecycle, agent:reply, sync:projects, …)
 // back onto Tauri's event bus.
 mod agent_hook_sink;
+// Background subscriber for the daemon's /events WebSocket. Spawned in
+// setup() once; reconnects forever so we survive daemon restarts.
+mod daemon_events;
 // `terminal` now lives in k2so-core. Re-exported so existing
 // `crate::terminal::*` paths keep working.
 pub use k2so_core::terminal;
@@ -198,6 +201,13 @@ pub fn run() {
             k2so_core::agent_hooks::set_sink(Box::new(
                 agent_hook_sink::TauriAgentHookEventSink::new(app.handle().clone()),
             ));
+
+            // Subscribe to the daemon's /events WebSocket. Daemon-
+            // originated hook events arrive here and are re-emitted via
+            // AppHandle::emit exactly as if agent_hooks.rs had handled
+            // them locally. No-op until the daemon is running; reconnects
+            // forever so we survive launchctl unload/load cycles.
+            daemon_events::spawn_subscriber(app.handle().clone());
 
             // Migrate old JSON window state to SQLite (one-time migration)
             perf_timer!("startup_migrate_window_state", {

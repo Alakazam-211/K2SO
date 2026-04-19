@@ -19,6 +19,20 @@ getrandom = "0.2"
 dirs = "5"
 
 # Async runtime. The daemon is async-first by convention — scheduler ticks,
-# companion WS, the HTTP server, and the future daemon->Tauri WS event
-# channel all live on the same multi-thread runtime.
+# companion WS, the HTTP server, and the daemon->Tauri WS event channel all
+# live on the same multi-thread runtime.
 tokio = { version = "1", features = ["full"] }
+
+# Async WS server for the daemon->Tauri event channel (GET /events). The
+# existing tungstenite 0.24 dep in the workspace is the sync flavor used
+# by companion::websocket; tokio-tungstenite tracks the same protocol
+# version so frames interop if we ever bridge the two.
+tokio-tungstenite = "0.23"
+
+# JSON serialization for HookEvent frames going over /events.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Futures helpers (Stream trait / StreamExt / SinkExt) needed by
+# tokio-tungstenite's async message loop.
+futures-util = "0.3"

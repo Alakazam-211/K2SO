@@ -26,6 +26,8 @@
 //! binary, plist is loadable, port file discoverable, token-auth path
 //! exercised) without yet taking responsibility for agent state.
 
+mod events;
+
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -37,6 +39,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 
 use k2so_core::log_debug;
+
+use crate::events::{DaemonBroadcastSink, WireEvent, EVENT_CHANNEL_CAP};
 
 const BANNER: &str = concat!(
     "k2so-daemon ",
@@ -51,6 +55,9 @@ struct DaemonState {
     token: Arc<String>,
     started_at: Instant,
     port: u16,
+    /// Broadcast channel the daemon's `AgentHookEventSink` publishes into.
+    /// Every `/events` WS subscriber takes a `Receiver` off this sender.
+    event_tx: Arc<broadcast::Sender<WireEvent>>,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -109,10 +116,17 @@ async fn main() {
         k2so_dir.join("daemon.token").display()
     );
 
+    // Event broadcast channel: the daemon's AgentHookEventSink publishes
+    // here; each /events subscriber takes its own Receiver.
+    let (event_tx, _) = broadcast::channel::<WireEvent>(EVENT_CHANNEL_CAP);
+    let event_tx = Arc::new(event_tx);
+    k2so_core::agent_hooks::set_sink(Box::new(DaemonBroadcastSink::new((*event_tx).clone())));
+
     let state = DaemonState {
         token: Arc::new(token),
         started_at: Instant::now(),
         port,
+        event_tx,
     };
 
     // Graceful-shutdown channel. launchd sends SIGTERM on system shutdown
@@ -158,9 +172,19 @@ async fn main() {
 /// Serve one connection. On any IO error or malformed request we drop the
 /// socket — every response also sets `Connection: close` so callers don't
 /// reuse the socket.
+///
+/// `/events` is the one exception: on a valid token we hand the raw
+/// [`TcpStream`] off to [`events::serve_events_connection`] which performs
+/// the WebSocket upgrade via `tokio_tungstenite::accept_async` — that
+/// function consumes the handshake bytes itself, so we DO NOT read the
+/// request body here for that route.
 async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
+    // Peek just the request line + headers so we can route on path
+    // without consuming the body. Enough for WS handshakes (which
+    // tokio-tungstenite will re-read) and the small GET bodies (which
+    // have no body).
     let mut buf = [0u8; 4096];
-    let n = match stream.read(&mut buf).await {
+    let n = match stream.peek(&mut buf).await {
         Ok(n) if n > 0 => n,
         _ => return,
     };
@@ -171,12 +195,15 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
     let (method, path_and_query) = match parts.as_slice() {
         [m, p, ..] => (*m, *p),
         _ => {
+            // Consume what we peeked so the error gets delivered.
+            let _ = stream.read(&mut buf).await;
             send_response(&mut stream, "400 Bad Request", "text/plain", "bad request\n").await;
             return;
         }
     };
 
     if method != "GET" {
+        let _ = stream.read(&mut buf).await;
         send_response(
             &mut stream,
             "405 Method Not Allowed",
@@ -191,17 +218,24 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         Some((p, q)) => (p, q),
         None => (path_and_query, ""),
     };
+    // Copy out of the lossy Cow so we can consume the read buffer below
+    // without extending the immutable borrow.
+    let path = path.to_string();
+    let query = query.to_string();
+    drop(req);
 
-    match path {
+    match path.as_str() {
         "/ping" => {
+            let _ = stream.read(&mut buf).await;
             // Unauthenticated. Smallest liveness check.
             send_response(&mut stream, "200 OK", "text/plain; charset=utf-8", BANNER).await;
         }
         "/status" => {
+            let _ = stream.read(&mut buf).await;
             // Token-gated. Returns a small JSON blob describing the
             // daemon's state so the Tauri app can verify it's talking to
             // the right process.
-            if !token_ok(query, state.token.as_str()) {
+            if !token_ok(&query, state.token.as_str()) {
                 send_response(
                     &mut stream,
                     "403 Forbidden",
@@ -222,7 +256,26 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             );
             send_response(&mut stream, "200 OK", "application/json", &body).await;
         }
+        "/events" => {
+            // Token check BEFORE the upgrade so unauthenticated clients
+            // see an HTTP 403 instead of a dangling WS close.
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            // Hand off to tokio-tungstenite; the handshake is still
+            // unread in the stream buffer.
+            events::serve_events_connection(stream, state.event_tx.clone()).await;
+        }
         _ => {
+            let _ = stream.read(&mut buf).await;
             send_response(&mut stream, "404 Not Found", "text/plain", "not found\n").await;
         }
     }

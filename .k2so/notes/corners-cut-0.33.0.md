@@ -11,17 +11,15 @@ found.
 
 ## Architecture
 
-### 1. Daemon uses `std::net::TcpListener`, not tokio
-- **Where:** `crates/k2so-daemon/src/main.rs`
-- **Why cut:** keeps the first working daemon small. Tokio-ization was
-  scoped as its own phase (P3) but the plan let it fold into P4 so we
-  didn't duplicate effort. Getting a synchronous boot path working
-  first unblocked everything else.
-- **Do it right:** switch the daemon's accept loop to
-  `tokio::net::TcpListener` + `tokio::spawn` per connection, with a
-  shared `tokio::runtime::Runtime` on the binary. Needed before the
-  daemon can handle concurrent long-lived connections
-  (companion WS, scheduled wakes, heartbeats).
+### 1. Daemon uses `std::net::TcpListener`, not tokio — **CLOSED 2026-04-19**
+- **Where:** `crates/k2so-daemon/src/main.rs`.
+- **Resolution:** switched to `#[tokio::main(flavor = "multi_thread")]`
+  + `tokio::net::TcpListener` + `tokio::spawn` per connection. Graceful
+  shutdown via `tokio::signal::ctrl_c` feeding a broadcast channel that
+  both the accept loop and per-connection handlers `select!` on. Commit
+  `075ef534`. Verified 230 tests green + manual smoke of /ping and
+  /status. Concurrent connections now safe for the upcoming /hook/*
+  and /cli/* migration.
 
 ### 2. `daemon.port` / `daemon.token` are parallel to the existing
        `heartbeat.port` / `heartbeat-token`

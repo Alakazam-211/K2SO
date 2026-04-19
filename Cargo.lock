@@ -2951,7 +2951,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "trash",
- "tungstenite",
+ "tungstenite 0.24.0",
  "url",
  "uuid",
 ]
@@ -2985,7 +2985,7 @@ dependencies = [
  "signal-hook-mio",
  "subtle",
  "tokio",
- "tungstenite",
+ "tungstenite 0.24.0",
  "url",
  "uuid",
 ]
@@ -2995,9 +2995,13 @@ name = "k2so-daemon"
 version = "0.33.0-dev"
 dependencies = [
  "dirs 5.0.1",
+ "futures-util",
  "getrandom 0.2.17",
  "k2so-core",
+ "serde",
+ "serde_json",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
@@ -6507,6 +6511,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-tungstenite"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6989540ced10490aaf14e6bad2e3d33728a2813310a0c71d1574304c49631cd"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite 0.23.0",
+]
+
+[[package]]
 name = "tokio-util"
 version = "0.7.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6764,6 +6780,24 @@ name = "ttf-parser"
 version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2c591d83f69777866b9126b24c6dd9a18351f177e49d625920d19f989fd31cf8"
+
+[[package]]
+name = "tungstenite"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e2e2ce1e47ed2994fd43b04c8f618008d4cabdd5ee34027cf14f9d918edd9c8"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.8.6",
+ "sha1",
+ "thiserror 1.0.69",
+ "utf-8",
+]
 
 [[package]]
 name = "tungstenite"
