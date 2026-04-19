@@ -1114,6 +1114,9 @@ pub fn run() {
             commands::companion::companion_status,
             commands::companion::companion_set_password,
             commands::companion::companion_disconnect_session,
+            // k2so-daemon lifecycle (Settings panel reads this to show
+            // "daemon: running / not installed / unreachable").
+            commands::daemon::daemon_status,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {

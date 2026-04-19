@@ -21,4 +21,5 @@ pub mod format;
 pub mod themes;
 pub mod states;
 pub mod companion;
+pub mod daemon;
 pub mod skill_layers;
