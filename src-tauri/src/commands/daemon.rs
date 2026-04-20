@@ -175,6 +175,22 @@ pub fn daemon_log_path() -> Result<String, String> {
     Ok(dir.join("daemon.stdout.log").to_string_lossy().to_string())
 }
 
+/// Read the "keep daemon running when K2SO quits" preference.
+/// Defaults to `true` — persistent agents are the 0.33.0 flagship
+/// feature, so the default respects that. The Settings pane toggles
+/// this; `RunEvent::ExitRequested` honors it on Cmd+Q.
+#[tauri::command]
+pub fn get_keep_daemon_on_quit() -> bool {
+    k2so_core::agents::settings::get_keep_daemon_on_quit()
+}
+
+/// Update the "keep daemon running when K2SO quits" preference.
+/// Backs the Settings pane toggle. Persisted to `app_settings`.
+#[tauri::command]
+pub fn set_keep_daemon_on_quit(keep: bool) -> Result<(), String> {
+    k2so_core::agents::settings::set_keep_daemon_on_quit(keep)
+}
+
 /// Return the last N lines of the daemon's stdout log. Defaults to
 /// the tail of the file if it's shorter than `lines`.
 #[tauri::command]

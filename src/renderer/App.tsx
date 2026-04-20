@@ -35,7 +35,6 @@ import { useTabsStore } from './stores/tabs'
 import { useSidebarStore } from './stores/sidebar'
 import { useActiveAgentsStore, startAgentPolling, stopAgentPolling } from './stores/active-agents'
 import AgentCloseDialog from './components/AgentCloseDialog/AgentCloseDialog'
-import DaemonQuitDialog from './components/DaemonQuitDialog/DaemonQuitDialog'
 import FocusWorkspaceHeader from './components/FocusWindow/FocusWorkspaceHeader'
 import { useGitInfo } from './hooks/useGit'
 import { useUpdateChecker } from './hooks/useUpdateChecker'
@@ -667,11 +666,6 @@ export default function App(): React.JSX.Element {
           onCancel={() => setShowQuitDialog(false)}
         />
       )}
-      {/* Cmd+Q prompt when the daemon is running. Release-only; dev
-          builds never see it because the backend emitter is gated
-          behind `#[cfg(not(debug_assertions))]`. Safe to mount
-          unconditionally — it's idle when the event doesn't fire. */}
-      <DaemonQuitDialog />
     </>
   )
 }

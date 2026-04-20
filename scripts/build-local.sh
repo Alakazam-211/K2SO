@@ -19,10 +19,10 @@
 #   Example: ./scripts/build-local.sh 0.33.0-rc1
 #
 # Output:
-#   src-tauri/target/release/bundle/dmg/K2SO_<version>_aarch64.dmg
+#   target/release/bundle/dmg/K2SO_<version>_aarch64.dmg
 #
 # After the script finishes:
-#   open src-tauri/target/release/bundle/dmg/
+#   open target/release/bundle/dmg/
 #   → drag K2SO.app to Applications → run the P4 acceptance checklist.
 
 set -euo pipefail
@@ -84,19 +84,56 @@ fi
 cd "$PROJECT_DIR"
 
 # ── Step 1: Bump version ──
+#
+# Bumps all THREE Cargo packages so they report a consistent version.
+# - src-tauri/Cargo.toml:       the main Tauri `k2so` bin
+# - crates/k2so-daemon/Cargo.toml: the daemon bin (otherwise /status
+#                                  reports the crate's literal version
+#                                  e.g. "0.33.0-dev", not the release)
+# - crates/k2so-core/Cargo.toml: the shared library both binaries link
 echo ""
 echo "Step 1: Bumping version to ${VERSION}..."
 sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"${VERSION}\"/" package.json src-tauri/tauri.conf.json
 sed -i '' "s/^version = \"[^\"]*\"/version = \"${VERSION}\"/" src-tauri/Cargo.toml
+sed -i '' "s/^version = \"[^\"]*\"/version = \"${VERSION}\"/" crates/k2so-daemon/Cargo.toml
+sed -i '' "s/^version = \"[^\"]*\"/version = \"${VERSION}\"/" crates/k2so-core/Cargo.toml
 sed -i '' "s/K2SO_CLI_VERSION=\"[^\"]*\"/K2SO_CLI_VERSION=\"${VERSION}\"/" cli/k2so
 echo "  Done."
 
 # ── Step 2: Build ──
+#
+# Nuke `target/release/` entirely before building. `cargo clean -p k2so`
+# targeted cleaning has repeatedly left stale env!("CARGO_PKG_VERSION")
+# strings baked into the Tauri binary even after a version bump —
+# cargo's incremental fingerprint surface does not include the package
+# version, so the crate's object files get reused. The nuclear option
+# trades ~15 min of cold-compile time for a guarantee that the shipped
+# binary's self-reported version matches what we bumped in Step 1.
+# Dependency crates also get rebuilt, which is the cost.
 echo ""
 echo "Step 2: Building release..."
 export APPLE_SIGNING_IDENTITY="$SIGNING_IDENTITY"
 export APPLE_TEAM_ID="36B8R93HXV"
+rm -rf target/release/bundle target/release/deps/libk2so_lib* \
+       target/release/deps/k2so-* target/release/deps/k2so_core-* \
+       target/release/deps/k2so_daemon-* target/release/incremental \
+       src-tauri/target/release 2>/dev/null || true
+cargo clean -p k2so -p k2so-daemon -p k2so-core 2>&1 | tail -2 || true
 bun run tauri build
+
+# ── Step 2.1: Verify the bundled Tauri binary actually has the new version ──
+#
+# Cargo has surprised us twice by shipping a binary whose compiled-in
+# CARGO_PKG_VERSION doesn't match the Cargo.toml. Fail the build loudly
+# here if it happens again — better to stop now than 15 minutes into
+# notarization with a wrong DMG.
+APP_BIN="target/release/bundle/macos/K2SO.app/Contents/MacOS/k2so"
+if ! grep -aq "${VERSION}" "$APP_BIN" 2>/dev/null; then
+    echo "  FATAL: built binary $APP_BIN does not contain the expected version string '${VERSION}'." >&2
+    echo "  Cargo cache likely leaked a stale CARGO_PKG_VERSION. Check target/release/ pollution and retry." >&2
+    exit 1
+fi
+echo "  Version check: built binary contains '${VERSION}' ✓"
 echo "  Build complete."
 
 # ── Step 2.5: Build + bundle k2so-daemon sidecar ──
@@ -109,7 +146,7 @@ if [ ! -x "$DAEMON_SRC" ]; then
     exit 1
 fi
 cp "$DAEMON_SRC" \
-    "src-tauri/target/release/bundle/macos/K2SO.app/Contents/MacOS/k2so-daemon"
+    "target/release/bundle/macos/K2SO.app/Contents/MacOS/k2so-daemon"
 echo "  k2so-daemon copied into K2SO.app/Contents/MacOS/"
 
 # ── Step 3: Sign with hardened runtime ──
@@ -117,19 +154,19 @@ echo ""
 echo "Step 3: Signing with hardened runtime..."
 codesign --force --options runtime --timestamp \
     --sign "$SIGNING_IDENTITY" \
-    "src-tauri/target/release/bundle/macos/K2SO.app/Contents/MacOS/k2so"
+    "target/release/bundle/macos/K2SO.app/Contents/MacOS/k2so"
 codesign --force --options runtime --timestamp \
     --sign "$SIGNING_IDENTITY" \
-    "src-tauri/target/release/bundle/macos/K2SO.app/Contents/MacOS/k2so-daemon"
+    "target/release/bundle/macos/K2SO.app/Contents/MacOS/k2so-daemon"
 codesign --force --options runtime --timestamp \
     --sign "$SIGNING_IDENTITY" \
-    "src-tauri/target/release/bundle/macos/K2SO.app"
+    "target/release/bundle/macos/K2SO.app"
 echo "  Signed (main + daemon + bundle)."
 
 # ── Step 4: Notarize app via ZIP ──
 echo ""
 echo "Step 4: Notarizing app..."
-cd src-tauri/target/release/bundle/macos
+cd target/release/bundle/macos
 ditto -c -k --keepParent "K2SO.app" "/tmp/K2SO_${VERSION}.zip"
 xcrun notarytool submit "/tmp/K2SO_${VERSION}.zip" \
     --keychain-profile "$KEYCHAIN_PROFILE" --wait
@@ -140,24 +177,24 @@ echo "  App notarized and stapled."
 echo ""
 echo "Step 5: Creating DMG..."
 cd "$PROJECT_DIR"
-rm -f "src-tauri/target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg"
+rm -f "target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg"
 hdiutil create -volname "K2SO" \
-    -srcfolder "src-tauri/target/release/bundle/macos/K2SO.app" \
+    -srcfolder "target/release/bundle/macos/K2SO.app" \
     -ov -format UDZO \
-    "src-tauri/target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg"
+    "target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg"
 codesign --force --timestamp \
     --sign "$SIGNING_IDENTITY" \
-    "src-tauri/target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg"
+    "target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg"
 
 # ── Step 6: Notarize DMG ──
 echo ""
 echo "Step 6: Notarizing DMG..."
-xcrun notarytool submit "src-tauri/target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg" \
+xcrun notarytool submit "target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg" \
     --keychain-profile "$KEYCHAIN_PROFILE" --wait
-xcrun stapler staple "src-tauri/target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg"
+xcrun stapler staple "target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg"
 echo "  DMG notarized and stapled."
 
-DMG_PATH="src-tauri/target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg"
+DMG_PATH="target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg"
 
 echo ""
 echo "═══════════════════════════════════════════════════"

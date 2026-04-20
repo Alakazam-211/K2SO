@@ -15,6 +15,7 @@ export const GENERAL_MANIFEST: SettingEntry[] = [
   { id: 'general.agentic-systems', section: 'general', label: 'Agentic Systems', description: 'Enable AI agent orchestration, workspace manager, heartbeat, review queue', keywords: ['ai', 'agent', 'agentic', 'heartbeat', 'manager', 'workspace states', 'review', 'beta'] },
   { id: 'general.claude-auth-refresh', section: 'general', label: 'Auto-refresh Claude credentials', description: 'Background scheduler that keeps your Claude session alive', keywords: ['claude', 'auth', 'token', 'login', 'credentials', 'scheduler'] },
   { id: 'general.daemon', section: 'general', label: 'K2SO Daemon', description: 'Background service that keeps agents running when the app is closed', keywords: ['daemon', 'background', 'launchd', 'persistent', 'lid', 'sleep', 'wake', 'agent'] },
+  { id: 'general.keep-daemon-on-quit', section: 'general', label: 'Keep daemon running when K2SO quits', description: 'When on, Cmd+Q leaves the daemon running so agents continue. When off, quit stops everything.', keywords: ['daemon', 'quit', 'cmd+q', 'background', 'persistent'] },
   { id: 'general.ai-assistant', section: 'general', label: 'AI Workspace Assistant', description: 'Local LLM for natural-language workspace operations (⌘L)', keywords: ['ai', 'assistant', 'llm', 'cmd+l', 'qwen', 'model', 'local', 'gguf'] },
   { id: 'general.model-status', section: 'general', label: 'Model Status', description: 'Current local LLM load state', keywords: ['model', 'llm', 'loaded', 'download'] },
   { id: 'general.download-model', section: 'general', label: 'Download Default Model', description: 'Fetch Qwen2.5-1.5B locally (~1.1GB)', keywords: ['download', 'model', 'qwen', 'local llm'] },
@@ -166,6 +167,11 @@ export function GeneralSection(): React.JSX.Element {
 
         {/* K2SO Daemon — persistent-agents service */}
         <DaemonRow />
+
+        {/* Keep-daemon-on-quit preference: honored by Cmd+Q and by the
+            menubar's Quit K2SO item. Default ON pairs with the menubar
+            icon so users always have visibility into what's running. */}
+        <KeepDaemonOnQuitRow />
 
         {/* AI Workspace Assistant (Cmd+L) — core feature, belongs in General */}
         <LocalLLMSettings />
@@ -544,6 +550,66 @@ function DaemonRow(): React.JSX.Element {
           <p className="text-[10px] text-red-400 break-all">{error}</p>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Keep daemon on quit ───────────────────────────────────────────────
+// Default is ON — persistent agents keep running past Cmd+Q. User can
+// flip OFF to get "normal app" quit behavior (daemon stops with the
+// window). Honored by:
+//   - RunEvent::ExitRequested handler in src-tauri/src/lib.rs
+//   - Menubar → Quit K2SO
+// Both check the same setting via `get_keep_daemon_on_quit`.
+
+function KeepDaemonOnQuitRow(): React.JSX.Element {
+  const [keep, setKeep] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    invoke<boolean>('get_keep_daemon_on_quit')
+      .then(setKeep)
+      .catch((e) => console.warn('[keep-daemon-on-quit]', e))
+  }, [])
+
+  const handleToggle = useCallback(async () => {
+    if (keep === null) return
+    const next = !keep
+    setKeep(next) // optimistic
+    try {
+      await invoke('set_keep_daemon_on_quit', { keep: next })
+    } catch (e) {
+      console.error('[keep-daemon-on-quit]', e)
+      setKeep(!next) // revert
+    }
+  }, [keep])
+
+  return (
+    <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
+      <div className="flex flex-col mr-4">
+        <span className="text-xs text-[var(--color-text-secondary)]">
+          Keep daemon running when K2SO quits
+        </span>
+        <span className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
+          {keep === false
+            ? 'Cmd+Q stops the daemon too. Agents won\u2019t fire in the background.'
+            : 'Cmd+Q quits the window; agents keep running. Menu bar icon shows status.'}
+        </span>
+      </div>
+      <button
+        onClick={handleToggle}
+        disabled={keep === null}
+        className={`relative inline-flex h-5 w-9 items-center transition-colors no-drag cursor-pointer disabled:opacity-50 ${
+          keep ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
+        }`}
+        role="switch"
+        aria-checked={keep ?? false}
+      >
+        <span
+          className={`inline-block h-3 w-3 transform bg-white transition-transform ${
+            keep ? 'translate-x-5' : 'translate-x-1'
+          }`}
+        />
+      </button>
     </div>
   )
 }

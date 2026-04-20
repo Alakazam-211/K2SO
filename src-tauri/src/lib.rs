@@ -14,6 +14,7 @@ static RELAUNCH_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 
 mod agent_hooks;
 mod commands;
+mod tray;
 // `companion` now lives in k2so-core. Re-exported so existing
 // `crate::companion::*` paths (commands/companion.rs, agent_hooks.rs,
 // commands/settings.rs) keep working.
@@ -322,7 +323,14 @@ pub fn run() {
             // `target/debug/k2so-daemon` path is volatile, and a dev
             // with `K2SO_INSTALL_DAEMON=1` can override.
             perf_timer!("startup_install_daemon_plist", {
-                const MIGRATION_ID: &str = "install_daemon_plist_v1";
+                // v2 bump: v1 was burned during 0.33.0 RC testing when
+                // dev launches with `K2SO_INSTALL_DAEMON=1` marked it
+                // applied against an earlier k2so-daemon binary path.
+                // Bumping the ID forces a re-install against the current
+                // bundled daemon binary on the first 0.33.0 launch for
+                // anyone carrying a stale v1 row. Safe for fresh users
+                // (neither row present → runs as usual).
+                const MIGRATION_ID: &str = "install_daemon_plist_v2";
                 let needs_run = {
                     let state = app.state::<AppState>();
                     let db = state.db.lock();
@@ -912,6 +920,16 @@ pub fn run() {
                     }
                 });
             }
+
+            // Menubar / system tray icon. Pairs with the persistent-
+            // agents feature: once Cmd+Q leaves the daemon running,
+            // users need a surface that shows what's still active.
+            // Failures here are non-fatal — the app works without a
+            // tray, users just lose visibility into the daemon from
+            // outside the main window.
+            if let Err(e) = tray::install(&app.handle().clone()) {
+                log_debug!("[tray] install failed: {e} (continuing without tray)");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1196,10 +1214,8 @@ pub fn run() {
             commands::daemon::daemon_restart,
             commands::daemon::daemon_log_path,
             commands::daemon::daemon_log_tail,
-            // Cmd+Q prompt result. Called by DaemonQuitDialog with the
-            // user's choice after the ExitRequested handler preempted
-            // an uncommitted quit.
-            commands::quit::confirm_quit,
+            commands::daemon::get_keep_daemon_on_quit,
+            commands::daemon::set_keep_daemon_on_quit,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {
@@ -1215,37 +1231,34 @@ pub fn run() {
         .run(|app, event| {
             match event {
                 // Cmd+Q / File → Quit / NSApplication terminate: —
-                // fires BEFORE the actual exit. In release builds, if
-                // the daemon is running AND the user hasn't already
-                // confirmed via the quit dialog, prevent the exit and
-                // bounce the decision to the frontend. The dialog
-                // component invokes `confirm_quit`, which flips
-                // `USER_CONFIRMED_QUIT` and re-requests exit — we see
-                // that flag on the re-entry and let it through.
-                //
-                // Dev builds skip this entirely so CLI-based kills
-                // (`pkill`, stop the dev server, etc.) don't hang on
-                // a modal prompt nobody can see from the terminal.
-                #[cfg(not(debug_assertions))]
-                tauri::RunEvent::ExitRequested { api, .. } => {
-                    if commands::quit::USER_CONFIRMED_QUIT
-                        .load(std::sync::atomic::Ordering::SeqCst)
-                    {
-                        // Second pass — user already chose. Let it exit.
-                    } else {
-                        // Only prompt if the daemon is live. If it's
-                        // not installed / not reachable, there's
-                        // nothing to preserve — plain quit.
-                        let daemon_alive = matches!(
-                            commands::daemon::daemon_status(),
-                            commands::daemon::DaemonStatusResponse::Running { .. }
+                // fires BEFORE the actual exit. Read the user's
+                // "keep_daemon_on_quit" preference and either (a)
+                // leave the daemon running (user wants persistent
+                // agents, default), or (b) unload the plist so
+                // launchd stops re-spawning it. No modal prompt —
+                // silent + predictable. The menubar icon shows the
+                // user what's still running after quit so the "ON"
+                // default doesn't hide a mystery process.
+                tauri::RunEvent::ExitRequested { .. } => {
+                    let keep_running =
+                        k2so_core::agents::settings::get_keep_daemon_on_quit();
+                    if !keep_running {
+                        let plist = k2so_core::wake::DaemonPlist::canonical(
+                            std::path::PathBuf::from("/unused"),
                         );
-                        if daemon_alive {
-                            api.prevent_exit();
-                            use tauri::Emitter;
-                            let _ = app.emit("daemon-quit-prompt", serde_json::json!({}));
+                        if let Some(path) = plist.plist_path() {
+                            if path.exists() {
+                                // Best-effort unload; errors swallowed
+                                // because the user asked to quit and
+                                // we shouldn't block on a hung
+                                // launchctl.
+                                let _ = k2so_core::wake::launchctl_unload(&path);
+                            }
                         }
                     }
+                    // Always let the exit proceed. The daemon either
+                    // keeps running under launchd (ON) or was told to
+                    // unload above (OFF).
                 }
                 tauri::RunEvent::Exit => {
                     if RELAUNCH_MODE.load(std::sync::atomic::Ordering::Relaxed) {

@@ -108,3 +108,35 @@ pub fn set_agentic_enabled(enabled: bool) -> Result<(), String> {
     .map(|_| ())
     .map_err(|e| format!("DB update failed: {}", e))
 }
+
+/// Read the "keep daemon running when K2SO quits" preference from
+/// `app_settings`. Defaults to `true` — matches the persistent-agents
+/// flagship: if the user installed K2SO and opted into heartbeats,
+/// they presumably want them to keep firing when the window closes.
+/// The menubar icon provides visibility into what's running, so
+/// defaulting ON doesn't leave the user wondering.
+pub fn get_keep_daemon_on_quit() -> bool {
+    let db = crate::db::shared();
+    let conn = db.lock();
+    conn.query_row(
+        "SELECT value FROM app_settings WHERE key = 'keep_daemon_on_quit'",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .map(|v| v == "1")
+    .unwrap_or(true) // default ON
+}
+
+/// Set the "keep daemon running when K2SO quits" preference. UPSERTs
+/// the `keep_daemon_on_quit` key in `app_settings`.
+pub fn set_keep_daemon_on_quit(keep: bool) -> Result<(), String> {
+    let db = crate::db::shared();
+    let conn = db.lock();
+    let value = if keep { "1" } else { "0" };
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('keep_daemon_on_quit', ?1)",
+        rusqlite::params![value],
+    )
+    .map(|_| ())
+    .map_err(|e| format!("DB update failed: {}", e))
+}

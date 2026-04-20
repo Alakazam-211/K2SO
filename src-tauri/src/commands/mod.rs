@@ -22,5 +22,4 @@ pub mod themes;
 pub mod states;
 pub mod companion;
 pub mod daemon;
-pub mod quit;
 pub mod skill_layers;
