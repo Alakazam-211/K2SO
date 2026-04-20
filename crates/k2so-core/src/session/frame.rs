@@ -11,11 +11,9 @@
 //! for the full design and §"How this fixes the companion reflow"
 //! for how per-client consumption escapes the baked-width trap.
 //!
-//! `AgentSignal(AgentSignal)` variant is added in C3 once the
-//! awareness module's types land; `Frame` is `#[non_exhaustive]`
-//! so the add is non-breaking.
-
 use serde::{Deserialize, Serialize};
+
+use crate::awareness::AgentSignal;
 
 /// The atom of the Session Stream. Producers emit Frames; consumers
 /// subscribe and filter.
@@ -47,6 +45,10 @@ pub enum Frame {
         kind: SemanticKind,
         payload: serde_json::Value,
     },
+    /// Cross-agent signal lifted from a `k2so:` APC escape or a
+    /// `k2so msg` CLI emit. Also routed to the Awareness Bus; visible
+    /// here for session-level auditing.
+    AgentSignal(AgentSignal),
     /// Opaque PTY byte slice. Kept for pixel-perfect replay,
     /// desktop-native rendering, and session recording. Consumers
     /// that want native terminal rendering can feed this straight

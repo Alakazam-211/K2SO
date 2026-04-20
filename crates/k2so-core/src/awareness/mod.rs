@@ -1,10 +1,176 @@
-//! Awareness Bus primitive (Phase 1 scaffolding).
+//! Awareness Bus primitive — cross-agent signals.
 //!
-//! This module hosts the primitive-B types from the Session Stream PRD:
-//! `AgentSignal`, `SignalKind`, `AgentAddress`. Types land in C3;
-//! routing / egress / filesystem-inbox integration is Phase 3.
+//! Primitive B from `.k2so/prds/session-stream-and-awareness-bus.md`.
+//! Phase 1 (this commit) defines the types. Routing, filesystem
+//! egress (Pi-Messenger-style atomic-rename inbox at
+//! `.k2so/awareness/inbox/<agent>/*.json`), and the hot-path broadcast
+//! channel all land in Phase 3.
 //!
-//! Feature-gated via `#[cfg(feature = "session_stream")]` in `lib.rs`.
+//! The wire model: agents emit `AgentSignal`s through one of three
+//! ingress paths (APC escape in a session, `k2so msg` CLI, extension-
+//! pack in-process emit) and subscribers receive them at the target
+//! inbox. `SignalKind` is deliberately small — five variants plus a
+//! `Custom` escape hatch — to keep the agent-facing vocabulary tight.
 
-/// Module presence marker; deleted in C3 once real public items exist.
-pub const VERSION: &str = "0.34.0-phase1";
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::session::SessionId;
+
+/// Opaque signal identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SignalId(pub Uuid);
+
+impl SignalId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for SignalId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for SignalId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Workspace identifier. Phase 1 wraps `String`; Phase 3 may swap for
+/// a typed reference into the `projects` table once routing needs it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WorkspaceId(pub String);
+
+/// Where a signal is addressed. Three shapes: a specific agent in a
+/// specific workspace, an entire workspace's inbox (no specific
+/// agent), or a broadcast visible to all locally-known agents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(tag = "scope", rename_all = "snake_case")]
+pub enum AgentAddress {
+    Agent {
+        workspace: WorkspaceId,
+        name: String,
+    },
+    Workspace {
+        workspace: WorkspaceId,
+    },
+    Broadcast,
+}
+
+/// Routing priority. Budget-aware — Phase 3's per-coordination-level
+/// message budgets (Pi-Messenger: none/minimal/moderate/chatty =
+/// 0/2/5/10 emissions per agent per session) will shed low-priority
+/// signals first when an agent overruns its budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum Priority {
+    Low,
+    #[default]
+    Normal,
+    High,
+    Urgent,
+}
+
+/// The locked SignalKind vocabulary — five variants + `Custom`. Matches
+/// the Pi-Messenger coordination vocabulary; `#[non_exhaustive]` so
+/// future additions are non-breaking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum SignalKind {
+    /// Chat-style message between agents.
+    Msg { text: String },
+    /// Status-line update from the sending agent.
+    Status { text: String },
+    /// File-reservation claim or release.
+    Reservation {
+        paths: Vec<String>,
+        action: ReservationAction,
+    },
+    /// Presence state change.
+    Presence { state: PresenceState },
+    /// Task lifecycle transition. `task_ref` optionally names the
+    /// markdown file / DB row being transitioned.
+    TaskLifecycle {
+        phase: TaskPhase,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_ref: Option<String>,
+    },
+    /// Escape hatch for harness-specific signals. `kind` names the
+    /// semantic; `payload` carries arbitrary JSON.
+    Custom {
+        kind: String,
+        payload: serde_json::Value,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum ReservationAction {
+    Claim,
+    Release,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceState {
+    Active,
+    Idle,
+    Away,
+    Stuck,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum TaskPhase {
+    Started,
+    Done,
+    Blocked,
+}
+
+/// A cross-agent signal. Phase 1 POD — no routing, just the wire
+/// format. Phase 3 adds the bus + filesystem-backed durability.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentSignal {
+    pub id: SignalId,
+    /// Session the sender was inside when emitting. Optional because
+    /// `k2so msg` CLI invocations aren't attached to a live session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionId>,
+    pub from: AgentAddress,
+    pub to: AgentAddress,
+    pub kind: SignalKind,
+    #[serde(default)]
+    pub priority: Priority,
+    /// For reply chains. `None` for first emission of a conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<SignalId>,
+    pub at: DateTime<Utc>,
+}
+
+impl AgentSignal {
+    /// Fresh signal with a random id and `at = now`.
+    pub fn new(from: AgentAddress, to: AgentAddress, kind: SignalKind) -> Self {
+        Self {
+            id: SignalId::new(),
+            session: None,
+            from,
+            to,
+            kind,
+            priority: Priority::default(),
+            reply_to: None,
+            at: Utc::now(),
+        }
+    }
+}

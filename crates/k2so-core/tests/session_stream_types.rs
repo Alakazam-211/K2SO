@@ -4,6 +4,7 @@
 
 #![cfg(feature = "session_stream")]
 
+use k2so_core::awareness::{AgentAddress, AgentSignal, SignalKind, WorkspaceId};
 use k2so_core::session::{
     CursorOp, EraseMode, Frame, HarnessKind, Line, SemanticKind, SeqnoGen,
     Session, SessionId, Style,
@@ -54,6 +55,16 @@ fn frame_variants_round_trip() {
             payload: json!({ "name": "bash", "input": { "cmd": "ls" } }),
         },
         Frame::RawPtyFrame(vec![0x1b, b'[', b'2', b'J']),
+        Frame::AgentSignal(AgentSignal::new(
+            AgentAddress::Agent {
+                workspace: WorkspaceId("k2so".into()),
+                name: "rust-eng".into(),
+            },
+            AgentAddress::Broadcast,
+            SignalKind::Msg {
+                text: "session stream frames flowing".into(),
+            },
+        )),
     ];
     for frame in cases {
         let encoded = serde_json::to_string(&frame).unwrap();
