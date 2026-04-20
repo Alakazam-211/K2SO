@@ -2990,6 +2990,7 @@ dependencies = [
  "tungstenite 0.24.0",
  "url",
  "uuid",
+ "vte",
 ]
 
 [[package]]

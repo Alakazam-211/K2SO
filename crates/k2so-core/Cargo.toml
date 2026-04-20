@@ -16,6 +16,12 @@ path = "src/lib.rs"
 # Enable in src-tauri's [dev-dependencies] entry; NOT a runtime feature.
 test-util = []
 
+# Gates the 0.34.0 Session Stream + Awareness Bus primitives (session/,
+# awareness/, term/). Flag off = modules don't compile in; zero impact
+# on the alacritty-backed terminal path. See the PRD at
+# .k2so/prds/session-stream-and-awareness-bus.md for the phased rollout.
+session_stream = []
+
 [dependencies]
 # Shared primitive deps.
 parking_lot = "0.12"
@@ -65,6 +71,12 @@ encoding_rs = "0.8"
 # Terminal backend — VT-compliant parser + PTY management + reflow.
 alacritty_terminal = "0.26.0-rc1"
 portable-pty = "0.8"
+
+# ANSI tokenizer used by the `session_stream`-gated line-mux producer
+# (`term::line_mux`). Pinned to "0.15" to match alacritty_terminal's
+# transitive pin (see Cargo.lock) so there's a single `vte` version in
+# the build graph — duplicate-crate bloat is risk R1 in the plan.
+vte = "0.15"
 
 # Glyph rendering (bitmap renderer path) + QOI image encoding for mobile
 # companion snapshots.

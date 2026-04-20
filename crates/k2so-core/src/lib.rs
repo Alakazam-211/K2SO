@@ -46,5 +46,15 @@ pub mod scheduler;
 pub mod terminal;
 pub mod wake;
 
+// 0.34.0 Session Stream primitives — gated so flag-off builds compile
+// bit-for-bit like v0.33.0. See .k2so/prds/session-stream-and-awareness-bus.md
+// for the phased rollout; plan at ~/.claude/plans/happy-hatching-locket.md.
+#[cfg(feature = "session_stream")]
+pub mod awareness;
+#[cfg(feature = "session_stream")]
+pub mod session;
+#[cfg(feature = "session_stream")]
+pub mod term;
+
 #[doc(hidden)]
 pub fn __scaffolding_marker() {}
