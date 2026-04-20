@@ -1196,6 +1196,10 @@ pub fn run() {
             commands::daemon::daemon_restart,
             commands::daemon::daemon_log_path,
             commands::daemon::daemon_log_tail,
+            // Cmd+Q prompt result. Called by DaemonQuitDialog with the
+            // user's choice after the ExitRequested handler preempted
+            // an uncommitted quit.
+            commands::quit::confirm_quit,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {
@@ -1210,6 +1214,39 @@ pub fn run() {
         })
         .run(|app, event| {
             match event {
+                // Cmd+Q / File → Quit / NSApplication terminate: —
+                // fires BEFORE the actual exit. In release builds, if
+                // the daemon is running AND the user hasn't already
+                // confirmed via the quit dialog, prevent the exit and
+                // bounce the decision to the frontend. The dialog
+                // component invokes `confirm_quit`, which flips
+                // `USER_CONFIRMED_QUIT` and re-requests exit — we see
+                // that flag on the re-entry and let it through.
+                //
+                // Dev builds skip this entirely so CLI-based kills
+                // (`pkill`, stop the dev server, etc.) don't hang on
+                // a modal prompt nobody can see from the terminal.
+                #[cfg(not(debug_assertions))]
+                tauri::RunEvent::ExitRequested { api, .. } => {
+                    if commands::quit::USER_CONFIRMED_QUIT
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        // Second pass — user already chose. Let it exit.
+                    } else {
+                        // Only prompt if the daemon is live. If it's
+                        // not installed / not reachable, there's
+                        // nothing to preserve — plain quit.
+                        let daemon_alive = matches!(
+                            commands::daemon::daemon_status(),
+                            commands::daemon::DaemonStatusResponse::Running { .. }
+                        );
+                        if daemon_alive {
+                            api.prevent_exit();
+                            use tauri::Emitter;
+                            let _ = app.emit("daemon-quit-prompt", serde_json::json!({}));
+                        }
+                    }
+                }
                 tauri::RunEvent::Exit => {
                     if RELAUNCH_MODE.load(std::sync::atomic::Ordering::Relaxed) {
                         // Relaunch mode — use normal exit so the spawned process survives
