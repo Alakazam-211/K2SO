@@ -74,10 +74,14 @@ alacritty_terminal = "0.26.0-rc1"
 portable-pty = "0.8"
 
 # ANSI tokenizer used by the `session_stream`-gated line-mux producer
-# (`term::line_mux`). Pinned to "0.15" to match alacritty_terminal's
-# transitive pin (see Cargo.lock) so there's a single `vte` version in
-# the build graph — duplicate-crate bloat is risk R1 in the plan.
-vte = "0.15"
+# (`term::line_mux`) and the dual-emit PTY reader (`terminal::session_stream_pty`,
+# Phase 2). Pinned to "0.15" to match alacritty_terminal's transitive pin
+# — single `vte` entry in Cargo.lock. `ansi` feature unlocks
+# `vte::ansi::Processor` + `vte::ansi::Handler`, which alacritty's
+# `Term` implements so we can drive the grid ourselves from a custom
+# reader thread without going through alacritty's private
+# `EventLoop::spawn()`.
+vte = { version = "0.15", features = ["std", "ansi"] }
 
 # Glyph rendering (bitmap renderer path) + QOI image encoding for mobile
 # companion snapshots.

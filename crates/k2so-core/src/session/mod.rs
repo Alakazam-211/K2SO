@@ -11,10 +11,13 @@
 //! Phase 1 (this crate's scope) defines the types. Runtime plumbing
 //! (broadcast channels, replay ring, archive writer) lands in Phase 2.
 
+pub mod entry;
 pub mod frame;
 pub mod line;
+pub mod registry;
 pub mod types;
 
+pub use entry::{SessionEntry, BROADCAST_CAP, REPLAY_CAP};
 pub use frame::{CursorOp, EraseMode, Frame, SemanticKind, Style};
 pub use line::{Line, SeqnoGen, SequenceNo};
 pub use types::{HarnessKind, Session, SessionId};
