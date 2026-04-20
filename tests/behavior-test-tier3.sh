@@ -1174,20 +1174,22 @@ else
     pass ".last_session retirement: no live file I/O remains"
 fi
 
-# Red-button should keep the process alive when any project has heartbeat
-# enabled, so autonomous wakes can fire without the user remembering to
-# keep the window open. Cmd+Q still quits.
+# Red-button behavior (0.33.0+): gated by the `keep_daemon_on_quit`
+# user setting in Settings > General. ON → prevent_close + hide window
+# (keeps K2SO Server + Tauri running). OFF → full quit. The old
+# `any_heartbeat_enabled` heuristic was retired — the toggle is the
+# single source of truth. Cmd+Q always quits regardless of toggle.
 LIB_SRC="$PROJECT_ROOT/src-tauri/src/lib.rs"
-if grep -q 'fn any_heartbeat_enabled' "$LIB_SRC"; then
-    pass "red-button keep-alive: any_heartbeat_enabled helper defined"
+if grep -q 'keep_daemon_on_quit' "$LIB_SRC"; then
+    pass "red-button keep-alive: keep_daemon_on_quit setting read in lib.rs"
 else
-    fail "red-button: helper missing" "Expected any_heartbeat_enabled fn in lib.rs"
+    fail "red-button: toggle read missing" "Expected keep_daemon_on_quit read in lib.rs"
 fi
 
-if grep -q 'if any_heartbeat_enabled()' "$LIB_SRC" && grep -q 'api.prevent_close()' "$LIB_SRC"; then
-    pass "red-button keep-alive: CloseRequested intercepted when heartbeat enabled"
+if grep -q 'api.prevent_close()' "$LIB_SRC"; then
+    pass "red-button keep-alive: CloseRequested intercepted when setting is ON"
 else
-    fail "red-button: intercept missing" "Expected any_heartbeat_enabled + prevent_close in CloseRequested"
+    fail "red-button: intercept missing" "Expected api.prevent_close() in CloseRequested handler"
 fi
 
 if grep -q 'RunEvent::Reopen' "$LIB_SRC"; then
