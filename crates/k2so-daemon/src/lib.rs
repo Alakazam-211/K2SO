@@ -1,0 +1,10 @@
+//! Thin library surface for the k2so-daemon binary.
+//!
+//! The crate's primary artifact remains the `k2so-daemon` binary
+//! (see `src/main.rs`). This lib exists so integration tests in
+//! `crates/k2so-daemon/tests/*.rs` can reach internal modules like
+//! `sessions_ws` without duplicating the code — the binary's own
+//! `mod` declarations are unchanged and sit above `main.rs`.
+
+pub mod events;
+pub mod sessions_ws;

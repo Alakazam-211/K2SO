@@ -9,6 +9,14 @@ description = "K2SO persistent-agents daemon: launchd-managed device-local proce
 name = "k2so-daemon"
 path = "src/main.rs"
 
+# Thin library surface so integration tests (crates/k2so-daemon/tests/*)
+# can reach modules like `sessions_ws` directly. The daemon has always
+# been a binary — this lib entry just re-exports the internal modules
+# for the test binaries. Production artifacts unchanged.
+[lib]
+name = "k2so_daemon"
+path = "src/lib.rs"
+
 [dependencies]
 # 0.34.0 Session Stream (Phase 2): enables the k2so-core types +
 # line-mux + registry that the daemon's /cli/sessions/subscribe
