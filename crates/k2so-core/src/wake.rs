@@ -200,6 +200,50 @@ pub fn install(plist: &DaemonPlist) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+/// Outcome of [`ensure_loaded`] — lets the caller log/report whether
+/// the daemon was already alive, freshly loaded, or not installed yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadOutcome {
+    /// Plist file does not exist on disk. Caller needs to run
+    /// [`install`] (or the install migration) first.
+    NotInstalled,
+    /// Plist was already loaded in launchctl when we checked. No-op.
+    AlreadyLoaded,
+    /// Plist existed on disk but wasn't loaded; we just loaded it.
+    Loaded,
+}
+
+/// Idempotent "make sure the daemon is loaded" check. Safe to call on
+/// every Tauri launch: if the daemon is already alive we do nothing,
+/// if the plist exists but isn't loaded we load it, and if the plist
+/// file is missing we report that so the install migration can run.
+///
+/// Used to auto-start the daemon on every Tauri launch regardless of
+/// the "Keep server running when window is closed" toggle — so a user
+/// who red-buttoned with toggle-OFF (which unloads the daemon) gets
+/// the daemon back automatically on next app launch.
+pub fn ensure_loaded(plist: &DaemonPlist) -> Result<LoadOutcome, String> {
+    let target = plist
+        .plist_path()
+        .ok_or_else(|| "cannot locate ~/Library/LaunchAgents".to_string())?;
+    if !target.exists() {
+        return Ok(LoadOutcome::NotInstalled);
+    }
+    // `launchctl list <label>` exits 0 if the service is loaded (even
+    // if not currently running), non-zero otherwise. Cheapest way to
+    // check without racing the plist.
+    let out = Command::new("launchctl")
+        .arg("list")
+        .arg(&plist.label)
+        .output()
+        .map_err(|e| format!("launchctl list: {e}"))?;
+    if out.status.success() {
+        return Ok(LoadOutcome::AlreadyLoaded);
+    }
+    launchctl_load(&target)?;
+    Ok(LoadOutcome::Loaded)
+}
+
 /// Uninstall: unload + remove the plist file. Safe to call on a fresh
 /// system (no plist yet).
 pub fn uninstall(plist: &DaemonPlist) -> Result<(), String> {

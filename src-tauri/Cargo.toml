@@ -1,6 +1,6 @@
 [package]
 name = "k2so"
-version = "0.32.13"
+version = "0.33.0-rc1"
 edition = "2021"
 description = "Developer workspace with terminals, git worktrees, and agent presets"
 license = "MIT"
@@ -19,7 +19,7 @@ path = "src/main.rs"
 # companion, scheduler, agent_hooks, push_adapter as modules migrate in).
 k2so-core = { path = "../crates/k2so-core" }
 
-tauri = { version = "2", features = ["protocol-asset", "macos-private-api", "tray-icon"] }
+tauri = { version = "2", features = ["protocol-asset", "macos-private-api", "tray-icon", "image-png"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"

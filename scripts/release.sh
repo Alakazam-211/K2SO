@@ -78,7 +78,10 @@ cd "$PROJECT_DIR"
 echo ""
 echo "Step 1: Bumping version to ${VERSION}..."
 sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"${VERSION}\"/" package.json src-tauri/tauri.conf.json
-sed -i '' "s/^version = \"[^\"]*\"/version = \"${VERSION}\"/" src-tauri/Cargo.toml
+sed -i '' "s/^version = \"[^\"]*\"/version = \"${VERSION}\"/" \
+    src-tauri/Cargo.toml \
+    crates/k2so-core/Cargo.toml \
+    crates/k2so-daemon/Cargo.toml
 sed -i '' "s/K2SO_CLI_VERSION=\"[^\"]*\"/K2SO_CLI_VERSION=\"${VERSION}\"/" cli/k2so
 echo "  Done."
 

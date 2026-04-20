@@ -175,20 +175,25 @@ pub fn daemon_log_path() -> Result<String, String> {
     Ok(dir.join("daemon.stdout.log").to_string_lossy().to_string())
 }
 
-/// Read the "keep daemon running when K2SO quits" preference.
-/// Defaults to `true` — persistent agents are the 0.33.0 flagship
-/// feature, so the default respects that. The Settings pane toggles
-/// this; `RunEvent::ExitRequested` honors it on Cmd+Q.
+/// Read the "keep daemon running when K2SO quits" preference. Reads
+/// from `~/.k2so/settings.json` via the same `read_settings()` path
+/// the rest of the Settings toggles use. Defaults to `true` —
+/// persistent agents are the 0.33.0 flagship feature, so the default
+/// respects that.
 #[tauri::command]
 pub fn get_keep_daemon_on_quit() -> bool {
-    k2so_core::agents::settings::get_keep_daemon_on_quit()
+    crate::commands::settings::read_settings().keep_daemon_on_quit
 }
 
 /// Update the "keep daemon running when K2SO quits" preference.
-/// Backs the Settings pane toggle. Persisted to `app_settings`.
+/// Writes through the same JSON file the rest of the app uses so
+/// everything stays in one place.
 #[tauri::command]
 pub fn set_keep_daemon_on_quit(keep: bool) -> Result<(), String> {
-    k2so_core::agents::settings::set_keep_daemon_on_quit(keep)
+    let mut settings = crate::commands::settings::read_settings();
+    settings.keep_daemon_on_quit = keep;
+    crate::commands::settings::write_settings(&settings);
+    Ok(())
 }
 
 /// Return the last N lines of the daemon's stdout log. Defaults to

@@ -2899,7 +2899,7 @@ dependencies = [
 
 [[package]]
 name = "k2so"
-version = "0.32.13"
+version = "0.33.0-rc1"
 dependencies = [
  "ahash",
  "alacritty_terminal",
@@ -2958,7 +2958,7 @@ dependencies = [
 
 [[package]]
 name = "k2so-core"
-version = "0.33.0-dev"
+version = "0.33.0-rc1"
 dependencies = [
  "alacritty_terminal",
  "argon2",
@@ -2994,7 +2994,7 @@ dependencies = [
 
 [[package]]
 name = "k2so-daemon"
-version = "0.33.0-dev"
+version = "0.33.0-rc1"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -5888,6 +5888,7 @@ dependencies = [
  "heck 0.5.0",
  "http",
  "http-range",
+ "image",
  "jni",
  "libc",
  "log",

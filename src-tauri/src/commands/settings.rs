@@ -136,6 +136,8 @@ pub struct AppSettings {
     pub timer: TimerSettings,
     #[serde(default)]
     pub agentic_systems_enabled: bool,
+    #[serde(default = "default_true")]
+    pub keep_daemon_on_quit: bool,
     #[serde(default)]
     pub claude_auth_auto_refresh: bool,
     #[serde(default)]
@@ -342,6 +344,7 @@ impl Default for AppSettings {
             ai_assistant_enabled: false,
             timer: TimerSettings::default(),
             agentic_systems_enabled: false,
+            keep_daemon_on_quit: true,
             claude_auth_auto_refresh: false,
             last_active_project_id: None,
             last_active_workspace_id: None,
@@ -420,7 +423,7 @@ pub(crate) fn read_settings() -> AppSettings {
     }
 }
 
-fn write_settings(settings: &AppSettings) {
+pub(crate) fn write_settings(settings: &AppSettings) {
     ensure_dir();
     let file = settings_file();
     let tmp = file.with_extension("json.tmp");

@@ -14,8 +14,8 @@ export const GENERAL_MANIFEST: SettingEntry[] = [
   { id: 'general.cli-version', section: 'general', label: 'CLI Version', description: 'Installed k2so CLI version + install/update button', keywords: ['k2so', 'cli', 'terminal', 'install', 'update', 'path'] },
   { id: 'general.agentic-systems', section: 'general', label: 'Agentic Systems', description: 'Enable AI agent orchestration, workspace manager, heartbeat, review queue', keywords: ['ai', 'agent', 'agentic', 'heartbeat', 'manager', 'workspace states', 'review', 'beta'] },
   { id: 'general.claude-auth-refresh', section: 'general', label: 'Auto-refresh Claude credentials', description: 'Background scheduler that keeps your Claude session alive', keywords: ['claude', 'auth', 'token', 'login', 'credentials', 'scheduler'] },
-  { id: 'general.daemon', section: 'general', label: 'K2SO Daemon', description: 'Background service that keeps agents running when the app is closed', keywords: ['daemon', 'background', 'launchd', 'persistent', 'lid', 'sleep', 'wake', 'agent'] },
-  { id: 'general.keep-daemon-on-quit', section: 'general', label: 'Keep daemon running when K2SO quits', description: 'When on, Cmd+Q leaves the daemon running so agents continue. When off, quit stops everything.', keywords: ['daemon', 'quit', 'cmd+q', 'background', 'persistent'] },
+  { id: 'general.daemon', section: 'general', label: 'K2SO Server', description: 'Background service that keeps agents running when the app is closed', keywords: ['server', 'daemon', 'background', 'launchd', 'persistent', 'lid', 'sleep', 'wake', 'agent'] },
+  { id: 'general.keep-daemon-on-quit', section: 'general', label: 'Keep server running when the window is closed', description: 'When on, clicking the red close button hides the window and keeps the Agent & Companion server running. When off, the red button stops everything. Cmd+Q always closes everything.', keywords: ['daemon', 'server', 'agent', 'companion', 'close', 'red button', 'window', 'hide', 'background', 'persistent'] },
   { id: 'general.ai-assistant', section: 'general', label: 'AI Workspace Assistant', description: 'Local LLM for natural-language workspace operations (⌘L)', keywords: ['ai', 'assistant', 'llm', 'cmd+l', 'qwen', 'model', 'local', 'gguf'] },
   { id: 'general.model-status', section: 'general', label: 'Model Status', description: 'Current local LLM load state', keywords: ['model', 'llm', 'loaded', 'download'] },
   { id: 'general.download-model', section: 'general', label: 'Download Default Model', description: 'Fetch Qwen2.5-1.5B locally (~1.1GB)', keywords: ['download', 'model', 'qwen', 'local llm'] },
@@ -353,9 +353,8 @@ function formatUptime(secs: number): string {
 
 function DaemonRow(): React.JSX.Element {
   const [status, setStatus] = useState<DaemonStatusState | null>(null)
-  const [busy, setBusy] = useState<null | 'install' | 'uninstall' | 'restart'>(null)
+  const [busy, setBusy] = useState<null | 'install' | 'restart'>(null)
   const [error, setError] = useState<string | null>(null)
-  const [confirmingUninstall, setConfirmingUninstall] = useState(false)
   const [showingLog, setShowingLog] = useState(false)
   const [logText, setLogText] = useState<string>('')
 
@@ -382,20 +381,6 @@ function DaemonRow(): React.JSX.Element {
     setError(null)
     try {
       await invoke<string>('daemon_install')
-      await refresh()
-    } catch (e) {
-      setError(String(e))
-    } finally {
-      setBusy(null)
-    }
-  }, [refresh])
-
-  const handleUninstall = useCallback(async () => {
-    setBusy('uninstall')
-    setError(null)
-    try {
-      await invoke('daemon_uninstall')
-      setConfirmingUninstall(false)
       await refresh()
     } catch (e) {
       setError(String(e))
@@ -438,23 +423,26 @@ function DaemonRow(): React.JSX.Element {
 
   const statusText = (() => {
     if (!status) return 'Loading...'
-    if (status.state === 'running') {
-      return `Running (PID ${status.pid}, up ${formatUptime(status.uptime_secs)})`
-    }
+    if (status.state === 'running') return 'Running'
     if (status.state === 'not_installed') return 'Not installed'
     return 'Installed but unreachable'
   })()
 
+  const runtimeText =
+    status?.state === 'running'
+      ? `PID ${status.pid}, up ${formatUptime(status.uptime_secs)}`
+      : null
+
   return (
     <div className="py-2 border-b border-[var(--color-border)]">
-      <div className="flex items-center justify-between">
-        <div className="flex flex-col">
-          <span className="text-xs text-[var(--color-text-secondary)]">K2SO Daemon</span>
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex flex-col min-w-0 flex-1">
+          <span className="text-xs text-[var(--color-text-secondary)]">K2SO Server</span>
           <span className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
-            Keeps agents running when the app is closed
+            Keeps agents, terminals, heartbeats, &amp; companion app service running when the app is closed
           </span>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-shrink-0">
           <div className="flex items-center gap-1.5">
             <span className="w-1.5 h-1.5 flex-shrink-0" style={{ backgroundColor: dotColor }} />
             <span className="text-xs text-[var(--color-text-muted)]">{statusText}</span>
@@ -489,7 +477,7 @@ function DaemonRow(): React.JSX.Element {
         </div>
       </div>
 
-      {/* Secondary row — log + uninstall affordances only shown when installed */}
+      {/* Secondary row — View log + runtime details when installed */}
       {status && status.state !== 'not_installed' && (
         <div className="flex items-center gap-3 mt-1.5 pl-0">
           <button
@@ -498,30 +486,8 @@ function DaemonRow(): React.JSX.Element {
           >
             View log
           </button>
-          {confirmingUninstall ? (
-            <>
-              <span className="text-[10px] text-red-400">Remove the launch agent?</span>
-              <button
-                onClick={handleUninstall}
-                disabled={busy !== null}
-                className="px-2 py-0.5 text-[10px] bg-red-500/20 text-red-400 border border-red-500/40 hover:bg-red-500/30 no-drag cursor-pointer disabled:opacity-50"
-              >
-                {busy === 'uninstall' ? 'Removing...' : 'Confirm'}
-              </button>
-              <button
-                onClick={() => setConfirmingUninstall(false)}
-                className="px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] no-drag cursor-pointer"
-              >
-                Cancel
-              </button>
-            </>
-          ) : (
-            <button
-              onClick={() => setConfirmingUninstall(true)}
-              className="text-[10px] text-[var(--color-text-muted)] underline hover:text-red-400 transition-colors no-drag cursor-pointer"
-            >
-              Uninstall daemon
-            </button>
+          {runtimeText && (
+            <span className="text-[10px] text-[var(--color-text-muted)]">{runtimeText}</span>
           )}
         </div>
       )}
@@ -591,12 +557,12 @@ function KeepDaemonOnQuitRow(): React.JSX.Element {
     <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
       <div className="flex-1 min-w-0 mr-3">
         <span className="text-xs text-[var(--color-text-secondary)]">
-          Keep daemon running when K2SO quits
+          Keep server running when the window is closed
         </span>
         <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
           {keep
-            ? 'Cmd+Q quits the window; agents keep running. Menu bar icon shows status.'
-            : 'Cmd+Q stops the daemon too. Agents won\u2019t fire in the background.'}
+            ? 'Red close button hides the window; agents keep working and the mobile companion stays reachable. Menu bar shows status. Cmd+Q closes everything.'
+            : 'Red close button stops everything, same as Cmd+Q. Agents pause and the mobile companion disconnects until you reopen K2SO.'}
         </p>
       </div>
       <button

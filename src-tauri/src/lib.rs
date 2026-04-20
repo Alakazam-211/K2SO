@@ -390,6 +390,35 @@ pub fn run() {
                 }
             });
 
+            // Autostart: on every Tauri launch (not just first-install
+            // migration), make sure the daemon plist is loaded. Covers
+            // the case where the user red-buttoned with "keep server
+            // running" OFF (which unloads the plist) and then relaunched
+            // the app — they expect the daemon to be back without having
+            // to click "Restart" in Settings. Fires regardless of the
+            // toggle, in both debug and release builds.
+            perf_timer!("startup_ensure_daemon_loaded", {
+                let plist = k2so_core::wake::DaemonPlist::canonical(
+                    std::path::PathBuf::from("/unused"),
+                );
+                match k2so_core::wake::ensure_loaded(&plist) {
+                    Ok(k2so_core::wake::LoadOutcome::AlreadyLoaded) => {
+                        log_debug!("[k2so] daemon already loaded in launchctl");
+                    }
+                    Ok(k2so_core::wake::LoadOutcome::Loaded) => {
+                        log_debug!("[k2so] daemon plist loaded (was unloaded)");
+                    }
+                    Ok(k2so_core::wake::LoadOutcome::NotInstalled) => {
+                        log_debug!(
+                            "[k2so] daemon plist not installed — install migration will handle it"
+                        );
+                    }
+                    Err(e) => {
+                        log_debug!("[k2so] daemon autostart failed: {e}");
+                    }
+                }
+            });
+
             // SKILL.md regeneration for all workspaces. 0.32.13 changes:
             //
             // 1. Version gate — only regen when the project's last-regen
@@ -502,22 +531,45 @@ pub fn run() {
                 let win_for_hide = win.clone();
                 win.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        // Keep the process alive if any project has heartbeat
-                        // enabled — otherwise autonomous wakes can't fire
-                        // when the user closes the window. This matches
-                        // the "always-on" pattern used by Slack/1Password
-                        // and makes K2SO actually autonomous.
+                        // Red close-button behavior is controlled by
+                        // the "Keep Agent & Companion server running
+                        // when K2SO quits" preference:
                         //
-                        // Users with no heartbeat-enabled projects get the
-                        // normal "red button quits" behavior. Cmd+Q always
-                        // quits regardless (NSApplication terminate: goes
-                        // straight to RunEvent::Exit, not here).
-                        if any_heartbeat_enabled() {
+                        //   ON  → hide the window, keep Tauri + server
+                        //         alive. Menubar icon stays visible so
+                        //         the user can see what's still running.
+                        //         Full quit happens only via Cmd+Q or
+                        //         the menubar "Quit K2SO" item.
+                        //   OFF → behave like a normal app quit: tear
+                        //         down in-app companion + daemon plist
+                        //         (if installed), then proceed to
+                        //         destroy.
+                        //
+                        // Cmd+Q is deliberately NOT routed through here
+                        // (NSApplication terminate: goes straight to
+                        // RunEvent::ExitRequested) — it always closes
+                        // everything regardless of the toggle.
+                        let keep_running =
+                            commands::settings::read_settings().keep_daemon_on_quit;
+                        if keep_running {
                             window::save_window_state(&app_handle);
                             api.prevent_close();
                             let _ = win_for_hide.hide();
-                            log_debug!("[window] Close intercepted — process staying alive for heartbeat agents");
+                            log_debug!("[window] Close intercepted — keeping server alive per settings");
                             return;
+                        }
+                        // Toggle OFF — user wants red-dot to take
+                        // everything down. Unload the daemon plist (if
+                        // installed) so launchd stops respawning it,
+                        // then fall through to the normal cleanup +
+                        // destroy path below.
+                        let plist = k2so_core::wake::DaemonPlist::canonical(
+                            std::path::PathBuf::from("/unused"),
+                        );
+                        if let Some(path) = plist.plist_path() {
+                            if path.exists() {
+                                let _ = k2so_core::wake::launchctl_unload(&path);
+                            }
                         }
                         window::save_window_state(&app_handle);
 
@@ -1230,35 +1282,27 @@ pub fn run() {
         })
         .run(|app, event| {
             match event {
-                // Cmd+Q / File → Quit / NSApplication terminate: —
-                // fires BEFORE the actual exit. Read the user's
-                // "keep_daemon_on_quit" preference and either (a)
-                // leave the daemon running (user wants persistent
-                // agents, default), or (b) unload the plist so
-                // launchd stops re-spawning it. No modal prompt —
-                // silent + predictable. The menubar icon shows the
-                // user what's still running after quit so the "ON"
-                // default doesn't hide a mystery process.
+                // Cmd+Q / File → Quit / Menubar "Quit K2SO" /
+                // NSApplication terminate: all land here. Semantic
+                // choice ratified with rosson: these always kill
+                // everything, regardless of the keep-running toggle.
+                // That toggle ONLY controls the red close-button
+                // behavior (handled in on_window_event above).
+                //
+                // So: unconditionally unload the daemon plist (if
+                // installed), then let exit proceed. The in-app
+                // companion server dies with the Tauri process.
                 tauri::RunEvent::ExitRequested { .. } => {
-                    let keep_running =
-                        k2so_core::agents::settings::get_keep_daemon_on_quit();
-                    if !keep_running {
-                        let plist = k2so_core::wake::DaemonPlist::canonical(
-                            std::path::PathBuf::from("/unused"),
-                        );
-                        if let Some(path) = plist.plist_path() {
-                            if path.exists() {
-                                // Best-effort unload; errors swallowed
-                                // because the user asked to quit and
-                                // we shouldn't block on a hung
-                                // launchctl.
-                                let _ = k2so_core::wake::launchctl_unload(&path);
-                            }
+                    let plist = k2so_core::wake::DaemonPlist::canonical(
+                        std::path::PathBuf::from("/unused"),
+                    );
+                    if let Some(path) = plist.plist_path() {
+                        if path.exists() {
+                            // Best-effort — errors swallowed so a
+                            // hung launchctl can't block the quit.
+                            let _ = k2so_core::wake::launchctl_unload(&path);
                         }
                     }
-                    // Always let the exit proceed. The daemon either
-                    // keeps running under launchd (ON) or was told to
-                    // unload above (OFF).
                 }
                 tauri::RunEvent::Exit => {
                     if RELAUNCH_MODE.load(std::sync::atomic::Ordering::Relaxed) {
