@@ -970,6 +970,167 @@ else:
 " 2>/dev/null || echo "$raw"
 }
 
+# ── Daemon lifecycle ─────────────────────────────────────────────────
+# These verbs wrap `launchctl` directly because the daemon might not be
+# running when they're invoked (so we can't go through its HTTP surface).
+# `install` / `uninstall` live in the Tauri app's Settings pane — we do
+# NOT duplicate that wiring here; the CLI only does start/stop/restart
+# against an already-installed plist.
+
+_daemon_label="com.k2so.k2so-daemon"
+_daemon_plist="$HOME/Library/LaunchAgents/${_daemon_label}.plist"
+_daemon_port_file="$HOME/.k2so/daemon.port"
+_daemon_token_file="$HOME/.k2so/daemon.token"
+_daemon_stdout_log="$HOME/.k2so/daemon.stdout.log"
+
+cmd_daemon_status() {
+    local as_json=0
+    [ "${1:-}" = "--json" ] && as_json=1
+
+    local installed="no"
+    [ -f "$_daemon_plist" ] && installed="yes"
+
+    # launchctl `print` returns info on the loaded service, including
+    # the PID when it's running. Extract just the PID for a clean one-
+    # line summary.
+    local uid pid="" running="no" last_exit_code=""
+    uid=$(id -u)
+    local print_output
+    print_output=$(launchctl print "gui/${uid}/${_daemon_label}" 2>/dev/null || true)
+    if [ -n "$print_output" ]; then
+        pid=$(printf '%s\n' "$print_output" | awk -F'=' '/^\s*pid\s*=/{gsub(/ /,"",$2); print $2; exit}')
+        last_exit_code=$(printf '%s\n' "$print_output" | awk -F'=' '/^\s*last exit code\s*=/{gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2; exit}')
+        [ -n "$pid" ] && [ "$pid" != "0" ] && running="yes"
+    fi
+
+    local port="" token_present="no"
+    [ -f "$_daemon_port_file" ] && port=$(cat "$_daemon_port_file" 2>/dev/null | tr -d '[:space:]')
+    [ -f "$_daemon_token_file" ] && [ -s "$_daemon_token_file" ] && token_present="yes"
+
+    if [ "$as_json" = "1" ]; then
+        printf '{"installed":"%s","running":"%s","pid":"%s","port":"%s","token":"%s","last_exit_code":"%s","plist":"%s","log":"%s"}\n' \
+            "$installed" "$running" "${pid:-}" "${port:-}" "$token_present" "${last_exit_code:-}" "$_daemon_plist" "$_daemon_stdout_log"
+        return 0
+    fi
+
+    echo "K2SO Daemon"
+    echo "  Installed:     $installed  ($_daemon_plist)"
+    echo "  Running:       $running$([ "$running" = "yes" ] && echo "  (PID $pid)")"
+    if [ "$running" = "yes" ]; then
+        [ -n "$port" ] && echo "  Port:          $port"
+        echo "  Auth token:    $([ "$token_present" = "yes" ] && echo "present" || echo "missing")"
+    fi
+    if [ -n "$last_exit_code" ] && [ "$last_exit_code" != "0" ]; then
+        echo "  Last exit code: $last_exit_code  (launchd restarted after a non-zero exit)"
+    fi
+    echo "  Log file:      $_daemon_stdout_log"
+    if [ "$installed" = "no" ]; then
+        echo ""
+        echo "  Daemon plist is not installed. Open K2SO → Settings → General → K2SO Daemon"
+        echo "  to install the launch agent (dev builds require K2SO_INSTALL_DAEMON=1)."
+    fi
+}
+
+cmd_daemon_start() {
+    if [ ! -f "$_daemon_plist" ]; then
+        echo "Daemon plist not installed at $_daemon_plist" >&2
+        echo "Open K2SO → Settings → General → K2SO Daemon → Install." >&2
+        exit 1
+    fi
+    # `launchctl load -w` is persistent across reboots. On an already-
+    # loaded plist it returns a harmless "service already loaded" which
+    # we swallow.
+    local err
+    err=$(launchctl load -w "$_daemon_plist" 2>&1) || true
+    if echo "$err" | grep -q "service already loaded\|Load failed: 37"; then
+        echo "Daemon already running."
+        return 0
+    fi
+    if [ -n "$err" ]; then
+        echo "launchctl load: $err" >&2
+    fi
+    echo "Daemon started."
+}
+
+cmd_daemon_stop() {
+    if [ ! -f "$_daemon_plist" ]; then
+        echo "Daemon plist not installed; nothing to stop."
+        return 0
+    fi
+    local err
+    err=$(launchctl unload -w "$_daemon_plist" 2>&1) || true
+    if echo "$err" | grep -qi "Could not find\|No such"; then
+        echo "Daemon was not running."
+        return 0
+    fi
+    if [ -n "$err" ]; then
+        echo "launchctl unload: $err" >&2
+    fi
+    echo "Daemon stopped."
+}
+
+cmd_daemon_restart() {
+    local uid
+    uid=$(id -u)
+    # `launchctl kickstart -k` sends SIGTERM and respawns (thanks to
+    # KeepAlive=true). Cleaner than unload+load because the plist
+    # config stays untouched.
+    local err
+    err=$(launchctl kickstart -k "gui/${uid}/${_daemon_label}" 2>&1) || true
+    if echo "$err" | grep -qi "Could not find"; then
+        # Fall through to a plain start for users who called `restart`
+        # before the daemon was ever loaded.
+        cmd_daemon_start
+        return $?
+    fi
+    if [ -n "$err" ]; then
+        echo "launchctl kickstart: $err" >&2
+    fi
+    echo "Daemon restarted."
+}
+
+cmd_daemon_log() {
+    local tail_n="200"
+    local follow=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --tail|-n) tail_n="$2"; shift 2 ;;
+            --follow|-f) follow=1; shift ;;
+            *) shift ;;
+        esac
+    done
+    if [ ! -f "$_daemon_stdout_log" ]; then
+        echo "No daemon log yet at $_daemon_stdout_log"
+        return 0
+    fi
+    if [ "$follow" = "1" ]; then
+        tail -n "$tail_n" -f "$_daemon_stdout_log"
+    else
+        tail -n "$tail_n" "$_daemon_stdout_log"
+    fi
+}
+
+cmd_daemon_uninstall() {
+    local force=0
+    [ "${1:-}" = "--yes" ] || [ "${1:-}" = "-y" ] && force=1
+    if [ "$force" != "1" ]; then
+        echo "This will remove the K2SO daemon launch agent and stop the daemon."
+        echo "Your workspace data (~/.k2so/k2so.db, agent files) is preserved."
+        printf "Proceed? [y/N] "
+        read -r answer
+        case "$answer" in
+            y|Y|yes|YES) ;;
+            *) echo "Cancelled."; return 1 ;;
+        esac
+    fi
+    if [ -f "$_daemon_plist" ]; then
+        launchctl unload -w "$_daemon_plist" 2>/dev/null || true
+        rm -f "$_daemon_plist"
+    fi
+    rm -f "$_daemon_port_file" "$_daemon_token_file"
+    echo "Daemon uninstalled."
+}
+
 cmd_reviews() {
     cli_request "/cli/reviews" | python3 -c "
 import json, sys
@@ -2398,6 +2559,17 @@ case "${1:-help}" in
             echo "Usage: k2so hooks status [--limit N] [--json]" >&2
             exit 1
         fi
+        ;;
+    daemon)
+        case "${2:-status}" in
+            status)    shift 2; cmd_daemon_status "$@" ;;
+            start)     shift 2; cmd_daemon_start "$@" ;;
+            stop)      shift 2; cmd_daemon_stop "$@" ;;
+            restart)   shift 2; cmd_daemon_restart "$@" ;;
+            log|logs)  shift 2; cmd_daemon_log "$@" ;;
+            uninstall) shift 2; cmd_daemon_uninstall "$@" ;;
+            *)         echo "Usage: k2so daemon <status|start|stop|restart|log|uninstall>" >&2; exit 1 ;;
+        esac
         ;;
     settings)
         shift; cmd_settings "$@"

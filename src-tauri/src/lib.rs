@@ -1188,8 +1188,14 @@ pub fn run() {
             commands::companion::companion_set_password,
             commands::companion::companion_disconnect_session,
             // k2so-daemon lifecycle (Settings panel reads this to show
-            // "daemon: running / not installed / unreachable").
+            // "daemon: running / not installed / unreachable") and
+            // controls the launch agent install/uninstall/restart.
             commands::daemon::daemon_status,
+            commands::daemon::daemon_install,
+            commands::daemon::daemon_uninstall,
+            commands::daemon::daemon_restart,
+            commands::daemon::daemon_log_path,
+            commands::daemon::daemon_log_tail,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {

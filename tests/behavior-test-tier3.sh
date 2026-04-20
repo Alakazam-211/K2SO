@@ -48,12 +48,23 @@ cat "$PROJECT_ROOT/src-tauri/src/commands/k2so_agents.rs" \
     "$PROJECT_ROOT/crates/k2so-core/src/agents/delegate.rs" \
     "$PROJECT_ROOT/crates/k2so-core/src/agents/workspace_regen.rs" \
     "$PROJECT_ROOT/crates/k2so-core/src/agents/skill_writer.rs" \
+    "$PROJECT_ROOT/crates/k2so-core/src/agents/commands.rs" \
+    "$PROJECT_ROOT/crates/k2so-core/src/agents/channel.rs" \
+    "$PROJECT_ROOT/crates/k2so-core/src/agents/checkin.rs" \
+    "$PROJECT_ROOT/crates/k2so-core/src/agents/connections.rs" \
+    "$PROJECT_ROOT/crates/k2so-core/src/agents/events.rs" \
+    "$PROJECT_ROOT/crates/k2so-core/src/agents/reviews.rs" \
+    "$PROJECT_ROOT/crates/k2so-core/src/agents/settings.rs" \
+    "$PROJECT_ROOT/crates/k2so-core/src/agents/workspaces.rs" \
     > "$HEARTBEAT_SRC" 2>/dev/null
 cp "$HEARTBEAT_SRC" "$AGENTS_SRC"
 
 cat "$PROJECT_ROOT/src-tauri/src/agent_hooks.rs" \
     "$PROJECT_ROOT/crates/k2so-core/src/agent_hooks.rs" \
     "$PROJECT_ROOT/crates/k2so-daemon/src/main.rs" \
+    "$PROJECT_ROOT/crates/k2so-daemon/src/cli.rs" \
+    "$PROJECT_ROOT/crates/k2so-core/src/agents/checkin.rs" \
+    "$PROJECT_ROOT/crates/k2so-core/src/agents/reviews.rs" \
     > "$HOOKS_SRC" 2>/dev/null
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[0;33m'; CYAN='\033[0;36m'; NC='\033[0m'

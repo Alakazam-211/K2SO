@@ -5,6 +5,16 @@
 //! (v0.33.0-dev, uptime 4m)" or "daemon: not installed" without the
 //! frontend needing to know how the daemon is discovered or
 //! authenticated. Wraps `crate::daemon_client::DaemonClient`.
+//!
+//! **Lifecycle commands** (`daemon_install` / `daemon_uninstall` /
+//! `daemon_restart`) wrap `k2so_core::wake` so the Settings pane can
+//! install or remove the launch agent without the frontend knowing
+//! `launchctl` exists. They all delegate to the same `DaemonPlist`
+//! shape used by the first-launch migration in `lib.rs::setup()`, so
+//! there's a single source of truth for what "canonical plist" means.
+
+use std::path::PathBuf;
+use std::process::Command;
 
 use serde::Serialize;
 
@@ -58,6 +68,128 @@ pub fn daemon_status() -> DaemonStatusResponse {
         },
         Err(e) => DaemonStatusResponse::Unreachable { reason: e },
     }
+}
+
+/// Locate the `k2so-daemon` binary bundled next to the current Tauri
+/// executable. Matches the search path used by the first-launch
+/// migration so Install / Reinstall operations agree on which binary
+/// the plist should point at. Returns `Err` if the binary isn't
+/// bundled (common in dev) or if we can't read the current exe path.
+fn locate_bundled_daemon() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("locate Tauri binary: {e}"))?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "Tauri binary has no parent dir".to_string())?;
+    let candidate = dir.join("k2so-daemon");
+    if !candidate.exists() {
+        return Err(format!(
+            "k2so-daemon not found at {} — dev builds don't bundle it; run from a release DMG",
+            candidate.display()
+        ));
+    }
+    Ok(candidate)
+}
+
+/// Install the launch agent plist and load it. Idempotent — an
+/// existing loaded plist with the same label is unloaded first. Safe
+/// to call as "reinstall" to repair a bad plist or a stale binary
+/// path after the user moves K2SO.app.
+///
+/// Returns the plist path on success so the UI can show it in a
+/// "View plist" affordance.
+#[tauri::command]
+pub fn daemon_install() -> Result<String, String> {
+    let daemon_bin = locate_bundled_daemon()?;
+    let plist = k2so_core::wake::DaemonPlist::canonical(daemon_bin);
+    k2so_core::wake::install(&plist)
+        .map(|p| p.to_string_lossy().to_string())
+}
+
+/// Unload the launch agent and delete the plist file. Does NOT delete
+/// the user's `~/.k2so/` data directory — that stays across install
+/// cycles on purpose. Also removes the `daemon.port` / `daemon.token`
+/// files so the frontend's `daemon_status` immediately reports
+/// `NotInstalled` instead of `Unreachable`.
+#[tauri::command]
+pub fn daemon_uninstall() -> Result<(), String> {
+    // Uninstall is always safe — the plist might already be gone,
+    // the daemon might never have been installed, etc. Any of those
+    // paths are success. The only real failure is "can't locate
+    // ~/Library/LaunchAgents" which `wake::uninstall` surfaces.
+    //
+    // We don't need the bundled binary path for uninstall — the
+    // canonical plist builder only uses `program` for `write()`,
+    // and `uninstall()` only cares about `label` + `plist_path()`.
+    // Pass a placeholder so we don't fail on missing binary in dev.
+    let plist = k2so_core::wake::DaemonPlist::canonical(PathBuf::from("/nonexistent-uninstall"));
+    k2so_core::wake::uninstall(&plist)?;
+
+    // Best-effort cleanup of the port/token/log files. Missing files
+    // are fine.
+    if let Some(dir) = dirs::home_dir().map(|h| h.join(".k2so")) {
+        for f in &["daemon.port", "daemon.token"] {
+            let _ = std::fs::remove_file(dir.join(f));
+        }
+    }
+    Ok(())
+}
+
+/// Restart the running daemon in-place without reinstalling the
+/// plist. Uses `launchctl kickstart -k gui/<uid>/<label>` which sends
+/// SIGTERM to the running daemon and lets launchd respawn it (because
+/// `KeepAlive: true`). Preferred over unload+load because the plist
+/// config stays untouched.
+#[tauri::command]
+pub fn daemon_restart() -> Result<(), String> {
+    let uid = unsafe { libc::getuid() };
+    let target = format!("gui/{}/com.k2so.k2so-daemon", uid);
+    let out = Command::new("launchctl")
+        .args(["kickstart", "-k", &target])
+        .output()
+        .map_err(|e| format!("launchctl kickstart: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // "Could not find" means the plist isn't loaded — not an
+        // error state from the user's perspective; they wanted a
+        // restart, the daemon wasn't running, nothing to do.
+        if stderr.contains("Could not find") {
+            return Ok(());
+        }
+        return Err(format!(
+            "launchctl kickstart failed (exit {}): {}",
+            out.status.code().unwrap_or(-1),
+            stderr.trim(),
+        ));
+    }
+    Ok(())
+}
+
+/// Return the path to the daemon's stdout log file, regardless of
+/// whether the daemon is currently running. The frontend uses this
+/// to reveal the file in Finder or tail it via a child process.
+#[tauri::command]
+pub fn daemon_log_path() -> Result<String, String> {
+    let dir = dirs::home_dir()
+        .ok_or_else(|| "home dir unavailable".to_string())?
+        .join(".k2so");
+    Ok(dir.join("daemon.stdout.log").to_string_lossy().to_string())
+}
+
+/// Return the last N lines of the daemon's stdout log. Defaults to
+/// the tail of the file if it's shorter than `lines`.
+#[tauri::command]
+pub fn daemon_log_tail(lines: Option<u32>) -> Result<String, String> {
+    let lines = lines.unwrap_or(200).clamp(1, 5000) as usize;
+    let path_str = daemon_log_path()?;
+    let path = PathBuf::from(&path_str);
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let collected: Vec<&str> = content.lines().collect();
+    let start = collected.len().saturating_sub(lines);
+    Ok(collected[start..].join("\n"))
 }
 
 #[cfg(test)]
