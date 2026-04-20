@@ -7,6 +7,7 @@
 //!
 //! Feature-gated via `#[cfg(feature = "session_stream")]` in `lib.rs`.
 
+pub mod apc;
 pub mod line_mux;
 
 pub use line_mux::LineMux;

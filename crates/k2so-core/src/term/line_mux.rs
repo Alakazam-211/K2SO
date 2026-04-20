@@ -30,7 +30,9 @@ use std::collections::VecDeque;
 
 use vte::{Params, Parser, Perform};
 
+use crate::log_debug;
 use crate::session::{CursorOp, EraseMode, Frame, Line, SeqnoGen, SequenceNo, Style};
+use crate::term::apc::{ApcChunk, ApcEvent, ApcExtractor};
 
 /// Bounded line-oriented terminal multiplexer. Feeds PTY bytes
 /// through a `vte::Parser`; emits `Frame`s and `Line`s into a
@@ -38,6 +40,7 @@ use crate::session::{CursorOp, EraseMode, Frame, Line, SeqnoGen, SequenceNo, Sty
 pub struct LineMux {
     parser: Parser,
     state: PerformState,
+    apc: ApcExtractor,
 }
 
 impl LineMux {
@@ -69,14 +72,38 @@ impl LineMux {
                 current_style: None,
                 cap,
             },
+            apc: ApcExtractor::new(),
         }
     }
 
     /// Feed a chunk of PTY bytes. Returns the frames emitted by this
     /// chunk. Scrollback can be read via `lines()`.
+    ///
+    /// APC sequences in the `k2so:` namespace are extracted *before*
+    /// reaching vte — vte 0.15 silently drops APC content, and APC is
+    /// a K2SO concept anyway — and emitted as `Frame::AgentSignal`
+    /// or `Frame::SemanticEvent` at their correct stream position.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Frame> {
         self.state.frames_out.clear();
-        self.parser.advance(&mut self.state, bytes);
+        let output = self.apc.feed(bytes);
+        for chunk in output.chunks {
+            match chunk {
+                ApcChunk::Bytes(b) => {
+                    self.parser.advance(&mut self.state, &b);
+                }
+                ApcChunk::Event(ApcEvent::Signal(signal)) => {
+                    self.state.flush_pending_text();
+                    self.state.frames_out.push(Frame::AgentSignal(signal));
+                }
+                ApcChunk::Event(ApcEvent::Semantic { kind, payload }) => {
+                    self.state.flush_pending_text();
+                    self.state.frames_out.push(Frame::SemanticEvent { kind, payload });
+                }
+            }
+        }
+        for drop in output.drops {
+            log_debug!("[apc] dropped: {:?}", drop);
+        }
         // Flush any trailing buffered text so callers see it even
         // when the chunk doesn't end on a line or control boundary.
         self.state.flush_pending_text();
