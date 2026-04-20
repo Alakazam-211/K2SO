@@ -8,8 +8,14 @@
 //! grid. The harness-neutral `Frame` and width-free `Line` types
 //! are the vocabulary every consumer speaks.
 //!
-//! Phase 1 (this crate's scope) defines the types. Runtime plumbing
-//! (broadcast channels, replay ring, archive writer) lands in Phase 2.
+//! Phase 1 (commits C1-C6) defined the types. Phase 2 (commits
+//! D1-D7) landed the runtime plumbing: per-session broadcast
+//! channel + replay ring (`entry` / `registry`), dual-emit PTY
+//! reader (`crate::terminal::session_stream_pty`), daemon WS
+//! subscribe endpoint (`crates/k2so-daemon/src/sessions_ws.rs`),
+//! and a smoke-test consumer (`crates/k2so-core/examples/
+//! session_stream_subscribe.rs`). Phase 3 adds the Awareness Bus
+//! routing + archive NDJSON writer.
 
 pub mod entry;
 pub mod frame;
