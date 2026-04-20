@@ -33,6 +33,7 @@ use vte::{Params, Parser, Perform};
 use crate::log_debug;
 use crate::session::{CursorOp, EraseMode, Frame, Line, SeqnoGen, SequenceNo, Style};
 use crate::term::apc::{ApcChunk, ApcEvent, ApcExtractor};
+use crate::term::recognizers::Recognizer;
 
 /// Bounded line-oriented terminal multiplexer. Feeds PTY bytes
 /// through a `vte::Parser`; emits `Frame`s and `Line`s into a
@@ -71,9 +72,19 @@ impl LineMux {
                 seqno_gen,
                 current_style: None,
                 cap,
+                recognizer: None,
             },
             apc: ApcExtractor::new(),
         }
+    }
+
+    /// Attach a per-harness T0.5 recognizer. The recognizer sees
+    /// every committed `Line` and can emit `SemanticEvent` frames
+    /// at the point the line finalizes (i.e. right after the Text
+    /// frame for the line's content).
+    pub fn with_recognizer(mut self, recognizer: Box<dyn Recognizer>) -> Self {
+        self.state.recognizer = Some(recognizer);
+        self
     }
 
     /// Feed a chunk of PTY bytes. Returns the frames emitted by this
@@ -162,6 +173,8 @@ struct PerformState {
     current_style: Option<Style>,
     /// Max scrollback lines to retain.
     cap: usize,
+    /// Optional per-harness recognizer. Sees every committed line.
+    recognizer: Option<Box<dyn Recognizer>>,
 }
 
 impl PerformState {
@@ -179,6 +192,14 @@ impl PerformState {
         self.flush_pending_text();
         let next_seqno = self.seqno_gen.next();
         let completed = std::mem::replace(&mut self.current, Line::new(next_seqno));
+        // Run the optional recognizer BEFORE pushing the line into
+        // scrollback — keeps the borrow scoping simple (frames_out
+        // and lines are both on self) and emits any SemanticEvent
+        // frames right after the Text frame for the line's content.
+        if let Some(recognizer) = self.recognizer.as_mut() {
+            let extra = recognizer.on_line(&completed);
+            self.frames_out.extend(extra);
+        }
         self.lines.push_back(completed);
         while self.lines.len() > self.cap {
             self.lines.pop_front();

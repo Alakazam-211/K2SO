@@ -9,5 +9,7 @@
 
 pub mod apc;
 pub mod line_mux;
+pub mod recognizers;
 
 pub use line_mux::LineMux;
+pub use recognizers::{ClaudeCodeRecognizer, Recognizer};
