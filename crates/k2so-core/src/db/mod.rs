@@ -239,6 +239,7 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
         ("0029_heartbeat_fires_schedule_name", include_str!("../../drizzle_sql/0029_heartbeat_fires_schedule_name.sql")),
         ("0030_code_migrations", include_str!("../../drizzle_sql/0030_code_migrations.sql")),
         ("0031_skill_regen_version", include_str!("../../drizzle_sql/0031_skill_regen_version.sql")),
+        ("0032_add_use_session_stream", include_str!("../../drizzle_sql/0032_add_use_session_stream.sql")),
     ];
 
     for (name, sql) in migrations {

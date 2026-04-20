@@ -29,9 +29,19 @@ pub fn update_project_setting(
         "agent_enabled",
         "pinned",
         "tier_id",
+        // 0.34.0 Session Stream opt-in (Phase 2). Values: 'on' | 'off'.
+        "use_session_stream",
     ];
     if !allowed.contains(&field) {
         return Err(format!("Unknown setting: {}", field));
+    }
+    // Validate value for the new enum-like setting so a typo doesn't
+    // silently leave a project in a broken half-state. Existing fields
+    // keep their bare string/int semantics for back-compat.
+    if field == "use_session_stream" && value != "on" && value != "off" {
+        return Err(format!(
+            "use_session_stream must be 'on' or 'off', got {value:?}"
+        ));
     }
 
     let sql = format!("UPDATE projects SET {} = ?1 WHERE path = ?2", field);
@@ -139,4 +149,24 @@ pub fn set_keep_daemon_on_quit(keep: bool) -> Result<(), String> {
     )
     .map(|_| ())
     .map_err(|e| format!("DB update failed: {}", e))
+}
+
+/// Return `true` if the given project has opted into the 0.34.0
+/// Session Stream pipeline (Phase 2). Defaults to `false` when the
+/// project doesn't exist or the column reads NULL (rows inserted
+/// before migration 0032 applied — the ALTER default backfills to
+/// 'off', so NULL here means "unknown project").
+///
+/// Callers pair this with the compile-time `session_stream` feature
+/// flag: both must be true for the dual-emit reader to kick in.
+pub fn get_use_session_stream(project_path: &str) -> bool {
+    let db = crate::db::shared();
+    let conn = db.lock();
+    conn.query_row(
+        "SELECT use_session_stream FROM projects WHERE path = ?1",
+        rusqlite::params![project_path],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .map(|v| v.as_deref() == Some("on"))
+    .unwrap_or(false)
 }
