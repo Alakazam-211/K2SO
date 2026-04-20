@@ -1,16 +1,21 @@
 //! Awareness Bus primitive — cross-agent signals.
 //!
 //! Primitive B from `.k2so/prds/session-stream-and-awareness-bus.md`.
-//! Phase 1 (this commit) defines the types. Routing, filesystem
-//! egress (Pi-Messenger-style atomic-rename inbox at
-//! `.k2so/awareness/inbox/<agent>/*.json`), and the hot-path broadcast
-//! channel all land in Phase 3.
+//! Phase 1 C3 shipped the types; Phase 3 E1-E8 layers the runtime
+//! (bus singleton, filesystem inbox, routing, egress composer,
+//! daemon endpoints, CLI verbs).
 //!
 //! The wire model: agents emit `AgentSignal`s through one of three
 //! ingress paths (APC escape in a session, `k2so msg` CLI, extension-
-//! pack in-process emit) and subscribers receive them at the target
-//! inbox. `SignalKind` is deliberately small — five variants plus a
-//! `Custom` escape hatch — to keep the agent-facing vocabulary tight.
+//! pack in-process emit). Each signal carries a `Delivery` field the
+//! sender picks — `Live` (real-time peer-to-peer, 1-on-1 semantics)
+//! or `Inbox` (intentional async, email semantics). `SignalKind` is
+//! deliberately small — five variants plus a `Custom` escape hatch —
+//! to keep the agent-facing vocabulary tight.
+
+pub mod bus;
+
+pub use bus::{publish, subscribe, subscriber_count, BUS_CAP};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
