@@ -124,6 +124,7 @@ fn agent_signal_round_trips_with_all_optional_fields() {
             text: "coordination check".into(),
         },
         priority: Priority::High,
+        delivery: k2so_core::awareness::Delivery::default(),
         reply_to: Some(SignalId::new()),
         at: Utc::now(),
     };

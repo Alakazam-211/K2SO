@@ -15,8 +15,12 @@
 
 pub mod bus;
 pub mod inbox;
+pub mod roster;
+pub mod routing;
 
 pub use bus::{publish, subscribe, subscriber_count, BUS_CAP};
+pub use roster::{AgentInfo, RosterFilter, RosterState};
+pub use routing::{resolve, resolve_for_agent, DeliveryPlan, TargetState};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -145,8 +149,37 @@ pub enum TaskPhase {
     Blocked,
 }
 
-/// A cross-agent signal. Phase 1 POD — no routing, just the wire
-/// format. Phase 3 adds the bus + filesystem-backed durability.
+/// Per-signal delivery mode. The sender picks based on intent —
+/// see the Phase 3 plan's egress matrix for full semantics.
+///
+/// - `Live` is the "1-on-1 conversation" path: target sees it
+///   immediately via PTY-inject (if running) or wake+inject (if
+///   offline). Use when the message is time-sensitive and the
+///   sender wants the target to react now.
+/// - `Inbox` is the "email / notice" path: atomic-rename file
+///   lands in the target's inbox; no PTY-inject, no wake. Target
+///   reads on their own schedule. Use for FYIs, status updates,
+///   things that can wait.
+///
+/// Default is `Live`. Callers who want the async/notice path must
+/// opt in explicitly — a deliberately stronger default than
+/// "whichever is easier" so peer-to-peer stays the norm.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[non_exhaustive]
+#[serde(rename_all = "lowercase")]
+pub enum Delivery {
+    #[default]
+    Live,
+    Inbox,
+}
+
+/// A cross-agent signal. Phase 1 POD — Phase 3 E3 adds the
+/// `delivery` field so senders can pick Live (1-on-1) vs Inbox
+/// (email) semantics. `#[serde(default)]` on delivery makes the
+/// addition backwards-compatible: old JSON without the field
+/// decodes with `delivery: Live` (the default).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentSignal {
     pub id: SignalId,
@@ -159,6 +192,10 @@ pub struct AgentSignal {
     pub kind: SignalKind,
     #[serde(default)]
     pub priority: Priority,
+    /// Delivery mode. `Live` (default) = real-time peer-to-peer.
+    /// `Inbox` = intentional async / notice. See `Delivery` docs.
+    #[serde(default)]
+    pub delivery: Delivery,
     /// For reply chains. `None` for first emission of a conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<SignalId>,
@@ -166,7 +203,7 @@ pub struct AgentSignal {
 }
 
 impl AgentSignal {
-    /// Fresh signal with a random id and `at = now`.
+    /// Fresh signal with default Live delivery, random id, `at = now`.
     pub fn new(from: AgentAddress, to: AgentAddress, kind: SignalKind) -> Self {
         Self {
             id: SignalId::new(),
@@ -175,8 +212,18 @@ impl AgentSignal {
             to,
             kind,
             priority: Priority::default(),
+            delivery: Delivery::default(),
             reply_to: None,
             at: Utc::now(),
         }
+    }
+
+    /// Builder-style opt-in for Inbox delivery. Most callers should
+    /// reach for this only when they've specifically decided that
+    /// the message can wait — use of the default `Live` stays the
+    /// norm for 1-on-1 agent conversations.
+    pub fn with_delivery(mut self, delivery: Delivery) -> Self {
+        self.delivery = delivery;
+        self
     }
 }

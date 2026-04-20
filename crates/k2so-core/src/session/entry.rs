@@ -43,6 +43,11 @@ pub struct SessionEntry {
     pub replay: Arc<Mutex<VecDeque<Frame>>>,
     /// Max size of the replay ring. Trimmed front-first on overflow.
     replay_cap: usize,
+    /// Optional agent name the session belongs to. Set when the
+    /// session is spawned for a specific agent (0.34.0 Phase 3
+    /// onward). Anonymous sessions (one-off debugging, test
+    /// fixtures) leave this `None`; roster queries skip them.
+    agent_name: Mutex<Option<String>>,
 }
 
 impl SessionEntry {
@@ -60,7 +65,20 @@ impl SessionEntry {
             tx,
             replay: Arc::new(Mutex::new(VecDeque::with_capacity(replay_cap))),
             replay_cap,
+            agent_name: Mutex::new(None),
         }
+    }
+
+    /// Tag this session with the agent it represents. Idempotent —
+    /// second call overwrites; useful if a session rebinds to a
+    /// different agent (rare but not forbidden).
+    pub fn set_agent_name(&self, name: impl Into<String>) {
+        *self.agent_name.lock() = Some(name.into());
+    }
+
+    /// Read the current agent-name binding, if any.
+    pub fn agent_name(&self) -> Option<String> {
+        self.agent_name.lock().clone()
     }
 
     /// Publish a frame. Durably appended to the replay ring first,

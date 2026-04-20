@@ -319,6 +319,12 @@ fn dispatch_verb(verb: &str, value: Value) -> Result<ApcEvent, DispatchErr> {
 /// Wrap a `SignalKind` into a complete `AgentSignal` with `from` and
 /// `session` left as routing placeholders. The Phase 3 routing layer
 /// enriches these from session context before egress.
+///
+/// Delivery defaults to `Live` — APC-emitted signals expect
+/// real-time peer-to-peer by default. Senders who want inbox
+/// semantics can override via the APC payload's `"delivery":"inbox"`
+/// field (parsed in the verb dispatcher), but we haven't threaded
+/// that through here yet — E5 adds it when wiring APC ingress.
 fn new_signal(to: AgentAddress, kind: SignalKind) -> AgentSignal {
     AgentSignal {
         id: SignalId::new(),
@@ -327,6 +333,7 @@ fn new_signal(to: AgentAddress, kind: SignalKind) -> AgentSignal {
         to,
         kind,
         priority: Priority::default(),
+        delivery: crate::awareness::Delivery::default(),
         reply_to: None,
         at: Utc::now(),
     }
