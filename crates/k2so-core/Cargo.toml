@@ -37,8 +37,9 @@ serde_json = "1"
 # Time handling in the activity feed + heartbeat audit rows.
 chrono = { version = "0.4", features = ["serde"] }
 
-# UUIDs for agent sessions, heartbeat fires, etc.
-uuid = { version = "1", features = ["v4"] }
+# UUIDs for agent sessions, heartbeat fires, etc. `serde` enables
+# Serialize/Deserialize impls used by session::SessionId (0.34.0).
+uuid = { version = "1", features = ["v4", "serde"] }
 
 # Home-directory lookup for ~/.k2so/k2so.db.
 dirs = "5"

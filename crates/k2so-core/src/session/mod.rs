@@ -1,15 +1,20 @@
-//! Session primitive (Phase 1 scaffolding).
+//! Session primitive — the atom of the 0.34.0 Session Stream.
 //!
-//! This module hosts the primitive-A types from the Session Stream PRD
-//! (`.k2so/prds/session-stream-and-awareness-bus.md`): `Frame`, `Line`,
-//! `SemanticKind`, `Session`. Types land in C2; this file is just the
-//! module root so downstream commits have a home to add to.
+//! This is primitive A from the PRD at
+//! `.k2so/prds/session-stream-and-awareness-bus.md`. A session here
+//! is a typed event stream owned by the daemon with many producers
+//! and many consumers — the unit that lets multiple devices view the
+//! same session at their own width without fighting over a shared
+//! grid. The harness-neutral `Frame` and width-free `Line` types
+//! are the vocabulary every consumer speaks.
 //!
-//! The whole module sits behind `#[cfg(feature = "session_stream")]` in
-//! `lib.rs`. Flag off → module doesn't compile in; zero impact on the
-//! alacritty-backed terminal path.
+//! Phase 1 (this crate's scope) defines the types. Runtime plumbing
+//! (broadcast channels, replay ring, archive writer) lands in Phase 2.
 
-/// Module presence marker. Used by the scaffold test to prove the
-/// feature-gated module is reachable. Later commits will delete this
-/// once real public items exist.
-pub const VERSION: &str = "0.34.0-phase1";
+pub mod frame;
+pub mod line;
+pub mod types;
+
+pub use frame::{CursorOp, EraseMode, Frame, SemanticKind, Style};
+pub use line::{Line, SeqnoGen, SequenceNo};
+pub use types::{HarnessKind, Session, SessionId};
