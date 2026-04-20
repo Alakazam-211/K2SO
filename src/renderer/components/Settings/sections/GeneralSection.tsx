@@ -563,16 +563,18 @@ function DaemonRow(): React.JSX.Element {
 // Both check the same setting via `get_keep_daemon_on_quit`.
 
 function KeepDaemonOnQuitRow(): React.JSX.Element {
-  const [keep, setKeep] = useState<boolean | null>(null)
+  // Default `true` so the UI renders immediately without a null gate;
+  // the real value arrives in the next tick from invoke() and either
+  // matches or flips.
+  const [keep, setKeep] = useState<boolean>(true)
 
   useEffect(() => {
     invoke<boolean>('get_keep_daemon_on_quit')
-      .then(setKeep)
+      .then((v) => setKeep(v))
       .catch((e) => console.warn('[keep-daemon-on-quit]', e))
   }, [])
 
-  const handleToggle = useCallback(async () => {
-    if (keep === null) return
+  const toggle = async (): Promise<void> => {
     const next = !keep
     setKeep(next) // optimistic
     try {
@@ -581,33 +583,43 @@ function KeepDaemonOnQuitRow(): React.JSX.Element {
       console.error('[keep-daemon-on-quit]', e)
       setKeep(!next) // revert
     }
-  }, [keep])
+  }
 
+  // Styling copies AgenticSystemsToggle so every toggle in Settings
+  // has the same physical footprint (36x20 track, 16x16 thumb).
   return (
     <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
-      <div className="flex flex-col mr-4">
+      <div className="flex-1 min-w-0 mr-3">
         <span className="text-xs text-[var(--color-text-secondary)]">
           Keep daemon running when K2SO quits
         </span>
-        <span className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
-          {keep === false
-            ? 'Cmd+Q stops the daemon too. Agents won\u2019t fire in the background.'
-            : 'Cmd+Q quits the window; agents keep running. Menu bar icon shows status.'}
-        </span>
+        <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
+          {keep
+            ? 'Cmd+Q quits the window; agents keep running. Menu bar icon shows status.'
+            : 'Cmd+Q stops the daemon too. Agents won\u2019t fire in the background.'}
+        </p>
       </div>
       <button
-        onClick={handleToggle}
-        disabled={keep === null}
-        className={`relative inline-flex h-5 w-9 items-center transition-colors no-drag cursor-pointer disabled:opacity-50 ${
-          keep ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
-        }`}
-        role="switch"
-        aria-checked={keep ?? false}
+        onClick={toggle}
+        className="no-drag cursor-pointer flex-shrink-0 relative"
+        style={{
+          width: 36,
+          height: 20,
+          backgroundColor: keep ? 'var(--color-accent)' : '#333',
+          border: 'none',
+          transition: 'background-color 150ms',
+        }}
       >
         <span
-          className={`inline-block h-3 w-3 transform bg-white transition-transform ${
-            keep ? 'translate-x-5' : 'translate-x-1'
-          }`}
+          style={{
+            position: 'absolute',
+            top: 2,
+            left: keep ? 18 : 2,
+            width: 16,
+            height: 16,
+            backgroundColor: '#fff',
+            transition: 'left 150ms',
+          }}
         />
       </button>
     </div>
