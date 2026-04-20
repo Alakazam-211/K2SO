@@ -25,6 +25,13 @@ impl SessionId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
+
+    /// Parse from a UUID string. Returns `None` on malformed input
+    /// — callers log / 400 / ignore as appropriate. Keeps the uuid
+    /// crate out of downstream callers' dep graphs.
+    pub fn parse(s: &str) -> Option<Self> {
+        Uuid::parse_str(s).ok().map(Self)
+    }
 }
 
 impl Default for SessionId {

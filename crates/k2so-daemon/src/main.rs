@@ -28,6 +28,7 @@
 
 mod cli;
 mod events;
+mod sessions_ws;
 
 use std::fs;
 use std::io::Write;
@@ -315,6 +316,26 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             }
             let body = k2so_core::agent_hooks::handle_hook_complete(&params);
             send_response(&mut stream, "200 OK", "application/json", body).await;
+        }
+        // Session Stream WS subscribe endpoint (0.34.0 Phase 2).
+        // Lives on a /cli/ path but routes to the WS handler rather
+        // than cli::dispatch because it's an HTTP upgrade, not a
+        // JSON request. Branch must precede the generic /cli/
+        // catchall below or the dispatch would swallow it.
+        "/cli/sessions/subscribe" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let params = parse_params(&path, &query);
+            sessions_ws::serve_session_subscribe_connection(stream, params).await;
         }
         // Unified /cli/* dispatch. Auth + param validation +
         // per-route handler all live in `cli::dispatch`; main.rs

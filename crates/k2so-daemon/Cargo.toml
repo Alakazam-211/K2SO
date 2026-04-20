@@ -10,7 +10,11 @@ name = "k2so-daemon"
 path = "src/main.rs"
 
 [dependencies]
-k2so-core = { path = "../k2so-core" }
+# 0.34.0 Session Stream (Phase 2): enables the k2so-core types +
+# line-mux + registry that the daemon's /cli/sessions/subscribe
+# endpoint fans out. Feature is additive — k2so-core's alacritty
+# backend is unchanged when it's on.
+k2so-core = { path = "../k2so-core", features = ["session_stream"] }
 
 # Cryptographic randomness for the per-boot hook auth token.
 getrandom = "0.2"
