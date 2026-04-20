@@ -14,6 +14,7 @@
 //! to keep the agent-facing vocabulary tight.
 
 pub mod bus;
+pub mod inbox;
 
 pub use bus::{publish, subscribe, subscriber_count, BUS_CAP};
 
