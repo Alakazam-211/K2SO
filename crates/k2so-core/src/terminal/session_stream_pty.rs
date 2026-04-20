@@ -37,7 +37,8 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use vte::ansi::{Processor, StdSyncHandler};
 
 use crate::log_debug;
-use crate::session::SessionId;
+use crate::session::{registry, SessionEntry, SessionId};
+use crate::term::LineMux;
 
 /// Minimal listener used by the Term we drive here. Phase 2 doesn't
 /// need the Title/Bell event forwarding the legacy `K2SOListener`
@@ -292,12 +293,30 @@ pub fn spawn_session_stream(cfg: SpawnConfig) -> Result<SessionStreamSession, St
     let term = Term::new(term_config, &term_size, NoopListener);
     let term = Arc::new(FairMutex::new(term));
 
+    // Register in SessionRegistry BEFORE the reader thread starts
+    // publishing — prevents a race where the first Frame would be
+    // broadcast before any subscriber has a lookup target.
+    let entry = registry::register(session_id);
+
     // Spawn reader thread. The cyclic loop: read → drive Processor
-    // against Term → repeat. Exits on EOF or Err.
+    // against Term AND feed LineMux → publish Frames → repeat.
+    // Exits on EOF or Err, then unregisters the session from the
+    // registry so stale IDs don't accumulate.
     let term_for_reader = Arc::clone(&term);
+    let entry_for_reader = Arc::clone(&entry);
+    let id_for_reader = session_id;
     let reader_handle = thread::Builder::new()
         .name(format!("session-stream-pty/{}", session_id))
-        .spawn(move || reader_loop(reader, term_for_reader))
+        .spawn(move || {
+            reader_loop(reader, term_for_reader, entry_for_reader);
+            // Natural shutdown — reader saw EOF or error. Drop the
+            // registry entry so a future `list_ids()` doesn't
+            // report this ghost session. Holders of Arc<SessionEntry>
+            // (including live subscribers) keep their clones and
+            // exit their receive loops when the broadcast sender's
+            // last strong reference drops.
+            let _ = registry::unregister(&id_for_reader);
+        })
         .map_err(|e| format!("spawn reader thread: {e}"))?;
 
     // Wrap the master in an Arc<Mutex> so the session handle holds
@@ -334,18 +353,29 @@ pub fn spawn_session_stream(cfg: SpawnConfig) -> Result<SessionStreamSession, St
 }
 
 /// The reader thread's inner loop. Reads chunks from the PTY
-/// master, drives Processor against Term for each byte. On EOF or
-/// any IO error, returns — the thread then exits.
+/// master, then in the same byte-batched pass:
+///   - Drives `vte::ansi::Processor::advance(&mut term, bytes)` so
+///     alacritty's `Term` grid updates exactly as its own EventLoop
+///     would — desktop rendering continues to work.
+///   - Feeds `LineMux::feed(bytes)` and publishes each emitted
+///     `Frame` to the session's `SessionEntry` via its broadcast
+///     channel + replay ring.
 ///
-/// D3b adds LineMux + SessionRegistry publishing here. The
-/// extension point is deliberate: this function's signature doesn't
-/// change.
-fn reader_loop(mut reader: Box<dyn Read + Send>, term: Arc<FairMutex<Term<NoopListener>>>) {
+/// Both consumers see the SAME byte stream. This is the invariant
+/// that makes Phase 2 testing valid for Phase 5 — when alacritty
+/// goes away, deleting the `processor.advance(...)` call is the
+/// only structural change; LineMux keeps seeing identical bytes.
+fn reader_loop(
+    mut reader: Box<dyn Read + Send>,
+    term: Arc<FairMutex<Term<NoopListener>>>,
+    entry: Arc<SessionEntry>,
+) {
     // `Processor` is generic over a `Timeout` type; the std-std
     // version (`StdSyncHandler`) is the default alacritty itself
     // uses internally. Be explicit so the compiler doesn't demand
     // turbofish annotations.
     let mut processor: Processor<StdSyncHandler> = Processor::new();
+    let mut line_mux = LineMux::new();
     let mut buf = [0u8; 4096];
     loop {
         match reader.read(&mut buf) {
@@ -355,11 +385,19 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, term: Arc<FairMutex<Term<NoopLi
             }
             Ok(n) => {
                 let chunk = &buf[..n];
-                // `Processor::advance` takes `&[u8]` — it batches
-                // the state machine internally, so we pass the
-                // whole chunk in one call rather than byte-by-byte.
-                let mut term_guard = term.lock();
-                processor.advance(&mut *term_guard, chunk);
+                // Fork A: alacritty Term grid. Lock per chunk so
+                // desktop consumers (Phase 3+ rendering clients)
+                // can snapshot between our writes.
+                {
+                    let mut term_guard = term.lock();
+                    processor.advance(&mut *term_guard, chunk);
+                }
+                // Fork B: line-mux + Frame publish. LineMux is
+                // thread-local here; no other thread touches it,
+                // so no locking needed.
+                for frame in line_mux.feed(chunk) {
+                    entry.publish(frame);
+                }
             }
             Err(e) => {
                 log_debug!("[session_stream/pty] read error: {}", e);

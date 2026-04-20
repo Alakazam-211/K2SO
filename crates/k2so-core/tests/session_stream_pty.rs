@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use k2so_core::session::SessionId;
+use k2so_core::session::{registry, Frame, SessionId};
 use k2so_core::terminal::{spawn_session_stream, SpawnConfig};
 
 /// Grab the raw text of the first `n` rows of Term's grid, trimmed
@@ -171,6 +171,153 @@ fn drop_kills_child_cleanly() {
     // joined. No observable way to assert this from here without
     // PID tracking, but if Drop deadlocks the test hangs (and
     // Cargo eventually kills it).
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// D3b integration — SessionRegistry + LineMux fork
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn session_is_registered_while_reader_runs() {
+    let session_id = SessionId::new();
+    let cfg = SpawnConfig {
+        session_id,
+        cwd: "/tmp".into(),
+        command: Some("sleep".into()),
+        args: Some(vec!["60".into()]),
+        cols: 80,
+        rows: 24,
+    };
+    let session = spawn_session_stream(cfg).expect("spawn");
+    // Registered immediately after spawn returns.
+    assert!(
+        registry::lookup(&session_id).is_some(),
+        "session should be registered immediately after spawn"
+    );
+    session.kill().expect("kill");
+    // Give the reader a moment to unregister after seeing EOF.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if registry::lookup(&session_id).is_none() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        registry::lookup(&session_id).is_none(),
+        "session should be unregistered after reader thread exits"
+    );
+}
+
+#[test]
+fn published_frames_reach_subscriber() {
+    let session_id = SessionId::new();
+    let cfg = SpawnConfig {
+        session_id,
+        cwd: "/tmp".into(),
+        command: Some("printf".into()),
+        args: Some(vec!["d3b-subscriber-test\\n".into()]),
+        cols: 80,
+        rows: 24,
+    };
+
+    // Subscribe BEFORE the reader thread has finished publishing.
+    // Register call inside spawn_session_stream happens before the
+    // reader thread is spawned, so this lookup always succeeds.
+    let mut session = spawn_session_stream(cfg).expect("spawn");
+    let entry = registry::lookup(&session_id).expect("registered");
+    let mut rx = entry.subscribe();
+
+    // Wait for the child + reader to drain.
+    assert!(session.wait_for_exit(Duration::from_secs(5)));
+    assert!(session.wait_for_reader_drain(Duration::from_secs(5)));
+
+    // Replay ring should carry our Text frame. We don't check the
+    // live channel because printf fires AND closes so fast the
+    // frame might be published before the reader thread handed off
+    // to our subscribe — but the replay ring retains it regardless.
+    // Use `try_recv` first (might catch any live delivery that
+    // happens to have landed), then fall back to replay_snapshot.
+    let mut collected: Vec<Frame> = Vec::new();
+    while let Ok(frame) = rx.try_recv() {
+        collected.push(frame);
+    }
+    collected.extend(entry.replay_snapshot());
+
+    let text_bytes: Vec<Vec<u8>> = collected
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Text { bytes, .. } => Some(bytes.clone()),
+            _ => None,
+        })
+        .collect();
+    let joined = String::from_utf8(
+        text_bytes.into_iter().flatten().collect::<Vec<_>>(),
+    )
+    .unwrap_or_default();
+    assert!(
+        joined.contains("d3b-subscriber-test"),
+        "expected frame content to include 'd3b-subscriber-test'; \
+         got concatenation: {joined:?}"
+    );
+}
+
+#[test]
+fn two_subscribers_each_see_frames() {
+    // Spawn a session; subscribe twice; write to the session;
+    // verify both receivers see the written bytes as Text frames.
+    let session_id = SessionId::new();
+    let cfg = SpawnConfig {
+        session_id,
+        cwd: "/tmp".into(),
+        command: Some("cat".into()),
+        args: None,
+        cols: 80,
+        rows: 24,
+    };
+    let session = spawn_session_stream(cfg).expect("spawn");
+    let entry = registry::lookup(&session_id).expect("registered");
+    let mut a = entry.subscribe();
+    let mut b = entry.subscribe();
+
+    session
+        .write(b"d3b-fanout-test\n")
+        .expect("write to child");
+
+    // Poll both receivers for any Text frame containing our sentinel.
+    // Use a generous timeout because cat echoes the line once shell
+    // buffering clears.
+    let mut a_saw = false;
+    let mut b_saw = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline && !(a_saw && b_saw) {
+        while let Ok(frame) = a.try_recv() {
+            if frame_contains(&frame, "d3b-fanout-test") {
+                a_saw = true;
+            }
+        }
+        while let Ok(frame) = b.try_recv() {
+            if frame_contains(&frame, "d3b-fanout-test") {
+                b_saw = true;
+            }
+        }
+        if !(a_saw && b_saw) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    session.kill().expect("kill");
+    assert!(a_saw, "subscriber A should have seen the frame");
+    assert!(b_saw, "subscriber B should have seen the frame");
+}
+
+fn frame_contains(frame: &Frame, needle: &str) -> bool {
+    match frame {
+        Frame::Text { bytes, .. } => {
+            std::str::from_utf8(bytes).map_or(false, |s| s.contains(needle))
+        }
+        _ => false,
+    }
 }
 
 #[test]
