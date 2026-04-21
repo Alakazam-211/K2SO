@@ -17,6 +17,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
@@ -48,6 +49,15 @@ pub struct SessionEntry {
     /// onward). Anonymous sessions (one-off debugging, test
     /// fixtures) leave this `None`; roster queries skip them.
     agent_name: Mutex<Option<String>>,
+    /// Monotonic time the entry was created. Used by the harness
+    /// watchdog to avoid SIGTERM-ing sessions that just spawned
+    /// (some harnesses take several seconds before emitting their
+    /// first frame). Read-only after construction.
+    created_at: Instant,
+    /// Monotonic time of the most recent `publish()` call. Updated
+    /// atomically on every frame emission. Watchdogs read this to
+    /// decide whether a session is wedged.
+    last_frame_at: Mutex<Instant>,
 }
 
 impl SessionEntry {
@@ -61,11 +71,14 @@ impl SessionEntry {
     pub fn with_replay_cap(replay_cap: usize) -> Self {
         assert!(replay_cap >= 1, "SessionEntry replay_cap must be >= 1");
         let (tx, _) = broadcast::channel(BROADCAST_CAP);
+        let now = Instant::now();
         Self {
             tx,
             replay: Arc::new(Mutex::new(VecDeque::with_capacity(replay_cap))),
             replay_cap,
             agent_name: Mutex::new(None),
+            created_at: now,
+            last_frame_at: Mutex::new(now),
         }
     }
 
@@ -81,11 +94,36 @@ impl SessionEntry {
         self.agent_name.lock().clone()
     }
 
-    /// Publish a frame. Durably appended to the replay ring first,
-    /// then broadcast to any live subscribers. Silent if there are
-    /// no receivers (same behavior as the existing `/events`
-    /// endpoint — producers never care whether anyone's listening).
+    /// Publish a session-content frame. Durably appended to the
+    /// replay ring, broadcast to live subscribers, and bumps
+    /// `last_frame_at` so the watchdog sees this as harness
+    /// activity and resets its idle timer.
+    ///
+    /// Use this for every frame that originates from the harness
+    /// (PTY output, agent signals, semantic events lifted from
+    /// harness protocols). For observer-emitted frames like
+    /// watchdog escalations, use `publish_meta` so the watchdog
+    /// doesn't inadvertently reset its own idle timer.
     pub fn publish(&self, frame: Frame) {
+        self.publish_inner(frame, true);
+    }
+
+    /// Publish a meta frame without touching `last_frame_at`.
+    /// Intended for watchdog escalations + other observer-emitted
+    /// frames that describe session state rather than carry
+    /// harness output. Subscribers still see the frame in the
+    /// same stream; only the idle-timer bump is suppressed.
+    ///
+    /// Primitive rule: anything the WATCHDOG emits is meta;
+    /// anything the HARNESS emits is content. Keep the two lanes
+    /// separate so `idle_for(now)` always answers "how long since
+    /// the harness last produced" rather than "how long since any
+    /// frame was published."
+    pub fn publish_meta(&self, frame: Frame) {
+        self.publish_inner(frame, false);
+    }
+
+    fn publish_inner(&self, frame: Frame, bump_activity: bool) {
         {
             let mut replay = self.replay.lock();
             replay.push_back(frame.clone());
@@ -94,6 +132,9 @@ impl SessionEntry {
             }
         }
         let _ = self.tx.send(frame);
+        if bump_activity {
+            *self.last_frame_at.lock() = Instant::now();
+        }
     }
 
     /// Subscribe to the live stream. The returned receiver sees
@@ -121,6 +162,30 @@ impl SessionEntry {
     /// to pre-allocate buffers of the right size.
     pub fn replay_cap(&self) -> usize {
         self.replay_cap
+    }
+
+    /// When this entry was constructed. Monotonic clock — safe to
+    /// subtract from `Instant::now()`. Watchdog uses this to give
+    /// freshly-spawned sessions a grace period before the idle
+    /// timer starts counting (otherwise a slow-booting harness
+    /// gets Ctrl-C'd before it finishes printing its first prompt).
+    pub fn created_at(&self) -> Instant {
+        self.created_at
+    }
+
+    /// Timestamp of the most recent `publish()`. Re-computed every
+    /// time a frame is broadcast. Watchdog subtracts this from
+    /// `now()` to get idle duration.
+    pub fn last_frame_at(&self) -> Instant {
+        *self.last_frame_at.lock()
+    }
+
+    /// How long the session has gone without emitting a frame, as
+    /// of `now`. Small convenience around `now - last_frame_at()`
+    /// that saturates at zero if the monotonic clock hiccups (can
+    /// happen across suspend/resume on macOS).
+    pub fn idle_for(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.last_frame_at())
     }
 }
 

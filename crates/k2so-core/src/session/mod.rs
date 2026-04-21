@@ -23,9 +23,14 @@ pub mod frame;
 pub mod line;
 pub mod registry;
 pub mod types;
+pub mod watchdog;
 
 pub use archive::{spawn as spawn_archive, HARD_LIMIT_BYTES, WARN_BYTES};
 pub use entry::{SessionEntry, BROADCAST_CAP, REPLAY_CAP};
 pub use frame::{CursorOp, EraseMode, Frame, SemanticKind, Style};
 pub use line::{Line, SeqnoGen, SequenceNo};
 pub use types::{HarnessKind, Session, SessionId};
+pub use watchdog::{
+    evaluate as watchdog_evaluate, mark_fired as watchdog_mark_fired, Escalation,
+    EscalationState, WatchdogConfig,
+};

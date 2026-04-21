@@ -60,6 +60,20 @@ pub fn list_agents() -> Vec<String> {
     shared().lock().unwrap().keys().cloned().collect()
 }
 
+/// Every registered (agent_name, session) pair. The watchdog
+/// iterates this every poll tick; returning owned Arcs lets the
+/// watchdog drop the map lock immediately and do expensive work
+/// (PTY writes, child kills, SemanticEvent emission) without
+/// holding it. Ordering is unspecified.
+pub fn snapshot() -> Vec<(String, Arc<SessionStreamSession>)> {
+    shared()
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(name, session)| (name.clone(), Arc::clone(session)))
+        .collect()
+}
+
 /// Test helper — drop every registered entry. Keeps tests that
 /// share the global map from contaminating each other. Only
 /// compiled in test / with `test-util` feature on k2so-core.

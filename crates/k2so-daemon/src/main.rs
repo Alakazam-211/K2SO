@@ -34,6 +34,7 @@ mod providers;
 mod session_map;
 mod sessions_ws;
 mod signal_format;
+mod watchdog;
 
 use std::fs;
 use std::io::Write;
@@ -167,6 +168,15 @@ async fn main() {
             let _ = pending_live::enqueue(sig, agent);
         }
     }
+
+    // Phase 3.2 G1 — harness watchdog. Tails session_map + the
+    // session registry, logs + emits watchdog SemanticEvent frames
+    // when sessions go idle past configured thresholds, and
+    // escalates to Ctrl-C / SIGKILL. Config is read from env vars
+    // (K2SO_WATCHDOG_*); set K2SO_WATCHDOG_DISABLED=1 to turn it
+    // off entirely. See `watchdog::config_from_env` for the
+    // defaults.
+    let _watchdog_handle = watchdog::spawn(watchdog::config_from_env());
 
     // heartbeat.port watchdog — see `run_heartbeat_port_watchdog` docs.
     // The daemon takes over `~/.k2so/heartbeat.port` whenever Tauri
