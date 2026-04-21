@@ -917,6 +917,45 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
           pointerEvents: 'none',
         }}
       />
+      {/* Dev-mode renderer badge. Mirrors AlacrittyTerminalView's
+       *  overlay so we can tell at a glance which renderer a pane
+       *  is running — the two look visually near-identical, and
+       *  the renderer-setting toggle stamps at tab-creation time
+       *  (not hot-swap), so "did my setting actually take?" is an
+       *  easy question to answer from this line.
+       *
+       *  Colour (cyan) deliberately differs from Alacritty's green
+       *  so a side-by-side screenshot makes the split obvious. */}
+      {import.meta.env.DEV && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 2,
+            right: 2,
+            padding: '2px 6px',
+            background: 'rgba(0,0,0,0.8)',
+            color: '#0ff',
+            fontSize: '10px',
+            fontFamily: 'monospace',
+            zIndex: 999,
+            pointerEvents: 'none',
+            borderRadius: '3px',
+          }}
+        >
+          <strong style={{ color: '#fff' }}>Kessel</strong> · cells:
+          {snapshot.cols}x{snapshot.rows} cursor:
+          {snapshot.cursor.col},{snapshot.cursor.row} vis:
+          {snapshot.cursor.visible ? 'Y' : 'N'} shape:
+          {snapshot.cursor.shape ?? config.cursor.defaultShape} off:
+          {viewportOffset} scr:{snapshot.scrollback.length} bells:
+          {snapshot.bellCount}
+          {snapshot.modes.altScreen && ' ALT'}
+          {snapshot.modes.synchronizedOutput && ' SYNC'}
+          {snapshot.modes.appCursor && ' APPCUR'}
+          {snapshot.modes.bracketedPaste && ' BP'}
+          {!snapshot.modes.autowrap && ' NOWRAP'}
+        </div>
+      )}
     </div>
   )
 }

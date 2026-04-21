@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { persist, createJSONStorage } from 'zustand/middleware'
 import {
   TERMINAL_FONT_SIZE_MIN,
   TERMINAL_FONT_SIZE_MAX,
@@ -38,48 +39,72 @@ interface TerminalSettingsState {
   setRenderer: (renderer: TerminalRenderer) => void
 }
 
-export const useTerminalSettingsStore = create<TerminalSettingsState>((set) => ({
-  fontSize: TERMINAL_FONT_SIZE_DEFAULT,
-  linkClickMode: 'click' as LinkClickMode,
-  openLinksInSplitPane: true,
-  shortcutLayout: 'cmd-active-cmdshift-pinned' as ShortcutModifierLayout,
-  // Default to alacritty while Kessel finishes baking. Users can opt
-  // in per-preference; each new tab captures the preference at spawn
-  // time so the choice doesn't hot-swap mid-session.
-  renderer: 'alacritty' as TerminalRenderer,
+// Persisted via zustand's persist middleware so the user's
+// renderer + other preferences survive reload/restart. Prior to
+// persistence, toggling to Kessel was silently lost on the next
+// app launch — users would swap to Kessel, restart, see Alacritty,
+// and assume the setting hadn't taken. Persisted in localStorage
+// under the key below.
+export const useTerminalSettingsStore = create<TerminalSettingsState>()(
+  persist(
+    (set) => ({
+      fontSize: TERMINAL_FONT_SIZE_DEFAULT,
+      linkClickMode: 'click' as LinkClickMode,
+      openLinksInSplitPane: true,
+      shortcutLayout: 'cmd-active-cmdshift-pinned' as ShortcutModifierLayout,
+      // Default to alacritty while Kessel finishes baking. Users can opt
+      // in per-preference; each new tab captures the preference at spawn
+      // time so the choice doesn't hot-swap mid-session.
+      renderer: 'alacritty' as TerminalRenderer,
 
-  incrementFontSize: () => {
-    set((state) => ({
-      fontSize: Math.min(state.fontSize + 1, TERMINAL_FONT_SIZE_MAX)
-    }))
-  },
+      incrementFontSize: () => {
+        set((state) => ({
+          fontSize: Math.min(state.fontSize + 1, TERMINAL_FONT_SIZE_MAX)
+        }))
+      },
 
-  decrementFontSize: () => {
-    set((state) => ({
-      fontSize: Math.max(state.fontSize - 1, TERMINAL_FONT_SIZE_MIN)
-    }))
-  },
+      decrementFontSize: () => {
+        set((state) => ({
+          fontSize: Math.max(state.fontSize - 1, TERMINAL_FONT_SIZE_MIN)
+        }))
+      },
 
-  resetFontSize: () => {
-    set({ fontSize: TERMINAL_FONT_SIZE_DEFAULT })
-  },
+      resetFontSize: () => {
+        set({ fontSize: TERMINAL_FONT_SIZE_DEFAULT })
+      },
 
-  setLinkClickMode: (mode: LinkClickMode) => {
-    set({ linkClickMode: mode })
-  },
+      setLinkClickMode: (mode: LinkClickMode) => {
+        set({ linkClickMode: mode })
+      },
 
-  setOpenLinksInSplitPane: (enabled: boolean) => {
-    set({ openLinksInSplitPane: enabled })
-  },
+      setOpenLinksInSplitPane: (enabled: boolean) => {
+        set({ openLinksInSplitPane: enabled })
+      },
 
-  setShortcutLayout: (layout: ShortcutModifierLayout) => {
-    set({ shortcutLayout: layout })
-  },
+      setShortcutLayout: (layout: ShortcutModifierLayout) => {
+        set({ shortcutLayout: layout })
+      },
 
-  setRenderer: (renderer: TerminalRenderer) => {
-    set({ renderer })
-  }
-}))
+      setRenderer: (renderer: TerminalRenderer) => {
+        set({ renderer })
+      }
+    }),
+    {
+      name: 'k2so-terminal-settings',
+      storage: createJSONStorage(() => localStorage),
+      // Persist only user-facing settings; never serialize the action
+      // closures (they rebuild on load anyway).
+      partialize: (state) => ({
+        fontSize: state.fontSize,
+        linkClickMode: state.linkClickMode,
+        openLinksInSplitPane: state.openLinksInSplitPane,
+        shortcutLayout: state.shortcutLayout,
+        renderer: state.renderer,
+      }),
+      version: 1,
+    },
+  ),
+)
 
 // ── Wire up Tauri event listeners for zoom ──────────────────────────
 

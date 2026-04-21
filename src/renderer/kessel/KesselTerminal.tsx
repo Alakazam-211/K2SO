@@ -56,6 +56,12 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
 
     async function boot() {
       setState({ kind: 'spawning' })
+      // eslint-disable-next-line no-console
+      console.info(
+        `%c[Kessel] spawning terminal tab-${terminalId}`,
+        'color:#0ff;font-weight:bold',
+        { cwd, command, args },
+      )
       // 1. Look up daemon port + token.
       let ws: DaemonWsUrl
       try {

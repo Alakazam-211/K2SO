@@ -363,6 +363,12 @@ export function AlacrittyTerminalView({
         const { cols, rows } = calculateDimensions()
         lastColsRef.current = cols
         lastRowsRef.current = rows
+        // eslint-disable-next-line no-console
+        console.info(
+          `%c[Alacritty] creating terminal ${terminalId}`,
+          'color:#ff0;font-weight:bold',
+          { cwd, command, args, cols, rows },
+        )
         await invoke('terminal_create', {
           id: terminalId, cwd,
           command: command ?? null, args: args ?? null,
@@ -906,7 +912,9 @@ export function AlacrittyTerminalView({
         />
       )}
 
-      {/* Debug overlay — only in dev mode */}
+      {/* Debug overlay — only in dev mode. Renderer-label first so
+       *  it's obvious at a glance which pane is Alacritty vs Kessel
+       *  (the two are otherwise visually near-identical). */}
       {import.meta.env.DEV && (
         <div style={{
           position: 'absolute', top: 2, right: 2, padding: '2px 6px',
@@ -914,7 +922,7 @@ export function AlacrittyTerminalView({
           fontFamily: 'monospace', zIndex: 999, pointerEvents: 'none',
           borderRadius: '3px',
         }}>
-          frames:{debugInfo.frames} offset:{debugInfo.offset} wheel:{debugInfo.wheel} cells:{gridState.cols}x{gridState.rows} cursor:{gridState.cursorCol},{gridState.cursorRow} vis:{gridState.cursorVisible?'Y':'N'} cell:{cellW.toFixed(1)}x{cellH}
+          <strong style={{ color: '#ff0' }}>Alacritty</strong> · frames:{debugInfo.frames} offset:{debugInfo.offset} wheel:{debugInfo.wheel} cells:{gridState.cols}x{gridState.rows} cursor:{gridState.cursorCol},{gridState.cursorRow} vis:{gridState.cursorVisible?'Y':'N'} cell:{cellW.toFixed(1)}x{cellH}
         </div>
       )}
     </div>
