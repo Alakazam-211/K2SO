@@ -2569,134 +2569,240 @@ print(f\"  Pinned:    {'yes' if d.get('pinned') else 'no'}\")
 }
 
 cmd_help() {
+    # Two-tier help. `k2so help` (default) shows the working set
+    # a Workspace Manager / custom agent needs day-to-day — roughly
+    # 20 verbs grouped by intent. `k2so help --advanced` (or
+    # `k2so help -a`) shows the full surface, including daemon
+    # lifecycle, PTY plumbing, heartbeat CRUD, and diagnostics.
+    #
+    # The audit that produced this split lives in the commit that
+    # introduced it. Rule of thumb: default help = "can I do the
+    # work my agent persona exists to do?" Advanced help = "can I
+    # operate the whole K2SO system?"
+    case "${1:-}" in
+        -a|--advanced|advanced) cmd_help_advanced ;;
+        *) cmd_help_general ;;
+    esac
+}
+
+cmd_help_general() {
     cat <<'EOF'
 K2SO CLI — Agent interface to K2SO workspace orchestration
 
-COMMANDS:
-  agent create <name> --role "."  Create a new agent (agent-template, manager, or custom)
-  agent update --name <n>         Update agent profile field or section
-    --field <field> --value "."   Field: frontmatter key or ## section name
-  agent list                      List all agents in this workspace
-  agent profile <name>            Read an agent's profile (agent.md)
+COMMUNICATION
+  msg <target> "text" [--wake]       Send a message (--wake: interrupt live session)
+  signal <target> <kind> <payload>   Low-level signal emission [--inbox --from <sender>]
+  roster                             Who's online (live sessions + inbox-reachable agents)
+  feed [--agent <n>] [--limit N]     View activity feed
+  connections list                   Workspaces connected to this one
+  connections add|remove <path>      Manage workspace connections
 
-  agents list                     List all agents with work counts
-  agents work <name>              Show agent's work items
-  agents status <name>            Show agent status and work summary
-  agents create <name> --role "." Create a new agent (alias)
-  agents delete <name> [--force]  Delete an agent and its work directories
-  agents launch <name>            Launch agent's Claude session in K2SO
-  agents generate-md <name>       Generate agent's CLAUDE.md context file
-  agents profile <name>           Read an agent's profile (agent.md)
-  agents lock <name>              Mark agent as busy (active session)
-  agents unlock <name>            Mark agent as available
-  agents triage                   Show triage summary (what needs work)
-  agents running                  List all active CLI LLM sessions
+YOUR WORK
+  work create --title "..." --body "..." [--priority H|N|L] [--agent <n>]
+  work inbox                         Show workspace inbox
+  work send --workspace <path> --title "..." --body "..."
+  checkin                            Agent check-in (heartbeat ping)
+  status "message" [--agent <n>]     Report an agent status update
+  done [--blocked "reason"]          Signal task completion (or blocked)
 
-  work create --title "." --body "."  Create a work item
-    [--agent <name>]              Assign to agent (omit for workspace inbox)
-    [--priority high|normal|low]  Set priority
-    [--type prd|milestone|task]   Set work item type
-    [--source feature|issue|...]  Source: feature, issue, crash, security, audit, manual
-  work inbox                      Show workspace-level inbox
-  work send --workspace <path>    Send work to another workspace's inbox
-    --title "..." --body "..."
-  work move --agent <name> --file <f> --from inbox --to active
+AGENT SURFACE (read-only)
+  agents list                        List all agents with work counts
+  agents work <name>                 Show one agent's work items
+  agents triage                      Plain-text summary of what needs work
+  agents running                     List all active CLI LLM sessions
 
-  delegate <agent> <file>         Assign work: creates worktree + launches agent
-  agent complete --agent <n>      Complete work: auto-merge or submit for review
-    --file <filename>             Based on workspace state capability mode
+DELEGATION + REVIEW (managers)
+  delegate <agent> <file>            Assign work: creates worktree + launches agent
+  reviews                            List all pending reviews
+  review approve <agent> <branch>    Merge + clean up worktree
+  review reject <agent> [--reason]   Discard worktree + move work back to inbox
+  review feedback <agent> --message  Request changes without rejecting
 
-  reviews                         List all pending reviews
-  review approve <agent> <branch> Approve: merge + cleanup worktree + delete branch
-  review reject <agent>           Reject: cleanup worktree + move work back to inbox
-    [--reason "..."]
-  review feedback <agent>         Request changes on agent's work
-    --message "..."
+INFO
+  help                               This help
+  help --advanced                    Full CLI reference (daemon lifecycle,
+                                     PTY plumbing, heartbeat CRUD, diagnostics)
+  version                            Show installed CLI version
 
-  commit [-m "message"]           AI Commit — launch Claude to review & commit
-  commit-merge [-m "message"]     AI Commit & Merge — commit then merge into main
+ENVIRONMENT
+  K2SO_PROJECT_PATH   Project root (defaults to $PWD)
+  K2SO_AGENT_NAME     Default agent name when --agent is omitted
 
-  workspace create <path>         Create a new folder + register as workspace
-  workspace open <path>           Register an existing folder as workspace
-  workspace remove <path>         Deregister workspace (keeps files on disk)
-  workspace cleanup               Remove stale worktree records (disk deleted)
+Run `k2so help --advanced` for the full verb surface — every
+heartbeat schedule option, daemon lifecycle, session/terminal
+plumbing, hook diagnostics, and developer aids.
+EOF
+}
 
-  terminal spawn --command "..."  Spawn a sub-terminal in current workspace
-  terminal write <id> "message"   Send text to a running terminal (virtual input)
-  terminal read <id> [--lines N]  Read last N lines from terminal buffer (default: 50)
+cmd_help_advanced() {
+    cat <<'EOF'
+K2SO CLI — Full surface reference
 
-  mode                            Show current workspace settings
-  mode <off|agent|manager>          Set workspace agent mode
-  heartbeat                       Manually trigger heartbeat triage
-  heartbeat wake                  Auto-wake Workspace Manager if inbox work exists
-  heartbeat log [-n <limit>]      Show the recent scheduler decisions (fires + skips)
-  heartbeat <on|off>              Enable/disable automatic heartbeat
-  heartbeat schedule              Show current project schedule
-  heartbeat schedule off          Disable scheduled heartbeat
-  heartbeat schedule hourly       Set hourly mode (repeating within work hours)
-    --start 09:00 --end 17:00     Work hours window
-    --every 30 --unit minutes     Wake frequency (minutes or hours)
-  heartbeat schedule daily        Set daily schedule
-    --time 09:00                  Time to wake
-  heartbeat schedule weekly       Set weekly schedule
-    --days mon,wed,fri --time 09:00
-  heartbeat schedule monthly      Set monthly schedule
-    --days 1,15 --time 09:00      Specific days of month
-  heartbeat schedule yearly       Set yearly schedule
-    --months jan,jul --time 09:00
-  heartbeat set --agent <n>        Set adaptive heartbeat config
-    [--interval N] [--phase ".."]   Interval in seconds, work phase
-    [--mode heartbeat|persistent]   Execution mode
-  heartbeat get --agent <name>    Read agent's heartbeat config
-  heartbeat force --agent <name>  Force immediate wake for an agent
-  heartbeat noop --agent <name>   Report no work found (triggers auto-backoff)
-  heartbeat action --agent <name> Report action taken (resets backoff)
+Grouped by audience. The general-use subset is duplicated here
+for completeness. See `k2so help` for the curated general list.
 
-  # Multi-heartbeat CRUD (per-workspace named schedules)
-  heartbeat add --name <n> <spec>  Create a named heartbeat
+════════════════════════════════════════════════════════════════
+  COMMUNICATION
+════════════════════════════════════════════════════════════════
+  msg <target> "text" [--wake]           Send a message (wraps the
+                                         awareness primitive post-0.34.0).
+  signal <target> <kind> <payload>       Emit a raw AgentSignal.
+    [--inbox]                              Delivery::Inbox (async).
+    [--from <sender>]                      Sender identity; default $K2SO_AGENT_NAME|"cli".
+  roster                                 Who's online + inbox-reachable.
+  feed [--agent <n>] [--limit N]         View activity feed.
+  connections list|add|remove <path>     Cross-workspace link management.
+
+════════════════════════════════════════════════════════════════
+  WORK ITEMS
+════════════════════════════════════════════════════════════════
+  work create --title "..." --body "..." [--agent <n>] [--priority H|N|L]
+              [--type prd|milestone|task] [--source feature|issue|crash|security|audit|manual]
+  work inbox                             Workspace-level inbox.
+  work send --workspace <path> --title "..." --body "..."
+                                         Send work to another workspace's inbox.
+  work move --agent <n> --file <f> --from inbox --to active
+
+════════════════════════════════════════════════════════════════
+  AGENT MANAGEMENT
+════════════════════════════════════════════════════════════════
+  agent create <name> --role "..."       Create agent (both `agent` and
+                                         `agents` are accepted).
+  agent update --name <n> --field <f> --value "..."
+                                         Update frontmatter or ## section.
+  agent delete <name> [--force]          Delete agent + work dirs.
+  agent complete --agent <n> --file <f>  Auto-merge or submit for review
+                                         based on state capability mode.
+  agent list|profile <name>              Read agent metadata.
+
+  agents list|work <n>|status <n>|profile <n>
+  agents create|delete (aliases of `agent *`)
+  agents launch <n>                      Launch agent's Claude session.
+  agents generate-md <n>                 Generate agent's CLAUDE.md.
+  agents lock <n>|unlock <n>             Manual session-lock manipulation.
+  agents triage                          Read-only pending-work summary.
+  agents running                         Active CLI LLM sessions.
+
+════════════════════════════════════════════════════════════════
+  DELEGATION + REVIEW
+════════════════════════════════════════════════════════════════
+  delegate <agent> <file>                Creates worktree + launches agent.
+  reviews                                Pending reviews.
+  review approve <agent> <branch>        Merge + clean up worktree.
+  review reject <agent> [--reason "..."] Discard worktree + requeue.
+  review feedback <agent> --message "."  Request changes without rejecting.
+
+════════════════════════════════════════════════════════════════
+  COMMITS (AI-assisted)
+════════════════════════════════════════════════════════════════
+  commit [-m "message"]                  Launch Claude to review & commit.
+  commit-merge [-m "message"]            Commit then merge into main.
+
+════════════════════════════════════════════════════════════════
+  WORKSPACE LIFECYCLE
+════════════════════════════════════════════════════════════════
+  workspace create <path>                Create folder + register.
+  workspace open <path>                  Register existing folder.
+  workspace remove <path>                Deregister (files stay).
+  workspace preview <path>                Preview before register.
+  workspace cleanup                      Remove stale worktree records.
+
+  mode                                   Show current workspace mode.
+  mode <off|agent|manager>               Set mode.
+  state list|get <id>|set <id>           Workspace state (drives capability gates).
+  agentic [on|off]                       Global agentic-systems toggle.
+  settings                               Show all workspace settings.
+
+════════════════════════════════════════════════════════════════
+  HEARTBEATS — per-agent adaptive
+════════════════════════════════════════════════════════════════
+  heartbeat                              Manually trigger triage.
+  heartbeat wake                         Auto-wake Workspace Manager if inbox.
+  heartbeat <on|off>                     Enable/disable automatic heartbeat.
+  heartbeat log [-n N]                   Recent scheduler decisions.
+  heartbeat set --agent <n> [--interval N] [--phase "..."] [--mode heartbeat|persistent]
+  heartbeat get --agent <n>              Read config.
+  heartbeat force --agent <n>            Force immediate wake.
+  heartbeat noop --agent <n>             Report no work (triggers backoff).
+  heartbeat action --agent <n>           Report action (resets backoff).
+
+════════════════════════════════════════════════════════════════
+  HEARTBEATS — per-project schedule
+════════════════════════════════════════════════════════════════
+  heartbeat schedule                     Show current project schedule.
+  heartbeat schedule off                 Disable.
+  heartbeat schedule hourly --start 09:00 --end 17:00 --every 30 --unit minutes
+  heartbeat schedule daily   --time 09:00
+  heartbeat schedule weekly  --days mon,wed,fri --time 09:00
+  heartbeat schedule monthly --days 1,15 --time 09:00
+  heartbeat schedule yearly  --months jan,jul --time 09:00
+
+════════════════════════════════════════════════════════════════
+  HEARTBEATS — named multi-schedule CRUD
+════════════════════════════════════════════════════════════════
+  heartbeat add --name <n> <spec>        Create a named heartbeat
     --daily|--weekly|--monthly|--yearly|--hourly plus --time, --days, etc.
-  heartbeat list                  Table of heartbeats for this workspace
-  heartbeat show <name>           Single heartbeat details [--json]
-  heartbeat edit <name> <spec>    Change schedule of existing heartbeat
-  heartbeat remove <name>         Delete heartbeat + its folder
-  heartbeat rename <old> <new>    Rename a heartbeat (folder + DB)
-  heartbeat enable <name>         Resume scheduling for this heartbeat
-  heartbeat disable <name>        Pause scheduling for this heartbeat
-  heartbeat status <name>         Recent fire history for one heartbeat [-n N]
-  heartbeat wakeup <name>         Print the wakeup.md contents
-    [--path-only]                 Print only the absolute path (scripting)
-    [--edit]                      Open the file in $EDITOR
+  heartbeat list                         Table of heartbeats.
+  heartbeat show <n>                     Single heartbeat details [--json].
+  heartbeat edit <n> <spec>              Change schedule.
+  heartbeat remove <n>                   Delete heartbeat + folder.
+  heartbeat rename <old> <new>           Rename folder + DB row.
+  heartbeat enable <n>|disable <n>       Resume/pause scheduling.
+  heartbeat status <n> [-n N]            Recent fire history.
+  heartbeat wakeup <n> [--path-only] [--edit]
+                                         Print/edit the WAKEUP.md.
 
-  agentic                         Show agentic systems status (on/off)
-  agentic <on|off>                Enable/disable agentic systems globally
+════════════════════════════════════════════════════════════════
+  TERMINAL / SESSION PLUMBING
+════════════════════════════════════════════════════════════════
+  terminal spawn --command "..."         Spawn a sub-terminal.
+  terminal write <id> "message"          Virtual input (paste + Enter).
+  terminal read <id> [--lines N]         Last N lines from buffer.
 
-  state list                      List all workspace states
-  state get <state-id>            Get details of a workspace state
-  state set <state-id>            Assign a state to the current workspace
+  sessions spawn --agent <n> [--command <cmd>] [--cwd <path>]
+                                         0.34.0 Session Stream spawn.
+  sessions list [--json]                 List known sessions on disk.
+  sessions compact                       Compact the archive ring.
 
-  settings                        Show all workspace settings
+════════════════════════════════════════════════════════════════
+  DIAGNOSTICS
+════════════════════════════════════════════════════════════════
+  hooks status [--limit N] [--json]      Hook pipeline state
+                                         (claude/cursor/gemini injection +
+                                         recent /hook/complete events).
+  reserve <paths...>                     Reserve file paths for exclusive editing.
+  release [paths...]                     Release reservations.
 
-  checkin [--agent <name>]        Agent check-in (heartbeat ping)
-  status "message" [--agent <n>]  Report agent status message
-  done [--blocked "reason"]       Signal task completion (or blocked)
-  msg <target> "text"             Send a message to another agent
-  reserve <paths...>              Reserve file paths for exclusive editing
-  release [paths...]              Release reserved paths (all if none given)
+════════════════════════════════════════════════════════════════
+  DAEMON LIFECYCLE
+════════════════════════════════════════════════════════════════
+  daemon status [--json]                 PID, port, uptime.
+  daemon start|stop|restart              launchctl bootstrap/bootout.
+  daemon log [--lines N]                 Tail stdout/stderr logs.
+  daemon uninstall                       Remove plist entirely.
 
-  app-update                      Check for app updates or download a version
-  app-update --list               List available releases
-  app-update <version>            Download and open a specific version
-  update                          Update CLI to latest version from GitHub
-  update --check                  Check if an update is available
-  version                         Show installed CLI version
+════════════════════════════════════════════════════════════════
+  SKILLS + COMPANION
+════════════════════════════════════════════════════════════════
+  skills                                 Skill management (see subcommands).
+  companion                              Companion API server (start/stop/config).
 
-  help                            Show this help message
+════════════════════════════════════════════════════════════════
+  UPDATES
+════════════════════════════════════════════════════════════════
+  app-update                             Check for app updates.
+  app-update --list                      List releases.
+  app-update <version>                   Download a version.
+  update                                 Update the CLI script.
+  update --check                         Check for CLI updates.
 
-ENVIRONMENT:
-  K2SO_PORT          Port of K2SO's HTTP server (set automatically)
-  K2SO_HOOK_TOKEN    Auth token (set automatically)
-  K2SO_PROJECT_PATH  Project root (defaults to $PWD)
-  K2SO_AGENT_NAME    Default agent name for skill commands
+════════════════════════════════════════════════════════════════
+  ENVIRONMENT
+════════════════════════════════════════════════════════════════
+  K2SO_PORT           Daemon port (auto-discovered from ~/.k2so/heartbeat.port).
+  K2SO_HOOK_TOKEN     Auth token (auto-discovered from ~/.k2so/heartbeat.token).
+  K2SO_PROJECT_PATH   Project root (defaults to $PWD).
+  K2SO_AGENT_NAME     Default agent name when --agent is omitted.
 EOF
 }
 
@@ -3010,7 +3116,12 @@ case "${1:-help}" in
         echo "k2so $K2SO_CLI_VERSION"
         ;;
     help|--help|-h)
-        cmd_help
+        # Guard against `set -u` when no trailing args.
+        if [ $# -gt 0 ]; then shift; fi
+        cmd_help "$@"
+        ;;
+    help-advanced)
+        cmd_help_advanced
         ;;
     *)
         echo "Unknown command: $1" >&2
