@@ -833,39 +833,69 @@ async fn send_cors_preflight(stream: &mut TcpStream) {
 /// streaming is deferred; the largest signal we expect is ~1KB, so
 /// 4KB is 4× the headroom.
 async fn read_post_body(stream: &mut TcpStream, buf: &mut [u8]) -> Vec<u8> {
-    let n = match stream.read(buf).await {
-        Ok(n) => n,
-        Err(_) => return Vec::new(),
-    };
-    let slice = &buf[..n];
-    // Find the end-of-headers marker.
-    let header_end = slice
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|p| p + 4);
-    match header_end {
-        Some(body_start) if body_start <= slice.len() => {
-            // Respect Content-Length if present — caps the body slice
-            // so trailing garbage (e.g. keep-alive noise) doesn't end
-            // up in the parsed body.
-            let headers = &slice[..body_start.saturating_sub(4)];
-            let headers_str = std::str::from_utf8(headers).unwrap_or("");
-            let body_bytes_available = slice.len() - body_start;
-            let content_length = headers_str
-                .lines()
-                .find_map(|line| {
+    // Phase 4.5: the old single-read version worked with curl (which
+    // batches headers + body into one TCP send) but broke with
+    // browser fetch, which sends headers in one packet and body in
+    // a separate packet. A single `stream.read()` would only return
+    // the headers, leaving the body unread — and the JSON parser
+    // got "EOF at column 0".
+    //
+    // Loop until we have the full body: read headers (first chunk),
+    // parse Content-Length, then keep reading until we've got that
+    // many body bytes or EOF.
+    let mut accumulated: Vec<u8> = Vec::new();
+    let mut header_end: Option<usize> = None;
+    let mut content_length: Option<usize> = None;
+
+    loop {
+        // Read into `buf` and append to `accumulated` until headers
+        // end is found.
+        let n = match stream.read(buf).await {
+            Ok(0) => break, // EOF
+            Ok(n) => n,
+            Err(_) => return Vec::new(),
+        };
+        accumulated.extend_from_slice(&buf[..n]);
+
+        if header_end.is_none() {
+            if let Some(pos) = accumulated
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+            {
+                header_end = Some(pos + 4);
+                let headers_str =
+                    std::str::from_utf8(&accumulated[..pos]).unwrap_or("");
+                content_length = headers_str.lines().find_map(|line| {
                     let lower = line.to_ascii_lowercase();
                     lower
                         .strip_prefix("content-length:")
-                        .map(|v| v.trim().parse::<usize>().ok())
-                        .flatten()
-                })
-                .unwrap_or(body_bytes_available);
-            let take = content_length.min(body_bytes_available);
-            slice[body_start..body_start + take].to_vec()
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                });
+            }
         }
-        _ => Vec::new(),
+
+        // Once headers end is known, check if we have the whole body.
+        if let (Some(body_start), Some(clen)) = (header_end, content_length) {
+            if accumulated.len() >= body_start + clen {
+                return accumulated[body_start..body_start + clen].to_vec();
+            }
+        }
+        // Without Content-Length, fall back to "one read gave us
+        // everything" heuristic once we've seen the headers.
+        if let (Some(body_start), None) = (header_end, content_length) {
+            return accumulated[body_start..].to_vec();
+        }
     }
+
+    // EOF before we got the full body (or before headers ended).
+    // Return whatever we have between header end and EOF; caller's
+    // parser will surface a helpful error if it's incomplete.
+    if let Some(body_start) = header_end {
+        if accumulated.len() > body_start {
+            return accumulated[body_start..].to_vec();
+        }
+    }
+    Vec::new()
 }
 
 /// Write `contents` to `path` with permissions 0600 so other users on the
