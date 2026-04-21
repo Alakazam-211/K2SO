@@ -192,6 +192,21 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     }
   }, [sessionId, port, token, onReady, onError, scheduleRender])
 
+  // Cursor blink. The snapshot carries an up-to-the-millisecond
+  // cursor position (mutated by every Frame::Text write + CursorOp),
+  // but rendering at that cadence makes Claude's rapid cursor moves
+  // look like the caret is "vibrating." Real terminals blink the
+  // cursor at ~500ms regardless of input traffic, so the eye
+  // perceives it as stable. We do the same here: a 500ms interval
+  // flips this boolean; the cursor overlay hides during the off
+  // phase. Any user keystroke resets the phase to ON so typing
+  // feels instant.
+  const [cursorBlinkOn, setCursorBlinkOn] = useState(true)
+  useEffect(() => {
+    const id = setInterval(() => setCursorBlinkOn((v) => !v), 500)
+    return () => clearInterval(id)
+  }, [])
+
   // Cell metrics for cursor positioning. Measured once per fontSize
   // change by writing a hidden span and reading its box. Simple and
   // accurate; matches AlacrittyTerminalView's approach.
@@ -226,6 +241,10 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       const seq = keyEventToSequence(e, 0)
       if (seq === null) return
       e.preventDefault()
+      // Any keystroke forces the cursor to the ON phase of the
+      // blink cycle so typing feels snappy (same UX as a real
+      // terminal). The 500ms interval will resume from ON.
+      setCursorBlinkOn(true)
       // Fire-and-forget; network-bound latency is not in the
       // render path. Errors log to console for now; a future
       // commit can route them to the onError prop.
@@ -337,7 +356,7 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
   )
 
   const cursorStyle = useMemo<React.CSSProperties>(() => {
-    if (!snapshot.cursor.visible) return { display: 'none' }
+    if (!snapshot.cursor.visible || !cursorBlinkOn) return { display: 'none' }
     if (!cellMetrics.width) return { display: 'none' }
     return {
       position: 'absolute',
@@ -354,6 +373,7 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     snapshot.cursor.row,
     cellMetrics.width,
     cellMetrics.height,
+    cursorBlinkOn,
   ])
 
   return (
