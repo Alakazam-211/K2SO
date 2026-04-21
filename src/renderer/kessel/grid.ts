@@ -306,6 +306,9 @@ export class TerminalGrid {
       case 'RestoreCursor':
         this.restoreCursor()
         break
+      case 'SetCursorVisible':
+        this.cursor_.visible = op.value
+        break
     }
   }
 

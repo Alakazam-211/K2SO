@@ -375,6 +375,42 @@ fn legacy_esc8_emits_restore_cursor_op() {
 }
 
 #[test]
+fn dectcem_hide_emits_set_cursor_visible_false() {
+    // CSI ? 25 l — DECTCEM cursor hide. TUIs emit this before a
+    // multi-step repaint so the caret doesn't flicker through
+    // intermediate positions.
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[?25l");
+    assert_eq!(frames.len(), 1);
+    assert!(matches!(
+        cursor_op(&frames[0]),
+        Some(CursorOp::SetCursorVisible(false))
+    ));
+}
+
+#[test]
+fn dectcem_show_emits_set_cursor_visible_true() {
+    // CSI ? 25 h — DECTCEM cursor show. Paired with hide above;
+    // emitted after the repaint settles.
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[?25h");
+    assert_eq!(frames.len(), 1);
+    assert!(matches!(
+        cursor_op(&frames[0]),
+        Some(CursorOp::SetCursorVisible(true))
+    ));
+}
+
+#[test]
+fn dectcem_ignores_unknown_private_mode() {
+    // CSI ? 12 l — we don't handle this yet (cursor blink). It
+    // should be silently dropped, NOT misinterpreted as cursor hide.
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[?12l");
+    assert_eq!(frames.len(), 0);
+}
+
+#[test]
 fn save_paint_restore_sequence_emits_ordered_ops() {
     // End-to-end Claude-style spinner paint:
     //   save → go to row 5 col 1 → emit char → restore

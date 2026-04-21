@@ -433,10 +433,23 @@ impl Perform for PerformState {
     fn csi_dispatch(
         &mut self,
         params: &Params,
-        _intermediates: &[u8],
+        intermediates: &[u8],
         _ignore: bool,
         action: char,
     ) {
+        // CSI private mode set/reset. Intermediate `?` distinguishes
+        // `CSI ? 25 h` (DECTCEM cursor-show) from `CSI 25 h` (ANSI
+        // mode 25, which we don't handle).
+        if intermediates == b"?" && (action == 'h' || action == 'l') {
+            let show = action == 'h';
+            for p in params.iter() {
+                match p.first().copied().unwrap_or(0) {
+                    25 => self.push_cursor_op(CursorOp::SetCursorVisible(show)),
+                    _ => {}
+                }
+            }
+            return;
+        }
         match action {
             'A' => self.push_cursor_op(CursorOp::Up(Self::csi_first(params, 1))),
             'B' => self.push_cursor_op(CursorOp::Down(Self::csi_first(params, 1))),

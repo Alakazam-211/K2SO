@@ -245,6 +245,14 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
         const sameCol = prev.col === s.cursor.col
         if (sameVis && sameRow && sameCol) return prev
 
+        // Visibility transitions commit immediately — the whole
+        // point of DECTCEM (CSI ?25 h/l) is "hide cursor NOW during
+        // this repaint." Deferring the hide would leak intermediate
+        // cursor positions exactly when the TUI asked us not to.
+        if (!sameVis) {
+          return { ...s.cursor }
+        }
+
         const rowDelta = Math.abs(s.cursor.row - prev.row)
         const colDelta = Math.abs(s.cursor.col - prev.col)
         const isSmallMove = rowDelta <= 1 && colDelta <= 20

@@ -121,6 +121,12 @@ pub enum CursorOp {
     /// DECRC — restore the cursor to the last saved position
     /// (ESC[u). No-op if no save is in flight.
     RestoreCursor,
+    /// DECTCEM cursor visibility toggle (CSI ? 25 h / CSI ? 25 l).
+    /// TUIs emit Hide before a multi-step repaint and Show after, so
+    /// the caret doesn't flicker through intermediate positions. The
+    /// Kessel DOM renderer honors this by setting the overlay to
+    /// display:none while invisible.
+    SetCursorVisible(bool),
 }
 
 /// EL / ED mode selector.

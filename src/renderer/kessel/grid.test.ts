@@ -267,6 +267,19 @@ describe('TerminalGrid SaveCursor / RestoreCursor CursorOps', () => {
     g.applyFrame({ frame: 'CursorOp', data: { op: 'RestoreCursor', value: null } })
     expect(g.snapshot().cursor).toMatchObject({ row: 1, col: 3 })
   })
+
+  it('SetCursorVisible toggles cursor.visible flag', () => {
+    // DECTCEM (CSI ?25 h/l). TUIs emit hide before a multi-step
+    // repaint and show afterward so intermediate positions don't
+    // flicker. The grid just mirrors the bit; the renderer honors
+    // it by hiding the overlay.
+    const g = new TerminalGrid({ rows: 5, cols: 10 })
+    expect(g.snapshot().cursor.visible).toBe(true)
+    g.applyFrame({ frame: 'CursorOp', data: { op: 'SetCursorVisible', value: false } })
+    expect(g.snapshot().cursor.visible).toBe(false)
+    g.applyFrame({ frame: 'CursorOp', data: { op: 'SetCursorVisible', value: true } })
+    expect(g.snapshot().cursor.visible).toBe(true)
+  })
 })
 
 // ── Semantic / raw frames are no-ops at the grid layer ──────────────
