@@ -211,13 +211,20 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
   // across multiple rAF cycles and each one snapshots an intermediate
   // cursor state.
   //
-  // Fix: only update the rendered cursor position when activity has
-  // been quiet for at least SETTLE_MS (~60ms — below the 100ms
-  // perception-of-latency threshold so typing still feels instant,
-  // but above the inter-chunk gap that causes Claude's repaint to
-  // span rAFs). During active bursts, the rendered cursor stays at
-  // its last resting position; once things settle, it snaps to the
-  // final grid cursor.
+  // Fix: hybrid settle policy based on move magnitude.
+  //   - Small moves (≤ 1 row change, ≤ 20 col change) advance the
+  //     rendered cursor immediately. Covers typing (col +1), Enter
+  //     (row +1, col=0), line wrap, and short cursor repositions.
+  //     Keeps fast typing feeling zero-latency.
+  //   - Large moves (multi-row jumps away) wait for SETTLE_MS of
+  //     quiet before committing. Covers Claude's "save → move to
+  //     bottom border → paint → restore" repaint sequence where
+  //     the intermediate position is many rows from the rest
+  //     position.
+  //
+  // The 60ms quiet threshold is below the 100ms perception-of-
+  // latency floor, and above the typical inter-chunk gap we see
+  // on Claude's repaint bursts (10-30ms).
   const SETTLE_MS = 60
   const [restingCursor, setRestingCursor] = useState(() => ({
     row: 0,
@@ -226,18 +233,26 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
   }))
   useEffect(() => {
     const id = setInterval(() => {
-      const quietMs = Date.now() - lastActivityRef.current
-      if (quietMs < SETTLE_MS) return
       const s = gridRef.current?.snapshot()
       if (!s) return
       setRestingCursor((prev) => {
-        if (
-          prev.row === s.cursor.row &&
-          prev.col === s.cursor.col &&
-          prev.visible === s.cursor.visible
-        ) {
-          return prev
+        const sameVis = prev.visible === s.cursor.visible
+        const sameRow = prev.row === s.cursor.row
+        const sameCol = prev.col === s.cursor.col
+        if (sameVis && sameRow && sameCol) return prev
+
+        const rowDelta = Math.abs(s.cursor.row - prev.row)
+        const colDelta = Math.abs(s.cursor.col - prev.col)
+        const isSmallMove = rowDelta <= 1 && colDelta <= 20
+        if (isSmallMove) {
+          // Typing / Enter / line wrap — advance immediately.
+          return { ...s.cursor }
         }
+
+        // Large move (Claude's bottom-border repaint etc.). Hold
+        // position until activity has been quiet for SETTLE_MS.
+        const quietMs = Date.now() - lastActivityRef.current
+        if (quietMs < SETTLE_MS) return prev
         return { ...s.cursor }
       })
     }, 16)
