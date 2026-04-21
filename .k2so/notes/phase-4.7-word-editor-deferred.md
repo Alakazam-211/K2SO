@@ -342,6 +342,69 @@ rewrite. Concretely:
 - D8 (mouse reporting) — build around the dispatcher shape from
   day one.
 
+### C8 — Alt-screen is a hard kill switch for 4.7 features
+
+**Rule:** when `TerminalGrid.modes.altScreen === true`, EVERY 4.7
+feature stands down. No exceptions. Vim, htop, less, lazygit,
+neovim, claude --fullscreen, and every other TUI that owns the
+whole buffer retains full control of input and display.
+
+**Why:** word-editor ergonomics (highlight-and-ask, replace-in-
+place, path-to-link transformation) make sense for AI-agent
+session output where Frame::SemanticEvent tags recognizable
+regions. They do NOT make sense inside a TUI where every
+keystroke and click is the TUI's to interpret. Terminal purists
+who drop into vim from a shell MUST experience vim exactly the
+way they would in iTerm2 or Terminal.app. Any 4.7 feature firing
+inside vim is a product bug, full stop.
+
+**Implementation shape (for when 4.7 starts):** every 4.7 dispatch
+hook — menu, click, hover, key — checks `modes.altScreen` as the
+first gate. Alt-screen true → short-circuit, pass through to the
+existing PTY path unchanged.
+
+**Affected 4.6 items:** none directly (4.6 doesn't add 4.7
+features). But D8's mouse dispatcher should structure itself
+such that "alt-screen on → forward to TUI" is the first branch,
+not a later filter. Makes the 4.7 add-on trivially correct.
+
+---
+
+## Toggle model (for when 4.7 starts)
+
+A global setting, three-tier:
+
+```
+kessel.wordEditor: 'auto' | 'off' | 'all'    // default 'auto'
+```
+
+- **`auto` (default)** — F1 / F2 / F3 / F5 activate only when
+  both: (a) `modes.altScreen === false`, AND (b) the target row
+  is inside a SemanticEvent region from a recognized harness.
+  F4 + F7 always available (they're separate UI surfaces, not
+  inside the pane). F6 opt-in via a sub-setting.
+- **`off`** — pure terminal. No menus, no intercepted clicks, no
+  editable overlays, no link transformation. For dotfile crowd
+  and vim purists who want byte-for-byte iTerm2 parity.
+- **`all`** — F6 everywhere, maximum feature surface. For power
+  users and testing.
+
+The C8 alt-screen rule overrides all three settings. Even with
+`kessel.wordEditor: 'all'`, vim gets pure terminal behavior
+because alt-screen is on. This is intentional.
+
+**Per-feature risk reminder:**
+
+| Feature | Risk | Activation scope in `auto` |
+|---|---|---|
+| F1 Highlight + ask | Low | !altScreen, any row |
+| F2 Replace-in-place | Medium | !altScreen + SemanticEvent region only |
+| F3 Jump-to-source | Low-med | !altScreen, any row |
+| F4 Timeline scrubber | None | Always (separate UI) |
+| F5 Annotations | Low | Always (gutter overlay, not input-capturing) |
+| F6 Rich prompt editor | **High** | Opt-in via sub-setting even in `auto` |
+| F7 Diff overlay | None | Always (separate view) |
+
 ---
 
 ## Estimated scope (for context, not commitment)

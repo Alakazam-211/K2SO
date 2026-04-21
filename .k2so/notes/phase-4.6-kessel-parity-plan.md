@@ -47,6 +47,39 @@ in-session feedback + the alacritty study:
 
 ---
 
+## Baseline principle — "vim must feel like vim"
+
+Before any deliverable below, the governing constraint: **at end
+of 4.6, a user who drops into vim / htop / less / lazygit /
+claude --fullscreen from the Kessel pane must experience an
+iTerm2-or-Terminal.app-equivalent TUI environment, with zero
+4.7 features leaking through.**
+
+This is the "creature comforts" floor — the set of things
+terminal purists don't even notice when present and immediately
+notice when absent:
+
+- Cursor shape reflects TUI mode (vim normal = block, insert = bar)
+- Mouse events reach the TUI when the TUI wants them (`?1000`+)
+- Shift-click/drag always keeps selection + paste local, even
+  inside TUI mouse mode (iTerm2 convention)
+- BEL produces a visual flash, not silent drop
+- Alt-screen programs fully own the buffer — no our-UI injection
+- `DECSCUSR` respected for the rare case a TUI requests blink
+- OSC palette + title updates honored so `vim` with solarized
+  colors looks right
+- App-cursor mode (`?1`) honored so zsh + vim arrow keys work
+
+Every 4.6 deliverable either (a) directly implements one of
+these, or (b) enables a future one without breaking the current
+baseline. If a deliverable trades purist comfort for anything
+else, it's wrong — revise or drop.
+
+Phase 4.7 sits on top of this baseline. Without the baseline,
+4.7 can never safely ship because we'd have no bedrock to trust.
+
+---
+
 ## Architectural rail the opening laid down
 
 One idea worth calling out because the rest of the phase rides on
@@ -262,7 +295,7 @@ focus/blur dispatch.
 
 **Risk:** minimal.
 
-### D8 — Mouse reporting (`DECSET ?1000` / `?1006`, and ?1002/?1003)
+### D8 — Mouse reporting + Shift-override (`DECSET ?1000` / `?1006`, and ?1002/?1003)
 
 ⭐ **Biggest user-facing gap remaining.** Without this, clicking
 inside htop/vim/less does nothing. Scroll inside vim doesn't go to
@@ -284,10 +317,23 @@ the post-session study.
 - When alt-screen is on, wheel events route to the TUI via mouse
   reporting instead of our scrollback viewport (the existing
   alt-screen-suppress-wheel guard becomes the dispatch point).
+- **Shift-override** (iTerm2 / Terminal.app convention): even
+  when the TUI has mouse mode enabled, holding Shift during a
+  click/drag/wheel forces the event to stay local — browser
+  selection, scrollback scroll, paste target. This is the
+  universal escape valve every purist expects, and without it
+  vim-with-mouse-mode-on is unselectable. First branch of the
+  dispatcher.
+- Dispatcher ordering is load-bearing for 4.7 C8 alt-screen
+  kill-switch: `if (altScreen) forwardToTUI; else if (shiftKey)
+  localHandling; else if (mouseMode) forwardToTUI; else
+  localHandling`. 4.7 feature dispatchers slot in between
+  altScreen check and the rest.
 
 **Tests:** full mouse-encoding test suite (X10 vs SGR, button
 combinations, wheel events), 1 integration that validates a click
-dispatches through to `/cli/terminal/write`.
+dispatches through to `/cli/terminal/write`, 1 integration that
+validates Shift-override works inside alt-screen mouse mode.
 
 **Estimate:** 3-4 commits, ~400 LOC + tests. Biggest item in 4.6.
 
@@ -295,6 +341,8 @@ dispatches through to `/cli/terminal/write`.
 TUIs subtly. Mitigation: mirror alacritty's encoder exactly + add
 a golden-output test file with known-good byte sequences from
 real TUIs (captured from the existing AlacrittyTerminalView path).
+
+**Honors 4.7 C2, C7, C8.**
 
 ### D9 — OSC 0/1/2 — Window title
 
@@ -398,6 +446,86 @@ supports this. Security-sensitive — guard by default.
 **Risk:** medium — security implications. Requires a user-visible
 setting toggle + rationale copy in the setting UI.
 
+### D13 — Cursor shape (DECSCUSR, `CSI SP q`)
+
+Vim and most modern editors set the cursor shape dynamically to
+signal their mode — steady block in normal mode, blinking bar in
+insert mode, steady underscore in replace mode. Our current pane
+renders a fixed semi-transparent block. Purists notice within
+seconds: if vim doesn't feel like vim, we're broken.
+
+**Cite:** vim-users who open vim in Kessel and immediately feel
+the loss of mode indication; also `alacritty_terminal`'s
+`CursorShape` enum.
+
+**Implementation sketch:**
+- New `CursorOp::SetCursorStyle(CursorShape)` variant.
+  `CursorShape` enum: `BlinkingBlock`, `SteadyBlock`,
+  `BlinkingUnderscore`, `SteadyUnderscore`, `BlinkingBar`,
+  `SteadyBar`.
+- LineMux: dispatch `CSI Ps SP q` in csi_dispatch (intermediate
+  byte = space, final = `q`). Ps values 0-6 per DECSCUSR spec.
+- TerminalGrid: store current shape on cursor_ state.
+- Renderer: cursorStyle useMemo reads shape + branches on CSS:
+  block = filled background, bar = 2px left border, underscore =
+  2px bottom border. Blinking variants flip opacity via CSS
+  `@keyframes` (not JS timer — CSS is GPU-accelerated and
+  browser will freeze it when tab is backgrounded).
+
+**Tests:** 1 LineMux case per shape, 1 grid case per shape.
+
+**Estimate:** 1 commit, ~120 LOC + tests.
+
+**Risk:** minimal. If the shape field is `None`, we render the
+existing block — so un-wired TUIs get the 4.5 behavior.
+
+**Honors 4.7 C6.** (Cursor shape rides on the cursor, not the
+cell, so cell shape stays `{ char, style }`.)
+
+**Note on the recent "no blink" commit (`e2ee0a8c`):** we removed
+our own blink interval because it was visual noise for AI-agent
+sessions. DECSCUSR's blinking variants are different — they're
+*the TUI requesting the cursor blink*, and honoring that request
+is correctness. Vim normal mode sets `SteadyBlock`; our renderer
+shows a solid block, no blink. Insert mode sets `BlinkingBar`;
+our renderer shows a blinking 2px bar. No conflict with the
+"solid by default" decision — that stands for when no DECSCUSR
+has been issued.
+
+### D14 — Bell (BEL `\x07`) — visual flash + optional audio
+
+TUIs emit BEL on errors, tab-completion ambiguity, end-of-history,
+and other feedback moments. iTerm2 and Terminal.app flash the pane
+(+optional audio). Our pane currently silently drops BEL — bash's
+bell-on-empty-history-search is totally invisible. Small polish,
+purist ask.
+
+**Cite:** alacritty_terminal's `BellAction` handler. Also implicitly
+every terminal user who Ctrl-R'd into an empty history.
+
+**Implementation sketch:**
+- New `Frame::Bell` variant (no payload).
+- LineMux: in `print` path, check for `\x07` and emit `Frame::Bell`
+  directly (bypasses flush_pending_text because BEL is not text).
+  Alternatively, handle in `execute` if vte surfaces it there.
+- Renderer: on receiving `Bell`, briefly invert pane background
+  via a CSS class that gets added + removed (150ms flash). No
+  audio in default implementation — but a setting-gated
+  `audio: 'off' | 'system' | 'custom'` can land here too.
+- Setting: `kessel.bell: 'off' | 'visual' | 'audio' | 'both'`
+  default `visual`.
+
+**Tests:** 1 LineMux case (`\x07` emits Bell frame), 1
+integration (Bell frame → class toggle).
+
+**Estimate:** 1 commit, ~70 LOC + tests + one new setting.
+
+**Risk:** minimal. Silently-drops remains an acceptable fallback
+if visual flash feels too aggressive.
+
+**Honors 4.7 C3.** (Bell frames hit the archive too — F4 timeline
+can show bell markers.)
+
 ---
 
 ## Recommended sequencing
@@ -410,19 +538,22 @@ hot path. Self-contained; no new UX surfaces. Ship these before
 anything user-visible, then re-baseline Rosson's "feels excellent"
 vs. "feels world-class."
 
-**Batch B — Input correctness (next week):**
-`D5` → `D6` → `D7`
+**Batch B — TUI-purist correctness (next week):**
+`D5` → `D6` → `D7` → `D13` → `D14`
 
-Flips the three small-but-correctness-bearing mode flags. `D5`
-(APP_CURSOR) in particular fixes a bug the user probably hasn't
-noticed yet — this is a pre-emptive fix.
+Every item here targets "does this feel like iTerm2/Terminal.app
+to a vim user?" `D5` (APP_CURSOR) + `D13` (cursor shape) together
+make vim's mode indicator work. `D14` (bell) fixes the silent-
+bash-error gap. `D6` (autowrap) + `D7` (focus reporting) round
+out the mode-flag set. Ship this batch BEFORE D8 — D8 is
+pointless if vim doesn't already feel like vim.
 
 **Batch C — Mouse (the real project of 4.6):**
 `D8`
 
-One-week focused effort. Can run in parallel with Batch B if the
-team has capacity, but most productive solo because the encoder
-layer is the integration bottleneck.
+One-week focused effort. Biggest single risk in 4.6. Ship with
+the Shift-override on day one or vim-with-mouse-mode users lose
+the ability to select text.
 
 **Batch D — Niceties (last, land opportunistically):**
 `D9` → `D10` → `D11` → `D12`
@@ -488,6 +619,12 @@ deliverable touches (format: `Honors 4.7 C2, C4`).
 - 1 hyperlink integration test.
 - 1 synchronized-output integration test asserting atomicity.
 - Flag-off bit-for-bit identity check still passes.
+- **"Vim acceptance test"** — manual and scripted. A purist
+  dotfile vim config (gruvbox colors, mode indicator, mouse mode
+  on, bracketed paste on) opens inside Kessel and every keystroke
+  + click + scroll behaves identically to the same config opened
+  inside iTerm2. Screenshot diff tolerance: zero. If any
+  deliverable regresses this test, it's not ready to merge.
 
 **Definition of done per deliverable:**
 - Rust-side tests green (`cargo test --features session_stream -p k2so-core`).
@@ -549,6 +686,10 @@ the same TUIs they run in Alacritty should see:
 - Identical OSC-driven theming + titles + hyperlinks (we don't
   need to match alacritty's image protocols, but the `osc_dispatch`
   floor should be congruent).
+- Cursor shape reflecting the TUI's declared mode (DECSCUSR).
+- Audible/visual bell on BEL.
+- Shift-override honored inside TUI mouse mode (iTerm2/Terminal.app
+  convention — not alacritty-specific, but universally expected).
 
 It does NOT mean:
 - Identical rendering performance (DOM vs GPU is an inherent gap).
