@@ -737,9 +737,9 @@ fn handle_cli_heartbeat(
     }
 }
 
-/// Thin forwarder to `triage::handle_triage`. Kept as a named
-/// fn here because `cli::dispatch` (in main.rs's module tree)
-/// references `crate::handle_agents_triage`.
+/// Thin forwarder to `triage::handle_triage` (read-only summary).
+/// Kept as a named fn here because `cli::dispatch` (in main.rs's
+/// module tree) references `crate::handle_agents_triage`.
 fn handle_agents_triage(project_path: &str) -> String {
     crate::triage::handle_triage(project_path)
 }

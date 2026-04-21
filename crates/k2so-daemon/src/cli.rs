@@ -818,12 +818,19 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         }
 
         // ── Scheduler / triage ──────────────────────────────────────
+        // `/cli/agents/triage` is READ-ONLY (plain-text summary for
+        // `k2so agents triage`). `/cli/scheduler-tick` is the
+        // DESTRUCTIVE heartbeat fire path — `~/.k2so/heartbeat.sh`
+        // invokes it on launchd's schedule and parses `"count":N`
+        // to log what fired. Pre-Phase-4 Tauri's agent_hooks
+        // listener served them with these same semantics; H7
+        // preserves the contract.
         "/cli/agents/triage" => match need_project(params) {
-            Ok(p) => CliResponse::ok_json(crate::handle_agents_triage(&p)),
+            Ok(p) => CliResponse::ok_text(crate::handle_agents_triage(&p)),
             Err(r) => r,
         },
         "/cli/scheduler-tick" => match need_project(params) {
-            Ok(p) => respond(k2so_core::agents::scheduler::k2so_agents_scheduler_tick(p)),
+            Ok(p) => CliResponse::ok_json(crate::triage::handle_scheduler_fire(&p)),
             Err(r) => r,
         },
 

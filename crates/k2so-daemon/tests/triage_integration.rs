@@ -1,6 +1,11 @@
-//! H6 of Phase 4 integration tests — `handle_triage` dispatches
-//! wakes via the Session Stream pipeline when the project has
-//! `use_session_stream='on'`.
+//! H6 of Phase 4 integration tests — `handle_scheduler_fire`
+//! dispatches wakes via the Session Stream pipeline when the
+//! project has `use_session_stream='on'`.
+//!
+//! Post-H7 note: the destructive fire path moved from
+//! `handle_triage` (which is now read-only) to
+//! `handle_scheduler_fire`. URL: `/cli/scheduler-tick`. Tests
+//! below exercise the destructive handler directly.
 //!
 //! The triage handler depends on a lot of real wiring
 //! (scheduler_tick, heartbeat candidates, AGENT.md, session
@@ -130,7 +135,7 @@ fn seed_inbox_work(project: &Path, agent: &str, slug: &str) {
 // ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "current_thread")]
-async fn triage_returns_json_shape_even_when_nothing_to_launch() {
+async fn scheduler_fire_returns_json_shape_even_when_nothing_to_launch() {
     let _g = lock();
     init_for_tests();
     clear_projects();
@@ -140,12 +145,47 @@ async fn triage_returns_json_shape_even_when_nothing_to_launch() {
     let proj_str = proj.to_string_lossy().into_owned();
     seed_project(&proj_str, "on");
 
-    let body = triage::handle_triage(&proj_str);
+    let body = triage::handle_scheduler_fire(&proj_str);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert!(v["count"].is_number());
     assert!(v["launched"].is_array());
     assert!(v["heartbeats"].is_array());
     assert_eq!(v["count"].as_u64(), Some(0));
+
+    clear_projects();
+}
+
+/// `handle_triage` post-H7 rework: read-only plain-text summary
+/// regardless of `use_session_stream` setting. No spawning.
+#[tokio::test(flavor = "current_thread")]
+async fn triage_summary_is_readonly_and_plaintext() {
+    let _g = lock();
+    init_for_tests();
+    clear_projects();
+    drain_session_map();
+
+    let proj = tmp_project_dir("readonly");
+    let proj_str = proj.to_string_lossy().into_owned();
+    seed_project(&proj_str, "on");
+    write_agent_md(&proj, "readonly-probe", "agent-template");
+    seed_inbox_work(&proj, "readonly-probe", "probe-task");
+
+    let body = triage::handle_triage(&proj_str);
+    assert!(
+        body.contains("readonly-probe"),
+        "summary missing agent name: {body}"
+    );
+    assert!(
+        body.contains("high") || body.contains("Triage test"),
+        "summary missing work-item details: {body}"
+    );
+    // No spawning happened → session_map stays empty for this agent.
+    let entries: Vec<String> =
+        session_map::snapshot().into_iter().map(|(n, _)| n).collect();
+    assert!(
+        !entries.iter().any(|n| n == "readonly-probe"),
+        "read-only triage should NOT spawn; session_map leaked: {entries:?}"
+    );
 
     clear_projects();
 }
@@ -166,7 +206,7 @@ async fn triage_with_flag_on_spawns_via_session_stream() {
     write_agent_md(&proj, "runner", "k2so");
     seed_inbox_work(&proj, "runner", "do-thing");
 
-    let _body = triage::handle_triage(&proj_str);
+    let _body = triage::handle_scheduler_fire(&proj_str);
 
     // Prove H6's target behavior: regardless of whether the
     // scheduler picked the agent, IF it did spawn, the session is
@@ -176,7 +216,7 @@ async fn triage_with_flag_on_spawns_via_session_stream() {
         session_map::snapshot().into_iter().map(|(n, _)| n).collect();
     assert!(
         entries.iter().any(|n| n == "runner"),
-        "expected 'runner' in session_map under flag-on triage; got {entries:?}"
+        "expected 'runner' in session_map under flag-on scheduler fire; got {entries:?}"
     );
 
     drain_session_map();
@@ -196,7 +236,7 @@ async fn triage_with_flag_off_does_not_land_in_session_map() {
     write_agent_md(&proj, "legacy", "k2so");
     seed_inbox_work(&proj, "legacy", "legacy-task");
 
-    let _body = triage::handle_triage(&proj_str);
+    let _body = triage::handle_scheduler_fire(&proj_str);
 
     // Flag-off path uses `spawn_wake_headless` which owns the PTY
     // through the legacy TerminalManager — no entry should appear
