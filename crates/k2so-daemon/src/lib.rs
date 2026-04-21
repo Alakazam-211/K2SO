@@ -8,4 +8,6 @@
 
 pub mod awareness_ws;
 pub mod events;
+pub mod providers;
+pub mod session_map;
 pub mod sessions_ws;

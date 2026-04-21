@@ -29,6 +29,8 @@
 mod awareness_ws;
 mod cli;
 mod events;
+mod providers;
+mod session_map;
 mod sessions_ws;
 
 use std::fs;
@@ -135,6 +137,12 @@ async fn main() {
     let (event_tx, _) = broadcast::channel::<WireEvent>(EVENT_CHANNEL_CAP);
     let event_tx = Arc::new(event_tx);
     k2so_core::agent_hooks::set_sink(Box::new(DaemonBroadcastSink::new((*event_tx).clone())));
+
+    // 0.34.0 Phase 3.1 — register the daemon-side InjectProvider +
+    // WakeProvider so awareness::egress can actually reach live
+    // sessions. Before this, signals to live targets landed in the
+    // bus + activity_feed but never in the target's PTY.
+    providers::register_all();
 
     // heartbeat.port watchdog — see `run_heartbeat_port_watchdog` docs.
     // The daemon takes over `~/.k2so/heartbeat.port` whenever Tauri
