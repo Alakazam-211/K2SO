@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import type { MosaicNode, MosaicDirection } from 'react-mosaic-component'
 import { RESUMABLE_CLI_TOOLS } from '@shared/constants'
 import { useSettingsStore } from '@/stores/settings'
+import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 
 // Lazy reference to presets store — avoids circular dependency (presets → tabs → presets).
 // Set by presets.ts on init via registerPresetsStore().
@@ -133,6 +134,12 @@ export interface SerializedItem {
   cursorPos?: number   // file-viewer cursor offset (for session restore)
   agentName?: string
   projectPath?: string
+  /** Phase 4.5+ renderer choice stamped when the tab was first
+   *  spawned. Preserved across app restarts so Kessel tabs come back
+   *  as Kessel tabs. Missing on rows serialized before the field
+   *  existed — restoreLayout falls back to the user's current
+   *  setting in that case. */
+  renderer?: 'alacritty' | 'kessel'
 }
 
 export interface SerializedPaneGroup {
@@ -359,6 +366,10 @@ function serializeTab(tab: Tab): SerializedTab {
           command: d.command,
           args: d.args,
           sessionId: d.sessionId,
+          // Persist the renderer so Kessel tabs survive restart
+          // as Kessel tabs. Older rows without this field fall back
+          // to currentRenderer() during restoreLayout.
+          renderer: d.renderer,
         }
       } else if (item.type === 'agent') {
         const d = item.data as AgentItemData
@@ -485,6 +496,20 @@ function mapTabAcrossGroups(
   return { tabs: state.tabs, extraGroups: state.extraGroups }
 }
 
+/** Read the current user-selected renderer. Snapshot-at-call-time:
+ *  tabs stamp the renderer they see AT CREATION, so toggling the
+ *  setting mid-session doesn't hot-swap open panes — only new ones
+ *  pick up the change. Safe to call from anywhere in the renderer
+ *  process (every terminal-tab creation path below goes through this). */
+function currentRenderer(): 'alacritty' | 'kessel' {
+  try {
+    return useTerminalSettingsStore.getState().renderer
+  } catch {
+    // Store not initialized (SSR/tests) — Alacritty is the safe default.
+    return 'alacritty'
+  }
+}
+
 /** Create a PaneGroup with a single terminal item */
 function makeTerminalPaneGroup(
   paneGroupId: string,
@@ -492,21 +517,6 @@ function makeTerminalPaneGroup(
   options?: { command?: string; args?: string[] }
 ): PaneGroup {
   const itemId = crypto.randomUUID()
-  // Snapshot the current renderer preference at tab-creation time.
-  // Dynamic import via require() would be cleaner but this module is
-  // already loaded at this point — the store's zustand getState is
-  // always safe to call. Each tab stores its chosen renderer so the
-  // preference can change mid-session without hot-swapping open
-  // terminals. Lazy require to avoid a TypeScript circular dep
-  // between stores/tabs and stores/terminal-settings.
-  let renderer: 'alacritty' | 'kessel' = 'alacritty'
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { useTerminalSettingsStore } = require('./terminal-settings') as typeof import('./terminal-settings')
-    renderer = useTerminalSettingsStore.getState().renderer
-  } catch {
-    // Store not available (SSR/tests) — fall back to alacritty.
-  }
   return {
     id: paneGroupId,
     items: [
@@ -518,7 +528,7 @@ function makeTerminalPaneGroup(
           cwd,
           command: options?.command,
           args: options?.args,
-          renderer,
+          renderer: currentRenderer(),
         },
       },
     ],
@@ -558,6 +568,11 @@ function paneDataToItem(pane: PaneData): Item {
         cwd: pane.cwd,
         command: pane.command,
         args: pane.args,
+        // Splits / paneDataToItem were silently dropping the renderer
+        // field, which meant Cmd+D (split pane) always landed in
+        // Alacritty even when the user had Kessel selected. Snapshot
+        // the current setting for consistency with makeTerminalPaneGroup.
+        renderer: currentRenderer(),
       },
     }
   } else if (pane.type === 'agent') {
@@ -1735,6 +1750,10 @@ export const useTabsStore = create<TabsState>((set, get) => ({
                 command,
                 args,
                 sessionId,
+                // Preserve the stamped renderer across restart. Tabs
+                // serialized before renderer persistence shipped have
+                // no field — fall back to the current user setting.
+                renderer: si.renderer ?? currentRenderer(),
               },
             }
           } else if (si.type === 'agent') {
@@ -1762,7 +1781,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
           items.push({
             id: crypto.randomUUID(),
             type: 'terminal',
-            data: { terminalId: newPgId, cwd },
+            data: { terminalId: newPgId, cwd, renderer: currentRenderer() },
           })
         }
 
@@ -1826,7 +1845,14 @@ export const useTabsStore = create<TabsState>((set, get) => ({
                   return {
                     id: crypto.randomUUID(),
                     type: 'terminal' as const,
-                    data: { terminalId: newPgId, cwd: si.cwd ?? cwd, command, args, sessionId },
+                    data: {
+                      terminalId: newPgId,
+                      cwd: si.cwd ?? cwd,
+                      command,
+                      args,
+                      sessionId,
+                      renderer: si.renderer ?? currentRenderer(),
+                    },
                   }
                 } else if (si.type === 'agent') {
                   return {
@@ -1848,7 +1874,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
                 }
               })
               if (items.length === 0) {
-                items.push({ id: crypto.randomUUID(), type: 'terminal', data: { terminalId: newPgId, cwd } })
+                items.push({ id: crypto.randomUUID(), type: 'terminal', data: { terminalId: newPgId, cwd, renderer: currentRenderer() } })
               }
               const clampedIndex = Math.max(0, Math.min(serializedPg?.activeItemIndex ?? 0, items.length - 1))
               paneGroups.set(newPgId, { id: newPgId, items, activeItemIndex: clampedIndex })

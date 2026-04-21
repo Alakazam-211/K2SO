@@ -180,6 +180,20 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
               // preference for NEW tabs is stamped at
               // makeTerminalPaneGroup time; mid-session toggle
               // changes don't affect already-open terminals.
+              // In dev, loudly surface when a terminal item lacks a
+              // renderer field — historical bug where require() in an
+              // ESM bundle silently threw and every tab fell through
+              // to 'alacritty'. If this fires, some tab-creation
+              // path is bypassing makeTerminalPaneGroup /
+              // paneDataToItem — that path needs currentRenderer()
+              // added to it.
+              if (import.meta.env.DEV && raw.renderer === undefined) {
+                // eslint-disable-next-line no-console
+                console.warn(
+                  '[tabs] terminal item has no renderer field; defaulting to alacritty',
+                  { terminalId: td.terminalId, cwd: td.cwd },
+                )
+              }
               if (raw.renderer === 'kessel') {
                 content = (
                   <KesselTerminal
