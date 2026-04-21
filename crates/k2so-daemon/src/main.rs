@@ -26,6 +26,7 @@
 //! binary, plist is loadable, port file discoverable, token-auth path
 //! exercised) without yet taking responsibility for agent state.
 
+mod agents_routes;
 mod awareness_ws;
 mod cli;
 mod cli_response;

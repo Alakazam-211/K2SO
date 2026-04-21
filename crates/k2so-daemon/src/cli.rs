@@ -880,6 +880,22 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             crate::companion_routes::handle_companion_projects_summary(params)
         }
 
+        // ── Phase 4 H5: agent launch + delegate ─────────────────────
+        // Daemon-owned Session Stream replacement for Tauri's
+        // `spawn_wake_pty`-backed handlers. Core still builds the
+        // launch JSON (three wake branches for launch; worktree +
+        // task CLAUDE.md for delegate) — the difference is the
+        // spawn lands in daemon session_map, not in Tauri's
+        // TerminalManager.
+        "/cli/agents/launch" => match need_project(params) {
+            Ok(p) => crate::agents_routes::handle_agents_launch(params, &p),
+            Err(r) => r,
+        },
+        "/cli/agents/delegate" => match need_project(params) {
+            Ok(p) => crate::agents_routes::handle_agents_delegate(params, &p),
+            Err(r) => r,
+        },
+
         _ => CliResponse::not_found(),
     }
 }

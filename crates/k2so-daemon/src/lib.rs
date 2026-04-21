@@ -6,6 +6,7 @@
 //! `sessions_ws` without duplicating the code — the binary's own
 //! `mod` declarations are unchanged and sit above `main.rs`.
 
+pub mod agents_routes;
 pub mod awareness_ws;
 pub mod cli_response;
 pub mod companion_routes;
