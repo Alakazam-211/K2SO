@@ -45,6 +45,7 @@ import MemoDialog from './components/Timer/MemoDialog'
 import ExtendTimerDialog from './components/Timer/ExtendTimerDialog'
 import { useCursorMigrationCheck } from './hooks/useCursorMigrationCheck'
 import { HarnessLab } from './kessel/HarnessLab'
+import { prewarmDaemonWs } from './kessel/daemon-ws'
 
 /** Parse focus mode project ID from URL hash (#focus=<projectId>) */
 function parseFocusProjectId(): string | null {
@@ -219,6 +220,16 @@ export default function App(): React.JSX.Element {
   const toggleAssistant = useAssistantStore((s) => s.toggle)
   const toggleReviewQueue = useReviewQueueStore((s) => s.toggle)
   const toggleRunningAgents = useRunningAgentsStore((s) => s.toggle)
+
+  // Prewarm the daemon_ws_url cache at app mount. The underlying
+  // Tauri command reads two files from ~/.k2so/ on every call; the
+  // result is stable for the app session so one fetch is enough.
+  // Fire-and-forget — the first Kessel pane would trigger this
+  // anyway, but kicking it off at mount hides the ~5-10ms disk I/O
+  // behind the rest of the initial render.
+  useEffect(() => {
+    prewarmDaemonWs()
+  }, [])
 
   // Cmd+, settings, Cmd+K command palette, Cmd+L assistant, Cmd+P review queue
   useEffect(() => {

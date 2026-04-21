@@ -17,15 +17,8 @@
 // the pane is blank instead of a silent white box.
 
 import React, { useEffect, useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
 import { SessionStreamView } from './SessionStreamView'
-
-interface DaemonWsUrl {
-  state: 'available' | 'not_installed'
-  port?: number
-  token?: string
-  reason?: string
-}
+import { getDaemonWs, invalidateDaemonWs } from './daemon-ws'
 
 export interface KesselTerminalProps {
   terminalId: string
@@ -53,6 +46,7 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
 
   useEffect(() => {
     let cancelled = false
+    const bootT0 = performance.now()
 
     async function boot() {
       setState({ kind: 'spawning' })
@@ -62,25 +56,25 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
         'color:#0ff;font-weight:bold',
         { cwd, command, args },
       )
-      // 1. Look up daemon port + token.
-      let ws: DaemonWsUrl
+      // Perf timing — lets us compare before/after optimization runs.
+      // Shows up in devtools Performance panel as named marks.
+      performance.mark(`kessel:boot:${terminalId}:start`)
+      // 1. Look up daemon port + token via the shared cache. First
+      //    call in the app session hits the Tauri command (which
+      //    reads 2 files from disk); every subsequent call is a
+      //    cheap promise return. Prewarmed at app startup so by the
+      //    time the user opens the first terminal it's already
+      //    resolved.
+      let ws: { port: number; token: string }
       try {
-        ws = await invoke<DaemonWsUrl>('daemon_ws_url')
+        ws = await getDaemonWs()
       } catch (e) {
         if (!cancelled) {
-          setState({ kind: 'error', message: `daemon_ws_url: ${String(e)}` })
+          setState({ kind: 'error', message: String(e) })
         }
         return
       }
-      if (ws.state !== 'available' || !ws.port || !ws.token) {
-        if (!cancelled) {
-          setState({
-            kind: 'error',
-            message: `daemon not reachable: ${ws.reason ?? 'unknown'}`,
-          })
-        }
-        return
-      }
+      performance.mark(`kessel:boot:${terminalId}:daemon-ws-ready`)
       // 2. Spawn via daemon. Use terminalId as the agent_name so
       //    live lookups via /cli/agents/running can find this pane.
       let result: SpawnResult
@@ -102,6 +96,11 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
         )
         if (!res.ok) {
           const body = await res.text()
+          // 401/403 likely mean the cached token is stale — daemon
+          // may have restarted. Invalidate so the next spawn retries.
+          if (res.status === 401 || res.status === 403) {
+            invalidateDaemonWs()
+          }
           if (!cancelled) {
             setState({
               kind: 'error',
@@ -112,6 +111,9 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
         }
         result = (await res.json()) as SpawnResult
       } catch (e) {
+        // Network-level failure (daemon down, wrong port). Invalidate
+        // so the retry path re-reads the credential files.
+        invalidateDaemonWs()
         if (!cancelled) {
           setState({ kind: 'error', message: `spawn error: ${String(e)}` })
         }
@@ -119,6 +121,21 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
       }
 
       if (!cancelled) {
+        performance.mark(`kessel:boot:${terminalId}:spawned`)
+        try {
+          performance.measure(
+            `kessel:boot:${terminalId}:total`,
+            `kessel:boot:${terminalId}:start`,
+            `kessel:boot:${terminalId}:spawned`,
+          )
+        } catch {
+          /* perf measure failures don't matter */
+        }
+        // eslint-disable-next-line no-console
+        console.info(
+          `%c[Kessel] ready tab-${terminalId} in ${Math.round(performance.now() - bootT0)}ms`,
+          'color:#0ff',
+        )
         setState({
           kind: 'ready',
           port: ws.port,
@@ -153,17 +170,19 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
   }
 
   if (state.kind !== 'ready') {
+    // Blank pane in the Kessel default background color — visually
+    // identical to an empty live pane, so the transition to the
+    // real SessionStreamView feels instant instead of a gray→black
+    // flash. Matches config.colors.background in KesselConfig.
     return (
       <div
         style={{
-          padding: 16,
-          color: '#888',
-          fontFamily: 'monospace',
-          fontSize: 12,
+          width: '100%',
+          height: '100%',
+          flex: 1,
+          backgroundColor: 'rgb(10,10,10)',
         }}
-      >
-        Spawning Kessel session…
-      </div>
+      />
     )
   }
 
