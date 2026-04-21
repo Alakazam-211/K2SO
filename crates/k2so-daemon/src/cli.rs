@@ -868,6 +868,12 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         // terminal_manager. Now a walk of session_map + registry.
         "/cli/agents/running" => crate::terminal_routes::handle_agents_running(params),
 
+        // ── Phase 4.5 I7: resize a live session ─────────────────────
+        // Resizes both the PTY and the alacritty Term so the child
+        // re-flows for the new dimensions. Called by Kessel's
+        // ResizeObserver on DOM pane resize.
+        "/cli/sessions/resize" => crate::terminal_routes::handle_sessions_resize(params),
+
         // ── Phase 4 H3: daemon-side terminal spawn ──────────────────
         // Thin wrappers over `spawn::spawn_agent_session` (the same
         // helper /cli/sessions/spawn uses). Emits HookEvents so

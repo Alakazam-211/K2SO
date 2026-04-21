@@ -49,6 +49,11 @@ export interface SessionStreamViewProps {
    *  to the daemon's /cli/terminal/write. Default true. Set false
    *  for debug / read-only viewers. */
   interactive?: boolean
+  /** If true, the pane observes its own DOM size and auto-resizes
+   *  the grid + PTY to fit. Default true. Set false when the parent
+   *  controls sizing explicitly (e.g. the Harness Lab's device-
+   *  size preset buttons). */
+  autoResize?: boolean
 }
 
 /** POST bytes to /cli/terminal/write for the given session. Returns
@@ -70,6 +75,26 @@ async function writeToSession(
     no_submit: 'true', // we send Enter explicitly via key-mapping
   })
   const url = `http://127.0.0.1:${port}/cli/terminal/write?${params}`
+  await fetch(url, { method: 'GET' })
+}
+
+/** POST to /cli/sessions/resize (I7). Fire-and-forget — the grid
+ *  updates its own dimensions locally; the daemon call just keeps
+ *  the child process in sync. */
+async function resizeSession(
+  port: number,
+  token: string,
+  sessionId: string,
+  cols: number,
+  rows: number,
+): Promise<void> {
+  const params = new URLSearchParams({
+    session: sessionId,
+    cols: String(cols),
+    rows: String(rows),
+    token,
+  })
+  const url = `http://127.0.0.1:${port}/cli/sessions/resize?${params}`
   await fetch(url, { method: 'GET' })
 }
 
@@ -115,6 +140,7 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     onReady,
     onError,
     interactive = true,
+    autoResize = true,
   } = props
 
   // TerminalGrid is held in a ref because it's imperative state —
@@ -214,6 +240,63 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     return () => el.removeEventListener('keydown', handler)
   }, [interactive, port, token, sessionId])
 
+  // I7 — ResizeObserver on the pane container. On dimension change,
+  // compute new cols/rows from cell metrics + container box, resize
+  // the TerminalGrid locally, and POST to /cli/sessions/resize so
+  // the child process sees the new dimensions.
+  //
+  // Debounce ~100ms: drag-resize fires many events per second;
+  // batching keeps network + grid churn bounded while still feeling
+  // live.
+  useEffect(() => {
+    if (!autoResize) return
+    const el = containerRef.current
+    if (!el) return
+    if (!cellMetrics.width || !cellMetrics.height) return
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let lastCols = cols
+    let lastRows = rows
+    const observer = new ResizeObserver((entries) => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        const rect = entries[0]?.contentRect
+        if (!rect) return
+        // Subtract the 4px padding on each side.
+        const availW = Math.max(0, rect.width - 8)
+        const availH = Math.max(0, rect.height - 8)
+        const newCols = Math.max(1, Math.floor(availW / cellMetrics.width))
+        const newRows = Math.max(1, Math.floor(availH / cellMetrics.height))
+        if (newCols === lastCols && newRows === lastRows) return
+        lastCols = newCols
+        lastRows = newRows
+        gridRef.current!.resize(newCols, newRows)
+        scheduleRender()
+        resizeSession(port, token, sessionId, newCols, newRows).catch(
+          (err) => {
+            // eslint-disable-next-line no-console
+            console.warn('[kessel] resize failed:', err)
+          },
+        )
+      }, 100)
+    })
+    observer.observe(el)
+    return () => {
+      if (timer) clearTimeout(timer)
+      observer.disconnect()
+    }
+  }, [
+    autoResize,
+    cellMetrics.width,
+    cellMetrics.height,
+    port,
+    token,
+    sessionId,
+    cols,
+    rows,
+    scheduleRender,
+  ])
+
   const containerStyle = useMemo<React.CSSProperties>(
     () => ({
       fontFamily: FONT_STACK,
@@ -225,17 +308,23 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       padding: '4px',
       position: 'relative',
       overflow: 'hidden',
-      // Deterministic width/height so a resize that hasn't yet
-      // reached the grid still clamps the view to the requested
-      // dims — no flicker while resize propagates through props.
-      width: cellMetrics.width
+      // When autoResize is off, pin the pane to the requested
+      // dims so a prop-driven resize clamps the view immediately
+      // and doesn't flicker while the grid catches up.
+      //
+      // When autoResize is on, defer sizing to the parent — the
+      // pane takes whatever box it's given and the
+      // ResizeObserver computes cols/rows to fit. This is the
+      // common case for tab panes and Harness Lab device-size
+      // presets.
+      width: !autoResize && cellMetrics.width
         ? `${cellMetrics.width * cols + 8}px`
         : undefined,
-      height: cellMetrics.height
+      height: !autoResize && cellMetrics.height
         ? `${cellMetrics.height * rows + 8}px`
         : undefined,
     }),
-    [fontSize, cellMetrics.width, cellMetrics.height, cols, rows],
+    [fontSize, cellMetrics.width, cellMetrics.height, cols, rows, autoResize],
   )
 
   const cursorStyle = useMemo<React.CSSProperties>(() => {

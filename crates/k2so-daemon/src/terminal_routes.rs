@@ -113,6 +113,50 @@ pub fn handle_read(params: &HashMap<String, String>) -> CliResponse {
     CliResponse::ok_json(serde_json::json!({ "lines": tail }).to_string())
 }
 
+/// Handler for `GET /cli/sessions/resize?session=<uuid>&cols=N&rows=N`.
+///
+/// Resizes both the underlying PTY and the alacritty Term backing
+/// the session so the child process (bash, claude, etc.) re-flows
+/// its output for the new dimensions. Returns `{"success":true}`
+/// on success; 400 on validation failure.
+///
+/// Phase 4.5 I7: Kessel's ResizeObserver fires on pane dimension
+/// changes and calls this endpoint to keep the PTY in sync with
+/// the DOM cells the user sees.
+pub fn handle_sessions_resize(params: &HashMap<String, String>) -> CliResponse {
+    let id_str = match params.get("session").or_else(|| params.get("id")) {
+        Some(s) if !s.is_empty() => s.as_str(),
+        _ => return CliResponse::bad_request("missing session param"),
+    };
+    let session_id = match SessionId::parse(id_str) {
+        Some(id) => id,
+        None => {
+            return CliResponse::bad_request("invalid session id (expected UUID)")
+        }
+    };
+    let cols: u16 = match params.get("cols").and_then(|s| s.parse().ok()) {
+        Some(c) if c >= 1 => c,
+        _ => return CliResponse::bad_request("missing or invalid cols (>=1)"),
+    };
+    let rows: u16 = match params.get("rows").and_then(|s| s.parse().ok()) {
+        Some(r) if r >= 1 => r,
+        _ => return CliResponse::bad_request("missing or invalid rows (>=1)"),
+    };
+
+    let session = match session_map::lookup_by_session_id(&session_id) {
+        Some(s) => s,
+        None => {
+            return CliResponse::bad_request(
+                "session not found in daemon session_map",
+            );
+        }
+    };
+    if let Err(e) = session.resize(cols, rows) {
+        return CliResponse::bad_request(format!("resize failed: {e}"));
+    }
+    CliResponse::ok_json(r#"{"success":true}"#.to_string())
+}
+
 /// Handler for `GET /cli/terminal/write?id=<session>&message=<text>[&no_submit=true]`.
 ///
 /// Looks up the session in the daemon's `session_map` by session
