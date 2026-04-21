@@ -164,6 +164,34 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     })
   }, [])
 
+  // Scrollback viewport. `viewportOffset` is the number of rows we
+  // have scrolled up from the bottom of the combined
+  // [scrollback..liveGrid] stream. 0 = pinned to bottom (normal
+  // live view). Positive = viewing older content that used to be
+  // on-screen.
+  //
+  // Invariants:
+  //   - 0 <= viewportOffset <= scrollback.length
+  //   - At offset 0, rendering is bit-identical to snapshot.grid
+  //   - Pinning logic: if offset is 0 when new lines scroll into
+  //     scrollback, stay at 0 (auto-follow). If offset > 0, bump by
+  //     the growth delta so the user's absolute-content view stays
+  //     frozen — the content they're reading doesn't slide up out
+  //     from under them as new output arrives.
+  //   - Any user input (keystroke / paste) snaps back to offset 0.
+  //     Matches every real terminal's "type-to-bottom" reflex.
+  const [viewportOffset, setViewportOffset] = useState(0)
+  const prevScrollbackLenRef = useRef(0)
+  useEffect(() => {
+    const prev = prevScrollbackLenRef.current
+    const curr = snapshot.scrollback.length
+    prevScrollbackLenRef.current = curr
+    const delta = curr - prev
+    if (delta > 0 && viewportOffset > 0) {
+      setViewportOffset((o) => Math.min(o + delta, curr))
+    }
+  }, [snapshot.scrollback.length, viewportOffset])
+
   // Cursor is always visible (no blink). Rosson's product decision:
   // a stable solid cursor reads more calmly than a pulsing one,
   // especially during rapid output. markActivity still exists to
@@ -301,6 +329,10 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       // Mark activity so the resting-cursor settle effect knows a
       // burst is in progress and defers large-move commits.
       markActivity()
+      // Snap back to bottom whenever the user types — matches real
+      // terminal behavior. If we're already at bottom this is a
+      // no-op.
+      setViewportOffset(0)
       // Fire-and-forget; network-bound latency is not in the
       // render path. Errors log to console for now; a future
       // commit can route them to the onError prop.
@@ -327,6 +359,7 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       if (!text) return
       e.preventDefault()
       markActivity()
+      setViewportOffset(0)
       writeToSession(port, token, sessionId, text).catch((err) => {
         // eslint-disable-next-line no-console
         console.warn('[kessel] paste write failed:', err)
@@ -341,6 +374,34 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       el.removeEventListener('paste', pasteHandler)
     }
   }, [interactive, port, token, sessionId, markActivity])
+
+  // Mouse wheel → scrollback navigation. deltaY < 0 (wheel up / two-
+  // finger swipe down on trackpad) scrolls toward older content;
+  // deltaY > 0 scrolls toward the live bottom. We clamp against the
+  // current scrollback length. preventDefault so the parent pane
+  // doesn't also scroll the browser viewport.
+  //
+  // LINES_PER_TICK trades scroll speed against overshoot on a
+  // trackpad. 3 matches xterm / Terminal.app feel.
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const LINES_PER_TICK = 3
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY === 0) return
+      e.preventDefault()
+      const direction = e.deltaY < 0 ? +1 : -1
+      const maxOffset = gridRef.current?.snapshot().scrollback.length ?? 0
+      setViewportOffset((o) => {
+        const next = o + direction * LINES_PER_TICK
+        if (next <= 0) return 0
+        if (next >= maxOffset) return maxOffset
+        return next
+      })
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [])
 
   // I7 — ResizeObserver on the pane container. On dimension change,
   // compute new cols/rows from cell metrics + container box, resize
@@ -438,11 +499,43 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     [fontSize, cellMetrics.width, cellMetrics.height, cols, rows, autoResize],
   )
 
+  // Compose the visible rows from the combined [scrollback..liveGrid]
+  // stream based on viewportOffset. When offset is 0, this is exactly
+  // snapshot.grid (identity — no allocation). When offset > 0, the
+  // window slides up into scrollback. Missing rows (when scrollback
+  // is shorter than the window needs) render as blank — matches
+  // alacritty's behavior when you scroll past the oldest line.
+  const visibleRows = useMemo<readonly (readonly Cell[])[]>(() => {
+    if (viewportOffset === 0) return snapshot.grid
+    const { scrollback, grid, rows } = snapshot
+    const totalLen = scrollback.length + grid.length
+    const windowEnd = totalLen - viewportOffset
+    const windowStart = windowEnd - rows
+    const out: (readonly Cell[])[] = []
+    for (let i = 0; i < rows; i++) {
+      const abs = windowStart + i
+      if (abs < 0) {
+        out.push([])
+      } else if (abs < scrollback.length) {
+        out.push(scrollback[abs])
+      } else {
+        out.push(grid[abs - scrollback.length])
+      }
+    }
+    return out
+  }, [viewportOffset, snapshot])
+
   const cursorStyle = useMemo<React.CSSProperties>(() => {
     // Drive from `restingCursor` (settled position) instead of
     // `snapshot.cursor` (which tracks every intermediate move). See
     // the resting-cursor effect above for rationale.
+    //
+    // Also hide the cursor entirely while the viewport is scrolled
+    // up — the cursor is a live-grid coordinate and would render at
+    // a row that's showing historical scrollback content. Every
+    // real terminal does this.
     if (!restingCursor.visible) return { display: 'none' }
+    if (viewportOffset > 0) return { display: 'none' }
     if (!cellMetrics.width) return { display: 'none' }
     return {
       position: 'absolute',
@@ -459,6 +552,7 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     restingCursor.row,
     cellMetrics.width,
     cellMetrics.height,
+    viewportOffset,
   ])
 
   return (
@@ -469,7 +563,7 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       tabIndex={interactive ? 0 : -1}
       style={{ ...containerStyle, outline: 'none' }}
     >
-      {snapshot.grid.map((row, rowIdx) => (
+      {visibleRows.map((row, rowIdx) => (
         <div key={`row-${rowIdx}`}>{renderRow(row, rowIdx)}</div>
       ))}
       <div aria-hidden="true" style={cursorStyle} />
