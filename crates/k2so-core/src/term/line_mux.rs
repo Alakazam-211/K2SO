@@ -484,6 +484,16 @@ impl Perform for PerformState {
                 self.flush_pending_text();
                 self.apply_sgr(params);
             }
+            's' => {
+                // DECSC — save cursor. Emitted before Claude's
+                // spinner paints a char somewhere else; paired
+                // with a later 'u' to restore.
+                self.push_cursor_op(CursorOp::SaveCursor);
+            }
+            'u' => {
+                // DECRC — restore cursor.
+                self.push_cursor_op(CursorOp::RestoreCursor);
+            }
             _ => {
                 // Unhandled CSI — silently dropped in Phase 1.
                 // Flush any pending text so frame ordering stays sane

@@ -243,6 +243,32 @@ describe('TerminalGrid mode stubs', () => {
   })
 })
 
+// ── SaveCursor / RestoreCursor via CursorOp frames ─────────────────
+
+describe('TerminalGrid SaveCursor / RestoreCursor CursorOps', () => {
+  it('SaveCursor frame + RestoreCursor frame round-trips cursor position', () => {
+    const g = new TerminalGrid({ rows: 10, cols: 20 })
+    // Move cursor to (3, 5) then save.
+    g.applyFrame({ frame: 'CursorOp', data: { op: 'Goto', value: { row: 4, col: 6 } } })
+    expect(g.snapshot().cursor).toMatchObject({ row: 3, col: 5 })
+    g.applyFrame({ frame: 'CursorOp', data: { op: 'SaveCursor', value: null } })
+    // Move elsewhere + write a char.
+    g.applyFrame({ frame: 'CursorOp', data: { op: 'Goto', value: { row: 8, col: 12 } } })
+    expect(g.snapshot().cursor).toMatchObject({ row: 7, col: 11 })
+    // Restore.
+    g.applyFrame({ frame: 'CursorOp', data: { op: 'RestoreCursor', value: null } })
+    expect(g.snapshot().cursor).toMatchObject({ row: 3, col: 5 })
+  })
+
+  it('RestoreCursor without a prior Save is a no-op', () => {
+    const g = new TerminalGrid({ rows: 5, cols: 10 })
+    g.applyFrame({ frame: 'CursorOp', data: { op: 'Goto', value: { row: 2, col: 4 } } })
+    // Never saved. Restore should leave cursor where it is.
+    g.applyFrame({ frame: 'CursorOp', data: { op: 'RestoreCursor', value: null } })
+    expect(g.snapshot().cursor).toMatchObject({ row: 1, col: 3 })
+  })
+})
+
 // ── Semantic / raw frames are no-ops at the grid layer ──────────────
 
 describe('TerminalGrid passthrough frames', () => {

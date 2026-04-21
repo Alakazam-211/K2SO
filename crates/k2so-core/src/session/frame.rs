@@ -110,6 +110,17 @@ pub enum CursorOp {
     EraseInDisplay(EraseMode),
     /// Full-screen clear (ED 2 in absolute form).
     ClearScreen,
+    /// DECSC — save cursor position (ESC[s). TUIs like Claude Code
+    /// use save → move elsewhere → paint spinner char → restore to
+    /// keep the visible cursor stable while side-drawing. Without
+    /// explicit save/restore, every intermediate paint moves the
+    /// cursor visibly (the "jittery cursor" symptom on the Kessel
+    /// renderer). Value is unused; adjacent tagging requires a
+    /// value slot so we pass `null`.
+    SaveCursor,
+    /// DECRC — restore the cursor to the last saved position
+    /// (ESC[u). No-op if no save is in flight.
+    RestoreCursor,
 }
 
 /// EL / ED mode selector.

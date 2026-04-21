@@ -300,6 +300,12 @@ export class TerminalGrid {
       case 'ClearScreen':
         this.clearScreen()
         break
+      case 'SaveCursor':
+        this.saveCursor()
+        break
+      case 'RestoreCursor':
+        this.restoreCursor()
+        break
     }
   }
 

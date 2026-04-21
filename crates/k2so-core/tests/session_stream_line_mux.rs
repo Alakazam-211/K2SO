@@ -336,6 +336,47 @@ fn sgr_bright_colors_30_90_range() {
 }
 
 #[test]
+fn save_cursor_emits_save_cursor_op() {
+    // DECSC (ESC[s) — save cursor. Claude Code uses this before
+    // painting spinners to avoid visibly moving the "real" cursor.
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[s");
+    assert_eq!(frames.len(), 1);
+    assert!(matches!(cursor_op(&frames[0]), Some(CursorOp::SaveCursor)));
+}
+
+#[test]
+fn restore_cursor_emits_restore_cursor_op() {
+    // DECRC (ESC[u) — restore cursor to saved position.
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[u");
+    assert_eq!(frames.len(), 1);
+    assert!(matches!(cursor_op(&frames[0]), Some(CursorOp::RestoreCursor)));
+}
+
+#[test]
+fn save_paint_restore_sequence_emits_ordered_ops() {
+    // End-to-end Claude-style spinner paint:
+    //   save → go to row 5 col 1 → emit char → restore
+    // Grid consumer sees cursor end up where it started.
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[s\x1b[5;1Hx\x1b[u");
+    // Expected frames: SaveCursor, Goto(5,1), Text("x"),
+    // RestoreCursor.
+    assert!(frames.len() >= 4);
+    assert!(matches!(cursor_op(&frames[0]), Some(CursorOp::SaveCursor)));
+    assert!(matches!(
+        cursor_op(&frames[1]),
+        Some(CursorOp::Goto { row: 5, col: 1 })
+    ));
+    assert_eq!(text_frame_bytes(&frames[2]), Some(&b"x"[..]));
+    assert!(matches!(
+        cursor_op(&frames[3]),
+        Some(CursorOp::RestoreCursor)
+    ));
+}
+
+#[test]
 fn sgr_flushes_before_style_change() {
     // Pending "pre" carries the OLD style, even mid-line.
     let mut mux = LineMux::new();

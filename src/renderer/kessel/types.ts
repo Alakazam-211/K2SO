@@ -75,6 +75,8 @@ export type CursorOp =
   | { op: 'EraseInLine'; value: EraseMode }
   | { op: 'EraseInDisplay'; value: EraseMode }
   | { op: 'ClearScreen'; value?: null }
+  | { op: 'SaveCursor'; value?: null }
+  | { op: 'RestoreCursor'; value?: null }
 
 export type EraseMode = 'to_end' | 'from_start' | 'all'
 

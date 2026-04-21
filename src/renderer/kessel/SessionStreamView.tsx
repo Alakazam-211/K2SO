@@ -164,6 +164,40 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     })
   }, [])
 
+  // Cursor blink. Alacritty-parity settings:
+  //   - 750ms on/off interval (matches alacritty's default
+  //     cursor.blink_interval, which is lower-frequency than our
+  //     initial 500ms — easier on the eye during rapid output).
+  //   - 5-second inactivity timeout: after 5s without a Frame or
+  //     keystroke, blinking freezes with the cursor ON. During a
+  //     quiet prompt the caret is a solid block instead of
+  //     pulsing, matching every real terminal users are used to.
+  //   - Any keystroke or frame arrival resets the timeout + forces
+  //     an ON phase so typing feels instant.
+  //
+  // Declared BEFORE the WS useEffect because that effect's onFrame
+  // callback calls markActivity(); keeping the declaration above the
+  // first reference avoids any temporal-dead-zone footguns if React
+  // ever changes hook execution order.
+  const [cursorBlinkOn, setCursorBlinkOn] = useState(true)
+  const lastActivityRef = useRef(Date.now())
+  const markActivity = useCallback(() => {
+    lastActivityRef.current = Date.now()
+    setCursorBlinkOn(true)
+  }, [])
+  useEffect(() => {
+    const id = setInterval(() => {
+      const quietMs = Date.now() - lastActivityRef.current
+      if (quietMs > 5_000) {
+        // Freeze with cursor on. Don't invert.
+        setCursorBlinkOn(true)
+        return
+      }
+      setCursorBlinkOn((v) => !v)
+    }, 750)
+    return () => clearInterval(id)
+  }, [])
+
   // Propagate prop-driven resize into the grid.
   useEffect(() => {
     if (!gridRef.current) return
@@ -180,6 +214,7 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     const off = client.on({
       onFrame: (frame: Frame) => {
         gridRef.current!.applyFrame(frame)
+        markActivity()
         scheduleRender()
       },
       onAck: (ack) => onReady?.(ack.replayCount),
@@ -190,22 +225,7 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       off()
       client.dispose()
     }
-  }, [sessionId, port, token, onReady, onError, scheduleRender])
-
-  // Cursor blink. The snapshot carries an up-to-the-millisecond
-  // cursor position (mutated by every Frame::Text write + CursorOp),
-  // but rendering at that cadence makes Claude's rapid cursor moves
-  // look like the caret is "vibrating." Real terminals blink the
-  // cursor at ~500ms regardless of input traffic, so the eye
-  // perceives it as stable. We do the same here: a 500ms interval
-  // flips this boolean; the cursor overlay hides during the off
-  // phase. Any user keystroke resets the phase to ON so typing
-  // feels instant.
-  const [cursorBlinkOn, setCursorBlinkOn] = useState(true)
-  useEffect(() => {
-    const id = setInterval(() => setCursorBlinkOn((v) => !v), 500)
-    return () => clearInterval(id)
-  }, [])
+  }, [sessionId, port, token, onReady, onError, scheduleRender, markActivity])
 
   // Cell metrics for cursor positioning. Measured once per fontSize
   // change by writing a hidden span and reading its box. Simple and
@@ -243,8 +263,8 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       e.preventDefault()
       // Any keystroke forces the cursor to the ON phase of the
       // blink cycle so typing feels snappy (same UX as a real
-      // terminal). The 500ms interval will resume from ON.
-      setCursorBlinkOn(true)
+      // terminal). The 750ms interval will resume from ON.
+      markActivity()
       // Fire-and-forget; network-bound latency is not in the
       // render path. Errors log to console for now; a future
       // commit can route them to the onError prop.
@@ -270,7 +290,7 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       const text = e.clipboardData?.getData('text')
       if (!text) return
       e.preventDefault()
-      setCursorBlinkOn(true)
+      markActivity()
       writeToSession(port, token, sessionId, text).catch((err) => {
         // eslint-disable-next-line no-console
         console.warn('[kessel] paste write failed:', err)
@@ -284,7 +304,7 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       el.removeEventListener('keydown', handler)
       el.removeEventListener('paste', pasteHandler)
     }
-  }, [interactive, port, token, sessionId])
+  }, [interactive, port, token, sessionId, markActivity])
 
   // I7 — ResizeObserver on the pane container. On dimension change,
   // compute new cols/rows from cell metrics + container box, resize
