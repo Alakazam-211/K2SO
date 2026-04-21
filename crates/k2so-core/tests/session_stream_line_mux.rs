@@ -355,6 +355,26 @@ fn restore_cursor_emits_restore_cursor_op() {
 }
 
 #[test]
+fn legacy_esc7_emits_save_cursor_op() {
+    // ESC 7 — legacy (non-CSI) save cursor. Pre-dates CSI s/u;
+    // still widely used by tmux, vim, and likely Claude Code's
+    // input-line repaint.
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b7");
+    assert_eq!(frames.len(), 1);
+    assert!(matches!(cursor_op(&frames[0]), Some(CursorOp::SaveCursor)));
+}
+
+#[test]
+fn legacy_esc8_emits_restore_cursor_op() {
+    // ESC 8 — legacy restore cursor.
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b8");
+    assert_eq!(frames.len(), 1);
+    assert!(matches!(cursor_op(&frames[0]), Some(CursorOp::RestoreCursor)));
+}
+
+#[test]
 fn save_paint_restore_sequence_emits_ordered_ops() {
     // End-to-end Claude-style spinner paint:
     //   save → go to row 5 col 1 → emit char → restore

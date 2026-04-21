@@ -505,7 +505,24 @@ impl Perform for PerformState {
 
     // Phase 1 passthroughs. C5 fills `osc_dispatch` for APC; DCS
     // (`hook`/`put`/`unhook`) stays empty until a harness needs it.
-    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, _byte: u8) {
+    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
+        // Legacy non-CSI save/restore cursor. Predates VT100's CSI s/u
+        // and is still emitted by tmux, vim, and (probably) Claude
+        // Code's input-line repaint. Without this, every repaint that
+        // uses ESC 7 / ESC 8 looks like the cursor is bouncing to
+        // wherever the TUI paints next, because our grid never knew
+        // the TUI meant to come back.
+        match byte {
+            b'7' => {
+                self.push_cursor_op(CursorOp::SaveCursor);
+                return;
+            }
+            b'8' => {
+                self.push_cursor_op(CursorOp::RestoreCursor);
+                return;
+            }
+            _ => {}
+        }
         self.flush_pending_text();
     }
 
