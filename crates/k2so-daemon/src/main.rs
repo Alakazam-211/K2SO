@@ -241,7 +241,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
     let is_post = method == "POST";
     let post_allowed = matches!(
         path_and_query.split_once('?').map(|(p, _)| p).unwrap_or(path_and_query),
-        "/cli/awareness/publish"
+        "/cli/awareness/publish" | "/cli/sessions/spawn"
     );
     if method != "GET" && !(is_post && post_allowed) {
         let _ = stream.read(&mut buf).await;
@@ -386,6 +386,27 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
                 return;
             }
             awareness_ws::serve_awareness_subscribe_connection(stream).await;
+        }
+        // POST /cli/sessions/spawn — daemon-side session spawn
+        // (Phase 3.1 F2). External callers send a JSON SpawnRequest;
+        // daemon spawns the session, registers it in session_map
+        // keyed by agent_name, returns {sessionId, agentName}.
+        "/cli/sessions/spawn" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let result = awareness_ws::handle_sessions_spawn(&body_bytes);
+            send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
         }
         // Unified /cli/* dispatch. Auth + param validation +
         // per-route handler all live in `cli::dispatch`; main.rs

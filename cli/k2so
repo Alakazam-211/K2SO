@@ -1676,6 +1676,65 @@ PY
     echo
 }
 
+# Spawn a Session Stream session in the daemon. After spawn, the
+# session's agent_name is registered in the daemon's session_map,
+# which means `k2so signal <agent>` now reaches that session's
+# live PTY via the InjectProvider.
+#
+# Usage:
+#   k2so sessions spawn --agent foo [--cwd <path>] [--command <cmd>] [--cols N] [--rows N]
+cmd_sessions_spawn() {
+    local agent="" cwd="$(pwd)" command="" cols="80" rows="24"
+    local args_json="null"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --agent)   agent="$2"; shift 2 ;;
+            --cwd)     cwd="$2"; shift 2 ;;
+            --command) command="$2"; shift 2 ;;
+            --cols)    cols="$2"; shift 2 ;;
+            --rows)    rows="$2"; shift 2 ;;
+            --) shift; break ;;
+            *) shift ;;
+        esac
+    done
+    [[ -z "$agent" ]] && { echo "Usage: k2so sessions spawn --agent <name> [--command <cmd>]" >&2; exit 1; }
+
+    local cmd_json="null"
+    [[ -n "$command" ]] && cmd_json=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$command")
+
+    local body
+    body=$(python3 <<PY
+import json
+body = {
+    "agent_name": "$agent",
+    "cwd": "$cwd",
+    "cols": int("$cols"),
+    "rows": int("$rows"),
+}
+cmd = $cmd_json
+if cmd is not None:
+    body["command"] = cmd
+print(json.dumps(body))
+PY
+)
+    cli_post_json "/cli/sessions/spawn" "$body"
+    echo
+}
+
+# Sessions subcommand dispatcher — handles `k2so sessions spawn`
+# and any future `sessions *` verbs.
+cmd_sessions() {
+    local sub="${1:-}"
+    shift 2>/dev/null || true
+    case "$sub" in
+        spawn) cmd_sessions_spawn "$@" ;;
+        *)
+            echo "Usage: k2so sessions spawn --agent <name> [...]" >&2
+            exit 1
+            ;;
+    esac
+}
+
 # Roster query — "who's in the office?"
 #
 # Usage:
@@ -2724,6 +2783,10 @@ case "${1:-help}" in
     roster)
         # 0.34.0 roster — "who's in the office?"
         shift; cmd_roster "$@"
+        ;;
+    sessions)
+        # 0.34.0 Phase 3.1 — k2so sessions spawn --agent foo
+        shift; cmd_sessions "$@"
         ;;
     reserve)
         shift; cmd_reserve "$@"

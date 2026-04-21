@@ -28,6 +28,119 @@ use k2so_core::log_debug;
 // POST /cli/awareness/publish
 // ──────────────────────────────────────────────────────────────────────
 
+/// Handler for `POST /cli/sessions/spawn`. Called by
+/// `main.rs::handle_connection` after token auth + body read.
+/// Accepts a JSON body shaped like:
+///
+/// ```json
+/// {
+///   "agent_name": "bar",
+///   "cwd": "/tmp",
+///   "command": "cat",
+///   "args": null,
+///   "cols": 80,
+///   "rows": 24
+/// }
+/// ```
+///
+/// Spawns a Session Stream session in the daemon process,
+/// registers it in `session_map` keyed by `agent_name`, tags the
+/// SessionEntry's agent_name so roster + liveness detection
+/// works, and returns `{"sessionId": "<uuid>"}`.
+///
+/// F2 of Phase 3.1. Makes the daemon's InjectProvider actually
+/// usable from external callers (CLI, Tauri, tests) — without a
+/// spawn endpoint, session_map always stays empty in a real
+/// daemon deployment.
+pub fn handle_sessions_spawn(body: &[u8]) -> HandlerResult {
+    use k2so_core::session::{registry, SessionId};
+    use k2so_core::terminal::{spawn_session_stream, SpawnConfig};
+
+    #[derive(serde::Deserialize)]
+    struct SpawnRequest {
+        agent_name: String,
+        #[serde(default = "default_cwd")]
+        cwd: String,
+        command: Option<String>,
+        args: Option<Vec<String>>,
+        #[serde(default = "default_cols")]
+        cols: u16,
+        #[serde(default = "default_rows")]
+        rows: u16,
+    }
+    fn default_cwd() -> String {
+        "/tmp".into()
+    }
+    fn default_cols() -> u16 {
+        80
+    }
+    fn default_rows() -> u16 {
+        24
+    }
+
+    let req: SpawnRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => {
+            return HandlerResult {
+                status: "400 Bad Request",
+                body: format!(
+                    r#"{{"error":"parse SpawnRequest: {}"}}"#,
+                    e.to_string().replace('"', "'")
+                ),
+            }
+        }
+    };
+    if req.agent_name.is_empty() {
+        return HandlerResult {
+            status: "400 Bad Request",
+            body: r#"{"error":"agent_name required"}"#.into(),
+        };
+    }
+
+    let session_id = SessionId::new();
+    let cfg = SpawnConfig {
+        session_id,
+        cwd: req.cwd,
+        command: req.command,
+        args: req.args,
+        cols: req.cols,
+        rows: req.rows,
+    };
+
+    let session = match spawn_session_stream(cfg) {
+        Ok(s) => s,
+        Err(e) => {
+            return HandlerResult {
+                status: "500 Internal Server Error",
+                body: format!(
+                    r#"{{"error":"spawn failed: {}"}}"#,
+                    e.replace('"', "'")
+                ),
+            }
+        }
+    };
+
+    // Tag the core's SessionEntry so liveness lookups (roster,
+    // egress::is_agent_live) find this agent under its name.
+    if let Some(entry) = registry::lookup(&session_id) {
+        entry.set_agent_name(&req.agent_name);
+    }
+
+    // Register in the daemon's session_map so InjectProvider can
+    // reach this session by agent name.
+    let arc = std::sync::Arc::new(session);
+    crate::session_map::register(&req.agent_name, arc);
+
+    let out = serde_json::json!({
+        "sessionId": session_id.to_string(),
+        "agentName": req.agent_name,
+    });
+    HandlerResult {
+        status: "200 OK",
+        body: out.to_string(),
+    }
+}
+
 /// Handler for `POST /cli/awareness/publish`. Called by
 /// `main.rs::handle_connection` after token auth + body read.
 ///
