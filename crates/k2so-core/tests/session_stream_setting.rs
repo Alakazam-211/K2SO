@@ -137,3 +137,35 @@ fn unknown_field_still_rejected() {
     .unwrap_err();
     assert!(err.contains("Unknown setting"), "error was: {err}");
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// G6 — settings JSON exposes useSessionStream for the UI toggle
+// ─────────────────────────────────────────────────────────────────────
+
+use k2so_core::agents::settings::get_project_settings;
+
+#[test]
+fn get_project_settings_exposes_use_session_stream_bool() {
+    fresh_db();
+    insert_project("/tmp/test-g6-reads-off");
+    let settings = get_project_settings("/tmp/test-g6-reads-off").unwrap();
+    // Default from the migration is 'off' → false in the JSON.
+    assert_eq!(
+        settings.get("useSessionStream").and_then(|v| v.as_bool()),
+        Some(false),
+        "settings JSON: {settings:#}"
+    );
+
+    update_project_setting(
+        "/tmp/test-g6-reads-off",
+        "use_session_stream",
+        "on",
+    )
+    .unwrap();
+    let settings = get_project_settings("/tmp/test-g6-reads-off").unwrap();
+    assert_eq!(
+        settings.get("useSessionStream").and_then(|v| v.as_bool()),
+        Some(true),
+        "after set 'on', useSessionStream should flip: {settings:#}"
+    );
+}

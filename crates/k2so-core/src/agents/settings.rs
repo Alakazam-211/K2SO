@@ -74,9 +74,18 @@ pub fn get_project_settings(project_path: &str) -> Result<serde_json::Value, Str
     let conn = db.lock();
 
     conn.query_row(
-        "SELECT agent_mode, worktree_mode, heartbeat_enabled, agent_enabled, pinned, name, tier_id FROM projects WHERE path = ?1",
+        "SELECT agent_mode, worktree_mode, heartbeat_enabled, agent_enabled, \
+                pinned, name, tier_id, use_session_stream \
+         FROM projects WHERE path = ?1",
         rusqlite::params![project_path],
         |row| {
+            // `use_session_stream` landed in migration 0032 with
+            // default 'off'; expose as a bool for React consumers
+            // (matching every other toggle shape in this struct).
+            let uss_raw = row
+                .get::<_, Option<String>>(7)
+                .unwrap_or(None)
+                .unwrap_or_else(|| "off".to_string());
             Ok(serde_json::json!({
                 "mode": row.get::<_, String>(0).unwrap_or_else(|_| "off".to_string()),
                 "worktreeMode": row.get::<_, i64>(1).unwrap_or(0) == 1,
@@ -85,6 +94,7 @@ pub fn get_project_settings(project_path: &str) -> Result<serde_json::Value, Str
                 "pinned": row.get::<_, i64>(4).unwrap_or(0) == 1,
                 "name": row.get::<_, String>(5).unwrap_or_default(),
                 "stateId": row.get::<_, Option<String>>(6).unwrap_or(None),
+                "useSessionStream": uss_raw == "on",
             }))
         },
     )
