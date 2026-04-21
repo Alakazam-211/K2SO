@@ -21,7 +21,7 @@ import { KesselClient } from './client'
 import { TerminalGrid, type Cell, type GridSnapshot } from './grid'
 import { DEFAULT_FG, DEFAULT_BG, styleToCss, stylesEqual } from './style'
 import type { Frame } from './types'
-import { keyEventToSequence } from '@/lib/key-mapping'
+import { keyEventToSequence, naturalTextEditingSequence } from '@/lib/key-mapping'
 
 // Font stack mirrors AlacrittyTerminalView so side-by-side users
 // see the same glyphs. MesloLGM Nerd Font is bundled with K2SO.
@@ -340,6 +340,24 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     const el = containerRef.current
     if (!el) return
     const handler = (e: KeyboardEvent) => {
+      // macOS natural-text-editing shortcuts first — Cmd+Arrow,
+      // Option+Arrow, Option+Backspace, Cmd+Backspace (→ Ctrl+U,
+      // kill-line-to-beginning), Cmd+Delete (→ Ctrl+K). These bind
+      // higher-level semantics onto keys that `keyEventToSequence`
+      // would otherwise return null for (since meta chords default
+      // to "let the browser handle it"). Parity with how the
+      // legacy AlacrittyTerminalView feels.
+      const natural = naturalTextEditingSequence(e)
+      if (natural !== null) {
+        e.preventDefault()
+        markActivity()
+        setViewportOffset(0)
+        writeToSession(port, token, sessionId, natural).catch((err) => {
+          // eslint-disable-next-line no-console
+          console.warn('[kessel] write failed:', err)
+        })
+        return
+      }
       // Key-mapping doesn't know our mode flags yet (Phase 2
       // LineMux doesn't emit them). Default mode = 0; shell
       // apps that need APP_CURSOR for arrow keys will degrade
