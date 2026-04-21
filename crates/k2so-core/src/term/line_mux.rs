@@ -249,7 +249,24 @@ impl Perform for PerformState {
 
     fn execute(&mut self, byte: u8) {
         match byte {
-            b'\n' => self.commit_line(),
+            b'\n' => {
+                // LF commits the current line. Push the `\n` into
+                // pending_text BEFORE flushing so downstream consumers
+                // (TerminalGrid, /cli/terminal/read reconstruction)
+                // see the line delimiter. Alacritty, the other half
+                // of the dual-emit reader, already gets the raw PTY
+                // byte; this brings LineMux to parity.
+                self.pending_text.push('\n');
+                self.commit_line();
+            }
+            b'\r' => {
+                // CR = cursor to col 0. Push into pending_text so the
+                // grid writeText path can interpret it. Historically
+                // dropped in Phase 1 when the only consumer was the
+                // archive writer; now that TerminalGrid needs column
+                // resets for `\r\n`-output, it's load-bearing.
+                self.pending_text.push('\r');
+            }
             b'\x08' => {
                 // BS — strip the last char from the current line.
                 // Also pop from pending_text so the downstream Text
@@ -258,7 +275,7 @@ impl Perform for PerformState {
                 self.pending_text.pop();
             }
             _ => {
-                // CR, Bell, Tab, other C0 — flushed but not otherwise
+                // Bell, Tab, other C0 — flushed but not otherwise
                 // surfaced in Phase 1.
             }
         }

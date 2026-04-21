@@ -35,12 +35,13 @@ fn two_lines_committed_and_two_text_frames_emitted() {
     assert_eq!(lines[1].text, "world");
     assert!(lines[0].seqno < lines[1].seqno);
 
-    // Two Text frames — one per run of printable chars before each
-    // newline. No CursorOp emitted for LF in Phase 1.
+    // Two Text frames — one per run of printable chars + the
+    // committing LF. Phase 4.5 preserves the `\n` in Frame::Text
+    // bytes so TerminalGrid consumers can reconstruct line breaks.
     let text_frames: Vec<_> = frames.iter().filter_map(text_frame_bytes).collect();
     assert_eq!(text_frames.len(), 2);
-    assert_eq!(text_frames[0], b"hello");
-    assert_eq!(text_frames[1], b"world");
+    assert_eq!(text_frames[0], b"hello\n");
+    assert_eq!(text_frames[1], b"world\n");
 
     // The current (unfinished) line is empty since the chunk ended on LF.
     assert!(mux.current_line_text().is_none());
@@ -148,7 +149,8 @@ fn mixed_text_and_control_preserves_ordering() {
         cursor_op(&frames[1]),
         Some(CursorOp::ClearScreen)
     ));
-    assert_eq!(text_frame_bytes(&frames[2]), Some(&b"post"[..]));
+    // Phase 4.5: the committing LF is preserved in Frame::Text.
+    assert_eq!(text_frame_bytes(&frames[2]), Some(&b"post\n"[..]));
 
     let lines: Vec<_> = mux.lines().collect();
     assert_eq!(lines.len(), 1);

@@ -352,7 +352,10 @@ fn linemux_interleaves_text_apc_text_in_correct_order() {
     }
     assert!(matches!(&frames[1], Frame::AgentSignal(_)));
     match &frames[2] {
-        Frame::Text { bytes, .. } => assert_eq!(bytes, b"post"),
+        // Post-Phase-4.5: the trailing `\n` terminator is now
+        // preserved in Frame::Text bytes so grid consumers see
+        // the line break.
+        Frame::Text { bytes, .. } => assert_eq!(bytes, b"post\n"),
         other => panic!("expected Text frame, got {other:?}"),
     }
 
@@ -365,6 +368,10 @@ fn linemux_interleaves_text_apc_text_in_correct_order() {
 #[test]
 fn linemux_no_regression_on_pure_text() {
     // Confirm C4's canonical test still holds after APC wiring.
+    // Phase 4.5: LineMux now preserves `\n` in Frame::Text bytes so
+    // downstream grid consumers know where lines break. Alacritty
+    // always saw the delimiter from the PTY stream directly; this
+    // brings LineMux's Frame::Text to parity.
     let mut mux = LineMux::new();
     let frames = mux.feed(b"hello\nworld\n");
     let text_frames: Vec<_> = frames
@@ -375,6 +382,6 @@ fn linemux_no_regression_on_pure_text() {
         })
         .collect();
     assert_eq!(text_frames.len(), 2);
-    assert_eq!(text_frames[0], b"hello");
-    assert_eq!(text_frames[1], b"world");
+    assert_eq!(text_frames[0], b"hello\n");
+    assert_eq!(text_frames[1], b"world\n");
 }
