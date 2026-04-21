@@ -31,7 +31,7 @@ use std::collections::VecDeque;
 use vte::{Params, Parser, Perform};
 
 use crate::log_debug;
-use crate::session::{CursorOp, EraseMode, Frame, Line, SeqnoGen, SequenceNo, Style};
+use crate::session::{CursorOp, EraseMode, Frame, Line, ModeKind, SeqnoGen, SequenceNo, Style};
 use crate::term::apc::{ApcChunk, ApcEvent, ApcExtractor};
 use crate::term::recognizers::Recognizer;
 
@@ -209,6 +209,11 @@ impl PerformState {
     fn push_cursor_op(&mut self, op: CursorOp) {
         self.flush_pending_text();
         self.frames_out.push(Frame::CursorOp(op));
+    }
+
+    fn push_frame(&mut self, frame: Frame) {
+        self.flush_pending_text();
+        self.frames_out.push(frame);
     }
 
     /// First parameter from a CSI `Params`, defaulting to `default`
@@ -441,10 +446,14 @@ impl Perform for PerformState {
         // `CSI ? 25 h` (DECTCEM cursor-show) from `CSI 25 h` (ANSI
         // mode 25, which we don't handle).
         if intermediates == b"?" && (action == 'h' || action == 'l') {
-            let show = action == 'h';
+            let on = action == 'h';
             for p in params.iter() {
                 match p.first().copied().unwrap_or(0) {
-                    25 => self.push_cursor_op(CursorOp::SetCursorVisible(show)),
+                    25 => self.push_cursor_op(CursorOp::SetCursorVisible(on)),
+                    2004 => self.push_frame(Frame::ModeChange {
+                        mode: ModeKind::BracketedPaste,
+                        on,
+                    }),
                     _ => {}
                 }
             }

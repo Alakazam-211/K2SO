@@ -268,6 +268,25 @@ describe('TerminalGrid SaveCursor / RestoreCursor CursorOps', () => {
     expect(g.snapshot().cursor).toMatchObject({ row: 1, col: 3 })
   })
 
+  it('ModeChange BracketedPaste toggles the modes.bracketedPaste flag', () => {
+    // DECSET ?2004 h / ?2004 l sets/clears bracketed-paste mode.
+    // The Kessel renderer reads this flag at paste time and wraps
+    // the payload in ESC[200~ / ESC[201~ so Claude-style TUIs don't
+    // auto-submit on embedded newlines.
+    const g = new TerminalGrid({ rows: 5, cols: 10 })
+    expect(g.snapshot().modes.bracketedPaste).toBe(false)
+    g.applyFrame({
+      frame: 'ModeChange',
+      data: { mode: 'bracketed_paste', on: true },
+    })
+    expect(g.snapshot().modes.bracketedPaste).toBe(true)
+    g.applyFrame({
+      frame: 'ModeChange',
+      data: { mode: 'bracketed_paste', on: false },
+    })
+    expect(g.snapshot().modes.bracketedPaste).toBe(false)
+  })
+
   it('SetCursorVisible toggles cursor.visible flag', () => {
     // DECTCEM (CSI ?25 h/l). TUIs emit hide before a multi-step
     // repaint and show afterward so intermediate positions don't

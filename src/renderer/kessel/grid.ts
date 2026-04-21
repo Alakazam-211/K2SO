@@ -45,6 +45,16 @@ export interface GridSnapshot {
   cursor: Readonly<Cursor>
   /** 0-indexed inclusive scroll region: [top, bottom]. */
   scrollRegion: Readonly<{ top: number; bottom: number }>
+  /** Terminal mode flags — populated by ModeChange frames. Consumers
+   *  read these to adapt behavior (e.g. wrap paste in ESC[200~..201~
+   *  when bracketedPaste is true). */
+  modes: Readonly<ModeFlags>
+}
+
+export interface ModeFlags {
+  /** DECSET ?2004 — when true, pasted text must be wrapped in
+   *  ESC[200~ … ESC[201~ so the TUI distinguishes paste from typing. */
+  bracketedPaste: boolean
 }
 
 export interface TerminalGridOpts {
@@ -74,6 +84,7 @@ export class TerminalGrid {
   private scrollRegion_: { top: number; bottom: number }
   private savedCursor_: { row: number; col: number } | null = null
   private altGrid_: Cell[][] | null = null
+  private modes_: ModeFlags = { bracketedPaste: false }
   private readonly scrollbackCap_: number
   // Partial UTF-8 handling: Frame::Text bytes are UTF-8 but multi-
   // byte sequences may span frames. TextDecoder's `stream: true`
@@ -118,6 +129,18 @@ export class TerminalGrid {
         // replay feed this into an emulator. The Kessel DOM
         // renderer doesn't.
         break
+      case 'ModeChange':
+        this.handleModeChange(frame.data.mode, frame.data.on)
+        break
+    }
+  }
+
+  private handleModeChange(mode: string, on: boolean): void {
+    switch (mode) {
+      case 'bracketed_paste':
+        this.modes_.bracketedPaste = on
+        break
+      // Future modes land here as they earn LineMux support.
     }
   }
 
@@ -155,6 +178,7 @@ export class TerminalGrid {
       scrollback: this.scrollback_,
       cursor: { ...this.cursor_ },
       scrollRegion: { ...this.scrollRegion_ },
+      modes: { ...this.modes_ },
     }
   }
 

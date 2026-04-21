@@ -37,6 +37,16 @@ export type Frame =
   | { frame: 'SemanticEvent'; data: SemanticEventData }
   | { frame: 'AgentSignal'; data: AgentSignal }
   | { frame: 'RawPtyFrame'; data: number[] }
+  | { frame: 'ModeChange'; data: ModeChangeData }
+
+export interface ModeChangeData {
+  mode: ModeKind
+  on: boolean
+}
+
+/** Terminal private-mode identifiers. Kept in lockstep with the Rust
+ *  `ModeKind` enum at `crates/k2so-core/src/session/frame.rs`. */
+export type ModeKind = 'bracketed_paste'
 
 export interface TextFrameData {
   /** UTF-8 bytes. Serde emits `Vec<u8>` as a number array. */

@@ -54,6 +54,26 @@ pub enum Frame {
     /// that want native terminal rendering can feed this straight
     /// back into their own emulator.
     RawPtyFrame(Vec<u8>),
+    /// Terminal private-mode change (DECSET / DECRST — CSI ? n h/l).
+    /// Lets the renderer and grid layer react to the TUI's declared
+    /// mode state without each one re-parsing the sequence. Phase 4.5
+    /// wires `BracketedPaste` first; `AltScreen`, `MouseVT200`, etc.
+    /// follow as the renderer earns support.
+    ModeChange { mode: ModeKind, on: bool },
+}
+
+/// Terminal private-mode identifiers. Enumerated because the set is
+/// small and known, and we want exhaustive switch statements in the
+/// TypeScript renderer to flag unhandled modes.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum ModeKind {
+    /// DECSET ?2004 — bracketed paste. When on, pasted text is
+    /// wrapped in ESC[200~ … ESC[201~ so the TUI can distinguish
+    /// paste from keystrokes (stops Claude from auto-submitting
+    /// mid-paste).
+    BracketedPaste,
 }
 
 /// The locked vocabulary for semantic events. Five variants + Custom

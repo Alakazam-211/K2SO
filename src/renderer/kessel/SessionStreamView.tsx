@@ -368,7 +368,21 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       e.preventDefault()
       markActivity()
       setViewportOffset(0)
-      writeToSession(port, token, sessionId, text).catch((err) => {
+      // Bracketed-paste wrap: if the TUI asked for it via ?2004 h,
+      // frame the paste between ESC[200~ and ESC[201~. This is what
+      // lets Claude / readline / etc. distinguish a paste burst
+      // from real keystrokes (otherwise a multi-line paste into
+      // Claude's prompt auto-submits at the first newline).
+      //
+      // The mode flag is maintained by TerminalGrid.handleModeChange
+      // as Frames arrive; we read the current snapshot here rather
+      // than depending on snapshot React state, since paste can
+      // arrive between rAF cycles.
+      const modes = gridRef.current?.snapshot().modes
+      const payload = modes?.bracketedPaste
+        ? `\x1b[200~${text}\x1b[201~`
+        : text
+      writeToSession(port, token, sessionId, payload).catch((err) => {
         // eslint-disable-next-line no-console
         console.warn('[kessel] paste write failed:', err)
       })

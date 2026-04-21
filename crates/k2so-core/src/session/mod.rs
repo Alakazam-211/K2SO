@@ -30,7 +30,7 @@ pub use archive::{
     HARD_LIMIT_BYTES, ROTATE_BYTES, WARN_BYTES,
 };
 pub use entry::{SessionEntry, BROADCAST_CAP, REPLAY_CAP};
-pub use frame::{CursorOp, EraseMode, Frame, SemanticKind, Style};
+pub use frame::{CursorOp, EraseMode, Frame, ModeKind, SemanticKind, Style};
 pub use line::{Line, SeqnoGen, SequenceNo};
 pub use types::{HarnessKind, Session, SessionId};
 pub use watchdog::{

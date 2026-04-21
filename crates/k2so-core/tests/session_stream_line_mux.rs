@@ -6,7 +6,7 @@
 
 #![cfg(feature = "session_stream")]
 
-use k2so_core::session::{CursorOp, EraseMode, Frame, Style};
+use k2so_core::session::{CursorOp, EraseMode, Frame, ModeKind, Style};
 use k2so_core::term::LineMux;
 
 /// Helper: extract Style from a Text frame (None = default style).
@@ -398,6 +398,32 @@ fn dectcem_show_emits_set_cursor_visible_true() {
     assert!(matches!(
         cursor_op(&frames[0]),
         Some(CursorOp::SetCursorVisible(true))
+    ));
+}
+
+#[test]
+fn bracketed_paste_mode_set_emits_mode_change_on() {
+    // DECSET ?2004 h — bracketed paste mode on. The TUI is
+    // announcing it wants pastes wrapped in ESC[200~ / ESC[201~.
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[?2004h");
+    assert_eq!(frames.len(), 1);
+    assert!(matches!(
+        &frames[0],
+        Frame::ModeChange { mode: ModeKind::BracketedPaste, on: true }
+    ));
+}
+
+#[test]
+fn bracketed_paste_mode_reset_emits_mode_change_off() {
+    // DECRST ?2004 l — bracketed paste off. Paste should stop
+    // being wrapped; TUI is back in line-oriented / raw mode.
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[?2004l");
+    assert_eq!(frames.len(), 1);
+    assert!(matches!(
+        &frames[0],
+        Frame::ModeChange { mode: ModeKind::BracketedPaste, on: false }
     ));
 }
 
