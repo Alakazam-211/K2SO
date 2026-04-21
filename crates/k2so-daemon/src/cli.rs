@@ -809,7 +809,11 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                     "notify_script": dirs::home_dir()
                         .map(|h| h.join(".k2so/hooks/notify.sh").to_string_lossy().to_string())
                         .unwrap_or_default(),
-                    "injections": serde_json::Value::Array(vec![]),
+                    // H7.1: scan per-CLI config files for notify.sh
+                    // injection so `k2so hooks status` reports the
+                    // full pipeline state (claude/cursor/gemini). Core
+                    // helper moved from src-tauri as part of H7.
+                    "injections": k2so_core::agent_hooks::check_hook_injections(),
                     "recent_events": events,
                     "recent_events_cap": 50,
                 })

@@ -282,6 +282,74 @@ pub fn handle_hook_complete(params: &HashMap<String, String>) -> &'static str {
     r#"{"success":true}"#
 }
 
+/// Scan common CLI LLM config files for our notify.sh injection and
+/// return the shape `{cli_name: {path, exists, injected}}` for each.
+/// Used by `/cli/hooks/status` so `k2so hooks status` can surface
+/// "hook is wired in for claude/cursor/gemini / not wired in" to the
+/// user without interactive inspection.
+///
+/// An entry is `injected: true` when the config file exists AND
+/// contains at least one reference to `.k2so/hooks/notify.sh`. Partial
+/// injection (one event hooked, others not) still reports `true` so
+/// users see events flow in `recent_events` while being able to spot
+/// a mismatch against their expected hook set.
+///
+/// Moved to core in Phase 4 H7.1 — the same daemon handler Tauri
+/// formerly served at `/cli/hooks/status` now lives in k2so-daemon
+/// and needs this helper. Keeping it src-tauri-only would leave the
+/// daemon returning an empty injections list, failing tier2 tests.
+pub fn check_hook_injections() -> serde_json::Value {
+    let home = dirs::home_dir();
+    let notify_fragment = ".k2so/hooks/notify.sh";
+
+    let check = |relative: &str| -> serde_json::Value {
+        let path = match &home {
+            Some(h) => h.join(relative),
+            None => {
+                return serde_json::json!({
+                    "path": null,
+                    "exists": false,
+                    "injected": false,
+                })
+            }
+        };
+        let path_str = path.to_string_lossy().to_string();
+        if !path.exists() {
+            return serde_json::json!({
+                "path": path_str,
+                "exists": false,
+                "injected": false,
+            });
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let injected = content.contains(notify_fragment);
+        serde_json::json!({
+            "path": path_str,
+            "exists": true,
+            "injected": injected,
+        })
+    };
+
+    let script_path = home
+        .as_ref()
+        .map(|h| h.join(notify_fragment))
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    serde_json::json!({
+        "notify_script": {
+            "path": script_path,
+            "exists": home
+                .as_ref()
+                .map(|h| h.join(notify_fragment).exists())
+                .unwrap_or(false),
+        },
+        "claude": check(".claude/settings.json"),
+        "cursor": check(".cursor/hooks.json"),
+        "gemini": check(".config/gemini/hooks.json"),
+    })
+}
+
 /// Percent-decode a URL-encoded string. Handles multi-byte UTF-8 sequences
 /// (e.g. `%E2%80%94` → `—`) by decoding bytes into a buffer first, then
 /// converting to UTF-8.
