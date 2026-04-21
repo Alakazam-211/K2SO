@@ -20,9 +20,13 @@
 //!
 //! **activity_feed row.** Always fired (PRD: "always, for audit").
 //! Uses `db::shared()` to insert via `ActivityFeedEntry::insert`.
-//! `project_id` comes from the signal's `from.workspace` if set;
-//! otherwise "_orphan" — orphan rows are visible when querying
-//! but don't collide with real projects.
+//! `project_id` comes from the signal's `from.workspace` if it
+//! matches a registered project row; otherwise falls back to the
+//! `_orphan` sentinel (seeded by `db::seed_audit_sentinels` at
+//! startup). `AgentAddress::Broadcast` senders use the `_broadcast`
+//! sentinel. The original unresolved workspace id is preserved in
+//! the row's `to_project_id` column when falling back, so audit
+//! consumers can still see what the sender claimed.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -331,6 +335,7 @@ fn write_audit(signal: &AgentSignal, target_agent: Option<&str>) -> i64 {
 
     let db = crate::db::shared();
     let conn = db.lock();
+    // Primary attempt: write with the sender-supplied project_id.
     match ActivityFeedEntry::insert(
         &conn,
         project_id,
@@ -343,11 +348,57 @@ fn write_audit(signal: &AgentSignal, target_agent: Option<&str>) -> i64 {
         full_signal.as_deref(),
     ) {
         Ok(id) => id,
+        Err(e) if is_fk_violation(&e) => {
+            // FK miss — the sender's workspace isn't a registered
+            // project. Fall back to the `_orphan` sentinel so audit
+            // still fires. Primitive promise: activity_feed ALWAYS
+            // records every delivered signal; we never silently drop
+            // because a caller passed an unregistered project id.
+            log_debug!(
+                "[awareness/egress] project_id={:?} not registered; \
+                 retrying audit insert under _orphan bucket",
+                project_id
+            );
+            match ActivityFeedEntry::insert(
+                &conn,
+                "_orphan",
+                target_agent,
+                &event_type,
+                from_agent,
+                target_agent,
+                Some(project_id),
+                Some(&summary),
+                full_signal.as_deref(),
+            ) {
+                Ok(id) => id,
+                Err(e2) => {
+                    log_debug!(
+                        "[awareness/egress] _orphan fallback insert failed: {}",
+                        e2
+                    );
+                    0
+                }
+            }
+        }
         Err(e) => {
             log_debug!("[awareness/egress] activity_feed insert failed: {}", e);
             0
         }
     }
+}
+
+/// True iff `err` represents a SQLite FOREIGN KEY constraint
+/// violation (extended code `SQLITE_CONSTRAINT_FOREIGNKEY`, 787).
+/// Used to distinguish "project_id doesn't match any projects.id"
+/// from other insert failures (disk full, DB locked, etc.) — only
+/// the FK case triggers the `_orphan` fallback.
+fn is_fk_violation(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(e, _)
+            if e.extended_code
+                == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY
+    )
 }
 
 fn signal_kind_tag(signal: &AgentSignal) -> &'static str {

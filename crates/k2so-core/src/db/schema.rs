@@ -1754,17 +1754,26 @@ mod unit_tests {
     #[test]
     fn project_create_list_get_delete_roundtrip() {
         let conn = fresh();
+        // Baseline accounts for the `_orphan` + `_broadcast`
+        // sentinel rows seeded by `db::seed_audit_sentinels` — they
+        // exist so egress audit never fails FK when a signal's
+        // workspace id doesn't match a real project.
+        let baseline = Project::list(&conn).unwrap().len();
+
         let id = make_project_row(&conn, "/tmp/proj-cr");
         let all = Project::list(&conn).unwrap();
-        assert_eq!(all.len(), 1);
-        assert_eq!(all[0].path, "/tmp/proj-cr");
+        assert_eq!(all.len(), baseline + 1);
+        assert!(
+            all.iter().any(|p| p.path == "/tmp/proj-cr"),
+            "inserted project should appear in list"
+        );
 
         let p = Project::get(&conn, &id).unwrap();
         assert_eq!(p.id, id);
         assert_eq!(p.name, "test");
 
         Project::delete(&conn, &id).unwrap();
-        assert_eq!(Project::list(&conn).unwrap().len(), 0);
+        assert_eq!(Project::list(&conn).unwrap().len(), baseline);
     }
 
     #[test]

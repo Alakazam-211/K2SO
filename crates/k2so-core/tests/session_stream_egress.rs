@@ -431,3 +431,93 @@ fn broadcast_signal_writes_audit_but_no_direct_delivery() {
     assert!(report.published_to_bus);
     assert!(report.activity_feed_row_id > 0);
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// G0 — audit-always-fires: unknown workspace falls back to `_orphan`
+// ─────────────────────────────────────────────────────────────────────
+//
+// Regression guard for the real-world bug surfaced by Rosson's
+// manual three-terminal smoke test on 2026-04-20: the CLI sent a
+// filesystem path as the signal's workspace, which didn't match any
+// `projects.id` UUID, so the `activity_feed` FK insert failed and
+// audit silently dropped (`activity_feed_row_id: 0`).
+//
+// With the _orphan fallback in place, audit ALWAYS fires — even
+// when the sender hands us a workspace id that doesn't resolve.
+// The original unresolved id is preserved in `to_project_id` so
+// audit consumers don't lose information.
+
+#[test]
+fn unknown_workspace_falls_back_to_orphan_audit_bucket() {
+    let _g = lock();
+    init_for_tests();
+    // Deliberately do NOT call ensure_project_row — the sender's
+    // workspace is an unregistered path, exactly mirroring the CLI
+    // bug from the Phase 3.1 smoke test.
+    let (_inject, _wake) = install_mocks();
+    let inbox_root = tmp_inbox_root("orphan-fallback");
+
+    let unregistered = WorkspaceId("/not/a/registered/project".into());
+    let signal = AgentSignal::new(
+        AgentAddress::Agent {
+            workspace: unregistered.clone(),
+            name: "sender".into(),
+        },
+        AgentAddress::Agent {
+            workspace: unregistered.clone(),
+            name: "any-target".into(),
+        },
+        SignalKind::Msg {
+            text: "audit must still fire".into(),
+        },
+    )
+    .with_delivery(Delivery::Inbox);
+
+    let report = egress::deliver(&signal, &inbox_root);
+
+    // Audit row DID get written — row id is non-zero even though
+    // the sender's workspace wasn't registered.
+    assert!(
+        report.activity_feed_row_id > 0,
+        "audit must fire via _orphan fallback (row id = {})",
+        report.activity_feed_row_id
+    );
+
+    // The row is bucketed under `_orphan`, and the original
+    // unresolved workspace is preserved as `to_project_id` so
+    // audit consumers can still see what the sender claimed.
+    let db = shared();
+    let conn = db.lock();
+    let (bucket, claimed): (String, Option<String>) = conn
+        .query_row(
+            "SELECT project_id, to_project_id FROM activity_feed WHERE id = ?1",
+            rusqlite::params![report.activity_feed_row_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(bucket, "_orphan");
+    assert_eq!(claimed.as_deref(), Some(unregistered.0.as_str()));
+}
+
+#[test]
+fn orphan_sentinel_row_exists_after_init_for_tests() {
+    // init_for_tests seeds both sentinel rows. Sanity-check that
+    // a subsequent lookup finds them — if seeding is accidentally
+    // skipped in the future, the fallback test above would also
+    // break, but this pinpoints the cause more precisely.
+    let _g = lock();
+    init_for_tests();
+
+    let db = shared();
+    let conn = db.lock();
+    for sentinel in ["_orphan", "_broadcast"] {
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM projects WHERE id = ?1",
+                rusqlite::params![sentinel],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "missing sentinel row: {sentinel}");
+    }
+}

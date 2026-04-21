@@ -1639,6 +1639,26 @@ cmd_signal() {
     local signal_id
     signal_id=$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null || echo "00000000-0000-0000-0000-000000000000")
 
+    # Resolve the project UUID so the audit row's FK to projects.id
+    # is satisfied. Fall back to the raw path if the lookup fails —
+    # egress's _orphan sentinel catches that case and still writes
+    # the audit row, just bucketed under _orphan instead of a real
+    # project. Without this lookup the CLI would send the absolute
+    # path as the workspace id, which FK-violates against
+    # projects.id (UUIDs) and silently drops audit.
+    local workspace_id="$PROJECT"
+    if [ -f "${HOME}/.k2so/k2so.db" ] && command -v sqlite3 >/dev/null 2>&1; then
+        # SQL-escape single quotes in the path (doubled per SQL spec).
+        local _safe_path="${PROJECT//\'/\'\'}"
+        local _resolved
+        _resolved=$(sqlite3 "${HOME}/.k2so/k2so.db" \
+            "SELECT id FROM projects WHERE path = '${_safe_path}' LIMIT 1;" 2>/dev/null || true)
+        if [ -n "$_resolved" ]; then
+            workspace_id="$_resolved"
+        fi
+        unset _safe_path _resolved
+    fi
+
     local body
     body=$(python3 <<PY
 import json, sys
@@ -1661,8 +1681,8 @@ else:
 
 signal = {
     "id": "$signal_id",
-    "from": {"scope":"agent","workspace":"$PROJECT","name":"$from"},
-    "to":   {"scope":"agent","workspace":"$PROJECT","name":"$target"},
+    "from": {"scope":"agent","workspace":"$workspace_id","name":"$from"},
+    "to":   {"scope":"agent","workspace":"$workspace_id","name":"$target"},
     "kind": kind_json,
     "priority": "normal",
     "delivery": "$delivery",
