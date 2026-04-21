@@ -238,9 +238,20 @@ pub fn spawn_session_stream(cfg: SpawnConfig) -> Result<SessionStreamSession, St
         })
         .map_err(|e| format!("openpty failed: {e}"))?;
 
-    // Build child command.
+    // Build child command. `-ilc` takes a shell COMMAND STRING
+    // (a script), not a literal program word. Passing
+    // `shell_escape(user_command)` used to wrap multi-word commands
+    // in single quotes, which made the outer shell parse the
+    // escaped form as a ONE-WORD command name — e.g. spawning
+    // `sleep 300` via `--command 'sleep 300'` turned into
+    // `zsh -ilc "'sleep 300'"` → `command not found: sleep 300`.
+    //
+    // The correct treatment: `user_command` is already a shell
+    // command string; hand it through verbatim. Individual `args`
+    // entries, on the other hand, ARE literal arguments and still
+    // need escaping before appending.
     let mut cmd = if let Some(user_command) = command {
-        let mut shell_cmd = shell_escape(&user_command);
+        let mut shell_cmd = user_command;
         if let Some(user_args) = args {
             for a in user_args {
                 shell_cmd.push(' ');

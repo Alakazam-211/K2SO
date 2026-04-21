@@ -245,12 +245,23 @@ fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
-    // Env-var parsing logic.
+    /// Env-var tests mutate process-wide state; serialize them so
+    /// parallel execution doesn't see torn config
+    /// (e.g. test A sets DISABLED=1; test B reads env mid-mutate
+    /// and mistakenly concludes defaults are None). Poison-tolerant
+    /// so a panicking test doesn't brick the rest of the suite.
+    static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    #[test]
-    fn config_from_env_defaults_with_no_vars() {
-        // Ensure no env pollution from earlier tests.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Clear every watchdog env var the tests touch, defensively —
+    /// even other test binaries in the same process don't pollute
+    /// our reads. Called at the start of every env-touching test.
+    fn clear_watchdog_env() {
         for v in [
             "K2SO_WATCHDOG_DISABLED",
             "K2SO_WATCHDOG_WARN_SECS",
@@ -261,13 +272,20 @@ mod tests {
         ] {
             std::env::remove_var(v);
         }
+    }
+
+    #[test]
+    fn config_from_env_defaults_with_no_vars() {
+        let _g = env_lock();
+        clear_watchdog_env();
         let c = config_from_env();
-        let d = WatchdogConfig::default();
-        assert_eq!(c, d);
+        assert_eq!(c, WatchdogConfig::default());
     }
 
     #[test]
     fn config_from_env_disabled_flag_disables_everything() {
+        let _g = env_lock();
+        clear_watchdog_env();
         std::env::set_var("K2SO_WATCHDOG_DISABLED", "1");
         let c = config_from_env();
         std::env::remove_var("K2SO_WATCHDOG_DISABLED");
@@ -276,6 +294,8 @@ mod tests {
 
     #[test]
     fn config_from_env_zero_secs_disables_individual_stage() {
+        let _g = env_lock();
+        clear_watchdog_env();
         std::env::set_var("K2SO_WATCHDOG_WARN_SECS", "0");
         let c = config_from_env();
         std::env::remove_var("K2SO_WATCHDOG_WARN_SECS");
