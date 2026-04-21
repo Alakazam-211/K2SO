@@ -39,11 +39,30 @@ export interface KesselClientOpts {
   maxReconnectAttempts?: number
   /** Backoff base in ms (default 500). Doubles each attempt, capped at 10s. */
   reconnectBaseMs?: number
+  /** D4: batch frames by animation frame instead of dispatching each
+   *  as-it-arrives. Claude's bottom-border repaints emit ~100 frames
+   *  per burst; batching cuts the per-frame callback overhead to one
+   *  invocation per rAF. Enabled by default for callers that pass
+   *  true; off by default for tests + simple consumers.
+   *
+   *  When on, listeners receive frames via `onFrames(batch)` if they
+   *  define it; listeners that only define `onFrame` still get each
+   *  frame sequentially inside the batch callback. Ordering is
+   *  preserved (4.7 C4). */
+  frameBatchingEnabled?: boolean
 }
 
 export interface KesselListener {
   onAck?: (ack: AckPayload) => void
+  /** Per-frame callback. Fires once per WS frame arrival unless
+   *  `frameBatchingEnabled` is true and `onFrames` is also defined,
+   *  in which case `onFrames` is preferred and this one is skipped. */
   onFrame?: (frame: Frame) => void
+  /** Batched frames callback — fires once per rAF with every frame
+   *  that arrived since the last flush. Batching reduces React
+   *  setState cost on heavy bursts (Claude repaints, htop at 1Hz).
+   *  Requires opts.frameBatchingEnabled=true on the client. */
+  onFrames?: (frames: readonly Frame[]) => void
   onError?: (err: ErrorPayload) => void
   onOpen?: () => void
   /** Fires on close. `code` is the WS close code. `willReconnect` tells
@@ -64,12 +83,18 @@ export class KesselClient {
   private disposed = false
   private reconnectAttempts = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  /** D4 batch buffer. Populated as frames arrive on the WS; drained
+   *  by a single rAF callback. Only used when frameBatchingEnabled
+   *  is true. */
+  private pendingFrames: Frame[] = []
+  private rafFlushPending = false
 
   constructor(opts: KesselClientOpts, wsFactory: WsFactory = (u) => new WebSocket(u)) {
     this.opts = {
       host: '127.0.0.1',
       maxReconnectAttempts: 5,
       reconnectBaseMs: 500,
+      frameBatchingEnabled: false,
       ...opts,
     }
     this.wsFactory = wsFactory
@@ -116,6 +141,11 @@ export class KesselClient {
       }
       this.ws = null
     }
+    // Drop any buffered batch — listeners are being cleared too so
+    // there's no one to deliver to. The pending rAF callback no-ops
+    // because rafFlushPending is reset and pendingFrames is empty.
+    this.pendingFrames = []
+    this.rafFlushPending = false
     this.listeners.clear()
   }
 
@@ -177,7 +207,7 @@ export class KesselClient {
         for (const l of this.listeners) l.onAck?.(env.payload)
         break
       case 'session:frame':
-        for (const l of this.listeners) l.onFrame?.(env.payload)
+        this.handleFrame(env.payload)
         break
       case 'session:error':
         for (const l of this.listeners) l.onError?.(env.payload)
@@ -188,6 +218,44 @@ export class KesselClient {
         const _exhaustive: never = env
         void _exhaustive
         break
+      }
+    }
+  }
+
+  private handleFrame(frame: Frame): void {
+    if (!this.opts.frameBatchingEnabled) {
+      this.dispatchFrameBatch([frame])
+      return
+    }
+    this.pendingFrames.push(frame)
+    if (this.rafFlushPending) return
+    this.rafFlushPending = true
+    const flush = (): void => {
+      this.rafFlushPending = false
+      const batch = this.pendingFrames
+      if (batch.length === 0) return
+      this.pendingFrames = []
+      this.dispatchFrameBatch(batch)
+    }
+    // rAF is available in every DOM renderer environment that
+    // matters; fall back to setTimeout for tests or headless cases.
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(flush)
+    } else {
+      setTimeout(flush, 0)
+    }
+  }
+
+  /** Dispatch a frame batch to all listeners. Listeners that defined
+   *  `onFrames` receive the full batch as a readonly array. Listeners
+   *  that only defined `onFrame` receive each frame sequentially,
+   *  preserving arrival order (4.7 C4). */
+  private dispatchFrameBatch(batch: readonly Frame[]): void {
+    for (const l of this.listeners) {
+      if (l.onFrames) {
+        l.onFrames(batch)
+      } else if (l.onFrame) {
+        for (const f of batch) l.onFrame(f)
       }
     }
   }

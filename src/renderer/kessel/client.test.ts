@@ -58,7 +58,7 @@ class FakeWebSocket {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-function makeClient() {
+function makeClient(extra: { frameBatchingEnabled?: boolean } = {}) {
   let lastWs: FakeWebSocket | null = null
   const factory = (url: string) => {
     lastWs = new FakeWebSocket(url)
@@ -71,6 +71,7 @@ function makeClient() {
       token: 'deadbeefcafebabe',
       reconnectBaseMs: 1, // fast retries for tests
       maxReconnectAttempts: 2,
+      ...extra,
     },
     factory,
   )
@@ -185,6 +186,84 @@ describe('KesselClient envelope dispatch', () => {
         expect(f.data.value).toEqual({ row: 5, col: 10 })
       }
     }
+  })
+
+  it('D4: batches frames when frameBatchingEnabled=true (single onFrames call, preserved order)', async () => {
+    // In the test env rAF is absent, so the client's internal
+    // fallback is setTimeout(flush, 0). We await a microtask so
+    // the batch drains before assertions.
+    const { client, getWs } = makeClient({ frameBatchingEnabled: true })
+    const batches: ReadonlyArray<readonly Frame[]>[] = []
+    const frameCalls: Frame[] = []
+    client.on({
+      onFrames: (fs) => batches.push([fs]),
+      onFrame: (f) => frameCalls.push(f), // should NOT fire when onFrames is defined
+    })
+    client.connect()
+    getWs().fireOpen()
+    // Fire 5 frames in rapid succession — all before the flush.
+    for (let i = 0; i < 5; i++) {
+      getWs().fireMessage(
+        JSON.stringify({
+          event: 'session:frame',
+          payload: {
+            frame: 'Text',
+            data: { bytes: [0x61 + i], style: null },
+          },
+        }),
+      )
+    }
+    // Let the setTimeout(0) flush drain.
+    await new Promise((r) => setTimeout(r, 5))
+    expect(batches.length).toBe(1)
+    expect(batches[0][0].length).toBe(5)
+    // Per-frame callback should NOT have fired; onFrames takes
+    // priority so we don't double-deliver.
+    expect(frameCalls.length).toBe(0)
+  })
+
+  it('D4: falls back to onFrame when listener only defines onFrame', async () => {
+    // With batching on + no onFrames, the listener receives each
+    // frame via onFrame inside the batch flush (order preserved).
+    const { client, getWs } = makeClient({ frameBatchingEnabled: true })
+    const frames: Frame[] = []
+    client.on({ onFrame: (f) => frames.push(f) })
+    client.connect()
+    getWs().fireOpen()
+    for (let i = 0; i < 3; i++) {
+      getWs().fireMessage(
+        JSON.stringify({
+          event: 'session:frame',
+          payload: {
+            frame: 'Text',
+            data: { bytes: [0x41 + i], style: null },
+          },
+        }),
+      )
+    }
+    await new Promise((r) => setTimeout(r, 5))
+    expect(frames.length).toBe(3)
+    expect(frames.map((f) => f.frame === 'Text' && f.data.bytes[0])).toEqual([
+      0x41,
+      0x42,
+      0x43,
+    ])
+  })
+
+  it('D4: batching off → dispatches each frame immediately (default behavior unchanged)', () => {
+    const { client, getWs } = makeClient() // batching defaults off
+    const frames: Frame[] = []
+    client.on({ onFrame: (f) => frames.push(f) })
+    client.connect()
+    getWs().fireOpen()
+    getWs().fireMessage(
+      JSON.stringify({
+        event: 'session:frame',
+        payload: { frame: 'Text', data: { bytes: [0x78], style: null } },
+      }),
+    )
+    // No await — synchronous delivery.
+    expect(frames.length).toBe(1)
   })
 
   it('surfaces invalid JSON as a synthesized error', () => {

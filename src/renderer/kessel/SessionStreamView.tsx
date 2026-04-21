@@ -369,10 +369,19 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
   // Open the WS once per (sessionId, port, token) tuple. dispose on
   // unmount or prop change.
   useEffect(() => {
-    const client = new KesselClient({ sessionId, port, token })
+    const client = new KesselClient({
+      sessionId,
+      port,
+      token,
+      frameBatchingEnabled: config.performance.frameBatchingEnabled,
+    })
+    // D4: one applyFrame loop + one scheduleRender per batch. Order
+    // preserved (4.7 C4). This cuts the per-frame React setState
+    // cascade that Claude's bottom-border repaints used to trigger.
     const off = client.on({
-      onFrame: (frame: Frame) => {
-        gridRef.current!.applyFrame(frame)
+      onFrames: (frames) => {
+        const grid = gridRef.current!
+        for (const frame of frames) grid.applyFrame(frame)
         markActivity()
         scheduleRender()
       },
@@ -384,7 +393,16 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       off()
       client.dispose()
     }
-  }, [sessionId, port, token, onReady, onError, scheduleRender, markActivity])
+  }, [
+    sessionId,
+    port,
+    token,
+    onReady,
+    onError,
+    scheduleRender,
+    markActivity,
+    config.performance.frameBatchingEnabled,
+  ])
 
   // Cell metrics for cursor positioning. Measured once per fontSize
   // change by writing a hidden span and reading its box. Simple and
