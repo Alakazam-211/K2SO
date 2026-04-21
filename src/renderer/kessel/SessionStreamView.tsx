@@ -253,10 +253,37 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
         console.warn('[kessel] write failed:', err)
       })
     }
+    // I8 — paste handler. Browser DOM gives us selection + copy
+    // (Cmd+C) for free since the pane is native <span>s; the gap
+    // was paste, since the pane isn't an editable input. Listen for
+    // the 'paste' event (fires on Cmd+V when focused) and forward
+    // the clipboard text through /cli/terminal/write. The shell /
+    // claude / whoever receives exactly what the user pasted.
+    //
+    // Known follow-up: when a receiving program has bracketed-paste
+    // mode enabled (CSI ?2004h), pasted text should be wrapped in
+    // ESC[200~ ... ESC[201~. LineMux doesn't surface this mode yet
+    // — see the roadmap. For now raw-pastes work correctly for
+    // bash/zsh/claude; multi-line pastes into a line-oriented shell
+    // will execute each line (same as any unwrapped paste).
+    const pasteHandler = (e: ClipboardEvent) => {
+      const text = e.clipboardData?.getData('text')
+      if (!text) return
+      e.preventDefault()
+      setCursorBlinkOn(true)
+      writeToSession(port, token, sessionId, text).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn('[kessel] paste write failed:', err)
+      })
+    }
     el.addEventListener('keydown', handler)
+    el.addEventListener('paste', pasteHandler)
     // Grab focus so the user can type immediately.
     el.focus()
-    return () => el.removeEventListener('keydown', handler)
+    return () => {
+      el.removeEventListener('keydown', handler)
+      el.removeEventListener('paste', pasteHandler)
+    }
   }, [interactive, port, token, sessionId])
 
   // I7 — ResizeObserver on the pane container. On dimension change,
