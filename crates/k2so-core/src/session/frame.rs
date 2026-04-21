@@ -74,6 +74,13 @@ pub enum ModeKind {
     /// paste from keystrokes (stops Claude from auto-submitting
     /// mid-paste).
     BracketedPaste,
+    /// DECSET ?1049 / ?47 — alternate screen buffer. TUIs like vim /
+    /// htop / less switch to alt screen on startup so their display
+    /// doesn't overwrite prior shell output; on exit they restore
+    /// the original buffer unchanged. Claude's full-screen repaint
+    /// mode uses this too. The grid swaps buffers; the renderer
+    /// suppresses scrollback navigation while on alt screen.
+    AltScreen,
 }
 
 /// The locked vocabulary for semantic events. Five variants + Custom

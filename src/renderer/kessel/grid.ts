@@ -55,6 +55,11 @@ export interface ModeFlags {
   /** DECSET ?2004 — when true, pasted text must be wrapped in
    *  ESC[200~ … ESC[201~ so the TUI distinguishes paste from typing. */
   bracketedPaste: boolean
+  /** DECSET ?1049 / ?47 — true while the grid is showing the alt-screen
+   *  buffer. Renderers suppress scrollback navigation while on alt
+   *  screen (the TUI owns the whole viewport and scrolling through its
+   *  history isn't meaningful — there isn't any). */
+  altScreen: boolean
 }
 
 export interface TerminalGridOpts {
@@ -84,7 +89,7 @@ export class TerminalGrid {
   private scrollRegion_: { top: number; bottom: number }
   private savedCursor_: { row: number; col: number } | null = null
   private altGrid_: Cell[][] | null = null
-  private modes_: ModeFlags = { bracketedPaste: false }
+  private modes_: ModeFlags = { bracketedPaste: false, altScreen: false }
   private readonly scrollbackCap_: number
   // Partial UTF-8 handling: Frame::Text bytes are UTF-8 but multi-
   // byte sequences may span frames. TextDecoder's `stream: true`
@@ -139,6 +144,19 @@ export class TerminalGrid {
     switch (mode) {
       case 'bracketed_paste':
         this.modes_.bracketedPaste = on
+        break
+      case 'alt_screen':
+        // ?1049 enter also saves the cursor and clears alt; ?1049
+        // exit restores the cursor and the main buffer. ?47 is the
+        // older op without the cursor save/restore. Both surface
+        // here as the same ModeKind — the callers in LineMux have
+        // already normalized.
+        if (on) {
+          this.enterAltScreen()
+        } else {
+          this.exitAltScreen()
+        }
+        this.modes_.altScreen = on
         break
       // Future modes land here as they earn LineMux support.
     }

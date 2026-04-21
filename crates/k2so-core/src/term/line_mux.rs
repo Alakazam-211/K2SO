@@ -454,6 +454,15 @@ impl Perform for PerformState {
                         mode: ModeKind::BracketedPaste,
                         on,
                     }),
+                    // ?1049 is the modern alt-screen op (save/
+                    // restore cursor + clear alt on enter), ?47 is
+                    // the original xterm variant. Most TUIs emit
+                    // ?1049 today but vim/less still emit ?47 in
+                    // some configs, so honor both.
+                    1049 | 47 => self.push_frame(Frame::ModeChange {
+                        mode: ModeKind::AltScreen,
+                        on,
+                    }),
                     _ => {}
                 }
             }

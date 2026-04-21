@@ -428,6 +428,41 @@ fn bracketed_paste_mode_reset_emits_mode_change_off() {
 }
 
 #[test]
+fn alt_screen_mode_1049_emits_mode_change() {
+    // DECSET ?1049 h — modern alt-screen enter (xterm+). TUIs use
+    // this so their full-screen UI doesn't overwrite the user's
+    // shell output; on exit (?1049 l) the prior buffer is restored.
+    let mut mux = LineMux::new();
+    let on_frames = mux.feed(b"\x1b[?1049h");
+    assert_eq!(on_frames.len(), 1);
+    assert!(matches!(
+        &on_frames[0],
+        Frame::ModeChange { mode: ModeKind::AltScreen, on: true }
+    ));
+    let off_frames = mux.feed(b"\x1b[?1049l");
+    assert_eq!(off_frames.len(), 1);
+    assert!(matches!(
+        &off_frames[0],
+        Frame::ModeChange { mode: ModeKind::AltScreen, on: false }
+    ));
+}
+
+#[test]
+fn alt_screen_mode_47_is_aliased_to_alt_screen() {
+    // DECSET ?47 — the original xterm alt-screen op. Less capable
+    // than ?1049 (no cursor save/restore), but some TUIs still
+    // emit it; we surface it as the same ModeKind so consumers
+    // don't need to branch on the variant.
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[?47h");
+    assert_eq!(frames.len(), 1);
+    assert!(matches!(
+        &frames[0],
+        Frame::ModeChange { mode: ModeKind::AltScreen, on: true }
+    ));
+}
+
+#[test]
 fn dectcem_ignores_unknown_private_mode() {
     // CSI ? 12 l — we don't handle this yet (cursor blink). It
     // should be silently dropped, NOT misinterpreted as cursor hide.

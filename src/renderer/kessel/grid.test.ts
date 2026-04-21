@@ -268,6 +268,35 @@ describe('TerminalGrid SaveCursor / RestoreCursor CursorOps', () => {
     expect(g.snapshot().cursor).toMatchObject({ row: 1, col: 3 })
   })
 
+  it('ModeChange AltScreen swaps buffers and flags modes.altScreen', () => {
+    // ?1049 h enters alt screen — primary buffer is preserved, the
+    // visible grid is a fresh blank canvas. ?1049 l exits and the
+    // primary buffer comes back unchanged. TUIs depend on this to
+    // preserve the user's shell scrollback across their session.
+    const g = new TerminalGrid({ rows: 3, cols: 5 })
+    // Paint 'abc' on the primary buffer.
+    g.applyFrame({ frame: 'Text', data: { bytes: [0x61, 0x62, 0x63], style: null } })
+    expect(g.snapshot().grid[0][0].char).toBe('a')
+    expect(g.snapshot().modes.altScreen).toBe(false)
+    // Enter alt screen.
+    g.applyFrame({
+      frame: 'ModeChange',
+      data: { mode: 'alt_screen', on: true },
+    })
+    expect(g.snapshot().modes.altScreen).toBe(true)
+    expect(g.snapshot().grid[0][0].char).toBe('')
+    // Paint 'xyz' on alt.
+    g.applyFrame({ frame: 'Text', data: { bytes: [0x78, 0x79, 0x7a], style: null } })
+    expect(g.snapshot().grid[0][0].char).toBe('x')
+    // Exit alt screen — primary should come back with 'abc'.
+    g.applyFrame({
+      frame: 'ModeChange',
+      data: { mode: 'alt_screen', on: false },
+    })
+    expect(g.snapshot().modes.altScreen).toBe(false)
+    expect(g.snapshot().grid[0][0].char).toBe('a')
+  })
+
   it('ModeChange BracketedPaste toggles the modes.bracketedPaste flag', () => {
     // DECSET ?2004 h / ?2004 l sets/clears bracketed-paste mode.
     // The Kessel renderer reads this flag at paste time and wraps

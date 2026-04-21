@@ -192,6 +192,19 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     }
   }, [snapshot.scrollback.length, viewportOffset])
 
+  // Alt-screen cutover: when the TUI enters ?1049 / ?47, force the
+  // viewport back to the bottom and stop honoring wheel scroll into
+  // scrollback. Alt screen is an isolated buffer — the only thing
+  // to view is what the TUI is painting right now, and "scrolling
+  // up through scrollback" from within vim / htop would show the
+  // user's shell output from before the TUI started, which is
+  // worse than useless.
+  useEffect(() => {
+    if (snapshot.modes.altScreen && viewportOffset !== 0) {
+      setViewportOffset(0)
+    }
+  }, [snapshot.modes.altScreen, viewportOffset])
+
   // Cursor is always visible (no blink). Rosson's product decision:
   // a stable solid cursor reads more calmly than a pulsing one,
   // especially during rapid output. markActivity still exists to
@@ -411,9 +424,15 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     const LINES_PER_TICK = 3
     const onWheel = (e: WheelEvent) => {
       if (e.deltaY === 0) return
+      const snap = gridRef.current?.snapshot()
+      // While the TUI owns the alt screen buffer (vim / htop etc.),
+      // scrollback doesn't apply — let the event pass through in
+      // case the TUI has its own mouse-wheel handling (Phase 5
+      // mouse reporting will forward it instead).
+      if (snap?.modes.altScreen) return
       e.preventDefault()
       const direction = e.deltaY < 0 ? +1 : -1
-      const maxOffset = gridRef.current?.snapshot().scrollback.length ?? 0
+      const maxOffset = snap?.scrollback.length ?? 0
       setViewportOffset((o) => {
         const next = o + direction * LINES_PER_TICK
         if (next <= 0) return 0
