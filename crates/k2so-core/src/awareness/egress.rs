@@ -119,6 +119,12 @@ pub struct DeliveryReport {
     /// Bus publish always fires; marker exists for symmetry and to
     /// make "everything succeeded" assertions easy.
     pub published_to_bus: bool,
+    /// G5: `true` if the sender exceeded their per-coordination-level
+    /// emit budget for this daemon run. Delivery channels (inject /
+    /// wake / inbox / bus) were ALL skipped; only the denial-audit
+    /// row was written. Sender agents can inspect this to back off
+    /// or slow down.
+    pub budget_denied: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -140,6 +146,16 @@ pub struct DeliveryReport {
 /// `roster::query` to enumerate members, then call `deliver_to_agent`
 /// for each.
 pub fn deliver(signal: &AgentSignal, inbox_root: &std::path::Path) -> DeliveryReport {
+    // G5 — budget gate. Every signal runs through here regardless
+    // of Agent/Workspace/Broadcast addressing so a chatty sender
+    // can't bypass their limit by broadcasting instead of
+    // 1-on-1-ing. On Deny: skip every delivery channel, write an
+    // audit row tagged `signal:budget-denied`, return a report
+    // with `budget_denied=true`.
+    if let Some(deny_report) = maybe_deny_over_budget(signal) {
+        return deny_report;
+    }
+
     match &signal.to {
         AgentAddress::Agent { name, .. } => {
             deliver_to_agent(signal, name, inbox_root)
@@ -154,6 +170,92 @@ pub fn deliver(signal: &AgentSignal, inbox_root: &std::path::Path) -> DeliveryRe
             report
         }
     }
+}
+
+/// Check the sender's per-coordination-level budget. Returns
+/// `Some(DeliveryReport { budget_denied: true, ... })` if the
+/// sender is over budget — caller returns this directly instead
+/// of running any delivery channel. Returns `None` if the sender
+/// is within budget (the budget counter has been incremented as a
+/// side effect).
+fn maybe_deny_over_budget(signal: &AgentSignal) -> Option<DeliveryReport> {
+    use crate::agents::launch_profile::{load_coordination_level, CoordinationLevel};
+    use crate::awareness::budget::{
+        check_and_increment, BudgetCheck, BudgetDecision, CLI_SENDER_NAME,
+    };
+
+    let (workspace_id, from_agent) = match &signal.from {
+        AgentAddress::Agent { workspace, name } => (workspace.0.as_str(), name.as_str()),
+        // Workspace + Broadcast senders have no per-agent budget
+        // (no AGENT.md to read). Keep the invariant "every
+        // emit audits" but skip budget enforcement. These address
+        // forms are only emitted by system-level callers today.
+        _ => return None,
+    };
+    if from_agent == CLI_SENDER_NAME {
+        // CLI shortcut — check_and_increment would allow this
+        // anyway, but skipping the AGENT.md lookup is free +
+        // avoids noise in cli-heavy workflows.
+        return None;
+    }
+
+    // Resolve the sender's coord level. Falls back to
+    // `CoordinationLevel::default()` = Moderate when no AGENT.md
+    // exists; `_orphan`-style workspaces (G0) also fall back to
+    // Moderate because we can't locate their agents dir.
+    let level = resolve_coordination_level(workspace_id, from_agent)
+        .unwrap_or_else(CoordinationLevel::default);
+
+    let decision = check_and_increment(&BudgetCheck {
+        workspace_id,
+        from_agent,
+        level,
+        is_status: matches!(signal.kind, crate::awareness::SignalKind::Status { .. }),
+        is_urgent: matches!(signal.priority, crate::awareness::Priority::Urgent),
+    });
+
+    match decision {
+        BudgetDecision::Allow => None,
+        BudgetDecision::Deny { level, budget, used } => {
+            log_debug!(
+                "[awareness/egress] budget denied: from={from_agent} \
+                 workspace={workspace_id} level={level:?} used={used}/{budget}"
+            );
+            let mut report = DeliveryReport::default();
+            report.budget_denied = true;
+            // Audit row with a dedicated event_type so higher-level
+            // queries can spot + count denials distinctly from real
+            // delivery events. Uses write_audit_event to override
+            // the default `signal:<kind>` event_type.
+            report.activity_feed_row_id =
+                write_audit_event(signal, None, "signal:budget-denied");
+            Some(report)
+        }
+    }
+}
+
+/// Resolve the sender agent's `CoordinationLevel`, looking up
+/// project path from the workspace id then reading AGENT.md.
+/// Returns `None` if the workspace isn't a registered project or
+/// AGENT.md is absent — caller substitutes default level.
+fn resolve_coordination_level(
+    workspace_id: &str,
+    agent_name: &str,
+) -> Option<crate::agents::launch_profile::CoordinationLevel> {
+    let db = crate::db::shared();
+    let conn = db.lock();
+    let project_path: String = conn
+        .query_row(
+            "SELECT path FROM projects WHERE id = ?1",
+            rusqlite::params![workspace_id],
+            |row| row.get(0),
+        )
+        .ok()?;
+    drop(conn);
+    Some(crate::agents::launch_profile::load_coordination_level(
+        &project_path,
+        agent_name,
+    ))
 }
 
 /// Deliver to a specific agent name. Resolves liveness from
@@ -313,6 +415,21 @@ fn render_signal_for_inject(signal: &AgentSignal) -> String {
 }
 
 fn write_audit(signal: &AgentSignal, target_agent: Option<&str>) -> i64 {
+    let event_type = format!("signal:{}", signal_kind_tag(signal));
+    write_audit_event(signal, target_agent, &event_type)
+}
+
+/// Write an activity_feed row with a CALLER-specified event_type
+/// rather than the default `signal:<kind>`. G5's budget-denial
+/// path uses this to tag denials with `signal:budget-denied` so
+/// higher-level queries can distinguish delivered signals from
+/// dropped ones. The full AgentSignal JSON still lands in
+/// `metadata`, preserving the "audit is reconstructable" primitive.
+fn write_audit_event(
+    signal: &AgentSignal,
+    target_agent: Option<&str>,
+    event_type: &str,
+) -> i64 {
     let project_id = match &signal.from {
         AgentAddress::Agent { workspace, .. }
         | AgentAddress::Workspace { workspace } => workspace.0.as_str(),
@@ -322,7 +439,6 @@ fn write_audit(signal: &AgentSignal, target_agent: Option<&str>) -> i64 {
         AgentAddress::Agent { name, .. } => Some(name.as_str()),
         _ => None,
     };
-    let event_type = format!("signal:{}", signal_kind_tag(signal));
     let summary = signal_summary(signal);
     // Store the full AgentSignal JSON in the metadata column so
     // callers can reconstruct the entire message from the audit
@@ -340,7 +456,7 @@ fn write_audit(signal: &AgentSignal, target_agent: Option<&str>) -> i64 {
         &conn,
         project_id,
         target_agent,
-        &event_type,
+        event_type,
         from_agent,
         target_agent,
         None,
@@ -363,7 +479,7 @@ fn write_audit(signal: &AgentSignal, target_agent: Option<&str>) -> i64 {
                 &conn,
                 "_orphan",
                 target_agent,
-                &event_type,
+                event_type,
                 from_agent,
                 target_agent,
                 Some(project_id),

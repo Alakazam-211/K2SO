@@ -63,6 +63,11 @@ impl WakeProvider for RecordingWake {
 
 fn install_mocks() -> (RecordingInject, RecordingWake) {
     egress::clear_providers_for_tests();
+    // G5: reset the per-sender budget counter so tests see a clean
+    // slate. Every egress test uses sender="sender" with the default
+    // Moderate level (budget=5); accumulating across tests would
+    // cause late-ordered tests to hit budget denial unexpectedly.
+    awareness::budget::reset_for_tests();
     let inject = RecordingInject::default();
     let wake = RecordingWake::default();
     egress::set_inject_provider(Box::new(inject.clone()));
@@ -520,4 +525,130 @@ fn orphan_sentinel_row_exists_after_init_for_tests() {
             .unwrap();
         assert_eq!(exists, 1, "missing sentinel row: {sentinel}");
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// G5 — per-coordination-level budget denies over-limit senders
+// ─────────────────────────────────────────────────────────────────────
+//
+// End-to-end through `egress::deliver`: an agent sender without an
+// AGENT.md defaults to Moderate (budget=5). Five signals land
+// normally; the sixth is denied. The DeliveryReport reflects the
+// denial AND an activity_feed row with
+// `event_type='signal:budget-denied'` is written for audit
+// consumers to spot + count.
+
+#[tokio::test(flavor = "current_thread")]
+async fn sender_over_budget_is_denied_and_audited() {
+    let _g = lock();
+    init_for_tests();
+    ensure_project_row("budget-ws");
+    let (inject, wake) = install_mocks();
+    let inbox_root = tmp_inbox_root("budget-denied");
+
+    let sid = register_live_agent("budget-target");
+
+    // Five Msg emits within Moderate budget.
+    for i in 0..5 {
+        let signal = AgentSignal::new(
+            AgentAddress::Agent {
+                workspace: WorkspaceId("budget-ws".into()),
+                name: "chatty-agent".into(),
+            },
+            AgentAddress::Agent {
+                workspace: WorkspaceId("budget-ws".into()),
+                name: "budget-target".into(),
+            },
+            SignalKind::Msg {
+                text: format!("msg {i}"),
+            },
+        )
+        .with_delivery(Delivery::Live);
+        let report = egress::deliver(&signal, &inbox_root);
+        assert!(
+            !report.budget_denied,
+            "emit {i} (within budget=5) must not be denied"
+        );
+        assert!(report.activity_feed_row_id > 0);
+    }
+
+    // Sixth emit → over budget; denied.
+    let signal = AgentSignal::new(
+        AgentAddress::Agent {
+            workspace: WorkspaceId("budget-ws".into()),
+            name: "chatty-agent".into(),
+        },
+        AgentAddress::Agent {
+            workspace: WorkspaceId("budget-ws".into()),
+            name: "budget-target".into(),
+        },
+        SignalKind::Msg {
+            text: "one too many".into(),
+        },
+    )
+    .with_delivery(Delivery::Live);
+    let denied = egress::deliver(&signal, &inbox_root);
+    assert!(denied.budget_denied, "sixth emit must be denied");
+    assert!(!denied.injected_to_pty, "denied signals must not inject");
+    assert!(!denied.published_to_bus, "denied signals must not publish to bus");
+    assert!(denied.inbox_path.is_none(), "denied signals must not inbox");
+    assert!(
+        denied.activity_feed_row_id > 0,
+        "denied signal must still fire audit"
+    );
+
+    // Audit row has the dedicated event_type tagging the denial.
+    let db = shared();
+    let conn = db.lock();
+    let event_type: String = conn
+        .query_row(
+            "SELECT event_type FROM activity_feed WHERE id = ?1",
+            rusqlite::params![denied.activity_feed_row_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(event_type, "signal:budget-denied");
+    drop(conn);
+
+    // Inject fired 5 times (the allowed emits) and NOT on the 6th.
+    assert_eq!(inject.calls.lock().unwrap().len(), 5);
+    // Wake never fired because the target was live for all emits.
+    assert!(wake.calls.lock().unwrap().is_empty());
+
+    registry::unregister(&sid);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cli_sender_bypasses_budget() {
+    let _g = lock();
+    init_for_tests();
+    ensure_project_row("budget-ws-cli");
+    let (inject, _) = install_mocks();
+    let inbox_root = tmp_inbox_root("cli-bypass");
+
+    let sid = register_live_agent("cli-target");
+
+    // 20 emits > Chatty budget (10); the `cli` sender-name bypass
+    // means none are denied.
+    for i in 0..20 {
+        let signal = AgentSignal::new(
+            AgentAddress::Agent {
+                workspace: WorkspaceId("budget-ws-cli".into()),
+                name: k2so_core::awareness::CLI_SENDER_NAME.into(),
+            },
+            AgentAddress::Agent {
+                workspace: WorkspaceId("budget-ws-cli".into()),
+                name: "cli-target".into(),
+            },
+            SignalKind::Msg {
+                text: format!("cli-msg {i}"),
+            },
+        )
+        .with_delivery(Delivery::Live);
+        let report = egress::deliver(&signal, &inbox_root);
+        assert!(!report.budget_denied, "cli emit {i} must never be denied");
+    }
+
+    assert_eq!(inject.calls.lock().unwrap().len(), 20);
+    registry::unregister(&sid);
 }

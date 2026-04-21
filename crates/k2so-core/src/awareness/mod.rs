@@ -13,6 +13,7 @@
 //! deliberately small — five variants plus a `Custom` escape hatch —
 //! to keep the agent-facing vocabulary tight.
 
+pub mod budget;
 pub mod bus;
 pub mod egress;
 pub mod inbox;
@@ -20,6 +21,7 @@ pub mod ingress;
 pub mod roster;
 pub mod routing;
 
+pub use budget::{check_and_increment as budget_check, BudgetCheck, BudgetDecision, CLI_SENDER_NAME};
 pub use bus::{publish, subscribe, subscriber_count, BUS_CAP};
 pub use egress::{
     deliver, deliver_to_agent, execute, set_inject_provider,
