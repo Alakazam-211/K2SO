@@ -44,6 +44,7 @@ import CountdownOverlay from './components/Timer/CountdownOverlay'
 import MemoDialog from './components/Timer/MemoDialog'
 import ExtendTimerDialog from './components/Timer/ExtendTimerDialog'
 import { useCursorMigrationCheck } from './hooks/useCursorMigrationCheck'
+import { HarnessLab } from './kessel/HarnessLab'
 
 /** Parse focus mode project ID from URL hash (#focus=<projectId>) */
 function parseFocusProjectId(): string | null {
@@ -208,6 +209,11 @@ export default function App(): React.JSX.Element {
   const settingsOpen = useSettingsStore((s) => s.settingsOpen)
   const openSettings = useSettingsStore((s) => s.openSettings)
 
+  // Phase 4.5 — Kessel Harness Lab (Cmd+Shift+K). Dev/visual
+  // validation surface for the new Session Stream pipeline. Not
+  // persisted to any store since it's intended as a sandbox.
+  const [kesselLabOpen, setKesselLabOpen] = useState(false)
+
   const toggleCommandPalette = useCommandPaletteStore((s) => s.toggle)
 
   const toggleAssistant = useAssistantStore((s) => s.toggle)
@@ -236,6 +242,11 @@ export default function App(): React.JSX.Element {
       if (e.metaKey && e.key === 'j') {
         e.preventDefault()
         toggleRunningAgents()
+      }
+      // Cmd+Shift+K — open the Kessel Harness Lab (Phase 4.5).
+      if (e.metaKey && e.shiftKey && (e.key === 'K' || e.key === 'k')) {
+        e.preventDefault()
+        setKesselLabOpen((v) => !v)
       }
       // Cmd+[ to go back, Cmd+] to go forward
       if (e.metaKey && !e.shiftKey && e.key === '[') {
@@ -610,6 +621,7 @@ export default function App(): React.JSX.Element {
         <CountdownOverlay />
         <MemoDialog />
       <ExtendTimerDialog />
+      <HarnessLab open={kesselLabOpen} onClose={() => setKesselLabOpen(false)} />
       </>
     )
   }
@@ -658,6 +670,7 @@ export default function App(): React.JSX.Element {
       <CountdownOverlay />
       <MemoDialog />
       <ExtendTimerDialog />
+      <HarnessLab open={kesselLabOpen} onClose={() => setKesselLabOpen(false)} />
       {showQuitDialog && (
         <AgentCloseDialog
           agents={quitAgents}
