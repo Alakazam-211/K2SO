@@ -36,8 +36,9 @@ use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use vte::ansi::{Processor, StdSyncHandler};
 
+use crate::awareness::ingress;
 use crate::log_debug;
-use crate::session::{registry, SessionEntry, SessionId};
+use crate::session::{registry, Frame, SessionEntry, SessionId};
 use crate::term::LineMux;
 
 /// Minimal listener used by the Term we drive here. Phase 2 doesn't
@@ -299,7 +300,8 @@ pub fn spawn_session_stream(cfg: SpawnConfig) -> Result<SessionStreamSession, St
     let entry = registry::register(session_id);
 
     // Spawn reader thread. The cyclic loop: read → drive Processor
-    // against Term AND feed LineMux → publish Frames → repeat.
+    // against Term AND feed LineMux → publish Frames + route
+    // AgentSignal frames through awareness::ingress → repeat.
     // Exits on EOF or Err, then unregisters the session from the
     // registry so stale IDs don't accumulate.
     let term_for_reader = Arc::clone(&term);
@@ -308,7 +310,12 @@ pub fn spawn_session_stream(cfg: SpawnConfig) -> Result<SessionStreamSession, St
     let reader_handle = thread::Builder::new()
         .name(format!("session-stream-pty/{}", session_id))
         .spawn(move || {
-            reader_loop(reader, term_for_reader, entry_for_reader);
+            reader_loop(
+                reader,
+                term_for_reader,
+                entry_for_reader,
+                id_for_reader,
+            );
             // Natural shutdown — reader saw EOF or error. Drop the
             // registry entry so a future `list_ids()` doesn't
             // report this ghost session. Holders of Arc<SessionEntry>
@@ -369,6 +376,7 @@ fn reader_loop(
     mut reader: Box<dyn Read + Send>,
     term: Arc<FairMutex<Term<NoopListener>>>,
     entry: Arc<SessionEntry>,
+    session_id: SessionId,
 ) {
     // `Processor` is generic over a `Timeout` type; the std-std
     // version (`StdSyncHandler`) is the default alacritty itself
@@ -395,7 +403,25 @@ fn reader_loop(
                 // Fork B: line-mux + Frame publish. LineMux is
                 // thread-local here; no other thread touches it,
                 // so no locking needed.
+                //
+                // Additionally, when line_mux emits an AgentSignal
+                // (an APC `k2so:*` escape landed inside the session
+                // output), route it through awareness::ingress for
+                // bus delivery. The Frame::AgentSignal itself still
+                // flows through the session's Frame stream so
+                // consumers can audit signals per-session; ingress
+                // enriches + delivers to the appropriate egress
+                // channels (PTY-inject / wake / inbox / feed).
                 for frame in line_mux.feed(chunk) {
+                    if let Frame::AgentSignal(ref signal) = frame {
+                        let agent = entry.agent_name();
+                        let _ = ingress::from_session(
+                            session_id,
+                            signal.clone(),
+                            agent.as_deref(),
+                            None,
+                        );
+                    }
                     entry.publish(frame);
                 }
             }

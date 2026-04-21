@@ -16,6 +16,7 @@
 pub mod bus;
 pub mod egress;
 pub mod inbox;
+pub mod ingress;
 pub mod roster;
 pub mod routing;
 
@@ -24,6 +25,7 @@ pub use egress::{
     deliver, deliver_to_agent, execute, set_inject_provider,
     set_wake_provider, DeliveryReport, InjectProvider, WakeProvider,
 };
+pub use ingress::{from_cli, from_session, inbox_root, set_inbox_root};
 pub use roster::{AgentInfo, RosterFilter, RosterState};
 pub use routing::{resolve, resolve_for_agent, DeliveryPlan, TargetState};
 

@@ -221,29 +221,56 @@ enum DispatchErr {
     Payload(String),
 }
 
+/// Parse a `"delivery"` field from an APC payload. Unknown or
+/// missing → `Delivery::Live` (the default). Accepts `"live"` and
+/// `"inbox"`; other strings fall back to `Live` rather than
+/// erroring — see the dispatcher call site for rationale.
+fn parse_delivery(value: &Value) -> crate::awareness::Delivery {
+    match value.get("delivery").and_then(|v| v.as_str()) {
+        Some("inbox") => crate::awareness::Delivery::Inbox,
+        Some("live") | None => crate::awareness::Delivery::Live,
+        Some(_other) => crate::awareness::Delivery::Live,
+    }
+}
+
 fn dispatch_verb(verb: &str, value: Value) -> Result<ApcEvent, DispatchErr> {
+    // All `Signal` verbs honor an optional top-level `"delivery"`
+    // field. Accepted values: `"live"` (default, real-time 1-on-1
+    // peer-to-peer) or `"inbox"` (intentional async / notice).
+    // Unknown values fall back to `Live` rather than erroring — the
+    // sender meant to send something, and silently dropping the
+    // signal because of a typo is worse than defaulting to the
+    // interrupt path.
+    let delivery = parse_delivery(&value);
+
     match verb {
         "msg" => {
             let to = value.get("to").and_then(|v| v.as_str()).unwrap_or("");
             let text = value.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            Ok(ApcEvent::Signal(new_signal(
-                AgentAddress::Agent {
-                    workspace: WorkspaceId(String::new()),
-                    name: to.to_string(),
-                },
-                SignalKind::Msg {
-                    text: text.to_string(),
-                },
-            )))
+            Ok(ApcEvent::Signal(
+                new_signal(
+                    AgentAddress::Agent {
+                        workspace: WorkspaceId(String::new()),
+                        name: to.to_string(),
+                    },
+                    SignalKind::Msg {
+                        text: text.to_string(),
+                    },
+                )
+                .with_delivery(delivery),
+            ))
         }
         "status" => {
             let text = value.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            Ok(ApcEvent::Signal(new_signal(
-                AgentAddress::Broadcast,
-                SignalKind::Status {
-                    text: text.to_string(),
-                },
-            )))
+            Ok(ApcEvent::Signal(
+                new_signal(
+                    AgentAddress::Broadcast,
+                    SignalKind::Status {
+                        text: text.to_string(),
+                    },
+                )
+                .with_delivery(delivery),
+            ))
         }
         "presence" => {
             let state_str = value.get("state").and_then(|v| v.as_str()).unwrap_or("");
@@ -258,10 +285,13 @@ fn dispatch_verb(verb: &str, value: Value) -> Result<ApcEvent, DispatchErr> {
                     )))
                 }
             };
-            Ok(ApcEvent::Signal(new_signal(
-                AgentAddress::Broadcast,
-                SignalKind::Presence { state },
-            )))
+            Ok(ApcEvent::Signal(
+                new_signal(
+                    AgentAddress::Broadcast,
+                    SignalKind::Presence { state },
+                )
+                .with_delivery(delivery),
+            ))
         }
         "reserve" | "release" => {
             let paths = value
@@ -278,10 +308,13 @@ fn dispatch_verb(verb: &str, value: Value) -> Result<ApcEvent, DispatchErr> {
             } else {
                 ReservationAction::Release
             };
-            Ok(ApcEvent::Signal(new_signal(
-                AgentAddress::Broadcast,
-                SignalKind::Reservation { paths, action },
-            )))
+            Ok(ApcEvent::Signal(
+                new_signal(
+                    AgentAddress::Broadcast,
+                    SignalKind::Reservation { paths, action },
+                )
+                .with_delivery(delivery),
+            ))
         }
         "task" => {
             let phase_str = value.get("phase").and_then(|v| v.as_str()).unwrap_or("");
@@ -299,10 +332,13 @@ fn dispatch_verb(verb: &str, value: Value) -> Result<ApcEvent, DispatchErr> {
                 .get("ref")
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            Ok(ApcEvent::Signal(new_signal(
-                AgentAddress::Broadcast,
-                SignalKind::TaskLifecycle { phase, task_ref },
-            )))
+            Ok(ApcEvent::Signal(
+                new_signal(
+                    AgentAddress::Broadcast,
+                    SignalKind::TaskLifecycle { phase, task_ref },
+                )
+                .with_delivery(delivery),
+            ))
         }
         "tool" => Ok(ApcEvent::Semantic {
             kind: SemanticKind::ToolCall,
