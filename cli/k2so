@@ -70,6 +70,22 @@ cli_request() {
         -d "$params" 2>/dev/null
 }
 
+# POST a JSON body. Used by /cli/awareness/publish (Phase 3).
+# Token rides in the query string (the daemon parses it there
+# before looking at the body). Caller supplies the full endpoint
+# and the JSON body on stdin via a pipe, or as the second arg.
+cli_post_json() {
+    local endpoint="$1"
+    local body="${2:-}"
+    if [ -z "$body" ]; then
+        body="$(cat)"
+    fi
+    curl -s -X POST "${BASE_URL}${endpoint}?token=${TOKEN}" \
+        --connect-timeout 5 --max-time 30 \
+        -H "Content-Type: application/json" \
+        --data-raw "$body" 2>/dev/null
+}
+
 urlencode() {
     python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1" 2>/dev/null || echo "$1"
 }
@@ -1580,6 +1596,121 @@ cmd_msg() {
     cli_request "/cli/msg" "$params"
 }
 
+# ── Awareness Bus CLI verbs (0.34.0 Phase 3) ─────────────────────────
+#
+# Low-level signal emission + roster query. The primitives every
+# agent uses to collaborate: "who's around?" + "tell them something
+# right now" + "send them a notice for later."
+
+# Emit a signal to another agent.
+#
+# Usage:
+#   k2so signal <target-agent> <kind> <json-payload> [--inbox] [--from <sender>]
+#
+# Defaults:
+#   kind     — "msg" if omitted
+#   delivery — Live (real-time 1-on-1) unless --inbox present
+#   from     — $K2SO_AGENT_NAME if set, else "cli"
+cmd_signal() {
+    local target="${1:-}"
+    local kind="${2:-msg}"
+    local raw_payload="${3:-{\}}"
+    shift 3 2>/dev/null || true
+    local delivery="live"
+    local from="${K2SO_AGENT_NAME:-cli}"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --inbox) delivery="inbox"; shift ;;
+            --from)  from="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && {
+        echo "Usage: k2so signal <target> <kind> <json-payload> [--inbox] [--from <sender>]" >&2
+        echo "  Default kind is 'msg'; default delivery is 'live' (interrupts running session)." >&2
+        echo "  --inbox sends as an intentional-async notice (target reads on their schedule)." >&2
+        exit 1
+    }
+
+    # Build the AgentSignal wire format. Matches
+    # k2so_core::awareness::AgentSignal serialization.
+    local now
+    now=$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec="microseconds"))' 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%S.000000+00:00")
+    local signal_id
+    signal_id=$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null || echo "00000000-0000-0000-0000-000000000000")
+
+    local body
+    body=$(python3 <<PY
+import json, sys
+kind = "$kind"
+raw = """$raw_payload"""
+# Map CLI kind argument → SignalKind JSON shape.
+kind_map = {
+    "msg":      lambda d: {"kind":"msg","data":{"text": d.get("text", "")}},
+    "status":   lambda d: {"kind":"status","data":{"text": d.get("text", "")}},
+    "presence": lambda d: {"kind":"presence","data":{"state": d.get("state", "active")}},
+}
+try:
+    payload_data = json.loads(raw) if raw.strip() else {}
+except json.JSONDecodeError:
+    payload_data = {"text": raw}
+if kind in kind_map:
+    kind_json = kind_map[kind](payload_data)
+else:
+    kind_json = {"kind":"custom","data":{"kind": kind, "payload": payload_data}}
+
+signal = {
+    "id": "$signal_id",
+    "from": {"scope":"agent","workspace":"$PROJECT","name":"$from"},
+    "to":   {"scope":"agent","workspace":"$PROJECT","name":"$target"},
+    "kind": kind_json,
+    "priority": "normal",
+    "delivery": "$delivery",
+    "at": "$now",
+}
+print(json.dumps(signal))
+PY
+)
+
+    cli_post_json "/cli/awareness/publish" "$body"
+    echo
+}
+
+# Roster query — "who's in the office?"
+#
+# Usage:
+#   k2so roster                    # all known agents in current workspace
+#   k2so roster --live             # only live agents
+cmd_roster() {
+    local filter="all"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --live) filter="live"; shift ;;
+            *) shift ;;
+        esac
+    done
+    # Roster lives in-core; daemon exposes it via a future route.
+    # Phase 3 MVP: filesystem-scan of .k2so/agents/ for known
+    # agents. Liveness not yet reported in CLI output (daemon-side
+    # registration path arrives in Phase 4); tests use the Rust
+    # API directly.
+    local agents_dir="${PROJECT}/.k2so/agents"
+    [[ ! -d "$agents_dir" ]] && { echo "No .k2so/agents/ found at $PROJECT" >&2; exit 1; }
+    echo "Roster for $PROJECT (filter: $filter)"
+    for dir in "$agents_dir"/*/; do
+        local name
+        name=$(basename "$dir")
+        # Skip hidden dirs (.archive).
+        [[ "$name" == .* ]] && continue
+        [[ ! -f "$dir/agent.md" ]] && continue
+        local skill_summary=""
+        if [[ -f "$dir/SKILL.md" ]]; then
+            skill_summary=$(tail -n +5 "$dir/SKILL.md" 2>/dev/null | head -c 80 | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')
+        fi
+        printf "  %-20s  %s\n" "$name" "${skill_summary:0:80}"
+    done
+}
+
 cmd_reserve() {
     local agent="${K2SO_AGENT_NAME:-}"
     local paths=()
@@ -2585,6 +2716,14 @@ case "${1:-help}" in
         ;;
     msg)
         shift; cmd_msg "$@"
+        ;;
+    signal)
+        # 0.34.0 Awareness Bus — k2so signal <target> <kind> <payload>
+        shift; cmd_signal "$@"
+        ;;
+    roster)
+        # 0.34.0 roster — "who's in the office?"
+        shift; cmd_roster "$@"
         ;;
     reserve)
         shift; cmd_reserve "$@"

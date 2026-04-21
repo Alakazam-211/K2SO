@@ -299,6 +299,24 @@ pub fn spawn_session_stream(cfg: SpawnConfig) -> Result<SessionStreamSession, St
     // broadcast before any subscriber has a lookup target.
     let entry = registry::register(session_id);
 
+    // Archive writer task — opt-in based on whether we're running
+    // inside a tokio runtime. Phase 2 unit tests (sync
+    // `std::thread::spawn` context, no runtime) skip archiving;
+    // daemon-spawned sessions (`#[tokio::main]` runtime) get it
+    // for free. Uses `safe_cwd` as the project root — Phase 4
+    // walks up to the real `.k2so/` ancestor.
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let archive_root = std::path::PathBuf::from(&safe_cwd);
+        let _archive_handle = crate::session::archive::spawn(
+            session_id,
+            Arc::clone(&entry),
+            archive_root,
+        );
+        // Handle intentionally dropped — the task outlives this
+        // function and exits when the broadcast sender closes
+        // (registry unregister → last Arc drops).
+    }
+
     // Spawn reader thread. The cyclic loop: read → drive Processor
     // against Term AND feed LineMux → publish Frames + route
     // AgentSignal frames through awareness::ingress → repeat.
