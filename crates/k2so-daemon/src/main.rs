@@ -17,14 +17,22 @@
 //!
 //! # Scaffolding pass (0.33.0-dev)
 //!
-//! Binds a loopback TCP listener on a random port, writes the port +
-//! freshly-generated auth token to `~/.k2so/daemon.port` and
-//! `~/.k2so/daemon.token` (note: **not** `heartbeat.port` yet — that's
-//! still owned by src-tauri's agent_hooks server; reconciliation comes
-//! when agent_hooks migrates into core), then answers `GET /ping` with a
-//! 200 OK. Enough to prove the lifecycle end-to-end (launchd spawns the
-//! binary, plist is loadable, port file discoverable, token-auth path
-//! exercised) without yet taking responsibility for agent state.
+//! Binds a loopback TCP listener on a random port and publishes the
+//! port + freshly-generated auth token through four filesystem
+//! channels:
+//!
+//! - `~/.k2so/daemon.port` / `~/.k2so/daemon.token` — daemon-specific
+//!   addresses used by Tauri's `DaemonClient` and by
+//!   `k2so daemon status` to reach the daemon's control-plane
+//!   endpoints regardless of who owns the CLI-facing HTTP surface.
+//! - `~/.k2so/heartbeat.port` / `~/.k2so/heartbeat.token` — **the**
+//!   CLI-facing surface since Phase 4 H7. Pre-Phase-4 this file was
+//!   owned by Tauri's agent_hooks HTTP server; H7 retires that
+//!   listener and makes the daemon the sole writer. The CLI
+//!   (`cli/k2so`) + every filesystem hook script reads these files
+//!   to discover the server on every request, so a daemon restart
+//!   (which rotates the random port) propagates instantly without
+//!   any running consumer needing to be restarted itself.
 
 mod agents_routes;
 mod awareness_ws;
@@ -122,11 +130,31 @@ async fn main() {
 
     let token = generate_token();
 
+    // Daemon-specific port/token files (read by Tauri's daemon_client
+    // for its internal HTTP client and by `k2so daemon status`). These
+    // have existed since 0.33.0 and are intentionally separate from
+    // heartbeat.port to avoid clashes while the Tauri agent_hooks
+    // listener coexisted.
     if let Err(e) = write_restricted(&k2so_dir.join("daemon.port"), port.to_string().as_bytes()) {
         log_debug!("[daemon] WARN: write daemon.port: {e}");
     }
     if let Err(e) = write_restricted(&k2so_dir.join("daemon.token"), token.as_bytes()) {
         log_debug!("[daemon] WARN: write daemon.token: {e}");
+    }
+
+    // H7: eager claim of heartbeat.port + heartbeat.token. Before
+    // Phase 4, Tauri's agent_hooks HTTP server was the primary owner
+    // of these files; the daemon only took over via the 2-second-
+    // delayed `run_heartbeat_port_watchdog` when Tauri wasn't
+    // running. H7 flips that around: the daemon owns heartbeat.port
+    // unconditionally at startup, and Tauri stops binding its own
+    // listener. The CLI (`cli/k2so`) + every launchd hook script
+    // read these files to discover the sole HTTP server.
+    if let Err(e) = write_restricted(&k2so_dir.join("heartbeat.port"), port.to_string().as_bytes()) {
+        log_debug!("[daemon] WARN: write heartbeat.port: {e}");
+    }
+    if let Err(e) = write_restricted(&k2so_dir.join("heartbeat.token"), token.as_bytes()) {
+        log_debug!("[daemon] WARN: write heartbeat.token: {e}");
     }
 
     // Publish port + token into the shared static so the rest of core
@@ -135,10 +163,9 @@ async fn main() {
     k2so_core::hook_config::set_token(token.clone());
 
     log_debug!(
-        "[daemon] Listening on 127.0.0.1:{} — port file {} token file {}",
+        "[daemon] Listening on 127.0.0.1:{} — daemon.{{port,token}} + heartbeat.{{port,token}} published to {}",
         port,
-        k2so_dir.join("daemon.port").display(),
-        k2so_dir.join("daemon.token").display()
+        k2so_dir.display()
     );
 
     // Event broadcast channel: the daemon's AgentHookEventSink publishes
@@ -488,35 +515,30 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
     }
 }
 
-/// Claim `~/.k2so/heartbeat.port` when it's unowned.
+/// Re-claim `~/.k2so/heartbeat.port` if something else has stomped it.
 ///
-/// The CLI (+ launchd's heartbeat script) reads `heartbeat.port` to
-/// find whatever K2SO server is alive. Pre-0.33.0 that was exclusively
-/// the Tauri app's `agent_hooks` server. With the daemon, there are
-/// now two potential writers:
+/// As of Phase 4 H7 the daemon is the **sole** writer of this file:
+/// it's written eagerly during `main()` startup (alongside
+/// daemon.port/daemon.token). Before H7 the Tauri agent_hooks server
+/// owned it, and this watchdog existed to fill the gap when Tauri
+/// wasn't running.
 ///
-/// - **Tauri running** — Tauri's existing startup writes its own port
-///   into `heartbeat.port` and removes it on graceful quit. CLI hits
-///   Tauri.
-/// - **Tauri quit** — no-one writes; CLI can't find a server. The
-///   daemon is running 24/7 via launchd but the CLI doesn't know which
-///   port without a published file.
+/// Post-H7 the watchdog is a pure safety net — its job is to restore
+/// the file if an external process deletes it (disk cleanup, a stale
+/// Tauri build that didn't get the H7 patch, user `rm`). Every
+/// `INTERVAL_SECS` seconds it:
 ///
-/// The watchdog solves the second case without fighting Tauri for
-/// ownership of the first. Every `INTERVAL_SECS` seconds it:
-///
-/// 1. Reads `heartbeat.port`. Missing? → write own port + token.
+/// 1. Reads `heartbeat.port`. Missing? → re-write own port + token.
 /// 2. Parses the port, tries a TCP connect to 127.0.0.1:<that_port>.
-///    - Connect succeeds → some server (probably Tauri) is live; leave
-///      it alone. Even if that port is ours, that just means we're
-///      already the owner.
-///    - Connect fails → stale file (writer crashed / Tauri got killed
-///      without its cleanup hook running). Claim ownership by
-///      overwriting.
+///    - Connect succeeds → a server holds the port (should be us;
+///      if something else took it, we can't take back without
+///      restarting). Leave alone.
+///    - Connect fails → stale file, we've lost the bind for some
+///      reason. Re-claim.
 ///
-/// This is a **clean-takeover model**: we never truncate a live server
-/// from `heartbeat.port`. Tauri's own startup overwrite + quit-time
-/// delete still works exactly as before; we just fill the gap.
+/// The 2-second startup delay avoids redundant writes with the eager
+/// startup write path — we've already staked our claim before any
+/// other process could.
 async fn run_heartbeat_port_watchdog(
     k2so_dir: PathBuf,
     own_port: u16,

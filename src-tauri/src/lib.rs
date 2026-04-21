@@ -82,6 +82,51 @@ use std::collections::HashMap;
 use parking_lot::Mutex;
 use tauri::{Emitter, Manager};
 
+/// H7: sync `k2so_core::hook_config` with the daemon's port + token so
+/// in-process Alacritty children emit `/hook/complete` requests at the
+/// daemon (the sole HTTP server post-H7). Reads `~/.k2so/daemon.port`
+/// + `~/.k2so/daemon.token` — written by the daemon on startup. Runs
+/// off-thread with a small retry loop for the cold-start case where
+/// Tauri wins the race against launchd's daemon spawn.
+///
+/// Best-effort: if the daemon files stay missing for the 5 retries,
+/// Tauri boots without hook-config wired. New sessions will still
+/// reach the daemon's `/cli/*` routes via CLI tools that read the
+/// files dynamically; only the in-process Alacritty hook-script path
+/// would be deaf, which is a degraded-but-usable state.
+fn prime_hook_config_from_daemon() {
+    std::thread::spawn(|| {
+        use std::time::Duration;
+        let Some(home) = dirs::home_dir() else { return };
+        let port_path = home.join(".k2so/daemon.port");
+        let token_path = home.join(".k2so/daemon.token");
+        for attempt in 0..5 {
+            let port_ok = std::fs::read_to_string(&port_path)
+                .ok()
+                .and_then(|s| s.trim().parse::<u16>().ok());
+            let token_ok = std::fs::read_to_string(&token_path)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            if let (Some(port), Some(token)) = (port_ok, token_ok) {
+                k2so_core::hook_config::set_port(port);
+                k2so_core::hook_config::set_token(token);
+                log_debug!(
+                    "[h7/hook-config] primed from daemon (port={}, attempt={})",
+                    port,
+                    attempt
+                );
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        log_debug!(
+            "[h7/hook-config] daemon port/token files unavailable after 5 retries; \
+             Alacritty children will boot with empty hook_config"
+        );
+    });
+}
+
 /// Entry point for the LLM worker subprocess.
 /// Loads the model, runs inference, prints the result to stdout, then exits.
 pub fn llm_worker_main(payload_path: &str) {
@@ -645,11 +690,12 @@ pub fn run() {
                             }
                         }
 
-                        // Remove stale port file so heartbeat script won't curl a dead port
-                        if let Some(home) = dirs::home_dir() {
-                            let port_file = home.join(".k2so/heartbeat.port");
-                            let _ = std::fs::remove_file(&port_file);
-                        }
+                        // Phase 4 H7: the daemon is the sole writer of
+                        // ~/.k2so/heartbeat.port since Tauri retired
+                        // its HTTP listener. Do NOT remove the file on
+                        // Tauri quit — the daemon process keeps running
+                        // (launchd-managed) and the CLI still needs a
+                        // valid port file to find it.
 
                         // Force-drop the LLM model to release Metal/GPU resources.
                         if let Some(state) = app_handle.try_state::<AppState>() {
@@ -673,128 +719,48 @@ pub fn run() {
                     }
                 });
             }
-            // Start agent lifecycle notification server and register hooks.
-            // Bind failure used to panic and abort the whole app — now we
-            // log the diagnostic, emit a frontend event, and keep booting
-            // the UI so the user at least sees a recoverable error state.
-            let hook_port_result = agent_hooks::start_server(app.handle().clone());
-            if let Ok(hook_port) = hook_port_result {
-                match agent_hooks::write_hook_script(hook_port) {
-                    Ok(script_path) => {
-                        agent_hooks::register_all_hooks(&app.handle().clone(), &script_path);
-                        log_debug!("[agent-hooks] Hook system ready on port {} with script {}", hook_port, script_path);
-                    }
-                    Err(e) => {
-                        log_debug!("[agent-hooks] Failed to write hook script: {}", e);
-                        let _ = app.handle().emit(
-                            "hook-injection-failed",
-                            serde_json::json!({
-                                "failures": [{"cli": "notify-script", "error": e}]
-                            }),
-                        );
-                    }
+            // Phase 4 H7: Tauri no longer runs its own HTTP listener.
+            // The k2so-daemon (launchd-managed) is the sole server for
+            // every /cli/* route + /hook/complete + /events WS, and
+            // writes heartbeat.port + heartbeat.token itself on startup.
+            //
+            // What Tauri still does here:
+            //   1. Write the notify.sh hook script to disk. The script
+            //      reads heartbeat.port at exec time, so it doesn't
+            //      need Tauri's port — just needs to exist on disk for
+            //      `register_all_hooks` to point ~/.claude/settings.json
+            //      at it.
+            //   2. Register those hooks with claude/cursor/etc so their
+            //      lifecycle events curl into the daemon's /hook/complete.
+            //   3. Sync hook_config so in-process Alacritty children
+            //      inject the daemon's port + token into child envs —
+            //      handled by `prime_hook_config_from_daemon` below.
+            //
+            // What Tauri no longer does (moved to daemon):
+            //   - Bind a TCP listener. The old `agent_hooks::start_server`
+            //     call is gone; its 60+ /cli/* routes are all served by
+            //     k2so-daemon now.
+            //   - Write heartbeat.port / heartbeat.token. Daemon does
+            //     it eagerly on startup.
+            //   - Clean up stale heartbeat.port files. Same reasoning:
+            //     daemon is the owner, not us.
+            match agent_hooks::write_hook_script(0) {
+                Ok(script_path) => {
+                    agent_hooks::register_all_hooks(&app.handle().clone(), &script_path);
+                    log_debug!("[agent-hooks] Hook scripts registered at {}", script_path);
                 }
-            } else {
-                let e = hook_port_result.as_ref().err().cloned().unwrap_or_default();
-                log_debug!("[agent-hooks] Failed to start notification server: {}", e);
-                let _ = app.handle().emit(
-                    "hook-injection-failed",
-                    serde_json::json!({
-                        "failures": [{"cli": "notify-server", "error": e}]
-                    }),
-                );
+                Err(e) => {
+                    log_debug!("[agent-hooks] Failed to write hook script: {}", e);
+                    let _ = app.handle().emit(
+                        "hook-injection-failed",
+                        serde_json::json!({
+                            "failures": [{"cli": "notify-script", "error": e}]
+                        }),
+                    );
+                }
             }
+            prime_hook_config_from_daemon();
             {
-                let hook_port = hook_port_result.unwrap_or(0);
-
-                // Clean stale port file on startup — if K2SO crashed previously,
-                // the old port file persists and CLI/heartbeat scripts connect to a dead port.
-                let home = dirs::home_dir().unwrap_or_default();
-                let k2so_dir = home.join(".k2so");
-                let _ = std::fs::create_dir_all(&k2so_dir);
-                {
-                    let stale_port_file = k2so_dir.join("heartbeat.port");
-                    if stale_port_file.exists() {
-                        // Check if the old port is still alive; if not, remove it
-                        if let Ok(old_port_str) = std::fs::read_to_string(&stale_port_file) {
-                            if let Ok(old_port) = old_port_str.trim().parse::<u16>() {
-                                if old_port != hook_port {
-                                    // Different port — old instance is dead, clean up
-                                    let _ = std::fs::remove_file(&stale_port_file);
-                                    log_debug!("[startup] Removed stale port file (was port {})", old_port);
-                                }
-                            } else {
-                                let _ = std::fs::remove_file(&stale_port_file);
-                            }
-                        }
-                    }
-                }
-
-                // Write port and token to ~/.k2so/ for external heartbeat scripts and CLI
-                // Atomic write: tmp file + rename to prevent partial reads
-                let port_file = k2so_dir.join("heartbeat.port");
-                let port_tmp = k2so_dir.join("heartbeat.port.tmp");
-                if let Err(e) = std::fs::write(&port_tmp, hook_port.to_string())
-                    .and_then(|_| std::fs::rename(&port_tmp, &port_file))
-                {
-                    log_debug!("[heartbeat] Failed to write port file: {}", e);
-                    // Fallback: try direct write without atomic rename
-                    let _ = std::fs::write(&port_file, hook_port.to_string());
-                }
-                // Verify the port file was actually written
-                match std::fs::read_to_string(&port_file) {
-                    Ok(contents) if contents.trim() == hook_port.to_string() => {
-                        log_debug!("[heartbeat] Port file verified: {}", port_file.display());
-                    }
-                    Ok(contents) => {
-                        log_debug!("[heartbeat] WARNING: Port file has wrong content: '{}' (expected {})", contents.trim(), hook_port);
-                        let _ = std::fs::write(&port_file, hook_port.to_string());
-                    }
-                    Err(e) => {
-                        log_debug!("[heartbeat] WARNING: Port file not readable after write: {}", e);
-                    }
-                }
-                let token_file = k2so_dir.join("heartbeat.token");
-                let token_str = crate::agent_hooks::get_token();
-                if !token_str.is_empty() {
-                    // Create token file with restricted permissions from the start (0600)
-                    // to avoid a race window where the file is world-readable between
-                    // write and chmod. Uses OpenOptions to set permissions atomically.
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::OpenOptionsExt;
-                        use std::io::Write;
-                        let token_tmp = k2so_dir.join("heartbeat.token.tmp");
-                        match std::fs::OpenOptions::new()
-                            .write(true)
-                            .create(true)
-                            .truncate(true)
-                            .mode(0o600)
-                            .open(&token_tmp)
-                        {
-                            Ok(mut f) => {
-                                if let Err(e) = f.write_all(token_str.as_bytes())
-                                    .and_then(|_| f.flush())
-                                {
-                                    log_debug!("[heartbeat] Failed to write token file: {}", e);
-                                } else {
-                                    let _ = std::fs::rename(&token_tmp, &token_file);
-                                }
-                            }
-                            Err(e) => log_debug!("[heartbeat] Failed to create token file: {}", e),
-                        }
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        let token_tmp = k2so_dir.join("heartbeat.token.tmp");
-                        if let Err(e) = std::fs::write(&token_tmp, token_str)
-                            .and_then(|_| std::fs::rename(&token_tmp, &token_file))
-                        {
-                            log_debug!("[heartbeat] Failed to write token file: {}", e);
-                        }
-                    }
-                }
-
                 // One-shot migration: ensure every registered project has
                 // a workspace `.k2so/wakeup.md` and every existing agent
                 // has its own `wakeup.md` (if its type supports wake-up).
@@ -857,27 +823,13 @@ pub fn run() {
                     });
                 }
 
-                // Watchdog: periodically verify the port file exists and is correct.
-                // If another process deletes it or it gets corrupted, recreate it so
-                // the heartbeat script can always find the running K2SO instance.
-                {
-                    let watchdog_port = hook_port;
-                    let watchdog_dir = k2so_dir.clone();
-                    std::thread::spawn(move || {
-                        loop {
-                            std::thread::sleep(std::time::Duration::from_secs(60));
-                            let port_file = watchdog_dir.join("heartbeat.port");
-                            let needs_write = match std::fs::read_to_string(&port_file) {
-                                Ok(contents) => contents.trim() != watchdog_port.to_string(),
-                                Err(_) => true,
-                            };
-                            if needs_write {
-                                log_debug!("[heartbeat] Port file missing or stale — recreating");
-                                let _ = std::fs::write(&port_file, watchdog_port.to_string());
-                            }
-                        }
-                    });
-                }
+                // Phase 4 H7: the old 60s heartbeat.port watchdog used
+                // to periodically rewrite heartbeat.port with Tauri's
+                // own port. Post-H7 the daemon owns heartbeat.port and
+                // runs its own re-claim loop (see
+                // `run_heartbeat_port_watchdog` in k2so-daemon). Tauri
+                // re-writing the file would fight the daemon for
+                // ownership, so this loop is gone.
             }
 
             // Auto-start companion API if configured
