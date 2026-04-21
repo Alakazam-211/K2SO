@@ -239,6 +239,155 @@ impl PerformState {
             raw
         }
     }
+
+    /// Parse SGR parameters and update `current_style`. Supports:
+    ///   - 0: reset (null out everything).
+    ///   - 1/22: bold on/off.
+    ///   - 3/23: italic on/off.
+    ///   - 4/24: underline on/off.
+    ///   - 30-37: standard fg palette (0-7).
+    ///   - 90-97: bright fg palette (8-15).
+    ///   - 38;5;N: 256-color fg.
+    ///   - 38;2;R;G;B: truecolor fg.
+    ///   - 39: default fg (null).
+    ///   - 40-47 / 100-107: bg equivalents.
+    ///   - 48;5;N / 48;2;R;G;B: extended bg.
+    ///   - 49: default bg (null).
+    ///
+    /// Ambiguous or malformed sequences are silently ignored so a
+    /// bad TUI doesn't crash the session. Unsupported codes (blink,
+    /// strikethrough, reverse) are intentionally dropped — they can
+    /// land in the Style struct when a consumer needs them.
+    ///
+    /// Two SGR param notations in the wild:
+    ///   - Semicolon-separated: ESC[38;5;123m → Params = [[38],[5],[123]]
+    ///   - Colon-separated:     ESC[38:5:123m → Params = [[38,5,123]]
+    /// We flatten both before walking, so both work.
+    fn apply_sgr(&mut self, params: &Params) {
+        let flat: Vec<u16> = params
+            .iter()
+            .flat_map(|p| p.iter().copied())
+            .collect();
+        // Empty params == ESC[m == reset.
+        if flat.is_empty() {
+            self.current_style = None;
+            return;
+        }
+        let mut style = self.current_style.clone().unwrap_or_default();
+        let mut i = 0;
+        while i < flat.len() {
+            let code = flat[i];
+            match code {
+                0 => style = Style::default(),
+                1 => style.bold = true,
+                3 => style.italic = true,
+                4 => style.underline = true,
+                22 => style.bold = false,
+                23 => style.italic = false,
+                24 => style.underline = false,
+                30..=37 => style.fg = Some(PALETTE_16[(code - 30) as usize]),
+                39 => style.fg = None,
+                40..=47 => style.bg = Some(PALETTE_16[(code - 40) as usize]),
+                49 => style.bg = None,
+                90..=97 => style.fg = Some(PALETTE_16[(code - 90 + 8) as usize]),
+                100..=107 => style.bg = Some(PALETTE_16[(code - 100 + 8) as usize]),
+                38 | 48 => {
+                    // Extended color. Next param is 5 (256-color)
+                    // or 2 (truecolor).
+                    let is_fg = code == 38;
+                    match flat.get(i + 1).copied() {
+                        Some(5) => {
+                            if let Some(idx) = flat.get(i + 2).copied() {
+                                let rgb = palette_256(idx);
+                                if is_fg {
+                                    style.fg = Some(rgb);
+                                } else {
+                                    style.bg = Some(rgb);
+                                }
+                                i += 2; // consumed 5 + N
+                            }
+                        }
+                        Some(2) => {
+                            if let (Some(r), Some(g), Some(b)) = (
+                                flat.get(i + 2).copied(),
+                                flat.get(i + 3).copied(),
+                                flat.get(i + 4).copied(),
+                            ) {
+                                let rgb = ((r as u32) << 16)
+                                    | ((g as u32) << 8)
+                                    | (b as u32);
+                                if is_fg {
+                                    style.fg = Some(rgb);
+                                } else {
+                                    style.bg = Some(rgb);
+                                }
+                                i += 4; // consumed 2 + R + G + B
+                            }
+                        }
+                        _ => {
+                            // Malformed extended SGR — skip.
+                        }
+                    }
+                }
+                _ => {
+                    // Unsupported SGR code. Drop silently.
+                }
+            }
+            i += 1;
+        }
+        // A "reset to defaults" style collapses to `None` so
+        // downstream consumers (renderer, archive) see the same
+        // wire shape as an untouched session.
+        self.current_style = if style == Style::default() {
+            None
+        } else {
+            Some(style)
+        };
+    }
+}
+
+/// Standard 16-color xterm palette. Indices 0-7 = basic; 8-15 =
+/// bright. Values are 0xRRGGBB. These are the xterm defaults; a
+/// future commit can surface this as a per-project theme.
+const PALETTE_16: [u32; 16] = [
+    0x000000, // black
+    0xcd0000, // red
+    0x00cd00, // green
+    0xcdcd00, // yellow
+    0x0000ee, // blue
+    0xcd00cd, // magenta
+    0x00cdcd, // cyan
+    0xe5e5e5, // white (actually light gray)
+    0x7f7f7f, // bright black (actually dark gray)
+    0xff0000, // bright red
+    0x00ff00, // bright green
+    0xffff00, // bright yellow
+    0x5c5cff, // bright blue
+    0xff00ff, // bright magenta
+    0x00ffff, // bright cyan
+    0xffffff, // bright white
+];
+
+/// Resolve a 256-color palette index to 0xRRGGBB. Index 0-15 use
+/// PALETTE_16; 16-231 cover a 6x6x6 RGB cube; 232-255 are a 24-step
+/// grayscale ramp. Matches xterm's standard mapping.
+fn palette_256(idx: u16) -> u32 {
+    if idx < 16 {
+        return PALETTE_16[idx as usize];
+    }
+    if idx < 232 {
+        let i = (idx - 16) as u32;
+        // Standard xterm 6-level cube: 0, 95, 135, 175, 215, 255.
+        const LEVELS: [u32; 6] = [0, 95, 135, 175, 215, 255];
+        let r = LEVELS[(i / 36) as usize];
+        let g = LEVELS[((i / 6) % 6) as usize];
+        let b = LEVELS[(i % 6) as usize];
+        return (r << 16) | (g << 8) | b;
+    }
+    // Grayscale ramp 232-255: 8, 18, 28, ... (10-step increments).
+    let step = (idx - 232) as u32;
+    let v = 8 + step * 10;
+    (v << 16) | (v << 8) | v
 }
 
 impl Perform for PerformState {
@@ -325,6 +474,15 @@ impl Perform for PerformState {
                     2 => self.push_cursor_op(CursorOp::EraseInLine(EraseMode::All)),
                     _ => {}
                 }
+            }
+            'm' => {
+                // SGR (Select Graphic Rendition). Phase 4.5 I8:
+                // parses the subset Claude / bash / standard TUIs
+                // emit. Flushes pending text FIRST so any
+                // previously-styled run gets its Text frame emitted
+                // before `current_style` changes.
+                self.flush_pending_text();
+                self.apply_sgr(params);
             }
             _ => {
                 // Unhandled CSI — silently dropped in Phase 1.

@@ -6,8 +6,27 @@
 
 #![cfg(feature = "session_stream")]
 
-use k2so_core::session::{CursorOp, EraseMode, Frame};
+use k2so_core::session::{CursorOp, EraseMode, Frame, Style};
 use k2so_core::term::LineMux;
+
+/// Helper: extract Style from a Text frame (None = default style).
+fn text_frame_style(frame: &Frame) -> Option<&Option<Style>> {
+    match frame {
+        Frame::Text { style, .. } => Some(style),
+        _ => None,
+    }
+}
+
+/// Helper: collect all (bytes, style) tuples from Text frames.
+fn text_frames_with_styles(frames: &[Frame]) -> Vec<(&[u8], Option<Style>)> {
+    frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Text { bytes, style } => Some((bytes.as_slice(), style.clone())),
+            _ => None,
+        })
+        .collect()
+}
 
 fn text_frame_bytes(frame: &Frame) -> Option<&[u8]> {
     match frame {
@@ -208,4 +227,124 @@ fn empty_feed_is_a_noop() {
 #[should_panic(expected = "LineMux cap must be >= 1")]
 fn zero_cap_panics() {
     let _ = LineMux::with_cap(0);
+}
+
+// ── Phase 4.5 SGR tests ────────────────────────────────────────────
+
+#[test]
+fn sgr_red_fg_colors_subsequent_text() {
+    // ESC[31m sets fg to red (palette index 1).
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"plain\x1b[31mred\n");
+    let triples = text_frames_with_styles(&frames);
+    assert_eq!(triples.len(), 2, "got {:#?}", triples);
+    // First frame "plain" has no style.
+    assert_eq!(triples[0].0, b"plain");
+    assert!(triples[0].1.is_none());
+    // Second frame "red\n" carries fg=0xcd0000.
+    assert_eq!(triples[1].0, b"red\n");
+    let style = triples[1].1.as_ref().expect("red style");
+    assert_eq!(style.fg, Some(0xcd0000));
+    assert_eq!(style.bg, None);
+}
+
+#[test]
+fn sgr_reset_clears_current_style() {
+    // After red fg + reset, following text is unstyled.
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[31mred\x1b[0mplain\n");
+    let triples = text_frames_with_styles(&frames);
+    assert_eq!(triples.len(), 2);
+    assert_eq!(triples[0].0, b"red");
+    assert_eq!(triples[0].1.as_ref().unwrap().fg, Some(0xcd0000));
+    assert_eq!(triples[1].0, b"plain\n");
+    assert!(triples[1].1.is_none(), "expected default style after reset");
+}
+
+#[test]
+fn sgr_empty_params_equals_reset() {
+    // ESC[m (no params) == ESC[0m.
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[31mred\x1b[mplain\n");
+    let triples = text_frames_with_styles(&frames);
+    assert_eq!(triples.len(), 2);
+    assert!(triples[1].1.is_none());
+}
+
+#[test]
+fn sgr_bold_italic_underline_set_attrs() {
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[1;3;4mbiu\n");
+    let triples = text_frames_with_styles(&frames);
+    let style = triples[0].1.as_ref().expect("style");
+    assert!(style.bold);
+    assert!(style.italic);
+    assert!(style.underline);
+}
+
+#[test]
+fn sgr_22_turns_off_bold() {
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[1mb\x1b[22mnot\n");
+    let triples = text_frames_with_styles(&frames);
+    assert_eq!(triples.len(), 2);
+    assert!(triples[0].1.as_ref().unwrap().bold);
+    // After 22, bold off — and no other attrs → collapse to None.
+    assert!(triples[1].1.is_none());
+}
+
+#[test]
+fn sgr_256_color_fg() {
+    // ESC[38;5;208m should set fg to orange (palette index 208 in the
+    // 6x6x6 cube: i=192 → r=LEVELS[5]=255, g=LEVELS[2]=135, b=LEVELS[0]=0).
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[38;5;208morange\n");
+    let triples = text_frames_with_styles(&frames);
+    let style = triples[0].1.as_ref().expect("style");
+    assert_eq!(style.fg, Some(0xff8700), "got {:06x}", style.fg.unwrap());
+}
+
+#[test]
+fn sgr_truecolor_fg() {
+    // ESC[38;2;255;100;50m
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[38;2;255;100;50mtc\n");
+    let triples = text_frames_with_styles(&frames);
+    let style = triples[0].1.as_ref().expect("style");
+    assert_eq!(style.fg, Some(0xff6432));
+}
+
+#[test]
+fn sgr_bg_color_and_default_bg() {
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[44mbluebg\x1b[49mclear\n");
+    let triples = text_frames_with_styles(&frames);
+    assert_eq!(triples.len(), 2);
+    let first = triples[0].1.as_ref().unwrap();
+    assert_eq!(first.bg, Some(0x0000ee));
+    // ESC[49m clears bg → style collapses to None.
+    assert!(triples[1].1.is_none());
+}
+
+#[test]
+fn sgr_bright_colors_30_90_range() {
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[91mbrightred\n");
+    let triples = text_frames_with_styles(&frames);
+    let style = triples[0].1.as_ref().expect("style");
+    assert_eq!(style.fg, Some(0xff0000));
+}
+
+#[test]
+fn sgr_flushes_before_style_change() {
+    // Pending "pre" carries the OLD style, even mid-line.
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"pre\x1b[32mpost\n");
+    let triples = text_frames_with_styles(&frames);
+    assert_eq!(triples.len(), 2);
+    assert_eq!(triples[0].0, b"pre");
+    assert!(triples[0].1.is_none());
+    assert_eq!(triples[1].0, b"post\n");
+    let post_style = triples[1].1.as_ref().unwrap();
+    assert_eq!(post_style.fg, Some(0x00cd00));
 }
