@@ -196,7 +196,12 @@ export function HarnessLab({ open, onClose }: HarnessLabProps): React.JSX.Elemen
         <div
           style={{
             flex: 1,
-            minHeight: 480,
+            // Explicit height (not just min-height) so SessionStreamView's
+            // `height: 100%` resolves to a real pixel value. Flex-row
+            // parent + `height: 100%` child needs an ancestor with
+            // a computed height; min-height doesn't count for %
+            // resolution in CSS spec.
+            height: 560,
             display: 'flex',
             border: '1px solid #3a3a3a',
             borderRadius: 4,

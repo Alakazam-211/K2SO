@@ -265,8 +265,14 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
         // Subtract the 4px padding on each side.
         const availW = Math.max(0, rect.width - 8)
         const availH = Math.max(0, rect.height - 8)
-        const newCols = Math.max(1, Math.floor(availW / cellMetrics.width))
-        const newRows = Math.max(1, Math.floor(availH / cellMetrics.height))
+        // Safety floor: if we'd compute < MIN_VIEWPORT cols or rows,
+        // refuse to resize the grid. A zero-width measurement (CSS
+        // layout not settled yet) would otherwise collapse the grid
+        // to 1×1 and every byte would wrap to a new row.
+        const MIN_COLS = 10
+        const MIN_ROWS = 3
+        const newCols = Math.max(MIN_COLS, Math.floor(availW / cellMetrics.width))
+        const newRows = Math.max(MIN_ROWS, Math.floor(availH / cellMetrics.height))
         if (newCols === lastCols && newRows === lastRows) return
         lastCols = newCols
         lastRows = newRows
