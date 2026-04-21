@@ -314,15 +314,18 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       //
       // When autoResize is on, defer sizing to the parent — the
       // pane takes whatever box it's given and the
-      // ResizeObserver computes cols/rows to fit. This is the
-      // common case for tab panes and Harness Lab device-size
-      // presets.
+      // ResizeObserver computes cols/rows to fit. flex:1 + width
+      // 100% + height 100% so the pane fills a flex container
+      // (Harness Lab, future tab panes). Without this, a flex-row
+      // parent would collapse the pane to 1 col because a block-
+      // level div has no intrinsic width beyond its content's.
       width: !autoResize && cellMetrics.width
         ? `${cellMetrics.width * cols + 8}px`
-        : undefined,
+        : '100%',
       height: !autoResize && cellMetrics.height
         ? `${cellMetrics.height * rows + 8}px`
-        : undefined,
+        : '100%',
+      flex: autoResize ? 1 : undefined,
     }),
     [fontSize, cellMetrics.width, cellMetrics.height, cols, rows, autoResize],
   )
