@@ -21,6 +21,7 @@ import { KesselClient } from './client'
 import { TerminalGrid, type Cell, type GridSnapshot } from './grid'
 import { DEFAULT_FG, DEFAULT_BG, styleToCss, stylesEqual } from './style'
 import type { Frame } from './types'
+import { keyEventToSequence } from '@/lib/key-mapping'
 
 // Font stack mirrors AlacrittyTerminalView so side-by-side users
 // see the same glyphs. MesloLGM Nerd Font is bundled with K2SO.
@@ -44,6 +45,32 @@ export interface SessionStreamViewProps {
   onReady?: (replayCount: number) => void
   /** Fires on any WS / daemon error, including invalid JSON. */
   onError?: (message: string) => void
+  /** If true, the view grabs focus on mount and keydown bytes stream
+   *  to the daemon's /cli/terminal/write. Default true. Set false
+   *  for debug / read-only viewers. */
+  interactive?: boolean
+}
+
+/** POST bytes to /cli/terminal/write for the given session. Returns
+ *  a promise so callers can decide whether to await (the happy path
+ *  is fire-and-forget — we don't block keystrokes on HTTP round-trip).
+ *  Bytes are URL-encoded; for binary non-UTF-8 sequences, the write
+ *  endpoint accepts raw UTF-8 text (key-mapping's escape sequences
+ *  are ASCII so this is safe). */
+async function writeToSession(
+  port: number,
+  token: string,
+  sessionId: string,
+  text: string,
+): Promise<void> {
+  const params = new URLSearchParams({
+    id: sessionId,
+    message: text,
+    token,
+    no_submit: 'true', // we send Enter explicitly via key-mapping
+  })
+  const url = `http://127.0.0.1:${port}/cli/terminal/write?${params}`
+  await fetch(url, { method: 'GET' })
 }
 
 /** Render a single grid row as coalesced spans — adjacent cells with
@@ -87,6 +114,7 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     fontSize = 14,
     onReady,
     onError,
+    interactive = true,
   } = props
 
   // TerminalGrid is held in a ref because it's imperative state —
@@ -155,6 +183,37 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     })
   }, [fontSize])
 
+  // Keyboard input path (I6). Keydown → key-mapping encoder →
+  // daemon's /cli/terminal/write. Focus is grabbed on mount when
+  // interactive=true so the pane is keyboard-reachable without the
+  // user having to click first.
+  const containerRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!interactive) return
+    const el = containerRef.current
+    if (!el) return
+    const handler = (e: KeyboardEvent) => {
+      // Key-mapping doesn't know our mode flags yet (Phase 2
+      // LineMux doesn't emit them). Default mode = 0; shell
+      // apps that need APP_CURSOR for arrow keys will degrade
+      // gracefully (still functional, just uses raw ESC[A etc.).
+      const seq = keyEventToSequence(e, 0)
+      if (seq === null) return
+      e.preventDefault()
+      // Fire-and-forget; network-bound latency is not in the
+      // render path. Errors log to console for now; a future
+      // commit can route them to the onError prop.
+      writeToSession(port, token, sessionId, seq).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn('[kessel] write failed:', err)
+      })
+    }
+    el.addEventListener('keydown', handler)
+    // Grab focus so the user can type immediately.
+    el.focus()
+    return () => el.removeEventListener('keydown', handler)
+  }, [interactive, port, token, sessionId])
+
   const containerStyle = useMemo<React.CSSProperties>(
     () => ({
       fontFamily: FONT_STACK,
@@ -201,9 +260,11 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
 
   return (
     <div
+      ref={containerRef}
       className="kessel-session-stream-view"
       data-session-id={sessionId}
-      style={containerStyle}
+      tabIndex={interactive ? 0 : -1}
+      style={{ ...containerStyle, outline: 'none' }}
     >
       {snapshot.grid.map((row, rowIdx) => (
         <div key={`row-${rowIdx}`}>{renderRow(row, rowIdx)}</div>

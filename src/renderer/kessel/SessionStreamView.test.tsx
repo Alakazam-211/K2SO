@@ -135,6 +135,65 @@ describe('SessionStreamView', () => {
     cleanup()
   })
 
+  it('sends keydown bytes to /cli/terminal/write', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(globalThis as any).fetch = fetchSpy
+    const { container } = render(
+      <SessionStreamView
+        sessionId="abc"
+        port={9000}
+        token="tok"
+        cols={5}
+        rows={2}
+      />,
+    )
+    const view = container.querySelector('.kessel-session-stream-view')!
+    // Dispatch a keydown event for 'a'. key-mapping treats plain
+    // printable keys as a pass-through (sequence = 'a').
+    act(() => {
+      const ev = new KeyboardEvent('keydown', {
+        key: 'a',
+        bubbles: true,
+        cancelable: true,
+      })
+      view.dispatchEvent(ev)
+    })
+    await Promise.resolve() // flush microtasks
+    expect(fetchSpy).toHaveBeenCalled()
+    const calledUrl = fetchSpy.mock.calls[0][0] as string
+    expect(calledUrl).toMatch(/\/cli\/terminal\/write\?/)
+    expect(calledUrl).toContain('id=abc')
+    expect(calledUrl).toContain('token=tok')
+    expect(calledUrl).toContain('message=a')
+    expect(calledUrl).toContain('no_submit=true')
+    cleanup()
+  })
+
+  it('does NOT wire keydown when interactive=false', () => {
+    const fetchSpy = vi.fn()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(globalThis as any).fetch = fetchSpy
+    const { container } = render(
+      <SessionStreamView
+        sessionId="abc"
+        port={9000}
+        token="tok"
+        cols={5}
+        rows={2}
+        interactive={false}
+      />,
+    )
+    const view = container.querySelector('.kessel-session-stream-view')!
+    act(() => {
+      view.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'a', bubbles: true, cancelable: true }),
+      )
+    })
+    expect(fetchSpy).not.toHaveBeenCalled()
+    cleanup()
+  })
+
   it('calls onError on invalid JSON', () => {
     const onError = vi.fn()
     render(
