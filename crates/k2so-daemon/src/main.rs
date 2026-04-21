@@ -29,9 +29,11 @@
 mod awareness_ws;
 mod cli;
 mod events;
+mod pending_live;
 mod providers;
 mod session_map;
 mod sessions_ws;
+mod signal_format;
 
 use std::fs;
 use std::io::Write;
@@ -143,6 +145,28 @@ async fn main() {
     // sessions. Before this, signals to live targets landed in the
     // bus + activity_feed but never in the target's PTY.
     providers::register_all();
+
+    // Phase 3.1 F3 — boot-time pending-live replay. Previous
+    // daemon-run may have queued signals for offline agents that
+    // never got injected (daemon crashed before the session came
+    // online). Log them so operators can eyeball the queue; the
+    // signals stay on disk until a session spawns for that agent
+    // and drains them.
+    let pending_summary = pending_live::replay_all();
+    for (agent, sigs) in &pending_summary {
+        log_debug!(
+            "[daemon/boot] {} pending-live signals queued for agent {} (will deliver on next spawn)",
+            sigs.len(),
+            agent
+        );
+        // Re-enqueue so the next spawn's drain path finds them —
+        // `replay_all` deletes on read, so we need to put them
+        // back for the spawn-time drain to pick up. Tests cover
+        // this round-trip.
+        for sig in sigs {
+            let _ = pending_live::enqueue(sig, agent);
+        }
+    }
 
     // heartbeat.port watchdog — see `run_heartbeat_port_watchdog` docs.
     // The daemon takes over `~/.k2so/heartbeat.port` whenever Tauri

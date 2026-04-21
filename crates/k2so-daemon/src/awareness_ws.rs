@@ -129,11 +129,30 @@ pub fn handle_sessions_spawn(body: &[u8]) -> HandlerResult {
     // Register in the daemon's session_map so InjectProvider can
     // reach this session by agent name.
     let arc = std::sync::Arc::new(session);
-    crate::session_map::register(&req.agent_name, arc);
+    crate::session_map::register(&req.agent_name, arc.clone());
+
+    // F3 drain: inject any pending-live signals that were queued
+    // while this agent was offline. Signals are rendered the same
+    // way live inject would render them, so the target's harness
+    // sees identical bytes regardless of whether the sender had to
+    // wait for the wake-and-inject path.
+    let pending = crate::pending_live::drain_for_agent(&req.agent_name);
+    let pending_count = pending.len();
+    for signal in pending {
+        let bytes = crate::signal_format::inject_bytes(&signal);
+        if let Err(e) = arc.write(bytes.as_bytes()) {
+            log_debug!(
+                "[daemon/spawn] drain-inject for {} signal id={} failed: {e}",
+                req.agent_name,
+                signal.id
+            );
+        }
+    }
 
     let out = serde_json::json!({
         "sessionId": session_id.to_string(),
         "agentName": req.agent_name,
+        "pendingDrained": pending_count,
     });
     HandlerResult {
         status: "200 OK",

@@ -33,6 +33,14 @@ impl InjectProvider for DaemonInjectProvider {
     }
 }
 
+// NB: the formatter that turns an AgentSignal into bytes-for-PTY
+// lives at the crate root (`crate::inject_bytes_for_signal`) —
+// both this provider (called by egress::try_inject via k2so-core's
+// render function) and the spawn-path drain loop use it. Since
+// egress::try_inject formats at its own site and we don't see
+// signal context here (only bytes), the provider impl stays
+// dead-simple: look up, write.
+
 /// Phase 3.1 MVP wake provider — logs the wake request but doesn't
 /// yet trigger a real scheduler wake. The real scheduler-wake
 /// primitive ("agent is offline, launch its session") is deferred
@@ -48,16 +56,26 @@ pub struct DaemonWakeProvider;
 
 impl WakeProvider for DaemonWakeProvider {
     fn wake(&self, agent: &str, signal: &AgentSignal) -> std::io::Result<()> {
-        log_debug!(
-            "[daemon/wake] wake request for {agent} (signal id={}, kind={:?}) — \
-             MVP: queued, real scheduler-wake deferred",
-            signal.id,
-            std::mem::discriminant(&signal.kind),
-        );
-        // F3 will add: append to `~/.k2so/daemon.pending-live/<agent>/`
-        // so the signal persists across daemon restart and is injected
-        // once the session comes online.
-        Ok(())
+        // F3 — persist the signal to the pending-live queue so it
+        // survives daemon restart. When a session for `agent`
+        // spawns (via /cli/sessions/spawn), the spawn path drains
+        // the queue and injects each signal in order.
+        match crate::pending_live::enqueue(signal, agent) {
+            Ok(path) => {
+                log_debug!(
+                    "[daemon/wake] queued signal id={} for {agent} at {:?}",
+                    signal.id,
+                    path
+                );
+                Ok(())
+            }
+            Err(e) => {
+                log_debug!(
+                    "[daemon/wake] failed to queue signal for {agent}: {e}"
+                );
+                Err(e)
+            }
+        }
     }
 }
 
