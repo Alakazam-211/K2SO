@@ -62,6 +62,12 @@ export interface GridSnapshot {
    *  row as potentially-damaged since the viewport-to-row mapping
    *  shifted. */
   damagedRows: readonly number[]
+  /** Monotonic counter incremented on every Frame::Bell received.
+   *  Renderers watch this for changes and trigger the visual flash /
+   *  audio cue. A counter (rather than a boolean) lets multiple
+   *  bells fire flashes in quick succession without a manual reset
+   *  — React's useEffect on this value fires once per increment. */
+  bellCount: number
 }
 
 export interface ModeFlags {
@@ -164,6 +170,9 @@ export class TerminalGrid {
    *  arrived — the rerender path fires but no row needs repainting).
    *  Renderers memoize non-damaged rows. D3. */
   private damagedRows_: Set<number> = new Set()
+  /** Running count of Bell frames received. Exposed on snapshot so
+   *  the renderer can trigger one flash per increment via useEffect. */
+  private bellCount_: number = 0
   // Partial UTF-8 handling: Frame::Text bytes are UTF-8 but multi-
   // byte sequences may span frames. TextDecoder's `stream: true`
   // mode buffers trailing partials across decode() calls.
@@ -328,6 +337,11 @@ export class TerminalGrid {
       case 'ModeChange':
         this.handleModeChange(frame.data.mode, frame.data.on)
         break
+      case 'Bell':
+        // Counter-based — the renderer watches the delta and fires
+        // one flash per increment (useEffect on bellCount).
+        this.bellCount_ += 1
+        break
     }
   }
 
@@ -410,6 +424,7 @@ export class TerminalGrid {
         this.damagedRows_.size === 0
           ? EMPTY_DAMAGE
           : Array.from(this.damagedRows_),
+      bellCount: this.bellCount_,
     }
   }
 

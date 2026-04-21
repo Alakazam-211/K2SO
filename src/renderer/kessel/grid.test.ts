@@ -529,6 +529,18 @@ describe('TerminalGrid SaveCursor / RestoreCursor CursorOps', () => {
     expect(g.snapshot().modes.bracketedPaste).toBe(false)
   })
 
+  it('Bell frame increments snapshot.bellCount', () => {
+    // Each Frame::Bell bumps the counter. The renderer watches for
+    // changes and fires a flash per increment.
+    const g = new TerminalGrid({ rows: 3, cols: 10 })
+    expect(g.snapshot().bellCount).toBe(0)
+    g.applyFrame({ frame: 'Bell', data: null })
+    expect(g.snapshot().bellCount).toBe(1)
+    g.applyFrame({ frame: 'Bell', data: null })
+    g.applyFrame({ frame: 'Bell', data: null })
+    expect(g.snapshot().bellCount).toBe(3)
+  })
+
   it('SetCursorStyle updates cursor.shape', () => {
     // DECSCUSR (CSI Ps SP q) — vim uses this to signal mode.
     const g = new TerminalGrid({ rows: 3, cols: 10 })

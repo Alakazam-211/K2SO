@@ -514,6 +514,46 @@ fn autowrap_mode_7_emits_mode_change() {
 }
 
 #[test]
+fn bel_byte_emits_bell_frame() {
+    // `\x07` BEL — bash Ctrl-R on empty history, readline
+    // ambiguity, explicit `echo -e '\a'`. LineMux surfaces it as
+    // Frame::Bell so the renderer can flash the pane.
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x07");
+    assert!(frames.iter().any(|f| matches!(f, Frame::Bell)));
+}
+
+#[test]
+fn bel_inside_text_preserves_ordering() {
+    // BEL embedded between prints: the Bell frame must appear
+    // AFTER the preceding Text frame, not before — the Text flush
+    // happens before the Bell push.
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"hi\x07there");
+    let mut saw_text_hi = false;
+    let mut saw_bell = false;
+    let mut saw_text_there = false;
+    for f in &frames {
+        match f {
+            Frame::Text { bytes, .. } if bytes == b"hi" => {
+                saw_text_hi = true;
+                assert!(!saw_bell && !saw_text_there);
+            }
+            Frame::Bell => {
+                assert!(saw_text_hi);
+                saw_bell = true;
+            }
+            Frame::Text { bytes, .. } if bytes == b"there" => {
+                assert!(saw_bell);
+                saw_text_there = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_text_hi && saw_bell && saw_text_there);
+}
+
+#[test]
 fn decscusr_steady_block_emits_set_cursor_style() {
     // CSI 2 SP q — vim normal mode requests a solid block.
     let mut mux = LineMux::new();

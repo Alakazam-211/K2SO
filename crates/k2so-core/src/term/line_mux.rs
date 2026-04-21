@@ -430,8 +430,16 @@ impl Perform for PerformState {
                 self.current.text.pop();
                 self.pending_text.pop();
             }
+            b'\x07' => {
+                // BEL — emit a Bell frame. D14 surfaces a visual
+                // flash (or audio, per user config) in the renderer.
+                // Flush any pending text first so the Bell frame
+                // arrives in the right temporal slot relative to
+                // the preceding output.
+                self.push_frame(Frame::Bell);
+            }
             _ => {
-                // Bell, Tab, other C0 — flushed but not otherwise
+                // Tab, other C0 — flushed but not otherwise
                 // surfaced in Phase 1.
             }
         }

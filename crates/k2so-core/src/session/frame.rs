@@ -60,6 +60,14 @@ pub enum Frame {
     /// wires `BracketedPaste` first; `AltScreen`, `MouseVT200`, etc.
     /// follow as the renderer earns support.
     ModeChange { mode: ModeKind, on: bool },
+    /// Terminal bell (BEL, `\x07`). Emitted on every BEL byte in the
+    /// PTY stream. The renderer surfaces a visual flash (and/or
+    /// audio beep) according to the user's config.bell setting;
+    /// the grid doesn't mutate visible state. Common sources: bash's
+    /// Ctrl-R on empty history, readline ambiguity, explicit `echo -e
+    /// '\a'` in scripts. No payload — the event itself is the
+    /// signal.
+    Bell,
 }
 
 /// Terminal private-mode identifiers. Enumerated because the set is

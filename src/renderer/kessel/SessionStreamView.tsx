@@ -538,6 +538,55 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     }
   }, [interactive, port, token, sessionId, markActivity])
 
+  // D14 — bell visual flash. When snapshot.bellCount increments
+  // (TUI emitted BEL), add a CSS class for config.bell.durationMs
+  // that paints a translucent overlay, then clear it. Multiple
+  // bells inside the flash window extend the duration — the timer
+  // is cleared + reset on every increment. Audio is delegated to
+  // the system bell when config.bell.mode is 'audio' or 'both'.
+  const [bellFlashing, setBellFlashing] = useState(false)
+  useEffect(() => {
+    if (snapshot.bellCount === 0) return
+    if (config.bell.mode === 'off') return
+    if (config.bell.mode === 'visual' || config.bell.mode === 'both') {
+      setBellFlashing(true)
+      const id = setTimeout(() => setBellFlashing(false), config.bell.durationMs)
+      return () => clearTimeout(id)
+    }
+    return undefined
+  }, [snapshot.bellCount, config.bell.mode, config.bell.durationMs])
+
+  // Audio cue — separate effect so it can fire independently of
+  // the visual flash timing. Uses a short programmatic AudioContext
+  // beep to avoid bundling a sound file and to respect the OS
+  // output-device routing.
+  useEffect(() => {
+    if (snapshot.bellCount === 0) return
+    if (config.bell.mode !== 'audio' && config.bell.mode !== 'both') return
+    try {
+      const AudioCtx = (window as unknown as {
+        AudioContext?: typeof AudioContext
+        webkitAudioContext?: typeof AudioContext
+      })
+      const AC = AudioCtx.AudioContext ?? AudioCtx.webkitAudioContext
+      if (!AC) return
+      const ctx = new AC()
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.frequency.value = 880
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime)
+      gain.gain.exponentialRampToValueAtTime(0.05, ctx.currentTime + 0.01)
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.12)
+      osc.connect(gain).connect(ctx.destination)
+      osc.start()
+      osc.stop(ctx.currentTime + 0.12)
+      setTimeout(() => ctx.close().catch(() => {}), 200)
+    } catch {
+      // Environments without AudioContext (tests, headless) — the
+      // visual flash covers the case. No throw.
+    }
+  }, [snapshot.bellCount, config.bell.mode])
+
   // D7 — focus reporting. When the TUI has enabled DECSET ?1004,
   // write CSI I on focus and CSI O on blur so neovim / tmux / etc.
   // can dim their UI while unfocused. The listener is attached
@@ -854,6 +903,20 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
         />
       ))}
       <div aria-hidden="true" style={cursorStyle} />
+      {/* D14 — bell visual flash overlay. Opacity fades via transition
+       *  to avoid a jarring on/off switch. Pointer-events none so it
+       *  doesn't intercept clicks. */}
+      <div
+        aria-hidden="true"
+        style={{
+          position: 'absolute',
+          inset: 0,
+          backgroundColor: `rgba(${(config.bell.color >> 16) & 0xff},${(config.bell.color >> 8) & 0xff},${config.bell.color & 0xff},0.12)`,
+          opacity: bellFlashing ? 1 : 0,
+          transition: `opacity ${Math.round(config.bell.durationMs / 2)}ms ease-out`,
+          pointerEvents: 'none',
+        }}
+      />
     </div>
   )
 }

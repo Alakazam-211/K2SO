@@ -38,6 +38,7 @@ export type Frame =
   | { frame: 'AgentSignal'; data: AgentSignal }
   | { frame: 'RawPtyFrame'; data: number[] }
   | { frame: 'ModeChange'; data: ModeChangeData }
+  | { frame: 'Bell'; data?: null }
 
 export interface ModeChangeData {
   mode: ModeKind
