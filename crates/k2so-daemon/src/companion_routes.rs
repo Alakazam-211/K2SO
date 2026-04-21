@@ -38,8 +38,13 @@ struct ProjectRow {
 fn list_projects() -> Vec<ProjectRow> {
     let db = k2so_core::db::shared();
     let conn = db.lock();
+    // Skip sentinel rows (_orphan, _broadcast) — audit buckets, not
+    // real workspaces. Their string "paths" would never match a
+    // real cwd anyway, but filtering at SQL-time is cheaper.
     let Ok(mut stmt) = conn.prepare(
-        "SELECT id, name, path, color FROM projects ORDER BY name ASC",
+        "SELECT id, name, path, color FROM projects \
+         WHERE id NOT IN ('_orphan', '_broadcast') \
+         ORDER BY name ASC",
     ) else {
         return Vec::new();
     };
@@ -74,11 +79,16 @@ struct ProjectSummaryRow {
 fn list_projects_for_summary() -> Vec<ProjectSummaryRow> {
     let db = k2so_core::db::shared();
     let conn = db.lock();
+    // Sentinel rows (`_orphan`, `_broadcast`) are audit-bucket
+    // infrastructure seeded by `db::seed_audit_sentinels`; they
+    // aren't real workspaces and shouldn't clutter companion UIs.
+    // Filter in SQL to keep the response clean.
     let Ok(mut stmt) = conn.prepare(
         "SELECT p.id, p.name, p.path, p.color, p.agent_mode, p.pinned, p.tab_order, \
                 p.focus_group_id, fg.name, fg.color \
          FROM projects p \
          LEFT JOIN focus_groups fg ON p.focus_group_id = fg.id \
+         WHERE p.id NOT IN ('_orphan', '_broadcast') \
          ORDER BY p.pinned DESC, p.tab_order ASC, p.name ASC",
     ) else {
         return Vec::new();

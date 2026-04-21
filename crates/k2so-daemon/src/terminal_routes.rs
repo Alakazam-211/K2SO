@@ -60,20 +60,43 @@ pub fn handle_read(params: &HashMap<String, String>) -> CliResponse {
         None => return CliResponse::bad_request("session not found"),
     };
 
-    // Decode every Frame::Text's bytes. Non-text frames (CursorOp,
-    // SemanticEvent, AgentSignal, RawPtyFrame) don't contribute to
-    // the "read" text — the caller asked for displayable lines.
-    let mut buf = Vec::<u8>::new();
+    // Decode every Frame::Text's bytes. LineMux emits a Frame::Text
+    // at each commit_line / flush_pending_text boundary — the raw
+    // `\n` delimiter is CONSUMED on commit and isn't included in
+    // any frame's bytes. To reconstruct displayable lines we:
+    //   1. Insert `\n` between Frame::Text entries (each frame ends
+    //      on a commit-line or flush boundary).
+    //   2. Then split on `\n` / `\r\n` so any accidentally embedded
+    //      newline inside a single frame (shouldn't happen with
+    //      LineMux but handled defensively) still splits cleanly.
+    //
+    // Non-text frames (CursorOp, SemanticEvent, AgentSignal,
+    // RawPtyFrame) don't contribute to the "read" output — the
+    // caller asked for displayable lines.
+    let mut parts = Vec::<Vec<u8>>::new();
     for frame in entry.replay_snapshot() {
         if let Frame::Text { bytes, .. } = frame {
-            buf.extend(bytes);
+            parts.push(bytes);
         }
     }
-    let text = String::from_utf8_lossy(&buf);
+    // Some producers (real LineMux today) emit Frame::Text WITHOUT
+    // a trailing `\n` — it was the commit-line delimiter. Other
+    // producers (tests, future producers that pass bytes through
+    // verbatim) may leave `\n` in the frame's bytes. Stripping a
+    // single trailing `\n` normalizes both shapes before we join
+    // with `\n` between frames.
+    let joined = parts
+        .iter()
+        .map(|p| {
+            let s = String::from_utf8_lossy(p).into_owned();
+            s.strip_suffix('\n').map(str::to_string).unwrap_or(s)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
     // Split on line terminators, preferring CRLF then LF, and
     // strip trailing '\r' that comes from a CRLF pair.
-    let mut lines: Vec<String> = text
+    let mut lines: Vec<String> = joined
         .split('\n')
         .map(|s| s.strip_suffix('\r').unwrap_or(s).to_string())
         .collect();
