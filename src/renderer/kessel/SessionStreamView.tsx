@@ -22,7 +22,11 @@ import { useKesselConfig } from './config-context'
 import { TerminalGrid, type Cell, type GridSnapshot } from './grid'
 import { styleToCss, stylesEqual } from './style'
 import type { Frame } from './types'
-import { keyEventToSequence, naturalTextEditingSequence } from '@/lib/key-mapping'
+import {
+  keyEventToSequence,
+  naturalTextEditingSequence,
+  MODE_APP_CURSOR,
+} from '@/lib/key-mapping'
 
 export interface SessionStreamViewProps {
   /** SessionId UUID for the daemon's live session. */
@@ -449,11 +453,16 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
         })
         return
       }
-      // Key-mapping doesn't know our mode flags yet (Phase 2
-      // LineMux doesn't emit them). Default mode = 0; shell
-      // apps that need APP_CURSOR for arrow keys will degrade
-      // gracefully (still functional, just uses raw ESC[A etc.).
-      const seq = keyEventToSequence(e, 0)
+      // D5 — read the live application-cursor flag off the grid
+      // so zsh / vim get SS3-format arrow keys when they flip
+      // DECSET ?1. Reading gridRef rather than snapshot.modes
+      // because keystrokes can arrive between rAF ticks and the
+      // React state snapshot might lag the real mode state by one
+      // frame.
+      const modeFlags = gridRef.current?.snapshot().modes.appCursor
+        ? MODE_APP_CURSOR
+        : 0
+      const seq = keyEventToSequence(e, modeFlags)
       if (seq === null) return
       e.preventDefault()
       // Mark activity so the resting-cursor settle effect knows a
@@ -518,6 +527,32 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       el.removeEventListener('paste', pasteHandler)
     }
   }, [interactive, port, token, sessionId, markActivity])
+
+  // D7 — focus reporting. When the TUI has enabled DECSET ?1004,
+  // write CSI I on focus and CSI O on blur so neovim / tmux / etc.
+  // can dim their UI while unfocused. The listener is attached
+  // unconditionally (both focus and blur always fire) but the write
+  // is gated on the mode flag — dispatching events to a TUI that
+  // didn't ask for them would paint junk bytes into its prompt.
+  useEffect(() => {
+    if (!interactive) return
+    const el = containerRef.current
+    if (!el) return
+    const onFocus = (): void => {
+      if (!gridRef.current?.snapshot().modes.focusReporting) return
+      writeToSession(port, token, sessionId, '\x1b[I').catch(() => {})
+    }
+    const onBlur = (): void => {
+      if (!gridRef.current?.snapshot().modes.focusReporting) return
+      writeToSession(port, token, sessionId, '\x1b[O').catch(() => {})
+    }
+    el.addEventListener('focus', onFocus)
+    el.addEventListener('blur', onBlur)
+    return () => {
+      el.removeEventListener('focus', onFocus)
+      el.removeEventListener('blur', onBlur)
+    }
+  }, [interactive, port, token, sessionId])
 
   // Mouse wheel → scrollback navigation. deltaY < 0 (wheel up / two-
   // finger swipe down on trackpad) scrolls toward older content;

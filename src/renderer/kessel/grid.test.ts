@@ -383,6 +383,46 @@ describe('TerminalGrid SaveCursor / RestoreCursor CursorOps', () => {
     expect(g.isDirty()).toBe(true)
   })
 
+  it('ModeChange ApplicationCursor toggles modes.appCursor', () => {
+    const g = new TerminalGrid({ rows: 3, cols: 10 })
+    expect(g.snapshot().modes.appCursor).toBe(false)
+    g.applyFrame({
+      frame: 'ModeChange',
+      data: { mode: 'application_cursor', on: true },
+    })
+    expect(g.snapshot().modes.appCursor).toBe(true)
+  })
+
+  it('ModeChange Autowrap defaults ON and clamps at EOL when turned off', () => {
+    // With wrap on (default), 'abc' into a 2-col grid wraps.
+    const onGrid = new TerminalGrid({ rows: 3, cols: 2 })
+    onGrid.applyFrame({ frame: 'Text', data: { bytes: [0x61, 0x62, 0x63], style: null } })
+    expect(onGrid.snapshot().grid[0][0].char).toBe('a')
+    expect(onGrid.snapshot().grid[0][1].char).toBe('b')
+    expect(onGrid.snapshot().grid[1][0].char).toBe('c')
+
+    // With wrap off, 'c' overwrites the last column.
+    const offGrid = new TerminalGrid({ rows: 3, cols: 2 })
+    offGrid.applyFrame({
+      frame: 'ModeChange',
+      data: { mode: 'autowrap', on: false },
+    })
+    offGrid.applyFrame({ frame: 'Text', data: { bytes: [0x61, 0x62, 0x63], style: null } })
+    expect(offGrid.snapshot().grid[0][0].char).toBe('a')
+    expect(offGrid.snapshot().grid[0][1].char).toBe('c') // 'b' was overwritten
+    expect(offGrid.snapshot().grid[1][0].char).toBe('') // never advanced
+  })
+
+  it('ModeChange FocusReporting toggles modes.focusReporting', () => {
+    const g = new TerminalGrid({ rows: 3, cols: 10 })
+    expect(g.snapshot().modes.focusReporting).toBe(false)
+    g.applyFrame({
+      frame: 'ModeChange',
+      data: { mode: 'focus_reporting', on: true },
+    })
+    expect(g.snapshot().modes.focusReporting).toBe(true)
+  })
+
   it('ModeChange SynchronizedOutput buffers frames until close', () => {
     // DECSET ?2026 h opens the sync window — subsequent frames
     // should NOT mutate the visible grid until ?2026 l closes it.

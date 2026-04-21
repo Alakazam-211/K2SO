@@ -473,6 +473,28 @@ impl Perform for PerformState {
                         mode: ModeKind::SynchronizedOutput,
                         on,
                     }),
+                    // ?1 application cursor keys — zsh / vim flip
+                    // this to get SS3-format arrow keys instead of
+                    // CSI-format. Consumer-side; the renderer reads
+                    // modes.appCursor when encoding keydown events.
+                    1 => self.push_frame(Frame::ModeChange {
+                        mode: ModeKind::ApplicationCursor,
+                        on,
+                    }),
+                    // ?7 autowrap mode — when off, writes past the
+                    // right edge clamp at the last column instead
+                    // of wrapping.
+                    7 => self.push_frame(Frame::ModeChange {
+                        mode: ModeKind::Autowrap,
+                        on,
+                    }),
+                    // ?1004 focus reporting — TUIs (neovim, tmux)
+                    // want to know when the pane focus changes so
+                    // they can dim / pause animations.
+                    1004 => self.push_frame(Frame::ModeChange {
+                        mode: ModeKind::FocusReporting,
+                        on,
+                    }),
                     _ => {}
                 }
             }

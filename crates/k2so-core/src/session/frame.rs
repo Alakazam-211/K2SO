@@ -90,6 +90,23 @@ pub enum ModeKind {
     /// archive and the broadcast channel still see every individual
     /// frame (4.7 C3 lossless invariant).
     SynchronizedOutput,
+    /// DECSET ?1 — application cursor keys. Zsh / vim / most
+    /// readline-based TUIs flip this on to receive SS3-format arrow
+    /// keys (`ESC O A`) instead of CSI-format (`ESC [ A`). Without
+    /// it, up-arrow-for-history types the raw escape sequence into
+    /// the prompt.
+    ApplicationCursor,
+    /// DECSET ?7 — autowrap mode. When on (default), text hitting
+    /// the right edge of a row continues on the next line. When off,
+    /// the cursor clamps at the last column and subsequent writes
+    /// overwrite the last cell. TUIs that draw boxes at exact
+    /// coordinates disable wrap to avoid smear.
+    Autowrap,
+    /// DECSET ?1004 — focus reporting. When on, the terminal emits
+    /// `ESC [ I` when the pane gains focus and `ESC [ O` when it
+    /// loses focus. TUIs (neovim, tmux) use this to dim UI / pause
+    /// animations while unfocused.
+    FocusReporting,
 }
 
 /// The locked vocabulary for semantic events. Five variants + Custom

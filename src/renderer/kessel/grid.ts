@@ -75,6 +75,19 @@ export interface ModeFlags {
    *  the matching `?2026 l`. Surfaced in the snapshot so callers can
    *  short-circuit repaints while the buffer is open. */
   synchronizedOutput: boolean
+  /** DECSET ?1 — application cursor keys. When true, SessionStreamView
+   *  encodes arrow keys as SS3 sequences (`ESC O A`) instead of CSI
+   *  (`ESC [ A`). zsh/vim depend on this for up-arrow-for-history
+   *  and normal-mode navigation. */
+  appCursor: boolean
+  /** DECSET ?7 — autowrap. When true (default), writes past the right
+   *  edge wrap to the next row. When false, the cursor clamps at the
+   *  last column and subsequent writes overwrite it. */
+  autowrap: boolean
+  /** DECSET ?1004 — focus reporting. When true, SessionStreamView
+   *  writes `ESC [ I` on focus-in and `ESC [ O` on focus-out so the
+   *  TUI can react to pane focus changes. */
+  focusReporting: boolean
 }
 
 export interface TerminalGridOpts {
@@ -120,6 +133,11 @@ export class TerminalGrid {
     bracketedPaste: false,
     altScreen: false,
     synchronizedOutput: false,
+    appCursor: false,
+    // Autowrap defaults ON per ECMA-48 / xterm — TUIs that want to
+    // draw at exact coordinates explicitly turn it off.
+    autowrap: true,
+    focusReporting: false,
   }
   private readonly scrollbackCap_: number
   private readonly syncUpdateTimeoutMs_: number
@@ -327,6 +345,15 @@ export class TerminalGrid {
         }
         this.modes_.altScreen = on
         break
+      case 'application_cursor':
+        this.modes_.appCursor = on
+        break
+      case 'autowrap':
+        this.modes_.autowrap = on
+        break
+      case 'focus_reporting':
+        this.modes_.focusReporting = on
+        break
       // Future modes land here as they earn LineMux support.
     }
   }
@@ -453,14 +480,26 @@ export class TerminalGrid {
       this.cursor_.col = Math.min(next, this.cols_ - 1)
       return
     }
-    // Wrap + scroll at EOL.
+    // Wrap + scroll at EOL — unless autowrap is off (DECRST ?7),
+    // in which case the cursor clamps at the last column and
+    // subsequent writes overwrite that cell in place.
     if (this.cursor_.col >= this.cols_) {
-      this.cursor_.col = 0
-      this.lineFeed()
+      if (this.modes_.autowrap) {
+        this.cursor_.col = 0
+        this.lineFeed()
+      } else {
+        this.cursor_.col = this.cols_ - 1
+      }
     }
     this.grid_[this.cursor_.row][this.cursor_.col] = { char, style }
     this.damagedRows_.add(this.cursor_.row)
-    this.cursor_.col += 1
+    // In wrap-off mode we do NOT advance past the last column; the
+    // next write will land on the same cell. In wrap-on mode we
+    // advance normally — the next write triggers the wrap/scroll
+    // branch above.
+    if (this.modes_.autowrap || this.cursor_.col < this.cols_ - 1) {
+      this.cursor_.col += 1
+    }
   }
 
   private lineFeed(): void {

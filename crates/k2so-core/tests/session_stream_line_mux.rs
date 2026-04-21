@@ -483,6 +483,49 @@ fn alt_screen_mode_47_is_aliased_to_alt_screen() {
 }
 
 #[test]
+fn application_cursor_mode_1_emits_mode_change() {
+    // DECSET ?1 — zsh / vim use this to get SS3-format arrow keys.
+    let mut mux = LineMux::new();
+    let on = mux.feed(b"\x1b[?1h");
+    assert_eq!(on.len(), 1);
+    assert!(matches!(
+        &on[0],
+        Frame::ModeChange { mode: ModeKind::ApplicationCursor, on: true }
+    ));
+    let off = mux.feed(b"\x1b[?1l");
+    assert_eq!(off.len(), 1);
+    assert!(matches!(
+        &off[0],
+        Frame::ModeChange { mode: ModeKind::ApplicationCursor, on: false }
+    ));
+}
+
+#[test]
+fn autowrap_mode_7_emits_mode_change() {
+    // DECSET ?7 — autowrap off makes writes past EOL clamp at the
+    // last column.
+    let mut mux = LineMux::new();
+    let off = mux.feed(b"\x1b[?7l");
+    assert_eq!(off.len(), 1);
+    assert!(matches!(
+        &off[0],
+        Frame::ModeChange { mode: ModeKind::Autowrap, on: false }
+    ));
+}
+
+#[test]
+fn focus_reporting_mode_1004_emits_mode_change() {
+    // DECSET ?1004 — TUIs request focus-in / focus-out events.
+    let mut mux = LineMux::new();
+    let on = mux.feed(b"\x1b[?1004h");
+    assert_eq!(on.len(), 1);
+    assert!(matches!(
+        &on[0],
+        Frame::ModeChange { mode: ModeKind::FocusReporting, on: true }
+    ));
+}
+
+#[test]
 fn dectcem_ignores_unknown_private_mode() {
     // CSI ? 12 l — we don't handle this yet (cursor blink). It
     // should be silently dropped, NOT misinterpreted as cursor hide.
