@@ -164,38 +164,14 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     })
   }, [])
 
-  // Cursor blink. Alacritty-parity settings:
-  //   - 750ms on/off interval (matches alacritty's default
-  //     cursor.blink_interval, which is lower-frequency than our
-  //     initial 500ms — easier on the eye during rapid output).
-  //   - 5-second inactivity timeout: after 5s without a Frame or
-  //     keystroke, blinking freezes with the cursor ON. During a
-  //     quiet prompt the caret is a solid block instead of
-  //     pulsing, matching every real terminal users are used to.
-  //   - Any keystroke or frame arrival resets the timeout + forces
-  //     an ON phase so typing feels instant.
-  //
-  // Declared BEFORE the WS useEffect because that effect's onFrame
-  // callback calls markActivity(); keeping the declaration above the
-  // first reference avoids any temporal-dead-zone footguns if React
-  // ever changes hook execution order.
-  const [cursorBlinkOn, setCursorBlinkOn] = useState(true)
+  // Cursor is always visible (no blink). Rosson's product decision:
+  // a stable solid cursor reads more calmly than a pulsing one,
+  // especially during rapid output. markActivity still exists to
+  // drive the resting-position settle logic below; the blink-phase
+  // state was removed.
   const lastActivityRef = useRef(Date.now())
   const markActivity = useCallback(() => {
     lastActivityRef.current = Date.now()
-    setCursorBlinkOn(true)
-  }, [])
-  useEffect(() => {
-    const id = setInterval(() => {
-      const quietMs = Date.now() - lastActivityRef.current
-      if (quietMs > 5_000) {
-        // Freeze with cursor on. Don't invert.
-        setCursorBlinkOn(true)
-        return
-      }
-      setCursorBlinkOn((v) => !v)
-    }, 750)
-    return () => clearInterval(id)
   }, [])
 
   // Cursor "resting position" tracking. The visible cursor overlay
@@ -322,9 +298,8 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       const seq = keyEventToSequence(e, 0)
       if (seq === null) return
       e.preventDefault()
-      // Any keystroke forces the cursor to the ON phase of the
-      // blink cycle so typing feels snappy (same UX as a real
-      // terminal). The 750ms interval will resume from ON.
+      // Mark activity so the resting-cursor settle effect knows a
+      // burst is in progress and defers large-move commits.
       markActivity()
       // Fire-and-forget; network-bound latency is not in the
       // render path. Errors log to console for now; a future
@@ -467,7 +442,7 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     // Drive from `restingCursor` (settled position) instead of
     // `snapshot.cursor` (which tracks every intermediate move). See
     // the resting-cursor effect above for rationale.
-    if (!restingCursor.visible || !cursorBlinkOn) return { display: 'none' }
+    if (!restingCursor.visible) return { display: 'none' }
     if (!cellMetrics.width) return { display: 'none' }
     return {
       position: 'absolute',
@@ -484,7 +459,6 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     restingCursor.row,
     cellMetrics.width,
     cellMetrics.height,
-    cursorBlinkOn,
   ])
 
   return (
