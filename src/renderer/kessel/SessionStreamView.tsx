@@ -18,15 +18,11 @@ import React, {
 } from 'react'
 
 import { KesselClient } from './client'
+import { useKesselConfig } from './config-context'
 import { TerminalGrid, type Cell, type GridSnapshot } from './grid'
-import { DEFAULT_FG, DEFAULT_BG, styleToCss, stylesEqual } from './style'
+import { styleToCss, stylesEqual } from './style'
 import type { Frame } from './types'
 import { keyEventToSequence, naturalTextEditingSequence } from '@/lib/key-mapping'
-
-// Font stack mirrors AlacrittyTerminalView so side-by-side users
-// see the same glyphs. MesloLGM Nerd Font is bundled with K2SO.
-const FONT_STACK =
-  "'MesloLGM Nerd Font', 'MesloLGM Nerd Font Mono', Menlo, Monaco, 'Courier New', monospace"
 
 export interface SessionStreamViewProps {
   /** SessionId UUID for the daemon's live session. */
@@ -130,13 +126,17 @@ function renderRow(row: readonly Cell[], rowIndex: number): React.ReactNode {
 }
 
 export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Element {
+  const config = useKesselConfig()
   const {
     sessionId,
     port,
     token,
     cols = 80,
     rows = 24,
-    fontSize = 14,
+    // Prop `fontSize` is an explicit override — callers that still
+    // pass it win over the config. Default falls through to config
+    // so a KesselConfigProvider can change the size app-wide.
+    fontSize = config.font.size,
     onReady,
     onError,
     interactive = true,
@@ -148,7 +148,11 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
   // via a version counter each animation frame.
   const gridRef = useRef<TerminalGrid | null>(null)
   if (gridRef.current === null) {
-    gridRef.current = new TerminalGrid({ cols, rows })
+    gridRef.current = new TerminalGrid({
+      cols,
+      rows,
+      scrollbackCap: config.scrolling.cap,
+    })
   }
 
   const [snapshot, setSnapshot] = useState<GridSnapshot>(() =>
@@ -239,10 +243,12 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
   //     the intermediate position is many rows from the rest
   //     position.
   //
-  // The 60ms quiet threshold is below the 100ms perception-of-
-  // latency floor, and above the typical inter-chunk gap we see
-  // on Claude's repaint bursts (10-30ms).
-  const SETTLE_MS = 60
+  // The quiet threshold is below the 100ms perception-of-latency
+  // floor, and above the typical inter-chunk gap we see on Claude's
+  // repaint bursts (10-30ms). Pulled from config so users can tune
+  // it — higher values trade input latency for more jitter
+  // suppression.
+  const SETTLE_MS = config.cursor.settleMs
   const [restingCursor, setRestingCursor] = useState(() => ({
     row: 0,
     col: 0,
@@ -282,7 +288,7 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       })
     }, 16)
     return () => clearInterval(id)
-  }, [])
+  }, [SETTLE_MS])
 
   // Propagate prop-driven resize into the grid.
   useEffect(() => {
@@ -319,16 +325,16 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
   const [cellMetrics, setCellMetrics] = useState({ width: 0, height: 0 })
   useEffect(() => {
     const el = document.createElement('span')
-    el.style.cssText = `font-family: ${FONT_STACK}; font-size: ${fontSize}px; position: absolute; visibility: hidden; white-space: pre;`
+    el.style.cssText = `font-family: ${config.font.family}; font-size: ${fontSize}px; position: absolute; visibility: hidden; white-space: pre;`
     el.textContent = 'W'
     document.body.appendChild(el)
     const rect = el.getBoundingClientRect()
     document.body.removeChild(el)
     setCellMetrics({
       width: rect.width,
-      height: Math.ceil(fontSize * 1.2),
+      height: Math.ceil(fontSize * config.font.lineHeightMultiplier),
     })
-  }, [fontSize])
+  }, [fontSize, config.font.family, config.font.lineHeightMultiplier])
 
   // Keyboard input path (I6). Keydown → key-mapping encoder →
   // daemon's /cli/terminal/write. Focus is grabbed on mount when
@@ -434,12 +440,13 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
   // current scrollback length. preventDefault so the parent pane
   // doesn't also scroll the browser viewport.
   //
-  // LINES_PER_TICK trades scroll speed against overshoot on a
-  // trackpad. 3 matches xterm / Terminal.app feel.
+  // Scroll multiplier (lines per wheel tick) trades scroll speed
+  // against overshoot on a trackpad. Read from config so users can
+  // tune it.
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
-    const LINES_PER_TICK = 3
+    const LINES_PER_TICK = config.scrolling.multiplier
     const onWheel = (e: WheelEvent) => {
       if (e.deltaY === 0) return
       const snap = gridRef.current?.snapshot()
@@ -460,7 +467,7 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     }
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
-  }, [])
+  }, [config.scrolling.multiplier])
 
   // I7 — ResizeObserver on the pane container. On dimension change,
   // compute new cols/rows from cell metrics + container box, resize
@@ -527,11 +534,11 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
 
   const containerStyle = useMemo<React.CSSProperties>(
     () => ({
-      fontFamily: FONT_STACK,
+      fontFamily: config.font.family,
       fontSize: `${fontSize}px`,
-      lineHeight: `${Math.ceil(fontSize * 1.2)}px`,
-      color: `rgb(${(DEFAULT_FG >> 16) & 0xff},${(DEFAULT_FG >> 8) & 0xff},${DEFAULT_FG & 0xff})`,
-      backgroundColor: `rgb(${(DEFAULT_BG >> 16) & 0xff},${(DEFAULT_BG >> 8) & 0xff},${DEFAULT_BG & 0xff})`,
+      lineHeight: `${Math.ceil(fontSize * config.font.lineHeightMultiplier)}px`,
+      color: `rgb(${(config.colors.foreground >> 16) & 0xff},${(config.colors.foreground >> 8) & 0xff},${config.colors.foreground & 0xff})`,
+      backgroundColor: `rgb(${(config.colors.background >> 16) & 0xff},${(config.colors.background >> 8) & 0xff},${config.colors.background & 0xff})`,
       whiteSpace: 'pre',
       padding: '4px',
       position: 'relative',
@@ -555,7 +562,18 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
         : '100%',
       flex: autoResize ? 1 : undefined,
     }),
-    [fontSize, cellMetrics.width, cellMetrics.height, cols, rows, autoResize],
+    [
+      fontSize,
+      cellMetrics.width,
+      cellMetrics.height,
+      cols,
+      rows,
+      autoResize,
+      config.font.family,
+      config.font.lineHeightMultiplier,
+      config.colors.foreground,
+      config.colors.background,
+    ],
   )
 
   // Compose the visible rows from the combined [scrollback..liveGrid]
