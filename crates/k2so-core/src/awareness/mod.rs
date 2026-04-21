@@ -14,11 +14,16 @@
 //! to keep the agent-facing vocabulary tight.
 
 pub mod bus;
+pub mod egress;
 pub mod inbox;
 pub mod roster;
 pub mod routing;
 
 pub use bus::{publish, subscribe, subscriber_count, BUS_CAP};
+pub use egress::{
+    deliver, deliver_to_agent, execute, set_inject_provider,
+    set_wake_provider, DeliveryReport, InjectProvider, WakeProvider,
+};
 pub use roster::{AgentInfo, RosterFilter, RosterState};
 pub use routing::{resolve, resolve_for_agent, DeliveryPlan, TargetState};
 
