@@ -6,5 +6,6 @@
 //! `sessions_ws` without duplicating the code — the binary's own
 //! `mod` declarations are unchanged and sit above `main.rs`.
 
+pub mod awareness_ws;
 pub mod events;
 pub mod sessions_ws;

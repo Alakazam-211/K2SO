@@ -26,6 +26,7 @@
 //! binary, plist is loadable, port file discoverable, token-auth path
 //! exercised) without yet taking responsibility for agent state.
 
+mod awareness_ws;
 mod cli;
 mod events;
 mod sessions_ws;
@@ -227,13 +228,20 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         }
     };
 
-    if method != "GET" {
+    // Most routes are GET. Specific POST-accepting routes are
+    // allowlisted here so non-GET hits other paths get a clean 405.
+    let is_post = method == "POST";
+    let post_allowed = matches!(
+        path_and_query.split_once('?').map(|(p, _)| p).unwrap_or(path_and_query),
+        "/cli/awareness/publish"
+    );
+    if method != "GET" && !(is_post && post_allowed) {
         let _ = stream.read(&mut buf).await;
         send_response(
             &mut stream,
             "405 Method Not Allowed",
             "application/json",
-            r#"{"error":"only GET is supported"}"#,
+            r#"{"error":"method not allowed for this route"}"#,
         )
         .await;
         return;
@@ -336,6 +344,40 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             }
             let params = parse_params(&path, &query);
             sessions_ws::serve_session_subscribe_connection(stream, params).await;
+        }
+        // Awareness Bus endpoints (0.34.0 Phase 3).
+        // `/cli/awareness/publish` — POST JSON body → egress::deliver
+        // `/cli/awareness/subscribe` — WS, streams bus signals out
+        "/cli/awareness/publish" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let result = awareness_ws::handle_publish(&body_bytes);
+            send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        "/cli/awareness/subscribe" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            awareness_ws::serve_awareness_subscribe_connection(stream).await;
         }
         // Unified /cli/* dispatch. Auth + param validation +
         // per-route handler all live in `cli::dispatch`; main.rs
@@ -742,6 +784,51 @@ async fn send_response(stream: &mut TcpStream, status: &str, ct: &str, body: &st
         body,
     );
     let _ = stream.write_all(resp.as_bytes()).await;
+}
+
+/// Read the body of a POST request. Consumes the request line and
+/// headers from the peeked stream, then returns whatever bytes
+/// follow the `\r\n\r\n` separator up to the Content-Length header.
+///
+/// MVP implementation — assumes the full request arrived in the
+/// 4KB peek buffer (fine for the single JSON AgentSignal payloads
+/// E7 + E8 handle). Production-grade Content-Length-driven
+/// streaming is deferred; the largest signal we expect is ~1KB, so
+/// 4KB is 4× the headroom.
+async fn read_post_body(stream: &mut TcpStream, buf: &mut [u8]) -> Vec<u8> {
+    let n = match stream.read(buf).await {
+        Ok(n) => n,
+        Err(_) => return Vec::new(),
+    };
+    let slice = &buf[..n];
+    // Find the end-of-headers marker.
+    let header_end = slice
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|p| p + 4);
+    match header_end {
+        Some(body_start) if body_start <= slice.len() => {
+            // Respect Content-Length if present — caps the body slice
+            // so trailing garbage (e.g. keep-alive noise) doesn't end
+            // up in the parsed body.
+            let headers = &slice[..body_start.saturating_sub(4)];
+            let headers_str = std::str::from_utf8(headers).unwrap_or("");
+            let body_bytes_available = slice.len() - body_start;
+            let content_length = headers_str
+                .lines()
+                .find_map(|line| {
+                    let lower = line.to_ascii_lowercase();
+                    lower
+                        .strip_prefix("content-length:")
+                        .map(|v| v.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(body_bytes_available);
+            let take = content_length.min(body_bytes_available);
+            slice[body_start..body_start + take].to_vec()
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Write `contents` to `path` with permissions 0600 so other users on the

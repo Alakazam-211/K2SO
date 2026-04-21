@@ -57,3 +57,9 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # Futures helpers (Stream trait / StreamExt / SinkExt) needed by
 # tokio-tungstenite's async message loop.
 futures-util = "0.3"
+
+[dev-dependencies]
+# Enable k2so-core's `test-util` feature for integration tests that
+# need the in-memory DB helper (`db::init_for_tests`). Production
+# binaries don't link this path — only `cargo test` does.
+k2so-core = { path = "../k2so-core", features = ["session_stream", "test-util"] }
