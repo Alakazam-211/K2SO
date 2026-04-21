@@ -852,6 +852,11 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         "/cli/terminal/read" => crate::terminal_routes::handle_read(params),
         "/cli/terminal/write" => crate::terminal_routes::handle_write(params),
 
+        // ── Phase 4 H2: live-session enumeration ────────────────────
+        // Replaces the Tauri endpoint that walked AppState's
+        // terminal_manager. Now a walk of session_map + registry.
+        "/cli/agents/running" => crate::terminal_routes::handle_agents_running(params),
+
         _ => CliResponse::not_found(),
     }
 }

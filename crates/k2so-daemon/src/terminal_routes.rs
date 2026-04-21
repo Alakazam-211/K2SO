@@ -21,6 +21,7 @@
 //!   - read:  `{"lines":["line1","line2",...]}`
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use k2so_core::session::{registry, Frame, SessionId};
 
@@ -139,4 +140,58 @@ pub fn handle_write(params: &HashMap<String, String>) -> CliResponse {
     }
 
     CliResponse::ok_json(r#"{"success":true}"#.to_string())
+}
+
+/// Handler for `GET /cli/agents/running`.
+///
+/// Returns a JSON array of every live session the daemon knows
+/// about (one entry per `session_map` key). Shape per item
+/// matches the pre-Phase-4 Tauri endpoint plus daemon-native
+/// enrichments:
+///
+/// ```json
+/// {
+///   "terminalId": "<session-uuid>",
+///   "agentName": "<name>",
+///   "cwd": "<resolved-path>",
+///   "command": "<shell-cmd>|null",
+///   "createdAtMs": 1234567890123,
+///   "idleMs": 2345,
+///   "subscriberCount": 1
+/// }
+/// ```
+///
+/// Reads from `session_map::snapshot()` + `session::registry`
+/// — no PTY peeking, no DB round-trip. O(N) in live sessions.
+///
+/// No `project` param needed: the daemon's session pool is
+/// process-wide, not per-project. Phase 4 H4 adds a companion
+/// endpoint that groups sessions by project.
+pub fn handle_agents_running(_params: &HashMap<String, String>) -> CliResponse {
+    let now = Instant::now();
+    let sessions = session_map::snapshot();
+    let mut out: Vec<serde_json::Value> = Vec::with_capacity(sessions.len());
+    for (agent_name, session) in sessions {
+        let idle_ms = registry::lookup(&session.session_id)
+            .map(|entry| entry.idle_for(now).as_millis() as u64)
+            .unwrap_or(0);
+        let subscriber_count = registry::lookup(&session.session_id)
+            .map(|entry| entry.subscriber_count())
+            .unwrap_or(0);
+        // `createdAtMs`: we don't have a wall-clock creation time
+        // handy (SessionEntry::created_at is a monotonic Instant),
+        // so expose the monotonic age as `idleMs` for now and let
+        // a future commit wire a SystemTime-typed created_at if a
+        // caller needs a wall-clock timestamp. For now emit the
+        // field as `null` to make the shape explicit to callers.
+        out.push(serde_json::json!({
+            "terminalId": session.session_id.to_string(),
+            "agentName": agent_name,
+            "cwd": session.cwd,
+            "command": session.command,
+            "idleMs": idle_ms,
+            "subscriberCount": subscriber_count,
+        }));
+    }
+    CliResponse::ok_json(serde_json::to_string(&out).unwrap_or_else(|_| "[]".into()))
 }

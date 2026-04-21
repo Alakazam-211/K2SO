@@ -103,6 +103,15 @@ pub struct SessionStreamSession {
     /// same `Term` type the standard backend uses, so reflow /
     /// snapshot helpers in `terminal::*` work unchanged.
     pub term: Arc<FairMutex<Term<NoopListener>>>,
+    /// Resolved cwd the child was spawned in. Stored so the
+    /// daemon's `/cli/agents/running` listing can surface it
+    /// (Phase 4 H2). Matches `SpawnConfig::cwd` after the
+    /// `resolve_cwd` pass in `spawn_session_stream`.
+    pub cwd: String,
+    /// Top-level command the child is running, if the caller
+    /// supplied one. `None` = default interactive shell (same
+    /// semantics as the legacy `/cli/agents/running` endpoint).
+    pub command: Option<String>,
     /// Write side — clones of this are handed to callers that want
     /// to send input to the child (e.g. typed keystrokes).
     writer: Arc<Mutex<Box<dyn std::io::Write + Send>>>,
@@ -226,6 +235,12 @@ pub fn spawn_session_stream(cfg: SpawnConfig) -> Result<SessionStreamSession, St
     // Resolve cwd the same way the standard backend does.
     let safe_cwd = crate::terminal::resolve_cwd(&cwd);
     let shell = crate::terminal::detect_shell();
+    // Clone before we move `command` into the command-builder
+    // branch below — the owning SessionStreamSession holds a copy
+    // so `/cli/agents/running` can surface what's actually running
+    // in the PTY without peeking at the live process (which
+    // changes as the user `exec`s or starts sub-shells).
+    let command_for_handle = command.clone();
 
     // Open PTY.
     let pty_system = native_pty_system();
@@ -381,6 +396,8 @@ pub fn spawn_session_stream(cfg: SpawnConfig) -> Result<SessionStreamSession, St
     Ok(SessionStreamSession {
         session_id,
         term,
+        cwd: safe_cwd,
+        command: command_for_handle,
         writer,
         child,
         reader_handle: Some(reader_handle),

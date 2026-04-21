@@ -291,3 +291,93 @@ async fn write_invalid_uuid_is_400() {
     assert_eq!(resp.status, "400 Bad Request");
     assert!(resp.body.contains("invalid session id"));
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// H2 — /cli/agents/running enumerates daemon session_map
+// ─────────────────────────────────────────────────────────────────────
+
+fn drop_all_sessions(agents: &[&str]) {
+    for a in agents {
+        if let Some(sess) = session_map::unregister(a) {
+            let _ = sess.kill();
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agents_running_returns_each_live_session() {
+    let _g = lock();
+    // Clean slate — prior tests may have leaked entries in the
+    // shared singleton session_map.
+    for name in ["running-alpha", "running-beta", "running-gamma"] {
+        let _ = session_map::unregister(name);
+    }
+
+    let (id_a, _sess_a) = spawn_cat_session("running-alpha");
+    let (id_b, _sess_b) = spawn_cat_session("running-beta");
+
+    let resp = terminal_routes::handle_agents_running(&params(&[]));
+    assert_eq!(resp.status, "200 OK");
+    let arr: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
+    let items = arr.as_array().expect("response is an array");
+    // Filter down to the two we care about — other tests can leak.
+    let mine: Vec<_> = items
+        .iter()
+        .filter(|v| {
+            let agent = v["agentName"].as_str().unwrap_or("");
+            agent == "running-alpha" || agent == "running-beta"
+        })
+        .collect();
+    assert_eq!(
+        mine.len(),
+        2,
+        "expected 2 matching entries: {}",
+        serde_json::to_string_pretty(items).unwrap_or_default()
+    );
+
+    for v in &mine {
+        let agent = v["agentName"].as_str().unwrap();
+        let tid = v["terminalId"].as_str().unwrap();
+        let expected_id = if agent == "running-alpha" {
+            id_a.to_string()
+        } else {
+            id_b.to_string()
+        };
+        assert_eq!(tid, expected_id);
+        assert_eq!(v["cwd"].as_str(), Some("/tmp"));
+        assert_eq!(v["command"].as_str(), Some("cat"));
+        // idleMs is a non-negative integer.
+        let idle = v["idleMs"].as_u64().expect("idleMs present");
+        let _ = idle; // >= 0 by u64 type
+        // subscriberCount: 0 is fine (no WS client attached in
+        // this test; daemon's own reader thread subscribes to the
+        // broadcast channel only via the broadcast::Receiver which
+        // is a send side).
+        v["subscriberCount"].as_u64().expect("subscriberCount present");
+    }
+
+    drop_all_sessions(&["running-alpha", "running-beta"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agents_running_returns_empty_array_when_no_sessions() {
+    let _g = lock();
+    // Drain any leftover registrations. `snapshot()` is authoritative;
+    // registry may still have entries for just-dropped sessions that
+    // haven't unregistered yet, but session_map is what this endpoint
+    // reads.
+    let pre = session_map::snapshot();
+    for (name, sess) in pre {
+        let _ = sess.kill();
+        session_map::unregister(&name);
+    }
+
+    let resp = terminal_routes::handle_agents_running(&params(&[]));
+    assert_eq!(resp.status, "200 OK");
+    let arr: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
+    assert_eq!(
+        arr.as_array().unwrap().len(),
+        0,
+        "empty session_map should yield empty JSON array"
+    );
+}
