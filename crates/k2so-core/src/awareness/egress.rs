@@ -320,6 +320,14 @@ fn write_audit(signal: &AgentSignal, target_agent: Option<&str>) -> i64 {
     };
     let event_type = format!("signal:{}", signal_kind_tag(signal));
     let summary = signal_summary(signal);
+    // Store the full AgentSignal JSON in the metadata column so
+    // callers can reconstruct the entire message from the audit
+    // log — including signal id (for bus/inbox correlation), full
+    // body (summary truncates at 80 chars), priority, reply_to,
+    // exact timestamp. activity_feed is the PRIMITIVE audit
+    // surface; higher-level views (conversation threads, per-agent
+    // message history, reply chains) are SQL queries on top.
+    let full_signal = serde_json::to_string(signal).ok();
 
     let db = crate::db::shared();
     let conn = db.lock();
@@ -332,7 +340,7 @@ fn write_audit(signal: &AgentSignal, target_agent: Option<&str>) -> i64 {
         target_agent,
         None,
         Some(&summary),
-        None,
+        full_signal.as_deref(),
     ) {
         Ok(id) => id,
         Err(e) => {

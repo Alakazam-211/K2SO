@@ -360,6 +360,49 @@ fn no_wake_provider_degrades_to_audit_only_on_live_to_offline() {
 // Broadcast handling
 // ─────────────────────────────────────────────────────────────────────
 
+/// F1.5 regression — every egress must store the full signal JSON
+/// in activity_feed.metadata so the audit log carries enough to
+/// reconstruct the entire message. The 80-char summary is for UI
+/// preview; metadata is the primitive source of truth.
+#[test]
+fn activity_feed_metadata_carries_full_signal_json() {
+    let _g = lock();
+    init_for_tests();
+    ensure_project_row("test-ws");
+    let _ = install_mocks();
+    let inbox_root = tmp_inbox_root("metadata-audit");
+
+    let sig = signal_to("bar", Delivery::Inbox);
+    let original_id = sig.id;
+    let report = egress::deliver(&sig, &inbox_root);
+    assert!(report.activity_feed_row_id > 0);
+
+    // Query the row's metadata back out.
+    let db = shared();
+    let conn = db.lock();
+    let meta: Option<String> = conn
+        .query_row(
+            "SELECT metadata FROM activity_feed WHERE id = ?1",
+            rusqlite::params![report.activity_feed_row_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let meta_str = meta.expect("metadata populated");
+
+    // Parse back into AgentSignal — round-trip must preserve id,
+    // delivery, and body.
+    let decoded: AgentSignal =
+        serde_json::from_str(&meta_str).expect("metadata parses as AgentSignal");
+    assert_eq!(decoded.id, original_id);
+    assert_eq!(decoded.delivery, Delivery::Inbox);
+    match decoded.kind {
+        SignalKind::Msg { text } => {
+            assert_eq!(text, "hello from egress test");
+        }
+        _ => panic!("kind changed"),
+    }
+}
+
 #[test]
 fn broadcast_signal_writes_audit_but_no_direct_delivery() {
     let _g = lock();
