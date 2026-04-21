@@ -34,6 +34,61 @@ use k2so_core::agent_hooks::{emit, HookEvent};
 use crate::cli_response::CliResponse;
 use crate::spawn::{spawn_agent_session, SpawnAgentSessionRequest};
 
+/// H6: spawn a wake PTY via the Session Stream pipeline (same
+/// shape as `k2so_core::agents::wake::spawn_wake_headless` but
+/// daemon-owned — the resulting session lands in `session_map`
+/// and is reachable by every /cli/* route that looks up by agent
+/// name). Caller decides which backend to use based on the
+/// project's `use_session_stream` setting.
+///
+/// Mirrors the side-effects of the legacy helper:
+///   1. spawn_agent_session (PTY + dual-emit reader + archive).
+///   2. Lock the agent in `agent_sessions` so scheduler skips it
+///      on the next tick.
+///   3. Emit `CliTerminalSpawnBackground` so any attached UI sees
+///      the new session.
+///
+/// Returns the session id (as a String) on success.
+pub fn spawn_wake_via_session_stream(
+    agent_name: &str,
+    project_path: &str,
+    wake_prompt: &str,
+) -> Result<String, String> {
+    let args = vec![
+        "--dangerously-skip-permissions".to_string(),
+        "--append-system-prompt".to_string(),
+        wake_prompt.to_string(),
+    ];
+    let outcome = spawn_agent_session(SpawnAgentSessionRequest {
+        agent_name: agent_name.to_string(),
+        cwd: project_path.to_string(),
+        command: Some("claude".to_string()),
+        args: Some(args),
+        cols: 120,
+        rows: 38,
+    })?;
+
+    let _ = k2so_core::agents::session::k2so_agents_lock(
+        project_path.to_string(),
+        agent_name.to_string(),
+        Some(outcome.session_id.to_string()),
+        Some("system".to_string()),
+    );
+
+    emit(
+        HookEvent::CliTerminalSpawnBackground,
+        serde_json::json!({
+            "terminalId": outcome.session_id.to_string(),
+            "command": "claude",
+            "cwd": project_path,
+            "projectPath": project_path,
+            "agentName": agent_name,
+        }),
+    );
+
+    Ok(outcome.session_id.to_string())
+}
+
 /// Extract a top-level string field from a launch-info JSON object,
 /// falling back to `default` if the field is missing or not a string.
 fn str_field<'a>(v: &'a serde_json::Value, key: &str, default: &'a str) -> &'a str {

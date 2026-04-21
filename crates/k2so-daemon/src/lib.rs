@@ -18,4 +18,5 @@ pub mod sessions_ws;
 pub mod signal_format;
 pub mod spawn;
 pub mod terminal_routes;
+pub mod triage;
 pub mod watchdog;
