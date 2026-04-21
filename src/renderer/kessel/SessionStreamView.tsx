@@ -165,7 +165,16 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     rafPendingRef.current = true
     requestAnimationFrame(() => {
       rafPendingRef.current = false
-      setSnapshot(gridRef.current!.snapshot())
+      const grid = gridRef.current!
+      // rAF coalescing: if nothing mutated the grid between the
+      // previous rAF and now (idle pane, or frames that arrived
+      // during a ?2026 sync window and got buffered), skip the
+      // snapshot + setState pair entirely. Saves the allocation +
+      // React's state-equality check on every idle animation frame.
+      if (!grid.isDirty()) return
+      const snap = grid.snapshot()
+      grid.clearDirty()
+      setSnapshot(snap)
     })
   }, [])
 

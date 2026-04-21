@@ -268,6 +268,79 @@ describe('TerminalGrid SaveCursor / RestoreCursor CursorOps', () => {
     expect(g.snapshot().cursor).toMatchObject({ row: 1, col: 3 })
   })
 
+  it('dirty flag: fresh grid is clean; any frame sets dirty', () => {
+    const g = new TerminalGrid({ rows: 3, cols: 10 })
+    expect(g.isDirty()).toBe(false)
+    g.applyFrame({ frame: 'Text', data: { bytes: [0x61], style: null } })
+    expect(g.isDirty()).toBe(true)
+    g.clearDirty()
+    expect(g.isDirty()).toBe(false)
+  })
+
+  it('dirty flag: SemanticEvent + AgentSignal also set dirty (4.7 C4)', () => {
+    // These frames don't mutate the grid but 4.7 subscribers need
+    // to see them, so the rerender path has to fire. D2's dirty
+    // bit is conservative exactly so we don't silently drop these.
+    const g = new TerminalGrid({ rows: 3, cols: 10 })
+    g.applyFrame({
+      frame: 'SemanticEvent',
+      data: { kind: { type: 'Message' }, payload: null },
+    })
+    expect(g.isDirty()).toBe(true)
+    g.clearDirty()
+    g.applyFrame({
+      frame: 'AgentSignal',
+      data: {
+        id: 'x',
+        from: { scope: 'broadcast' },
+        to: { scope: 'broadcast' },
+        kind: { kind: 'msg', data: { text: 'hi' } },
+        at: '2026-04-21T00:00:00Z',
+      },
+    })
+    expect(g.isDirty()).toBe(true)
+  })
+
+  it('dirty flag: resize sets dirty', () => {
+    const g = new TerminalGrid({ rows: 3, cols: 10 })
+    g.clearDirty()
+    g.resize(20, 6)
+    expect(g.isDirty()).toBe(true)
+  })
+
+  it('dirty flag: sync-open flips the flag so the watchdog can see it', () => {
+    // The SessionStreamView watchdog useEffect depends on reading
+    // snapshot.modes.synchronizedOutput === true. That means the
+    // open transition must produce a dirty bit, or the snapshot
+    // never refreshes and the watchdog never starts.
+    const g = new TerminalGrid({ rows: 3, cols: 10 })
+    g.clearDirty()
+    g.applyFrame({
+      frame: 'ModeChange',
+      data: { mode: 'synchronized_output', on: true },
+    })
+    expect(g.isDirty()).toBe(true)
+  })
+
+  it('dirty flag: frames inside the sync buffer do NOT mark dirty until drain', () => {
+    // Buffered frames haven't mutated visible state yet — dirty
+    // stays false while they're parked. When drainSyncPending
+    // flushes them through applyFrameImmediate, THAT sets dirty.
+    const g = new TerminalGrid({ rows: 3, cols: 10 })
+    g.applyFrame({
+      frame: 'ModeChange',
+      data: { mode: 'synchronized_output', on: true },
+    })
+    g.clearDirty() // isolate the buffer-time check from the open-transition dirty
+    g.applyFrame({ frame: 'Text', data: { bytes: [0x61], style: null } })
+    expect(g.isDirty()).toBe(false)
+    g.applyFrame({
+      frame: 'ModeChange',
+      data: { mode: 'synchronized_output', on: false },
+    })
+    expect(g.isDirty()).toBe(true)
+  })
+
   it('ModeChange SynchronizedOutput buffers frames until close', () => {
     // DECSET ?2026 h opens the sync window — subsequent frames
     // should NOT mutate the visible grid until ?2026 l closes it.

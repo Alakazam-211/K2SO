@@ -117,6 +117,11 @@ export class TerminalGrid {
   /** Unix-ms timestamp the current sync window opened at. null when
    *  not in sync mode. */
   private syncOpenedAt_: number | null = null
+  /** Dirty bit for rAF coalescing. Set by any frame that reaches
+   *  the mutation path; cleared by `clearDirty()` after the renderer
+   *  reads `snapshot()`. Lets SessionStreamView skip re-reading the
+   *  snapshot when nothing changed between rAF ticks. */
+  private dirty_: boolean = false
   // Partial UTF-8 handling: Frame::Text bytes are UTF-8 but multi-
   // byte sequences may span frames. TextDecoder's `stream: true`
   // mode buffers trailing partials across decode() calls.
@@ -165,9 +170,18 @@ export class TerminalGrid {
         if (!this.modes_.synchronizedOutput) {
           this.modes_.synchronizedOutput = true
           this.syncOpenedAt_ = Date.now()
+          // Mark dirty so the snapshot reflects the new mode flag
+          // on the next rAF. SessionStreamView's watchdog effect
+          // depends on reading this transition via snapshot state.
+          this.dirty_ = true
         }
         return
       }
+      // Close path: drain always marks dirty if there were buffered
+      // frames; additionally mark dirty for the mode-flag transition
+      // itself so an empty sync window still produces one rerender
+      // that flips the flag back to false.
+      this.dirty_ = true
       this.drainSyncPending()
       return
     }
@@ -212,6 +226,21 @@ export class TerminalGrid {
     return this.syncPending_.length
   }
 
+  /** True if any mutation has occurred since the last `clearDirty()`.
+   *  Used by SessionStreamView's rAF loop to skip re-snapshotting
+   *  when nothing has changed — eliminates one setState + one
+   *  snapshot allocation per idle frame. */
+  isDirty(): boolean {
+    return this.dirty_
+  }
+
+  /** Clear the dirty bit. Callers should read `snapshot()` BEFORE
+   *  clearing — otherwise a mutation landing between the two calls
+   *  would be seen as "clean" on the next rAF. */
+  clearDirty(): void {
+    this.dirty_ = false
+  }
+
   private drainSyncPending(): void {
     const pending = this.syncPending_
     this.syncPending_ = []
@@ -223,6 +252,13 @@ export class TerminalGrid {
   }
 
   private applyFrameImmediate(frame: Frame): void {
+    // Conservative dirty mark — every frame that reaches the apply
+    // path flips the bit, including SemanticEvent + AgentSignal
+    // which don't mutate grid state but which 4.7 subscribers will
+    // eventually consume (4.7 C4: don't drop these). The rerender
+    // when the grid-visible state hasn't changed is cheap — React
+    // skips DOM updates when the snapshot identity hasn't changed.
+    this.dirty_ = true
     switch (frame.frame) {
       case 'Text':
         this.writeText(frame.data.bytes, frame.data.style)
@@ -275,6 +311,7 @@ export class TerminalGrid {
   resize(cols: number, rows: number): void {
     const newCols = Math.max(1, cols)
     const newRows = Math.max(1, rows)
+    this.dirty_ = true
     // Grow/shrink each existing row's column count.
     this.grid_ = this.grid_.map((row) => this.resizeRow(row, newCols))
     // Adjust row count: append blanks or trim from the bottom.
