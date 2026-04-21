@@ -1573,6 +1573,25 @@ cmd_done() {
 }
 
 cmd_msg() {
+    # `k2so msg` is a convenience wrapper over the awareness primitive.
+    # Pre-Phase-4 it hit Tauri's `/cli/msg` which wrote two
+    # activity_feed rows (message.sent on sender side,
+    # message.received on recipient side) and optionally PTY-
+    # injected a wake-style notice.
+    #
+    # Post-Phase-4, the daemon is the sole HTTP server and the
+    # awareness bus handles the whole flow. An `AgentSignal` with
+    # `SignalKind::Msg` + `Delivery::Live` injects into the target's
+    # live session (matching --wake's old intent); `Delivery::Inbox`
+    # writes to the filesystem inbox for async pickup. Every signal
+    # audits as `event_type='signal:msg'` in activity_feed.
+    #
+    # `--wake` historically meant "inject if live, else inbox." That
+    # is *exactly* Delivery::Live — the target's liveness (and the
+    # inject provider's fallback behavior) already handles the
+    # if-live/else-inbox branching inside the daemon. So --wake ⇒
+    # Live, default ⇒ Inbox (old behavior of dropping a message
+    # file without disturbing anyone).
     local agent="${K2SO_AGENT_NAME:-}"
     local target=""
     local text=""
@@ -1591,9 +1610,16 @@ cmd_msg() {
     [[ -z "$agent" ]] && { echo "Error: --agent required (or set K2SO_AGENT_NAME)" >&2; exit 1; }
     [[ -z "$target" ]] && { echo "Error: target required" >&2; exit 1; }
     [[ -z "$text" ]] && { echo "Error: message text required" >&2; exit 1; }
-    local params="agent=$agent&target=$(urlencode "$target")&text=$(urlencode "$text")"
-    [[ "$wake" == "true" ]] && params="$params&wake=true"
-    cli_request "/cli/msg" "$params"
+
+    # Delegate to the signal primitive. Pass --from explicitly so
+    # the sender name is the agent flag (not the default "cli").
+    # Delivery is Inbox unless --wake was set (matching the
+    # pre-Phase-4 /cli/msg semantic).
+    local delivery_flag=""
+    [[ "$wake" != "true" ]] && delivery_flag="--inbox"
+    local payload
+    payload=$(python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1]}))' "$text")
+    K2SO_AGENT_NAME="$agent" cmd_signal "$target" "msg" "$payload" $delivery_flag --from "$agent"
 }
 
 # ── Awareness Bus CLI verbs (0.34.0 Phase 3) ─────────────────────────

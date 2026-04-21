@@ -1075,18 +1075,25 @@ section "18. Agent Messaging (msg)"
 run agent create test-frontend --role "Frontend engineer for testing" > /dev/null 2>&1 || true
 
 OUTPUT=$(run msg --agent test-backend test-frontend "Please review the API changes")
-if echo "$OUTPUT" | grep -q "success\|sent\|ok\|msg"; then
+# Post-Phase-4, `k2so msg` is a thin wrapper over the awareness
+# primitive. The response now matches the `/cli/awareness/publish`
+# DeliveryReport shape: keys like activity_feed_row_id,
+# published_to_bus, inbox_path.
+if echo "$OUTPUT" | grep -qE "activity_feed_row_id|published_to_bus|inbox_path"; then
     pass "msg sends message to target agent"
 else
     fail "msg send" "Output: $OUTPUT"
 fi
 
-# Verify message stored in DB activity_feed (messages go to DB, not filesystem)
-MSG_COUNT=$(sqlite3 ~/.k2so/k2so.db "SELECT COUNT(*) FROM activity_feed WHERE event_type = 'message.received' AND to_agent = 'test-frontend';" 2>/dev/null || echo "0")
+# Verify message stored in DB activity_feed. Pre-Phase-4 Tauri's
+# /cli/msg wrote event_type='message.received'; the awareness
+# primitive writes event_type='signal:msg' for every signal it
+# delivers. See k2so_core::awareness::egress::write_audit_event.
+MSG_COUNT=$(sqlite3 ~/.k2so/k2so.db "SELECT COUNT(*) FROM activity_feed WHERE event_type LIKE 'signal:%' AND to_agent = 'test-frontend';" 2>/dev/null || echo "0")
 if [ "$MSG_COUNT" -gt 0 ]; then
     pass "msg stored in DB activity_feed ($MSG_COUNT messages)"
 else
-    fail "msg db" "No message.received entries for test-frontend in activity_feed"
+    fail "msg db" "No signal:* entries for test-frontend in activity_feed"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════
