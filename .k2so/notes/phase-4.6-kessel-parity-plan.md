@@ -433,6 +433,34 @@ security-sensitive.
 
 ---
 
+## Forward-compat with Phase 4.7 (word-editor tooling)
+
+**Read `.k2so/notes/phase-4.7-word-editor-deferred.md` before
+starting any 4.6 deliverable.** That doc defines seven binding
+constraints (C1–C7) that 4.6 must honor so 4.7 stays buildable
+without a rewrite. Highlights:
+
+- **C2 per-cell click targeting** — don't introduce span
+  coalescing tricks in `renderRow` that lose the ability to
+  resolve col from click-x. Build `coordsFromMouseEvent` during
+  D8; everything downstream inherits.
+- **C3 archive is lossless** — D1 synchronized-output buffers on
+  the renderer side only; the `SessionEntry` broadcast (upstream
+  of both renderer and archive) sees every frame. D4 WS batching
+  happens at the client boundary, not upstream of the entry.
+- **C4 `SemanticEvent` frames preserved** — D2's dirty flag must
+  set dirty on SemanticEvent receipt. D4 WS batches must preserve
+  frame ordering.
+- **C7 region-aware input dispatch** — D5 (keyboard) and D8
+  (mouse) must expose optional region-dispatcher hooks. Default
+  behavior is today's all-to-PTY; F6 rich prompt editor will
+  swap in a dispatcher without touching D5/D8.
+
+Every 4.6 commit message should cite which 4.7 constraints the
+deliverable touches (format: `Honors 4.7 C2, C4`).
+
+---
+
 ## Out of scope for 4.6 (and why)
 
 - **OffscreenCanvas / GPU renderer.** Phase 8 territory. Can't be
