@@ -28,6 +28,7 @@
 
 mod awareness_ws;
 mod cli;
+mod cli_response;
 mod events;
 mod pending_live;
 mod providers;
@@ -35,6 +36,7 @@ mod session_map;
 mod sessions_ws;
 mod signal_format;
 mod spawn;
+mod terminal_routes;
 mod watchdog;
 
 use std::fs;

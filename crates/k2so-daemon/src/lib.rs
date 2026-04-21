@@ -7,6 +7,7 @@
 //! `mod` declarations are unchanged and sit above `main.rs`.
 
 pub mod awareness_ws;
+pub mod cli_response;
 pub mod events;
 pub mod pending_live;
 pub mod providers;
@@ -14,4 +15,5 @@ pub mod session_map;
 pub mod sessions_ws;
 pub mod signal_format;
 pub mod spawn;
+pub mod terminal_routes;
 pub mod watchdog;

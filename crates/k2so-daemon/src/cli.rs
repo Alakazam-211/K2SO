@@ -25,53 +25,9 @@
 
 use std::collections::HashMap;
 
-/// Final HTTP response body + status line the caller emits. Keeping
-/// it as an owned struct (rather than returning the raw TcpStream
-/// write) lets the caller attach the `Content-Length` / `Connection:
-/// close` boilerplate once at the top of the dispatch.
-pub struct CliResponse {
-    pub status: &'static str,
-    pub content_type: &'static str,
-    pub body: String,
-}
-
-impl CliResponse {
-    pub fn ok_json(body: String) -> Self {
-        Self {
-            status: "200 OK",
-            content_type: "application/json",
-            body,
-        }
-    }
-    pub fn ok_text(body: String) -> Self {
-        Self {
-            status: "200 OK",
-            content_type: "text/plain; charset=utf-8",
-            body,
-        }
-    }
-    pub fn bad_request(err: impl std::fmt::Display) -> Self {
-        Self {
-            status: "400 Bad Request",
-            content_type: "application/json",
-            body: serde_json::json!({ "error": err.to_string() }).to_string(),
-        }
-    }
-    pub fn not_found() -> Self {
-        Self {
-            status: "404 Not Found",
-            content_type: "application/json",
-            body: r#"{"error":"route not found"}"#.to_string(),
-        }
-    }
-    pub fn forbidden() -> Self {
-        Self {
-            status: "403 Forbidden",
-            content_type: "application/json",
-            body: r#"{"error":"Invalid or missing auth token"}"#.to_string(),
-        }
-    }
-}
+// CliResponse is shared with lib-side handler modules
+// (terminal_routes, etc.) via the top-level cli_response module.
+pub use crate::cli_response::CliResponse;
 
 /// Serialize a `Result<T, String>` from core into either a 200 JSON
 /// body or a 400 `{"error": "..."}`. The single biggest shape for
@@ -888,6 +844,13 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                 Err(r) => r,
             }
         }
+
+        // ── Phase 4 H1: daemon-side terminal IO ─────────────────────
+        // Session-stream-aware read + write against daemon-owned
+        // sessions. `id` is a SessionId UUID. See
+        // `terminal_routes` for behavior details.
+        "/cli/terminal/read" => crate::terminal_routes::handle_read(params),
+        "/cli/terminal/write" => crate::terminal_routes::handle_write(params),
 
         _ => CliResponse::not_found(),
     }

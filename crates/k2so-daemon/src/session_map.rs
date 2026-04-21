@@ -74,6 +74,23 @@ pub fn snapshot() -> Vec<(String, Arc<SessionStreamSession>)> {
         .collect()
 }
 
+/// Lookup a session by its `SessionId` rather than its agent
+/// name. Iterates the map — O(N) but N is the number of live
+/// daemon sessions, realistically in the low hundreds at most.
+/// Used by the Phase 4 `/cli/terminal/write` handler, where the
+/// caller identifies the target by session id rather than by
+/// agent name.
+pub fn lookup_by_session_id(
+    id: &k2so_core::session::SessionId,
+) -> Option<Arc<SessionStreamSession>> {
+    shared()
+        .lock()
+        .unwrap()
+        .values()
+        .find(|s| s.session_id == *id)
+        .cloned()
+}
+
 /// Test helper — drop every registered entry. Keeps tests that
 /// share the global map from contaminating each other. Only
 /// compiled in test / with `test-util` feature on k2so-core.
