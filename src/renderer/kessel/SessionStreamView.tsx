@@ -198,6 +198,52 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     return () => clearInterval(id)
   }, [])
 
+  // Cursor "resting position" tracking. The visible cursor overlay
+  // follows `restingCursor`, not `snapshot.cursor`. `snapshot.cursor`
+  // faithfully reflects the grid state every rAF — which includes the
+  // intermediate positions Claude paints through during a repaint
+  // (save → move to bottom border → paint → restore). Rendering the
+  // intermediate positions makes the caret visibly jump.
+  //
+  // Alacritty's frame pacing hides this: a full Claude repaint fits
+  // in one 16ms GL frame, so only the final position is ever drawn.
+  // Our WS delivery + rAF is coarser — Claude's bytes can arrive
+  // across multiple rAF cycles and each one snapshots an intermediate
+  // cursor state.
+  //
+  // Fix: only update the rendered cursor position when activity has
+  // been quiet for at least SETTLE_MS (~60ms — below the 100ms
+  // perception-of-latency threshold so typing still feels instant,
+  // but above the inter-chunk gap that causes Claude's repaint to
+  // span rAFs). During active bursts, the rendered cursor stays at
+  // its last resting position; once things settle, it snaps to the
+  // final grid cursor.
+  const SETTLE_MS = 60
+  const [restingCursor, setRestingCursor] = useState(() => ({
+    row: 0,
+    col: 0,
+    visible: true,
+  }))
+  useEffect(() => {
+    const id = setInterval(() => {
+      const quietMs = Date.now() - lastActivityRef.current
+      if (quietMs < SETTLE_MS) return
+      const s = gridRef.current?.snapshot()
+      if (!s) return
+      setRestingCursor((prev) => {
+        if (
+          prev.row === s.cursor.row &&
+          prev.col === s.cursor.col &&
+          prev.visible === s.cursor.visible
+        ) {
+          return prev
+        }
+        return { ...s.cursor }
+      })
+    }, 16)
+    return () => clearInterval(id)
+  }, [])
+
   // Propagate prop-driven resize into the grid.
   useEffect(() => {
     if (!gridRef.current) return
@@ -403,21 +449,24 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
   )
 
   const cursorStyle = useMemo<React.CSSProperties>(() => {
-    if (!snapshot.cursor.visible || !cursorBlinkOn) return { display: 'none' }
+    // Drive from `restingCursor` (settled position) instead of
+    // `snapshot.cursor` (which tracks every intermediate move). See
+    // the resting-cursor effect above for rationale.
+    if (!restingCursor.visible || !cursorBlinkOn) return { display: 'none' }
     if (!cellMetrics.width) return { display: 'none' }
     return {
       position: 'absolute',
-      left: `${4 + cellMetrics.width * snapshot.cursor.col}px`,
-      top: `${4 + cellMetrics.height * snapshot.cursor.row}px`,
+      left: `${4 + cellMetrics.width * restingCursor.col}px`,
+      top: `${4 + cellMetrics.height * restingCursor.row}px`,
       width: `${cellMetrics.width}px`,
       height: `${cellMetrics.height}px`,
       backgroundColor: 'rgba(224, 224, 224, 0.5)',
       pointerEvents: 'none',
     }
   }, [
-    snapshot.cursor.visible,
-    snapshot.cursor.col,
-    snapshot.cursor.row,
+    restingCursor.visible,
+    restingCursor.col,
+    restingCursor.row,
     cellMetrics.width,
     cellMetrics.height,
     cursorBlinkOn,
