@@ -29,6 +29,7 @@
 mod awareness_ws;
 mod cli;
 mod cli_response;
+mod companion_routes;
 mod events;
 mod pending_live;
 mod providers;

@@ -871,6 +871,15 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
 
+        // ── Phase 4 H4: companion cross-workspace enumeration ──────
+        // Global session list + per-project summary. No project
+        // param — these are intentionally cross-workspace (the
+        // companion UI shows every workspace at once).
+        "/cli/companion/sessions" => crate::companion_routes::handle_companion_sessions(params),
+        "/cli/companion/projects-summary" => {
+            crate::companion_routes::handle_companion_projects_summary(params)
+        }
+
         _ => CliResponse::not_found(),
     }
 }
