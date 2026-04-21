@@ -303,6 +303,20 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         }
     };
 
+    // Phase 4.5: handle CORS preflight before the method allowlist.
+    // The Tauri WebView origin (tauri://localhost or http://localhost:5173
+    // in dev) is cross-origin relative to http://127.0.0.1:<port>, so
+    // the browser sends an OPTIONS preflight before every POST. We
+    // answer it with permissive CORS headers — token auth still
+    // gates every real request, so `Access-Control-Allow-Origin: *`
+    // adds no security risk and avoids hard-coding every possible
+    // Tauri dev-server port.
+    if method == "OPTIONS" {
+        let _ = stream.read(&mut buf).await;
+        send_cors_preflight(&mut stream).await;
+        return;
+    }
+
     // Most routes are GET. Specific POST-accepting routes are
     // allowlisted here so non-GET hits other paths get a clean 405.
     let is_post = method == "POST";
@@ -778,11 +792,34 @@ fn token_ok(query: &str, expected: &str) -> bool {
 }
 
 async fn send_response(stream: &mut TcpStream, status: &str, ct: &str, body: &str) {
+    // CORS headers on every response so the Tauri WebView (cross-
+    // origin from tauri://localhost or http://localhost:5173 to
+    // http://127.0.0.1:<port>) can read the body. Token auth
+    // gates every real request so permissive origin adds no risk.
     let resp = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {status}\r\n\
+         Content-Type: {ct}\r\n\
+         Content-Length: {}\r\n\
+         Access-Control-Allow-Origin: *\r\n\
+         Access-Control-Expose-Headers: *\r\n\
+         Connection: close\r\n\r\n{}",
         body.len(),
         body,
     );
+    let _ = stream.write_all(resp.as_bytes()).await;
+}
+
+/// Respond to a CORS preflight (OPTIONS) with permissive headers so
+/// the WebView accepts the subsequent GET/POST. 204 No Content is
+/// the conventional preflight response status.
+async fn send_cors_preflight(stream: &mut TcpStream) {
+    let resp = "HTTP/1.1 204 No Content\r\n\
+        Access-Control-Allow-Origin: *\r\n\
+        Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+        Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
+        Access-Control-Max-Age: 600\r\n\
+        Content-Length: 0\r\n\
+        Connection: close\r\n\r\n";
     let _ = stream.write_all(resp.as_bytes()).await;
 }
 
