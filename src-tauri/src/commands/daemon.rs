@@ -213,6 +213,74 @@ pub fn daemon_log_tail(lines: Option<u32>) -> Result<String, String> {
     Ok(collected[start..].join("\n"))
 }
 
+/// Phase 4.5 I1 — expose the daemon's port + auth token to the
+/// renderer so React can compose the Session Stream WebSocket URL
+/// (`ws://127.0.0.1:<port>/cli/sessions/subscribe?session=<uuid>&token=<token>`).
+///
+/// Reads `~/.k2so/heartbeat.port` + `~/.k2so/heartbeat.token` —
+/// the Phase 4 H7 files the daemon eagerly writes on startup.
+/// Intentionally reads the `heartbeat.*` pair (the public CLI-
+/// facing address) rather than `daemon.*` (the Tauri-internal
+/// pair) so future thin clients on other devices use the same
+/// discovery convention.
+///
+/// Returns `NotInstalled { reason }` when either file is missing
+/// — same "tri-state" shape as `daemon_status` so the renderer
+/// can mirror the Settings pane's UX for daemon-unavailable.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum DaemonWsUrlResponse {
+    /// Port + token both readable; renderer can compose the URL.
+    Available { port: u16, token: String },
+    /// One or both files missing — daemon not running / not
+    /// installed. Matches `daemon_status`'s NotInstalled variant.
+    NotInstalled { reason: String },
+}
+
+#[tauri::command]
+pub fn daemon_ws_url() -> DaemonWsUrlResponse {
+    let Some(home) = dirs::home_dir() else {
+        return DaemonWsUrlResponse::NotInstalled {
+            reason: "home directory unavailable".to_string(),
+        };
+    };
+    let port_path = home.join(".k2so/heartbeat.port");
+    let token_path = home.join(".k2so/heartbeat.token");
+
+    let port_raw = match std::fs::read_to_string(&port_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return DaemonWsUrlResponse::NotInstalled {
+                reason: format!("read {}: {e}", port_path.display()),
+            };
+        }
+    };
+    let port: u16 = match port_raw.trim().parse() {
+        Ok(p) => p,
+        Err(e) => {
+            return DaemonWsUrlResponse::NotInstalled {
+                reason: format!("parse port {:?}: {e}", port_raw.trim()),
+            };
+        }
+    };
+
+    let token = match std::fs::read_to_string(&token_path) {
+        Ok(s) => s.trim().to_string(),
+        Err(e) => {
+            return DaemonWsUrlResponse::NotInstalled {
+                reason: format!("read {}: {e}", token_path.display()),
+            };
+        }
+    };
+    if token.is_empty() {
+        return DaemonWsUrlResponse::NotInstalled {
+            reason: "token file empty".to_string(),
+        };
+    }
+
+    DaemonWsUrlResponse::Available { port, token }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +318,38 @@ mod tests {
         };
         let json = serde_json::to_string(&r).expect("serialize");
         assert!(json.contains("\"state\":\"unreachable\""), "got: {json}");
+    }
+
+    #[test]
+    fn ws_url_available_serializes_with_port_and_token() {
+        let r = DaemonWsUrlResponse::Available {
+            port: 58211,
+            token: "abc123".to_string(),
+        };
+        let json = serde_json::to_string(&r).expect("serialize");
+        assert!(json.contains("\"state\":\"available\""), "got: {json}");
+        assert!(json.contains("\"port\":58211"), "got: {json}");
+        assert!(json.contains("\"token\":\"abc123\""), "got: {json}");
+    }
+
+    #[test]
+    fn ws_url_not_installed_when_files_missing() {
+        // Mirror of daemon_status_with_no_files: only assert when
+        // the env cooperates (no daemon installed). Otherwise skip
+        // — CI machines may have a daemon running.
+        let k2so_dir = dirs::home_dir().unwrap().join(".k2so");
+        let port_file = k2so_dir.join("heartbeat.port");
+        let token_file = k2so_dir.join("heartbeat.token");
+        if port_file.exists() || token_file.exists() {
+            eprintln!(
+                "[test] heartbeat files present; skipping NotInstalled assertion"
+            );
+            return;
+        }
+        match daemon_ws_url() {
+            DaemonWsUrlResponse::NotInstalled { .. } => {}
+            other => panic!("expected NotInstalled, got {other:?}"),
+        }
     }
 
     #[test]

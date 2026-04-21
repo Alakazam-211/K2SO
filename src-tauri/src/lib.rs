@@ -1218,6 +1218,7 @@ pub fn run() {
             commands::daemon::daemon_restart,
             commands::daemon::daemon_log_path,
             commands::daemon::daemon_log_tail,
+            commands::daemon::daemon_ws_url,
             commands::daemon::get_keep_daemon_on_quit,
             commands::daemon::set_keep_daemon_on_quit,
         ])
