@@ -780,6 +780,20 @@ pub fn run() {
                             None => return,
                         };
                         for project in &projects {
+                            // Skip audit-bucket sentinels (`_orphan`,
+                            // `_broadcast`) — these are SQL-only rows
+                            // seeded by `db::seed_audit_sentinels` and
+                            // their "path" is a bare token, not a real
+                            // filesystem path. Treating them as projects
+                            // made every migration write scaffolds to
+                            // `<cwd>/_orphan/` and `<cwd>/_broadcast/`,
+                            // which under `tauri dev` (CWD=src-tauri)
+                            // caused the file watcher to detect those
+                            // writes and restart the app in an infinite
+                            // loop (Phase 4.5 diagnostic).
+                            if project.id == "_orphan" || project.id == "_broadcast" {
+                                continue;
+                            }
                             // 0.32.7 filename standardization: rename all lowercase
                             // agent.md / wakeup.md on disk → AGENT.md / WAKEUP.md.
                             // Must run BEFORE the heartbeat migrations below so those
