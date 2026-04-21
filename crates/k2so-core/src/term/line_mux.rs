@@ -463,6 +463,16 @@ impl Perform for PerformState {
                         mode: ModeKind::AltScreen,
                         on,
                     }),
+                    // ?2026 synchronized output — TUIs bracket
+                    // multi-step repaints and expect the renderer
+                    // to defer visible state changes until the
+                    // close. Producer side is pure passthrough;
+                    // the buffering lives in the consumer
+                    // (TerminalGrid).
+                    2026 => self.push_frame(Frame::ModeChange {
+                        mode: ModeKind::SynchronizedOutput,
+                        on,
+                    }),
                     _ => {}
                 }
             }

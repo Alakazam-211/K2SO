@@ -60,6 +60,12 @@ export interface ModeFlags {
    *  screen (the TUI owns the whole viewport and scrolling through its
    *  history isn't meaningful — there isn't any). */
   altScreen: boolean
+  /** DECSET ?2026 — synchronized output. When true, `applyFrame` is
+   *  buffering frames internally; the next visible snapshot will be
+   *  the atomic result of every frame received between `?2026 h` and
+   *  the matching `?2026 l`. Surfaced in the snapshot so callers can
+   *  short-circuit repaints while the buffer is open. */
+  synchronizedOutput: boolean
 }
 
 export interface TerminalGridOpts {
@@ -67,11 +73,18 @@ export interface TerminalGridOpts {
   cols?: number
   /** Max scrollback lines before the oldest is discarded. */
   scrollbackCap?: number
+  /** Watchdog for DECSET ?2026 synchronized output. If the TUI
+   *  opens a sync update and never closes it, we force-flush the
+   *  pending buffer after this many ms so the pane can't wedge.
+   *  150ms matches alacritty. Set to 0 to disable (the buffer
+   *  will only ever drain on an explicit close). */
+  syncUpdateTimeoutMs?: number
 }
 
 const DEFAULT_ROWS = 24
 const DEFAULT_COLS = 80
 const DEFAULT_SCROLLBACK_CAP = 10_000
+const DEFAULT_SYNC_UPDATE_TIMEOUT_MS = 150
 
 function blankCell(): Cell {
   return { char: '', style: null }
@@ -89,8 +102,21 @@ export class TerminalGrid {
   private scrollRegion_: { top: number; bottom: number }
   private savedCursor_: { row: number; col: number } | null = null
   private altGrid_: Cell[][] | null = null
-  private modes_: ModeFlags = { bracketedPaste: false, altScreen: false }
+  private modes_: ModeFlags = {
+    bracketedPaste: false,
+    altScreen: false,
+    synchronizedOutput: false,
+  }
   private readonly scrollbackCap_: number
+  private readonly syncUpdateTimeoutMs_: number
+  /** Frames that arrived while modes_.synchronizedOutput was true.
+   *  Drained atomically on the close directive, on a subsequent
+   *  frame arriving past the timeout (auto-recover from a buggy
+   *  TUI), or on explicit forceDrain(). */
+  private syncPending_: Frame[] = []
+  /** Unix-ms timestamp the current sync window opened at. null when
+   *  not in sync mode. */
+  private syncOpenedAt_: number | null = null
   // Partial UTF-8 handling: Frame::Text bytes are UTF-8 but multi-
   // byte sequences may span frames. TextDecoder's `stream: true`
   // mode buffers trailing partials across decode() calls.
@@ -100,6 +126,10 @@ export class TerminalGrid {
     this.rows_ = Math.max(1, opts.rows ?? DEFAULT_ROWS)
     this.cols_ = Math.max(1, opts.cols ?? DEFAULT_COLS)
     this.scrollbackCap_ = Math.max(0, opts.scrollbackCap ?? DEFAULT_SCROLLBACK_CAP)
+    this.syncUpdateTimeoutMs_ = Math.max(
+      0,
+      opts.syncUpdateTimeoutMs ?? DEFAULT_SYNC_UPDATE_TIMEOUT_MS,
+    )
     this.grid_ = Array.from({ length: this.rows_ }, () => blankRow(this.cols_))
     this.scrollRegion_ = { top: 0, bottom: this.rows_ - 1 }
   }
@@ -114,8 +144,85 @@ export class TerminalGrid {
   // ── Public entry point ──────────────────────────────────────────
 
   /** Apply a Frame. Returns nothing — callers read state via
-   *  `snapshot()` on the next animation frame. */
+   *  `snapshot()` on the next animation frame.
+   *
+   *  While `modes_.synchronizedOutput` is true, non-control frames
+   *  are buffered and will apply atomically when the TUI emits the
+   *  close directive (or when the watchdog timeout fires). The
+   *  archive and broadcast channels (Rust-side) are untouched by
+   *  this buffering — they always see the original frame stream
+   *  (4.7 C3 lossless invariant).
+   */
   applyFrame(frame: Frame): void {
+    // Sync-output close is the hot path — drain first, then apply
+    // the off transition. This keeps the buffer tight and avoids
+    // a re-entry with a stale syncOpenedAt_.
+    if (
+      frame.frame === 'ModeChange' &&
+      frame.data.mode === 'synchronized_output'
+    ) {
+      if (frame.data.on) {
+        if (!this.modes_.synchronizedOutput) {
+          this.modes_.synchronizedOutput = true
+          this.syncOpenedAt_ = Date.now()
+        }
+        return
+      }
+      this.drainSyncPending()
+      return
+    }
+
+    // If we're in sync mode, check the watchdog first. A buggy TUI
+    // that opened sync and never closed would wedge the pane
+    // otherwise.
+    if (
+      this.modes_.synchronizedOutput &&
+      this.syncOpenedAt_ !== null &&
+      this.syncUpdateTimeoutMs_ > 0 &&
+      Date.now() - this.syncOpenedAt_ > this.syncUpdateTimeoutMs_
+    ) {
+      this.drainSyncPending()
+      // Fall through so the current frame applies immediately on
+      // the now-drained state.
+    }
+
+    if (this.modes_.synchronizedOutput) {
+      this.syncPending_.push(frame)
+      return
+    }
+
+    this.applyFrameImmediate(frame)
+  }
+
+  /** Force-flush any buffered sync frames and return to live mode.
+   *  No-op when sync isn't active. Useful for callers that own a
+   *  watchdog clock outside the grid (SessionStreamView runs a
+   *  setTimeout to cover the silent-TUI case where no new frame
+   *  arrives to trigger the internal watchdog). */
+  forceDrain(): void {
+    if (this.modes_.synchronizedOutput) {
+      this.drainSyncPending()
+    }
+  }
+
+  /** How many frames are currently buffered waiting for the sync
+   *  close. Zero when not in sync mode. Exposed for tests + the
+   *  watchdog. */
+  pendingSyncCount(): number {
+    return this.syncPending_.length
+  }
+
+  private drainSyncPending(): void {
+    const pending = this.syncPending_
+    this.syncPending_ = []
+    this.modes_.synchronizedOutput = false
+    this.syncOpenedAt_ = null
+    for (const f of pending) {
+      this.applyFrameImmediate(f)
+    }
+  }
+
+  private applyFrameImmediate(frame: Frame): void {
     switch (frame.frame) {
       case 'Text':
         this.writeText(frame.data.bytes, frame.data.style)

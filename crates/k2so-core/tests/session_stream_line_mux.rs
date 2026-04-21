@@ -448,6 +448,26 @@ fn alt_screen_mode_1049_emits_mode_change() {
 }
 
 #[test]
+fn synchronized_output_mode_2026_emits_mode_change() {
+    // DECSET ?2026 is xterm+kitty+wezterm+alacritty's "synchronized
+    // output" op. TUIs wrap multi-step repaints in ?2026 h / ?2026 l
+    // so the renderer can apply the whole burst atomically.
+    let mut mux = LineMux::new();
+    let on = mux.feed(b"\x1b[?2026h");
+    assert_eq!(on.len(), 1);
+    assert!(matches!(
+        &on[0],
+        Frame::ModeChange { mode: ModeKind::SynchronizedOutput, on: true }
+    ));
+    let off = mux.feed(b"\x1b[?2026l");
+    assert_eq!(off.len(), 1);
+    assert!(matches!(
+        &off[0],
+        Frame::ModeChange { mode: ModeKind::SynchronizedOutput, on: false }
+    ));
+}
+
+#[test]
 fn alt_screen_mode_47_is_aliased_to_alt_screen() {
     // DECSET ?47 — the original xterm alt-screen op. Less capable
     // than ?1049 (no cursor save/restore), but some TUIs still

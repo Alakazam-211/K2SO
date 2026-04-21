@@ -152,6 +152,7 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       cols,
       rows,
       scrollbackCap: config.scrolling.cap,
+      syncUpdateTimeoutMs: config.performance.syncUpdateTimeoutMs,
     })
   }
 
@@ -208,6 +209,28 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       setViewportOffset(0)
     }
   }, [snapshot.modes.altScreen, viewportOffset])
+
+  // Synchronized-output silent-TUI watchdog. TerminalGrid has its
+  // own internal watchdog that fires when a post-timeout frame
+  // arrives, but if the TUI opens ?2026 and then goes completely
+  // silent, no frame ever arrives to trigger it. This effect runs
+  // a setTimeout that force-drains the pending buffer even with no
+  // incoming traffic. Matches alacritty's "sync update should not
+  // hang the terminal" safety behavior.
+  useEffect(() => {
+    if (!snapshot.modes.synchronizedOutput) return
+    const timeoutMs = config.performance.syncUpdateTimeoutMs
+    if (timeoutMs <= 0) return
+    const id = setTimeout(() => {
+      gridRef.current?.forceDrain()
+      scheduleRender()
+    }, timeoutMs)
+    return () => clearTimeout(id)
+  }, [
+    snapshot.modes.synchronizedOutput,
+    config.performance.syncUpdateTimeoutMs,
+    scheduleRender,
+  ])
 
   // Cursor is always visible (no blink). Rosson's product decision:
   // a stable solid cursor reads more calmly than a pulsing one,

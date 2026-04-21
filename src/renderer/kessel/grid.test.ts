@@ -268,6 +268,64 @@ describe('TerminalGrid SaveCursor / RestoreCursor CursorOps', () => {
     expect(g.snapshot().cursor).toMatchObject({ row: 1, col: 3 })
   })
 
+  it('ModeChange SynchronizedOutput buffers frames until close', () => {
+    // DECSET ?2026 h opens the sync window — subsequent frames
+    // should NOT mutate the visible grid until ?2026 l closes it.
+    // The whole point is atomic repaint: a consumer snapshotting
+    // mid-sequence sees the pre-sync state, then the post-close
+    // state, never anything in between.
+    const g = new TerminalGrid({ rows: 3, cols: 10 })
+    // Pre-sync baseline.
+    g.applyFrame({ frame: 'Text', data: { bytes: [0x61], style: null } })
+    expect(g.snapshot().grid[0][0].char).toBe('a')
+    expect(g.snapshot().modes.synchronizedOutput).toBe(false)
+
+    // Open sync.
+    g.applyFrame({
+      frame: 'ModeChange',
+      data: { mode: 'synchronized_output', on: true },
+    })
+    expect(g.snapshot().modes.synchronizedOutput).toBe(true)
+
+    // Feed several frames — none should appear yet.
+    g.applyFrame({ frame: 'Text', data: { bytes: [0x62], style: null } })
+    g.applyFrame({ frame: 'Text', data: { bytes: [0x63], style: null } })
+    g.applyFrame({ frame: 'Text', data: { bytes: [0x64], style: null } })
+    expect(g.snapshot().grid[0][0].char).toBe('a') // still 'a'
+    expect(g.pendingSyncCount()).toBe(3)
+
+    // Close sync — all buffered frames apply atomically.
+    g.applyFrame({
+      frame: 'ModeChange',
+      data: { mode: 'synchronized_output', on: false },
+    })
+    expect(g.snapshot().modes.synchronizedOutput).toBe(false)
+    expect(g.pendingSyncCount()).toBe(0)
+    expect(g.snapshot().grid[0][0].char).toBe('a')
+    expect(g.snapshot().grid[0][1].char).toBe('b')
+    expect(g.snapshot().grid[0][2].char).toBe('c')
+    expect(g.snapshot().grid[0][3].char).toBe('d')
+  })
+
+  it('SynchronizedOutput watchdog force-drains after timeout', () => {
+    // Simulates a buggy TUI that opens ?2026 and never closes. The
+    // next frame arriving past the timeout auto-drains the buffer
+    // so the pane can't wedge. forceDrain() is the external escape
+    // hatch SessionStreamView uses for the silent-TUI case.
+    const g = new TerminalGrid({ rows: 3, cols: 10, syncUpdateTimeoutMs: 10 })
+    g.applyFrame({
+      frame: 'ModeChange',
+      data: { mode: 'synchronized_output', on: true },
+    })
+    g.applyFrame({ frame: 'Text', data: { bytes: [0x78], style: null } })
+    expect(g.pendingSyncCount()).toBe(1)
+
+    // External drain (simulates the silent-TUI setTimeout path).
+    g.forceDrain()
+    expect(g.snapshot().modes.synchronizedOutput).toBe(false)
+    expect(g.snapshot().grid[0][0].char).toBe('x')
+  })
+
   it('ModeChange AltScreen swaps buffers and flags modes.altScreen', () => {
     // ?1049 h enters alt screen — primary buffer is preserved, the
     // visible grid is a fresh blank canvas. ?1049 l exits and the

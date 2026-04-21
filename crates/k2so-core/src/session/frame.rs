@@ -81,6 +81,15 @@ pub enum ModeKind {
     /// mode uses this too. The grid swaps buffers; the renderer
     /// suppresses scrollback navigation while on alt screen.
     AltScreen,
+    /// DECSET ?2026 — synchronized output. TUIs wrap multi-step
+    /// repaints in `?2026 h` … `?2026 l`; the renderer buffers
+    /// intermediate frames and applies them as one atomic visible
+    /// change on the close. Eliminates the partial-repaint flashes
+    /// and residual cursor jitter that our settle window papers
+    /// over today. Honored on the RENDERER side only — the session
+    /// archive and the broadcast channel still see every individual
+    /// frame (4.7 C3 lossless invariant).
+    SynchronizedOutput,
 }
 
 /// The locked vocabulary for semantic events. Five variants + Custom
