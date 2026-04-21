@@ -42,6 +42,23 @@ export interface TerminalItemData {
   command?: string
   args?: string[]
   sessionId?: string  // CLI tool session ID for resume on restart
+  /**
+   * Phase 4.5 renderer selection — captured at tab creation from the
+   * user's terminal settings preference. Each tab remembers its own
+   * renderer so toggling the preference doesn't hot-swap existing
+   * terminals mid-session. Missing / undefined = alacritty (the
+   * historical default for every tab created pre-4.5).
+   */
+  renderer?: 'alacritty' | 'kessel'
+  /**
+   * Phase 4.5 — Kessel-specific SessionId UUID returned by the
+   * daemon's /cli/sessions/spawn. Populated lazily by the Kessel
+   * mount wrapper once the session is live; used by the
+   * SessionStreamView to subscribe to the right Frame stream.
+   * For renderer='alacritty' this stays empty and `terminalId`
+   * carries the alacritty-manager id instead.
+   */
+  kesselSessionId?: string
 }
 
 export interface FileViewerItemData {
@@ -475,6 +492,21 @@ function makeTerminalPaneGroup(
   options?: { command?: string; args?: string[] }
 ): PaneGroup {
   const itemId = crypto.randomUUID()
+  // Snapshot the current renderer preference at tab-creation time.
+  // Dynamic import via require() would be cleaner but this module is
+  // already loaded at this point — the store's zustand getState is
+  // always safe to call. Each tab stores its chosen renderer so the
+  // preference can change mid-session without hot-swapping open
+  // terminals. Lazy require to avoid a TypeScript circular dep
+  // between stores/tabs and stores/terminal-settings.
+  let renderer: 'alacritty' | 'kessel' = 'alacritty'
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { useTerminalSettingsStore } = require('./terminal-settings') as typeof import('./terminal-settings')
+    renderer = useTerminalSettingsStore.getState().renderer
+  } catch {
+    // Store not available (SSR/tests) — fall back to alacritty.
+  }
   return {
     id: paneGroupId,
     items: [
@@ -486,6 +518,7 @@ function makeTerminalPaneGroup(
           cwd,
           command: options?.command,
           args: options?.args,
+          renderer,
         },
       },
     ],

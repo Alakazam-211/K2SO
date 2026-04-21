@@ -8,17 +8,34 @@ import {
 export type LinkClickMode = 'click' | 'cmd-click'
 export type ShortcutModifierLayout = 'cmd-active-cmdshift-pinned' | 'cmd-pinned-cmdshift-active'
 
+/**
+ * Terminal rendering backend selection (Phase 4.5).
+ *
+ * - `alacritty` (default): the classic in-process alacritty_terminal
+ *   engine + DOM renderer. Production-hardened, full SGR / alt-screen /
+ *   mouse support. The current render path for every tab since K2SO
+ *   shipped.
+ * - `kessel`: subscribes to the daemon's Session Stream WebSocket
+ *   (`/cli/sessions/subscribe`) and renders from Frame events. Beta —
+ *   SGR parity as of 4.5, cursor blinks, but alt-screen buffer + full
+ *   mouse reporting are not yet wired. Changes to this setting only
+ *   affect NEW tabs; already-open tabs keep their chosen renderer.
+ */
+export type TerminalRenderer = 'alacritty' | 'kessel'
+
 interface TerminalSettingsState {
   fontSize: number
   linkClickMode: LinkClickMode
   openLinksInSplitPane: boolean
   shortcutLayout: ShortcutModifierLayout
+  renderer: TerminalRenderer
   incrementFontSize: () => void
   decrementFontSize: () => void
   resetFontSize: () => void
   setLinkClickMode: (mode: LinkClickMode) => void
   setOpenLinksInSplitPane: (enabled: boolean) => void
   setShortcutLayout: (layout: ShortcutModifierLayout) => void
+  setRenderer: (renderer: TerminalRenderer) => void
 }
 
 export const useTerminalSettingsStore = create<TerminalSettingsState>((set) => ({
@@ -26,6 +43,10 @@ export const useTerminalSettingsStore = create<TerminalSettingsState>((set) => (
   linkClickMode: 'click' as LinkClickMode,
   openLinksInSplitPane: true,
   shortcutLayout: 'cmd-active-cmdshift-pinned' as ShortcutModifierLayout,
+  // Default to alacritty while Kessel finishes baking. Users can opt
+  // in per-preference; each new tab captures the preference at spawn
+  // time so the choice doesn't hot-swap mid-session.
+  renderer: 'alacritty' as TerminalRenderer,
 
   incrementFontSize: () => {
     set((state) => ({
@@ -53,6 +74,10 @@ export const useTerminalSettingsStore = create<TerminalSettingsState>((set) => (
 
   setShortcutLayout: (layout: ShortcutModifierLayout) => {
     set({ shortcutLayout: layout })
+  },
+
+  setRenderer: (renderer: TerminalRenderer) => {
+    set({ renderer })
   }
 }))
 
