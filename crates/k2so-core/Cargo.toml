@@ -33,6 +33,11 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # Serialization: used across db, push, eventually companion and scheduler.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# YAML parser for the nested `launch:` block in agent.md frontmatter
+# (see agents::launch_profile, phase 3.2 G3). The existing
+# parse_frontmatter helper stays for flat key:value callers; the
+# launch-profile loader uses serde_yaml for full nested support.
+serde_yaml = "0.9"
 
 # Time handling in the activity feed + heartbeat audit rows.
 chrono = { version = "0.4", features = ["serde"] }
