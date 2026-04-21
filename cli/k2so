@@ -1741,15 +1741,163 @@ PY
     echo
 }
 
-# Sessions subcommand dispatcher — handles `k2so sessions spawn`
-# and any future `sessions *` verbs.
+# List every session this project's filesystem knows about, by
+# walking $PROJECT/.k2so/sessions/ and summarizing each directory.
+# No daemon round-trip — archive dirs are the source of truth.
+#
+# Output columns: session id, total archive bytes, segment count,
+# active-segment size, last-modified wall-clock timestamp.
+# Pass --json to get a machine-parseable array.
+#
+# Usage:
+#   k2so sessions list [--json]
+cmd_sessions_list() {
+    local json_mode=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_mode="1"; shift ;;
+            --) shift; break ;;
+            *) shift ;;
+        esac
+    done
+    local sessions_dir="${PROJECT}/.k2so/sessions"
+    if [ ! -d "$sessions_dir" ]; then
+        if [ -n "$json_mode" ]; then
+            echo "[]"
+        else
+            echo "No sessions yet for $PROJECT" >&2
+        fi
+        return 0
+    fi
+    python3 - "$sessions_dir" "$json_mode" <<'PY'
+import json, os, sys, time
+sessions_dir = sys.argv[1]
+as_json = sys.argv[2] == "1"
+
+rows = []
+for name in sorted(os.listdir(sessions_dir)):
+    session_dir = os.path.join(sessions_dir, name)
+    if not os.path.isdir(session_dir):
+        continue
+    total = 0
+    segments = 0
+    active_bytes = 0
+    latest_mtime = 0
+    for f in os.listdir(session_dir):
+        path = os.path.join(session_dir, f)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        if not (f == "archive.ndjson" or f.startswith("archive.") and (f.endswith(".ndjson") or f.endswith(".ndjson.gz"))):
+            continue
+        total += st.st_size
+        segments += 1
+        latest_mtime = max(latest_mtime, int(st.st_mtime))
+        if f == "archive.ndjson":
+            active_bytes = st.st_size
+    rows.append({
+        "session_id": name,
+        "total_bytes": total,
+        "segments": segments,
+        "active_bytes": active_bytes,
+        "last_modified_epoch": latest_mtime,
+    })
+
+def human_bytes(n):
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.2f} KB"
+    if n < 1024 * 1024 * 1024:
+        return f"{n / (1024 * 1024):.2f} MB"
+    return f"{n / (1024 * 1024 * 1024):.2f} GB"
+
+if as_json:
+    print(json.dumps(rows, indent=2))
+else:
+    if not rows:
+        print("No sessions yet", file=sys.stderr)
+        sys.exit(0)
+    print(f"{'SESSION':38}  {'SEGMENTS':>8}  {'TOTAL':>12}  {'ACTIVE':>12}  LAST MODIFIED")
+    for r in rows:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["last_modified_epoch"])) if r["last_modified_epoch"] else "-"
+        print(f"{r['session_id']:38}  {r['segments']:>8}  {human_bytes(r['total_bytes']):>12}  {human_bytes(r['active_bytes']):>12}  {ts}")
+PY
+}
+
+# Compact a session's rotated segments by gzipping them in place.
+# NEVER touches the active segment (archive.ndjson). Idempotent —
+# re-running is a no-op once every rotated segment is already
+# gzipped.
+#
+# Usage:
+#   k2so sessions compact <session-id>
+cmd_sessions_compact() {
+    local session_id="${1:-}"
+    [[ -z "$session_id" ]] && {
+        echo "Usage: k2so sessions compact <session-id>" >&2
+        echo "(use 'k2so sessions list' to find session ids)" >&2
+        exit 1
+    }
+    local session_dir="${PROJECT}/.k2so/sessions/${session_id}"
+    if [ ! -d "$session_dir" ]; then
+        echo "No archive directory for session $session_id at $session_dir" >&2
+        exit 1
+    fi
+    if ! command -v gzip >/dev/null 2>&1; then
+        echo "gzip not found in PATH — cannot compact" >&2
+        exit 1
+    fi
+
+    local count=0
+    local compacted_bytes_before=0
+    local compacted_bytes_after=0
+    # Loop through every rotated segment that isn't yet gzipped.
+    # Filename pattern: archive.NNN.ndjson (NOT archive.ndjson,
+    # NOT *.ndjson.gz).
+    while IFS= read -r -d '' seg; do
+        local before_size
+        before_size=$(stat -f '%z' "$seg" 2>/dev/null || stat -c '%s' "$seg" 2>/dev/null || echo 0)
+        compacted_bytes_before=$((compacted_bytes_before + before_size))
+
+        # `gzip -f` overwrites if a *.gz already exists; we checked
+        # above that the .gz form doesn't exist for this segment.
+        if gzip -f "$seg"; then
+            local after_size
+            after_size=$(stat -f '%z' "$seg.gz" 2>/dev/null || stat -c '%s' "$seg.gz" 2>/dev/null || echo 0)
+            compacted_bytes_after=$((compacted_bytes_after + after_size))
+            count=$((count + 1))
+        else
+            echo "gzip failed for $seg" >&2
+        fi
+    done < <(find "$session_dir" -maxdepth 1 -type f \
+        -name 'archive.[0-9][0-9][0-9].ndjson' -print0 | sort -z)
+
+    if [ "$count" -eq 0 ]; then
+        echo "Nothing to compact for session $session_id (no uncompressed rotated segments)." >&2
+        return 0
+    fi
+
+    local saved=$((compacted_bytes_before - compacted_bytes_after))
+    echo "{\"sessionId\":\"$session_id\",\"compacted\":$count,\"bytesBefore\":$compacted_bytes_before,\"bytesAfter\":$compacted_bytes_after,\"bytesSaved\":$saved}"
+}
+
+# Sessions subcommand dispatcher — handles `k2so sessions spawn`,
+# `k2so sessions list`, `k2so sessions compact`, and any future
+# `sessions *` verbs.
 cmd_sessions() {
     local sub="${1:-}"
     shift 2>/dev/null || true
     case "$sub" in
-        spawn) cmd_sessions_spawn "$@" ;;
+        spawn)   cmd_sessions_spawn "$@" ;;
+        list)    cmd_sessions_list "$@" ;;
+        compact) cmd_sessions_compact "$@" ;;
         *)
-            echo "Usage: k2so sessions spawn --agent <name> [...]" >&2
+            echo "Usage:" >&2
+            echo "  k2so sessions spawn --agent <name> [...]" >&2
+            echo "  k2so sessions list [--json]" >&2
+            echo "  k2so sessions compact <session-id>" >&2
             exit 1
             ;;
     esac

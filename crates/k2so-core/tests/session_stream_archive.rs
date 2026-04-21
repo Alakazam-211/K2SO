@@ -239,8 +239,195 @@ async fn empty_session_produces_empty_archive_file() {
 
 #[test]
 fn byte_thresholds_match_expected_values() {
-    // Lock the MVP thresholds so Phase 3.2 has to bump them
-    // deliberately. WARN at 100MB, hard limit at 500MB.
-    assert_eq!(session::WARN_BYTES, 100 * 1024 * 1024);
-    assert_eq!(session::HARD_LIMIT_BYTES, 500 * 1024 * 1024);
+    // Post-G2 thresholds: per-segment rotation boundary is small
+    // enough to keep individual files tailable/greppable; aggregate
+    // cap is far larger than the MVP 500MB because rotation makes
+    // the aggregate-use story sustainable. Locked so future phases
+    // have to bump these deliberately.
+    assert_eq!(session::ROTATE_BYTES, 50 * 1024 * 1024);
+    assert_eq!(session::WARN_BYTES, 1_024 * 1024 * 1024);
+    assert_eq!(session::HARD_LIMIT_BYTES, 5 * 1_024 * 1_024 * 1_024);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// G2 — rotation + compact helpers
+// ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "current_thread")]
+async fn active_segment_rotates_past_boundary() {
+    // Small ROTATE_BYTES would require writing 50MB+ of frames in a
+    // test — too slow. Instead, set the active segment up with a
+    // single ROTATE_BYTES+ pre-existing file on disk, then publish
+    // one more frame and assert that the NEXT write triggers
+    // rotation: archive.ndjson shrinks back to just the new frame,
+    // archive.000.ndjson has the old bytes.
+    let project = tmp_project("rotate");
+    let session_id = SessionId::new();
+    let archive_dir = project
+        .join(".k2so/sessions")
+        .join(session_id.to_string());
+    std::fs::create_dir_all(&archive_dir).unwrap();
+    let active = archive_dir.join("archive.ndjson");
+
+    // Seed the active file with a single fake frame line that's
+    // already bigger than ROTATE_BYTES. Use a tiny padding bytes
+    // field so the JSON parses as a real Frame::Text.
+    let padding_size = (archive::ROTATE_BYTES as usize) + 1_024;
+    let pad_bytes: Vec<u8> = vec![b'a'; padding_size];
+    let frame = text_frame(std::str::from_utf8(&pad_bytes).unwrap());
+    let mut fat_line = serde_json::to_vec(&frame).unwrap();
+    fat_line.push(b'\n');
+    std::fs::write(&active, &fat_line).unwrap();
+
+    // Now spin up the writer; it sees bytes_in_current > ROTATE_BYTES
+    // already, so the very next write triggers rotation.
+    let entry = Arc::new(SessionEntry::new());
+    let handle = archive::spawn(session_id, entry.clone(), project.clone());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    entry.publish(text_frame("post-rotation"));
+    drop(entry);
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+    // archive.ndjson now holds only the "post-rotation" frame.
+    let active_lines = read_archive_lines(&active);
+    assert_eq!(
+        active_lines.len(),
+        1,
+        "active segment should have exactly one line after rotation: {active_lines:?}"
+    );
+    assert_eq!(
+        text_frame_body(&active_lines[0]).as_deref(),
+        Some("post-rotation")
+    );
+
+    // archive.000.ndjson exists and holds the pre-rotation bytes.
+    let rotated = archive_dir.join("archive.000.ndjson");
+    assert!(rotated.exists(), "rotated segment should exist: {rotated:?}");
+    let rotated_size = std::fs::metadata(&rotated).unwrap().len();
+    assert!(
+        rotated_size > archive::ROTATE_BYTES,
+        "rotated segment carries the pre-rotation bytes ({rotated_size} bytes)"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rotation_index_increments_across_multiple_rotations() {
+    // Seed TWO pre-rotated segments; the writer should skip those
+    // indices and use 002 for its own next rotation.
+    let project = tmp_project("rotate-multi");
+    let session_id = SessionId::new();
+    let archive_dir = project
+        .join(".k2so/sessions")
+        .join(session_id.to_string());
+    std::fs::create_dir_all(&archive_dir).unwrap();
+    std::fs::write(archive_dir.join("archive.000.ndjson"), b"old-0\n").unwrap();
+    std::fs::write(archive_dir.join("archive.001.ndjson"), b"old-1\n").unwrap();
+
+    // Seed active segment over ROTATE_BYTES so next publish rotates.
+    let fat = vec![b'b'; (archive::ROTATE_BYTES as usize) + 1_024];
+    let frame = text_frame(std::str::from_utf8(&fat).unwrap());
+    let mut fat_line = serde_json::to_vec(&frame).unwrap();
+    fat_line.push(b'\n');
+    std::fs::write(archive_dir.join("archive.ndjson"), &fat_line).unwrap();
+
+    let entry = Arc::new(SessionEntry::new());
+    let handle = archive::spawn(session_id, entry.clone(), project.clone());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    entry.publish(text_frame("bump"));
+    drop(entry);
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+    // 000 + 001 preserved, 002 newly rotated (the pre-seeded fat
+    // active segment moves to index 002).
+    assert!(archive_dir.join("archive.000.ndjson").exists());
+    assert!(archive_dir.join("archive.001.ndjson").exists());
+    assert!(archive_dir.join("archive.002.ndjson").exists());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn aggregate_hard_limit_freezes_writes_but_keeps_session_alive() {
+    // Simulate an archive dir whose aggregate bytes already exceed
+    // HARD_LIMIT_BYTES. The writer should open successfully but
+    // refuse to write any further frames — the `frozen` state is
+    // set on startup from the aggregate size read off disk.
+    //
+    // Using a real 5GB seed file would wreck CI; instead we monkey-
+    // patch by creating a file whose reported size is artificially
+    // large via sparse-file truncation.
+    let project = tmp_project("aggregate-freeze");
+    let session_id = SessionId::new();
+    let archive_dir = project
+        .join(".k2so/sessions")
+        .join(session_id.to_string());
+    std::fs::create_dir_all(&archive_dir).unwrap();
+
+    // Sparse file: set_len grows the logical size without actually
+    // allocating blocks. read_dir → metadata().len() reports the
+    // logical size, which is what compute_aggregate_bytes sums.
+    let fake_old = archive_dir.join("archive.999.ndjson");
+    let f = std::fs::File::create(&fake_old).unwrap();
+    f.set_len(archive::HARD_LIMIT_BYTES + 1).unwrap();
+    drop(f);
+
+    let entry = Arc::new(SessionEntry::new());
+    let handle = archive::spawn(session_id, entry.clone(), project.clone());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    entry.publish(text_frame("should-not-appear"));
+    drop(entry);
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+    // Active segment is empty — writer was frozen from startup.
+    let active = archive_dir.join("archive.ndjson");
+    let bytes = std::fs::metadata(&active).unwrap().len();
+    assert_eq!(
+        bytes, 0,
+        "active segment must stay empty when aggregate cap is already exceeded"
+    );
+}
+
+#[test]
+fn parse_rotation_index_matches_expected_patterns() {
+    assert_eq!(archive::parse_rotation_index("archive.000.ndjson"), Some(0));
+    assert_eq!(archive::parse_rotation_index("archive.007.ndjson"), Some(7));
+    assert_eq!(
+        archive::parse_rotation_index("archive.042.ndjson.gz"),
+        Some(42)
+    );
+    assert_eq!(archive::parse_rotation_index("archive.999.ndjson"), Some(999));
+
+    // Non-matches.
+    assert_eq!(archive::parse_rotation_index("archive.ndjson"), None);
+    assert_eq!(archive::parse_rotation_index("archive.foo.ndjson"), None);
+    assert_eq!(archive::parse_rotation_index("not-an-archive.000.ndjson"), None);
+    assert_eq!(archive::parse_rotation_index("archive.000.txt"), None);
+    assert_eq!(
+        archive::parse_rotation_index("archive.001.ndjson.zstd"),
+        None
+    );
+}
+
+#[test]
+fn rotated_uncompressed_segments_skips_active_and_gzipped() {
+    let project = tmp_project("compact-enumeration");
+    let session_id = SessionId::new();
+    let dir = project
+        .join(".k2so/sessions")
+        .join(session_id.to_string());
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(dir.join("archive.ndjson"), b"active\n").unwrap();
+    std::fs::write(dir.join("archive.000.ndjson.gz"), b"gzipped").unwrap();
+    std::fs::write(dir.join("archive.001.ndjson"), b"old\n").unwrap();
+    std::fs::write(dir.join("archive.002.ndjson"), b"old\n").unwrap();
+
+    let segments = archive::rotated_uncompressed_segments(&dir).unwrap();
+    let names: Vec<_> = segments
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["archive.001.ndjson".to_string(), "archive.002.ndjson".to_string()]
+    );
 }

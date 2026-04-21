@@ -25,7 +25,10 @@ pub mod registry;
 pub mod types;
 pub mod watchdog;
 
-pub use archive::{spawn as spawn_archive, HARD_LIMIT_BYTES, WARN_BYTES};
+pub use archive::{
+    parse_rotation_index, rotated_uncompressed_segments, spawn as spawn_archive,
+    HARD_LIMIT_BYTES, ROTATE_BYTES, WARN_BYTES,
+};
 pub use entry::{SessionEntry, BROADCAST_CAP, REPLAY_CAP};
 pub use frame::{CursorOp, EraseMode, Frame, SemanticKind, Style};
 pub use line::{Line, SeqnoGen, SequenceNo};
