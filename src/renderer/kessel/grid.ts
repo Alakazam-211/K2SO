@@ -20,7 +20,7 @@
 //   - UTF-8 decoding buffers partial multi-byte sequences across
 //     Frame::Text boundaries via a stateful TextDecoder.
 
-import type { Frame, Style } from './types'
+import type { CursorShape, Frame, Style } from './types'
 
 export interface Cell {
   /** Grapheme this cell holds. Empty string on a blank cell. */
@@ -33,6 +33,10 @@ export interface Cursor {
   row: number
   col: number
   visible: boolean
+  /** Shape requested by the TUI via DECSCUSR (CSI Ps SP q). `null`
+   *  when no TUI has issued the sequence — renderer falls back to
+   *  `config.cursor.defaultShape`. */
+  shape: CursorShape | null
 }
 
 export interface GridSnapshot {
@@ -125,7 +129,7 @@ export class TerminalGrid {
   private cols_: number
   private grid_: Cell[][]
   private scrollback_: Cell[][] = []
-  private cursor_: Cursor = { row: 0, col: 0, visible: true }
+  private cursor_: Cursor = { row: 0, col: 0, visible: true, shape: null }
   private scrollRegion_: { top: number; bottom: number }
   private savedCursor_: { row: number; col: number } | null = null
   private altGrid_: Cell[][] | null = null
@@ -576,6 +580,9 @@ export class TerminalGrid {
         break
       case 'SetCursorVisible':
         this.cursor_.visible = op.value
+        break
+      case 'SetCursorStyle':
+        this.cursor_.shape = op.value
         break
     }
   }

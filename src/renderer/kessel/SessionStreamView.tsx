@@ -21,7 +21,7 @@ import { KesselClient } from './client'
 import { useKesselConfig } from './config-context'
 import { TerminalGrid, type Cell, type GridSnapshot } from './grid'
 import { styleToCss, stylesEqual } from './style'
-import type { Frame } from './types'
+import type { CursorShape, Frame } from './types'
 import {
   keyEventToSequence,
   naturalTextEditingSequence,
@@ -320,10 +320,16 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
   // it — higher values trade input latency for more jitter
   // suppression.
   const SETTLE_MS = config.cursor.settleMs
-  const [restingCursor, setRestingCursor] = useState(() => ({
+  const [restingCursor, setRestingCursor] = useState<{
+    row: number
+    col: number
+    visible: boolean
+    shape: CursorShape | null
+  }>(() => ({
     row: 0,
     col: 0,
     visible: true,
+    shape: null,
   }))
   useEffect(() => {
     const id = setInterval(() => {
@@ -331,15 +337,19 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       if (!s) return
       setRestingCursor((prev) => {
         const sameVis = prev.visible === s.cursor.visible
+        const sameShape = prev.shape === s.cursor.shape
         const sameRow = prev.row === s.cursor.row
         const sameCol = prev.col === s.cursor.col
-        if (sameVis && sameRow && sameCol) return prev
+        if (sameVis && sameShape && sameRow && sameCol) return prev
 
         // Visibility transitions commit immediately — the whole
         // point of DECTCEM (CSI ?25 h/l) is "hide cursor NOW during
         // this repaint." Deferring the hide would leak intermediate
         // cursor positions exactly when the TUI asked us not to.
-        if (!sameVis) {
+        // Shape transitions (DECSCUSR) likewise — vim's mode
+        // indicator is a user-facing correctness signal, not a
+        // repaint artifact; users see any lag.
+        if (!sameVis || !sameShape) {
           return { ...s.cursor }
         }
 
@@ -734,22 +744,70 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     if (!restingCursor.visible) return { display: 'none' }
     if (viewportOffset > 0) return { display: 'none' }
     if (!cellMetrics.width) return { display: 'none' }
-    return {
+
+    // D13 — shape from TUI's DECSCUSR (restingCursor.shape) or the
+    // user's configured fallback. The fallback is what vim normal-
+    // mode would look like; the TUI overrides per-mode via CSI Ps
+    // SP q. Blinking variants drive a CSS @keyframes animation —
+    // GPU-cheap, and browsers freeze it when the tab is
+    // backgrounded.
+    const shape: CursorShape = restingCursor.shape ?? config.cursor.defaultShape
+    const base: React.CSSProperties = {
       position: 'absolute',
       left: `${4 + cellMetrics.width * restingCursor.col}px`,
       top: `${4 + cellMetrics.height * restingCursor.row}px`,
-      width: `${cellMetrics.width}px`,
-      height: `${cellMetrics.height}px`,
-      backgroundColor: 'rgba(224, 224, 224, 0.5)',
       pointerEvents: 'none',
+    }
+    const blinkMs = config.cursor.blinkIntervalMs
+    const animation = shape.startsWith('blinking_')
+      ? `kessel-cursor-blink ${blinkMs * 2}ms steps(2, end) infinite`
+      : undefined
+    const barWidth = Math.max(1, Math.round(cellMetrics.width * config.cursor.thickness))
+    const underscoreHeight = Math.max(1, Math.round(cellMetrics.height * config.cursor.thickness))
+    const caretColor = `rgba(224, 224, 224, 0.5)`
+
+    switch (shape) {
+      case 'steady_block':
+      case 'blinking_block':
+        return {
+          ...base,
+          width: `${cellMetrics.width}px`,
+          height: `${cellMetrics.height}px`,
+          backgroundColor: caretColor,
+          animation,
+        }
+      case 'steady_bar':
+      case 'blinking_bar':
+        return {
+          ...base,
+          width: `${barWidth}px`,
+          height: `${cellMetrics.height}px`,
+          backgroundColor: caretColor,
+          animation,
+        }
+      case 'steady_underscore':
+      case 'blinking_underscore':
+        return {
+          ...base,
+          width: `${cellMetrics.width}px`,
+          height: `${underscoreHeight}px`,
+          // Nudge to the bottom of the cell.
+          top: `${4 + cellMetrics.height * restingCursor.row + cellMetrics.height - underscoreHeight}px`,
+          backgroundColor: caretColor,
+          animation,
+        }
     }
   }, [
     restingCursor.visible,
     restingCursor.col,
     restingCursor.row,
+    restingCursor.shape,
     cellMetrics.width,
     cellMetrics.height,
     viewportOffset,
+    config.cursor.defaultShape,
+    config.cursor.blinkIntervalMs,
+    config.cursor.thickness,
   ])
 
   // D3 per-row damage lookup. Used by RowRenderer's memo predicate.
@@ -781,6 +839,12 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       tabIndex={interactive ? 0 : -1}
       style={{ ...containerStyle, outline: 'none' }}
     >
+      {/* D13 — keyframes for the DECSCUSR blinking variants. Emitted
+       *  here so the stylesheet is co-located with the pane; browsers
+       *  dedupe identical rules across multiple panes. Opacity-only
+       *  animation is GPU-cheap and pauses automatically when the
+       *  tab is backgrounded. */}
+      <style>{`@keyframes kessel-cursor-blink { 0%,50% { opacity: 1 } 51%,100% { opacity: 0 } }`}</style>
       {visibleRows.map((row, rowIdx) => (
         <RowRenderer
           key={`row-${rowIdx}`}

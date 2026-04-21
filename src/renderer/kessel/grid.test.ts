@@ -529,6 +529,22 @@ describe('TerminalGrid SaveCursor / RestoreCursor CursorOps', () => {
     expect(g.snapshot().modes.bracketedPaste).toBe(false)
   })
 
+  it('SetCursorStyle updates cursor.shape', () => {
+    // DECSCUSR (CSI Ps SP q) — vim uses this to signal mode.
+    const g = new TerminalGrid({ rows: 3, cols: 10 })
+    expect(g.snapshot().cursor.shape).toBe(null)
+    g.applyFrame({
+      frame: 'CursorOp',
+      data: { op: 'SetCursorStyle', value: 'steady_block' },
+    })
+    expect(g.snapshot().cursor.shape).toBe('steady_block')
+    g.applyFrame({
+      frame: 'CursorOp',
+      data: { op: 'SetCursorStyle', value: 'blinking_bar' },
+    })
+    expect(g.snapshot().cursor.shape).toBe('blinking_bar')
+  })
+
   it('SetCursorVisible toggles cursor.visible flag', () => {
     // DECTCEM (CSI ?25 h/l). TUIs emit hide before a multi-step
     // repaint and show afterward so intermediate positions don't

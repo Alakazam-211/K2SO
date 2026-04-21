@@ -31,7 +31,9 @@ use std::collections::VecDeque;
 use vte::{Params, Parser, Perform};
 
 use crate::log_debug;
-use crate::session::{CursorOp, EraseMode, Frame, Line, ModeKind, SeqnoGen, SequenceNo, Style};
+use crate::session::{
+    CursorOp, CursorShape, EraseMode, Frame, Line, ModeKind, SeqnoGen, SequenceNo, Style,
+};
 use crate::term::apc::{ApcChunk, ApcEvent, ApcExtractor};
 use crate::term::recognizers::Recognizer;
 
@@ -442,6 +444,30 @@ impl Perform for PerformState {
         _ignore: bool,
         action: char,
     ) {
+        // DECSCUSR — CSI Ps SP q sets the cursor shape. Intermediate
+        // byte is ASCII space (0x20). Vim's :set guicursor and neovim's
+        // mode-change hooks depend on this to flip between block / bar /
+        // underscore for normal / insert / replace.
+        if intermediates == b" " && action == 'q' {
+            let ps = params
+                .iter()
+                .next()
+                .and_then(|p| p.first().copied())
+                .unwrap_or(0);
+            let shape = match ps {
+                0 | 1 => Some(CursorShape::BlinkingBlock),
+                2 => Some(CursorShape::SteadyBlock),
+                3 => Some(CursorShape::BlinkingUnderscore),
+                4 => Some(CursorShape::SteadyUnderscore),
+                5 => Some(CursorShape::BlinkingBar),
+                6 => Some(CursorShape::SteadyBar),
+                _ => None,
+            };
+            if let Some(sh) = shape {
+                self.push_cursor_op(CursorOp::SetCursorStyle(sh));
+            }
+            return;
+        }
         // CSI private mode set/reset. Intermediate `?` distinguishes
         // `CSI ? 25 h` (DECTCEM cursor-show) from `CSI 25 h` (ANSI
         // mode 25, which we don't handle).

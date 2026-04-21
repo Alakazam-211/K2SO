@@ -180,6 +180,34 @@ pub enum CursorOp {
     /// Kessel DOM renderer honors this by setting the overlay to
     /// display:none while invisible.
     SetCursorVisible(bool),
+    /// DECSCUSR cursor shape selector (CSI Ps SP q). Vim / neovim
+    /// flip between steady-block (normal mode) and blinking-bar
+    /// (insert mode) to signal editor mode. Without this, the pane
+    /// renders a static semi-transparent block regardless of what
+    /// the TUI declared. Shape is purely presentational — the grid
+    /// cell at (cursor.row, cursor.col) is still the canonical
+    /// logical position.
+    SetCursorStyle(CursorShape),
+}
+
+/// Cursor shape requested by the TUI via DECSCUSR (CSI Ps SP q).
+/// Mapping:
+///   Ps=0 or 1 → BlinkingBlock (xterm default)
+///   Ps=2      → SteadyBlock
+///   Ps=3      → BlinkingUnderscore
+///   Ps=4      → SteadyUnderscore
+///   Ps=5      → BlinkingBar (xterm extension, VT520+)
+///   Ps=6      → SteadyBar
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum CursorShape {
+    BlinkingBlock,
+    SteadyBlock,
+    BlinkingUnderscore,
+    SteadyUnderscore,
+    BlinkingBar,
+    SteadyBar,
 }
 
 /// EL / ED mode selector.

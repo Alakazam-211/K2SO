@@ -94,6 +94,17 @@ export type CursorOp =
   | { op: 'SaveCursor'; value?: null }
   | { op: 'RestoreCursor'; value?: null }
   | { op: 'SetCursorVisible'; value: boolean }
+  | { op: 'SetCursorStyle'; value: CursorShape }
+
+/** Cursor shape requested by DECSCUSR. Kept in lockstep with the Rust
+ *  `CursorShape` enum at `crates/k2so-core/src/session/frame.rs`. */
+export type CursorShape =
+  | 'blinking_block'
+  | 'steady_block'
+  | 'blinking_underscore'
+  | 'steady_underscore'
+  | 'blinking_bar'
+  | 'steady_bar'
 
 export type EraseMode = 'to_end' | 'from_start' | 'all'
 

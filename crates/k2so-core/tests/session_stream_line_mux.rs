@@ -6,7 +6,7 @@
 
 #![cfg(feature = "session_stream")]
 
-use k2so_core::session::{CursorOp, EraseMode, Frame, ModeKind, Style};
+use k2so_core::session::{CursorOp, CursorShape, EraseMode, Frame, ModeKind, Style};
 use k2so_core::term::LineMux;
 
 /// Helper: extract Style from a Text frame (None = default style).
@@ -510,6 +510,46 @@ fn autowrap_mode_7_emits_mode_change() {
     assert!(matches!(
         &off[0],
         Frame::ModeChange { mode: ModeKind::Autowrap, on: false }
+    ));
+}
+
+#[test]
+fn decscusr_steady_block_emits_set_cursor_style() {
+    // CSI 2 SP q — vim normal mode requests a solid block.
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[2 q");
+    assert_eq!(frames.len(), 1);
+    assert!(matches!(
+        cursor_op(&frames[0]),
+        Some(CursorOp::SetCursorStyle(CursorShape::SteadyBlock))
+    ));
+}
+
+#[test]
+fn decscusr_blinking_bar_emits_set_cursor_style() {
+    // CSI 5 SP q — vim insert mode (and most readline-mode editors).
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[5 q");
+    assert_eq!(frames.len(), 1);
+    assert!(matches!(
+        cursor_op(&frames[0]),
+        Some(CursorOp::SetCursorStyle(CursorShape::BlinkingBar))
+    ));
+}
+
+#[test]
+fn decscusr_zero_and_one_map_to_blinking_block_default() {
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x1b[0 q");
+    assert!(matches!(
+        cursor_op(&frames[0]),
+        Some(CursorOp::SetCursorStyle(CursorShape::BlinkingBlock))
+    ));
+    let mut mux2 = LineMux::new();
+    let frames2 = mux2.feed(b"\x1b[1 q");
+    assert!(matches!(
+        cursor_op(&frames2[0]),
+        Some(CursorOp::SetCursorStyle(CursorShape::BlinkingBlock))
     ));
 }
 
