@@ -53,8 +53,7 @@ use k2so_core::log_debug;
 /// spawn endpoint, session_map always stays empty in a real
 /// daemon deployment.
 pub fn handle_sessions_spawn(body: &[u8]) -> HandlerResult {
-    use k2so_core::session::{registry, SessionId};
-    use k2so_core::terminal::{spawn_session_stream, SpawnConfig};
+    use crate::spawn::{spawn_agent_session, SpawnAgentSessionRequest};
 
     #[derive(serde::Deserialize)]
     struct SpawnRequest {
@@ -97,18 +96,15 @@ pub fn handle_sessions_spawn(body: &[u8]) -> HandlerResult {
         };
     }
 
-    let session_id = SessionId::new();
-    let cfg = SpawnConfig {
-        session_id,
+    let outcome = match spawn_agent_session(SpawnAgentSessionRequest {
+        agent_name: req.agent_name,
         cwd: req.cwd,
         command: req.command,
         args: req.args,
         cols: req.cols,
         rows: req.rows,
-    };
-
-    let session = match spawn_session_stream(cfg) {
-        Ok(s) => s,
+    }) {
+        Ok(o) => o,
         Err(e) => {
             return HandlerResult {
                 status: "500 Internal Server Error",
@@ -120,39 +116,10 @@ pub fn handle_sessions_spawn(body: &[u8]) -> HandlerResult {
         }
     };
 
-    // Tag the core's SessionEntry so liveness lookups (roster,
-    // egress::is_agent_live) find this agent under its name.
-    if let Some(entry) = registry::lookup(&session_id) {
-        entry.set_agent_name(&req.agent_name);
-    }
-
-    // Register in the daemon's session_map so InjectProvider can
-    // reach this session by agent name.
-    let arc = std::sync::Arc::new(session);
-    crate::session_map::register(&req.agent_name, arc.clone());
-
-    // F3 drain: inject any pending-live signals that were queued
-    // while this agent was offline. Signals are rendered the same
-    // way live inject would render them, so the target's harness
-    // sees identical bytes regardless of whether the sender had to
-    // wait for the wake-and-inject path.
-    let pending = crate::pending_live::drain_for_agent(&req.agent_name);
-    let pending_count = pending.len();
-    for signal in pending {
-        let bytes = crate::signal_format::inject_bytes(&signal);
-        if let Err(e) = arc.write(bytes.as_bytes()) {
-            log_debug!(
-                "[daemon/spawn] drain-inject for {} signal id={} failed: {e}",
-                req.agent_name,
-                signal.id
-            );
-        }
-    }
-
     let out = serde_json::json!({
-        "sessionId": session_id.to_string(),
-        "agentName": req.agent_name,
-        "pendingDrained": pending_count,
+        "sessionId": outcome.session_id.to_string(),
+        "agentName": outcome.agent_name,
+        "pendingDrained": outcome.pending_drained,
     });
     HandlerResult {
         status: "200 OK",

@@ -1,17 +1,21 @@
 //! Daemon implementations of the k2so-core awareness provider traits.
 //!
-//! F1 of Phase 3.1. These are the real `InjectProvider` +
-//! `WakeProvider` impls that turn `k2so signal`-style egress from
-//! "writes to bus + activity_feed" into "writes to target's live
-//! PTY" — the last mile that makes real-time peer-to-peer
-//! collaboration actually work.
+//! F1 of Phase 3.1 — `DaemonInjectProvider` + `DaemonWakeProvider` —
+//! plus G4 of Phase 3.2, which teaches `DaemonWakeProvider` to
+//! ACTUALLY LAUNCH the target agent's session (via the shared
+//! `spawn::spawn_agent_session` helper) when an `AGENT.md` launch
+//! profile exists for it. Before G4, wake just enqueued to
+//! pending-live and waited for a user-triggered spawn; G4 closes
+//! that gap so offline agents get auto-spawned on demand.
 //!
 //! Registered at daemon startup via `register_all()`.
 
-use k2so_core::awareness::{AgentSignal, InjectProvider, WakeProvider};
+use k2so_core::agents::launch_profile::{load_launch_profile, resolve_cwd, LaunchProfile};
+use k2so_core::awareness::{AgentAddress, AgentSignal, InjectProvider, WakeProvider};
 use k2so_core::log_debug;
 
 use crate::session_map;
+use crate::spawn::{spawn_agent_session, SpawnAgentSessionRequest};
 
 /// Looks up the target agent's session handle in `session_map` and
 /// writes the rendered signal bytes into its PTY. If no session is
@@ -41,25 +45,39 @@ impl InjectProvider for DaemonInjectProvider {
 // signal context here (only bytes), the provider impl stays
 // dead-simple: look up, write.
 
-/// Phase 3.1 MVP wake provider — logs the wake request but doesn't
-/// yet trigger a real scheduler wake. The real scheduler-wake
-/// primitive ("agent is offline, launch its session") is deferred
-/// to follow-up work; the F3 pending-live-delivery queue holds
-/// the signal until the session comes online on its own (next
-/// user-triggered spawn, next heartbeat, etc.) and injects on
-/// that path.
+/// Phase 3.2 G4 wake provider. Two-stage delivery:
 ///
-/// This preserves the PRD's "Live to offline target = wake + inject"
-/// invariant in principle — the inject part gets queued for when
-/// the target is next live. The "wake" part is the TODO.
+/// 1. **Durability first:** enqueue the signal to the F3 pending-
+///    live queue on disk so it survives daemon restart, OS crash,
+///    and spawn failure. Queueing is the unconditional baseline —
+///    even if auto-launch fails (no profile, bad spawn config),
+///    the signal stays on disk and the next user-triggered spawn
+///    will drain it.
+///
+/// 2. **Auto-launch (G4):** if the target agent has a
+///    `<project>/.k2so/agents/<agent>/AGENT.md` launch profile
+///    (G3's `launch_profile::load_launch_profile`), spawn a fresh
+///    session using that profile. The spawn path then drains the
+///    pending-live queue in order, and the just-enqueued signal
+///    becomes the session's first byte of input.
+///
+/// Race-safe single-flight: before spawning, re-check
+/// `session_map::lookup(agent)`. If a concurrent path (another
+/// signal's wake, a `/cli/sessions/spawn` arriving mid-flight)
+/// already registered the session, we skip — the queued signal
+/// will be drained by the now-live session path naturally.
+///
+/// The `from.workspace` field on the signal supplies the project
+/// id used to locate `AGENT.md`. After G0's CLI resolver, this
+/// is a UUID matching `projects.id`; we look it up to get the
+/// filesystem path. Signals with a stale or unknown workspace id
+/// fall back to queue-only delivery with a log line.
 pub struct DaemonWakeProvider;
 
 impl WakeProvider for DaemonWakeProvider {
     fn wake(&self, agent: &str, signal: &AgentSignal) -> std::io::Result<()> {
-        // F3 — persist the signal to the pending-live queue so it
-        // survives daemon restart. When a session for `agent`
-        // spawns (via /cli/sessions/spawn), the spawn path drains
-        // the queue and injects each signal in order.
+        // Stage 1: always enqueue so durability is preserved
+        // regardless of what the auto-launch path does next.
         match crate::pending_live::enqueue(signal, agent) {
             Ok(path) => {
                 log_debug!(
@@ -67,15 +85,124 @@ impl WakeProvider for DaemonWakeProvider {
                     signal.id,
                     path
                 );
-                Ok(())
             }
             Err(e) => {
                 log_debug!(
                     "[daemon/wake] failed to queue signal for {agent}: {e}"
                 );
-                Err(e)
+                return Err(e);
             }
         }
+
+        // Stage 2: G4 auto-launch. Best-effort — any failure here
+        // (profile absent, project path unknown, spawn error) leaves
+        // the signal queued for a future user-triggered spawn.
+        if let Err(reason) = try_auto_launch(agent, signal) {
+            log_debug!(
+                "[daemon/wake] auto-launch skipped for {agent}: {reason} \
+                 (signal stays in queue)"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Inner auto-launch path. Lifted out of the trait impl so the
+/// "couldn't launch, here's why" branch is explicit and
+/// testable.
+///
+/// Returns `Ok(())` when the spawn succeeded (session_map now has
+/// an entry for the agent; the pending queue has been drained).
+/// `Err(reason)` covers every skipped-auto-launch path, each with
+/// a short reason the caller logs:
+///   - agent already has a live session (someone else spawned)
+///   - no AGENT.md launch profile on disk
+///   - workspace id doesn't map to a known project path
+///   - spawn itself failed (bad command, PTY exhaustion, etc.)
+fn try_auto_launch(agent: &str, signal: &AgentSignal) -> Result<(), String> {
+    // Single-flight: if a concurrent path already registered the
+    // session, skip. The pending-live drain on that session will
+    // pick up our enqueued signal.
+    if session_map::lookup(agent).is_some() {
+        return Err("session already live".into());
+    }
+
+    // Resolve the signal's workspace id → projects.id → projects.path.
+    // Without a real path we can't locate AGENT.md.
+    let workspace_id = match &signal.from {
+        AgentAddress::Agent { workspace, .. }
+        | AgentAddress::Workspace { workspace } => workspace.0.as_str(),
+        AgentAddress::Broadcast => {
+            return Err("broadcast signal has no attributable workspace".into());
+        }
+        // `AgentAddress` is `#[non_exhaustive]`; any future variant
+        // falls through to queue-only — the safe default when we
+        // don't know how to derive a project id.
+        _ => return Err("unhandled AgentAddress variant for from".into()),
+    };
+    let project_path = lookup_project_path(workspace_id)
+        .ok_or_else(|| format!("no project registered for workspace id {workspace_id:?}"))?;
+
+    // G3 launch profile lookup. Absent profile = stay in queue-only
+    // mode. Malformed profile = log + skip (bad YAML shouldn't kill
+    // the wake path).
+    let profile = match load_launch_profile(&project_path, agent) {
+        Ok(Some(p)) => p,
+        Ok(None) => return Err("no AGENT.md launch profile".into()),
+        Err(e) => return Err(format!("launch profile parse failed: {e}")),
+    };
+
+    // Spawn. Shared helper tags agent_name on the SessionEntry,
+    // registers in session_map, and drains the pending-live queue.
+    // The signal we just enqueued is part of that drain and becomes
+    // the target's first byte of input.
+    let req = launch_request_for(agent, &project_path, &profile);
+    let outcome = spawn_agent_session(req).map_err(|e| format!("spawn failed: {e}"))?;
+
+    log_debug!(
+        "[daemon/wake] auto-launched session={} agent={agent} pending_drained={} \
+         via AGENT.md launch profile",
+        outcome.session_id,
+        outcome.pending_drained,
+    );
+    Ok(())
+}
+
+/// Lookup `projects.path` by `projects.id`. Returns `None` if the
+/// workspace id doesn't match any registered project (signals from
+/// an unregistered workspace fall through to queue-only delivery).
+fn lookup_project_path(workspace_id: &str) -> Option<String> {
+    let db = k2so_core::db::shared();
+    let conn = db.lock();
+    conn.query_row(
+        "SELECT path FROM projects WHERE id = ?1",
+        rusqlite::params![workspace_id],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+}
+
+/// Turn a `LaunchProfile` + project root into a `SpawnAgentSessionRequest`.
+/// Applies defaults for every field the profile leaves unset
+/// (matching `POST /cli/sessions/spawn`'s defaults for consistency
+/// with the explicit-spawn path).
+fn launch_request_for(
+    agent: &str,
+    project_path: &str,
+    profile: &LaunchProfile,
+) -> SpawnAgentSessionRequest {
+    let project_root = std::path::Path::new(project_path);
+    let cwd = resolve_cwd(project_root, profile.cwd.as_deref())
+        .to_string_lossy()
+        .into_owned();
+
+    SpawnAgentSessionRequest {
+        agent_name: agent.to_string(),
+        cwd,
+        command: profile.command.clone(),
+        args: profile.args.clone(),
+        cols: profile.cols.unwrap_or(80),
+        rows: profile.rows.unwrap_or(24),
     }
 }
 

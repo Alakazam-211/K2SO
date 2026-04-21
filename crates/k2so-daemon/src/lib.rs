@@ -13,4 +13,5 @@ pub mod providers;
 pub mod session_map;
 pub mod sessions_ws;
 pub mod signal_format;
+pub mod spawn;
 pub mod watchdog;

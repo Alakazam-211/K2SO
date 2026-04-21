@@ -34,6 +34,7 @@ mod providers;
 mod session_map;
 mod sessions_ws;
 mod signal_format;
+mod spawn;
 mod watchdog;
 
 use std::fs;
