@@ -857,6 +857,20 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         // terminal_manager. Now a walk of session_map + registry.
         "/cli/agents/running" => crate::terminal_routes::handle_agents_running(params),
 
+        // ── Phase 4 H3: daemon-side terminal spawn ──────────────────
+        // Thin wrappers over `spawn::spawn_agent_session` (the same
+        // helper /cli/sessions/spawn uses). Emits HookEvents so
+        // attached UIs can react, matching the legacy Tauri
+        // endpoint shape.
+        "/cli/terminal/spawn" => match need_project(params) {
+            Ok(p) => crate::terminal_routes::handle_terminal_spawn(params, &p),
+            Err(r) => r,
+        },
+        "/cli/terminal/spawn-background" => match need_project(params) {
+            Ok(p) => crate::terminal_routes::handle_terminal_spawn_background(params, &p),
+            Err(r) => r,
+        },
+
         _ => CliResponse::not_found(),
     }
 }

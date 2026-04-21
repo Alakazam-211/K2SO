@@ -359,6 +359,107 @@ async fn agents_running_returns_each_live_session() {
     drop_all_sessions(&["running-alpha", "running-beta"]);
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// H3 — /cli/terminal/spawn + /cli/terminal/spawn-background
+// ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "current_thread")]
+async fn terminal_spawn_requires_agent_param() {
+    let _g = lock();
+    let resp = terminal_routes::handle_terminal_spawn(
+        &params(&[("command", "cat")]),
+        "/tmp/test-project",
+    );
+    assert_eq!(resp.status, "400 Bad Request");
+    assert!(resp.body.contains("missing agent"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn terminal_spawn_creates_session_and_registers_in_map() {
+    let _g = lock();
+    let agent = "h3-spawn-test";
+    let _ = session_map::unregister(agent);
+
+    let resp = terminal_routes::handle_terminal_spawn(
+        &params(&[
+            ("agent", agent),
+            ("command", "cat"),
+            ("cwd", "/tmp"),
+        ]),
+        "/tmp/test-project",
+    );
+    assert_eq!(resp.status, "200 OK");
+    let v: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
+    assert_eq!(v["success"], serde_json::json!(true));
+    assert_eq!(v["agentName"].as_str(), Some(agent));
+    let terminal_id = v["terminalId"].as_str().unwrap();
+    assert!(!terminal_id.is_empty());
+
+    let session = session_map::lookup(agent).expect("registered");
+    assert_eq!(session.session_id.to_string(), terminal_id);
+    assert_eq!(session.cwd, "/tmp");
+    assert_eq!(session.command.as_deref(), Some("cat"));
+
+    let _ = session.kill();
+    session_map::unregister(agent);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn terminal_spawn_background_allows_missing_agent() {
+    let _g = lock();
+    let resp = terminal_routes::handle_terminal_spawn_background(
+        &params(&[("command", "cat"), ("cwd", "/tmp")]),
+        "/tmp/test-project",
+    );
+    assert_eq!(resp.status, "200 OK");
+    let v: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
+    let agent_name = v["agentName"].as_str().unwrap();
+    assert!(
+        agent_name.starts_with("terminal-"),
+        "agent_name should be synthesized, got: {agent_name}"
+    );
+
+    // Synthesized session must be addressable via session_map.
+    let session = session_map::lookup(agent_name).expect("registered");
+    let _ = session.kill();
+    session_map::unregister(agent_name);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn terminal_spawn_applies_default_cwd_from_project() {
+    let _g = lock();
+    let agent = "h3-cwd-default";
+    let _ = session_map::unregister(agent);
+
+    // Create a real directory so `resolve_cwd` (which falls back
+    // to $HOME for missing paths) actually uses our project path.
+    let project_dir = std::env::temp_dir().join(format!(
+        "k2so-h3-cwd-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let project_str = project_dir.to_string_lossy().into_owned();
+
+    let resp = terminal_routes::handle_terminal_spawn(
+        &params(&[("agent", agent), ("command", "cat")]),
+        &project_str,
+    );
+    assert_eq!(resp.status, "200 OK");
+    let session = session_map::lookup(agent).expect("registered");
+    assert_eq!(
+        session.cwd, project_str,
+        "cwd should default to project_path when cwd param is absent"
+    );
+
+    let _ = session.kill();
+    session_map::unregister(agent);
+    let _ = std::fs::remove_dir_all(&project_dir);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn agents_running_returns_empty_array_when_no_sessions() {
     let _g = lock();

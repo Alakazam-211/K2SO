@@ -142,6 +142,149 @@ pub fn handle_write(params: &HashMap<String, String>) -> CliResponse {
     CliResponse::ok_json(r#"{"success":true}"#.to_string())
 }
 
+/// Handler for `GET /cli/terminal/spawn`.
+///
+/// Spawns a new session on behalf of an agent via the shared
+/// `spawn::spawn_agent_session` helper, then emits a
+/// `CliTerminalSpawn` HookEvent so any attached Tauri UI can
+/// open a pane for it. The HookEvent is observational — the
+/// PTY already exists in the daemon regardless of whether a UI
+/// picks it up.
+///
+/// Params:
+///   - `agent`   — agent name (required; used as session_map key)
+///   - `command` — optional shell command; default shell if absent
+///   - `cwd`     — optional working directory; project path default
+///   - `title`   — optional display title for the UI pane
+///   - `cols` / `rows` — optional dimensions (default 80×24)
+///   - `wait`    — observational hint for UI; not used daemon-side
+pub fn handle_terminal_spawn(
+    params: &HashMap<String, String>,
+    project_path: &str,
+) -> CliResponse {
+    spawn_terminal_impl(
+        params,
+        project_path,
+        k2so_core::agent_hooks::HookEvent::CliTerminalSpawn,
+        /* require_agent= */ true,
+    )
+}
+
+/// Handler for `GET /cli/terminal/spawn-background`.
+///
+/// Like `/cli/terminal/spawn` but emits the `CliTerminalSpawnBackground`
+/// event instead — telling UIs "this is a background / companion
+/// terminal, don't steal focus." Agent param is OPTIONAL; if
+/// absent, the session registers under a synthesized
+/// `terminal-<short-uuid>` key so it's still addressable via
+/// session_map (for H1's write + H2's listing).
+pub fn handle_terminal_spawn_background(
+    params: &HashMap<String, String>,
+    project_path: &str,
+) -> CliResponse {
+    spawn_terminal_impl(
+        params,
+        project_path,
+        k2so_core::agent_hooks::HookEvent::CliTerminalSpawnBackground,
+        /* require_agent= */ false,
+    )
+}
+
+fn spawn_terminal_impl(
+    params: &HashMap<String, String>,
+    project_path: &str,
+    event: k2so_core::agent_hooks::HookEvent,
+    require_agent: bool,
+) -> CliResponse {
+    use crate::spawn::{spawn_agent_session, SpawnAgentSessionRequest};
+
+    let agent_param = params.get("agent").cloned().unwrap_or_default();
+    if require_agent && agent_param.is_empty() {
+        return CliResponse::bad_request("missing agent param");
+    }
+    let command = params.get("command").and_then(|s| {
+        if s.is_empty() {
+            None
+        } else {
+            Some(s.clone())
+        }
+    });
+    if command.is_none() && require_agent {
+        // Foreground-style /cli/terminal/spawn used to accept an
+        // empty command and emit the event without spawning — the
+        // UI decided whether to open a shell. For Phase 4 we
+        // unconditionally spawn, so require an explicit command.
+        // Callers that want a shell pass `command=bash` (or any
+        // shell of choice).
+    }
+    let cwd = params
+        .get("cwd")
+        .cloned()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| project_path.to_string());
+    let cols: u16 = params
+        .get("cols")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(80);
+    let rows: u16 = params
+        .get("rows")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(24);
+
+    // Synthesize an agent_name for background spawns that didn't
+    // supply one — must be non-empty so session_map accepts it.
+    let agent_name = if agent_param.is_empty() {
+        format!(
+            "terminal-{}",
+            &SessionId::new().to_string()[..8]
+        )
+    } else {
+        agent_param
+    };
+
+    let outcome = match spawn_agent_session(SpawnAgentSessionRequest {
+        agent_name: agent_name.clone(),
+        cwd: cwd.clone(),
+        command: command.clone(),
+        args: None,
+        cols,
+        rows,
+    }) {
+        Ok(o) => o,
+        Err(e) => return CliResponse::bad_request(format!("spawn failed: {e}")),
+    };
+
+    // Emit the HookEvent so Tauri (or any other subscriber on the
+    // daemon's /events WS) can react — open a pane, show a
+    // notification, etc. Same shape as the legacy Tauri endpoints
+    // so existing subscribers don't need to change.
+    let title = params.get("title").cloned();
+    let wait = params
+        .get("wait")
+        .map(|v| matches!(v.as_str(), "1" | "true"))
+        .unwrap_or(false);
+    let payload = serde_json::json!({
+        "terminalId": outcome.session_id.to_string(),
+        "agentName": &agent_name,
+        "command": command,
+        "cwd": cwd,
+        "title": title,
+        "wait": wait,
+        "projectPath": project_path,
+    });
+    k2so_core::agent_hooks::emit(event, payload);
+
+    CliResponse::ok_json(
+        serde_json::json!({
+            "success": true,
+            "terminalId": outcome.session_id.to_string(),
+            "agentName": agent_name,
+            "pendingDrained": outcome.pending_drained,
+        })
+        .to_string(),
+    )
+}
+
 /// Handler for `GET /cli/agents/running`.
 ///
 /// Returns a JSON array of every live session the daemon knows
