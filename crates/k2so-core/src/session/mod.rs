@@ -17,12 +17,14 @@
 //! session_stream_subscribe.rs`). Phase 3 adds the Awareness Bus
 //! routing + archive NDJSON writer.
 
+pub mod archive;
 pub mod entry;
 pub mod frame;
 pub mod line;
 pub mod registry;
 pub mod types;
 
+pub use archive::{spawn as spawn_archive, HARD_LIMIT_BYTES, WARN_BYTES};
 pub use entry::{SessionEntry, BROADCAST_CAP, REPLAY_CAP};
 pub use frame::{CursorOp, EraseMode, Frame, SemanticKind, Style};
 pub use line::{Line, SeqnoGen, SequenceNo};
