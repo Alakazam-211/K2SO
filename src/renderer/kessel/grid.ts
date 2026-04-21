@@ -49,6 +49,15 @@ export interface GridSnapshot {
    *  read these to adapt behavior (e.g. wrap paste in ESC[200~..201~
    *  when bracketedPaste is true). */
   modes: Readonly<ModeFlags>
+  /** Live-grid row indices that were touched since the last
+   *  `clearDirty()`. Renderers use this to skip React reconciliation
+   *  for rows that haven't changed (D3 damage tracking). The array
+   *  is a fresh copy per snapshot — safe to hold across renders.
+   *  Empty array = whole grid can be reused. When viewportOffset is
+   *  non-zero (scrolled into scrollback), callers should treat every
+   *  row as potentially-damaged since the viewport-to-row mapping
+   *  shifted. */
+  damagedRows: readonly number[]
 }
 
 export interface ModeFlags {
@@ -86,6 +95,11 @@ const DEFAULT_COLS = 80
 const DEFAULT_SCROLLBACK_CAP = 10_000
 const DEFAULT_SYNC_UPDATE_TIMEOUT_MS = 150
 
+/** Shared empty-damage sentinel. Using `===` against this lets the
+ *  renderer short-circuit "the whole pane is clean" as one pointer
+ *  compare instead of iterating an empty array. */
+const EMPTY_DAMAGE: readonly number[] = Object.freeze([])
+
 function blankCell(): Cell {
   return { char: '', style: null }
 }
@@ -122,6 +136,12 @@ export class TerminalGrid {
    *  reads `snapshot()`. Lets SessionStreamView skip re-reading the
    *  snapshot when nothing changed between rAF ticks. */
   private dirty_: boolean = false
+  /** Per-row damage set. Live-grid row indices that mutated since
+   *  the last `clearDirty()`. Paired with `dirty_`: `dirty_ = true`
+   *  with `damagedRows_.size === 0` is valid (e.g. a SemanticEvent
+   *  arrived — the rerender path fires but no row needs repainting).
+   *  Renderers memoize non-damaged rows. D3. */
+  private damagedRows_: Set<number> = new Set()
   // Partial UTF-8 handling: Frame::Text bytes are UTF-8 but multi-
   // byte sequences may span frames. TextDecoder's `stream: true`
   // mode buffers trailing partials across decode() calls.
@@ -234,11 +254,17 @@ export class TerminalGrid {
     return this.dirty_
   }
 
-  /** Clear the dirty bit. Callers should read `snapshot()` BEFORE
-   *  clearing — otherwise a mutation landing between the two calls
-   *  would be seen as "clean" on the next rAF. */
+  /** Clear the dirty bit AND the per-row damage set. Callers should
+   *  read `snapshot()` BEFORE clearing — otherwise a mutation
+   *  landing between the two calls would be seen as "clean" on the
+   *  next rAF, and the row's damage info would be lost. */
   clearDirty(): void {
     this.dirty_ = false
+    this.damagedRows_.clear()
+  }
+
+  private markAllRowsDamaged(): void {
+    for (let i = 0; i < this.rows_; i++) this.damagedRows_.add(i)
   }
 
   private drainSyncPending(): void {
@@ -312,6 +338,14 @@ export class TerminalGrid {
     const newCols = Math.max(1, cols)
     const newRows = Math.max(1, rows)
     this.dirty_ = true
+    // Any geometry change invalidates every visible row — row
+    // indices shift, widths change, etc. Memoization must not
+    // short-circuit here.
+    // Mark before mutating rows_ so the loop uses the larger of
+    // old/new for safety.
+    for (let i = 0; i < Math.max(this.rows_, newRows); i++) {
+      this.damagedRows_.add(i)
+    }
     // Grow/shrink each existing row's column count.
     this.grid_ = this.grid_.map((row) => this.resizeRow(row, newCols))
     // Adjust row count: append blanks or trim from the bottom.
@@ -341,6 +375,10 @@ export class TerminalGrid {
       cursor: { ...this.cursor_ },
       scrollRegion: { ...this.scrollRegion_ },
       modes: { ...this.modes_ },
+      damagedRows:
+        this.damagedRows_.size === 0
+          ? EMPTY_DAMAGE
+          : Array.from(this.damagedRows_),
     }
   }
 
@@ -368,12 +406,14 @@ export class TerminalGrid {
     this.grid_ = Array.from({ length: this.rows_ }, () => blankRow(this.cols_))
     this.cursor_.row = 0
     this.cursor_.col = 0
+    this.markAllRowsDamaged()
   }
   /** Exit alt screen, restore the primary buffer unchanged. */
   exitAltScreen(): void {
     if (!this.altGrid_) return
     this.grid_ = this.altGrid_
     this.altGrid_ = null
+    this.markAllRowsDamaged()
   }
   /** Whether we're currently on the alt-screen buffer. */
   onAltScreen(): boolean {
@@ -419,6 +459,7 @@ export class TerminalGrid {
       this.lineFeed()
     }
     this.grid_[this.cursor_.row][this.cursor_.col] = { char, style }
+    this.damagedRows_.add(this.cursor_.row)
     this.cursor_.col += 1
   }
 
@@ -438,8 +479,10 @@ export class TerminalGrid {
     if (covers_full) this.pushScrollback(departing)
     for (let r = top; r < bottom; r++) {
       this.grid_[r] = this.grid_[r + 1]
+      this.damagedRows_.add(r)
     }
     this.grid_[bottom] = blankRow(this.cols_)
+    this.damagedRows_.add(bottom)
     // Cursor stays at same absolute row (bottom of region).
   }
 
@@ -523,6 +566,7 @@ export class TerminalGrid {
         for (let c = 0; c < this.cols_; c++) row[c] = blankCell()
         break
     }
+    this.damagedRows_.add(this.cursor_.row)
   }
 
   private eraseInDisplay(mode: 'to_end' | 'from_start' | 'all'): void {
@@ -531,11 +575,13 @@ export class TerminalGrid {
         this.eraseInLine('to_end')
         for (let r = this.cursor_.row + 1; r < this.rows_; r++) {
           this.grid_[r] = blankRow(this.cols_)
+          this.damagedRows_.add(r)
         }
         break
       case 'from_start':
         for (let r = 0; r < this.cursor_.row; r++) {
           this.grid_[r] = blankRow(this.cols_)
+          this.damagedRows_.add(r)
         }
         this.eraseInLine('from_start')
         break
@@ -549,6 +595,7 @@ export class TerminalGrid {
     this.grid_ = Array.from({ length: this.rows_ }, () => blankRow(this.cols_))
     this.cursor_.row = 0
     this.cursor_.col = 0
+    this.markAllRowsDamaged()
   }
 
   private resizeRow(row: Cell[], newCols: number): Cell[] {

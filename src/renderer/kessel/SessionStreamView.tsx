@@ -125,6 +125,41 @@ function renderRow(row: readonly Cell[], rowIndex: number): React.ReactNode {
   return spans
 }
 
+/** Memoized single-row renderer. React.memo with a custom comparator:
+ *  "skip the render when the row is NOT in the current damage set."
+ *  D3. Cuts per-keystroke work in 24-row panes from ~1800 cell
+ *  iterations to ~80 (only the typed row re-coalesces spans).
+ *
+ *  We can't use row-reference equality because TerminalGrid mutates
+ *  cells in place — the row array is the same object before and
+ *  after a keystroke. The `damaged` flag is the real signal.
+ *
+ *  CAVEAT for 4.7 C2 (per-cell click targeting): this memo never
+ *  changes row identity, and coordinate math in the parent uses
+ *  cellMetrics × index so click-to-cell still resolves correctly. */
+interface RowRendererProps {
+  row: readonly Cell[]
+  rowIdx: number
+  /** True when this row mutated since the last clearDirty(). False
+   *  when the renderer should reuse the prior mounted DOM. */
+  damaged: boolean
+}
+
+const RowRenderer = React.memo(
+  function RowRenderer({ row, rowIdx }: RowRendererProps): React.JSX.Element {
+    return <div>{renderRow(row, rowIdx)}</div>
+  },
+  (prev, next) => {
+    // Skip the re-render when the row isn't damaged AND geometry
+    // matches. If rowIdx changed (resize shifted indices) force a
+    // re-render even when undamaged — the key handles this in most
+    // cases but we belt-and-suspenders.
+    if (prev.rowIdx !== next.rowIdx) return false
+    if (next.damaged) return false
+    return true
+  },
+)
+
 export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Element {
   const config = useKesselConfig()
   const {
@@ -664,6 +699,27 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     viewportOffset,
   ])
 
+  // D3 per-row damage lookup. Used by RowRenderer's memo predicate.
+  //
+  // When viewportOffset > 0 we conservatively treat every row as
+  // damaged because the viewport-to-grid mapping shifted. The
+  // common case is viewportOffset === 0 where we ride the set.
+  //
+  // If the whole scrollback viewport is live-grid (altScreen + no
+  // scrollback), `abs < scrollback.length` is never true so we
+  // translate directly.
+  const damageSet = useMemo(
+    () => new Set(snapshot.damagedRows),
+    [snapshot.damagedRows],
+  )
+  const isRowDamaged = useCallback(
+    (visibleIdx: number): boolean => {
+      if (viewportOffset > 0) return true
+      return damageSet.has(visibleIdx)
+    },
+    [damageSet, viewportOffset],
+  )
+
   return (
     <div
       ref={containerRef}
@@ -673,7 +729,12 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       style={{ ...containerStyle, outline: 'none' }}
     >
       {visibleRows.map((row, rowIdx) => (
-        <div key={`row-${rowIdx}`}>{renderRow(row, rowIdx)}</div>
+        <RowRenderer
+          key={`row-${rowIdx}`}
+          row={row}
+          rowIdx={rowIdx}
+          damaged={isRowDamaged(rowIdx)}
+        />
       ))}
       <div aria-hidden="true" style={cursorStyle} />
     </div>

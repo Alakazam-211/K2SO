@@ -268,6 +268,48 @@ describe('TerminalGrid SaveCursor / RestoreCursor CursorOps', () => {
     expect(g.snapshot().cursor).toMatchObject({ row: 1, col: 3 })
   })
 
+  it('damagedRows: writeText marks only the cursor row', () => {
+    const g = new TerminalGrid({ rows: 5, cols: 10 })
+    // Move to row 2 then type.
+    g.applyFrame({ frame: 'CursorOp', data: { op: 'Goto', value: { row: 3, col: 1 } } })
+    g.clearDirty()
+    g.applyFrame({ frame: 'Text', data: { bytes: [0x78], style: null } })
+    expect(g.snapshot().damagedRows).toEqual([2])
+  })
+
+  it('damagedRows: lineFeed at bottom of scroll region damages every row in region', () => {
+    // Scrolling region rotates rows from top to bottom; each row
+    // must appear in the damage set so the renderer re-emits them.
+    const g = new TerminalGrid({ rows: 3, cols: 5 })
+    // Fill the grid so lineFeed scrolls.
+    g.applyFrame({ frame: 'Text', data: { bytes: [0x61, 0x0a, 0x62, 0x0a, 0x63, 0x0a, 0x64], style: null } })
+    g.clearDirty()
+    // Trigger one more lineFeed — cursor is at last row after the
+    // previous writes; next newline scrolls.
+    g.applyFrame({ frame: 'Text', data: { bytes: [0x0a], style: null } })
+    const damaged = new Set(g.snapshot().damagedRows)
+    expect(damaged.has(0)).toBe(true)
+    expect(damaged.has(1)).toBe(true)
+    expect(damaged.has(2)).toBe(true)
+  })
+
+  it('damagedRows: clearDirty empties the damage set', () => {
+    const g = new TerminalGrid({ rows: 3, cols: 5 })
+    g.applyFrame({ frame: 'Text', data: { bytes: [0x61], style: null } })
+    expect(g.snapshot().damagedRows.length).toBeGreaterThan(0)
+    g.clearDirty()
+    expect(g.snapshot().damagedRows).toEqual([])
+    expect(g.isDirty()).toBe(false)
+  })
+
+  it('damagedRows: clearScreen marks every row', () => {
+    const g = new TerminalGrid({ rows: 4, cols: 10 })
+    g.clearDirty()
+    g.applyFrame({ frame: 'CursorOp', data: { op: 'ClearScreen', value: null } })
+    const damaged = new Set(g.snapshot().damagedRows)
+    expect(damaged.size).toBe(4)
+  })
+
   it('dirty flag: fresh grid is clean; any frame sets dirty', () => {
     const g = new TerminalGrid({ rows: 3, cols: 10 })
     expect(g.isDirty()).toBe(false)
