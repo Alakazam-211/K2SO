@@ -399,6 +399,8 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     const wsStart = performance.now()
     let firstFrameAt: number | null = null
     let ackAt: number | null = null
+    let altScreenAt: number | null = null
+    let tuiReadyAt: number | null = null
     const client = new KesselClient({
       sessionId,
       port,
@@ -410,8 +412,9 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     // cascade that Claude's bottom-border repaints used to trigger.
     const off = client.on({
       onFrames: (frames) => {
+        const now = performance.now()
         if (firstFrameAt === null) {
-          firstFrameAt = performance.now()
+          firstFrameAt = now
           // eslint-disable-next-line no-console
           console.info(
             `%c[Kessel] tab-${sessionId.slice(0, 8)} first-frame=${Math.round(firstFrameAt - wsStart)}ms (ack=${
@@ -421,7 +424,40 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
           )
         }
         const grid = gridRef.current!
-        for (const frame of frames) grid.applyFrame(frame)
+        for (const frame of frames) {
+          // TUI-launch breakdown: watch for alt-screen enter (Claude,
+          // vim, htop, claude --fullscreen all flip ?1049 h BEFORE
+          // drawing their UI). First content frame after that is the
+          // TUI's initial paint — what the user reads as "Claude is
+          // ready."
+          if (
+            altScreenAt === null &&
+            frame.frame === 'ModeChange' &&
+            frame.data.mode === 'alt_screen' &&
+            frame.data.on === true
+          ) {
+            altScreenAt = now
+            // eslint-disable-next-line no-console
+            console.info(
+              `%c[Kessel] tab-${sessionId.slice(0, 8)} tui-alt-screen=${Math.round(altScreenAt - wsStart)}ms (ws-start → TUI requested alt buffer)`,
+              'color:#0ff',
+            )
+          } else if (
+            altScreenAt !== null &&
+            tuiReadyAt === null &&
+            frame.frame === 'Text'
+          ) {
+            tuiReadyAt = now
+            const altToText = Math.round(tuiReadyAt - altScreenAt)
+            const totalToTui = Math.round(tuiReadyAt - wsStart)
+            // eslint-disable-next-line no-console
+            console.info(
+              `%c[Kessel] tab-${sessionId.slice(0, 8)} tui-ready=${totalToTui}ms (alt-screen +${altToText}ms → first TUI paint)`,
+              'color:#0ff;font-weight:bold',
+            )
+          }
+          grid.applyFrame(frame)
+        }
         markActivity()
         scheduleRender()
       },

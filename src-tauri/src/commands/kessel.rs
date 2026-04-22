@@ -263,6 +263,35 @@ pub fn kessel_daemon_ws() -> KesselDaemonWsResponse {
     }
 }
 
+/// Fire-and-forget: spawns a background thread that polls for daemon
+/// creds and, once available, pings the daemon to materialize the
+/// reqwest::blocking::Client's internal tokio runtime.
+///
+/// Called from `main()` BEFORE `run()` so the runtime is hot by the
+/// time any frontend code runs — including restored tabs that spawn
+/// immediately on app hydration (these fire before any React
+/// useEffect-driven warmup could kick in).
+///
+/// Idempotent. Polls for up to 5 seconds (250 × 20ms) waiting for
+/// the daemon's credential files to appear; gives up silently if the
+/// daemon never comes online so this function can never block app
+/// startup.
+pub fn warm_http_pool_async() {
+    std::thread::spawn(|| {
+        for _ in 0..250 {
+            if let Ok(creds) = load_creds() {
+                let url = format!("http://127.0.0.1:{}/ping", creds.port);
+                // Throwaway request — we don't care about the
+                // response, just the side effect of spinning up
+                // reqwest's internal runtime + connection pool.
+                let _ = http_client().get(&url).send();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    });
+}
+
 /// Warm the reqwest::blocking::Client's internal tokio runtime +
 /// connection pool BEFORE the user presses Cmd+T for the first time.
 ///

@@ -172,6 +172,16 @@ pub fn llm_worker_main(payload_path: &str) {
     }
 }
 
+/// Re-export so `main.rs` can fire the reqwest warmup thread BEFORE
+/// `run()` starts Tauri's window initialization. See
+/// `commands::kessel::warm_http_pool_async` for rationale — in one
+/// sentence, the first `reqwest::blocking::Client::send()` call takes
+/// ~500-800ms to spin up a tokio runtime, and we want that cost
+/// absorbed by daemon-creds polling instead of the first Cmd+T.
+pub fn warm_http_pool_async() {
+    commands::kessel::warm_http_pool_async();
+}
+
 pub fn run() {
     // Ignore SIGPIPE so writing to a dead PTY returns EPIPE instead of
     // killing the entire process.
