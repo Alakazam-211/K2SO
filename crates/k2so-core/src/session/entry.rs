@@ -24,8 +24,28 @@ use tokio::sync::broadcast;
 
 use crate::session::Frame;
 
-/// Replay-ring capacity — per the PRD default.
-pub const REPLAY_CAP: usize = 1000;
+/// Replay-ring capacity. Originally 1000 per the PRD default, but
+/// that was tuned for live-spawned sessions where subscribers attach
+/// within a few hundred ms and miss at most a handful of bytes. It
+/// breaks down for `claude --resume <id>` (and similar harness
+/// resumes) where the child process replays the entire prior
+/// conversation to the PTY in a burst of tens of thousands of bytes.
+/// LineMux emits a fresh Frame::Text on every SGR change, and
+/// Claude's markdown output is heavily styled — a medium
+/// conversation can produce ~5-10 frames per visible line, and a
+/// resume burst easily overflows a 1000-cap ring before the Tauri
+/// renderer has opened its WebSocket. The user-visible symptom is
+/// "resume shows only the last few lines of the conversation."
+///
+/// Bumped to 50_000 so typical resumes fit end-to-end. Memory cost
+/// per session: ~50_000 × avg_frame_bytes (~100-200 B) ≈ 5-10 MB,
+/// bounded and deallocated when the session ends.
+///
+/// The permanent fix is to replay the on-disk NDJSON archive
+/// (`session::archive`) for late subscribers so we're not
+/// memory-bound at all, but that's a larger change. This constant
+/// bump is the minimal hotfix.
+pub const REPLAY_CAP: usize = 50_000;
 
 /// Broadcast-channel capacity — matches the daemon's existing
 /// `/events` endpoint (crates/k2so-daemon/src/events.rs:48). Slow

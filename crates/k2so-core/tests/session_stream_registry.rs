@@ -141,8 +141,13 @@ fn replay_ring_trims_front_at_cap() {
 }
 
 #[test]
-fn replay_ring_cap_constant_matches_prd() {
-    assert_eq!(REPLAY_CAP, 1000);
+fn replay_ring_cap_covers_claude_resume_bursts() {
+    // Bumped from the original 1000 to 50_000 so `claude --resume`
+    // (which replays the full prior conversation as a fast burst
+    // of tens of thousands of LineMux frames) fits in the ring
+    // before the Tauri renderer's late-joining WS subscription
+    // attaches. See the comment on REPLAY_CAP for the full story.
+    assert_eq!(REPLAY_CAP, 50_000);
 }
 
 #[test]
