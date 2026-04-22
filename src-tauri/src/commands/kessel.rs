@@ -263,32 +263,35 @@ pub fn kessel_daemon_ws() -> KesselDaemonWsResponse {
     }
 }
 
-/// Fire-and-forget: spawns a background thread that polls for daemon
-/// creds and, once available, pings the daemon to materialize the
-/// reqwest::blocking::Client's internal tokio runtime.
+/// Fire-and-forget: materialize the reqwest::blocking::Client's
+/// tokio runtime IMMEDIATELY from a background thread.
 ///
-/// Called from `main()` BEFORE `run()` so the runtime is hot by the
-/// time any frontend code runs — including restored tabs that spawn
-/// immediately on app hydration (these fire before any React
-/// useEffect-driven warmup could kick in).
+/// Called from `main()` BEFORE `run()`. The first
+/// `reqwest::blocking::Client::builder().build()` call spawns a
+/// dedicated OS thread running a tokio current_thread runtime.
+/// That spawn + runtime init is ~500-800ms of pure work. Every
+/// subsequent `http_client()` caller (including
+/// OnceLock::get_or_init racers) then reuses that already-built
+/// client.
 ///
-/// Idempotent. Polls for up to 5 seconds (250 × 20ms) waiting for
-/// the daemon's credential files to appear; gives up silently if the
-/// daemon never comes online so this function can never block app
-/// startup.
+/// Previous version polled for daemon creds before pinging. That
+/// cost 40+ms of polling delay before reqwest init even started,
+/// and restored tabs could beat the warmup to `http_client()`,
+/// paying the full cold-start cost on Tab 1.
+///
+/// New version skips the creds poll entirely: we just need the
+/// Client built. Materializing it is the whole point; a throwaway
+/// network request isn't needed. Calling `http_client()` once
+/// triggers the full init.
+///
+/// Idempotent. Never blocks. No daemon dependency.
 pub fn warm_http_pool_async() {
     std::thread::spawn(|| {
-        for _ in 0..250 {
-            if let Ok(creds) = load_creds() {
-                let url = format!("http://127.0.0.1:{}/ping", creds.port);
-                // Throwaway request — we don't care about the
-                // response, just the side effect of spinning up
-                // reqwest's internal runtime + connection pool.
-                let _ = http_client().get(&url).send();
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        // Touch the client to force OnceLock::get_or_init to build
+        // it right now, on this thread, before any kessel_spawn
+        // has a chance to race us. No HTTP request needed — the
+        // construction itself is what costs ~500ms.
+        let _ = http_client();
     });
 }
 
@@ -372,6 +375,31 @@ pub fn kessel_write(session_id: String, text: String) -> Result<(), String> {
         }
         return Err(format!("daemon write {}: body-skipped", s.as_u16()));
     }
+    Ok(())
+}
+
+/// Tell the daemon to close a Kessel session by agent name. Called
+/// from the frontend when a Kessel pane unmounts (tab close). Without
+/// this, sessions accumulate in the daemon's `session_map` — every
+/// tab open leaks a PTY master FD, a reader thread, and an archive
+/// file handle. ~14 tabs exhausts the default ulimit -n of 256 and
+/// new spawns fail with "dup of fd 255 failed".
+#[tauri::command]
+pub fn kessel_close(agent_name: String) -> Result<(), String> {
+    let creds = load_creds()?;
+    let url = format!(
+        "http://127.0.0.1:{}/cli/sessions/close?token={}",
+        creds.port, creds.token
+    );
+    let body = serde_json::json!({ "agent_name": agent_name });
+    let _ = http_client()
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_vec(&body).unwrap_or_default())
+        .send();
+    // Fire-and-forget: we don't fail the UI tear-down if the close
+    // request errors. The daemon may have already cleaned up; the
+    // session may have exited on its own; etc.
     Ok(())
 }
 

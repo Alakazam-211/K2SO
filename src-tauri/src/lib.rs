@@ -1252,6 +1252,7 @@ pub fn run() {
             commands::kessel::kessel_write,
             commands::kessel::kessel_resize,
             commands::kessel::kessel_warm_http,
+            commands::kessel::kessel_close,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {

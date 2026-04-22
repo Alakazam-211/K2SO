@@ -322,7 +322,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
     let is_post = method == "POST";
     let post_allowed = matches!(
         path_and_query.split_once('?').map(|(p, _)| p).unwrap_or(path_and_query),
-        "/cli/awareness/publish" | "/cli/sessions/spawn"
+        "/cli/awareness/publish" | "/cli/sessions/spawn" | "/cli/sessions/close"
     );
     if method != "GET" && !(is_post && post_allowed) {
         let _ = stream.read(&mut buf).await;
@@ -486,6 +486,27 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             }
             let body_bytes = read_post_body(&mut stream, &mut buf).await;
             let result = awareness_ws::handle_sessions_spawn(&body_bytes);
+            send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/sessions/close — frontend calls this on tab
+        // unmount. Removes from session_map; Arc drop → child kill
+        // + PTY master FD close. Without this, every Cmd+T leaks an
+        // FD and ~14 spawns hit the per-process limit.
+        "/cli/sessions/close" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let result = awareness_ws::handle_sessions_close(&body_bytes);
             send_response(&mut stream, result.status, "application/json", &result.body)
                 .await;
         }

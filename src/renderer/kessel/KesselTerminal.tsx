@@ -177,6 +177,19 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
     void boot()
     return () => {
       cancelled = true
+      // Tell the daemon to tear down this session when the tab
+      // unmounts. Without this, session_map accumulates entries
+      // and each one holds a PTY master FD + reader thread +
+      // archive handle — a hard leak that hits the per-process
+      // FD limit (ulimit -n = 256 default) around ~14 tabs.
+      //
+      // Fire-and-forget. If the daemon is gone or the session
+      // already exited, the call no-ops. The Tauri command itself
+      // swallows errors.
+      const agentName = `tab-${terminalId}`
+      invoke('kessel_close', { agentName }).catch(() => {
+        /* best-effort cleanup */
+      })
     }
     // Re-spawn only when terminalId changes — same terminal tab
     // keeps its session across prop tweaks.

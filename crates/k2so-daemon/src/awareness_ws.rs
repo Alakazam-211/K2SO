@@ -127,6 +127,64 @@ pub fn handle_sessions_spawn(body: &[u8]) -> HandlerResult {
     }
 }
 
+/// Handler for `POST /cli/sessions/close`. Tears down a Kessel
+/// session by agent name: removes it from `session_map` so holders
+/// drop the Arc; when the last strong reference drops,
+/// `SessionStreamSession::drop` kills the child, joins the reader
+/// thread, and closes the PTY master FD.
+///
+/// **Why this exists.** Every Cmd+T in the UI creates a new session
+/// keyed by `tab-<UUID>` in `session_map`. The daemon has no way to
+/// learn when the user closes the tab — without this endpoint,
+/// sessions accumulate forever, each holding PTY master FD + reader
+/// thread + archive file handle. On a typical ulimit -n of 256,
+/// opening ~14 tabs exhausts the per-process FD budget and the next
+/// `spawn_command` fails with "dup of fd 255 failed" (portable-pty's
+/// stdio redirection during child setup).
+///
+/// Body: `{"agent_name": "tab-<UUID>"}`.
+/// Response: `{"closed": true|false}` — `closed` is false when no
+/// entry was registered under that name (not an error; the caller
+/// may have never spawned, or we already cleaned up).
+pub fn handle_sessions_close(body: &[u8]) -> HandlerResult {
+    #[derive(serde::Deserialize)]
+    struct CloseRequest {
+        agent_name: String,
+    }
+
+    let req: CloseRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => {
+            return HandlerResult {
+                status: "400 Bad Request",
+                body: format!(
+                    r#"{{"error":"parse CloseRequest: {}"}}"#,
+                    e.to_string().replace('"', "'")
+                ),
+            }
+        }
+    };
+    if req.agent_name.is_empty() {
+        return HandlerResult {
+            status: "400 Bad Request",
+            body: r#"{"error":"agent_name required"}"#.into(),
+        };
+    }
+
+    // Remove from session_map + drop the Arc we just took out. Any
+    // concurrent holders (providers::inject mid-write, the roster
+    // query path) keep their clones and their work finishes before
+    // drop. When the last clone is released, SessionStreamSession's
+    // Drop impl kills the child, joins the reader thread, closes
+    // the PTY master, and the FDs come back to the pool.
+    let removed = crate::session_map::unregister(&req.agent_name).is_some();
+    let out = serde_json::json!({ "closed": removed });
+    HandlerResult {
+        status: "200 OK",
+        body: out.to_string(),
+    }
+}
+
 /// Handler for `POST /cli/awareness/publish`. Called by
 /// `main.rs::handle_connection` after token auth + body read.
 ///
