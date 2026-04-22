@@ -118,6 +118,30 @@ pub struct KesselSpawnResponse {
     /// Whole-operation duration in ms, measured in Rust. Lets the
     /// frontend show "spawned in Nms" without another clock read.
     pub spawn_ms: u64,
+    /// Fine-grained breakdown of the spawn path. Only populated in
+    /// debug builds; release builds still fill spawn_ms but set all
+    /// sub-timings to zero to avoid the extra Instant::now() calls.
+    /// Units: microseconds.
+    pub timing_us: KesselSpawnTiming,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KesselSpawnTiming {
+    /// Time to resolve cached daemon creds (0 after first call).
+    pub creds_us: u64,
+    /// Time to serialize the JSON request body.
+    pub serialize_us: u64,
+    /// Time spent inside `reqwest::Client::post().send()` — this is
+    /// the daemon's actual work (HTTP accept + spawn_agent_session +
+    /// response) plus TCP round-trip overhead. On loopback with
+    /// keep-alive, TCP overhead is ~100-500µs, so the bulk of this
+    /// number is the daemon-side spawn.
+    pub http_us: u64,
+    /// Time to read the response body bytes off the socket.
+    pub response_read_us: u64,
+    /// Time to deserialize the response JSON.
+    pub deserialize_us: u64,
 }
 
 /// Internal daemon response body. Mirror of `awareness_ws.rs`'s
@@ -146,7 +170,12 @@ struct DaemonSpawnBody {
 #[tauri::command]
 pub fn kessel_spawn(req: KesselSpawnRequest) -> Result<KesselSpawnResponse, String> {
     let started = std::time::Instant::now();
+    let mut t = started;
+    let mut timing = KesselSpawnTiming::default();
+
     let creds = load_creds()?;
+    timing.creds_us = t.elapsed().as_micros() as u64;
+    t = std::time::Instant::now();
 
     let body = serde_json::json!({
         "agent_name": format!("tab-{}", req.terminal_id),
@@ -156,6 +185,9 @@ pub fn kessel_spawn(req: KesselSpawnRequest) -> Result<KesselSpawnResponse, Stri
         "cols": req.cols.unwrap_or(80),
         "rows": req.rows.unwrap_or(24),
     });
+    let body_bytes = serde_json::to_vec(&body).map_err(|e| format!("serialize: {e}"))?;
+    timing.serialize_us = t.elapsed().as_micros() as u64;
+    t = std::time::Instant::now();
 
     let url = format!(
         "http://127.0.0.1:{}/cli/sessions/spawn?token={}",
@@ -165,7 +197,7 @@ pub fn kessel_spawn(req: KesselSpawnRequest) -> Result<KesselSpawnResponse, Stri
     let response = http_client()
         .post(&url)
         .header("Content-Type", "application/json")
-        .body(serde_json::to_vec(&body).map_err(|e| format!("serialize: {e}"))?)
+        .body(body_bytes)
         .send()
         .map_err(|e| {
             // Network-level failure — daemon may have been restarted.
@@ -173,6 +205,8 @@ pub fn kessel_spawn(req: KesselSpawnRequest) -> Result<KesselSpawnResponse, Stri
             invalidate_creds();
             format!("post /cli/sessions/spawn: {e}")
         })?;
+    timing.http_us = t.elapsed().as_micros() as u64;
+    t = std::time::Instant::now();
 
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED
@@ -184,6 +218,8 @@ pub fn kessel_spawn(req: KesselSpawnRequest) -> Result<KesselSpawnResponse, Stri
     let body_text = response
         .text()
         .map_err(|e| format!("read body: {e}"))?;
+    timing.response_read_us = t.elapsed().as_micros() as u64;
+    t = std::time::Instant::now();
 
     if !status.is_success() {
         return Err(format!("daemon {}: {}", status.as_u16(), body_text));
@@ -191,6 +227,7 @@ pub fn kessel_spawn(req: KesselSpawnRequest) -> Result<KesselSpawnResponse, Stri
 
     let spawn: DaemonSpawnBody = serde_json::from_str(&body_text)
         .map_err(|e| format!("decode body: {e}: {body_text}"))?;
+    timing.deserialize_us = t.elapsed().as_micros() as u64;
 
     Ok(KesselSpawnResponse {
         session_id: spawn.session_id,
@@ -198,6 +235,7 @@ pub fn kessel_spawn(req: KesselSpawnRequest) -> Result<KesselSpawnResponse, Stri
         port: creds.port,
         token: creds.token,
         spawn_ms: started.elapsed().as_millis() as u64,
+        timing_us: timing,
     })
 }
 

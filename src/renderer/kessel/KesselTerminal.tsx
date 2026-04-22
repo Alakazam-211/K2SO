@@ -34,13 +34,23 @@ export interface KesselTerminalProps {
  *  does the HTTP POST to the daemon's `/cli/sessions/spawn`, reuses
  *  a persistent reqwest::Client with keep-alive, and hands us the
  *  whole triple (sessionId, port, token) in one IPC hop so the
- *  browser never pays the fetch overhead. */
+ *  browser never pays the fetch overhead.
+ *
+ *  `timingUs` breaks down the spawn cost so dev-mode logging can
+ *  show where the milliseconds are going. Units are microseconds. */
 interface KesselSpawnResult {
   sessionId: string
   agentName: string
   port: number
   token: string
   spawnMs: number
+  timingUs: {
+    credsUs: number
+    serializeUs: number
+    httpUs: number
+    responseReadUs: number
+    deserializeUs: number
+  }
 }
 
 type State =
@@ -108,9 +118,16 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
         } catch {
           /* perf measure failures don't matter */
         }
+        const totalMs = Math.round(performance.now() - bootT0)
+        const t = result.timingUs
         // eslint-disable-next-line no-console
         console.info(
-          `%c[Kessel] ready tab-${terminalId} in ${Math.round(performance.now() - bootT0)}ms (rust-side: ${result.spawnMs}ms)`,
+          `%c[Kessel] ready tab-${terminalId} total=${totalMs}ms rust=${result.spawnMs}ms ` +
+            `(creds=${Math.round(t.credsUs / 1000)}ms ` +
+            `ser=${(t.serializeUs / 1000).toFixed(1)}ms ` +
+            `http=${Math.round(t.httpUs / 1000)}ms ` +
+            `resp=${(t.responseReadUs / 1000).toFixed(1)}ms ` +
+            `de=${(t.deserializeUs / 1000).toFixed(1)}ms)`,
           'color:#0ff',
         )
         setState({
