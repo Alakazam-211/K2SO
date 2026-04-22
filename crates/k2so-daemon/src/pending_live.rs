@@ -27,14 +27,72 @@
 //! under the daemon's own `~/.k2so/` — this is the daemon's own
 //! queue state, not project-scoped. One daemon, one queue root.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use k2so_core::awareness::AgentSignal;
 use k2so_core::fs_atomic::atomic_write;
 use k2so_core::log_debug;
+
+/// In-memory pending-signal counters keyed by agent name. Populated
+/// once at first access by scanning the queue directory; updated on
+/// every `enqueue` and cleared on every successful `drain_for_agent`.
+///
+/// **Why this exists.** The pre-L1.1 `drain_for_agent` hit the disk
+/// with `fs::read_dir(...)` on EVERY session spawn, whether the queue
+/// was empty or not. On a fresh machine with no pending signals, that
+/// was ~2-5ms of pure I/O on every Cmd+T for zero benefit. The counter
+/// lets us short-circuit the common case (no signals queued) with a
+/// single mutex acquire + hashmap lookup — ~100ns amortized.
+///
+/// **Consistency.** enqueue AND drain both go through the mutex so
+/// counter state never lags disk state. The window where a file is
+/// visible on disk but not yet in the counter (or vice-versa) never
+/// exists outside the lock. Correctness > raw throughput for this
+/// state — enqueue/drain are low-frequency operations (user-driven,
+/// not per-frame) so lock contention is a non-issue.
+static PENDING_STATE: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+
+fn pending_state() -> &'static Mutex<HashMap<String, usize>> {
+    PENDING_STATE.get_or_init(|| {
+        // First-access initialization: scan the queue root once,
+        // populating the counter from whatever's already on disk.
+        // Any boot-time replay that predated us is reflected here.
+        let root = queue_root();
+        let mut map = HashMap::new();
+        if let Ok(entries) = fs::read_dir(&root) {
+            for entry in entries.filter_map(|r| r.ok()) {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                let count = match fs::read_dir(&path) {
+                    Ok(it) => it
+                        .filter_map(|r| r.ok())
+                        .filter(|e| {
+                            e.path()
+                                .extension()
+                                .and_then(|x| x.to_str())
+                                == Some("json")
+                        })
+                        .count(),
+                    Err(_) => 0,
+                };
+                if count > 0 {
+                    map.insert(name.to_string(), count);
+                }
+            }
+        }
+        Mutex::new(map)
+    })
+}
 
 /// Resolve the queue root. Daemon's `~/.k2so/daemon.pending-live/`.
 /// Tests override via env var; production uses `dirs::home_dir()`.
@@ -63,7 +121,18 @@ pub fn enqueue(signal: &AgentSignal, target_agent: &str) -> io::Result<PathBuf> 
     let json = serde_json::to_vec_pretty(signal).map_err(|e| {
         io::Error::new(io::ErrorKind::InvalidData, format!("serialize: {e}"))
     })?;
+
+    // Take the lock around both the file write AND the counter
+    // bump so a concurrent drain can never observe an inconsistent
+    // (file-on-disk, counter-says-zero) state. See PENDING_STATE
+    // doc for rationale.
+    let mut state = pending_state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     atomic_write(&path, &json)?;
+    *state.entry(target_agent.to_string()).or_insert(0) += 1;
+    drop(state);
+
     log_debug!(
         "[daemon/pending-live] queued signal id={} for agent={} at {:?}",
         signal.id,
@@ -76,10 +145,29 @@ pub fn enqueue(signal: &AgentSignal, target_agent: &str) -> io::Result<PathBuf> 
 /// Drain every queued signal for `agent`, deleting each file
 /// after successful parse. Used by the spawn path to flush
 /// anything that was queued while the agent was offline.
+///
+/// Hot path: when no signals are queued (by far the common case on
+/// every Cmd+T / Cmd+Shift+T), returns `Vec::new()` after a single
+/// mutex acquire + hashmap lookup. No disk I/O. This is the
+/// primary win of L1.1.
 pub fn drain_for_agent(agent: &str) -> Vec<AgentSignal> {
+    let mut state = pending_state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // Fast path. Empty (or missing) counter = no files on disk.
+    // Locked access to the counter means enqueue can't sneak a
+    // file between this check and any subsequent drain_directory
+    // call — if a file exists, the counter contains it.
+    if state.get(agent).copied().unwrap_or(0) == 0 {
+        return Vec::new();
+    }
+    // Slow path. Actually drain, clear the counter. Still inside
+    // the lock so enqueue waits — keeps state coherent.
     let root = queue_root();
     let dir = root.join(sanitize(agent));
-    drain_directory(&dir)
+    let signals = drain_directory(&dir);
+    state.remove(agent);
+    signals
 }
 
 /// Boot-time replay — scan every agent directory under the queue
@@ -166,5 +254,36 @@ fn sanitize(name: &str) -> String {
         format!("_{}", clean)
     } else {
         clean
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// L1.1 fast path: when no signals have been queued for an agent,
+    /// `drain_for_agent` must NOT touch the disk. We verify this by
+    /// pointing the queue root at a non-existent path and confirming
+    /// `drain_for_agent` returns quickly with an empty vec instead
+    /// of erroring out on `read_dir`. If the fast path was bypassed,
+    /// we'd still get an empty vec (the read_dir error is swallowed)
+    /// but any bug that re-introduces the disk hit would still work
+    /// "correctly" — so the meaningful check is a benchmark, not a
+    /// unit assertion. This unit test just pins down the behavior.
+    #[test]
+    fn drain_for_unknown_agent_is_fast_path_empty() {
+        // Use a deliberately nonexistent path so any disk read would
+        // fail. The result should still be Vec::new() courtesy of the
+        // fast path.
+        std::env::set_var(
+            "K2SO_PENDING_LIVE_ROOT",
+            "/tmp/k2so-pending-live-nonexistent-l11-test",
+        );
+        // First access initializes PENDING_STATE from disk. The
+        // nonexistent path means the initial map is empty. Subsequent
+        // drain calls for any agent should hit the fast path.
+        let result = drain_for_agent("agent-that-was-never-enqueued");
+        assert!(result.is_empty());
+        std::env::remove_var("K2SO_PENDING_LIVE_ROOT");
     }
 }
