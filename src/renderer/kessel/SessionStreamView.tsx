@@ -20,6 +20,7 @@ import React, {
 import { invoke } from '@tauri-apps/api/core'
 import { KesselClient } from './client'
 import { useKesselConfig } from './config-context'
+import { useIsTabVisible } from '@/contexts/TabVisibilityContext'
 import { TerminalGrid, type Cell, type GridSnapshot } from './grid'
 import { styleToCss, stylesEqual } from './style'
 import type { CursorShape, Frame } from './types'
@@ -578,6 +579,32 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     }
   }, [])
 
+  // Auto-focus when the tab becomes visible. Retained-view model:
+  // every pane stays mounted across tab switches (display:none on
+  // inactive ones), so the keydown effect's mount-time el.focus()
+  // only fires once per pane lifetime. Without this, clicking the
+  // tab bar surfaces the pane but leaves focus on the tab button —
+  // the user has to click inside the terminal before typing
+  // registers. Match the behavior of every native tabbed terminal:
+  // on tab activation, the terminal owns focus.
+  //
+  // Gated on `interactive` — a read-only Kessel preview (HarnessLab
+  // embed, future read-only viewers) shouldn't steal focus.
+  const isTabVisible = useIsTabVisible()
+  useEffect(() => {
+    if (!interactive) return
+    if (!isTabVisible) return
+    const el = containerRef.current
+    if (!el) return
+    // Defer one frame so the pane's `display: block` transition has
+    // painted before focus runs. Calling focus() on a still-hidden
+    // element is a no-op in some browsers.
+    const raf = requestAnimationFrame(() => {
+      containerRef.current?.focus()
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [interactive, isTabVisible])
+
   useEffect(() => {
     if (!interactive) return
     const el = containerRef.current
@@ -855,17 +882,50 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
         timer = null
         const rect = entries[0]?.contentRect
         if (!rect) return
+        // Tab switches use `display:none` to hide inactive panes
+        // (see PaneGroupView.tsx). A hidden container measures as
+        // 0×0 via ResizeObserver. If we treated that as a "real"
+        // resize, we'd:
+        //   1. Floor to MIN_COLS/MIN_ROWS (10×3 — the old behavior).
+        //   2. Shrink the grid, truncating every row to 10 cells
+        //      and pushing bottom-overflow rows to scrollback at
+        //      that narrow width.
+        //   3. Send a SIGWINCH to Claude Code / vim / etc., which
+        //      repaints at 10×3 — destroying the TUI's rendering
+        //      work.
+        //   4. When the tab returns and we resize back to real
+        //      dimensions, the damage is already done: scrollback
+        //      shows narrow-wrapped junk (one word per line with
+        //      trailing blanks from the 0.34.1 pad-on-resize fix),
+        //      and Claude has to redraw from scratch at full
+        //      width — producing the visible message-doubling
+        //      users reported after 0.34.1 shipped.
+        //
+        // Fix: skip the resize entirely if the container has no
+        // layout. When the tab becomes visible again, ResizeObserver
+        // will fire with real dimensions and we'll either match
+        // the current grid size (no-op via the lastCols check
+        // below) or resize to the correct new value if the window
+        // was actually resized while hidden.
+        if (rect.width === 0 || rect.height === 0) return
         // Subtract the 4px padding on each side.
         const availW = Math.max(0, rect.width - 8)
         const availH = Math.max(0, rect.height - 8)
-        // Safety floor: if we'd compute < MIN_VIEWPORT cols or rows,
-        // refuse to resize the grid. A zero-width measurement (CSS
-        // layout not settled yet) would otherwise collapse the grid
-        // to 1×1 and every byte would wrap to a new row.
+        // Belt-and-braces sanity floor — a real terminal container
+        // is hundreds of px wide, but a layout glitch could produce
+        // a handful of pixels. Treat anything that'd compute to
+        // fewer than MIN_COLS legitimate columns as "layout not
+        // settled yet" and skip. This is NOT the clamp the old
+        // code did; it's an early return, leaving the grid at its
+        // previous (known-good) size until a real measurement
+        // arrives.
         const MIN_COLS = 10
         const MIN_ROWS = 3
-        const newCols = Math.max(MIN_COLS, Math.floor(availW / cellMetrics.width))
-        const newRows = Math.max(MIN_ROWS, Math.floor(availH / cellMetrics.height))
+        const rawCols = Math.floor(availW / cellMetrics.width)
+        const rawRows = Math.floor(availH / cellMetrics.height)
+        if (rawCols < MIN_COLS || rawRows < MIN_ROWS) return
+        const newCols = rawCols
+        const newRows = rawRows
         if (newCols === lastCols && newRows === lastRows) return
         lastCols = newCols
         lastRows = newRows
@@ -966,6 +1026,49 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     return out
   }, [viewportOffset, snapshot])
 
+  // Track the last cursor position the user saw while the pane
+  // was focused. When focus is lost, TUIs with focus-reporting
+  // (DECSET ?1004 — Claude Code, neovim, tmux) re-render without
+  // the active-input highlight and often "park" the hardware
+  // cursor at the bottom-left corner of their drawn area, out of
+  // the way. If we naively drove the cursor from the live
+  // `restingCursor`, it would visibly jump to the parked row the
+  // moment focus leaves — typically below the bypass-permissions
+  // footer in Claude's case. Instead, freeze the cursor at the
+  // last focused position whenever the pane is not in a
+  // steady-state focused mode.
+  //
+  // FOCUS GAIN has the same race in reverse: the moment the user
+  // clicks into the pane we send CSI I (focus-in) to the TUI, but
+  // the TUI takes 50-200ms to repaint itself with the cursor back
+  // at the input line. During that window, `restingCursor` is
+  // still at the parked position. If we flip straight to live the
+  // instant `isFocused` becomes true, the user sees a 1-2 frame
+  // flash of the solid cursor at the parked position before Claude
+  // repaints. Debounce by 200ms — within that window we keep
+  // showing the previously-captured position (now solid-filled
+  // instead of hollow), so the transition is "hollow → solid in
+  // place" rather than "hollow → solid elsewhere → solid in place".
+  const lastFocusedCursorRef = useRef(restingCursor)
+  const [liveCursorEnabled, setLiveCursorEnabled] = useState(false)
+  useEffect(() => {
+    if (!isFocused) {
+      setLiveCursorEnabled(false)
+      return
+    }
+    const id = setTimeout(() => setLiveCursorEnabled(true), 200)
+    return () => clearTimeout(id)
+  }, [isFocused])
+  useEffect(() => {
+    // Only capture the live cursor into the ref once we're
+    // confidently in steady-state focused mode. Otherwise the
+    // ref would inherit the parked position that Claude painted
+    // during the blur → focus round-trip.
+    if (isFocused && liveCursorEnabled) {
+      lastFocusedCursorRef.current = restingCursor
+    }
+  }, [isFocused, liveCursorEnabled, restingCursor])
+
   const cursorStyle = useMemo<React.CSSProperties>(() => {
     // Drive from `restingCursor` (settled position) instead of
     // `snapshot.cursor` (which tracks every intermediate move). See
@@ -985,14 +1088,25 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     if (viewportOffset > 0) return { display: 'none' }
     if (!cellMetrics.width) return { display: 'none' }
 
-    // D13 — shape from TUI's DECSCUSR (restingCursor.shape) or the
+    // When unfocused (or within the 200ms post-focus-gain settle
+    // window), render the cursor at its last-focused position. Only
+    // switch to the live cursor once we're confident Claude / the
+    // TUI has finished repainting in response to the CSI I focus-in
+    // notification. See lastFocusedCursorRef + liveCursorEnabled
+    // above for the full rationale.
+    const effective =
+      isFocused && liveCursorEnabled
+        ? restingCursor
+        : lastFocusedCursorRef.current
+
+    // D13 — shape from TUI's DECSCUSR (effective.shape) or the
     // user's configured fallback. Blinking variants only animate
     // when focused; an unfocused pane's cursor is a static outline.
-    const shape: CursorShape = restingCursor.shape ?? config.cursor.defaultShape
+    const shape: CursorShape = effective.shape ?? config.cursor.defaultShape
     const base: React.CSSProperties = {
       position: 'absolute',
-      left: `${4 + cellMetrics.width * restingCursor.col}px`,
-      top: `${4 + cellMetrics.height * restingCursor.row}px`,
+      left: `${4 + cellMetrics.width * effective.col}px`,
+      top: `${4 + cellMetrics.height * effective.row}px`,
       pointerEvents: 'none',
       boxSizing: 'border-box',
     }
@@ -1035,20 +1149,19 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
           width: `${cellMetrics.width}px`,
           height: `${underscoreHeight}px`,
           // Nudge to the bottom of the cell.
-          top: `${4 + cellMetrics.height * restingCursor.row + cellMetrics.height - underscoreHeight}px`,
+          top: `${4 + cellMetrics.height * effective.row + cellMetrics.height - underscoreHeight}px`,
           backgroundColor: fill,
           boxShadow: outline,
           animation,
         }
     }
   }, [
-    restingCursor.col,
-    restingCursor.row,
-    restingCursor.shape,
+    restingCursor,
     cellMetrics.width,
     cellMetrics.height,
     viewportOffset,
     isFocused,
+    liveCursorEnabled,
     config.cursor.defaultShape,
     config.cursor.blinkIntervalMs,
     config.cursor.thickness,
