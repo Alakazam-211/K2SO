@@ -413,16 +413,40 @@ export class TerminalGrid {
         this.resizeRow(row, newCols),
       )
     }
-    // Adjust row count: append blanks or trim from the bottom.
-    if (newRows > this.rows_) {
-      for (let i = this.rows_; i < newRows; i++) {
+    // Adjust row count.
+    //
+    // GROW (newRows > old): append blank rows at the bottom. Cursor
+    //   stays at its current row; new blank space appears below it.
+    //   A future improvement could pull rows from the tail of
+    //   scrollback to fill the new top rows (xterm-style "uncover
+    //   history on grow"), but straight append matches the simplest
+    //   model and keeps subscribers' grid-coordinate math stable.
+    //
+    // SHRINK (newRows < old): push the TOP (oldRows - newRows) rows
+    //   to scrollback, keep the BOTTOM newRows in the live grid.
+    //   This is the convention every real terminal follows — the
+    //   freshest content (and whatever cursor position the TUI
+    //   settled on after its last write) stays visible. Cursor row
+    //   is adjusted by the same shift so "content under the cursor"
+    //   stays under it.
+    //
+    //   Previously we pushed the BOTTOM rows to scrollback, which
+    //   made the opposite happen: after a tab-hide/show cycle that
+    //   resized the grid smaller, the live grid showed the FIRST N
+    //   rows (oldest content in the frame) while Claude's cursor
+    //   at the end of its output ended up in scrollback, and the
+    //   user saw the "cursor stuck in the middle of the story"
+    //   bug after 0.34.1.
+    const oldRows = this.rows_
+    if (newRows > oldRows) {
+      for (let i = oldRows; i < newRows; i++) {
         this.grid_.push(blankRow(newCols))
       }
-    } else if (newRows < this.rows_) {
-      // Bottom rows may hold content — push them to scrollback so
-      // the user can scroll up to see them after shrinking.
-      const overflow = this.grid_.splice(newRows)
+    } else if (newRows < oldRows) {
+      const toTrim = oldRows - newRows
+      const overflow = this.grid_.splice(0, toTrim)
       for (const row of overflow) this.pushScrollback(row)
+      this.cursor_.row = Math.max(0, this.cursor_.row - toTrim)
     }
     this.cols_ = newCols
     this.rows_ = newRows

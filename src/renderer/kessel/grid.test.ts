@@ -194,16 +194,39 @@ describe('TerminalGrid resize', () => {
     expect(rawRow(g, 1)).toBe('def       ')
   })
 
-  it('shrinks rows by pushing bottom rows into scrollback', () => {
+  it('shrinks rows by pushing TOP rows into scrollback (freshest content stays visible)', () => {
     const g = new TerminalGrid({ rows: 3, cols: 5 })
     g.applyFrame(text('aaaaa\r\nbbbbb\r\nccccc'))
     g.resize(5, 2)
     const snap = g.snapshot()
     expect(snap.rows).toBe(2)
     expect(snap.scrollback.length).toBe(1)
-    expect(snap.scrollback[0].map((c) => c.char).join('')).toBe('ccccc')
-    expect(rowText(g, 0)).toBe('aaaaa')
-    expect(rowText(g, 1)).toBe('bbbbb')
+    // Top row 'aaaaa' scrolled off into scrollback.
+    expect(snap.scrollback[0].map((c) => c.char).join('')).toBe('aaaaa')
+    // Bottom rows (freshest content) stay in the live grid.
+    expect(rowText(g, 0)).toBe('bbbbb')
+    expect(rowText(g, 1)).toBe('ccccc')
+  })
+
+  it('shrink keeps the cursor anchored to the content row under it', () => {
+    // Cursor at row 4 (0-indexed) of a 5-row grid. Shrink to 3
+    // rows. Expect 2 rows to scroll off the top, cursor to shift
+    // from row 4 → row 2 (same content stays under the caret).
+    const g = new TerminalGrid({ rows: 5, cols: 10 })
+    g.applyFrame(text('row0\r\nrow1\r\nrow2\r\nrow3\r\nrow4'))
+    // Goto is 1-indexed (ECMA-48 CUP). row:5 col:5 → (4, 4) 0-idx.
+    g.applyFrame({
+      frame: 'CursorOp',
+      data: { op: 'Goto', value: { row: 5, col: 5 } },
+    })
+    g.resize(10, 3)
+    const snap = g.snapshot()
+    expect(snap.rows).toBe(3)
+    expect(snap.cursor.row).toBe(2)
+    expect(snap.cursor.col).toBe(4)
+    // The content beneath the cursor (was row 4, now row 2) should
+    // be the same `row4` string.
+    expect(rowText(g, 2).trimEnd()).toBe('row4')
   })
 
   it('clamps cursor into new bounds', () => {
