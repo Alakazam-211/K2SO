@@ -419,9 +419,69 @@ export function AlacrittyTerminalView({
 
       invoke('terminal_set_focus', { id: terminalId, focused: true }).catch((e) => console.warn('[terminal]', e))
 
+      // Parity instrumentation with Kessel's SessionStreamView.
+      // first-frame = time from Cmd+T to the first grid update
+      // received (shell emitted its prompt, or Claude started
+      // producing output). tui-alt-screen = when the TermMode
+      // alt-screen bit flips (ALT_SCREEN = 1 << 7 in
+      // alacritty_terminal's TermMode bitflags) — fires when
+      // claude/vim/htop request their full-screen buffer. Both
+      // metrics let us compare Claude launch speed directly
+      // between Alacritty and Kessel.
+      //
+      // References alacritty_terminal::term::TermMode:
+      //   APP_CURSOR       = 1 << 1
+      //   APP_KEYPAD       = 1 << 2
+      //   BRACKETED_PASTE  = 1 << 4
+      //   ALT_SCREEN       = 1 << 7   ← this one
+      const ALT_SCREEN_BIT = 1 << 7
+      let firstFrameAt: number | null = null
+      let altScreenAt: number | null = null
+      let tuiReadyAt: number | null = null
+
       // Listen for grid updates (DOM text rendering)
       unlistenGrid = await listen<GridUpdate>(`terminal:grid:${terminalId}`, (event) => {
-        scheduleRender(event.payload)
+        const payload = event.payload
+        if (firstFrameAt === null && spawnedAt !== undefined) {
+          firstFrameAt = performance.now()
+          const ms = Math.round(firstFrameAt - spawnedAt)
+          // eslint-disable-next-line no-console
+          console.info(
+            `%c[Alacritty] ${terminalId} first-frame=${ms}ms (Cmd+T → shell/tui emit)`,
+            'color:#ff0',
+          )
+        }
+        // Detect alt-screen enter (Claude / full-screen TUIs).
+        if (
+          altScreenAt === null &&
+          spawnedAt !== undefined &&
+          (payload.mode & ALT_SCREEN_BIT) !== 0
+        ) {
+          altScreenAt = performance.now()
+          const ms = Math.round(altScreenAt - spawnedAt)
+          // eslint-disable-next-line no-console
+          console.info(
+            `%c[Alacritty] ${terminalId} tui-alt-screen=${ms}ms`,
+            'color:#ff0',
+          )
+        }
+        // After alt-screen, first grid update with content = TUI
+        // first paint. approximates "Claude UI is visible."
+        if (
+          altScreenAt !== null &&
+          tuiReadyAt === null &&
+          spawnedAt !== undefined &&
+          payload.lines.length > 0
+        ) {
+          tuiReadyAt = performance.now()
+          const ms = Math.round(tuiReadyAt - spawnedAt)
+          // eslint-disable-next-line no-console
+          console.info(
+            `%c[Alacritty] ${terminalId} tui-ready=${ms}ms (Cmd+T → TUI first paint)`,
+            'color:#ff0;font-weight:bold',
+          )
+        }
+        scheduleRender(payload)
         useActiveAgentsStore.getState().recordOutput(terminalId)
       })
 
