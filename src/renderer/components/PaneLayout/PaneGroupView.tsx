@@ -1,5 +1,6 @@
 import { useCallback, useContext, useState } from 'react'
 import { AlacrittyTerminalView } from '@/components/Terminal/AlacrittyTerminalView'
+import { KesselTerminal } from '@/kessel/KesselTerminal'
 import { FileViewerPane } from '@/components/FileViewerPane/FileViewerPane'
 import { AgentPane } from '@/components/AgentPane/AgentPane'
 import { useTabsStore } from '@/stores/tabs'
@@ -172,7 +173,39 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
               const td = isFallback
                 ? { ...raw, command: undefined as string | undefined, args: undefined as string[] | undefined, terminalId: `${raw.terminalId}-shell` }
                 : raw
-              content = (
+              // Phase 4.5: dispatch to the renderer this tab was
+              // created with. A missing `renderer` field is treated
+              // as 'alacritty' — preserves behavior for every tab
+              // that existed before the toggle shipped. The
+              // preference for NEW tabs is stamped at
+              // makeTerminalPaneGroup time; mid-session toggle
+              // changes don't affect already-open terminals.
+              // In dev, loudly surface when a terminal item lacks a
+              // renderer field — historical bug where require() in an
+              // ESM bundle silently threw and every tab fell through
+              // to 'alacritty'. If this fires, some tab-creation
+              // path is bypassing makeTerminalPaneGroup /
+              // paneDataToItem — that path needs currentRenderer()
+              // added to it.
+              if (import.meta.env.DEV && raw.renderer === undefined) {
+                // eslint-disable-next-line no-console
+                console.warn(
+                  '[tabs] terminal item has no renderer field; defaulting to alacritty',
+                  { terminalId: td.terminalId, cwd: td.cwd },
+                )
+              }
+              if (raw.renderer === 'kessel') {
+                content = (
+                  <KesselTerminal
+                    terminalId={td.terminalId}
+                    cwd={td.cwd}
+                    command={td.command}
+                    args={td.args}
+                    spawnedAt={td.spawnedAt}
+                  />
+                )
+              } else {
+                content = (
                 <AlacrittyTerminalView
                   terminalId={td.terminalId}
                   tabId={tabId}
@@ -180,6 +213,7 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
                   cwd={td.cwd}
                   command={td.command}
                   args={td.args}
+                  spawnedAt={td.spawnedAt}
                   onExit={(exitCode) => {
                     const hadCommand = raw.command
                     if (hadCommand && !isFallback) {
@@ -197,7 +231,8 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
                     }
                   }}
                 />
-              )
+                )
+              }
             } else if (item.type === 'file-viewer') {
               const fd = item.data as FileViewerItemData
               content = (

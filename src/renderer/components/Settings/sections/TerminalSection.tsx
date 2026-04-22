@@ -2,7 +2,7 @@ import React from 'react'
 import { useSettingsStore } from '@/stores/settings'
 import type { TerminalSettings } from '@/stores/settings'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
-import type { LinkClickMode } from '@/stores/terminal-settings'
+import type { LinkClickMode, TerminalRenderer } from '@/stores/terminal-settings'
 import { SettingRow } from '../controls/SettingControls'
 import { SettingDropdown } from '../controls/SettingControls'
 import type { SettingEntry } from '../searchManifest'
@@ -15,6 +15,7 @@ export const TERMINAL_MANIFEST: SettingEntry[] = [
   { id: 'terminal.natural-text-editing', section: 'terminal', label: 'Natural Text Editing', description: 'Opt+Arrow word motion, Cmd+Arrow line motion', keywords: ['keyboard', 'edit', 'opt', 'alt'] },
   { id: 'terminal.link-click-mode', section: 'terminal', label: 'Link Click Mode', description: 'Click vs Cmd+Click to activate links', keywords: ['link', 'url', 'click'] },
   { id: 'terminal.open-links-in-split', section: 'terminal', label: 'Open Links in Split Pane', description: 'Open file links in a sibling pane when splits are active', keywords: ['link', 'split', 'pane'] },
+  { id: 'terminal.renderer', section: 'terminal', label: 'Terminal Renderer', description: 'Alacritty (legacy) vs Kessel (BETA)', keywords: ['renderer', 'engine', 'kessel', 'alacritty', 'session stream', 'beta'] },
 ]
 
 export function TerminalSection(): React.JSX.Element {
@@ -24,6 +25,8 @@ export function TerminalSection(): React.JSX.Element {
   const setLinkClickMode = useTerminalSettingsStore((s) => s.setLinkClickMode)
   const openLinksInSplitPane = useTerminalSettingsStore((s) => s.openLinksInSplitPane)
   const setOpenLinksInSplitPane = useTerminalSettingsStore((s) => s.setOpenLinksInSplitPane)
+  const renderer = useTerminalSettingsStore((s) => s.renderer)
+  const setRenderer = useTerminalSettingsStore((s) => s.setRenderer)
 
   return (
     <div className="max-w-xl">
@@ -128,6 +131,22 @@ export function TerminalSection(): React.JSX.Element {
               { value: 'cmd-click', label: '\u2318 + Click' },
             ]}
             onChange={(v) => setLinkClickMode(v as LinkClickMode)}
+          />
+        </SettingRow>
+
+        {/* Terminal Renderer — Phase 4.5 Kessel opt-in */}
+        <SettingRow settingId="terminal.renderer" label={
+          <span title="Alacritty is the production-hardened default. Kessel subscribes to the daemon's Session Stream and is in BETA — changing this only affects NEW terminals; existing tabs keep their current renderer.">
+            Terminal Renderer
+          </span>
+        }>
+          <SettingDropdown
+            value={renderer}
+            options={[
+              { value: 'alacritty', label: 'Alacritty (legacy)' },
+              { value: 'kessel', label: 'Kessel (BETA)' },
+            ]}
+            onChange={(v) => setRenderer(v as TerminalRenderer)}
           />
         </SettingRow>
 

@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.33.0"
+K2SO_CLI_VERSION="0.34.0"
 
 set -euo pipefail
 
@@ -68,6 +68,22 @@ cli_request() {
     curl -sG "${BASE_URL}${endpoint}" \
         --connect-timeout 5 --max-time 30 \
         -d "$params" 2>/dev/null
+}
+
+# POST a JSON body. Used by /cli/awareness/publish (Phase 3).
+# Token rides in the query string (the daemon parses it there
+# before looking at the body). Caller supplies the full endpoint
+# and the JSON body on stdin via a pipe, or as the second arg.
+cli_post_json() {
+    local endpoint="$1"
+    local body="${2:-}"
+    if [ -z "$body" ]; then
+        body="$(cat)"
+    fi
+    curl -s -X POST "${BASE_URL}${endpoint}?token=${TOKEN}" \
+        --connect-timeout 5 --max-time 30 \
+        -H "Content-Type: application/json" \
+        --data-raw "$body" 2>/dev/null
 }
 
 urlencode() {
@@ -1557,6 +1573,25 @@ cmd_done() {
 }
 
 cmd_msg() {
+    # `k2so msg` is a convenience wrapper over the awareness primitive.
+    # Pre-Phase-4 it hit Tauri's `/cli/msg` which wrote two
+    # activity_feed rows (message.sent on sender side,
+    # message.received on recipient side) and optionally PTY-
+    # injected a wake-style notice.
+    #
+    # Post-Phase-4, the daemon is the sole HTTP server and the
+    # awareness bus handles the whole flow. An `AgentSignal` with
+    # `SignalKind::Msg` + `Delivery::Live` injects into the target's
+    # live session (matching --wake's old intent); `Delivery::Inbox`
+    # writes to the filesystem inbox for async pickup. Every signal
+    # audits as `event_type='signal:msg'` in activity_feed.
+    #
+    # `--wake` historically meant "inject if live, else inbox." That
+    # is *exactly* Delivery::Live — the target's liveness (and the
+    # inject provider's fallback behavior) already handles the
+    # if-live/else-inbox branching inside the daemon. So --wake ⇒
+    # Live, default ⇒ Inbox (old behavior of dropping a message
+    # file without disturbing anyone).
     local agent="${K2SO_AGENT_NAME:-}"
     local target=""
     local text=""
@@ -1575,9 +1610,358 @@ cmd_msg() {
     [[ -z "$agent" ]] && { echo "Error: --agent required (or set K2SO_AGENT_NAME)" >&2; exit 1; }
     [[ -z "$target" ]] && { echo "Error: target required" >&2; exit 1; }
     [[ -z "$text" ]] && { echo "Error: message text required" >&2; exit 1; }
-    local params="agent=$agent&target=$(urlencode "$target")&text=$(urlencode "$text")"
-    [[ "$wake" == "true" ]] && params="$params&wake=true"
-    cli_request "/cli/msg" "$params"
+
+    # Delegate to the signal primitive. Pass --from explicitly so
+    # the sender name is the agent flag (not the default "cli").
+    # Delivery is Inbox unless --wake was set (matching the
+    # pre-Phase-4 /cli/msg semantic).
+    local delivery_flag=""
+    [[ "$wake" != "true" ]] && delivery_flag="--inbox"
+    local payload
+    payload=$(python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1]}))' "$text")
+    K2SO_AGENT_NAME="$agent" cmd_signal "$target" "msg" "$payload" $delivery_flag --from "$agent"
+}
+
+# ── Awareness Bus CLI verbs (0.34.0 Phase 3) ─────────────────────────
+#
+# Low-level signal emission + roster query. The primitives every
+# agent uses to collaborate: "who's around?" + "tell them something
+# right now" + "send them a notice for later."
+
+# Emit a signal to another agent.
+#
+# Usage:
+#   k2so signal <target-agent> <kind> <json-payload> [--inbox] [--from <sender>]
+#
+# Defaults:
+#   kind     — "msg" if omitted
+#   delivery — Live (real-time 1-on-1) unless --inbox present
+#   from     — $K2SO_AGENT_NAME if set, else "cli"
+cmd_signal() {
+    local target="${1:-}"
+    local kind="${2:-msg}"
+    local raw_payload="${3:-{\}}"
+    shift 3 2>/dev/null || true
+    local delivery="live"
+    local from="${K2SO_AGENT_NAME:-cli}"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --inbox) delivery="inbox"; shift ;;
+            --from)  from="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && {
+        echo "Usage: k2so signal <target> <kind> <json-payload> [--inbox] [--from <sender>]" >&2
+        echo "  Default kind is 'msg'; default delivery is 'live' (interrupts running session)." >&2
+        echo "  --inbox sends as an intentional-async notice (target reads on their schedule)." >&2
+        exit 1
+    }
+
+    # Build the AgentSignal wire format. Matches
+    # k2so_core::awareness::AgentSignal serialization.
+    local now
+    now=$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec="microseconds"))' 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%S.000000+00:00")
+    local signal_id
+    signal_id=$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null || echo "00000000-0000-0000-0000-000000000000")
+
+    # Resolve the project UUID so the audit row's FK to projects.id
+    # is satisfied. Fall back to the raw path if the lookup fails —
+    # egress's _orphan sentinel catches that case and still writes
+    # the audit row, just bucketed under _orphan instead of a real
+    # project. Without this lookup the CLI would send the absolute
+    # path as the workspace id, which FK-violates against
+    # projects.id (UUIDs) and silently drops audit.
+    local workspace_id="$PROJECT"
+    if [ -f "${HOME}/.k2so/k2so.db" ] && command -v sqlite3 >/dev/null 2>&1; then
+        # SQL-escape single quotes in the path (doubled per SQL spec).
+        local _safe_path="${PROJECT//\'/\'\'}"
+        local _resolved
+        _resolved=$(sqlite3 "${HOME}/.k2so/k2so.db" \
+            "SELECT id FROM projects WHERE path = '${_safe_path}' LIMIT 1;" 2>/dev/null || true)
+        if [ -n "$_resolved" ]; then
+            workspace_id="$_resolved"
+        fi
+        unset _safe_path _resolved
+    fi
+
+    local body
+    body=$(python3 <<PY
+import json, sys
+kind = "$kind"
+raw = """$raw_payload"""
+# Map CLI kind argument → SignalKind JSON shape.
+kind_map = {
+    "msg":      lambda d: {"kind":"msg","data":{"text": d.get("text", "")}},
+    "status":   lambda d: {"kind":"status","data":{"text": d.get("text", "")}},
+    "presence": lambda d: {"kind":"presence","data":{"state": d.get("state", "active")}},
+}
+try:
+    payload_data = json.loads(raw) if raw.strip() else {}
+except json.JSONDecodeError:
+    payload_data = {"text": raw}
+if kind in kind_map:
+    kind_json = kind_map[kind](payload_data)
+else:
+    kind_json = {"kind":"custom","data":{"kind": kind, "payload": payload_data}}
+
+signal = {
+    "id": "$signal_id",
+    "from": {"scope":"agent","workspace":"$workspace_id","name":"$from"},
+    "to":   {"scope":"agent","workspace":"$workspace_id","name":"$target"},
+    "kind": kind_json,
+    "priority": "normal",
+    "delivery": "$delivery",
+    "at": "$now",
+}
+print(json.dumps(signal))
+PY
+)
+
+    cli_post_json "/cli/awareness/publish" "$body"
+    echo
+}
+
+# Spawn a Session Stream session in the daemon. After spawn, the
+# session's agent_name is registered in the daemon's session_map,
+# which means `k2so signal <agent>` now reaches that session's
+# live PTY via the InjectProvider.
+#
+# Usage:
+#   k2so sessions spawn --agent foo [--cwd <path>] [--command <cmd>] [--cols N] [--rows N]
+cmd_sessions_spawn() {
+    local agent="" cwd="$(pwd)" command="" cols="80" rows="24"
+    local args_json="null"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --agent)   agent="$2"; shift 2 ;;
+            --cwd)     cwd="$2"; shift 2 ;;
+            --command) command="$2"; shift 2 ;;
+            --cols)    cols="$2"; shift 2 ;;
+            --rows)    rows="$2"; shift 2 ;;
+            --) shift; break ;;
+            *) shift ;;
+        esac
+    done
+    [[ -z "$agent" ]] && { echo "Usage: k2so sessions spawn --agent <name> [--command <cmd>]" >&2; exit 1; }
+
+    local cmd_json="null"
+    [[ -n "$command" ]] && cmd_json=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$command")
+
+    local body
+    body=$(python3 <<PY
+import json
+body = {
+    "agent_name": "$agent",
+    "cwd": "$cwd",
+    "cols": int("$cols"),
+    "rows": int("$rows"),
+}
+cmd = $cmd_json
+if cmd is not None:
+    body["command"] = cmd
+print(json.dumps(body))
+PY
+)
+    cli_post_json "/cli/sessions/spawn" "$body"
+    echo
+}
+
+# List every session this project's filesystem knows about, by
+# walking $PROJECT/.k2so/sessions/ and summarizing each directory.
+# No daemon round-trip — archive dirs are the source of truth.
+#
+# Output columns: session id, total archive bytes, segment count,
+# active-segment size, last-modified wall-clock timestamp.
+# Pass --json to get a machine-parseable array.
+#
+# Usage:
+#   k2so sessions list [--json]
+cmd_sessions_list() {
+    local json_mode=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_mode="1"; shift ;;
+            --) shift; break ;;
+            *) shift ;;
+        esac
+    done
+    local sessions_dir="${PROJECT}/.k2so/sessions"
+    if [ ! -d "$sessions_dir" ]; then
+        if [ -n "$json_mode" ]; then
+            echo "[]"
+        else
+            echo "No sessions yet for $PROJECT" >&2
+        fi
+        return 0
+    fi
+    python3 - "$sessions_dir" "$json_mode" <<'PY'
+import json, os, sys, time
+sessions_dir = sys.argv[1]
+as_json = sys.argv[2] == "1"
+
+rows = []
+for name in sorted(os.listdir(sessions_dir)):
+    session_dir = os.path.join(sessions_dir, name)
+    if not os.path.isdir(session_dir):
+        continue
+    total = 0
+    segments = 0
+    active_bytes = 0
+    latest_mtime = 0
+    for f in os.listdir(session_dir):
+        path = os.path.join(session_dir, f)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        if not (f == "archive.ndjson" or f.startswith("archive.") and (f.endswith(".ndjson") or f.endswith(".ndjson.gz"))):
+            continue
+        total += st.st_size
+        segments += 1
+        latest_mtime = max(latest_mtime, int(st.st_mtime))
+        if f == "archive.ndjson":
+            active_bytes = st.st_size
+    rows.append({
+        "session_id": name,
+        "total_bytes": total,
+        "segments": segments,
+        "active_bytes": active_bytes,
+        "last_modified_epoch": latest_mtime,
+    })
+
+def human_bytes(n):
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.2f} KB"
+    if n < 1024 * 1024 * 1024:
+        return f"{n / (1024 * 1024):.2f} MB"
+    return f"{n / (1024 * 1024 * 1024):.2f} GB"
+
+if as_json:
+    print(json.dumps(rows, indent=2))
+else:
+    if not rows:
+        print("No sessions yet", file=sys.stderr)
+        sys.exit(0)
+    print(f"{'SESSION':38}  {'SEGMENTS':>8}  {'TOTAL':>12}  {'ACTIVE':>12}  LAST MODIFIED")
+    for r in rows:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["last_modified_epoch"])) if r["last_modified_epoch"] else "-"
+        print(f"{r['session_id']:38}  {r['segments']:>8}  {human_bytes(r['total_bytes']):>12}  {human_bytes(r['active_bytes']):>12}  {ts}")
+PY
+}
+
+# Compact a session's rotated segments by gzipping them in place.
+# NEVER touches the active segment (archive.ndjson). Idempotent —
+# re-running is a no-op once every rotated segment is already
+# gzipped.
+#
+# Usage:
+#   k2so sessions compact <session-id>
+cmd_sessions_compact() {
+    local session_id="${1:-}"
+    [[ -z "$session_id" ]] && {
+        echo "Usage: k2so sessions compact <session-id>" >&2
+        echo "(use 'k2so sessions list' to find session ids)" >&2
+        exit 1
+    }
+    local session_dir="${PROJECT}/.k2so/sessions/${session_id}"
+    if [ ! -d "$session_dir" ]; then
+        echo "No archive directory for session $session_id at $session_dir" >&2
+        exit 1
+    fi
+    if ! command -v gzip >/dev/null 2>&1; then
+        echo "gzip not found in PATH — cannot compact" >&2
+        exit 1
+    fi
+
+    local count=0
+    local compacted_bytes_before=0
+    local compacted_bytes_after=0
+    # Loop through every rotated segment that isn't yet gzipped.
+    # Filename pattern: archive.NNN.ndjson (NOT archive.ndjson,
+    # NOT *.ndjson.gz).
+    while IFS= read -r -d '' seg; do
+        local before_size
+        before_size=$(stat -f '%z' "$seg" 2>/dev/null || stat -c '%s' "$seg" 2>/dev/null || echo 0)
+        compacted_bytes_before=$((compacted_bytes_before + before_size))
+
+        # `gzip -f` overwrites if a *.gz already exists; we checked
+        # above that the .gz form doesn't exist for this segment.
+        if gzip -f "$seg"; then
+            local after_size
+            after_size=$(stat -f '%z' "$seg.gz" 2>/dev/null || stat -c '%s' "$seg.gz" 2>/dev/null || echo 0)
+            compacted_bytes_after=$((compacted_bytes_after + after_size))
+            count=$((count + 1))
+        else
+            echo "gzip failed for $seg" >&2
+        fi
+    done < <(find "$session_dir" -maxdepth 1 -type f \
+        -name 'archive.[0-9][0-9][0-9].ndjson' -print0 | sort -z)
+
+    if [ "$count" -eq 0 ]; then
+        echo "Nothing to compact for session $session_id (no uncompressed rotated segments)." >&2
+        return 0
+    fi
+
+    local saved=$((compacted_bytes_before - compacted_bytes_after))
+    echo "{\"sessionId\":\"$session_id\",\"compacted\":$count,\"bytesBefore\":$compacted_bytes_before,\"bytesAfter\":$compacted_bytes_after,\"bytesSaved\":$saved}"
+}
+
+# Sessions subcommand dispatcher — handles `k2so sessions spawn`,
+# `k2so sessions list`, `k2so sessions compact`, and any future
+# `sessions *` verbs.
+cmd_sessions() {
+    local sub="${1:-}"
+    shift 2>/dev/null || true
+    case "$sub" in
+        spawn)   cmd_sessions_spawn "$@" ;;
+        list)    cmd_sessions_list "$@" ;;
+        compact) cmd_sessions_compact "$@" ;;
+        *)
+            echo "Usage:" >&2
+            echo "  k2so sessions spawn --agent <name> [...]" >&2
+            echo "  k2so sessions list [--json]" >&2
+            echo "  k2so sessions compact <session-id>" >&2
+            exit 1
+            ;;
+    esac
+}
+
+# Roster query — "who's in the office?"
+#
+# Usage:
+#   k2so roster                    # all known agents in current workspace
+#   k2so roster --live             # only live agents
+cmd_roster() {
+    local filter="all"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --live) filter="live"; shift ;;
+            *) shift ;;
+        esac
+    done
+    # Roster lives in-core; daemon exposes it via a future route.
+    # Phase 3 MVP: filesystem-scan of .k2so/agents/ for known
+    # agents. Liveness not yet reported in CLI output (daemon-side
+    # registration path arrives in Phase 4); tests use the Rust
+    # API directly.
+    local agents_dir="${PROJECT}/.k2so/agents"
+    [[ ! -d "$agents_dir" ]] && { echo "No .k2so/agents/ found at $PROJECT" >&2; exit 1; }
+    echo "Roster for $PROJECT (filter: $filter)"
+    for dir in "$agents_dir"/*/; do
+        local name
+        name=$(basename "$dir")
+        # Skip hidden dirs (.archive).
+        [[ "$name" == .* ]] && continue
+        [[ ! -f "$dir/agent.md" ]] && continue
+        local skill_summary=""
+        if [[ -f "$dir/SKILL.md" ]]; then
+            skill_summary=$(tail -n +5 "$dir/SKILL.md" 2>/dev/null | head -c 80 | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')
+        fi
+        printf "  %-20s  %s\n" "$name" "${skill_summary:0:80}"
+    done
 }
 
 cmd_reserve() {
@@ -2185,134 +2569,240 @@ print(f\"  Pinned:    {'yes' if d.get('pinned') else 'no'}\")
 }
 
 cmd_help() {
+    # Two-tier help. `k2so help` (default) shows the working set
+    # a Workspace Manager / custom agent needs day-to-day — roughly
+    # 20 verbs grouped by intent. `k2so help --advanced` (or
+    # `k2so help -a`) shows the full surface, including daemon
+    # lifecycle, PTY plumbing, heartbeat CRUD, and diagnostics.
+    #
+    # The audit that produced this split lives in the commit that
+    # introduced it. Rule of thumb: default help = "can I do the
+    # work my agent persona exists to do?" Advanced help = "can I
+    # operate the whole K2SO system?"
+    case "${1:-}" in
+        -a|--advanced|advanced) cmd_help_advanced ;;
+        *) cmd_help_general ;;
+    esac
+}
+
+cmd_help_general() {
     cat <<'EOF'
 K2SO CLI — Agent interface to K2SO workspace orchestration
 
-COMMANDS:
-  agent create <name> --role "."  Create a new agent (agent-template, manager, or custom)
-  agent update --name <n>         Update agent profile field or section
-    --field <field> --value "."   Field: frontmatter key or ## section name
-  agent list                      List all agents in this workspace
-  agent profile <name>            Read an agent's profile (agent.md)
+COMMUNICATION
+  msg <target> "text" [--wake]       Send a message (--wake: interrupt live session)
+  signal <target> <kind> <payload>   Low-level signal emission [--inbox --from <sender>]
+  roster                             Who's online (live sessions + inbox-reachable agents)
+  feed [--agent <n>] [--limit N]     View activity feed
+  connections list                   Workspaces connected to this one
+  connections add|remove <path>      Manage workspace connections
 
-  agents list                     List all agents with work counts
-  agents work <name>              Show agent's work items
-  agents status <name>            Show agent status and work summary
-  agents create <name> --role "." Create a new agent (alias)
-  agents delete <name> [--force]  Delete an agent and its work directories
-  agents launch <name>            Launch agent's Claude session in K2SO
-  agents generate-md <name>       Generate agent's CLAUDE.md context file
-  agents profile <name>           Read an agent's profile (agent.md)
-  agents lock <name>              Mark agent as busy (active session)
-  agents unlock <name>            Mark agent as available
-  agents triage                   Show triage summary (what needs work)
-  agents running                  List all active CLI LLM sessions
+YOUR WORK
+  work create --title "..." --body "..." [--priority H|N|L] [--agent <n>]
+  work inbox                         Show workspace inbox
+  work send --workspace <path> --title "..." --body "..."
+  checkin                            Agent check-in (heartbeat ping)
+  status "message" [--agent <n>]     Report an agent status update
+  done [--blocked "reason"]          Signal task completion (or blocked)
 
-  work create --title "." --body "."  Create a work item
-    [--agent <name>]              Assign to agent (omit for workspace inbox)
-    [--priority high|normal|low]  Set priority
-    [--type prd|milestone|task]   Set work item type
-    [--source feature|issue|...]  Source: feature, issue, crash, security, audit, manual
-  work inbox                      Show workspace-level inbox
-  work send --workspace <path>    Send work to another workspace's inbox
-    --title "..." --body "..."
-  work move --agent <name> --file <f> --from inbox --to active
+AGENT SURFACE (read-only)
+  agents list                        List all agents with work counts
+  agents work <name>                 Show one agent's work items
+  agents triage                      Plain-text summary of what needs work
+  agents running                     List all active CLI LLM sessions
 
-  delegate <agent> <file>         Assign work: creates worktree + launches agent
-  agent complete --agent <n>      Complete work: auto-merge or submit for review
-    --file <filename>             Based on workspace state capability mode
+DELEGATION + REVIEW (managers)
+  delegate <agent> <file>            Assign work: creates worktree + launches agent
+  reviews                            List all pending reviews
+  review approve <agent> <branch>    Merge + clean up worktree
+  review reject <agent> [--reason]   Discard worktree + move work back to inbox
+  review feedback <agent> --message  Request changes without rejecting
 
-  reviews                         List all pending reviews
-  review approve <agent> <branch> Approve: merge + cleanup worktree + delete branch
-  review reject <agent>           Reject: cleanup worktree + move work back to inbox
-    [--reason "..."]
-  review feedback <agent>         Request changes on agent's work
-    --message "..."
+INFO
+  help                               This help
+  help --advanced                    Full CLI reference (daemon lifecycle,
+                                     PTY plumbing, heartbeat CRUD, diagnostics)
+  version                            Show installed CLI version
 
-  commit [-m "message"]           AI Commit — launch Claude to review & commit
-  commit-merge [-m "message"]     AI Commit & Merge — commit then merge into main
+ENVIRONMENT
+  K2SO_PROJECT_PATH   Project root (defaults to $PWD)
+  K2SO_AGENT_NAME     Default agent name when --agent is omitted
 
-  workspace create <path>         Create a new folder + register as workspace
-  workspace open <path>           Register an existing folder as workspace
-  workspace remove <path>         Deregister workspace (keeps files on disk)
-  workspace cleanup               Remove stale worktree records (disk deleted)
+Run `k2so help --advanced` for the full verb surface — every
+heartbeat schedule option, daemon lifecycle, session/terminal
+plumbing, hook diagnostics, and developer aids.
+EOF
+}
 
-  terminal spawn --command "..."  Spawn a sub-terminal in current workspace
-  terminal write <id> "message"   Send text to a running terminal (virtual input)
-  terminal read <id> [--lines N]  Read last N lines from terminal buffer (default: 50)
+cmd_help_advanced() {
+    cat <<'EOF'
+K2SO CLI — Full surface reference
 
-  mode                            Show current workspace settings
-  mode <off|agent|manager>          Set workspace agent mode
-  heartbeat                       Manually trigger heartbeat triage
-  heartbeat wake                  Auto-wake Workspace Manager if inbox work exists
-  heartbeat log [-n <limit>]      Show the recent scheduler decisions (fires + skips)
-  heartbeat <on|off>              Enable/disable automatic heartbeat
-  heartbeat schedule              Show current project schedule
-  heartbeat schedule off          Disable scheduled heartbeat
-  heartbeat schedule hourly       Set hourly mode (repeating within work hours)
-    --start 09:00 --end 17:00     Work hours window
-    --every 30 --unit minutes     Wake frequency (minutes or hours)
-  heartbeat schedule daily        Set daily schedule
-    --time 09:00                  Time to wake
-  heartbeat schedule weekly       Set weekly schedule
-    --days mon,wed,fri --time 09:00
-  heartbeat schedule monthly      Set monthly schedule
-    --days 1,15 --time 09:00      Specific days of month
-  heartbeat schedule yearly       Set yearly schedule
-    --months jan,jul --time 09:00
-  heartbeat set --agent <n>        Set adaptive heartbeat config
-    [--interval N] [--phase ".."]   Interval in seconds, work phase
-    [--mode heartbeat|persistent]   Execution mode
-  heartbeat get --agent <name>    Read agent's heartbeat config
-  heartbeat force --agent <name>  Force immediate wake for an agent
-  heartbeat noop --agent <name>   Report no work found (triggers auto-backoff)
-  heartbeat action --agent <name> Report action taken (resets backoff)
+Grouped by audience. The general-use subset is duplicated here
+for completeness. See `k2so help` for the curated general list.
 
-  # Multi-heartbeat CRUD (per-workspace named schedules)
-  heartbeat add --name <n> <spec>  Create a named heartbeat
+════════════════════════════════════════════════════════════════
+  COMMUNICATION
+════════════════════════════════════════════════════════════════
+  msg <target> "text" [--wake]           Send a message (wraps the
+                                         awareness primitive post-0.34.0).
+  signal <target> <kind> <payload>       Emit a raw AgentSignal.
+    [--inbox]                              Delivery::Inbox (async).
+    [--from <sender>]                      Sender identity; default $K2SO_AGENT_NAME|"cli".
+  roster                                 Who's online + inbox-reachable.
+  feed [--agent <n>] [--limit N]         View activity feed.
+  connections list|add|remove <path>     Cross-workspace link management.
+
+════════════════════════════════════════════════════════════════
+  WORK ITEMS
+════════════════════════════════════════════════════════════════
+  work create --title "..." --body "..." [--agent <n>] [--priority H|N|L]
+              [--type prd|milestone|task] [--source feature|issue|crash|security|audit|manual]
+  work inbox                             Workspace-level inbox.
+  work send --workspace <path> --title "..." --body "..."
+                                         Send work to another workspace's inbox.
+  work move --agent <n> --file <f> --from inbox --to active
+
+════════════════════════════════════════════════════════════════
+  AGENT MANAGEMENT
+════════════════════════════════════════════════════════════════
+  agent create <name> --role "..."       Create agent (both `agent` and
+                                         `agents` are accepted).
+  agent update --name <n> --field <f> --value "..."
+                                         Update frontmatter or ## section.
+  agent delete <name> [--force]          Delete agent + work dirs.
+  agent complete --agent <n> --file <f>  Auto-merge or submit for review
+                                         based on state capability mode.
+  agent list|profile <name>              Read agent metadata.
+
+  agents list|work <n>|status <n>|profile <n>
+  agents create|delete (aliases of `agent *`)
+  agents launch <n>                      Launch agent's Claude session.
+  agents generate-md <n>                 Generate agent's CLAUDE.md.
+  agents lock <n>|unlock <n>             Manual session-lock manipulation.
+  agents triage                          Read-only pending-work summary.
+  agents running                         Active CLI LLM sessions.
+
+════════════════════════════════════════════════════════════════
+  DELEGATION + REVIEW
+════════════════════════════════════════════════════════════════
+  delegate <agent> <file>                Creates worktree + launches agent.
+  reviews                                Pending reviews.
+  review approve <agent> <branch>        Merge + clean up worktree.
+  review reject <agent> [--reason "..."] Discard worktree + requeue.
+  review feedback <agent> --message "."  Request changes without rejecting.
+
+════════════════════════════════════════════════════════════════
+  COMMITS (AI-assisted)
+════════════════════════════════════════════════════════════════
+  commit [-m "message"]                  Launch Claude to review & commit.
+  commit-merge [-m "message"]            Commit then merge into main.
+
+════════════════════════════════════════════════════════════════
+  WORKSPACE LIFECYCLE
+════════════════════════════════════════════════════════════════
+  workspace create <path>                Create folder + register.
+  workspace open <path>                  Register existing folder.
+  workspace remove <path>                Deregister (files stay).
+  workspace preview <path>                Preview before register.
+  workspace cleanup                      Remove stale worktree records.
+
+  mode                                   Show current workspace mode.
+  mode <off|agent|manager>               Set mode.
+  state list|get <id>|set <id>           Workspace state (drives capability gates).
+  agentic [on|off]                       Global agentic-systems toggle.
+  settings                               Show all workspace settings.
+
+════════════════════════════════════════════════════════════════
+  HEARTBEATS — per-agent adaptive
+════════════════════════════════════════════════════════════════
+  heartbeat                              Manually trigger triage.
+  heartbeat wake                         Auto-wake Workspace Manager if inbox.
+  heartbeat <on|off>                     Enable/disable automatic heartbeat.
+  heartbeat log [-n N]                   Recent scheduler decisions.
+  heartbeat set --agent <n> [--interval N] [--phase "..."] [--mode heartbeat|persistent]
+  heartbeat get --agent <n>              Read config.
+  heartbeat force --agent <n>            Force immediate wake.
+  heartbeat noop --agent <n>             Report no work (triggers backoff).
+  heartbeat action --agent <n>           Report action (resets backoff).
+
+════════════════════════════════════════════════════════════════
+  HEARTBEATS — per-project schedule
+════════════════════════════════════════════════════════════════
+  heartbeat schedule                     Show current project schedule.
+  heartbeat schedule off                 Disable.
+  heartbeat schedule hourly --start 09:00 --end 17:00 --every 30 --unit minutes
+  heartbeat schedule daily   --time 09:00
+  heartbeat schedule weekly  --days mon,wed,fri --time 09:00
+  heartbeat schedule monthly --days 1,15 --time 09:00
+  heartbeat schedule yearly  --months jan,jul --time 09:00
+
+════════════════════════════════════════════════════════════════
+  HEARTBEATS — named multi-schedule CRUD
+════════════════════════════════════════════════════════════════
+  heartbeat add --name <n> <spec>        Create a named heartbeat
     --daily|--weekly|--monthly|--yearly|--hourly plus --time, --days, etc.
-  heartbeat list                  Table of heartbeats for this workspace
-  heartbeat show <name>           Single heartbeat details [--json]
-  heartbeat edit <name> <spec>    Change schedule of existing heartbeat
-  heartbeat remove <name>         Delete heartbeat + its folder
-  heartbeat rename <old> <new>    Rename a heartbeat (folder + DB)
-  heartbeat enable <name>         Resume scheduling for this heartbeat
-  heartbeat disable <name>        Pause scheduling for this heartbeat
-  heartbeat status <name>         Recent fire history for one heartbeat [-n N]
-  heartbeat wakeup <name>         Print the wakeup.md contents
-    [--path-only]                 Print only the absolute path (scripting)
-    [--edit]                      Open the file in $EDITOR
+  heartbeat list                         Table of heartbeats.
+  heartbeat show <n>                     Single heartbeat details [--json].
+  heartbeat edit <n> <spec>              Change schedule.
+  heartbeat remove <n>                   Delete heartbeat + folder.
+  heartbeat rename <old> <new>           Rename folder + DB row.
+  heartbeat enable <n>|disable <n>       Resume/pause scheduling.
+  heartbeat status <n> [-n N]            Recent fire history.
+  heartbeat wakeup <n> [--path-only] [--edit]
+                                         Print/edit the WAKEUP.md.
 
-  agentic                         Show agentic systems status (on/off)
-  agentic <on|off>                Enable/disable agentic systems globally
+════════════════════════════════════════════════════════════════
+  TERMINAL / SESSION PLUMBING
+════════════════════════════════════════════════════════════════
+  terminal spawn --command "..."         Spawn a sub-terminal.
+  terminal write <id> "message"          Virtual input (paste + Enter).
+  terminal read <id> [--lines N]         Last N lines from buffer.
 
-  state list                      List all workspace states
-  state get <state-id>            Get details of a workspace state
-  state set <state-id>            Assign a state to the current workspace
+  sessions spawn --agent <n> [--command <cmd>] [--cwd <path>]
+                                         0.34.0 Session Stream spawn.
+  sessions list [--json]                 List known sessions on disk.
+  sessions compact                       Compact the archive ring.
 
-  settings                        Show all workspace settings
+════════════════════════════════════════════════════════════════
+  DIAGNOSTICS
+════════════════════════════════════════════════════════════════
+  hooks status [--limit N] [--json]      Hook pipeline state
+                                         (claude/cursor/gemini injection +
+                                         recent /hook/complete events).
+  reserve <paths...>                     Reserve file paths for exclusive editing.
+  release [paths...]                     Release reservations.
 
-  checkin [--agent <name>]        Agent check-in (heartbeat ping)
-  status "message" [--agent <n>]  Report agent status message
-  done [--blocked "reason"]       Signal task completion (or blocked)
-  msg <target> "text"             Send a message to another agent
-  reserve <paths...>              Reserve file paths for exclusive editing
-  release [paths...]              Release reserved paths (all if none given)
+════════════════════════════════════════════════════════════════
+  DAEMON LIFECYCLE
+════════════════════════════════════════════════════════════════
+  daemon status [--json]                 PID, port, uptime.
+  daemon start|stop|restart              launchctl bootstrap/bootout.
+  daemon log [--lines N]                 Tail stdout/stderr logs.
+  daemon uninstall                       Remove plist entirely.
 
-  app-update                      Check for app updates or download a version
-  app-update --list               List available releases
-  app-update <version>            Download and open a specific version
-  update                          Update CLI to latest version from GitHub
-  update --check                  Check if an update is available
-  version                         Show installed CLI version
+════════════════════════════════════════════════════════════════
+  SKILLS + COMPANION
+════════════════════════════════════════════════════════════════
+  skills                                 Skill management (see subcommands).
+  companion                              Companion API server (start/stop/config).
 
-  help                            Show this help message
+════════════════════════════════════════════════════════════════
+  UPDATES
+════════════════════════════════════════════════════════════════
+  app-update                             Check for app updates.
+  app-update --list                      List releases.
+  app-update <version>                   Download a version.
+  update                                 Update the CLI script.
+  update --check                         Check for CLI updates.
 
-ENVIRONMENT:
-  K2SO_PORT          Port of K2SO's HTTP server (set automatically)
-  K2SO_HOOK_TOKEN    Auth token (set automatically)
-  K2SO_PROJECT_PATH  Project root (defaults to $PWD)
-  K2SO_AGENT_NAME    Default agent name for skill commands
+════════════════════════════════════════════════════════════════
+  ENVIRONMENT
+════════════════════════════════════════════════════════════════
+  K2SO_PORT           Daemon port (auto-discovered from ~/.k2so/heartbeat.port).
+  K2SO_HOOK_TOKEN     Auth token (auto-discovered from ~/.k2so/heartbeat.token).
+  K2SO_PROJECT_PATH   Project root (defaults to $PWD).
+  K2SO_AGENT_NAME     Default agent name when --agent is omitted.
 EOF
 }
 
@@ -2397,7 +2887,7 @@ cmd_update() {
 
     # Extract the version from the remote script
     local remote_version
-    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.33.0"//')
+    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.34.0"//')
     if [ -z "$remote_version" ]; then
         echo "Error: Could not parse remote version." >&2
         exit 1
@@ -2586,6 +3076,18 @@ case "${1:-help}" in
     msg)
         shift; cmd_msg "$@"
         ;;
+    signal)
+        # 0.34.0 Awareness Bus — k2so signal <target> <kind> <payload>
+        shift; cmd_signal "$@"
+        ;;
+    roster)
+        # 0.34.0 roster — "who's in the office?"
+        shift; cmd_roster "$@"
+        ;;
+    sessions)
+        # 0.34.0 Phase 3.1 — k2so sessions spawn --agent foo
+        shift; cmd_sessions "$@"
+        ;;
     reserve)
         shift; cmd_reserve "$@"
         ;;
@@ -2614,7 +3116,12 @@ case "${1:-help}" in
         echo "k2so $K2SO_CLI_VERSION"
         ;;
     help|--help|-h)
-        cmd_help
+        # Guard against `set -u` when no trailing args.
+        if [ $# -gt 0 ]; then shift; fi
+        cmd_help "$@"
+        ;;
+    help-advanced)
+        cmd_help_advanced
         ;;
     *)
         echo "Unknown command: $1" >&2

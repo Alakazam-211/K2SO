@@ -17,17 +17,38 @@
 //!
 //! # Scaffolding pass (0.33.0-dev)
 //!
-//! Binds a loopback TCP listener on a random port, writes the port +
-//! freshly-generated auth token to `~/.k2so/daemon.port` and
-//! `~/.k2so/daemon.token` (note: **not** `heartbeat.port` yet — that's
-//! still owned by src-tauri's agent_hooks server; reconciliation comes
-//! when agent_hooks migrates into core), then answers `GET /ping` with a
-//! 200 OK. Enough to prove the lifecycle end-to-end (launchd spawns the
-//! binary, plist is loadable, port file discoverable, token-auth path
-//! exercised) without yet taking responsibility for agent state.
+//! Binds a loopback TCP listener on a random port and publishes the
+//! port + freshly-generated auth token through four filesystem
+//! channels:
+//!
+//! - `~/.k2so/daemon.port` / `~/.k2so/daemon.token` — daemon-specific
+//!   addresses used by Tauri's `DaemonClient` and by
+//!   `k2so daemon status` to reach the daemon's control-plane
+//!   endpoints regardless of who owns the CLI-facing HTTP surface.
+//! - `~/.k2so/heartbeat.port` / `~/.k2so/heartbeat.token` — **the**
+//!   CLI-facing surface since Phase 4 H7. Pre-Phase-4 this file was
+//!   owned by Tauri's agent_hooks HTTP server; H7 retires that
+//!   listener and makes the daemon the sole writer. The CLI
+//!   (`cli/k2so`) + every filesystem hook script reads these files
+//!   to discover the server on every request, so a daemon restart
+//!   (which rotates the random port) propagates instantly without
+//!   any running consumer needing to be restarted itself.
 
+mod agents_routes;
+mod awareness_ws;
 mod cli;
+mod cli_response;
+mod companion_routes;
 mod events;
+mod pending_live;
+mod providers;
+mod session_map;
+mod sessions_ws;
+mod signal_format;
+mod spawn;
+mod terminal_routes;
+mod triage;
+mod watchdog;
 
 use std::fs;
 use std::io::Write;
@@ -109,11 +130,31 @@ async fn main() {
 
     let token = generate_token();
 
+    // Daemon-specific port/token files (read by Tauri's daemon_client
+    // for its internal HTTP client and by `k2so daemon status`). These
+    // have existed since 0.33.0 and are intentionally separate from
+    // heartbeat.port to avoid clashes while the Tauri agent_hooks
+    // listener coexisted.
     if let Err(e) = write_restricted(&k2so_dir.join("daemon.port"), port.to_string().as_bytes()) {
         log_debug!("[daemon] WARN: write daemon.port: {e}");
     }
     if let Err(e) = write_restricted(&k2so_dir.join("daemon.token"), token.as_bytes()) {
         log_debug!("[daemon] WARN: write daemon.token: {e}");
+    }
+
+    // H7: eager claim of heartbeat.port + heartbeat.token. Before
+    // Phase 4, Tauri's agent_hooks HTTP server was the primary owner
+    // of these files; the daemon only took over via the 2-second-
+    // delayed `run_heartbeat_port_watchdog` when Tauri wasn't
+    // running. H7 flips that around: the daemon owns heartbeat.port
+    // unconditionally at startup, and Tauri stops binding its own
+    // listener. The CLI (`cli/k2so`) + every launchd hook script
+    // read these files to discover the sole HTTP server.
+    if let Err(e) = write_restricted(&k2so_dir.join("heartbeat.port"), port.to_string().as_bytes()) {
+        log_debug!("[daemon] WARN: write heartbeat.port: {e}");
+    }
+    if let Err(e) = write_restricted(&k2so_dir.join("heartbeat.token"), token.as_bytes()) {
+        log_debug!("[daemon] WARN: write heartbeat.token: {e}");
     }
 
     // Publish port + token into the shared static so the rest of core
@@ -122,10 +163,9 @@ async fn main() {
     k2so_core::hook_config::set_token(token.clone());
 
     log_debug!(
-        "[daemon] Listening on 127.0.0.1:{} — port file {} token file {}",
+        "[daemon] Listening on 127.0.0.1:{} — daemon.{{port,token}} + heartbeat.{{port,token}} published to {}",
         port,
-        k2so_dir.join("daemon.port").display(),
-        k2so_dir.join("daemon.token").display()
+        k2so_dir.display()
     );
 
     // Event broadcast channel: the daemon's AgentHookEventSink publishes
@@ -133,6 +173,43 @@ async fn main() {
     let (event_tx, _) = broadcast::channel::<WireEvent>(EVENT_CHANNEL_CAP);
     let event_tx = Arc::new(event_tx);
     k2so_core::agent_hooks::set_sink(Box::new(DaemonBroadcastSink::new((*event_tx).clone())));
+
+    // 0.34.0 Phase 3.1 — register the daemon-side InjectProvider +
+    // WakeProvider so awareness::egress can actually reach live
+    // sessions. Before this, signals to live targets landed in the
+    // bus + activity_feed but never in the target's PTY.
+    providers::register_all();
+
+    // Phase 3.1 F3 — boot-time pending-live replay. Previous
+    // daemon-run may have queued signals for offline agents that
+    // never got injected (daemon crashed before the session came
+    // online). Log them so operators can eyeball the queue; the
+    // signals stay on disk until a session spawns for that agent
+    // and drains them.
+    let pending_summary = pending_live::replay_all();
+    for (agent, sigs) in &pending_summary {
+        log_debug!(
+            "[daemon/boot] {} pending-live signals queued for agent {} (will deliver on next spawn)",
+            sigs.len(),
+            agent
+        );
+        // Re-enqueue so the next spawn's drain path finds them —
+        // `replay_all` deletes on read, so we need to put them
+        // back for the spawn-time drain to pick up. Tests cover
+        // this round-trip.
+        for sig in sigs {
+            let _ = pending_live::enqueue(sig, agent);
+        }
+    }
+
+    // Phase 3.2 G1 — harness watchdog. Tails session_map + the
+    // session registry, logs + emits watchdog SemanticEvent frames
+    // when sessions go idle past configured thresholds, and
+    // escalates to Ctrl-C / SIGKILL. Config is read from env vars
+    // (K2SO_WATCHDOG_*); set K2SO_WATCHDOG_DISABLED=1 to turn it
+    // off entirely. See `watchdog::config_from_env` for the
+    // defaults.
+    let _watchdog_handle = watchdog::spawn(watchdog::config_from_env());
 
     // heartbeat.port watchdog — see `run_heartbeat_port_watchdog` docs.
     // The daemon takes over `~/.k2so/heartbeat.port` whenever Tauri
@@ -226,13 +303,34 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         }
     };
 
-    if method != "GET" {
+    // Phase 4.5: handle CORS preflight before the method allowlist.
+    // The Tauri WebView origin (tauri://localhost or http://localhost:5173
+    // in dev) is cross-origin relative to http://127.0.0.1:<port>, so
+    // the browser sends an OPTIONS preflight before every POST. We
+    // answer it with permissive CORS headers — token auth still
+    // gates every real request, so `Access-Control-Allow-Origin: *`
+    // adds no security risk and avoids hard-coding every possible
+    // Tauri dev-server port.
+    if method == "OPTIONS" {
+        let _ = stream.read(&mut buf).await;
+        send_cors_preflight(&mut stream).await;
+        return;
+    }
+
+    // Most routes are GET. Specific POST-accepting routes are
+    // allowlisted here so non-GET hits other paths get a clean 405.
+    let is_post = method == "POST";
+    let post_allowed = matches!(
+        path_and_query.split_once('?').map(|(p, _)| p).unwrap_or(path_and_query),
+        "/cli/awareness/publish" | "/cli/sessions/spawn" | "/cli/sessions/close"
+    );
+    if method != "GET" && !(is_post && post_allowed) {
         let _ = stream.read(&mut buf).await;
         send_response(
             &mut stream,
             "405 Method Not Allowed",
             "application/json",
-            r#"{"error":"only GET is supported"}"#,
+            r#"{"error":"method not allowed for this route"}"#,
         )
         .await;
         return;
@@ -316,6 +414,102 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             let body = k2so_core::agent_hooks::handle_hook_complete(&params);
             send_response(&mut stream, "200 OK", "application/json", body).await;
         }
+        // Session Stream WS subscribe endpoint (0.34.0 Phase 2).
+        // Lives on a /cli/ path but routes to the WS handler rather
+        // than cli::dispatch because it's an HTTP upgrade, not a
+        // JSON request. Branch must precede the generic /cli/
+        // catchall below or the dispatch would swallow it.
+        "/cli/sessions/subscribe" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let params = parse_params(&path, &query);
+            sessions_ws::serve_session_subscribe_connection(stream, params).await;
+        }
+        // Awareness Bus endpoints (0.34.0 Phase 3).
+        // `/cli/awareness/publish` — POST JSON body → egress::deliver
+        // `/cli/awareness/subscribe` — WS, streams bus signals out
+        "/cli/awareness/publish" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let result = awareness_ws::handle_publish(&body_bytes);
+            send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        "/cli/awareness/subscribe" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            awareness_ws::serve_awareness_subscribe_connection(stream).await;
+        }
+        // POST /cli/sessions/spawn — daemon-side session spawn
+        // (Phase 3.1 F2). External callers send a JSON SpawnRequest;
+        // daemon spawns the session, registers it in session_map
+        // keyed by agent_name, returns {sessionId, agentName}.
+        "/cli/sessions/spawn" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let result = awareness_ws::handle_sessions_spawn(&body_bytes);
+            send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/sessions/close — frontend calls this on tab
+        // unmount. Removes from session_map; Arc drop → child kill
+        // + PTY master FD close. Without this, every Cmd+T leaks an
+        // FD and ~14 spawns hit the per-process limit.
+        "/cli/sessions/close" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let result = awareness_ws::handle_sessions_close(&body_bytes);
+            send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
         // Unified /cli/* dispatch. Auth + param validation +
         // per-route handler all live in `cli::dispatch`; main.rs
         // just translates the CliResponse into bytes.
@@ -356,35 +550,30 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
     }
 }
 
-/// Claim `~/.k2so/heartbeat.port` when it's unowned.
+/// Re-claim `~/.k2so/heartbeat.port` if something else has stomped it.
 ///
-/// The CLI (+ launchd's heartbeat script) reads `heartbeat.port` to
-/// find whatever K2SO server is alive. Pre-0.33.0 that was exclusively
-/// the Tauri app's `agent_hooks` server. With the daemon, there are
-/// now two potential writers:
+/// As of Phase 4 H7 the daemon is the **sole** writer of this file:
+/// it's written eagerly during `main()` startup (alongside
+/// daemon.port/daemon.token). Before H7 the Tauri agent_hooks server
+/// owned it, and this watchdog existed to fill the gap when Tauri
+/// wasn't running.
 ///
-/// - **Tauri running** — Tauri's existing startup writes its own port
-///   into `heartbeat.port` and removes it on graceful quit. CLI hits
-///   Tauri.
-/// - **Tauri quit** — no-one writes; CLI can't find a server. The
-///   daemon is running 24/7 via launchd but the CLI doesn't know which
-///   port without a published file.
+/// Post-H7 the watchdog is a pure safety net — its job is to restore
+/// the file if an external process deletes it (disk cleanup, a stale
+/// Tauri build that didn't get the H7 patch, user `rm`). Every
+/// `INTERVAL_SECS` seconds it:
 ///
-/// The watchdog solves the second case without fighting Tauri for
-/// ownership of the first. Every `INTERVAL_SECS` seconds it:
-///
-/// 1. Reads `heartbeat.port`. Missing? → write own port + token.
+/// 1. Reads `heartbeat.port`. Missing? → re-write own port + token.
 /// 2. Parses the port, tries a TCP connect to 127.0.0.1:<that_port>.
-///    - Connect succeeds → some server (probably Tauri) is live; leave
-///      it alone. Even if that port is ours, that just means we're
-///      already the owner.
-///    - Connect fails → stale file (writer crashed / Tauri got killed
-///      without its cleanup hook running). Claim ownership by
-///      overwriting.
+///    - Connect succeeds → a server holds the port (should be us;
+///      if something else took it, we can't take back without
+///      restarting). Leave alone.
+///    - Connect fails → stale file, we've lost the bind for some
+///      reason. Re-claim.
 ///
-/// This is a **clean-takeover model**: we never truncate a live server
-/// from `heartbeat.port`. Tauri's own startup overwrite + quit-time
-/// delete still works exactly as before; we just fill the gap.
+/// The 2-second startup delay avoids redundant writes with the eager
+/// startup write path — we've already staked our claim before any
+/// other process could.
 async fn run_heartbeat_port_watchdog(
     k2so_dir: PathBuf,
     own_port: u16,
@@ -583,102 +772,11 @@ fn handle_cli_heartbeat(
     }
 }
 
-/// Serve `/cli/agents/triage`. Runs scheduler_tick to decide which
-/// agents to wake, composes each agent's wake prompt, and spawns a
-/// PTY per agent via `spawn_wake_headless`. Also runs the multi-
-/// heartbeat tick and spawns for each eligible `HeartbeatFireCandidate`.
-/// Writes the response body (always JSON, always 200 from the HTTP
-/// layer — errors are captured in the body's `error` field).
-///
-/// Intentionally simpler than src-tauri's agent_hooks triage path:
-/// skips the worktree-resume + inbox-delegate branches (those require
-/// k2so_agents_build_launch, which is still src-tauri-only). Lid-
-/// closed wakes get the "compose wakeup prompt + launch claude"
-/// behavior; resume + delegate stay supervised.
+/// Thin forwarder to `triage::handle_triage` (read-only summary).
+/// Kept as a named fn here because `cli::dispatch` (in main.rs's
+/// module tree) references `crate::handle_agents_triage`.
 fn handle_agents_triage(project_path: &str) -> String {
-    use k2so_core::agents::{heartbeat, scheduler, wake};
-
-    let launchable = match scheduler::k2so_agents_scheduler_tick(project_path.to_string()) {
-        Ok(v) => v,
-        Err(e) => {
-            return serde_json::json!({
-                "error": e,
-                "count": 0,
-                "launched": [],
-                "heartbeats": [],
-            })
-            .to_string()
-        }
-    };
-
-    let mut launched: Vec<String> = Vec::new();
-    for agent_name in &launchable {
-        // Compose the wake prompt per agent type. `__lead__` uses the
-        // workspace manager's wake template + default heartbeat body;
-        // other agents use their per-type wakeup.md.
-        let prompt = if agent_name == "__lead__" {
-            wake::compose_wake_prompt_for_lead(project_path)
-        } else {
-            match wake::compose_wake_prompt_for_agent(project_path, agent_name) {
-                Some(p) => p,
-                None => continue, // agent-template: never wakes autonomously
-            }
-        };
-        match wake::spawn_wake_headless(agent_name, project_path, &prompt) {
-            Ok(_tid) => launched.push(agent_name.clone()),
-            Err(e) => {
-                k2so_core::log_debug!(
-                    "[daemon/triage] spawn failed for {}: {}",
-                    agent_name,
-                    e
-                );
-            }
-        }
-    }
-
-    // Multi-heartbeat tick — each candidate carries its own explicit
-    // wakeup path so different heartbeats can fire different workflows.
-    let candidates = heartbeat::k2so_agents_heartbeat_tick(project_path);
-    let mut hb_fired: Vec<String> = Vec::new();
-    for cand in &candidates {
-        if scheduler::is_agent_locked(project_path, &cand.agent_name) {
-            k2so_core::log_debug!(
-                "[daemon/triage] skipped_locked hb={} agent={}",
-                cand.name,
-                cand.agent_name
-            );
-            continue;
-        }
-        let prompt = match wake::compose_wake_prompt_from_path(std::path::Path::new(
-            &cand.wakeup_path_abs,
-        )) {
-            Some(p) => p,
-            None => continue,
-        };
-        match wake::spawn_wake_headless(&cand.agent_name, project_path, &prompt) {
-            Ok(_tid) => {
-                heartbeat::stamp_heartbeat_fired(project_path, &cand.name);
-                hb_fired.push(cand.name.clone());
-            }
-            Err(e) => {
-                k2so_core::log_debug!(
-                    "[daemon/triage] hb spawn failed for {}/{}: {}",
-                    cand.agent_name,
-                    cand.name,
-                    e
-                );
-            }
-        }
-    }
-
-    let mut all = launched.clone();
-    all.extend(hb_fired.clone());
-    serde_json::json!({
-        "count": all.len(),
-        "launched": all,
-        "heartbeats": hb_fired,
-    })
-    .to_string()
+    crate::triage::handle_triage(project_path)
 }
 
 /// Dispatch `/cli/heartbeat-log` (the "all recent fires" diagnostic
@@ -715,12 +813,110 @@ fn token_ok(query: &str, expected: &str) -> bool {
 }
 
 async fn send_response(stream: &mut TcpStream, status: &str, ct: &str, body: &str) {
+    // CORS headers on every response so the Tauri WebView (cross-
+    // origin from tauri://localhost or http://localhost:5173 to
+    // http://127.0.0.1:<port>) can read the body. Token auth
+    // gates every real request so permissive origin adds no risk.
     let resp = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {status}\r\n\
+         Content-Type: {ct}\r\n\
+         Content-Length: {}\r\n\
+         Access-Control-Allow-Origin: *\r\n\
+         Access-Control-Expose-Headers: *\r\n\
+         Connection: close\r\n\r\n{}",
         body.len(),
         body,
     );
     let _ = stream.write_all(resp.as_bytes()).await;
+}
+
+/// Respond to a CORS preflight (OPTIONS) with permissive headers so
+/// the WebView accepts the subsequent GET/POST. 204 No Content is
+/// the conventional preflight response status.
+async fn send_cors_preflight(stream: &mut TcpStream) {
+    let resp = "HTTP/1.1 204 No Content\r\n\
+        Access-Control-Allow-Origin: *\r\n\
+        Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+        Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
+        Access-Control-Max-Age: 600\r\n\
+        Content-Length: 0\r\n\
+        Connection: close\r\n\r\n";
+    let _ = stream.write_all(resp.as_bytes()).await;
+}
+
+/// Read the body of a POST request. Consumes the request line and
+/// headers from the peeked stream, then returns whatever bytes
+/// follow the `\r\n\r\n` separator up to the Content-Length header.
+///
+/// MVP implementation — assumes the full request arrived in the
+/// 4KB peek buffer (fine for the single JSON AgentSignal payloads
+/// E7 + E8 handle). Production-grade Content-Length-driven
+/// streaming is deferred; the largest signal we expect is ~1KB, so
+/// 4KB is 4× the headroom.
+async fn read_post_body(stream: &mut TcpStream, buf: &mut [u8]) -> Vec<u8> {
+    // Phase 4.5: the old single-read version worked with curl (which
+    // batches headers + body into one TCP send) but broke with
+    // browser fetch, which sends headers in one packet and body in
+    // a separate packet. A single `stream.read()` would only return
+    // the headers, leaving the body unread — and the JSON parser
+    // got "EOF at column 0".
+    //
+    // Loop until we have the full body: read headers (first chunk),
+    // parse Content-Length, then keep reading until we've got that
+    // many body bytes or EOF.
+    let mut accumulated: Vec<u8> = Vec::new();
+    let mut header_end: Option<usize> = None;
+    let mut content_length: Option<usize> = None;
+
+    loop {
+        // Read into `buf` and append to `accumulated` until headers
+        // end is found.
+        let n = match stream.read(buf).await {
+            Ok(0) => break, // EOF
+            Ok(n) => n,
+            Err(_) => return Vec::new(),
+        };
+        accumulated.extend_from_slice(&buf[..n]);
+
+        if header_end.is_none() {
+            if let Some(pos) = accumulated
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+            {
+                header_end = Some(pos + 4);
+                let headers_str =
+                    std::str::from_utf8(&accumulated[..pos]).unwrap_or("");
+                content_length = headers_str.lines().find_map(|line| {
+                    let lower = line.to_ascii_lowercase();
+                    lower
+                        .strip_prefix("content-length:")
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                });
+            }
+        }
+
+        // Once headers end is known, check if we have the whole body.
+        if let (Some(body_start), Some(clen)) = (header_end, content_length) {
+            if accumulated.len() >= body_start + clen {
+                return accumulated[body_start..body_start + clen].to_vec();
+            }
+        }
+        // Without Content-Length, fall back to "one read gave us
+        // everything" heuristic once we've seen the headers.
+        if let (Some(body_start), None) = (header_end, content_length) {
+            return accumulated[body_start..].to_vec();
+        }
+    }
+
+    // EOF before we got the full body (or before headers ended).
+    // Return whatever we have between header end and EOF; caller's
+    // parser will surface a helpful error if it's incomplete.
+    if let Some(body_start) = header_end {
+        if accumulated.len() > body_start {
+            return accumulated[body_start..].to_vec();
+        }
+    }
+    Vec::new()
 }
 
 /// Write `contents` to `path` with permissions 0600 so other users on the

@@ -44,6 +44,8 @@ import CountdownOverlay from './components/Timer/CountdownOverlay'
 import MemoDialog from './components/Timer/MemoDialog'
 import ExtendTimerDialog from './components/Timer/ExtendTimerDialog'
 import { useCursorMigrationCheck } from './hooks/useCursorMigrationCheck'
+import { HarnessLab } from './kessel/HarnessLab'
+import { prewarmDaemonWs } from './kessel/daemon-ws'
 
 /** Parse focus mode project ID from URL hash (#focus=<projectId>) */
 function parseFocusProjectId(): string | null {
@@ -208,11 +210,26 @@ export default function App(): React.JSX.Element {
   const settingsOpen = useSettingsStore((s) => s.settingsOpen)
   const openSettings = useSettingsStore((s) => s.openSettings)
 
+  // Phase 4.5 — Kessel Harness Lab (Cmd+Shift+K). Dev/visual
+  // validation surface for the new Session Stream pipeline. Not
+  // persisted to any store since it's intended as a sandbox.
+  const [kesselLabOpen, setKesselLabOpen] = useState(false)
+
   const toggleCommandPalette = useCommandPaletteStore((s) => s.toggle)
 
   const toggleAssistant = useAssistantStore((s) => s.toggle)
   const toggleReviewQueue = useReviewQueueStore((s) => s.toggle)
   const toggleRunningAgents = useRunningAgentsStore((s) => s.toggle)
+
+  // Prewarm the daemon_ws_url cache at app mount. The underlying
+  // Tauri command reads two files from ~/.k2so/ on every call; the
+  // result is stable for the app session so one fetch is enough.
+  // Fire-and-forget — the first Kessel pane would trigger this
+  // anyway, but kicking it off at mount hides the ~5-10ms disk I/O
+  // behind the rest of the initial render.
+  useEffect(() => {
+    prewarmDaemonWs()
+  }, [])
 
   // Cmd+, settings, Cmd+K command palette, Cmd+L assistant, Cmd+P review queue
   useEffect(() => {
@@ -236,6 +253,11 @@ export default function App(): React.JSX.Element {
       if (e.metaKey && e.key === 'j') {
         e.preventDefault()
         toggleRunningAgents()
+      }
+      // Cmd+Shift+K — open the Kessel Harness Lab (Phase 4.5).
+      if (e.metaKey && e.shiftKey && (e.key === 'K' || e.key === 'k')) {
+        e.preventDefault()
+        setKesselLabOpen((v) => !v)
       }
       // Cmd+[ to go back, Cmd+] to go forward
       if (e.metaKey && !e.shiftKey && e.key === '[') {
@@ -610,6 +632,7 @@ export default function App(): React.JSX.Element {
         <CountdownOverlay />
         <MemoDialog />
       <ExtendTimerDialog />
+      <HarnessLab open={kesselLabOpen} onClose={() => setKesselLabOpen(false)} />
       </>
     )
   }
@@ -658,6 +681,7 @@ export default function App(): React.JSX.Element {
       <CountdownOverlay />
       <MemoDialog />
       <ExtendTimerDialog />
+      <HarnessLab open={kesselLabOpen} onClose={() => setKesselLabOpen(false)} />
       {showQuitDialog && (
         <AgentCloseDialog
           agents={quitAgents}

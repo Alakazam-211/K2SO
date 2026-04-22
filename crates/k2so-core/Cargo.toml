@@ -1,6 +1,6 @@
 [package]
 name = "k2so-core"
-version = "0.33.0"
+version = "0.34.0"
 edition = "2021"
 license = "MIT"
 description = "K2SO device-local core library: db, llm, terminal, companion, scheduler, agent_hooks, push_adapter. Linked by both src-tauri (Tauri app, thin client) and k2so-daemon (persistent-agent runtime)."
@@ -16,6 +16,12 @@ path = "src/lib.rs"
 # Enable in src-tauri's [dev-dependencies] entry; NOT a runtime feature.
 test-util = []
 
+# Gates the 0.34.0 Session Stream + Awareness Bus primitives (session/,
+# awareness/, term/). Flag off = modules don't compile in; zero impact
+# on the alacritty-backed terminal path. See the PRD at
+# .k2so/prds/session-stream-and-awareness-bus.md for the phased rollout.
+session_stream = []
+
 [dependencies]
 # Shared primitive deps.
 parking_lot = "0.12"
@@ -27,12 +33,18 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # Serialization: used across db, push, eventually companion and scheduler.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# YAML parser for the nested `launch:` block in agent.md frontmatter
+# (see agents::launch_profile, phase 3.2 G3). The existing
+# parse_frontmatter helper stays for flat key:value callers; the
+# launch-profile loader uses serde_yaml for full nested support.
+serde_yaml = "0.9"
 
 # Time handling in the activity feed + heartbeat audit rows.
 chrono = { version = "0.4", features = ["serde"] }
 
-# UUIDs for agent sessions, heartbeat fires, etc.
-uuid = { version = "1", features = ["v4"] }
+# UUIDs for agent sessions, heartbeat fires, etc. `serde` enables
+# Serialize/Deserialize impls used by session::SessionId (0.34.0).
+uuid = { version = "1", features = ["v4", "serde"] }
 
 # Home-directory lookup for ~/.k2so/k2so.db.
 dirs = "5"
@@ -65,6 +77,16 @@ encoding_rs = "0.8"
 # Terminal backend — VT-compliant parser + PTY management + reflow.
 alacritty_terminal = "0.26.0-rc1"
 portable-pty = "0.8"
+
+# ANSI tokenizer used by the `session_stream`-gated line-mux producer
+# (`term::line_mux`) and the dual-emit PTY reader (`terminal::session_stream_pty`,
+# Phase 2). Pinned to "0.15" to match alacritty_terminal's transitive pin
+# — single `vte` entry in Cargo.lock. `ansi` feature unlocks
+# `vte::ansi::Processor` + `vte::ansi::Handler`, which alacritty's
+# `Term` implements so we can drive the grid ourselves from a custom
+# reader thread without going through alacritty's private
+# `EventLoop::spawn()`.
+vte = { version = "0.15", features = ["std", "ansi"] }
 
 # Glyph rendering (bitmap renderer path) + QOI image encoding for mobile
 # companion snapshots.

@@ -119,6 +119,7 @@ pub fn init_for_tests() -> Arc<ReentrantMutex<Connection>> {
     let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
     run_migrations(&conn).expect("test migrations");
     seed_agent_presets(&conn).expect("test seed");
+    seed_audit_sentinels(&conn).expect("test audit sentinels");
     let handle = Arc::new(ReentrantMutex::new(conn));
     match SHARED.set(handle.clone()) {
         Ok(()) => handle,
@@ -153,6 +154,7 @@ pub fn init_database() -> Result<Arc<ReentrantMutex<Connection>>> {
 
     run_migrations(&conn)?;
     seed_agent_presets(&conn)?;
+    seed_audit_sentinels(&conn)?;
 
     let handle = Arc::new(ReentrantMutex::new(conn));
     // Race-free publish: whoever wins gets their handle stored, losers
@@ -177,6 +179,7 @@ pub(crate) fn bootstrap_test_db_at<P: AsRef<Path>>(path: P) -> Result<()> {
     let conn = open_with_resilience(path)?;
     run_migrations(&conn)?;
     seed_agent_presets(&conn)?;
+    seed_audit_sentinels(&conn)?;
     Ok(())
 }
 
@@ -193,6 +196,7 @@ pub(crate) fn isolated_test_connection() -> Connection {
     let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
     run_migrations(&conn).expect("migrations");
     seed_agent_presets(&conn).expect("seed");
+    seed_audit_sentinels(&conn).expect("audit sentinels");
     conn
 }
 
@@ -239,6 +243,7 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
         ("0029_heartbeat_fires_schedule_name", include_str!("../../drizzle_sql/0029_heartbeat_fires_schedule_name.sql")),
         ("0030_code_migrations", include_str!("../../drizzle_sql/0030_code_migrations.sql")),
         ("0031_skill_regen_version", include_str!("../../drizzle_sql/0031_skill_regen_version.sql")),
+        ("0032_add_use_session_stream", include_str!("../../drizzle_sql/0032_add_use_session_stream.sql")),
     ];
 
     for (name, sql) in migrations {
@@ -364,6 +369,39 @@ pub(crate) fn seed_agent_presets(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    Ok(())
+}
+
+/// Seed the sentinel `projects` rows used by `awareness::egress`
+/// when a signal's workspace doesn't resolve to a real project.
+///
+/// `activity_feed.project_id` has a hard FK on `projects.id`. Without
+/// these rows, any signal from an unregistered workspace (CLI run in
+/// a non-K2SO directory, signals from ad-hoc test harnesses, etc.)
+/// would fail the FK check — audit silently drops, breaking the
+/// "audit always fires" primitive promise locked in the Phase 3 PRD.
+///
+/// Two sentinels:
+/// - `_orphan`  — fallback for `AgentAddress::Agent` / `Workspace`
+///                signals whose workspace id isn't in `projects`.
+/// - `_broadcast` — bucket for `AgentAddress::Broadcast` senders
+///                (no single workspace attributable).
+///
+/// Both are upserted with INSERT OR IGNORE so re-running at boot
+/// never duplicates. Paths/names are human-readable tags — they're
+/// never dereferenced as filesystem paths, but showing them in a
+/// `k2so projects` listing should be obvious.
+pub(crate) fn seed_audit_sentinels(conn: &Connection) -> Result<()> {
+    let sentinels: &[(&str, &str, &str)] = &[
+        ("_orphan", "_orphan", "Orphan audit bucket"),
+        ("_broadcast", "_broadcast", "Broadcast audit bucket"),
+    ];
+    for (id, path, name) in sentinels {
+        conn.execute(
+            "INSERT OR IGNORE INTO projects (id, path, name) VALUES (?1, ?2, ?3)",
+            params![id, path, name],
+        )?;
+    }
     Ok(())
 }
 

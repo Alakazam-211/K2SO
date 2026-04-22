@@ -29,9 +29,19 @@ pub fn update_project_setting(
         "agent_enabled",
         "pinned",
         "tier_id",
+        // 0.34.0 Session Stream opt-in (Phase 2). Values: 'on' | 'off'.
+        "use_session_stream",
     ];
     if !allowed.contains(&field) {
         return Err(format!("Unknown setting: {}", field));
+    }
+    // Validate value for the new enum-like setting so a typo doesn't
+    // silently leave a project in a broken half-state. Existing fields
+    // keep their bare string/int semantics for back-compat.
+    if field == "use_session_stream" && value != "on" && value != "off" {
+        return Err(format!(
+            "use_session_stream must be 'on' or 'off', got {value:?}"
+        ));
     }
 
     let sql = format!("UPDATE projects SET {} = ?1 WHERE path = ?2", field);
@@ -64,9 +74,18 @@ pub fn get_project_settings(project_path: &str) -> Result<serde_json::Value, Str
     let conn = db.lock();
 
     conn.query_row(
-        "SELECT agent_mode, worktree_mode, heartbeat_enabled, agent_enabled, pinned, name, tier_id FROM projects WHERE path = ?1",
+        "SELECT agent_mode, worktree_mode, heartbeat_enabled, agent_enabled, \
+                pinned, name, tier_id, use_session_stream \
+         FROM projects WHERE path = ?1",
         rusqlite::params![project_path],
         |row| {
+            // `use_session_stream` landed in migration 0032 with
+            // default 'off'; expose as a bool for React consumers
+            // (matching every other toggle shape in this struct).
+            let uss_raw = row
+                .get::<_, Option<String>>(7)
+                .unwrap_or(None)
+                .unwrap_or_else(|| "off".to_string());
             Ok(serde_json::json!({
                 "mode": row.get::<_, String>(0).unwrap_or_else(|_| "off".to_string()),
                 "worktreeMode": row.get::<_, i64>(1).unwrap_or(0) == 1,
@@ -75,6 +94,7 @@ pub fn get_project_settings(project_path: &str) -> Result<serde_json::Value, Str
                 "pinned": row.get::<_, i64>(4).unwrap_or(0) == 1,
                 "name": row.get::<_, String>(5).unwrap_or_default(),
                 "stateId": row.get::<_, Option<String>>(6).unwrap_or(None),
+                "useSessionStream": uss_raw == "on",
             }))
         },
     )
@@ -139,4 +159,24 @@ pub fn set_keep_daemon_on_quit(keep: bool) -> Result<(), String> {
     )
     .map(|_| ())
     .map_err(|e| format!("DB update failed: {}", e))
+}
+
+/// Return `true` if the given project has opted into the 0.34.0
+/// Session Stream pipeline (Phase 2). Defaults to `false` when the
+/// project doesn't exist or the column reads NULL (rows inserted
+/// before migration 0032 applied — the ALTER default backfills to
+/// 'off', so NULL here means "unknown project").
+///
+/// Callers pair this with the compile-time `session_stream` feature
+/// flag: both must be true for the dual-emit reader to kick in.
+pub fn get_use_session_stream(project_path: &str) -> bool {
+    let db = crate::db::shared();
+    let conn = db.lock();
+    conn.query_row(
+        "SELECT use_session_stream FROM projects WHERE path = ?1",
+        rusqlite::params![project_path],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .map(|v| v.as_deref() == Some("on"))
+    .unwrap_or(false)
 }

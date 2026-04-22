@@ -63,6 +63,10 @@ interface AlacrittyTerminalViewProps {
   command?: string
   args?: string[]
   onExit?: (exitCode: number) => void
+  /** performance.now() at Cmd+T / Cmd+Shift+T press. Used to log
+   *  end-to-end spawn→visible latency for parity comparison with
+   *  Kessel. See tabs.ts TerminalItemData.spawnedAt. */
+  spawnedAt?: number
 }
 
 function shellEscape(path: string): string {
@@ -167,6 +171,7 @@ export function AlacrittyTerminalView({
   command,
   args,
   onExit,
+  spawnedAt,
 }: AlacrittyTerminalViewProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewportRef = useRef<HTMLDivElement>(null)
@@ -363,6 +368,12 @@ export function AlacrittyTerminalView({
         const { cols, rows } = calculateDimensions()
         lastColsRef.current = cols
         lastRowsRef.current = rows
+        // eslint-disable-next-line no-console
+        console.info(
+          `%c[Alacritty] creating terminal ${terminalId}`,
+          'color:#ff0;font-weight:bold',
+          { cwd, command, args, cols, rows },
+        )
         await invoke('terminal_create', {
           id: terminalId, cwd,
           command: command ?? null, args: args ?? null,
@@ -385,11 +396,103 @@ export function AlacrittyTerminalView({
       ptyIdRef.current = terminalId
       setCreated(true)
 
+      // E2E timing — matches the Kessel side's `spawnedAt → ready` log
+      // so side-by-side comparison is direct.
+      if (spawnedAt !== undefined) {
+        const e2eMs = Math.round(performance.now() - spawnedAt)
+        // eslint-disable-next-line no-console
+        console.info(
+          `%c[Alacritty] ready ${terminalId} e2e=${e2eMs}ms`,
+          'color:#ff0',
+        )
+        requestAnimationFrame(() => {
+          setTimeout(() => {
+            const paintMs = Math.round(performance.now() - spawnedAt)
+            // eslint-disable-next-line no-console
+            console.info(
+              `%c[Alacritty] ${terminalId} first-paint≈${paintMs}ms (Cmd+T → cursor visible)`,
+              'color:#ff0;font-weight:bold',
+            )
+          }, 0)
+        })
+      }
+
       invoke('terminal_set_focus', { id: terminalId, focused: true }).catch((e) => console.warn('[terminal]', e))
+
+      // Parity instrumentation with Kessel's SessionStreamView.
+      // first-frame = first grid update received.
+      // tui-alt-screen = when the TermMode alt-screen bit flips
+      //   (ALT_SCREEN = 1 << 7 in alacritty_terminal's TermMode).
+      // tui-ready = earliest of: alt-screen enter, bracketed-paste
+      //   on (1 << 4), or app-cursor on (1 << 1). Works uniformly
+      //   for Claude (no alt-screen, emits bracketed-paste) and
+      //   vim/htop (alt-screen). Matches the Kessel-side predicate.
+      //
+      // TermMode bit references:
+      //   APP_CURSOR       = 1 << 1
+      //   APP_KEYPAD       = 1 << 2
+      //   BRACKETED_PASTE  = 1 << 4
+      //   ALT_SCREEN       = 1 << 7
+      const MODE_APP_CURSOR = 1 << 1
+      const MODE_BRACKETED_PASTE = 1 << 4
+      const ALT_SCREEN_BIT = 1 << 7
+      let firstFrameAt: number | null = null
+      let altScreenAt: number | null = null
+      let tuiReadyAt: number | null = null
+      let prevMode = 0
 
       // Listen for grid updates (DOM text rendering)
       unlistenGrid = await listen<GridUpdate>(`terminal:grid:${terminalId}`, (event) => {
-        scheduleRender(event.payload)
+        const payload = event.payload
+        if (firstFrameAt === null && spawnedAt !== undefined) {
+          firstFrameAt = performance.now()
+          const ms = Math.round(firstFrameAt - spawnedAt)
+          // eslint-disable-next-line no-console
+          console.info(
+            `%c[Alacritty] ${terminalId} first-frame=${ms}ms (Cmd+T → shell/tui emit)`,
+            'color:#ff0',
+          )
+        }
+        // Detect alt-screen enter.
+        if (
+          altScreenAt === null &&
+          spawnedAt !== undefined &&
+          (payload.mode & ALT_SCREEN_BIT) !== 0
+        ) {
+          altScreenAt = performance.now()
+          const ms = Math.round(altScreenAt - spawnedAt)
+          // eslint-disable-next-line no-console
+          console.info(
+            `%c[Alacritty] ${terminalId} tui-alt-screen=${ms}ms`,
+            'color:#ff0',
+          )
+        }
+        // tui-ready fires on the TRANSITION of any "TUI is active"
+        // bit from 0 → 1. ALT_SCREEN, BRACKETED_PASTE, APP_CURSOR
+        // each indicate the shell/TUI has set up its session and
+        // is ready for user interaction. First one to flip wins.
+        if (tuiReadyAt === null && spawnedAt !== undefined) {
+          const watchedBits =
+            ALT_SCREEN_BIT | MODE_BRACKETED_PASTE | MODE_APP_CURSOR
+          const newlySet = payload.mode & watchedBits & ~prevMode
+          if (newlySet !== 0) {
+            tuiReadyAt = performance.now()
+            const ms = Math.round(tuiReadyAt - spawnedAt)
+            const label =
+              (newlySet & ALT_SCREEN_BIT) !== 0
+                ? 'alt_screen'
+                : (newlySet & MODE_BRACKETED_PASTE) !== 0
+                  ? 'bracketed_paste'
+                  : 'app_cursor'
+            // eslint-disable-next-line no-console
+            console.info(
+              `%c[Alacritty] ${terminalId} tui-ready=${ms}ms (${label} ON → TUI interactive)`,
+              'color:#ff0;font-weight:bold',
+            )
+          }
+        }
+        prevMode = payload.mode
+        scheduleRender(payload)
         useActiveAgentsStore.getState().recordOutput(terminalId)
       })
 
@@ -906,7 +1009,9 @@ export function AlacrittyTerminalView({
         />
       )}
 
-      {/* Debug overlay — only in dev mode */}
+      {/* Debug overlay — only in dev mode. Renderer-label first so
+       *  it's obvious at a glance which pane is Alacritty vs Kessel
+       *  (the two are otherwise visually near-identical). */}
       {import.meta.env.DEV && (
         <div style={{
           position: 'absolute', top: 2, right: 2, padding: '2px 6px',
@@ -914,7 +1019,7 @@ export function AlacrittyTerminalView({
           fontFamily: 'monospace', zIndex: 999, pointerEvents: 'none',
           borderRadius: '3px',
         }}>
-          frames:{debugInfo.frames} offset:{debugInfo.offset} wheel:{debugInfo.wheel} cells:{gridState.cols}x{gridState.rows} cursor:{gridState.cursorCol},{gridState.cursorRow} vis:{gridState.cursorVisible?'Y':'N'} cell:{cellW.toFixed(1)}x{cellH}
+          <strong style={{ color: '#ff0' }}>Alacritty</strong> · frames:{debugInfo.frames} offset:{debugInfo.offset} wheel:{debugInfo.wheel} cells:{gridState.cols}x{gridState.rows} cursor:{gridState.cursorCol},{gridState.cursorRow} vis:{gridState.cursorVisible?'Y':'N'} cell:{cellW.toFixed(1)}x{cellH}
         </div>
       )}
     </div>

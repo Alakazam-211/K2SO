@@ -718,13 +718,61 @@ completion; Phases 1-2 can land earlier as internal plumbing.
 - Flip internal default to "on" once both desktop and mobile render
   correctly.
 
-### Phase 3 — Awareness Bus (2-3 days)
+### Phase 3 — Awareness Bus (2-3 days) — **SHIPPED 2026-04-20**
 
 - APC parser in VTE → `AgentSignal` frames.
 - Bus ingress/routing/egress in k2so-core.
 - Replace `k2so msg --wake`'s inline PTY-inject with a bus emit.
   Fallback stays for Tier 0 targets that aren't APC-aware.
 - `k2so signal` / `k2so awareness tail` CLI commands ship.
+- Commits E1–E8 on `feat/session-stream`. See
+  `.k2so/notes/phase-3-awareness-bus-complete.md`.
+
+### Phase 3.1 — Live inject + spawn + pending-live durability — **SHIPPED 2026-04-20**
+
+Unplanned sub-phase surfaced during Phase 3 implementation: the
+Phase 3 primitives existed but the daemon had no `InjectProvider`
+or `WakeProvider` registered, so `Delivery::Live` signals fell
+through to audit-only. 3.1 closed that gap:
+
+- Daemon-owned `session_map` (`HashMap<agent_name, Arc<SessionStreamSession>>`).
+- `DaemonInjectProvider` + `DaemonWakeProvider` registered at
+  daemon startup.
+- `POST /cli/sessions/spawn` endpoint + `k2so sessions spawn` CLI
+  verb so external callers can create sessions keyed by agent name.
+- Pending-live delivery queue at
+  `~/.k2so/daemon.pending-live/<agent>/<ts>-<uuid>.json` +
+  drain-on-spawn + boot-time replay scan.
+- `activity_feed.metadata` now stores the full `AgentSignal` JSON
+  for reconstructable audit.
+- Commits F1–F3 on `feat/session-stream`. See
+  `.k2so/notes/phase-3.1-live-inject-complete.md`.
+
+### Phase 3.2 — hardening before user-visible release (NEW, PENDING)
+
+Unplanned hardening bucket identified during Phase 3.1 that should
+land before any user-visible 0.34.0 release. Scope:
+
+- **Harness watchdog** — idle-session detection (no frames for
+  N minutes) + SIGTERM/SIGKILL escalation for wedged harnesses.
+  Originally in PRD's Phase 3 scope; deferred here.
+- **Archive NDJSON rotation** — size + time-based rotation of
+  `<project>/.k2so/sessions/<id>/archive.ndjson`. Phase 3.1 MVP
+  freezes at 500MB hard-fail-open; 3.2 adds real rotation + a
+  `k2so session compact <id>` command.
+- **Real scheduler-wake** — `DaemonWakeProvider` currently
+  persists queued signals but doesn't actually *launch* the
+  target agent's session. A real scheduler-wake primitive that
+  launches the session in response to a pending signal closes
+  the last delivery latency gap.
+- **Per-coordination-level message budgets** — Pi-Messenger
+  style none/minimal/moderate/chatty (0/2/5/10 emits per agent
+  per session) to prevent noisy agents from flooding the bus.
+- **Settings UI toggle** for `use_session_stream` (per-project).
+  Today users flip via SQL; 3.2 exposes it in Tauri Settings.
+
+Rough scope: 5-7 commits. No user-visible architecture change —
+all hardening on top of what Phase 3.1 already shipped.
 
 ### Phase 4 — Finish the daemon migration (1-2 days)
 
@@ -734,6 +782,24 @@ completion; Phases 1-2 can land earlier as internal plumbing.
   (teardown helpers migrate to core alongside).
 - Task #230 closes.
 
+### Phase 4.5 — Tauri React pane subscribes to Session Stream (NEW, PENDING)
+
+Inserted between Phase 4's route migration and Phase 5's alacritty
+removal. This is the **first user-visible wiring moment** — Rosson
+opens K2SO, his desktop terminals render from the Frame stream
+instead of legacy alacritty grid emission.
+
+- React component opens a WS to daemon's `/cli/sessions/subscribe`.
+- Renders `Line + Frame` stream at desktop width using DOM (Metal
+  punch-through comes in Phase 8, separately).
+- Handles the Phase 2 feature flag — when `use_session_stream='off'`
+  on the project, falls back to the legacy grid emission path.
+- Feature-flag reversible: desktop can be flipped back to alacritty
+  path at any time until Phase 5 actually removes the dep.
+
+Rough scope: 4-6 commits. Conceptually isolated from the daemon
+architecture — React-side work + a small Tauri IPC bridge.
+
 ### Phase 5 — Delete alacritty_terminal + Tauri in-process pool (1 day)
 
 - Remove `alacritty_terminal` dependency from `src-tauri/Cargo.toml`
@@ -742,7 +808,7 @@ completion; Phases 1-2 can land earlier as internal plumbing.
 - Tauri's React pane is now WS-only, consuming Line + Frame from
   the daemon and rendering via DOM (Metal punch-through comes in
   Phase 8, separately).
-- Only fires after Phases 1-4 have been production-stable for at
+- Only fires after Phases 1-4.5 have been production-stable for at
   least one release.
 
 ### Phase 6 — Tier 1 adapters (1 day per harness)
@@ -980,6 +1046,14 @@ Phases 1-4 to have been production-stable for at least one release.
   entries for Codex / Aider / Gemini / Goose; new open question
   #10 commits to parallel short-form characterizations of those
   harnesses before Phase 6 lands the first per-harness adapter.
+- 2026-04-20 Phases 1, 2, 3, and 3.1 **shipped** on the
+  `feat/session-stream` branch across 26 commits. 411 tests green;
+  flag-off workspace build bit-for-bit identical to `v0.33.0`.
+  End-to-end peer-to-peer collaboration works via CLI + daemon +
+  real PTYs. Phase 3.2 (hardening bucket) and Phase 4.5 (Tauri
+  React pane subscribes) added to the migration plan to register
+  follow-up work surfaced during implementation. Completion
+  summaries at `.k2so/notes/phase-{2,3,3.1}-*-complete.md`.
 - 2026-04-19 Second review pass during 0.34.0 surface-area check
   with `rosson`. Three substantive amendments:
   (1) **"The baked-width problem"** named explicitly as the root

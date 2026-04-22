@@ -25,53 +25,9 @@
 
 use std::collections::HashMap;
 
-/// Final HTTP response body + status line the caller emits. Keeping
-/// it as an owned struct (rather than returning the raw TcpStream
-/// write) lets the caller attach the `Content-Length` / `Connection:
-/// close` boilerplate once at the top of the dispatch.
-pub struct CliResponse {
-    pub status: &'static str,
-    pub content_type: &'static str,
-    pub body: String,
-}
-
-impl CliResponse {
-    pub fn ok_json(body: String) -> Self {
-        Self {
-            status: "200 OK",
-            content_type: "application/json",
-            body,
-        }
-    }
-    pub fn ok_text(body: String) -> Self {
-        Self {
-            status: "200 OK",
-            content_type: "text/plain; charset=utf-8",
-            body,
-        }
-    }
-    pub fn bad_request(err: impl std::fmt::Display) -> Self {
-        Self {
-            status: "400 Bad Request",
-            content_type: "application/json",
-            body: serde_json::json!({ "error": err.to_string() }).to_string(),
-        }
-    }
-    pub fn not_found() -> Self {
-        Self {
-            status: "404 Not Found",
-            content_type: "application/json",
-            body: r#"{"error":"route not found"}"#.to_string(),
-        }
-    }
-    pub fn forbidden() -> Self {
-        Self {
-            status: "403 Forbidden",
-            content_type: "application/json",
-            body: r#"{"error":"Invalid or missing auth token"}"#.to_string(),
-        }
-    }
-}
+// CliResponse is shared with lib-side handler modules
+// (terminal_routes, etc.) via the top-level cli_response module.
+pub use crate::cli_response::CliResponse;
 
 /// Serialize a `Result<T, String>` from core into either a 200 JSON
 /// body or a 400 `{"error": "..."}`. The single biggest shape for
@@ -853,7 +809,11 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                     "notify_script": dirs::home_dir()
                         .map(|h| h.join(".k2so/hooks/notify.sh").to_string_lossy().to_string())
                         .unwrap_or_default(),
-                    "injections": serde_json::Value::Array(vec![]),
+                    // H7.1: scan per-CLI config files for notify.sh
+                    // injection so `k2so hooks status` reports the
+                    // full pipeline state (claude/cursor/gemini). Core
+                    // helper moved from src-tauri as part of H7.
+                    "injections": k2so_core::agent_hooks::check_hook_injections(),
                     "recent_events": events,
                     "recent_events_cap": 50,
                 })
@@ -862,12 +822,19 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         }
 
         // ── Scheduler / triage ──────────────────────────────────────
+        // `/cli/agents/triage` is READ-ONLY (plain-text summary for
+        // `k2so agents triage`). `/cli/scheduler-tick` is the
+        // DESTRUCTIVE heartbeat fire path — `~/.k2so/heartbeat.sh`
+        // invokes it on launchd's schedule and parses `"count":N`
+        // to log what fired. Pre-Phase-4 Tauri's agent_hooks
+        // listener served them with these same semantics; H7
+        // preserves the contract.
         "/cli/agents/triage" => match need_project(params) {
-            Ok(p) => CliResponse::ok_json(crate::handle_agents_triage(&p)),
+            Ok(p) => CliResponse::ok_text(crate::handle_agents_triage(&p)),
             Err(r) => r,
         },
         "/cli/scheduler-tick" => match need_project(params) {
-            Ok(p) => respond(k2so_core::agents::scheduler::k2so_agents_scheduler_tick(p)),
+            Ok(p) => CliResponse::ok_json(crate::triage::handle_scheduler_fire(&p)),
             Err(r) => r,
         },
 
@@ -888,6 +855,63 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                 Err(r) => r,
             }
         }
+
+        // ── Phase 4 H1: daemon-side terminal IO ─────────────────────
+        // Session-stream-aware read + write against daemon-owned
+        // sessions. `id` is a SessionId UUID. See
+        // `terminal_routes` for behavior details.
+        "/cli/terminal/read" => crate::terminal_routes::handle_read(params),
+        "/cli/terminal/write" => crate::terminal_routes::handle_write(params),
+
+        // ── Phase 4 H2: live-session enumeration ────────────────────
+        // Replaces the Tauri endpoint that walked AppState's
+        // terminal_manager. Now a walk of session_map + registry.
+        "/cli/agents/running" => crate::terminal_routes::handle_agents_running(params),
+
+        // ── Phase 4.5 I7: resize a live session ─────────────────────
+        // Resizes both the PTY and the alacritty Term so the child
+        // re-flows for the new dimensions. Called by Kessel's
+        // ResizeObserver on DOM pane resize.
+        "/cli/sessions/resize" => crate::terminal_routes::handle_sessions_resize(params),
+
+        // ── Phase 4 H3: daemon-side terminal spawn ──────────────────
+        // Thin wrappers over `spawn::spawn_agent_session` (the same
+        // helper /cli/sessions/spawn uses). Emits HookEvents so
+        // attached UIs can react, matching the legacy Tauri
+        // endpoint shape.
+        "/cli/terminal/spawn" => match need_project(params) {
+            Ok(p) => crate::terminal_routes::handle_terminal_spawn(params, &p),
+            Err(r) => r,
+        },
+        "/cli/terminal/spawn-background" => match need_project(params) {
+            Ok(p) => crate::terminal_routes::handle_terminal_spawn_background(params, &p),
+            Err(r) => r,
+        },
+
+        // ── Phase 4 H4: companion cross-workspace enumeration ──────
+        // Global session list + per-project summary. No project
+        // param — these are intentionally cross-workspace (the
+        // companion UI shows every workspace at once).
+        "/cli/companion/sessions" => crate::companion_routes::handle_companion_sessions(params),
+        "/cli/companion/projects-summary" => {
+            crate::companion_routes::handle_companion_projects_summary(params)
+        }
+
+        // ── Phase 4 H5: agent launch + delegate ─────────────────────
+        // Daemon-owned Session Stream replacement for Tauri's
+        // `spawn_wake_pty`-backed handlers. Core still builds the
+        // launch JSON (three wake branches for launch; worktree +
+        // task CLAUDE.md for delegate) — the difference is the
+        // spawn lands in daemon session_map, not in Tauri's
+        // TerminalManager.
+        "/cli/agents/launch" => match need_project(params) {
+            Ok(p) => crate::agents_routes::handle_agents_launch(params, &p),
+            Err(r) => r,
+        },
+        "/cli/agents/delegate" => match need_project(params) {
+            Ok(p) => crate::agents_routes::handle_agents_delegate(params, &p),
+            Err(r) => r,
+        },
 
         _ => CliResponse::not_found(),
     }

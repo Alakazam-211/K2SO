@@ -5,12 +5,24 @@ pub mod event_sink;
 pub mod grid_types;
 pub mod reflow;
 mod font_renderer;
+// 0.34.0 Session Stream PTY reader (Phase 2). Parallel code path to
+// alacritty_backend's EventLoop::spawn(); replaces it for sessions
+// where the `use_session_stream` project setting is 'on'. Gated on
+// the `session_stream` feature to keep flag-off builds bit-for-bit
+// equivalent to v0.33.0.
+#[cfg(feature = "session_stream")]
+pub mod session_stream_pty;
 // `bitmap_renderer` was deleted in 0.33.x. The DOM/grid broadcast
 // protocol that shipped in 0.32.13 retired bitmap rendering; the
 // module's 414 lines were dead code for a full release.
 
 pub use alacritty_backend::TerminalManager;
 pub use event_sink::TerminalEventSink;
+
+#[cfg(feature = "session_stream")]
+pub use session_stream_pty::{
+    spawn_session_stream, NoopListener, SessionStreamSession, SpawnConfig,
+};
 
 use parking_lot::Mutex;
 use std::sync::{Arc, OnceLock};
