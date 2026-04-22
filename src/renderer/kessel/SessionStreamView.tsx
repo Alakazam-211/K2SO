@@ -425,11 +425,23 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
         }
         const grid = gridRef.current!
         for (const frame of frames) {
-          // TUI-launch breakdown: watch for alt-screen enter (Claude,
-          // vim, htop, claude --fullscreen all flip ?1049 h BEFORE
-          // drawing their UI). First content frame after that is the
-          // TUI's initial paint — what the user reads as "Claude is
-          // ready."
+          // TUI-launch breakdown.
+          //
+          // Original version fired tui-ready only after an
+          // alt-screen enter — useful for vim/htop but WRONG for
+          // Claude, which doesn't use alt-screen. Claude paints
+          // inline in the scrollback buffer. We need a TUI-agnostic
+          // signal for "the TUI has started painting its UI."
+          //
+          // New heuristic: tui-alt-screen still fires on alt-screen
+          // for TUIs that use it. tui-ready fires when we see ANY
+          // ModeChange frame that signals interactive intent —
+          // specifically `bracketed_paste: on` or `focus_reporting:
+          // on`, which Claude + most modern TUIs emit right after
+          // their cold-start is done and before they paint. On
+          // alt-screen TUIs, tui-ready fires at the same time as
+          // tui-alt-screen. Works uniformly for Claude (no alt-
+          // screen) and vim (alt-screen + bracketed paste).
           if (
             altScreenAt === null &&
             frame.frame === 'ModeChange' &&
@@ -439,20 +451,23 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
             altScreenAt = now
             // eslint-disable-next-line no-console
             console.info(
-              `%c[Kessel] tab-${sessionId.slice(0, 8)} tui-alt-screen=${Math.round(altScreenAt - wsStart)}ms (ws-start → TUI requested alt buffer)`,
+              `%c[Kessel] tab-${sessionId.slice(0, 8)} tui-alt-screen=${Math.round(altScreenAt - wsStart)}ms`,
               'color:#0ff',
             )
-          } else if (
-            altScreenAt !== null &&
+          }
+          if (
             tuiReadyAt === null &&
-            frame.frame === 'Text'
+            frame.frame === 'ModeChange' &&
+            frame.data.on === true &&
+            (frame.data.mode === 'alt_screen' ||
+              frame.data.mode === 'bracketed_paste' ||
+              frame.data.mode === 'focus_reporting')
           ) {
             tuiReadyAt = now
-            const altToText = Math.round(tuiReadyAt - altScreenAt)
             const totalToTui = Math.round(tuiReadyAt - wsStart)
             // eslint-disable-next-line no-console
             console.info(
-              `%c[Kessel] tab-${sessionId.slice(0, 8)} tui-ready=${totalToTui}ms (alt-screen +${altToText}ms → first TUI paint)`,
+              `%c[Kessel] tab-${sessionId.slice(0, 8)} tui-ready=${totalToTui}ms (${frame.data.mode} ON → TUI is interactive)`,
               'color:#0ff;font-weight:bold',
             )
           }

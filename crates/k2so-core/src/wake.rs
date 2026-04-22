@@ -98,7 +98,7 @@ impl DaemonPlist {
     <key>KeepAlive</key>
     <{keep_alive}/>
     <key>ProcessType</key>
-    <string>Background</string>
+    <string>Interactive</string>
     <key>StandardErrorPath</key>
     <string>{stderr}</string>
     <key>StandardOutPath</key>
@@ -307,7 +307,12 @@ mod tests {
         }
         assert!(xml.contains("<string>com.k2so.test-daemon</string>"));
         assert!(xml.contains("<true/>"));
-        assert!(xml.contains("<string>Background</string>"));
+        // ProcessType Interactive gives the daemon's child processes
+        // (spawned PTY shells + Claude) the same priority Tauri's
+        // foreground app enjoys. Before this, the daemon was
+        // Background — Claude startup in Kessel took 3s vs 1s in
+        // Alacritty purely from priority starvation on fork/exec.
+        assert!(xml.contains("<string>Interactive</string>"));
     }
 
     #[test]

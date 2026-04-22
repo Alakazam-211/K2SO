@@ -420,24 +420,26 @@ export function AlacrittyTerminalView({
       invoke('terminal_set_focus', { id: terminalId, focused: true }).catch((e) => console.warn('[terminal]', e))
 
       // Parity instrumentation with Kessel's SessionStreamView.
-      // first-frame = time from Cmd+T to the first grid update
-      // received (shell emitted its prompt, or Claude started
-      // producing output). tui-alt-screen = when the TermMode
-      // alt-screen bit flips (ALT_SCREEN = 1 << 7 in
-      // alacritty_terminal's TermMode bitflags) — fires when
-      // claude/vim/htop request their full-screen buffer. Both
-      // metrics let us compare Claude launch speed directly
-      // between Alacritty and Kessel.
+      // first-frame = first grid update received.
+      // tui-alt-screen = when the TermMode alt-screen bit flips
+      //   (ALT_SCREEN = 1 << 7 in alacritty_terminal's TermMode).
+      // tui-ready = earliest of: alt-screen enter, bracketed-paste
+      //   on (1 << 4), or app-cursor on (1 << 1). Works uniformly
+      //   for Claude (no alt-screen, emits bracketed-paste) and
+      //   vim/htop (alt-screen). Matches the Kessel-side predicate.
       //
-      // References alacritty_terminal::term::TermMode:
+      // TermMode bit references:
       //   APP_CURSOR       = 1 << 1
       //   APP_KEYPAD       = 1 << 2
       //   BRACKETED_PASTE  = 1 << 4
-      //   ALT_SCREEN       = 1 << 7   ← this one
+      //   ALT_SCREEN       = 1 << 7
+      const MODE_APP_CURSOR = 1 << 1
+      const MODE_BRACKETED_PASTE = 1 << 4
       const ALT_SCREEN_BIT = 1 << 7
       let firstFrameAt: number | null = null
       let altScreenAt: number | null = null
       let tuiReadyAt: number | null = null
+      let prevMode = 0
 
       // Listen for grid updates (DOM text rendering)
       unlistenGrid = await listen<GridUpdate>(`terminal:grid:${terminalId}`, (event) => {
@@ -451,7 +453,7 @@ export function AlacrittyTerminalView({
             'color:#ff0',
           )
         }
-        // Detect alt-screen enter (Claude / full-screen TUIs).
+        // Detect alt-screen enter.
         if (
           altScreenAt === null &&
           spawnedAt !== undefined &&
@@ -465,22 +467,31 @@ export function AlacrittyTerminalView({
             'color:#ff0',
           )
         }
-        // After alt-screen, first grid update with content = TUI
-        // first paint. approximates "Claude UI is visible."
-        if (
-          altScreenAt !== null &&
-          tuiReadyAt === null &&
-          spawnedAt !== undefined &&
-          payload.lines.length > 0
-        ) {
-          tuiReadyAt = performance.now()
-          const ms = Math.round(tuiReadyAt - spawnedAt)
-          // eslint-disable-next-line no-console
-          console.info(
-            `%c[Alacritty] ${terminalId} tui-ready=${ms}ms (Cmd+T → TUI first paint)`,
-            'color:#ff0;font-weight:bold',
-          )
+        // tui-ready fires on the TRANSITION of any "TUI is active"
+        // bit from 0 → 1. ALT_SCREEN, BRACKETED_PASTE, APP_CURSOR
+        // each indicate the shell/TUI has set up its session and
+        // is ready for user interaction. First one to flip wins.
+        if (tuiReadyAt === null && spawnedAt !== undefined) {
+          const watchedBits =
+            ALT_SCREEN_BIT | MODE_BRACKETED_PASTE | MODE_APP_CURSOR
+          const newlySet = payload.mode & watchedBits & ~prevMode
+          if (newlySet !== 0) {
+            tuiReadyAt = performance.now()
+            const ms = Math.round(tuiReadyAt - spawnedAt)
+            const label =
+              (newlySet & ALT_SCREEN_BIT) !== 0
+                ? 'alt_screen'
+                : (newlySet & MODE_BRACKETED_PASTE) !== 0
+                  ? 'bracketed_paste'
+                  : 'app_cursor'
+            // eslint-disable-next-line no-console
+            console.info(
+              `%c[Alacritty] ${terminalId} tui-ready=${ms}ms (${label} ON → TUI interactive)`,
+              'color:#ff0;font-weight:bold',
+            )
+          }
         }
+        prevMode = payload.mode
         scheduleRender(payload)
         useActiveAgentsStore.getState().recordOutput(terminalId)
       })
