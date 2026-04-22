@@ -146,28 +146,19 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
     )
   }
 
-  if (state.kind !== 'ready') {
-    // Blank pane in the Kessel default background color — visually
-    // identical to an empty live pane, so the transition to the
-    // real SessionStreamView feels instant instead of a gray→black
-    // flash. Matches config.colors.background in KesselConfig.
-    return (
-      <div
-        style={{
-          width: '100%',
-          height: '100%',
-          flex: 1,
-          backgroundColor: 'rgb(10,10,10)',
-        }}
-      />
-    )
-  }
-
+  // L1.5 — optimistic mount. Render SessionStreamView in both
+  // `spawning` and `ready` states; during `spawning` we pass
+  // sessionId=null so the WS effect skips. Font measurement, grid
+  // allocation, cursor styling, and layout all complete during the
+  // spawn wait, so when the Rust-side spawn returns and we swap
+  // sessionId from null → real, the only thing that changes is the
+  // WS connection starting — the pane is visually already there.
+  const isReady = state.kind === 'ready'
   return (
     <SessionStreamView
-      sessionId={state.sessionId}
-      port={state.port}
-      token={state.token}
+      sessionId={isReady ? state.sessionId : null}
+      port={isReady ? state.port : 0}
+      token={isReady ? state.token : ''}
       cols={80}
       rows={24}
       fontSize={fontSize}

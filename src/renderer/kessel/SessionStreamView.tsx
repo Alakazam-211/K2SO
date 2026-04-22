@@ -29,11 +29,18 @@ import {
 } from '@/lib/key-mapping'
 
 export interface SessionStreamViewProps {
-  /** SessionId UUID for the daemon's live session. */
-  sessionId: string
-  /** Daemon port — from `invoke('daemon_ws_url')`. */
+  /** SessionId UUID for the daemon's live session. `null` =
+   *  optimistic mount: render the grid shell (font, cursor, empty
+   *  rows) without connecting the WebSocket. The WS useEffect
+   *  short-circuits on null so the pane appears instantly and
+   *  transitions to a live view when the spawn resolves without
+   *  a second mount cycle. L1.5. */
+  sessionId: string | null
+  /** Daemon port — from `invoke('daemon_ws_url')`. Ignored while
+   *  sessionId is null. */
   port: number
-  /** Auth token — from `invoke('daemon_ws_url')`. */
+  /** Auth token — from `invoke('daemon_ws_url')`. Ignored while
+   *  sessionId is null. */
   token: string
   /** Columns. Default 80. */
   cols?: number
@@ -61,13 +68,18 @@ export interface SessionStreamViewProps {
  *  is fire-and-forget — we don't block keystrokes on HTTP round-trip).
  *  Bytes are URL-encoded; for binary non-UTF-8 sequences, the write
  *  endpoint accepts raw UTF-8 text (key-mapping's escape sequences
- *  are ASCII so this is safe). */
+ *  are ASCII so this is safe).
+ *
+ *  Sessionless (`null`) calls are no-ops — supports the L1.5
+ *  optimistic-mount window where the pane is rendered before the
+ *  spawn has returned a sessionId. */
 async function writeToSession(
   port: number,
   token: string,
-  sessionId: string,
+  sessionId: string | null,
   text: string,
 ): Promise<void> {
+  if (sessionId === null) return
   const params = new URLSearchParams({
     id: sessionId,
     message: text,
@@ -80,14 +92,18 @@ async function writeToSession(
 
 /** POST to /cli/sessions/resize (I7). Fire-and-forget — the grid
  *  updates its own dimensions locally; the daemon call just keeps
- *  the child process in sync. */
+ *  the child process in sync.
+ *
+ *  Sessionless (`null`) calls are no-ops — supports L1.5 optimistic
+ *  mount. */
 async function resizeSession(
   port: number,
   token: string,
-  sessionId: string,
+  sessionId: string | null,
   cols: number,
   rows: number,
 ): Promise<void> {
+  if (sessionId === null) return
   const params = new URLSearchParams({
     session: sessionId,
     cols: String(cols),
@@ -381,8 +397,11 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
   }, [cols, rows, scheduleRender])
 
   // Open the WS once per (sessionId, port, token) tuple. dispose on
-  // unmount or prop change.
+  // unmount or prop change. L1.5: skip entirely while sessionId is
+  // null — the pane is still optimistic-mounted waiting for spawn
+  // to complete, and there's nothing to subscribe to yet.
   useEffect(() => {
+    if (sessionId === null) return
     const client = new KesselClient({
       sessionId,
       port,
