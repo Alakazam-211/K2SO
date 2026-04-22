@@ -424,11 +424,34 @@ impl Perform for PerformState {
                 self.pending_text.push('\r');
             }
             b'\x08' => {
-                // BS — strip the last char from the current line.
-                // Also pop from pending_text so the downstream Text
-                // frame reflects the post-BS state.
+                // BS — strip the last char from LineMux's internal
+                // line-reconstruction buffer (current.text). That
+                // keeps the "what's the full line" accounting correct
+                // for line_mux's own consumers (archive NDJSON,
+                // semantic recognizers).
+                //
+                // HOWEVER: we must PASS THROUGH the \x08 byte to the
+                // consumer so TerminalGrid sees it and decrements
+                // its cursor. Previously this branch also popped
+                // pending_text, which ate the BS byte before any Text
+                // frame was emitted. That produced two visible bugs:
+                //
+                //   1. Backspace didn't work in non-TUI shells: the
+                //      shell's echo of BS-SP-BS was eaten, so the
+                //      grid never moved the cursor back + never
+                //      cleared the deleted cell.
+                //   2. Up-arrow history replace left "dead characters":
+                //      zsh readline replaces "x" with "ls" via
+                //      BS-l-s-SP-BS, but with BS eaten the grid drew
+                //      "ls" starting at the cursor's current position
+                //      (col 1), leaving the 'x' at col 0 visible → "xls".
+                //
+                // Claude and other full-screen TUIs use alt-screen +
+                // direct cursor positioning via CSI H / CUP, so they
+                // never hit this path — that's why the bug only
+                // manifested in the shell.
                 self.current.text.pop();
-                self.pending_text.pop();
+                self.pending_text.push(8 as char);
             }
             b'\x07' => {
                 // BEL — emit a Bell frame. D14 surfaces a visual

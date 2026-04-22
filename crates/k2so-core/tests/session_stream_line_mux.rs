@@ -514,6 +514,41 @@ fn autowrap_mode_7_emits_mode_change() {
 }
 
 #[test]
+fn backspace_byte_passes_through_to_text_frame() {
+    // Regression test for the 2026-04-21 "dead characters" bug:
+    // LineMux used to pop \x08 from pending_text, so the BS byte never
+    // reached the consumer's Text frame. That ate the BS-SP-BS echo
+    // that shells emit for backspace + the BS-l-s-SP-BS sequence zsh
+    // readline uses for up-arrow history replace — the grid's cursor
+    // never moved back, and old characters stayed visible.
+    //
+    // After the fix, the BS byte is included in the emitted Text
+    // frame's bytes array so TerminalGrid.writeChar sees it and
+    // decrements the cursor column.
+    let mut mux = LineMux::new();
+    // 'a' + BS + 'b' should emit a Text frame containing [a, \x08, b].
+    let frames = mux.feed(b"a\x08b");
+    let bytes = text_frame_bytes(&frames[0]).expect("text frame");
+    assert_eq!(bytes, b"a\x08b");
+}
+
+#[test]
+fn shell_replace_sequence_emits_bs_bytes() {
+    // Realistic zsh readline replacement: erase one typed char and
+    // draw a two-char command. Sequence: \x08 l s \x20 \x08
+    // (BS-'l'-'s'-SP-BS). All five bytes must reach the consumer.
+    let mut mux = LineMux::new();
+    let frames = mux.feed(b"\x08ls \x08");
+    let concat: Vec<u8> = frames
+        .iter()
+        .filter_map(text_frame_bytes)
+        .flatten()
+        .copied()
+        .collect();
+    assert_eq!(concat, b"\x08ls \x08");
+}
+
+#[test]
 fn bel_byte_emits_bell_frame() {
     // `\x07` BEL — bash Ctrl-R on empty history, readline
     // ambiguity, explicit `echo -e '\a'`. LineMux surfaces it as
