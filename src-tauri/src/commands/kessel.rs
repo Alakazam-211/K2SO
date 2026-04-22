@@ -263,6 +263,41 @@ pub fn kessel_daemon_ws() -> KesselDaemonWsResponse {
     }
 }
 
+/// Warm the reqwest::blocking::Client's internal tokio runtime +
+/// connection pool BEFORE the user presses Cmd+T for the first time.
+///
+/// **Why this matters.** `reqwest::blocking` lazily spawns a tokio
+/// runtime the first time `.send()` is called. On a cold process,
+/// that initialization costs 500-800ms. With Rosson's measurements:
+///
+///   first Kessel tab:   e2e=643ms (cold reqwest)
+///   second Kessel tab:  e2e=64ms   (warm)
+///
+/// The difference is almost entirely runtime spin-up, not the daemon
+/// or PTY. Calling this once at app startup hides the cost behind
+/// the app's own mount, so the first user-initiated Cmd+T hits a
+/// warm pool.
+///
+/// Called from the frontend via `invoke('kessel_warm_http')` at
+/// App mount (see daemon-ws.ts prewarmDaemonWs). Idempotent — safe
+/// to call multiple times. Does a GET /ping on the daemon (an
+/// unauthenticated endpoint) so we don't need creds for this.
+#[tauri::command]
+pub fn kessel_warm_http() -> Result<(), String> {
+    // Need the daemon port to target — load_creds reads it from the
+    // already-cached creds file. If creds aren't ready yet (daemon
+    // still booting), just skip warming. The first real spawn will
+    // pay the full warm-up cost instead.
+    let Ok(creds) = load_creds() else {
+        return Ok(());
+    };
+    let url = format!("http://127.0.0.1:{}/ping", creds.port);
+    // Fire-and-forget — we don't care about the response, just the
+    // side effect of materializing the reqwest runtime + pool.
+    let _ = http_client().get(&url).send();
+    Ok(())
+}
+
 /// Write bytes to a Kessel session's PTY. Replaces the browser-side
 /// `fetch('/cli/terminal/write?...')` per-keystroke hot path.
 ///

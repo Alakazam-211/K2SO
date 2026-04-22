@@ -71,12 +71,27 @@ export function getDaemonWs(): Promise<DaemonWsAvailable> {
 /** Fire-and-forget warm-up. Safe to call from app mount; errors are
  *  swallowed because the terminal-pane code paths call `getDaemonWs`
  *  themselves and will surface a real error at that point if the
- *  daemon isn't reachable. */
+ *  daemon isn't reachable.
+ *
+ *  Also kicks the Rust-side `kessel_warm_http` command so the
+ *  reqwest::blocking::Client's internal tokio runtime spins up
+ *  BEFORE the user's first Cmd+T. Without this, the first spawn
+ *  paid ~500-800ms of pure runtime initialization cost — measured
+ *  in Rosson's logs as e2e=643ms for tab 1 vs e2e=64ms for tab 2. */
 export function prewarmDaemonWs(): void {
-  // Kick off the fetch but don't block. A failure here has no
-  // downstream effect — the next real caller retries via the
-  // cache-invalidation path.
-  getDaemonWs().catch(() => {
-    /* ignored — prewarm is best-effort */
-  })
+  // Resolve cached creds first (populates the Rust-side cache too
+  // via kessel_daemon_ws's load_creds call path eventually).
+  getDaemonWs()
+    .then(async () => {
+      try {
+        // Materialize the blocking reqwest runtime + pool so the
+        // user's first spawn hits warm metal.
+        await invoke('kessel_warm_http')
+      } catch {
+        /* best-effort; real spawn will just pay the cost itself */
+      }
+    })
+    .catch(() => {
+      /* daemon not ready yet — real spawn will retry from disk */
+    })
 }
