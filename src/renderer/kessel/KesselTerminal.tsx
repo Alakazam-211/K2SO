@@ -17,8 +17,9 @@
 // the pane is blank instead of a silent white box.
 
 import React, { useEffect, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { SessionStreamView } from './SessionStreamView'
-import { getDaemonWs, invalidateDaemonWs } from './daemon-ws'
+import { invalidateDaemonWs } from './daemon-ws'
 
 export interface KesselTerminalProps {
   terminalId: string
@@ -29,9 +30,17 @@ export interface KesselTerminalProps {
   onExit?: (code: number) => void
 }
 
-interface SpawnResult {
+/** Shape returned by the `kessel_spawn` Tauri command. The Rust side
+ *  does the HTTP POST to the daemon's `/cli/sessions/spawn`, reuses
+ *  a persistent reqwest::Client with keep-alive, and hands us the
+ *  whole triple (sessionId, port, token) in one IPC hop so the
+ *  browser never pays the fetch overhead. */
+interface KesselSpawnResult {
   sessionId: string
   agentName: string
+  port: number
+  token: string
+  spawnMs: number
 }
 
 type State =
@@ -56,63 +65,31 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
         'color:#0ff;font-weight:bold',
         { cwd, command, args },
       )
-      // Perf timing — lets us compare before/after optimization runs.
-      // Shows up in devtools Performance panel as named marks.
       performance.mark(`kessel:boot:${terminalId}:start`)
-      // 1. Look up daemon port + token via the shared cache. First
-      //    call in the app session hits the Tauri command (which
-      //    reads 2 files from disk); every subsequent call is a
-      //    cheap promise return. Prewarmed at app startup so by the
-      //    time the user opens the first terminal it's already
-      //    resolved.
-      let ws: { port: number; token: string }
+
+      // L1.4 — one Tauri IPC that:
+      //   (a) reads cached daemon port/token from Rust-side cache
+      //       (no repeated disk I/O)
+      //   (b) POSTs to /cli/sessions/spawn via a persistent
+      //       reqwest::blocking::Client with HTTP keep-alive
+      //   (c) returns {sessionId, port, token} in one hop
+      // Replaces the prior [invoke daemon_ws_url → browser fetch →
+      // await .json()] waterfall with a single round trip.
+      let result: KesselSpawnResult
       try {
-        ws = await getDaemonWs()
-      } catch (e) {
-        if (!cancelled) {
-          setState({ kind: 'error', message: String(e) })
-        }
-        return
-      }
-      performance.mark(`kessel:boot:${terminalId}:daemon-ws-ready`)
-      // 2. Spawn via daemon. Use terminalId as the agent_name so
-      //    live lookups via /cli/agents/running can find this pane.
-      let result: SpawnResult
-      try {
-        const res = await fetch(
-          `http://127.0.0.1:${ws.port}/cli/sessions/spawn?token=${ws.token}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              agent_name: `tab-${terminalId}`,
-              cwd,
-              command,
-              args,
-              cols: 80,
-              rows: 24,
-            }),
+        result = await invoke<KesselSpawnResult>('kessel_spawn', {
+          req: {
+            terminalId,
+            cwd,
+            command: command ?? null,
+            args: args ?? null,
+            cols: 80,
+            rows: 24,
           },
-        )
-        if (!res.ok) {
-          const body = await res.text()
-          // 401/403 likely mean the cached token is stale — daemon
-          // may have restarted. Invalidate so the next spawn retries.
-          if (res.status === 401 || res.status === 403) {
-            invalidateDaemonWs()
-          }
-          if (!cancelled) {
-            setState({
-              kind: 'error',
-              message: `spawn failed: HTTP ${res.status} ${body}`,
-            })
-          }
-          return
-        }
-        result = (await res.json()) as SpawnResult
+        })
       } catch (e) {
-        // Network-level failure (daemon down, wrong port). Invalidate
-        // so the retry path re-reads the credential files.
+        // Invalidate the in-browser daemon-ws cache too so the next
+        // fallback call (HarnessLab etc.) re-reads creds from disk.
         invalidateDaemonWs()
         if (!cancelled) {
           setState({ kind: 'error', message: `spawn error: ${String(e)}` })
@@ -133,13 +110,13 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
         }
         // eslint-disable-next-line no-console
         console.info(
-          `%c[Kessel] ready tab-${terminalId} in ${Math.round(performance.now() - bootT0)}ms`,
+          `%c[Kessel] ready tab-${terminalId} in ${Math.round(performance.now() - bootT0)}ms (rust-side: ${result.spawnMs}ms)`,
           'color:#0ff',
         )
         setState({
           kind: 'ready',
-          port: ws.port,
-          token: ws.token,
+          port: result.port,
+          token: result.token,
           sessionId: result.sessionId,
         })
       }

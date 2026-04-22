@@ -1235,6 +1235,10 @@ pub fn run() {
             commands::daemon::daemon_ws_url,
             commands::daemon::get_keep_daemon_on_quit,
             commands::daemon::set_keep_daemon_on_quit,
+            // Kessel — terminal spawn path optimized to skip the
+            // browser fetch overhead. See commands/kessel.rs.
+            commands::kessel::kessel_spawn,
+            commands::kessel::kessel_daemon_ws,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {
