@@ -302,7 +302,25 @@ pub fn spawn_session_stream(cfg: SpawnConfig) -> Result<SessionStreamSession, St
         c.arg(&shell_cmd);
         c
     } else {
-        CommandBuilder::new(&shell)
+        // No command = bare interactive login shell. Pass `-il`
+        // explicitly so zsh/bash activate their line editor (ZLE /
+        // readline) and put the PTY into raw mode. Without these
+        // flags, even when the shell sees a TTY, some shell configs
+        // skip line-editor initialization — which leaves the PTY in
+        // canonical mode (`icanon` + `echo`), and every visible line
+        // editing operation (Backspace, Up-arrow history replace,
+        // Ctrl+W word-erase) either no-ops or produces junk output
+        // because the kernel handles editing but can't render back.
+        //
+        // Alacritty's backend does the same thing (bare shell + no
+        // args) and works fine there because some of the env vars it
+        // sets trip zsh into "I am definitely interactive" mode.
+        // Rather than chase that env interaction, be explicit: -i
+        // turns the interactive flag on unconditionally, -l makes it
+        // a login shell so ~/.zprofile loads (matches Alacritty).
+        let mut c = CommandBuilder::new(&shell);
+        c.arg("-il");
+        c
     };
     cmd.cwd(&safe_cwd);
     cmd.env("TERM", "xterm-256color");
