@@ -136,9 +136,14 @@ export function keyEventToSequence(e: KeyboardEvent, mode: number = 0): string |
       if (e.shiftKey) return '\n'  // Shift+Enter: newline (for multi-line input in Claude CLI etc.)
       return '\r'
     case 'Backspace':
-      // Backspace always sends DEL (0x7f) — this is correct for modern terminals.
-      // Ctrl+Backspace sends BS (0x08).
-      if (e.ctrlKey) return '\x08'
+      // Backspace always sends DEL (0x7f) — correct for modern terminals.
+      // Ctrl+Backspace → ESC+DEL: bound to backward-kill-word in both
+      // zsh's default emacs keymap and GNU readline (bash). Sending
+      // \x08 used to be the old Unix convention but modern shells
+      // bind it identically to DEL (backward-delete-char).
+      // Option+Backspace → same ESC+DEL, matches macOS "Natural Text
+      // Editing" iTerm2 preset which users expect.
+      if (e.ctrlKey) return '\x1b\x7f'
       if (e.altKey) return '\x1b\x7f'
       return '\x7f'
     case 'Tab':
