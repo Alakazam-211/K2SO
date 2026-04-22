@@ -89,6 +89,11 @@ pub fn spawn_agent_session(
         args: req.args.clone(),
         cols: req.cols,
         rows: req.rows,
+        // Production: Kessel renders from Frames, doesn't use the
+        // alacritty Term grid. Skipping the Term dual-parse halves
+        // the reader thread's CPU cost per chunk, letting the PTY
+        // drain at full speed.
+        track_alacritty_term: false,
     };
 
     let session = spawn_session_stream(cfg)?;

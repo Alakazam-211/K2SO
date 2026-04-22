@@ -49,6 +49,7 @@ fn echo_hello_populates_term_grid() {
         args: Some(vec!["hello from session stream\\n".into()]),
         cols: 80,
         rows: 24,
+        track_alacritty_term: true,
     };
     let mut session =
         spawn_session_stream(cfg).expect("session should spawn");
@@ -91,6 +92,7 @@ fn session_id_survives_spawn() {
         args: None,
         cols: 80,
         rows: 24,
+        track_alacritty_term: true,
     };
     let mut session =
         spawn_session_stream(cfg).expect("session should spawn");
@@ -110,6 +112,7 @@ fn write_to_session_reaches_child() {
         args: None,
         cols: 80,
         rows: 24,
+        track_alacritty_term: true,
     };
     let mut session =
         spawn_session_stream(cfg).expect("session should spawn");
@@ -156,6 +159,7 @@ fn drop_kills_child_cleanly() {
             args: Some(vec!["60".into()]),
             cols: 80,
             rows: 24,
+            track_alacritty_term: true,
         };
         let session =
             spawn_session_stream(cfg).expect("session should spawn");
@@ -187,6 +191,7 @@ fn session_is_registered_while_reader_runs() {
         args: Some(vec!["60".into()]),
         cols: 80,
         rows: 24,
+        track_alacritty_term: true,
     };
     let session = spawn_session_stream(cfg).expect("spawn");
     // Registered immediately after spawn returns.
@@ -219,6 +224,7 @@ fn published_frames_reach_subscriber() {
         args: Some(vec!["d3b-subscriber-test\\n".into()]),
         cols: 80,
         rows: 24,
+        track_alacritty_term: true,
     };
 
     // Subscribe BEFORE the reader thread has finished publishing.
@@ -274,6 +280,7 @@ fn two_subscribers_each_see_frames() {
         args: None,
         cols: 80,
         rows: 24,
+        track_alacritty_term: true,
     };
     let session = spawn_session_stream(cfg).expect("spawn");
     let entry = registry::lookup(&session_id).expect("registered");
@@ -330,6 +337,7 @@ fn resize_updates_term_dimensions() {
         args: Some(vec!["60".into()]),
         cols: 80,
         rows: 24,
+        track_alacritty_term: true,
     };
     let session =
         spawn_session_stream(cfg).expect("session should spawn");

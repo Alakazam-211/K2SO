@@ -51,6 +51,7 @@ fn spawn_cat_session() -> (SessionId, Arc<k2so_core::terminal::SessionStreamSess
         args: None,
         cols: 80,
         rows: 24,
+        track_alacritty_term: false,
     })
     .expect("spawn cat");
     let arc = Arc::new(session);

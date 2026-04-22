@@ -73,6 +73,7 @@ async fn daemon_inject_provider_writes_bytes_to_live_session() {
         args: None,
         cols: 80,
         rows: 24,
+        track_alacritty_term: false,
     })
     .expect("spawn bar session");
 

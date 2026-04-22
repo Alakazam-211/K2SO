@@ -86,6 +86,7 @@ async fn main() {
         args: cmd_args,
         cols: 120,
         rows: 40,
+        track_alacritty_term: false,
     }) {
         Ok(s) => s,
         Err(e) => {

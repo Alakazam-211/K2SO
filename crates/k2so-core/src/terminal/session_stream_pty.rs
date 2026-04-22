@@ -93,6 +93,29 @@ pub struct SpawnConfig {
     pub args: Option<Vec<String>>,
     pub cols: u16,
     pub rows: u16,
+    /// If true, the reader thread dual-parses every PTY chunk through
+    /// both alacritty's `Term` and `LineMux`. Production Kessel uses
+    /// only LineMux (the Kessel renderer receives Frames, not Term
+    /// grid snapshots), so this is `false` by default — halves the
+    /// reader's CPU cost on the hot path and lets the PTY drain
+    /// faster, which in turn lets children's stdout writes stop
+    /// blocking on PTY-full back-pressure. Tests that assert on
+    /// `session.term` grid state set this to `true`.
+    pub track_alacritty_term: bool,
+}
+
+impl Default for SpawnConfig {
+    fn default() -> Self {
+        Self {
+            session_id: SessionId::new(),
+            cwd: String::new(),
+            command: None,
+            args: None,
+            cols: 80,
+            rows: 24,
+            track_alacritty_term: false,
+        }
+    }
 }
 
 /// Owner-side handle to a live session_stream session. Drop the
@@ -227,6 +250,7 @@ pub fn spawn_session_stream(cfg: SpawnConfig) -> Result<SessionStreamSession, St
         args,
         cols,
         rows,
+        track_alacritty_term,
     } = cfg;
 
     let cols = cols.max(2);
@@ -437,6 +461,7 @@ pub fn spawn_session_stream(cfg: SpawnConfig) -> Result<SessionStreamSession, St
                 term_for_reader,
                 entry_for_reader,
                 id_for_reader,
+                track_alacritty_term,
             );
             // Natural shutdown — reader saw EOF or error. Drop the
             // registry entry so a future `list_ids()` doesn't
@@ -501,6 +526,7 @@ fn reader_loop(
     term: Arc<FairMutex<Term<NoopListener>>>,
     entry: Arc<SessionEntry>,
     session_id: SessionId,
+    track_alacritty_term: bool,
 ) {
     // `Processor` is generic over a `Timeout` type; the std-std
     // version (`StdSyncHandler`) is the default alacritty itself
@@ -508,7 +534,13 @@ fn reader_loop(
     // turbofish annotations.
     let mut processor: Processor<StdSyncHandler> = Processor::new();
     let mut line_mux = LineMux::new();
-    let mut buf = [0u8; 4096];
+    // Larger buffer than the original 4KB so each read drains more
+    // of the PTY in one syscall — fewer round trips through the
+    // reader's processing loop means less time the child can sit on
+    // a blocked `write()`. 16KB is still well under any kernel PTY
+    // buffer cap (usually 4KB × N) but reduces syscall frequency
+    // for heavy bursts (shell rc, Claude UI paint).
+    let mut buf = [0u8; 16384];
     loop {
         match reader.read(&mut buf) {
             Ok(0) => {
@@ -517,10 +549,17 @@ fn reader_loop(
             }
             Ok(n) => {
                 let chunk = &buf[..n];
-                // Fork A: alacritty Term grid. Lock per chunk so
-                // desktop consumers (Phase 3+ rendering clients)
-                // can snapshot between our writes.
-                {
+                // Fork A: alacritty Term grid. ONLY when
+                // track_alacritty_term is true — production Kessel
+                // consumers (SessionStreamView) render from Frames,
+                // not from Term grid snapshots. Skipping this
+                // double-parse halves the reader's per-chunk CPU
+                // cost and lets the PTY drain faster, which in turn
+                // removes the back-pressure on the child's stdout
+                // writes. Root cause of the 4.6x system-time
+                // penalty on `zsh -ilc` shell startup in the
+                // Kessel pane.
+                if track_alacritty_term {
                     let mut term_guard = term.lock();
                     processor.advance(&mut *term_guard, chunk);
                 }

@@ -79,6 +79,7 @@ async fn subscriber_receives_ack_then_frames() {
         args: Some(vec!["30".into()]),
         cols: 80,
         rows: 24,
+        track_alacritty_term: false,
     })
     .expect("spawn session");
 
@@ -126,6 +127,7 @@ async fn subscriber_receives_text_frames_for_child_output() {
         args: None,
         cols: 80,
         rows: 24,
+        track_alacritty_term: false,
     })
     .expect("spawn session");
 
@@ -255,6 +257,7 @@ async fn two_concurrent_subscribers_each_see_frames() {
         args: None,
         cols: 80,
         rows: 24,
+        track_alacritty_term: false,
     })
     .expect("spawn");
 
@@ -334,6 +337,7 @@ async fn late_subscriber_receives_replay_ring_then_live() {
         args: None,
         cols: 80,
         rows: 24,
+        track_alacritty_term: false,
     })
     .expect("spawn");
 

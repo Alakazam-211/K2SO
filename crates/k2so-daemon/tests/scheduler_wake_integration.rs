@@ -277,6 +277,7 @@ async fn wake_skips_auto_launch_when_agent_is_already_live() {
         args: None,
         cols: 80,
         rows: 24,
+        track_alacritty_term: false,
     })
     .expect("existing session spawn");
     let existing_arc = std::sync::Arc::new(existing_session);

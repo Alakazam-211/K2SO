@@ -44,6 +44,7 @@ fn spawn_cat_session(
         args: None,
         cols: 80,
         rows: 24,
+        track_alacritty_term: false,
     })
     .expect("spawn cat");
     let arc = Arc::new(session);
