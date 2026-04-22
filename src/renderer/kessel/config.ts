@@ -74,8 +74,16 @@ export interface KesselScrollingConfig {
   /** Max scrollback lines before the oldest is discarded. Matches
    *  TerminalGrid's DEFAULT_SCROLLBACK_CAP. */
   cap: number
-  /** Lines advanced per mouse-wheel "tick". Alacritty's default is
-   *  3; bumps up for less overshoot on trackpads. */
+  /** Trackpad/wheel scroll sensitivity, unitless. The handler
+   *  accumulates pixel deltas and converts them to lines at
+   *  `1 line per cell height` (i.e. physical-distance scrolling,
+   *  matching every native macOS text view). This value then
+   *  scales the line count up or down:
+   *    1.0 → Alacritty-equivalent (default).
+   *    2.0 → twice as fast.
+   *    0.5 → half as fast.
+   *  NOT "lines per wheel event" — trackpads send 30-60 events
+   *  per swipe, so that semantic would overshoot wildly. */
   multiplier: number
 }
 
@@ -171,7 +179,7 @@ export const defaultKesselConfig: KesselConfig = {
   },
   scrolling: {
     cap: 10_000,
-    multiplier: 3,
+    multiplier: 1,
   },
   cursor: {
     defaultShape: 'steady_block',
