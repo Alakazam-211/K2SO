@@ -17,6 +17,7 @@ import React, {
   useState,
 } from 'react'
 
+import { invoke } from '@tauri-apps/api/core'
 import { KesselClient } from './client'
 import { useKesselConfig } from './config-context'
 import { TerminalGrid, type Cell, type GridSnapshot } from './grid'
@@ -63,55 +64,48 @@ export interface SessionStreamViewProps {
   autoResize?: boolean
 }
 
-/** POST bytes to /cli/terminal/write for the given session. Returns
- *  a promise so callers can decide whether to await (the happy path
- *  is fire-and-forget — we don't block keystrokes on HTTP round-trip).
- *  Bytes are URL-encoded; for binary non-UTF-8 sequences, the write
- *  endpoint accepts raw UTF-8 text (key-mapping's escape sequences
- *  are ASCII so this is safe).
+/** Write bytes to the PTY via the `kessel_write` Tauri command.
  *
- *  Sessionless (`null`) calls are no-ops — supports the L1.5
- *  optimistic-mount window where the pane is rendered before the
- *  spawn has returned a sessionId. */
+ *  **Why not fetch?** Browser fetch pays ~3-15ms of overhead per call
+ *  (CSP check, URL parse, network layer hop). Per-keystroke that
+ *  produces visible lag at fast typing. The Tauri command hits a
+ *  persistent reqwest::Client with keep-alive — ~1-3ms per call.
+ *
+ *  Signature kept compatible with the pre-Tauri version so all
+ *  callers (keydown, paste, focus, blur) pass through unchanged.
+ *  The `port` + `token` arguments are ignored here; the Tauri
+ *  command reads them from its own in-memory cache. */
 async function writeToSession(
-  port: number,
-  token: string,
+  _port: number,
+  _token: string,
   sessionId: string | null,
   text: string,
 ): Promise<void> {
   if (sessionId === null) return
-  const params = new URLSearchParams({
-    id: sessionId,
-    message: text,
-    token,
-    no_submit: 'true', // we send Enter explicitly via key-mapping
-  })
-  const url = `http://127.0.0.1:${port}/cli/terminal/write?${params}`
-  await fetch(url, { method: 'GET' })
+  try {
+    await invoke<void>('kessel_write', { sessionId, text })
+  } catch {
+    // Fire-and-forget semantics — don't block the keystroke path on
+    // a transient daemon blip. Any persistent failure will show up
+    // as missing output and the user will retry.
+  }
 }
 
-/** POST to /cli/sessions/resize (I7). Fire-and-forget — the grid
- *  updates its own dimensions locally; the daemon call just keeps
- *  the child process in sync.
- *
- *  Sessionless (`null`) calls are no-ops — supports L1.5 optimistic
- *  mount. */
+/** Resize the PTY via the `kessel_resize` Tauri command. Same
+ *  Tauri-IPC-replacing-fetch pattern as `writeToSession`. */
 async function resizeSession(
-  port: number,
-  token: string,
+  _port: number,
+  _token: string,
   sessionId: string | null,
   cols: number,
   rows: number,
 ): Promise<void> {
   if (sessionId === null) return
-  const params = new URLSearchParams({
-    session: sessionId,
-    cols: String(cols),
-    rows: String(rows),
-    token,
-  })
-  const url = `http://127.0.0.1:${port}/cli/sessions/resize?${params}`
-  await fetch(url, { method: 'GET' })
+  try {
+    await invoke<void>('kessel_resize', { sessionId, cols, rows })
+  } catch {
+    /* best-effort; grid already resized locally */
+  }
 }
 
 /** Render a single grid row as coalesced spans — adjacent cells with

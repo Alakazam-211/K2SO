@@ -263,6 +263,89 @@ pub fn kessel_daemon_ws() -> KesselDaemonWsResponse {
     }
 }
 
+/// Write bytes to a Kessel session's PTY. Replaces the browser-side
+/// `fetch('/cli/terminal/write?...')` per-keystroke hot path.
+///
+/// **Why this matters.** Browser fetch carries ~3-15ms of pipeline
+/// overhead per call (CSP check, URL parsing, network layer hop).
+/// At fast typing speeds (70+ wpm ≈ 7 cps), each keystroke was
+/// paying that tax, producing visible lag. Tauri IPC → persistent
+/// reqwest → daemon is ~1-3ms. Alacritty uses plain `invoke()` for
+/// its write path and feels instant; this brings Kessel to parity.
+///
+/// Fire-and-forget on the frontend side — the Tauri command returns
+/// once the HTTP call is sent; callers don't need to await the PTY
+/// acknowledgement.
+#[tauri::command]
+pub fn kessel_write(session_id: String, text: String) -> Result<(), String> {
+    let creds = load_creds()?;
+    // URL-encode `text` so control bytes (\r, \n, escape sequences)
+    // round-trip correctly. reqwest's query param handling handles
+    // this natively.
+    let url = format!(
+        "http://127.0.0.1:{}/cli/terminal/write",
+        creds.port
+    );
+    let response = http_client()
+        .get(&url)
+        .query(&[
+            ("id", session_id.as_str()),
+            ("message", text.as_str()),
+            ("token", creds.token.as_str()),
+            ("no_submit", "true"),
+        ])
+        .send()
+        .map_err(|e| {
+            invalidate_creds();
+            format!("write: {e}")
+        })?;
+    if !response.status().is_success() {
+        let s = response.status();
+        if s == reqwest::StatusCode::UNAUTHORIZED
+            || s == reqwest::StatusCode::FORBIDDEN
+        {
+            invalidate_creds();
+        }
+        return Err(format!("daemon write {}: body-skipped", s.as_u16()));
+    }
+    Ok(())
+}
+
+/// Resize a Kessel session's PTY. Same Tauri-IPC pattern as
+/// `kessel_write` — eliminates browser fetch overhead from the
+/// resize path. Resizes fire on every ResizeObserver callback,
+/// typically debounced to ~100ms but still worth routing through
+/// the faster path.
+#[tauri::command]
+pub fn kessel_resize(
+    session_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    let creds = load_creds()?;
+    let url = format!(
+        "http://127.0.0.1:{}/cli/sessions/resize",
+        creds.port
+    );
+    let response = http_client()
+        .get(&url)
+        .query(&[
+            ("session", session_id.as_str()),
+            ("cols", cols.to_string().as_str()),
+            ("rows", rows.to_string().as_str()),
+            ("token", creds.token.as_str()),
+        ])
+        .send()
+        .map_err(|e| {
+            invalidate_creds();
+            format!("resize: {e}")
+        })?;
+    if !response.status().is_success() {
+        return Err(format!("daemon resize {}: failed", response.status().as_u16()));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

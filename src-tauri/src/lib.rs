@@ -1239,6 +1239,8 @@ pub fn run() {
             // browser fetch overhead. See commands/kessel.rs.
             commands::kessel::kessel_spawn,
             commands::kessel::kessel_daemon_ws,
+            commands::kessel::kessel_write,
+            commands::kessel::kessel_resize,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {
