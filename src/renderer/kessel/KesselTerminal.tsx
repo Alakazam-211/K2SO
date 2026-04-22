@@ -28,6 +28,12 @@ export interface KesselTerminalProps {
   args?: string[]
   fontSize?: number
   onExit?: (code: number) => void
+  /** performance.now() timestamp captured when the user pressed
+   *  Cmd+T / Cmd+Shift+T. Used to compute end-to-end spawn →
+   *  first-content-visible latency and log it to devtools console.
+   *  Present for both Kessel and Alacritty terminals so we have
+   *  apples-to-apples comparisons. */
+  spawnedAt?: number
 }
 
 /** Shape returned by the `kessel_spawn` Tauri command. The Rust side
@@ -60,7 +66,7 @@ type State =
   | { kind: 'error'; message: string }
 
 export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
-  const { terminalId, cwd, command, args, fontSize } = props
+  const { terminalId, cwd, command, args, fontSize, spawnedAt } = props
   const [state, setState] = useState<State>({ kind: 'idle' })
 
   useEffect(() => {
@@ -121,9 +127,22 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
         }
         const totalMs = Math.round(performance.now() - bootT0)
         const t = result.timingUs
+        // End-to-end: from Cmd+T keystroke to "pane is live". This
+        // is what the USER perceives as "how fast the terminal
+        // launched." Includes React orchestration before boot()
+        // even fires. Closest thing we have to "first pixel drawn"
+        // — the optimistic-mount pane is visible before this, but
+        // the cursor+content become live right after setState
+        // below.
+        const endToEndMs =
+          spawnedAt !== undefined
+            ? Math.round(performance.now() - spawnedAt)
+            : null
         // eslint-disable-next-line no-console
         console.info(
-          `%c[Kessel] ready tab-${terminalId} total=${totalMs}ms rust=${result.spawnMs}ms ` +
+          `%c[Kessel] ready tab-${terminalId}` +
+            (endToEndMs !== null ? ` e2e=${endToEndMs}ms` : '') +
+            ` total=${totalMs}ms rust=${result.spawnMs}ms ` +
             `(creds=${Math.round(t.credsUs / 1000)}ms ` +
             `ser=${(t.serializeUs / 1000).toFixed(1)}ms ` +
             `http=${Math.round(t.httpUs / 1000)}ms ` +
@@ -131,6 +150,21 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
             `de=${(t.deserializeUs / 1000).toFixed(1)}ms)`,
           'color:#0ff',
         )
+        // Also schedule a post-paint measurement so we capture the
+        // ACTUAL time the user sees the cursor rendered. rAF fires
+        // before paint, rAF-nested-setTimeout(0) fires after paint.
+        requestAnimationFrame(() => {
+          setTimeout(() => {
+            if (spawnedAt !== undefined) {
+              const paintMs = Math.round(performance.now() - spawnedAt)
+              // eslint-disable-next-line no-console
+              console.info(
+                `%c[Kessel] tab-${terminalId} first-paint≈${paintMs}ms (Cmd+T → cursor visible)`,
+                'color:#0ff;font-weight:bold',
+              )
+            }
+          }, 0)
+        })
         setState({
           kind: 'ready',
           port: result.port,

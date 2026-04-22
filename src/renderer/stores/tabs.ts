@@ -43,6 +43,13 @@ export interface TerminalItemData {
   command?: string
   args?: string[]
   sessionId?: string  // CLI tool session ID for resume on restart
+  /** performance.now() timestamp captured at the moment the user
+   *  pressed Cmd+T / Cmd+Shift+T / Cmd+D to create this terminal.
+   *  Terminal view components compare to performance.now() at their
+   *  first-content render to report end-to-end spawn→visible time.
+   *  Backends can measure themselves against this for an apples-to-
+   *  apples comparison (Alacritty vs Kessel). */
+  spawnedAt?: number
   /**
    * Phase 4.5 renderer selection — captured at tab creation from the
    * user's terminal settings preference. Each tab remembers its own
@@ -529,6 +536,7 @@ function makeTerminalPaneGroup(
           command: options?.command,
           args: options?.args,
           renderer: currentRenderer(),
+          spawnedAt: performance.now(),
         },
       },
     ],
@@ -573,6 +581,7 @@ function paneDataToItem(pane: PaneData): Item {
         // Alacritty even when the user had Kessel selected. Snapshot
         // the current setting for consistency with makeTerminalPaneGroup.
         renderer: currentRenderer(),
+        spawnedAt: performance.now(),
       },
     }
   } else if (pane.type === 'agent') {

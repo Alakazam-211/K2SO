@@ -63,6 +63,10 @@ interface AlacrittyTerminalViewProps {
   command?: string
   args?: string[]
   onExit?: (exitCode: number) => void
+  /** performance.now() at Cmd+T / Cmd+Shift+T press. Used to log
+   *  end-to-end spawn→visible latency for parity comparison with
+   *  Kessel. See tabs.ts TerminalItemData.spawnedAt. */
+  spawnedAt?: number
 }
 
 function shellEscape(path: string): string {
@@ -167,6 +171,7 @@ export function AlacrittyTerminalView({
   command,
   args,
   onExit,
+  spawnedAt,
 }: AlacrittyTerminalViewProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewportRef = useRef<HTMLDivElement>(null)
@@ -390,6 +395,27 @@ export function AlacrittyTerminalView({
       if (!mounted) return
       ptyIdRef.current = terminalId
       setCreated(true)
+
+      // E2E timing — matches the Kessel side's `spawnedAt → ready` log
+      // so side-by-side comparison is direct.
+      if (spawnedAt !== undefined) {
+        const e2eMs = Math.round(performance.now() - spawnedAt)
+        // eslint-disable-next-line no-console
+        console.info(
+          `%c[Alacritty] ready ${terminalId} e2e=${e2eMs}ms`,
+          'color:#ff0',
+        )
+        requestAnimationFrame(() => {
+          setTimeout(() => {
+            const paintMs = Math.round(performance.now() - spawnedAt)
+            // eslint-disable-next-line no-console
+            console.info(
+              `%c[Alacritty] ${terminalId} first-paint≈${paintMs}ms (Cmd+T → cursor visible)`,
+              'color:#ff0;font-weight:bold',
+            )
+          }, 0)
+        })
+      }
 
       invoke('terminal_set_focus', { id: terminalId, focused: true }).catch((e) => console.warn('[terminal]', e))
 

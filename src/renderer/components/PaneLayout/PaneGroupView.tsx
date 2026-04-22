@@ -201,6 +201,7 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
                     cwd={td.cwd}
                     command={td.command}
                     args={td.args}
+                    spawnedAt={td.spawnedAt}
                   />
                 )
               } else {
@@ -212,6 +213,7 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
                   cwd={td.cwd}
                   command={td.command}
                   args={td.args}
+                  spawnedAt={td.spawnedAt}
                   onExit={(exitCode) => {
                     const hadCommand = raw.command
                     if (hadCommand && !isFallback) {
