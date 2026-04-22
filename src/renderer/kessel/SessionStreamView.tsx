@@ -402,6 +402,9 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
   // to complete, and there's nothing to subscribe to yet.
   useEffect(() => {
     if (sessionId === null) return
+    const wsStart = performance.now()
+    let firstFrameAt: number | null = null
+    let ackAt: number | null = null
     const client = new KesselClient({
       sessionId,
       port,
@@ -413,12 +416,30 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     // cascade that Claude's bottom-border repaints used to trigger.
     const off = client.on({
       onFrames: (frames) => {
+        if (firstFrameAt === null) {
+          firstFrameAt = performance.now()
+          // eslint-disable-next-line no-console
+          console.info(
+            `%c[Kessel] tab-${sessionId.slice(0, 8)} first-frame=${Math.round(firstFrameAt - wsStart)}ms (ack=${
+              ackAt !== null ? Math.round(ackAt - wsStart) : '?'
+            }ms)`,
+            'color:#0ff',
+          )
+        }
         const grid = gridRef.current!
         for (const frame of frames) grid.applyFrame(frame)
         markActivity()
         scheduleRender()
       },
-      onAck: (ack) => onReady?.(ack.replayCount),
+      onAck: (ack) => {
+        ackAt = performance.now()
+        // eslint-disable-next-line no-console
+        console.info(
+          `%c[Kessel] tab-${sessionId.slice(0, 8)} ws-ack=${Math.round(ackAt - wsStart)}ms replay=${ack.replayCount}`,
+          'color:#0ff',
+        )
+        onReady?.(ack.replayCount)
+      },
       onError: (err) => onError?.(err.message),
     })
     client.connect()

@@ -125,7 +125,24 @@ pub async fn run(
     );
 
     let mut bytes_in_current = file.metadata().await?.len();
-    let mut aggregate = compute_aggregate_bytes(&archive_dir).await?;
+    // L3.1 — read the cached aggregate from the sidecar first. Only
+    // walk the directory if the cache is missing or unreadable. A
+    // fresh session always takes the walk path (sidecar doesn't
+    // exist yet), but the walk is O(1) since the dir has just one
+    // zero-byte file. For RESUMED sessions with many rotated
+    // segments, this is O(segments) → O(1).
+    let aggregate_sidecar = archive_dir.join(".aggregate");
+    let mut aggregate = match read_aggregate_cache(&aggregate_sidecar).await {
+        Some(v) => v,
+        None => {
+            let v = compute_aggregate_bytes(&archive_dir).await?;
+            // Best-effort cache write so the next restart hits the
+            // fast path. Failure here is not fatal — we fall back to
+            // the walk on next startup.
+            let _ = write_aggregate_cache(&aggregate_sidecar, v).await;
+            v
+        }
+    };
     let mut warned = aggregate >= WARN_BYTES;
     let mut frozen = aggregate >= HARD_LIMIT_BYTES;
 
@@ -171,6 +188,12 @@ pub async fn run(
                         continue;
                     }
                     bytes_in_current = 0;
+                    // L3.1 — persist updated aggregate after rotation
+                    // so a restart immediately after this point
+                    // reloads the correct total without a directory
+                    // walk.
+                    let _ =
+                        write_aggregate_cache(&aggregate_sidecar, aggregate).await;
                 }
 
                 if let Err(e) = file.write_all(&buf).await {
@@ -306,10 +329,40 @@ pub fn parse_rotation_index(filename: &str) -> Option<u32> {
 /// Sum the sizes of every file in `dir`. Used at writer startup so
 /// the aggregate byte counter reflects historical segments, not
 /// just the active one.
+/// L3.1 — read the cached aggregate total from the `.aggregate`
+/// sidecar. Returns `None` if the sidecar is missing, unreadable,
+/// or has an unexpected length. Callers must fall back to
+/// `compute_aggregate_bytes` in the None case.
+///
+/// Encoding: 8 bytes little-endian u64. No framing, no magic — the
+/// sidecar is a pure cache and can be blown away safely.
+async fn read_aggregate_cache(path: &Path) -> Option<u64> {
+    let data = tokio::fs::read(path).await.ok()?;
+    if data.len() != 8 {
+        return None;
+    }
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&data);
+    Some(u64::from_le_bytes(buf))
+}
+
+/// Persist the aggregate total to the sidecar. Best-effort — any
+/// write error is swallowed because the cache is advisory; a missed
+/// write just means the next restart walks the dir again.
+async fn write_aggregate_cache(path: &Path, value: u64) -> std::io::Result<()> {
+    tokio::fs::write(path, value.to_le_bytes()).await
+}
+
 pub async fn compute_aggregate_bytes(dir: &Path) -> std::io::Result<u64> {
     let mut sum: u64 = 0;
     let mut entries = tokio::fs::read_dir(dir).await?;
     while let Some(entry) = entries.next_entry().await? {
+        // Skip the L3.1 `.aggregate` sidecar — it's a cache of this
+        // very computation's output, so including it would double-
+        // count the 8-byte cache itself on every walk.
+        if entry.file_name() == ".aggregate" {
+            continue;
+        }
         if let Ok(meta) = entry.metadata().await {
             if meta.is_file() {
                 sum += meta.len();
