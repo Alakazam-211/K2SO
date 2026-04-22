@@ -289,6 +289,84 @@ pub fn spawn_session_stream(cfg: SpawnConfig) -> Result<SessionStreamSession, St
     // (Phase 3+ hooks read this to route signals back through the bus).
     cmd.env("K2SO_SESSION_ID", session_id.to_string());
 
+    // ── Env parity with alacritty_backend ──────────────────────────
+    // Historical note: Kessel's daemon-side spawn used to set only
+    // the five vars above. That left users' shell rc scripts running
+    // `k2so ...` commands slow or broken because (a) the bundled
+    // `cli/` directory wasn't on PATH, (b) K2SO_PROJECT_PATH was
+    // unset so CLI commands couldn't locate the workspace, and (c)
+    // hook env vars were missing so any agent-lifecycle hook calls
+    // would fall through to the slower discovery path (reading
+    // heartbeat.port from disk). When a shell's rc runs a slow
+    // `k2so register-something` command at every startup, the net
+    // effect is 1-2 seconds of added latency per session spawn —
+    // exactly the gap Rosson reported vs Alacritty.
+
+    // PATH — prepend the bundled cli/ directory so `k2so` is
+    // discoverable. Same search logic alacritty_backend uses so
+    // both paths resolve to the same binary. Falls back to passing
+    // through the existing PATH unchanged when no cli/ is found.
+    if let Ok(exe_path) = std::env::current_exe() {
+        let cli_dir = if let Some(macos_dir) = exe_path.parent() {
+            // Production: <app>/Contents/MacOS/<bin> → <app>/Contents/Resources/_up_/cli/
+            let resources_cli = macos_dir
+                .parent()
+                .map(|contents| contents.join("Resources").join("_up_").join("cli"));
+            if resources_cli.as_ref().map_or(false, |p| p.exists()) {
+                resources_cli
+            } else {
+                // Dev: target/debug/<bin> → ../../cli/
+                macos_dir
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .map(|repo| repo.join("cli"))
+                    .filter(|p| p.exists())
+            }
+        } else {
+            None
+        };
+        if let Some(cli_dir) = cli_dir {
+            let existing = std::env::var("PATH").unwrap_or_default();
+            cmd.env(
+                "PATH",
+                format!("{}:{existing}", cli_dir.to_string_lossy()),
+            );
+        }
+    }
+
+    // K2SO_PROJECT_PATH — walk up from cwd to find .k2so/ so the CLI
+    // in the child process knows which workspace it's operating in.
+    // Same 20-level safety walk alacritty_backend uses.
+    {
+        let mut dir = std::path::PathBuf::from(&safe_cwd);
+        let mut found = None;
+        for _ in 0..20 {
+            if dir.join(".k2so").is_dir() {
+                found = Some(dir.to_string_lossy().to_string());
+                break;
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        cmd.env(
+            "K2SO_PROJECT_PATH",
+            found.unwrap_or_else(|| safe_cwd.clone()),
+        );
+    }
+
+    // Agent-hooks server env — only set when the hook server is
+    // actually running in this process. In the daemon, hook_config
+    // stays at 0/"" (hook server lives in src-tauri), so these are
+    // skipped and the CLI falls through to heartbeat.port lookup.
+    // In the Tauri process (if session_stream_pty is ever called
+    // from there), the hook vars are set properly.
+    let hook_port = crate::hook_config::get_port();
+    if hook_port > 0 {
+        cmd.env("K2SO_PORT", hook_port.to_string());
+        cmd.env("K2SO_HOOK_TOKEN", crate::hook_config::get_token());
+    }
+
     // Spawn.
     let child = pair
         .slave
