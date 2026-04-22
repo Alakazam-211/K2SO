@@ -88,14 +88,15 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
       let result: KesselSpawnResult
       try {
         result = await invoke<KesselSpawnResult>('kessel_spawn', {
-          req: {
-            terminalId,
-            cwd,
-            command: command ?? null,
-            args: args ?? null,
-            cols: 80,
-            rows: 24,
-          },
+          // Tauri converts camelCase arg names to snake_case on the
+          // Rust side. Keep these camelCase to match the Rust
+          // function signature's snake_case params.
+          terminalId,
+          cwd,
+          command: command ?? null,
+          args: args ?? null,
+          cols: 80,
+          rows: 24,
         })
       } catch (e) {
         // Invalidate the in-browser daemon-ws cache too so the next

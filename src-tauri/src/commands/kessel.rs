@@ -97,17 +97,6 @@ fn invalidate_creds() {
 
 // ── Request / response shapes mirroring the browser-side path ──
 
-#[derive(Debug, Deserialize)]
-pub struct KesselSpawnRequest {
-    #[serde(rename = "terminalId")]
-    pub terminal_id: String,
-    pub cwd: String,
-    pub command: Option<String>,
-    pub args: Option<Vec<String>>,
-    pub cols: Option<u16>,
-    pub rows: Option<u16>,
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KesselSpawnResponse {
@@ -168,7 +157,14 @@ struct DaemonSpawnBody {
 /// Invalidates the cached token on 401/403 so a daemon restart
 /// doesn't wedge the user — next call retries from disk.
 #[tauri::command]
-pub fn kessel_spawn(req: KesselSpawnRequest) -> Result<KesselSpawnResponse, String> {
+pub fn kessel_spawn(
+    terminal_id: String,
+    cwd: String,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+) -> Result<KesselSpawnResponse, String> {
     let started = std::time::Instant::now();
     let mut t = started;
     let mut timing = KesselSpawnTiming::default();
@@ -178,12 +174,12 @@ pub fn kessel_spawn(req: KesselSpawnRequest) -> Result<KesselSpawnResponse, Stri
     t = std::time::Instant::now();
 
     let body = serde_json::json!({
-        "agent_name": format!("tab-{}", req.terminal_id),
-        "cwd": req.cwd,
-        "command": req.command,
-        "args": req.args,
-        "cols": req.cols.unwrap_or(80),
-        "rows": req.rows.unwrap_or(24),
+        "agent_name": format!("tab-{}", terminal_id),
+        "cwd": cwd,
+        "command": command,
+        "args": args,
+        "cols": cols.unwrap_or(80),
+        "rows": rows.unwrap_or(24),
     });
     let body_bytes = serde_json::to_vec(&body).map_err(|e| format!("serialize: {e}"))?;
     timing.serialize_us = t.elapsed().as_micros() as u64;
