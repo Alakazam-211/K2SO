@@ -393,6 +393,26 @@ export class TerminalGrid {
     }
     // Grow/shrink each existing row's column count.
     this.grid_ = this.grid_.map((row) => this.resizeRow(row, newCols))
+    // Scrollback rows must track the same column width as the live
+    // grid. Without this, rows that were written at an earlier
+    // narrower width keep that width forever — as the user resizes
+    // the window wider, the scrollback renders as a ragged,
+    // short-line block until enough new content has scrolled off
+    // the live grid to replace the narrow rows. Padding here costs
+    // O(scrollbackCap * cols) blank-cell allocations, bounded.
+    //
+    // Note: this does NOT re-flow soft-wrapped logical lines (an
+    // 80-col line split across two 40-col rows stays split after a
+    // 120-col resize). True reflow requires tracking the "this row
+    // wraps into the next" bit at write time — deferred to the
+    // Phase 4.7 word-editor pass. For now, the visible improvement
+    // is that every scrollback row extends the full width, so the
+    // viewport looks uniform.
+    if (this.scrollback_.length > 0) {
+      this.scrollback_ = this.scrollback_.map((row) =>
+        this.resizeRow(row, newCols),
+      )
+    }
     // Adjust row count: append blanks or trim from the bottom.
     if (newRows > this.rows_) {
       for (let i = this.rows_; i < newRows; i++) {
