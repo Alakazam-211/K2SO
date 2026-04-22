@@ -366,13 +366,37 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
         const rowDelta = Math.abs(s.cursor.row - prev.row)
         const colDelta = Math.abs(s.cursor.col - prev.col)
         const isSmallMove = rowDelta <= 1 && colDelta <= 20
-        if (isSmallMove) {
+
+        // Special case: cursor snapped to col=0 on the same row it
+        // was already on, from ANY non-zero column. This is the
+        // `\r`-then-reprint idiom every shell and TUI uses to
+        // rewrite the current line (ZLE prompt refresh, `rg`
+        // progress updates, Claude Code's input-prompt repaint
+        // where the caret sits at col=2 right of `> `, etc.).
+        // Without the settle, the caret flickers to col=0 for
+        // ~16ms before the reprint catches up.
+        //
+        // Even prev.col=1 triggers this — Claude's repaint pattern
+        // passes through very short prompts too, and the 60ms
+        // settle is below the perception-of-latency floor. The
+        // only cases that ever feel the lag are Home/Ctrl+A and
+        // backspace-at-col=1, both of which are user-initiated
+        // so the user is already LOOKING FOR the cursor to move —
+        // 60ms is imperceptible.
+        const isTransientCR =
+          s.cursor.col === 0 &&
+          s.cursor.row === prev.row &&
+          prev.col >= 1
+
+        if (isSmallMove && !isTransientCR) {
           // Typing / Enter / line wrap — advance immediately.
           return { ...s.cursor }
         }
 
-        // Large move (Claude's bottom-border repaint etc.). Hold
-        // position until activity has been quiet for SETTLE_MS.
+        // Large move (Claude's bottom-border repaint, \r reprint,
+        // etc.). Hold position until activity has been quiet for
+        // SETTLE_MS — if the reprint finishes within that window
+        // the intermediate col=0 frame never renders.
         const quietMs = Date.now() - lastActivityRef.current
         if (quietMs < SETTLE_MS) return prev
         return { ...s.cursor }
@@ -507,6 +531,17 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
   // change by writing a hidden span and reading its box. Simple and
   // accurate; matches AlacrittyTerminalView's approach.
   const [cellMetrics, setCellMetrics] = useState({ width: 0, height: 0 })
+
+  // Focus tracking drives solid-vs-hollow cursor rendering. Initial
+  // value reflects whether the tab owns focus at mount; focus/blur
+  // listeners (attached further below, after containerRef is
+  // declared) keep it in sync. Decoupled from the D7 focus-reporting
+  // effect — that one only writes CSI I/O when the TUI opted in,
+  // whereas the cursor UX must always reflect focus.
+  const [isFocused, setIsFocused] = useState<boolean>(() => {
+    if (typeof document === 'undefined') return false
+    return document.hasFocus()
+  })
   useEffect(() => {
     const el = document.createElement('span')
     el.style.cssText = `font-family: ${config.font.family}; font-size: ${fontSize}px; position: absolute; visibility: hidden; white-space: pre;`
@@ -525,6 +560,24 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
   // interactive=true so the pane is keyboard-reachable without the
   // user having to click first.
   const containerRef = useRef<HTMLDivElement>(null)
+
+  // Focus-tracking listener for the cursor UX (paired with the
+  // `isFocused` state declared above). Runs unconditionally —
+  // non-interactive panes still need the hollow-cursor affordance
+  // when the user clicks away.
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const onFocus = (): void => setIsFocused(true)
+    const onBlur = (): void => setIsFocused(false)
+    el.addEventListener('focus', onFocus)
+    el.addEventListener('blur', onBlur)
+    return () => {
+      el.removeEventListener('focus', onFocus)
+      el.removeEventListener('blur', onBlur)
+    }
+  }, [])
+
   useEffect(() => {
     if (!interactive) return
     const el = containerRef.current
@@ -698,19 +751,35 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     }
   }, [interactive, port, token, sessionId])
 
-  // Mouse wheel → scrollback navigation. deltaY < 0 (wheel up / two-
-  // finger swipe down on trackpad) scrolls toward older content;
-  // deltaY > 0 scrolls toward the live bottom. We clamp against the
-  // current scrollback length. preventDefault so the parent pane
-  // doesn't also scroll the browser viewport.
+  // Mouse wheel → scrollback navigation.
   //
-  // Scroll multiplier (lines per wheel tick) trades scroll speed
-  // against overshoot on a trackpad. Read from config so users can
-  // tune it.
+  // macOS trackpads fire 30-60 pixel-delta wheel events per two-
+  // finger swipe. Treating each event as a discrete "tick" would
+  // scroll hundreds of lines per swipe. The fix — ported from
+  // AlacrittyTerminalView — is:
+  //   1. Accumulate pixel deltas (`e.deltaY`) across events.
+  //   2. Flush every 50ms via setTimeout.
+  //   3. Convert accumulated pixels → lines at 1 line per cell
+  //      height. A 100px swipe on a 20px cell = 5 lines, matching
+  //      physical-distance scrolling in every native macOS app.
+  //
+  // DOM_DELTA_LINE (rare — classic mouse wheels on some drivers)
+  // arrives as a small integer line count rather than pixels. We
+  // scale those up by cellHeight so a single accumulator variable
+  // can carry both kinds.
+  //
+  // `config.scrolling.multiplier` is a user-tunable sensitivity
+  // factor: 1.0 matches Alacritty 1:1 (the default). Bump it up
+  // for faster scrolling, down for slower.
+  //
+  // deltaY < 0 → older content (increase viewportOffset).
+  // deltaY > 0 → newer content (decrease viewportOffset).
+  const scrollAccumRef = useRef(0)
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
-    const LINES_PER_TICK = config.scrolling.multiplier
+    const FLUSH_MS = 50
     const onWheel = (e: WheelEvent) => {
       if (e.deltaY === 0) return
       const snap = gridRef.current?.snapshot()
@@ -720,18 +789,49 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
       // mouse reporting will forward it instead).
       if (snap?.modes.altScreen) return
       e.preventDefault()
-      const direction = e.deltaY < 0 ? +1 : -1
-      const maxOffset = snap?.scrollback.length ?? 0
-      setViewportOffset((o) => {
-        const next = o + direction * LINES_PER_TICK
-        if (next <= 0) return 0
-        if (next >= maxOffset) return maxOffset
-        return next
-      })
+
+      const cellH = cellMetrics.height || 20
+      // Normalize deltaY to pixels regardless of deltaMode so the
+      // accumulator math below is one-size-fits-all.
+      const pixelDelta =
+        e.deltaMode === WheelEvent.DOM_DELTA_LINE
+          ? e.deltaY * cellH
+          : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
+            ? e.deltaY * cellH * (snap?.rows ?? 24)
+            : e.deltaY
+      scrollAccumRef.current += pixelDelta
+
+      if (!scrollTimerRef.current) {
+        scrollTimerRef.current = setTimeout(() => {
+          scrollTimerRef.current = null
+          const accum = scrollAccumRef.current
+          scrollAccumRef.current = 0
+          if (accum === 0) return
+          const lines = Math.round(
+            (accum * config.scrolling.multiplier) / cellH,
+          )
+          if (lines === 0) return
+          const offsetDelta = -lines
+          const maxOffset =
+            gridRef.current?.snapshot().scrollback.length ?? 0
+          setViewportOffset((o) => {
+            const next = o + offsetDelta
+            if (next <= 0) return 0
+            if (next >= maxOffset) return maxOffset
+            return next
+          })
+        }, FLUSH_MS)
+      }
     }
     el.addEventListener('wheel', onWheel, { passive: false })
-    return () => el.removeEventListener('wheel', onWheel)
-  }, [config.scrolling.multiplier])
+    return () => {
+      el.removeEventListener('wheel', onWheel)
+      if (scrollTimerRef.current) {
+        clearTimeout(scrollTimerRef.current)
+        scrollTimerRef.current = null
+      }
+    }
+  }, [config.scrolling.multiplier, cellMetrics.height])
 
   // I7 — ResizeObserver on the pane container. On dimension change,
   // compute new cols/rows from cell metrics + container box, resize
@@ -871,34 +971,41 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     // `snapshot.cursor` (which tracks every intermediate move). See
     // the resting-cursor effect above for rationale.
     //
-    // Also hide the cursor entirely while the viewport is scrolled
-    // up — the cursor is a live-grid coordinate and would render at
-    // a row that's showing historical scrollback content. Every
-    // real terminal does this.
-    if (!restingCursor.visible) return { display: 'none' }
+    // Intentionally ignore `restingCursor.visible` (DECTCEM hide).
+    // TUI apps like Claude Code hide the cursor so they can paint
+    // their own, but our DOM pane has no way to render that glyph —
+    // the user ends up "losing" the cursor entirely. Per the
+    // product directive: always show the pane's cursor, solid when
+    // the tab is focused, hollow outline when it isn't. Matches the
+    // native macOS text-input caret convention.
+    //
+    // Still hide while the viewport is scrolled up — the cursor is
+    // a live-grid coordinate and would render at a row that's
+    // showing historical scrollback content.
     if (viewportOffset > 0) return { display: 'none' }
     if (!cellMetrics.width) return { display: 'none' }
 
     // D13 — shape from TUI's DECSCUSR (restingCursor.shape) or the
-    // user's configured fallback. The fallback is what vim normal-
-    // mode would look like; the TUI overrides per-mode via CSI Ps
-    // SP q. Blinking variants drive a CSS @keyframes animation —
-    // GPU-cheap, and browsers freeze it when the tab is
-    // backgrounded.
+    // user's configured fallback. Blinking variants only animate
+    // when focused; an unfocused pane's cursor is a static outline.
     const shape: CursorShape = restingCursor.shape ?? config.cursor.defaultShape
     const base: React.CSSProperties = {
       position: 'absolute',
       left: `${4 + cellMetrics.width * restingCursor.col}px`,
       top: `${4 + cellMetrics.height * restingCursor.row}px`,
       pointerEvents: 'none',
+      boxSizing: 'border-box',
     }
     const blinkMs = config.cursor.blinkIntervalMs
-    const animation = shape.startsWith('blinking_')
-      ? `kessel-cursor-blink ${blinkMs * 2}ms steps(2, end) infinite`
-      : undefined
+    const animation =
+      isFocused && shape.startsWith('blinking_')
+        ? `kessel-cursor-blink ${blinkMs * 2}ms steps(2, end) infinite`
+        : undefined
     const barWidth = Math.max(1, Math.round(cellMetrics.width * config.cursor.thickness))
     const underscoreHeight = Math.max(1, Math.round(cellMetrics.height * config.cursor.thickness))
-    const caretColor = `rgba(224, 224, 224, 0.5)`
+    const caretColor = 'rgb(224, 224, 224)'
+    const fill = isFocused ? caretColor : 'transparent'
+    const outline = isFocused ? undefined : `inset 0 0 0 1px ${caretColor}`
 
     switch (shape) {
       case 'steady_block':
@@ -907,7 +1014,8 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
           ...base,
           width: `${cellMetrics.width}px`,
           height: `${cellMetrics.height}px`,
-          backgroundColor: caretColor,
+          backgroundColor: fill,
+          boxShadow: outline,
           animation,
         }
       case 'steady_bar':
@@ -916,7 +1024,8 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
           ...base,
           width: `${barWidth}px`,
           height: `${cellMetrics.height}px`,
-          backgroundColor: caretColor,
+          backgroundColor: fill,
+          boxShadow: outline,
           animation,
         }
       case 'steady_underscore':
@@ -927,18 +1036,19 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
           height: `${underscoreHeight}px`,
           // Nudge to the bottom of the cell.
           top: `${4 + cellMetrics.height * restingCursor.row + cellMetrics.height - underscoreHeight}px`,
-          backgroundColor: caretColor,
+          backgroundColor: fill,
+          boxShadow: outline,
           animation,
         }
     }
   }, [
-    restingCursor.visible,
     restingCursor.col,
     restingCursor.row,
     restingCursor.shape,
     cellMetrics.width,
     cellMetrics.height,
     viewportOffset,
+    isFocused,
     config.cursor.defaultShape,
     config.cursor.blinkIntervalMs,
     config.cursor.thickness,
