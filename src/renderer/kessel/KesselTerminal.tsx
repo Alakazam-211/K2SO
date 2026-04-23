@@ -16,10 +16,11 @@
 // Errors surface via a simple message overlay so the user sees why
 // the pane is blank instead of a silent white box.
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { SessionStreamView } from './SessionStreamView'
 import { SessionStreamViewTerm } from './SessionStreamViewTerm'
+import { useKesselConfig } from './config-context'
 import { invalidateDaemonWs } from './daemon-ws'
 
 export interface KesselTerminalProps {
@@ -85,9 +86,51 @@ type State =
 
 export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
   const { terminalId, cwd, command, args, fontSize, spawnedAt, variant = 'term' } = props
+  const config = useKesselConfig()
+  const effectiveFontSize = fontSize ?? config.font.size
   const [state, setState] = useState<State>({ kind: 'idle' })
 
+  // Measure the wrapper container BEFORE spawning so the daemon
+  // PTY opens at the user's real window size from the start. The
+  // daemon's grow-settle task captures cfg.cols / cfg.rows at spawn
+  // time and shrinks to them after settle — passing hardcoded 80×24
+  // meant every Kessel pane's Term ended up locked to 80×24 even
+  // when the user's window was much wider, and TUI output wrapped
+  // early inside a mostly-empty container.
+  //
+  // useLayoutEffect runs after DOM layout but before paint, so the
+  // wrapper's bounding rect is real by the time we read it. If the
+  // pane mounts hidden (retained-view display:none in another
+  // workspace) getBoundingClientRect returns 0 — fall back to a
+  // reasonable default; ResizeObserver inside SessionStreamViewTerm
+  // catches up when the tab becomes visible.
+  const wrapperRef = useRef<HTMLDivElement>(null)
+  const [measuredDims, setMeasuredDims] =
+    useState<{ cols: number; rows: number } | null>(null)
+  useLayoutEffect(() => {
+    const el = wrapperRef.current
+    if (!el) return
+    const span = document.createElement('span')
+    span.style.cssText = `font-family: ${config.font.family}; font-size: ${effectiveFontSize}px; position: absolute; visibility: hidden; white-space: pre;`
+    span.textContent = 'W'
+    document.body.appendChild(span)
+    const cellW = span.getBoundingClientRect().width
+    document.body.removeChild(span)
+    const cellH = Math.ceil(effectiveFontSize * config.font.lineHeightMultiplier)
+    const rect = el.getBoundingClientRect()
+    if (rect.width === 0 || rect.height === 0 || cellW === 0 || cellH === 0) {
+      setMeasuredDims({ cols: 120, rows: 40 })
+      return
+    }
+    const availW = Math.max(0, rect.width - 8)
+    const availH = Math.max(0, rect.height - 8)
+    const cols = Math.max(20, Math.floor(availW / cellW))
+    const rows = Math.max(5, Math.floor(availH / cellH))
+    setMeasuredDims({ cols, rows })
+  }, [effectiveFontSize, config.font.family, config.font.lineHeightMultiplier])
+
   useEffect(() => {
+    if (measuredDims === null) return
     let cancelled = false
     const bootT0 = performance.now()
 
@@ -119,8 +162,8 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
           cwd,
           command: command ?? null,
           args: args ?? null,
-          cols: 80,
-          rows: 24,
+          cols: measuredDims!.cols,
+          rows: measuredDims!.rows,
         })
       } catch (e) {
         // Invalidate the in-browser daemon-ws cache too so the next
@@ -213,23 +256,7 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
     }
     // Re-spawn only when terminalId changes — same terminal tab
     // keeps its session across prop tweaks.
-  }, [terminalId, cwd, command, args?.join('\0')])
-
-  if (state.kind === 'error') {
-    return (
-      <div
-        style={{
-          padding: 16,
-          color: '#ff6666',
-          fontFamily: 'monospace',
-          fontSize: 12,
-          whiteSpace: 'pre-wrap',
-        }}
-      >
-        {state.message}
-      </div>
-    )
-  }
+  }, [terminalId, cwd, command, args?.join('\0'), measuredDims])
 
   // L1.5 — optimistic mount. Render SessionStreamView in both
   // `spawning` and `ready` states; during `spawning` we pass
@@ -239,36 +266,52 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
   // sessionId from null → real, the only thing that changes is the
   // WS connection starting — the pane is visually already there.
   const isReady = state.kind === 'ready'
+  const paneCols = measuredDims?.cols ?? 80
+  const paneRows = measuredDims?.rows ?? 24
 
-  // `variant` defaults to 'term' (Canvas Plan Phase 5). Legacy
-  // Frame path is still accessible via the escape-hatch prop while
-  // we close parity gaps; PaneGroupView doesn't pass the prop, so
-  // production tabs always use the Term path.
-  if (variant === 'frame') {
-    return (
-      <SessionStreamView
-        sessionId={isReady ? state.sessionId : null}
-        port={isReady ? state.port : 0}
-        token={isReady ? state.token : ''}
-        cols={80}
-        rows={24}
-        fontSize={fontSize}
-        autoResize
-        interactive
-      />
-    )
-  }
-
+  // Wrapper is always rendered so useLayoutEffect can measure it
+  // before boot() fires. Children switch based on state; the
+  // measurement + boot gate happens once on mount.
   return (
-    <SessionStreamViewTerm
-      sessionId={isReady ? state.sessionId : null}
-      port={isReady ? state.port : 0}
-      token={isReady ? state.token : ''}
-      cols={80}
-      rows={24}
-      fontSize={fontSize}
-      autoResize
-      interactive
-    />
+    <div
+      ref={wrapperRef}
+      style={{ display: 'flex', flex: 1, width: '100%', height: '100%' }}
+    >
+      {state.kind === 'error' ? (
+        <div
+          style={{
+            padding: 16,
+            color: '#ff6666',
+            fontFamily: 'monospace',
+            fontSize: 12,
+            whiteSpace: 'pre-wrap',
+          }}
+        >
+          {state.message}
+        </div>
+      ) : variant === 'frame' ? (
+        <SessionStreamView
+          sessionId={isReady ? state.sessionId : null}
+          port={isReady ? state.port : 0}
+          token={isReady ? state.token : ''}
+          cols={paneCols}
+          rows={paneRows}
+          fontSize={fontSize}
+          autoResize
+          interactive
+        />
+      ) : (
+        <SessionStreamViewTerm
+          sessionId={isReady ? state.sessionId : null}
+          port={isReady ? state.port : 0}
+          token={isReady ? state.token : ''}
+          cols={paneCols}
+          rows={paneRows}
+          fontSize={fontSize}
+          autoResize
+          interactive
+        />
+      )}
+    </div>
   )
 }
