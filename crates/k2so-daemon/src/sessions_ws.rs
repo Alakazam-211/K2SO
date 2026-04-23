@@ -81,6 +81,43 @@ pub async fn serve_session_subscribe_connection(
     let mut rx = entry.subscribe();
     let replay = entry.replay_snapshot();
 
+    // Instrumentation: tally what's in the ring so the daemon log
+    // shows exactly what this subscriber is about to receive. If
+    // the scrollback problem ever reappears, this line is the
+    // answer to "did the ring have the data?" — distinct from
+    // "did the client render it?"
+    let mut text_frames = 0usize;
+    let mut text_bytes = 0usize;
+    let mut mode_frames = 0usize;
+    let mut boundary_seen = false;
+    for frame in &replay {
+        match frame {
+            Frame::Text { bytes, .. } => {
+                text_frames += 1;
+                text_bytes += bytes.len();
+            }
+            Frame::ModeChange { .. } => mode_frames += 1,
+            Frame::SemanticEvent {
+                kind: k2so_core::session::SemanticKind::Custom { kind, .. },
+                ..
+            } if kind == "grow_boundary" => {
+                boundary_seen = true;
+            }
+            _ => {}
+        }
+    }
+    log_debug!(
+        "[daemon/sessions_ws] subscriber for {session_id} will drain \
+         replay: frames={} text={} text_bytes~={} mode={} \
+         grow_boundary={} (live subscribers on entry: {})",
+        replay.len(),
+        text_frames,
+        text_bytes,
+        mode_frames,
+        boundary_seen,
+        entry.subscriber_count()
+    );
+
     // Send ack.
     let ack = serialize_event(
         "session:ack",
@@ -95,6 +132,7 @@ pub async fn serve_session_subscribe_connection(
     }
 
     // Flush replay.
+    let mut replay_sent = 0usize;
     for frame in replay {
         let msg = match serialize_frame_event(&frame) {
             Ok(m) => m,
@@ -104,14 +142,19 @@ pub async fn serve_session_subscribe_connection(
             }
         };
         if let Err(e) = write.send(Message::Text(msg)).await {
-            log_debug!("[daemon/sessions_ws] replay write failed (client gone): {e}");
+            log_debug!(
+                "[daemon/sessions_ws] replay write failed after {replay_sent} \
+                 frames (client gone): {e}"
+            );
             return;
         }
+        replay_sent += 1;
     }
 
     log_debug!(
-        "[daemon/sessions_ws] subscriber connected for {session_id} \
-         (live subscribers on entry: {})",
+        "[daemon/sessions_ws] subscriber connected for {session_id}, \
+         replay_sent={} (live subscribers on entry: {})",
+        replay_sent,
         entry.subscriber_count()
     );
 

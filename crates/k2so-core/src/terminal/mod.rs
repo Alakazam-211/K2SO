@@ -12,6 +12,12 @@ mod font_renderer;
 // equivalent to v0.33.0.
 #[cfg(feature = "session_stream")]
 pub mod session_stream_pty;
+// Grow-then-shrink settle watcher (2026-04-22). Every Session Stream
+// spawn opens the PTY at an artificially large rows value; this
+// module owns the "has the initial paint settled?" decision that
+// drives the follow-up SIGWINCH shrink.
+#[cfg(feature = "session_stream")]
+pub mod grow_settle;
 // `bitmap_renderer` was deleted in 0.33.x. The DOM/grid broadcast
 // protocol that shipped in 0.32.13 retired bitmap rendering; the
 // module's 414 lines were dead code for a full release.
@@ -21,7 +27,8 @@ pub use event_sink::TerminalEventSink;
 
 #[cfg(feature = "session_stream")]
 pub use session_stream_pty::{
-    spawn_session_stream, NoopListener, SessionStreamSession, SpawnConfig,
+    spawn_session_stream, spawn_session_stream_and_grow, NoopListener,
+    SessionStreamSession, SpawnConfig, GROW_ROWS,
 };
 
 use parking_lot::Mutex;

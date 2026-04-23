@@ -15,7 +15,7 @@ use k2so_core::awareness::{AgentAddress, AgentSignal, InjectProvider, WakeProvid
 use k2so_core::log_debug;
 
 use crate::session_map;
-use crate::spawn::{spawn_agent_session, SpawnAgentSessionRequest};
+use crate::spawn::{spawn_agent_session_blocking, SpawnAgentSessionRequest};
 
 /// Looks up the target agent's session handle in `session_map` and
 /// writes the rendered signal bytes into its PTY. If no session is
@@ -157,7 +157,8 @@ fn try_auto_launch(agent: &str, signal: &AgentSignal) -> Result<(), String> {
     // The signal we just enqueued is part of that drain and becomes
     // the target's first byte of input.
     let req = launch_request_for(agent, &project_path, &profile);
-    let outcome = spawn_agent_session(req).map_err(|e| format!("spawn failed: {e}"))?;
+    let outcome = spawn_agent_session_blocking(req)
+        .map_err(|e| format!("spawn failed: {e}"))?;
 
     log_debug!(
         "[daemon/wake] auto-launched session={} agent={agent} pending_drained={} \

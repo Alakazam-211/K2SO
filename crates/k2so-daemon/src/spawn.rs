@@ -36,7 +36,9 @@ use std::sync::Arc;
 
 use k2so_core::log_debug;
 use k2so_core::session::{registry, SessionId};
-use k2so_core::terminal::{spawn_session_stream, SessionStreamSession, SpawnConfig};
+use k2so_core::terminal::{
+    spawn_session_stream_and_grow, SessionStreamSession, SpawnConfig,
+};
 
 use crate::pending_live;
 use crate::session_map;
@@ -74,7 +76,13 @@ pub struct SpawnAgentSessionOutcome {
 /// how many pending-live signals were drained into it, plus the
 /// owning Arc (so callers can hold it alive past this function if
 /// needed — `session_map` also holds a clone).
-pub fn spawn_agent_session(
+///
+/// Async because the grow-then-shrink orchestration
+/// (`spawn_session_stream_and_grow`) awaits the settle watcher
+/// before returning. The HTTP response doesn't go out until the
+/// session's replay ring is seeded with the full initial paint and
+/// the PTY has been SIGWINCHed down to the user's real rows.
+pub async fn spawn_agent_session(
     req: SpawnAgentSessionRequest,
 ) -> Result<SpawnAgentSessionOutcome, String> {
     if req.agent_name.is_empty() {
@@ -96,7 +104,7 @@ pub fn spawn_agent_session(
         track_alacritty_term: false,
     };
 
-    let session = spawn_session_stream(cfg)?;
+    let session = spawn_session_stream_and_grow(cfg).await?;
 
     // Tag the SessionEntry so liveness lookups (roster,
     // egress::is_agent_live) find this session under its agent name.
@@ -132,5 +140,23 @@ pub fn spawn_agent_session(
         agent_name: req.agent_name,
         pending_drained: pending_count,
         session: arc,
+    })
+}
+
+/// Synchronous wrapper around the async `spawn_agent_session`, for
+/// callers that live inside the daemon's sync `/cli/*` dispatch
+/// path (`terminal_routes`, `agents_routes`). Uses
+/// `tokio::task::block_in_place` to `block_on` the async spawn
+/// without deadlocking the multi-thread tokio runtime.
+///
+/// Only safe inside a multi-thread tokio runtime — the daemon main
+/// is `#[tokio::main(flavor = "multi_thread")]`, which is the only
+/// production call site. Unit tests that want sync semantics should
+/// use a `#[tokio::test(flavor = "multi_thread")]` runtime.
+pub fn spawn_agent_session_blocking(
+    req: SpawnAgentSessionRequest,
+) -> Result<SpawnAgentSessionOutcome, String> {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(spawn_agent_session(req))
     })
 }

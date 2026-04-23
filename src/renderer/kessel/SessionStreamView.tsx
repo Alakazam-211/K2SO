@@ -30,6 +30,17 @@ import {
   MODE_APP_CURSOR,
 } from '@/lib/key-mapping'
 
+/** Mirror of the daemon's `GROW_ROWS` constant in
+ *  `crates/k2so-core/src/terminal/session_stream_pty.rs`. The daemon
+ *  opens every PTY at `max(requested_rows, GROW_ROWS)` and paints the
+ *  child TUI into that oversized canvas before SIGWINCH'ing down; the
+ *  Kessel client must allocate a matching canvas locally so replay
+ *  frames (which were captured at the big size) land where the daemon
+ *  painted them. When the daemon emits the `grow_boundary` semantic
+ *  marker, the client trims + resizes to the real target, at which
+ *  point the overflow rows scroll into scrollback naturally. */
+export const KESSEL_GROW_ROWS = 500
+
 export interface SessionStreamViewProps {
   /** SessionId UUID for the daemon's live session. `null` =
    *  optimistic mount: render the grid shell (font, cursor, empty
@@ -170,6 +181,19 @@ const RowRenderer = React.memo(
     // re-render even when undamaged — the key handles this in most
     // cases but we belt-and-suspenders.
     if (prev.rowIdx !== next.rowIdx) return false
+    // Reference inequality on `row` means the visible row at this
+    // index is pointing at a DIFFERENT underlying Cell[] — typically
+    // what happens when viewportOffset changes (visibleRows[i]
+    // swaps between `scrollback[N]` and `grid[K]`). Without this
+    // check, scrolling back down from scrollback leaves the bottom
+    // of the grid showing stale cells — the memo short-circuits
+    // because `damaged` is false for rows that weren't mutated
+    // since the last clearDirty(), even though the row they're
+    // DISPLAYING just changed identity. `row` stays referentially
+    // stable across in-place cell mutations within the same grid
+    // row, so the `damaged` check below still covers the keystroke
+    // / paint path without false-positive re-renders.
+    if (prev.row !== next.row) return false
     if (next.damaged) return false
     return true
   },
@@ -196,11 +220,26 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
   // TerminalGrid is held in a ref because it's imperative state —
   // Frame events mutate it in place, and we trigger a React rerender
   // via a version counter each animation frame.
+  //
+  // **Grow-phase initial rows.** The grid is constructed with
+  // `KESSEL_GROW_ROWS` (matching the daemon's GROW_ROWS) so replay
+  // frames — captured while the daemon's PTY was at 500 rows — land
+  // at the same rows the child TUI painted them into. The client's
+  // grow_boundary handler below trims + resizes to the real target
+  // as soon as the boundary marker arrives, and from then on the
+  // grid matches the user's window like any other pane.
+  //
+  // The grid always starts oversized; rAF rendering is cheap because
+  // empty rows coalesce to a single span and render in one DOM node
+  // apiece, and the boundary frame lands in the same micro-tick that
+  // the replay drain finishes (it's always the last frame in the
+  // initial WS burst).
   const gridRef = useRef<TerminalGrid | null>(null)
+  const awaitingBoundaryRef = useRef(true)
   if (gridRef.current === null) {
     gridRef.current = new TerminalGrid({
       cols,
-      rows,
+      rows: Math.max(rows, KESSEL_GROW_ROWS),
       scrollbackCap: config.scrolling.cap,
       syncUpdateTimeoutMs: config.performance.syncUpdateTimeoutMs,
     })
@@ -407,8 +446,16 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
   }, [SETTLE_MS])
 
   // Propagate prop-driven resize into the grid.
+  //
+  // Suppressed while awaitingBoundaryRef is true — the grid is
+  // intentionally oversized during the grow window and must not be
+  // shrunk before the daemon's grow_boundary marker arrives. Once
+  // boundary-handling fires `grid.resize(target_cols, target_rows)`
+  // the ref flips to false and subsequent prop changes apply
+  // normally.
   useEffect(() => {
     if (!gridRef.current) return
+    if (awaitingBoundaryRef.current) return
     if (gridRef.current.rows !== rows || gridRef.current.cols !== cols) {
       gridRef.current.resize(cols, rows)
       scheduleRender()
@@ -426,6 +473,14 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     let ackAt: number | null = null
     let altScreenAt: number | null = null
     let tuiReadyAt: number | null = null
+
+    // Safety fallback: if we're still waiting on the daemon's
+    // grow_boundary marker 3 s after the ack arrives, assume we're
+    // talking to an older daemon that doesn't emit it. Clear
+    // awaitingBoundary and force a resize to the current props so
+    // the grid doesn't stay stuck at KESSEL_GROW_ROWS forever. No-op
+    // when the boundary already fired.
+    let boundaryFallback: ReturnType<typeof setTimeout> | null = null
     const client = new KesselClient({
       sessionId,
       port,
@@ -450,6 +505,49 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
         }
         const grid = gridRef.current!
         for (const frame of frames) {
+          // grow_boundary — daemon's marker between "painted into the
+          // oversized grow canvas" and "child is now running at the
+          // real size." Trim the live grid down to content rows
+          // (cursor.row + 1), then resize to the daemon's target so
+          // the overflow scrolls into scrollback via grid.resize's
+          // standard top-push shrink path. After this point the
+          // grid matches the real window and ResizeObserver fires
+          // behave normally.
+          if (
+            awaitingBoundaryRef.current &&
+            frame.frame === 'SemanticEvent' &&
+            frame.data.kind.type === 'Custom' &&
+            frame.data.kind.kind === 'grow_boundary'
+          ) {
+            const payload = frame.data.kind.payload as {
+              target_cols?: number
+              target_rows?: number
+              grow_rows?: number
+              reason?: string
+            }
+            const tCols = payload.target_cols ?? cols
+            const tRows = payload.target_rows ?? rows
+            const preCursor = grid.snapshot().cursor
+            const preRows = grid.rows
+            const preScrollbackLen = grid.snapshot().scrollback.length
+            grid.trimRows(preCursor.row + 1)
+            grid.resize(tCols, tRows)
+            awaitingBoundaryRef.current = false
+            if (boundaryFallback !== null) {
+              clearTimeout(boundaryFallback)
+              boundaryFallback = null
+            }
+            const postScrollbackLen = grid.snapshot().scrollback.length
+            // eslint-disable-next-line no-console
+            console.info(
+              `%c[Kessel] tab-${sessionId.slice(0, 8)} grow_boundary ` +
+                `cursor.row=${preCursor.row} trim=${preRows}→${preCursor.row + 1} ` +
+                `resize=${tCols}×${tRows} (reason=${payload.reason}) ` +
+                `scrollback:${preScrollbackLen}→${postScrollbackLen}`,
+              'color:#ff0;font-weight:bold',
+            )
+            continue
+          }
           // TUI-launch breakdown.
           //
           // Original version fired tui-ready only after an
@@ -509,6 +607,54 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
           'color:#0ff',
         )
         onReady?.(ack.replayCount)
+        // Arm the fallback: 3 s after ack, if we still haven't seen
+        // a grow_boundary frame, drop out of the grow-phase gate so
+        // the grid doesn't stay stuck at KESSEL_GROW_ROWS. Covers
+        // the "old daemon" and "daemon crashed mid-grow" cases.
+        if (boundaryFallback === null) {
+          boundaryFallback = setTimeout(() => {
+            if (!awaitingBoundaryRef.current) return
+            const grid = gridRef.current
+            if (!grid) return
+            const preRows = grid.rows
+            const preCursor = grid.snapshot().cursor
+            // Prefer measuring the live container over the props
+            // `cols`/`rows` defaults (80x24) — the fallback runs
+            // when we're talking to an older daemon that never
+            // sends the boundary, and in that case the daemon has
+            // already shrunk the PTY to whatever the spawn request
+            // asked for. We want the client-side grid to match the
+            // REAL window so ResizeObserver doesn't have to
+            // immediately resize again.
+            const el = containerRef.current
+            const cm = cellMetrics
+            let targetCols = cols
+            let targetRows = rows
+            if (el && cm.width > 0 && cm.height > 0) {
+              const rect = el.getBoundingClientRect()
+              const w = Math.max(0, rect.width - 8)
+              const h = Math.max(0, rect.height - 8)
+              const c = Math.floor(w / cm.width)
+              const r = Math.floor(h / cm.height)
+              if (c >= 10 && r >= 3) {
+                targetCols = c
+                targetRows = r
+              }
+            }
+            grid.trimRows(preCursor.row + 1)
+            grid.resize(targetCols, targetRows)
+            awaitingBoundaryRef.current = false
+            scheduleRender()
+            // eslint-disable-next-line no-console
+            console.warn(
+              `%c[Kessel] tab-${sessionId.slice(0, 8)} grow_boundary fallback ` +
+                `(no marker after 3s) trim=${preRows}→${preCursor.row + 1} ` +
+                `resize=${targetCols}×${targetRows} ` +
+                `(measured; daemon is old?)`,
+              'color:#fa0;font-weight:bold',
+            )
+          }, 3000)
+        }
       },
       onError: (err) => onError?.(err.message),
     })
@@ -516,6 +662,10 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     return () => {
       off()
       client.dispose()
+      if (boundaryFallback !== null) {
+        clearTimeout(boundaryFallback)
+        boundaryFallback = null
+      }
     }
   }, [
     sessionId,
@@ -929,6 +1079,12 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
         if (newCols === lastCols && newRows === lastRows) return
         lastCols = newCols
         lastRows = newRows
+        // Grow-phase gate: if we're still waiting on the daemon's
+        // grow_boundary marker, do NOT shrink the oversized grid
+        // from under the replay frames. The boundary handler picks
+        // the final dims from the payload; after it fires this
+        // observer resumes normal operation.
+        if (awaitingBoundaryRef.current) return
         gridRef.current!.resize(newCols, newRows)
         scheduleRender()
         resizeSession(port, token, sessionId, newCols, newRows).catch(

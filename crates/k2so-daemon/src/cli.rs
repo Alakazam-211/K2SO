@@ -913,6 +913,97 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
 
+        // R3 — session diagnostic. Returns ring stats for a live
+        // session so callers can verify the preload flow worked
+        // ("did the full conversation history make it into the
+        // ring?"). Query param: session=<uuid>.
+        "/cli/sessions/diagnose" => diagnose_session(params),
+
         _ => CliResponse::not_found(),
     }
+}
+
+/// R3 — handler for `/cli/sessions/diagnose?session=<uuid>`.
+/// Counts each Frame variant in the replay ring, emits the first
+/// and last frames as full JSON (for sanity-checking), and reports
+/// the ring's cap so the caller knows how close to the limit the
+/// session is. Used by the daemon to answer "what got preloaded?"
+/// without dumping an entire conversation's worth of frames back
+/// over the wire.
+fn diagnose_session(params: &HashMap<String, String>) -> CliResponse {
+    use k2so_core::session::{registry, Frame, SessionId};
+
+    let raw = str_param(params, "session");
+    let session_id = match SessionId::parse(&raw) {
+        Some(id) => id,
+        None => {
+            return CliResponse::bad_request(
+                "missing or malformed 'session' query param",
+            );
+        }
+    };
+    let entry = match registry::lookup(&session_id) {
+        Some(e) => e,
+        None => {
+            return CliResponse::bad_request(format!(
+                "session {session_id} not found in registry"
+            ));
+        }
+    };
+
+    let ring = entry.replay_snapshot();
+    // Count frame variants. Matches the preload filter in
+    // `session::preload::should_replay` so callers can eyeball
+    // whether the filter is working.
+    let mut text_count = 0usize;
+    let mut cursor_op_count = 0usize;
+    let mut mode_change_count = 0usize;
+    let mut raw_pty_count = 0usize;
+    let mut bell_count = 0usize;
+    let mut semantic_count = 0usize;
+    let mut agent_signal_count = 0usize;
+    let mut other_count = 0usize;
+    for f in ring.iter() {
+        match f {
+            Frame::Text { .. } => text_count += 1,
+            Frame::CursorOp(_) => cursor_op_count += 1,
+            Frame::ModeChange { .. } => mode_change_count += 1,
+            Frame::RawPtyFrame(_) => raw_pty_count += 1,
+            Frame::Bell => bell_count += 1,
+            Frame::SemanticEvent { .. } => semantic_count += 1,
+            Frame::AgentSignal(_) => agent_signal_count += 1,
+            // Frame is #[non_exhaustive]; catch-all for future
+            // variants so this route keeps compiling past new
+            // additions. Diagnostic only — future work should add
+            // the new variant to the struct's field list so it
+            // shows up separately.
+            _ => other_count += 1,
+        }
+    }
+    let first = ring.first().cloned();
+    let last = ring.last().cloned();
+
+    let body = serde_json::json!({
+        "sessionId": session_id.to_string(),
+        "ringLen": ring.len(),
+        "replayCap": entry.replay_cap(),
+        "subscribers": entry.subscriber_count(),
+        "frameCounts": {
+            "text": text_count,
+            "cursorOp": cursor_op_count,
+            "modeChange": mode_change_count,
+            "rawPty": raw_pty_count,
+            "bell": bell_count,
+            "semanticEvent": semantic_count,
+            "agentSignal": agent_signal_count,
+            "other": other_count,
+        },
+        // First + last frames — spot check whether the preloaded
+        // content looks like the expected prior conversation (a
+        // shell greeting, a Claude banner, etc.) and whether the
+        // tail is where live output has been arriving.
+        "firstFrame": first,
+        "lastFrame": last,
+    });
+    CliResponse::ok_json(body.to_string())
 }

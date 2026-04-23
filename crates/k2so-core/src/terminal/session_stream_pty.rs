@@ -118,6 +118,196 @@ impl Default for SpawnConfig {
     }
 }
 
+/// Grow-phase PTY row count. Every Session Stream spawn opens the
+/// PTY at `max(cfg.rows, GROW_ROWS)` so the child TUI emits a much
+/// larger initial paint than would fit in the user's real window.
+/// LineMux captures every byte into the ring, and after the paint
+/// settles (see `grow_settle`) we SIGWINCH down to `cfg.rows`. The
+/// result: subscribers drain a ring that contains the full TUI
+/// history, with scrollback populated naturally by the grid's
+/// normal scroll-off mechanics.
+///
+/// 500 rows is enough room for any conversation most CLI-LLM
+/// harnesses will emit (Claude caps internally around 60 rows;
+/// codex, aider, gemini-cli similar orders of magnitude). If a
+/// future harness paints more, bump this constant — memory cost
+/// is bounded by the ring's `REPLAY_CAP`, not by grow rows.
+///
+/// Set to 0 to disable grow entirely; the spawn becomes the
+/// pre-grow behavior (PTY opens at `cfg.rows` directly, no
+/// settle, no shrink). Useful for tests that want deterministic
+/// row counts without the settle jitter.
+pub const GROW_ROWS: u16 = 500;
+
+/// Async-orchestrated spawn + grow + shrink. Use this from any
+/// async context (daemon HTTP handlers, scheduler-wake) that wants
+/// the full "seed the ring with a big paint before any subscriber
+/// attaches" behavior.
+///
+/// Sequence:
+///   1. Open the PTY at `effective_rows = max(cfg.rows, GROW_ROWS)`
+///      by forwarding a patched `SpawnConfig` to the synchronous
+///      `spawn_session_stream`.
+///   2. Look up the session's `SessionEntry` in the registry.
+///   3. Await `grow_settle::run_grow_settle(&entry)` — blocks until
+///      the TUI signals it's ready OR goes idle OR hits the
+///      ceiling. See `grow_settle` module docs for triggers.
+///   4. Call `session.resize(cfg.cols, cfg.rows)` so the child
+///      receives SIGWINCH and repaints at the user's real size.
+///   5. Return the `SessionStreamSession` — ready to serve
+///      subscribers.
+///
+/// Callers that don't need the grow phase (tests, one-shot
+/// commands where ring contents don't matter) can still call the
+/// synchronous `spawn_session_stream` directly.
+pub async fn spawn_session_stream_and_grow(
+    cfg: SpawnConfig,
+) -> Result<SessionStreamSession, String> {
+    let target_cols = cfg.cols;
+    let target_rows = cfg.rows;
+    let grow_rows = target_rows.max(GROW_ROWS);
+    let should_grow = grow_rows > target_rows;
+
+    let grow_cfg = SpawnConfig {
+        rows: grow_rows,
+        ..cfg
+    };
+    let session = spawn_session_stream(grow_cfg)?;
+
+    if !should_grow {
+        // cfg.rows >= GROW_ROWS already, or GROW_ROWS==0 — no need
+        // to settle-and-shrink; the session is already at its
+        // target size.
+        return Ok(session);
+    }
+
+    let session_id = session.session_id;
+    let entry = match registry::lookup(&session_id) {
+        Some(e) => e,
+        None => {
+            // Should not happen in practice — spawn_session_stream
+            // just registered this id. Defensive: skip settle and
+            // return the session as-is.
+            log_debug!(
+                "[session_stream/pty] grow-shrink: registry lookup missed for \
+                 freshly-spawned {}; skipping settle + shrink",
+                session_id
+            );
+            return Ok(session);
+        }
+    };
+
+    let reason = crate::terminal::grow_settle::run_grow_settle(&entry).await;
+
+    match reason {
+        crate::terminal::grow_settle::SettleReason::Closed => {
+            log_debug!(
+                "[session_stream/pty] grow-shrink: session {} closed during \
+                 grow; returning session (child likely exited early)",
+                session_id
+            );
+        }
+        other => {
+            // Ring-state instrumentation right before the boundary.
+            // Subscribers attaching anywhere up to this point drain
+            // this replay snapshot; logging frame counts here + after
+            // shrink gives a before/after view in the daemon log so
+            // we can tell whether the ring is actually carrying the
+            // grow-phase paint.
+            let (frame_count, byte_count, text_count, mode_count) =
+                ring_stats(&entry);
+            log_debug!(
+                "[session_stream/pty] grow-shrink: session {} settled via {} — \
+                 ring before shrink: frames={} text={} mode={} bytes~={} \
+                 subscribers={}",
+                session_id,
+                other.tag(),
+                frame_count,
+                text_count,
+                mode_count,
+                byte_count,
+                entry.subscriber_count()
+            );
+
+            // Emit the grow_boundary marker BEFORE the SIGWINCH so
+            // every subscriber (live or late) sees it at the exact
+            // offset between "daemon painted into the oversized
+            // canvas" and "child is now running at the real size."
+            // The Kessel client uses this frame to trim blanks +
+            // resize its local grid so overflow rows scroll into
+            // scrollback naturally.
+            //
+            // `publish_meta` skips bumping `last_frame_at` because
+            // this frame is observer-emitted, not harness output —
+            // watchdogs should not treat it as activity.
+            let boundary_payload = serde_json::json!({
+                "target_cols": target_cols,
+                "target_rows": target_rows,
+                "grow_rows": grow_rows,
+                "reason": other.tag(),
+            });
+            entry.publish_meta(crate::session::Frame::SemanticEvent {
+                kind: crate::session::SemanticKind::Custom {
+                    kind: "grow_boundary".into(),
+                    payload: boundary_payload.clone(),
+                },
+                payload: boundary_payload,
+            });
+            log_debug!(
+                "[session_stream/pty] grow-shrink: session {} emitted \
+                 grow_boundary frame (target={}x{}, grow_rows={})",
+                session_id,
+                target_cols,
+                target_rows,
+                grow_rows
+            );
+
+            if let Err(e) = session.resize(target_cols, target_rows) {
+                log_debug!(
+                    "[session_stream/pty] grow-shrink: session {} shrink resize failed: {e}",
+                    session_id
+                );
+            } else {
+                log_debug!(
+                    "[session_stream/pty] grow-shrink: session {} SIGWINCH \
+                     {} → {} rows sent",
+                    session_id,
+                    grow_rows,
+                    target_rows
+                );
+            }
+        }
+    }
+
+    Ok(session)
+}
+
+/// Lightweight ring inspection for instrumentation. Walks the replay
+/// snapshot once and tallies frame counts by variant + rough byte
+/// total (sum of Text payload lengths). Cheap enough to call per
+/// settle — the snapshot is a `Vec<Frame>` clone we iterate in-memory.
+/// Returns (total_frames, total_text_bytes, text_frame_count,
+/// mode_change_count).
+fn ring_stats(entry: &crate::session::SessionEntry) -> (usize, usize, usize, usize) {
+    let snap = entry.replay_snapshot();
+    let mut text_bytes = 0usize;
+    let mut text_frames = 0usize;
+    let mut mode_frames = 0usize;
+    for frame in &snap {
+        match frame {
+            crate::session::Frame::Text { bytes, .. } => {
+                text_bytes += bytes.len();
+                text_frames += 1;
+            }
+            crate::session::Frame::ModeChange { .. } => {
+                mode_frames += 1;
+            }
+            _ => {}
+        }
+    }
+    (snap.len(), text_bytes, text_frames, mode_frames)
+}
+
 /// Owner-side handle to a live session_stream session. Drop the
 /// handle → child is killed, reader thread joins, PTY cleaned up.
 pub struct SessionStreamSession {

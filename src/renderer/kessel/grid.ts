@@ -376,6 +376,39 @@ export class TerminalGrid {
     }
   }
 
+  /** Truncate the live grid to the top `keepTopN` rows. Does NOT
+   *  push anything to scrollback and does NOT adjust cursor beyond
+   *  clamping it into the new bounds. Intended for the grow-boundary
+   *  path: the daemon painted into a GROW_ROWS-sized canvas, the
+   *  replay ring brought that paint to us, and now we want to drop
+   *  the trailing blank rows BEFORE a subsequent `resize()` would
+   *  have pushed them to scrollback as junk. After `trimRows`, a
+   *  follow-up `resize(cols, targetRows)` scrolls the overflow
+   *  rows (which now contain actual content, not blanks) into
+   *  scrollback naturally via its top-push shrink path. */
+  trimRows(keepTopN: number): void {
+    const keep = Math.max(1, Math.floor(keepTopN))
+    if (keep >= this.rows_) return
+    this.dirty_ = true
+    this.markAllRowsDamaged()
+    this.grid_ = this.grid_.slice(0, keep)
+    this.rows_ = keep
+    this.scrollRegion_ = { top: 0, bottom: this.rows_ - 1 }
+    this.cursor_.row = Math.min(this.cursor_.row, this.rows_ - 1)
+  }
+
+  /** Clear every live-grid cell back to blank, keeping the cursor's
+   *  position intact and WITHOUT pushing anything to scrollback.
+   *  Companion to `trimRows` — used when a caller (e.g. the Kessel
+   *  renderer during an abort / reset path) wants a blank canvas
+   *  that preserves history. `clearScreen()` differs by resetting
+   *  cursor to (0,0); this one leaves it alone. */
+  clearLiveGrid(): void {
+    this.dirty_ = true
+    this.grid_ = Array.from({ length: this.rows_ }, () => blankRow(this.cols_))
+    this.markAllRowsDamaged()
+  }
+
   /** Resize to the given dimensions. Preserves scrollback + grid
    *  rows up to the new row count (truncating bottom rows or
    *  padding with blanks). Cursor clamps to new bounds. */

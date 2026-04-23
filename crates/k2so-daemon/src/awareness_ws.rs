@@ -52,7 +52,7 @@ use k2so_core::log_debug;
 /// usable from external callers (CLI, Tauri, tests) — without a
 /// spawn endpoint, session_map always stays empty in a real
 /// daemon deployment.
-pub fn handle_sessions_spawn(body: &[u8]) -> HandlerResult {
+pub async fn handle_sessions_spawn(body: &[u8]) -> HandlerResult {
     use crate::spawn::{spawn_agent_session, SpawnAgentSessionRequest};
 
     #[derive(serde::Deserialize)]
@@ -103,7 +103,9 @@ pub fn handle_sessions_spawn(body: &[u8]) -> HandlerResult {
         args: req.args,
         cols: req.cols,
         rows: req.rows,
-    }) {
+    })
+    .await
+    {
         Ok(o) => o,
         Err(e) => {
             return HandlerResult {

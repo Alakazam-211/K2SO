@@ -485,7 +485,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
                 return;
             }
             let body_bytes = read_post_body(&mut stream, &mut buf).await;
-            let result = awareness_ws::handle_sessions_spawn(&body_bytes);
+            let result = awareness_ws::handle_sessions_spawn(&body_bytes).await;
             send_response(&mut stream, result.status, "application/json", &result.body)
                 .await;
         }
