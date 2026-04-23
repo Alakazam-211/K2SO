@@ -427,45 +427,23 @@ export function SessionStreamViewTerm(
   useEffect(() => {
     let unlistenSnap: UnlistenFn | null = null
     let unlistenDelta: UnlistenFn | null = null
+    // Tauri events are broadcast-all: every listener fires for
+    // every pane's snapshot/delta. The paneId check filters out
+    // non-matching events; only our pane's payload actually
+    // mutates state.
     ;(async () => {
       unlistenSnap = await listen<TermGridSnapshot>(
         'kessel:grid-snapshot',
         (evt) => {
-          // NOTE: this callback fires for EVERY pane's snapshot
-          // (Tauri events are broadcast-all). The paneId filter
-          // below throws out non-matching events — but the
-          // callback *invocation* still costs main-thread time.
-          // The perf log records every invocation, matched or
-          // not, so the user can see the event fan-in cost.
-          const ours = evt.payload.paneId === paneIdRef.current
-          const t0 = performance.now()
-          if (ours) {
-            setSnapshot(evt.payload)
-          }
-          perfLog('rx_snapshot', {
-            pane: evt.payload.paneId,
-            ours,
-            live_rows: evt.payload.grid.length,
-            sb_rows: evt.payload.scrollback.length,
-            dur_ms: (performance.now() - t0).toFixed(2),
-          })
+          if (evt.payload.paneId !== paneIdRef.current) return
+          setSnapshot(evt.payload)
         },
       )
       unlistenDelta = await listen<TermGridDelta>(
         'kessel:grid-delta',
         (evt) => {
-          const ours = evt.payload.paneId === paneIdRef.current
-          const t0 = performance.now()
-          if (ours) {
-            setSnapshot((prev) => mergeDelta(prev, evt.payload))
-          }
-          perfLog('rx_delta', {
-            pane: evt.payload.paneId,
-            ours,
-            damaged_rows: evt.payload.damagedRows.length,
-            sb_append: evt.payload.scrollbackAppended.length,
-            dur_ms: (performance.now() - t0).toFixed(2),
-          })
+          if (evt.payload.paneId !== paneIdRef.current) return
+          setSnapshot((prev) => mergeDelta(prev, evt.payload))
         },
       )
     })()
