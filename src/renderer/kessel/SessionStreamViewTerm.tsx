@@ -97,6 +97,28 @@ interface TermGridSnapshot {
   displayOffset: number
 }
 
+/** Delta update — only changed rows since last emit plus any new
+ *  scrollback that accumulated between emits. Applied against the
+ *  local grid mirror built up by a prior snapshot or delta chain.
+ *  Matches the Rust-side `TermGridDelta`. */
+interface DamagedRow {
+  row: number
+  runs: CellRun[]
+}
+interface TermGridDelta {
+  paneId: string
+  cols: number
+  rows: number
+  /** Rows in the live grid that changed since the last emit. */
+  damagedRows: DamagedRow[]
+  /** New rows that scrolled into scrollback between emits,
+   *  oldest-first. Frontend appends to its scrollback buffer. */
+  scrollbackAppended: CellRun[][]
+  cursor: TermCursor
+  version: number
+  displayOffset: number
+}
+
 /** Convert a 24-bit hex color int to a CSS `rgb(...)` string. */
 function hexToCss(n: number): string {
   const r = (n >> 16) & 0xff
@@ -153,6 +175,43 @@ function renderRowRuns(row: CellRun[], rowIdx: number): React.ReactNode {
  *  types. */
 function paneIdFor(sessionId: string): string {
   return `kessel-${sessionId}`
+}
+
+/** Apply a delta to a prior snapshot, returning the new snapshot
+ *  that reflects the merged state. Returns `prev` unchanged if
+ *  prev is null or its paneId doesn't match (frontend hasn't
+ *  received its initial full snapshot yet, or the delta is for a
+ *  different pane). Pure — no mutation of `prev`. */
+function mergeDelta(
+  prev: TermGridSnapshot | null,
+  delta: TermGridDelta,
+): TermGridSnapshot | null {
+  if (!prev || prev.paneId !== delta.paneId) return prev
+  // Rebuild the grid by copying prev.grid and overlaying damaged
+  // rows at their indices. If the grid dimensions changed (rare
+  // — usually after resize) rebuild to new shape:
+  const nextGrid: CellRun[][] = prev.grid.slice()
+  // If rows grew, pad with blanks. If rows shrank, truncate.
+  while (nextGrid.length < delta.rows) nextGrid.push([])
+  if (nextGrid.length > delta.rows) nextGrid.length = delta.rows
+  for (const dr of delta.damagedRows) {
+    if (dr.row < 0 || dr.row >= delta.rows) continue
+    nextGrid[dr.row] = dr.runs
+  }
+  const nextScrollback: CellRun[][] =
+    delta.scrollbackAppended.length > 0
+      ? prev.scrollback.concat(delta.scrollbackAppended)
+      : prev.scrollback
+  return {
+    paneId: prev.paneId,
+    cols: delta.cols,
+    rows: delta.rows,
+    grid: nextGrid,
+    scrollback: nextScrollback,
+    cursor: delta.cursor,
+    version: delta.version,
+    displayOffset: delta.displayOffset,
+  }
 }
 
 export function SessionStreamViewTerm(
@@ -244,20 +303,42 @@ export function SessionStreamViewTerm(
     }
   }, [sessionId, port, token, cols, rows])
 
-  // ── Snapshot event listener ───────────────────────────────────
+  // ── Snapshot + delta listeners ────────────────────────────────
+  //
+  // Full snapshots (`kessel:grid-snapshot`) land on first attach,
+  // on resume after pause, and when the Term's damage says every
+  // line changed. They replace the frontend's mirror wholesale.
+  //
+  // Deltas (`kessel:grid-delta`) are the steady-state hot path:
+  // they carry only the row indices that changed + any new
+  // scrollback rows that appeared. The frontend merges each
+  // delta into its existing mirror.
+  //
+  // Ordering: we always install the listeners as pairs so a
+  // delta arriving before its preceding snapshot (shouldn't
+  // happen but guard anyway) gets dropped quietly.
   useEffect(() => {
-    let unlisten: UnlistenFn | null = null
+    let unlistenSnap: UnlistenFn | null = null
+    let unlistenDelta: UnlistenFn | null = null
     ;(async () => {
-      unlisten = await listen<TermGridSnapshot>(
+      unlistenSnap = await listen<TermGridSnapshot>(
         'kessel:grid-snapshot',
         (evt) => {
           if (evt.payload.paneId !== paneIdRef.current) return
           setSnapshot(evt.payload)
         },
       )
+      unlistenDelta = await listen<TermGridDelta>(
+        'kessel:grid-delta',
+        (evt) => {
+          if (evt.payload.paneId !== paneIdRef.current) return
+          setSnapshot((prev) => mergeDelta(prev, evt.payload))
+        },
+      )
     })()
     return () => {
-      if (unlisten) unlisten()
+      if (unlistenSnap) unlistenSnap()
+      if (unlistenDelta) unlistenDelta()
     }
   }, [])
 
@@ -287,6 +368,30 @@ export function SessionStreamViewTerm(
     })
     return () => cancelAnimationFrame(raf)
   }, [interactive, isTabVisible])
+
+  // ── Hidden-pane emission pause ────────────────────────────────
+  //
+  // When the user switches away from a tab that contains a
+  // Kessel pane, we tell the Tauri-side Term to stop emitting
+  // snapshots/deltas to us. The Term keeps reading bytes and
+  // advancing its state — so the session stays current — but
+  // IPC + React state churn goes to zero. On becoming visible
+  // again, resume triggers one full snapshot that catches us
+  // back up in a single pass.
+  //
+  // Retained-view model means components stay mounted across
+  // tab switches; without this gate, every hidden Kessel pane
+  // would keep hammering the main thread with snapshot events
+  // the user can't see. The workspace-switch lag the user
+  // reported was exactly this symptom.
+  useEffect(() => {
+    const paneId = paneIdRef.current
+    if (paneId === null) return
+    const cmd = isTabVisible ? 'kessel_term_resume' : 'kessel_term_pause'
+    invoke(cmd, { paneId }).catch(() => {
+      /* pane may have detached mid-flight; ignore */
+    })
+  }, [isTabVisible])
 
   // ── Cell metrics (for cursor positioning + wheel math) ────────
   const [cellMetrics, setCellMetrics] = useState({ width: 0, height: 0 })

@@ -214,10 +214,27 @@ struct PaneState {
     apc_filter: ApcFilter,
     /// vte parser; stateful across calls.
     processor: Processor<StdSyncHandler>,
-    /// Monotonic counter of grid mutations since last snapshot —
-    /// frontend uses this to skip snapshots when nothing has
-    /// changed between rAF ticks.
+    /// Monotonic counter of grid mutations. Bumped on every
+    /// feed_bytes that produces damage, every resize, every APC.
+    /// Goes into each emit (snapshot OR delta) so the frontend can
+    /// skip duplicate updates.
     dirty_counter: u64,
+    /// Scrollback size as of the last emit. Used to detect when
+    /// new rows have scrolled INTO scrollback between emits so we
+    /// can append them on the delta path (damage API only tracks
+    /// the visible grid, not scrollback).
+    last_history_size: usize,
+    /// False until we've pushed our first emit to the frontend.
+    /// Keeps the contract: first emit after attach OR after resume
+    /// is always a full snapshot. Everything else is a delta.
+    has_emitted_since_attach: bool,
+    /// When true, `reader_loop` keeps feeding bytes through the
+    /// vte but SKIPS emitting snapshots/deltas to the frontend.
+    /// Used to stop starving the UI thread with events from panes
+    /// the user isn't currently looking at. The Term keeps
+    /// advancing underneath; on unpause we emit one full snapshot
+    /// so the frontend catches up in one shot.
+    paused: bool,
     /// Reader task handle — aborted on detach.
     reader_task: Option<JoinHandle<()>>,
 }
@@ -238,6 +255,9 @@ impl PaneState {
             apc_filter: ApcFilter::new(),
             processor: Processor::new(),
             dirty_counter: 0,
+            last_history_size: 0,
+            has_emitted_since_attach: false,
+            paused: false,
             reader_task: None,
         }
     }
@@ -414,6 +434,46 @@ impl CellRun {
     }
 }
 
+/// Incremental update for a single live-grid row. Only the rows
+/// alacritty's damage API flagged as changed since the last emit
+/// appear here; unchanged rows ride forward from the frontend's
+/// last-known state. Cheap on the wire relative to a full snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DamagedRow {
+    /// Row index in the live grid (0 = topmost visible row).
+    pub row: usize,
+    /// Full row contents, run-encoded. We don't use the damage
+    /// API's left/right bounds here — alacritty's bounds are
+    /// coarse (post-write unions), and emitting the whole row
+    /// keeps the frontend merge logic trivially correct.
+    pub runs: Vec<CellRun>,
+}
+
+/// Per-tick delta emit. Applied against the frontend's local grid
+/// mirror:
+///   - `damaged_rows` → replace those rows in the live grid.
+///   - `scrollback_appended` → push onto the end of scrollback
+///     (oldest-last within the vec; these are rows that scrolled
+///     off the top of the live grid between emits).
+///   - `cursor` / `cols` / `rows` / `display_offset` → absorb.
+///
+/// A delta always carries the current cursor + dims so the
+/// frontend never has to interpret "did the cursor move?"
+/// separately from damage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TermGridDelta {
+    pub pane_id: String,
+    pub cols: usize,
+    pub rows: usize,
+    pub damaged_rows: Vec<DamagedRow>,
+    pub scrollback_appended: Vec<Vec<CellRun>>,
+    pub cursor: CursorSnapshot,
+    pub version: u64,
+    pub display_offset: usize,
+}
+
 /// Xterm-compatible default palette. Indices 0..15 are the
 /// basic 16 colors; 16..231 is the 6x6x6 color cube; 232..255
 /// is the 24-step grayscale. Used to resolve NamedColor /
@@ -516,12 +576,33 @@ fn encode_row_runs(grid: &alacritty_terminal::grid::Grid<Cell>, line: Line, cols
     out
 }
 
-/// Project a Term into a serializable snapshot. Walks both the
-/// live viewport and scrollback, building run-encoded rows with
-/// per-run SGR state (fg, bg, bold, italic, underline, inverse,
-/// dim, strikeout). Matches the styling fidelity the legacy
-/// Frame-based renderer had.
+/// Project a Term into a full serializable snapshot. Walks every
+/// row of the live viewport AND every row of scrollback, building
+/// run-encoded rows with per-run SGR state. Used for:
+///   - Initial attach (one-time cost when a pane first mounts).
+///   - Resume after emission was paused (hidden tab becomes
+///     visible again).
+///   - Explicit on-demand pulls via `kessel_term_grid_snapshot`.
+///
+/// **NOT used on the hot path.** Every per-tick mutation emits a
+/// `TermGridDelta` instead — see `build_delta` + the reader loop's
+/// snapshot-interval logic.
 fn snapshot_term(pane_id: &str, state: &PaneState) -> TermGridSnapshot {
+    let history_size = state.term.lock().grid().history_size();
+    snapshot_term_with_scrollback(pane_id, state, history_size)
+}
+
+/// Variant of `snapshot_term` that lets the caller control the
+/// scrollback depth. Used by the on-demand scrollback-slice
+/// command to serve deeper history than the fast-path snapshot
+/// carries. `scrollback_rows_requested` is capped at the Term's
+/// actual `history_size` so callers can't ask for more than
+/// exists.
+fn snapshot_term_with_scrollback(
+    pane_id: &str,
+    state: &PaneState,
+    scrollback_rows_requested: usize,
+) -> TermGridSnapshot {
     let term = state.term.lock();
     let cols = term.columns();
     let rows = term.screen_lines();
@@ -533,9 +614,13 @@ fn snapshot_term(pane_id: &str, state: &PaneState) -> TermGridSnapshot {
     }
 
     let history_size = grid.history_size();
-    let mut scrollback_rows: Vec<Vec<CellRun>> =
-        Vec::with_capacity(history_size);
-    for r in (1..=history_size as i32).rev() {
+    let take = scrollback_rows_requested.min(history_size);
+    let mut scrollback_rows: Vec<Vec<CellRun>> = Vec::with_capacity(take);
+    // Walk the most-recent `take` rows of scrollback (closest to
+    // the live grid, since that's what a scroll-up hits first).
+    // Indices: scrollback above live starts at Line(-1) and goes
+    // to Line(-history_size). "Most recent" = Line(-1) side.
+    for r in (1..=take as i32).rev() {
         scrollback_rows.push(encode_row_runs(grid, Line(-r), cols));
     }
 
@@ -556,6 +641,139 @@ fn snapshot_term(pane_id: &str, state: &PaneState) -> TermGridSnapshot {
         version: state.dirty_counter,
         display_offset: grid.display_offset(),
     }
+}
+
+/// Outcome of a single emit decision. The caller emits one of
+/// these on the appropriate Tauri event name: `Full` on
+/// `kessel:grid-snapshot`, `Delta` on `kessel:grid-delta`, `Skip`
+/// does nothing.
+enum EmitDecision {
+    Full(TermGridSnapshot),
+    Delta(TermGridDelta),
+    Skip,
+}
+
+/// Inspect the Term's damage + scrollback growth since the last
+/// emit and produce the cheapest correct update. Skips entirely
+/// when paused OR when nothing has changed.
+///
+/// Called inside `reader_loop` on each snapshot-interval tick AND
+/// after each feed_bytes chunk is absorbed. Resets Term damage
+/// after reading it so the next call starts with a clean slate.
+fn build_emit(pane_id: &str, state: &mut PaneState) -> EmitDecision {
+    if state.paused {
+        return EmitDecision::Skip;
+    }
+
+    // First emit after attach — always a full snapshot. The
+    // frontend has no local mirror yet, so deltas would dangle.
+    if !state.has_emitted_since_attach {
+        state.has_emitted_since_attach = true;
+        let snap = snapshot_term(pane_id, state);
+        state.last_history_size = snap.scrollback.len();
+        // Drain damage so the next tick builds a clean delta.
+        state.term.lock().reset_damage();
+        return EmitDecision::Full(snap);
+    }
+
+    // Take the damage under the Term lock, then drop the lock
+    // while we serialize. Damage is copied into an owned Vec so
+    // we don't hold the lock across the RLE encode.
+    let (damage_kind, history_size, display_offset, cursor_point, cols, rows) = {
+        let mut term = state.term.lock();
+        let history_size = term.grid().history_size();
+        let display_offset = term.grid().display_offset();
+        let cursor_point = term.grid().cursor.point;
+        let cols = term.columns();
+        let rows = term.screen_lines();
+        let damage_kind = match term.damage() {
+            alacritty_terminal::term::TermDamage::Full => DamageKind::Full,
+            alacritty_terminal::term::TermDamage::Partial(iter) => {
+                let lines: Vec<usize> = iter.map(|d| d.line).collect();
+                DamageKind::Partial(lines)
+            }
+        };
+        term.reset_damage();
+        (damage_kind, history_size, display_offset, cursor_point, cols, rows)
+    };
+
+    let new_scrollback = history_size.saturating_sub(state.last_history_size);
+
+    // If nothing changed: neither live damage nor scrollback
+    // growth, skip emission entirely.
+    let partial_empty =
+        matches!(&damage_kind, DamageKind::Partial(lines) if lines.is_empty());
+    if partial_empty && new_scrollback == 0 {
+        return EmitDecision::Skip;
+    }
+
+    // Full damage → full snapshot. Cheaper than trying to list
+    // every row as damaged.
+    if matches!(&damage_kind, DamageKind::Full) {
+        let snap = snapshot_term(pane_id, state);
+        state.last_history_size = snap.scrollback.len();
+        return EmitDecision::Full(snap);
+    }
+
+    // Build a delta. Re-lock the term briefly to encode damaged
+    // rows + any new scrollback additions.
+    let damaged_lines: Vec<usize> = match damage_kind {
+        DamageKind::Partial(lines) => lines,
+        DamageKind::Full => unreachable!("handled above"),
+    };
+
+    let term = state.term.lock();
+    let grid = term.grid();
+
+    let mut damaged_rows: Vec<DamagedRow> = Vec::with_capacity(damaged_lines.len());
+    for row_idx in damaged_lines {
+        if row_idx >= rows {
+            continue;
+        }
+        let runs = encode_row_runs(grid, Line(row_idx as i32), cols);
+        damaged_rows.push(DamagedRow {
+            row: row_idx,
+            runs,
+        });
+    }
+
+    // Scrollback appended: the last `new_scrollback` rows above
+    // Line(0) are newly-appended history (oldest-first within our
+    // return so the frontend just pushes them onto its scrollback
+    // vec). alacritty indexes scrollback at Line(-1) (most-recent)
+    // down to Line(-history_size) (oldest).
+    let mut scrollback_appended: Vec<Vec<CellRun>> =
+        Vec::with_capacity(new_scrollback);
+    for offset in (1..=new_scrollback as i32).rev() {
+        scrollback_appended.push(encode_row_runs(grid, Line(-offset), cols));
+    }
+    drop(term);
+
+    state.last_history_size = history_size;
+
+    let delta = TermGridDelta {
+        pane_id: pane_id.to_string(),
+        cols,
+        rows,
+        damaged_rows,
+        scrollback_appended,
+        cursor: CursorSnapshot {
+            row: (cursor_point.line.0.max(0)) as usize,
+            col: cursor_point.column.0,
+            visible: true,
+        },
+        version: state.dirty_counter,
+        display_offset,
+    };
+    EmitDecision::Delta(delta)
+}
+
+/// Intermediate type used by `build_emit` to copy damage state
+/// out from under the Term lock so we can serialize without
+/// blocking other callers.
+enum DamageKind {
+    Full,
+    Partial(Vec<usize>),
 }
 
 // ── WS reader task ───────────────────────────────────────────────
@@ -590,16 +808,16 @@ async fn reader_loop(
         "[kessel_term] pane={pane_id} session={session_id} ws connected"
     );
 
-    // Emit snapshots on a light cadence so the frontend sees
-    // updates without being hammered every byte. 30 Hz is enough
-    // for terminal UI.
+    // Emission cadence. Byte absorption happens as fast as the
+    // WS delivers; emission is throttled to roughly 30 Hz so the
+    // frontend isn't hammered per-byte. Only emits when there's
+    // something to say — `build_emit` returns `Skip` on quiet
+    // ticks, and Delta when only a few rows changed.
     let mut snapshot_interval =
         tokio::time::interval(Duration::from_millis(33));
     snapshot_interval.set_missed_tick_behavior(
         tokio::time::MissedTickBehavior::Skip,
     );
-
-    let mut last_emitted_version: u64 = u64::MAX;
 
     loop {
         tokio::select! {
@@ -614,10 +832,16 @@ async fn reader_loop(
                     Some(Ok(Message::Binary(data))) => {
                         let mut p = pane.lock();
                         p.feed_bytes(&data);
+                        // Bytes advance the Term regardless of
+                        // pause state — a hidden pane still needs
+                        // to track its session. Emission is what
+                        // pause controls, and that's handled on
+                        // the next snapshot_interval tick via
+                        // build_emit.
                     }
                     Some(Ok(Message::Text(_))) => {
                         // session:ack envelope; ignored for now.
-                        // Phase 5 can parse this for the
+                        // A future phase can parse this for the
                         // front/back offset gap indicator.
                     }
                     Some(Ok(Message::Ping(p))) => {
@@ -627,25 +851,26 @@ async fn reader_loop(
                 }
             }
             _ = snapshot_interval.tick() => {
-                // Snap + push if dirty.
-                let snapshot = {
-                    let p = pane.lock();
-                    if p.dirty_counter == last_emitted_version {
-                        None
-                    } else {
-                        last_emitted_version = p.dirty_counter;
-                        Some(snapshot_term(&pane_id, &p))
-                    }
+                let decision = {
+                    let mut p = pane.lock();
+                    build_emit(&pane_id, &mut p)
                 };
-                if let Some(snap) = snapshot {
-                    let _ = app.emit("kessel:grid-snapshot", snap);
+                match decision {
+                    EmitDecision::Skip => {}
+                    EmitDecision::Full(snap) => {
+                        let _ = app.emit("kessel:grid-snapshot", snap);
+                    }
+                    EmitDecision::Delta(delta) => {
+                        let _ = app.emit("kessel:grid-delta", delta);
+                    }
                 }
             }
         }
     }
 
     // Final snapshot on close so the frontend sees the true
-    // terminal state when the session ends.
+    // terminal state when the session ends. Bypasses the pause
+    // gate since the reader is exiting anyway.
     let final_snap = {
         let p = pane.lock();
         snapshot_term(&pane_id, &p)
@@ -730,6 +955,60 @@ pub fn kessel_term_resize(
         .ok_or_else(|| format!("unknown pane {pane_id}"))?;
     let mut p = pane.lock();
     p.resize(cols, rows);
+    Ok(())
+}
+
+/// On-demand deeper scrollback pull. Returns a full snapshot
+/// including up to `rows` scrollback rows (most-recent). Intended
+/// for the moment a user scrolls past the fast-path cap and needs
+/// more history than the steady-state snapshot carries. Cost is
+/// roughly O(rows × cols), so callers should request only what
+/// they need — not the whole 5000-row buffer.
+#[tauri::command]
+pub fn kessel_term_scrollback_slice(
+    pane_id: String,
+    rows: usize,
+) -> Result<TermGridSnapshot, String> {
+    let pane = registry()
+        .get(&pane_id)
+        .ok_or_else(|| format!("unknown pane {pane_id}"))?;
+    let p = pane.lock();
+    Ok(snapshot_term_with_scrollback(&pane_id, &p, rows))
+}
+
+/// Pause outbound snapshot/delta emission for a pane. The pane's
+/// Term keeps absorbing bytes from the daemon — session state
+/// stays current — we just stop spending IPC + serialization on
+/// an audience of zero. Intended for tab-visibility changes:
+/// called when the user switches away from a Kessel pane's tab.
+///
+/// Idempotent. Unknown `pane_id` returns Ok — likely the pane
+/// already detached (e.g. tab closed while the visibility
+/// effect was mid-flight).
+#[tauri::command]
+pub fn kessel_term_pause(pane_id: String) -> Result<(), String> {
+    if let Some(pane) = registry().get(&pane_id) {
+        let mut p = pane.lock();
+        p.paused = true;
+    }
+    Ok(())
+}
+
+/// Unpause emission. Forces the NEXT emit to be a full snapshot
+/// by clearing `has_emitted_since_attach` — since the frontend's
+/// mirror went stale during the pause window, a delta would
+/// dangle. Full snapshot catches it up in one shot.
+///
+/// Idempotent; unknown `pane_id` returns Ok.
+#[tauri::command]
+pub fn kessel_term_resume(pane_id: String) -> Result<(), String> {
+    if let Some(pane) = registry().get(&pane_id) {
+        let mut p = pane.lock();
+        p.paused = false;
+        // Treat resume as a fresh attach for the emit state
+        // machine: next emit is full, scrollback baseline resets.
+        p.has_emitted_since_attach = false;
+    }
     Ok(())
 }
 

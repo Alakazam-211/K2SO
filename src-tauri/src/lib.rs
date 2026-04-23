@@ -1257,7 +1257,10 @@ pub fn run() {
             // driven by the daemon's byte stream.
             commands::kessel_term::kessel_term_attach,
             commands::kessel_term::kessel_term_grid_snapshot,
+            commands::kessel_term::kessel_term_scrollback_slice,
             commands::kessel_term::kessel_term_resize,
+            commands::kessel_term::kessel_term_pause,
+            commands::kessel_term::kessel_term_resume,
             commands::kessel_term::kessel_term_detach,
         ])
         .build(tauri::generate_context!())
