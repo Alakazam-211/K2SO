@@ -255,6 +255,17 @@ export function SessionStreamViewTerm(
   const containerRef = useRef<HTMLDivElement>(null)
   const paneIdRef = useRef<string | null>(null)
 
+  // Read tab visibility here (at the top of the component) so both
+  // the attach lifecycle below AND the visibility effect further
+  // down can use it. Mirror into a ref so the attach effect can
+  // read the current value without depending on it (depending on
+  // it would remount the pane every time visibility flips, which
+  // defeats retained-view). The separate visibility effect below
+  // handles transitions.
+  const isTabVisible = useIsTabVisible()
+  const isTabVisibleRef = useRef(isTabVisible)
+  isTabVisibleRef.current = isTabVisible
+
   // ── Attach / detach lifecycle ─────────────────────────────────
   useEffect(() => {
     if (sessionId === null) return
@@ -273,10 +284,17 @@ export function SessionStreamViewTerm(
             token,
             cols,
             rows,
+            // Pass current visibility so the pane is created with
+            // paused=false if this tab is visible. Prevents the
+            // attach-vs-resume race that left newly-mounted panes
+            // stuck paused until a manual tab-switch forced a
+            // resume invoke.
+            initiallyVisible: isTabVisibleRef.current,
           },
         })
         perfLog('attach_invoke', {
           pane: paneId,
+          initially_visible: isTabVisibleRef.current,
           dur_ms: (performance.now() - t0).toFixed(2),
         })
       } catch (e) {
@@ -394,7 +412,7 @@ export function SessionStreamViewTerm(
   }, [])
 
   // ── Auto-focus on tab activation ──────────────────────────────
-  const isTabVisible = useIsTabVisible()
+  // isTabVisible already declared above; re-used here.
   useEffect(() => {
     if (!interactive) return
     if (!isTabVisible) return
@@ -421,7 +439,16 @@ export function SessionStreamViewTerm(
   // would keep hammering the main thread with snapshot events
   // the user can't see. The workspace-switch lag the user
   // reported was exactly this symptom.
+  // Skip the initial fire — attach already applied the correct
+  // pause state via `initiallyVisible`. Only run on subsequent
+  // transitions, which are the only places we actually need an
+  // invoke (e.g. user switches workspace tabs after mount).
+  const visibilityMountedRef = useRef(false)
   useEffect(() => {
+    if (!visibilityMountedRef.current) {
+      visibilityMountedRef.current = true
+      return
+    }
     const paneId = paneIdRef.current
     if (paneId === null) return
     const cmd = isTabVisible ? 'kessel_term_resume' : 'kessel_term_pause'

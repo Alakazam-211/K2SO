@@ -1022,6 +1022,27 @@ pub struct AttachArgs {
     pub token: String,
     pub cols: u16,
     pub rows: u16,
+    /// Tab-visibility state AT THE MOMENT OF ATTACH. If true, the
+    /// pane is created with `paused=false` so the reader task's
+    /// first snapshot_interval tick emits immediately. If false,
+    /// pane starts paused and waits for a `kessel_term_resume`
+    /// call when visibility flips.
+    ///
+    /// Solves the attach/resume race on initial mount: without
+    /// this flag, `kessel_term_resume` invoked from the
+    /// visibility useEffect could hit before `attach` registered
+    /// the pane (both fire as concurrent async invokes), making
+    /// resume a no-op and leaving the pane paused until the user
+    /// manually switched tabs away and back.
+    ///
+    /// Defaults to true for backwards compatibility if the
+    /// caller doesn't specify. Frontend always passes it now.
+    #[serde(default = "default_initially_visible")]
+    pub initially_visible: bool,
+}
+
+fn default_initially_visible() -> bool {
+    true
 }
 
 #[tauri::command]
@@ -1036,15 +1057,28 @@ pub async fn kessel_term_attach(
     let initial_rows = args.rows.max(500);
     let state = PaneState::new(args.cols, initial_rows);
     let pane_arc = registry().insert(args.pane_id.clone(), state);
+
+    // Apply initial visibility atomically with registration. If the
+    // tab is visible at mount time, flip paused=false here so the
+    // reader task's first tick emits without needing a separate
+    // resume invoke. Prevents the attach-vs-resume race on mount.
+    {
+        let mut p = pane_arc.lock();
+        p.paused = !args.initially_visible;
+        // has_emitted_since_attach stays false (its default) so the
+        // first emit — whenever it fires — is a full snapshot.
+    }
+
     let pane_count = registry().count();
     perf(
         "attach",
         &format!(
-            "pane={} session={} cols={} rows={} pane_count={} dur_us={}",
+            "pane={} session={} cols={} rows={} initially_visible={} pane_count={} dur_us={}",
             args.pane_id,
             args.session_id,
             args.cols,
             args.rows,
+            args.initially_visible,
             pane_count,
             t0.elapsed().as_micros()
         ),
