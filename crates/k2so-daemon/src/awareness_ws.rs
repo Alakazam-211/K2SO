@@ -96,6 +96,41 @@ pub async fn handle_sessions_spawn(body: &[u8]) -> HandlerResult {
         };
     }
 
+    // Idempotency shortcut (Canvas Plan Phase 9): if a live session
+    // for this agent_name is already registered, return its id
+    // without re-spawning. Matches the AlacrittyTerminalView pattern
+    // of `terminal_exists → reattach : create`. This is what lets
+    // workspace switches remount KesselTerminal components without
+    // paying the full grow-then-shrink cost on every mount — the
+    // PTY and its child process are ALREADY running, so remount
+    // just hands back the existing sessionId and the reattach path
+    // takes over.
+    //
+    // A concurrent spawn race (two mounts for the same
+    // agent_name landing at the same time) is fine: the first one
+    // wins the `session_map::register` call inside
+    // `spawn_agent_session`; the second one lands here, sees the
+    // freshly-registered session, and gets the same id. Both
+    // callers end up attached to the same PTY.
+    if let Some(existing) = crate::session_map::lookup(&req.agent_name) {
+        log_debug!(
+            "[daemon/sessions_spawn] idempotent return: agent={} \
+             already has live session={}",
+            req.agent_name,
+            existing.session_id
+        );
+        let out = serde_json::json!({
+            "sessionId": existing.session_id.to_string(),
+            "agentName": req.agent_name,
+            "pendingDrained": 0,
+            "reattached": true,
+        });
+        return HandlerResult {
+            status: "200 OK",
+            body: out.to_string(),
+        };
+    }
+
     let outcome = match spawn_agent_session(SpawnAgentSessionRequest {
         agent_name: req.agent_name,
         cwd: req.cwd,
@@ -122,6 +157,7 @@ pub async fn handle_sessions_spawn(body: &[u8]) -> HandlerResult {
         "sessionId": outcome.session_id.to_string(),
         "agentName": outcome.agent_name,
         "pendingDrained": outcome.pending_drained,
+        "reattached": false,
     });
     HandlerResult {
         status: "200 OK",
