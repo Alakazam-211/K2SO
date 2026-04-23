@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
 
+use crate::session::bytes_ring::{BytesRing, RingChunk};
 use crate::session::Frame;
 
 /// Replay-ring capacity. Originally 1000 per the PRD default, but
@@ -53,6 +54,13 @@ pub const REPLAY_CAP: usize = 50_000;
 /// buffer fills; they can then catch up from the replay ring.
 pub const BROADCAST_CAP: usize = 256;
 
+/// Broadcast capacity for the raw-byte channel (Canvas Plan Phase 2).
+/// A lagged byte subscriber falls back to the byte ring + on-disk
+/// archive for continuity; the broadcast is only for the live tail.
+/// Higher than the frame broadcast because byte chunks arrive more
+/// frequently (one per PTY read vs one per logical Frame burst).
+pub const BYTES_BROADCAST_CAP: usize = 1024;
+
 /// Everything a session needs to fan frames to N consumers.
 #[derive(Debug)]
 pub struct SessionEntry {
@@ -64,6 +72,17 @@ pub struct SessionEntry {
     pub replay: Arc<Mutex<VecDeque<Frame>>>,
     /// Max size of the replay ring. Trimmed front-first on overflow.
     replay_cap: usize,
+    /// Canvas Plan Phase 2: live broadcast of raw PTY bytes. Every
+    /// chunk read from the PTY master is published here (in
+    /// addition to being driven through LineMux into the Frame
+    /// channel). Subscribers that want pixel-perfect reflow (a
+    /// local alacritty_terminal::Term) read from this channel +
+    /// the `bytes_ring` + on-disk byte archive.
+    pub bytes_tx: broadcast::Sender<Arc<[u8]>>,
+    /// Canvas Plan Phase 2: bounded in-memory byte buffer with
+    /// offset tracking. Sized by `BYTES_RING_CAP`; see
+    /// `bytes_ring::BytesRing` for eviction semantics.
+    pub bytes_ring: Arc<Mutex<BytesRing>>,
     /// Optional agent name the session belongs to. Set when the
     /// session is spawned for a specific agent (0.34.0 Phase 3
     /// onward). Anonymous sessions (one-off debugging, test
@@ -91,11 +110,14 @@ impl SessionEntry {
     pub fn with_replay_cap(replay_cap: usize) -> Self {
         assert!(replay_cap >= 1, "SessionEntry replay_cap must be >= 1");
         let (tx, _) = broadcast::channel(BROADCAST_CAP);
+        let (bytes_tx, _) = broadcast::channel(BYTES_BROADCAST_CAP);
         let now = Instant::now();
         Self {
             tx,
             replay: Arc::new(Mutex::new(VecDeque::with_capacity(replay_cap))),
             replay_cap,
+            bytes_tx,
+            bytes_ring: Arc::new(Mutex::new(BytesRing::new())),
             agent_name: Mutex::new(None),
             created_at: now,
             last_frame_at: Mutex::new(now),
@@ -163,6 +185,53 @@ impl SessionEntry {
     /// draining this.
     pub fn subscribe(&self) -> broadcast::Receiver<Frame> {
         self.tx.subscribe()
+    }
+
+    /// Canvas Plan Phase 2: publish a raw-byte chunk. Appends to the
+    /// byte ring (with offset tracking) AND broadcasts to live byte
+    /// subscribers. Returns the absolute byte offset the chunk lands
+    /// at (i.e. the offset of its first byte in the Session's byte
+    /// stream).
+    ///
+    /// Called from `session_stream_pty::reader_loop` once per PTY
+    /// read, in tandem with the existing Frame publish path. Both
+    /// taps see the same bytes in the same order.
+    pub fn publish_bytes(&self, data: Arc<[u8]>) -> u64 {
+        let offset = self.bytes_ring.lock().push(Arc::clone(&data));
+        let _ = self.bytes_tx.send(data);
+        offset
+    }
+
+    /// Subscribe to the live byte broadcast. New chunks published
+    /// AFTER this call are delivered. For historical bytes, call
+    /// `bytes_snapshot_from(offset)` first + read the on-disk
+    /// byte archive when the ring has already evicted past the
+    /// requested offset.
+    pub fn bytes_subscribe(&self) -> broadcast::Receiver<Arc<[u8]>> {
+        self.bytes_tx.subscribe()
+    }
+
+    /// Snapshot of the byte ring starting at (or just before)
+    /// `from_offset`. Each returned chunk is tagged with its
+    /// absolute offset so the caller can skip partial-chunk
+    /// prefixes. Returns empty when `from_offset` is past the
+    /// ring's current back.
+    pub fn bytes_snapshot_from(&self, from_offset: u64) -> Vec<RingChunk> {
+        self.bytes_ring.lock().snapshot_from(from_offset)
+    }
+
+    /// Current byte-stream cursor pair: (front_offset, back_offset).
+    /// `front` is the earliest in-memory byte; `back` is the next
+    /// byte to be written. `[0, front)` is only available from the
+    /// on-disk archive.
+    pub fn bytes_offsets(&self) -> (u64, u64) {
+        let r = self.bytes_ring.lock();
+        (r.front_offset(), r.back_offset())
+    }
+
+    /// Current live-byte subscriber count — diagnostic.
+    pub fn bytes_subscriber_count(&self) -> usize {
+        self.bytes_tx.receiver_count()
     }
 
     /// Snapshot of the replay ring — clones up to `replay_cap`

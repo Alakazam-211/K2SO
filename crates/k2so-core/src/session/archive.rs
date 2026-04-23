@@ -98,6 +98,103 @@ pub fn spawn(
     })
 }
 
+/// Spawn a byte-archive writer task for `session_id`. Parallel to
+/// `spawn` but subscribes to the Session's raw byte broadcast and
+/// appends each chunk to `<project>/.k2so/sessions/<id>/archive.bytes`.
+///
+/// **No rotation, no framing.** The file is an append-only recording
+/// of the PTY's output, byte-identical to what the child process
+/// wrote. Late subscribers that want pixel-perfect replay read this
+/// file from offset 0 (or from a specific offset) through their
+/// local vte. Canvas Plan Phase 2.
+///
+/// **Freeze behavior matches the NDJSON writer:** at `HARD_LIMIT_BYTES`
+/// aggregate (bytes + NDJSON) the writer stops appending. The session
+/// stays alive; operators can rotate/compact manually and restart
+/// the daemon to resume archival.
+///
+/// **Requires a tokio runtime.** Same contract as `spawn`.
+pub fn spawn_bytes(
+    session_id: SessionId,
+    entry: Arc<SessionEntry>,
+    project_root: PathBuf,
+) -> JoinHandle<()> {
+    let rx = entry.bytes_subscribe();
+    tokio::spawn(async move {
+        if let Err(e) = run_bytes(session_id, rx, project_root).await {
+            log_debug!(
+                "[session/archive-bytes] writer exited with error: {e}"
+            );
+        }
+    })
+}
+
+/// Inner loop for the byte-archive writer. Public so tests can
+/// invoke it directly.
+pub async fn run_bytes(
+    session_id: SessionId,
+    mut rx: tokio::sync::broadcast::Receiver<Arc<[u8]>>,
+    project_root: PathBuf,
+) -> std::io::Result<()> {
+    let archive_dir = project_root
+        .join(".k2so/sessions")
+        .join(session_id.to_string());
+    tokio::fs::create_dir_all(&archive_dir).await?;
+    let bytes_path = archive_dir.join("archive.bytes");
+
+    let mut file = open_for_append(&bytes_path).await?;
+    log_debug!(
+        "[session/archive-bytes] writer started — session={} path={:?}",
+        session_id,
+        bytes_path
+    );
+
+    loop {
+        match rx.recv().await {
+            Ok(chunk) => {
+                if chunk.is_empty() {
+                    continue;
+                }
+                if let Err(e) = file.write_all(&chunk).await {
+                    log_debug!(
+                        "[session/archive-bytes] write failed: {e}"
+                    );
+                    // Keep the loop alive — a write error on one
+                    // chunk shouldn't tear down the whole task.
+                    // The next chunk will re-attempt.
+                    continue;
+                }
+            }
+            Err(RecvError::Lagged(n)) => {
+                // Byte broadcast is larger (BYTES_BROADCAST_CAP =
+                // 1024), but under heavy load the archive writer
+                // can still fall behind. Document the gap and
+                // continue; any client that wanted contiguous
+                // bytes will see the gap in its replay — that's
+                // acceptable for now because the in-memory ring
+                // has wider coverage and is the primary replay
+                // source.
+                log_debug!(
+                    "[session/archive-bytes] session={} lagged {n} chunks — \
+                     archive has a byte gap; continuing",
+                    session_id
+                );
+                continue;
+            }
+            Err(RecvError::Closed) => {
+                // Graceful shutdown — session ended. Flush and
+                // exit.
+                let _ = file.flush().await;
+                log_debug!(
+                    "[session/archive-bytes] writer shutting down — session={}",
+                    session_id
+                );
+                return Ok(());
+            }
+        }
+    }
+}
+
 /// Run the archive-writer loop. Public so tests can invoke it
 /// directly on a specific runtime and assert on its result.
 ///

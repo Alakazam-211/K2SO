@@ -18,6 +18,7 @@
 //! routing + archive NDJSON writer.
 
 pub mod archive;
+pub mod bytes_ring;
 pub mod entry;
 pub mod frame;
 pub mod line;
@@ -29,7 +30,8 @@ pub use archive::{
     parse_rotation_index, rotated_uncompressed_segments, spawn as spawn_archive,
     HARD_LIMIT_BYTES, ROTATE_BYTES, WARN_BYTES,
 };
-pub use entry::{SessionEntry, BROADCAST_CAP, REPLAY_CAP};
+pub use bytes_ring::{BytesRing, RingChunk, BYTES_RING_CAP};
+pub use entry::{SessionEntry, BROADCAST_CAP, BYTES_BROADCAST_CAP, REPLAY_CAP};
 pub use frame::{
     CursorOp, CursorShape, EraseMode, Frame, ModeKind, SemanticKind, Style,
 };

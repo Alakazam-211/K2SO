@@ -646,10 +646,18 @@ pub fn spawn_session_stream(cfg: SpawnConfig) -> Result<SessionStreamSession, St
         let _archive_handle = crate::session::archive::spawn(
             session_id,
             Arc::clone(&entry),
+            archive_root.clone(),
+        );
+        // Canvas Plan Phase 2: also start the byte archive writer.
+        // Same lifetime model as the Frame writer — task outlives
+        // this function, exits when the byte broadcast closes.
+        let _bytes_archive_handle = crate::session::archive::spawn_bytes(
+            session_id,
+            Arc::clone(&entry),
             archive_root,
         );
-        // Handle intentionally dropped — the task outlives this
-        // function and exits when the broadcast sender closes
+        // Handles intentionally dropped — the tasks outlive this
+        // function and exit when the broadcast senders close
         // (registry unregister → last Arc drops).
     }
 
@@ -795,6 +803,20 @@ fn reader_loop(
                     }
                     entry.publish(frame);
                 }
+                // Fork C (Canvas Plan Phase 2): raw byte publish.
+                // Fans the same chunk out on the byte broadcast +
+                // into the in-memory byte ring, tagged with its
+                // absolute byte offset in the Session. Subscribers
+                // that want pixel-perfect reflow via a local Term
+                // drain the ring + tail the broadcast instead of
+                // consuming Frames.
+                //
+                // Publishing AFTER the Frame fork so any subscriber
+                // that reads both channels sees frames and the
+                // bytes they were derived from land in a consistent
+                // causal order.
+                let bytes_arc: Arc<[u8]> = Arc::from(chunk.to_vec().into_boxed_slice());
+                entry.publish_bytes(bytes_arc);
             }
             Err(e) => {
                 log_debug!("[session_stream/pty] read error: {}", e);

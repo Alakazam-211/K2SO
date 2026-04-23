@@ -43,6 +43,7 @@ mod events;
 mod pending_live;
 mod providers;
 mod session_map;
+mod sessions_bytes_ws;
 mod sessions_ws;
 mod signal_format;
 mod spawn;
@@ -433,6 +434,24 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             }
             let params = parse_params(&path, &query);
             sessions_ws::serve_session_subscribe_connection(stream, params).await;
+        }
+        // Canvas Plan Phase 2: raw-byte stream subscribe. Parallel
+        // to /cli/sessions/subscribe but streams PTY bytes as
+        // binary WS frames for clients running their own vte.
+        "/cli/sessions/bytes" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let params = parse_params(&path, &query);
+            sessions_bytes_ws::serve_session_bytes_connection(stream, params).await;
         }
         // Awareness Bus endpoints (0.34.0 Phase 3).
         // `/cli/awareness/publish` — POST JSON body → egress::deliver
