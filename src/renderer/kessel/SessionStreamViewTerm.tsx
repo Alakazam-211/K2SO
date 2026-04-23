@@ -1,0 +1,519 @@
+// Canvas Plan Phase 5 — Kessel pane that renders from Tauri-side
+// alacritty Term snapshots instead of the frontend TerminalGrid.
+//
+// Lifecycle:
+//   1. On mount: invoke('kessel_term_attach', {...}) — Rust spawns
+//      an async task that opens a WS to /cli/sessions/bytes and
+//      drives bytes into an alacritty Term.
+//   2. Listen for `kessel:grid-snapshot` events. Each event carries
+//      a serialized Term snapshot (rows + scrollback as strings,
+//      cursor, version).
+//   3. Render the visible window from the snapshot, same DOM
+//      shape as SessionStreamView (one <div> per row of <span>
+//      spans).
+//   4. Keyboard input: kessel_write (existing) forwards bytes to
+//      the daemon PTY, which loops back via the byte stream into
+//      our Term.
+//   5. On window resize: kessel_term_resize calls term.resize
+//      (which reflows scrollback at new cols natively — the
+//      headline win of Phase 4 + 5).
+//   6. On unmount: kessel_term_detach — Rust aborts the reader
+//      task and drops the Term.
+//
+// Deliberately does NOT use the legacy TerminalGrid (grid.ts).
+// Reflow, scrollback retention, cursor tracking are Term's job
+// now. Selection, search, per-cell styling are Phase-6 polish.
+
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
+
+import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { useKesselConfig } from './config-context'
+import { useIsTabVisible } from '@/contexts/TabVisibilityContext'
+import {
+  keyEventToSequence,
+  naturalTextEditingSequence,
+} from '@/lib/key-mapping'
+
+export interface SessionStreamViewTermProps {
+  /** Daemon SessionId (UUID). `null` = optimistic mount while the
+   *  daemon spawn is in flight. */
+  sessionId: string | null
+  /** Daemon port — from kessel_spawn result. */
+  port: number
+  /** Auth token — from kessel_spawn result. */
+  token: string
+  /** Initial cols. Resize overrides this once ResizeObserver fires. */
+  cols?: number
+  /** Initial rows. Same as cols. */
+  rows?: number
+  /** Font size (px). */
+  fontSize?: number
+  /** Interactive? Default true. */
+  interactive?: boolean
+  /** Auto-resize via ResizeObserver? Default true. */
+  autoResize?: boolean
+}
+
+interface TermCursor {
+  row: number
+  col: number
+  visible: boolean
+}
+
+interface TermGridSnapshot {
+  paneId: string
+  cols: number
+  rows: number
+  grid: string[]
+  scrollback: string[]
+  cursor: TermCursor
+  version: number
+  displayOffset: number
+}
+
+/** Stable pane id. Derived from sessionId but prefixed so the
+ *  daemon side can tell Kessel pane requests from other pane
+ *  types. */
+function paneIdFor(sessionId: string): string {
+  return `kessel-${sessionId}`
+}
+
+export function SessionStreamViewTerm(
+  props: SessionStreamViewTermProps,
+): React.JSX.Element {
+  const config = useKesselConfig()
+  const {
+    sessionId,
+    port,
+    token,
+    cols = 80,
+    rows = 24,
+    fontSize = config.font.size,
+    interactive = true,
+    autoResize = true,
+  } = props
+
+  const [snapshot, setSnapshot] = useState<TermGridSnapshot | null>(null)
+  const [viewportOffset, setViewportOffset] = useState(0)
+  const [isFocused, setIsFocused] = useState<boolean>(() =>
+    typeof document !== 'undefined' ? document.hasFocus() : false,
+  )
+
+  const containerRef = useRef<HTMLDivElement>(null)
+  const paneIdRef = useRef<string | null>(null)
+
+  // ── Attach / detach lifecycle ─────────────────────────────────
+  useEffect(() => {
+    if (sessionId === null) return
+    const paneId = paneIdFor(sessionId)
+    paneIdRef.current = paneId
+    let cancelled = false
+
+    ;(async () => {
+      try {
+        await invoke('kessel_term_attach', {
+          args: {
+            paneId,
+            sessionId,
+            port,
+            token,
+            cols,
+            rows,
+          },
+        })
+        // eslint-disable-next-line no-console
+        console.info(
+          `%c[KesselTerm] attached pane=${paneId}`,
+          'color:#0ff;font-weight:bold',
+        )
+      } catch (e) {
+        if (!cancelled) {
+          // eslint-disable-next-line no-console
+          console.warn('[KesselTerm] attach failed:', e)
+        }
+      }
+    })()
+
+    // Pull an initial snapshot once attach has had a chance to run.
+    const pullInitial = async () => {
+      try {
+        const snap = await invoke<TermGridSnapshot>(
+          'kessel_term_grid_snapshot',
+          { paneId },
+        )
+        if (!cancelled) setSnapshot(snap)
+      } catch {
+        // Retry once after 50ms — attach is racing with first pull.
+        setTimeout(async () => {
+          if (cancelled) return
+          try {
+            const snap = await invoke<TermGridSnapshot>(
+              'kessel_term_grid_snapshot',
+              { paneId },
+            )
+            setSnapshot(snap)
+          } catch {
+            /* fine — snapshots will flow via events */
+          }
+        }, 50)
+      }
+    }
+    void pullInitial()
+
+    return () => {
+      cancelled = true
+      void invoke('kessel_term_detach', { paneId }).catch(() => {})
+      paneIdRef.current = null
+    }
+  }, [sessionId, port, token, cols, rows])
+
+  // ── Snapshot event listener ───────────────────────────────────
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null
+    ;(async () => {
+      unlisten = await listen<TermGridSnapshot>(
+        'kessel:grid-snapshot',
+        (evt) => {
+          if (evt.payload.paneId !== paneIdRef.current) return
+          setSnapshot(evt.payload)
+        },
+      )
+    })()
+    return () => {
+      if (unlisten) unlisten()
+    }
+  }, [])
+
+  // ── Focus tracking ────────────────────────────────────────────
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const on = (): void => setIsFocused(true)
+    const off = (): void => setIsFocused(false)
+    el.addEventListener('focus', on)
+    el.addEventListener('blur', off)
+    return () => {
+      el.removeEventListener('focus', on)
+      el.removeEventListener('blur', off)
+    }
+  }, [])
+
+  // ── Auto-focus on tab activation ──────────────────────────────
+  const isTabVisible = useIsTabVisible()
+  useEffect(() => {
+    if (!interactive) return
+    if (!isTabVisible) return
+    const el = containerRef.current
+    if (!el) return
+    const raf = requestAnimationFrame(() => {
+      containerRef.current?.focus()
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [interactive, isTabVisible])
+
+  // ── Cell metrics (for cursor positioning + wheel math) ────────
+  const [cellMetrics, setCellMetrics] = useState({ width: 0, height: 0 })
+  useEffect(() => {
+    const el = document.createElement('span')
+    el.style.cssText = `font-family: ${config.font.family}; font-size: ${fontSize}px; position: absolute; visibility: hidden; white-space: pre;`
+    el.textContent = 'W'
+    document.body.appendChild(el)
+    const rect = el.getBoundingClientRect()
+    document.body.removeChild(el)
+    setCellMetrics({
+      width: rect.width,
+      height: Math.ceil(fontSize * config.font.lineHeightMultiplier),
+    })
+  }, [fontSize, config.font.family, config.font.lineHeightMultiplier])
+
+  // ── Keyboard input ────────────────────────────────────────────
+  useEffect(() => {
+    if (!interactive) return
+    if (sessionId === null) return
+    const el = containerRef.current
+    if (!el) return
+
+    const send = (seq: string): void => {
+      if (sessionId === null) return
+      invoke('kessel_write', { sessionId, text: seq }).catch(() => {})
+    }
+
+    const onKey = (e: KeyboardEvent): void => {
+      const natural = naturalTextEditingSequence(e)
+      if (natural !== null) {
+        e.preventDefault()
+        setViewportOffset(0)
+        send(natural)
+        return
+      }
+      // Phase 5 first pass: default arrow-key mode (no app cursor
+      // flag yet — snapshot doesn't carry Term modes). zsh/vim
+      // users can still edit with CSI arrows; SS3 encoding will
+      // land when we wire Term mode flags into the snapshot.
+      const seq = keyEventToSequence(e, 0)
+      if (seq === null) return
+      e.preventDefault()
+      setViewportOffset(0)
+      send(seq)
+    }
+    const onPaste = (e: ClipboardEvent): void => {
+      const text = e.clipboardData?.getData('text')
+      if (!text) return
+      e.preventDefault()
+      setViewportOffset(0)
+      send(text)
+    }
+
+    el.addEventListener('keydown', onKey)
+    el.addEventListener('paste', onPaste)
+    el.focus()
+    return () => {
+      el.removeEventListener('keydown', onKey)
+      el.removeEventListener('paste', onPaste)
+    }
+  }, [interactive, sessionId])
+
+  // ── ResizeObserver → kessel_term_resize + daemon /cli/sessions/resize ──
+  useEffect(() => {
+    if (!autoResize) return
+    if (sessionId === null) return
+    const el = containerRef.current
+    if (!el) return
+    if (!cellMetrics.width || !cellMetrics.height) return
+
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let lastCols = cols
+    let lastRows = rows
+    const observer = new ResizeObserver((entries) => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        const rect = entries[0]?.contentRect
+        if (!rect) return
+        if (rect.width === 0 || rect.height === 0) return
+        const availW = Math.max(0, rect.width - 8)
+        const availH = Math.max(0, rect.height - 8)
+        const newCols = Math.floor(availW / cellMetrics.width)
+        const newRows = Math.floor(availH / cellMetrics.height)
+        if (newCols < 10 || newRows < 3) return
+        if (newCols === lastCols && newRows === lastRows) return
+        lastCols = newCols
+        lastRows = newRows
+        const paneId = paneIdRef.current
+        if (paneId) {
+          invoke('kessel_term_resize', {
+            paneId,
+            cols: newCols,
+            rows: newRows,
+          }).catch(() => {})
+        }
+        // Also ask the daemon to SIGWINCH the PTY so Claude
+        // redraws at the new size.
+        if (sessionId !== null) {
+          invoke('kessel_resize', {
+            sessionId,
+            cols: newCols,
+            rows: newRows,
+          }).catch(() => {})
+        }
+      }, 100)
+    })
+    observer.observe(el)
+    return () => {
+      if (timer) clearTimeout(timer)
+      observer.disconnect()
+    }
+  }, [
+    autoResize,
+    cellMetrics.width,
+    cellMetrics.height,
+    sessionId,
+    cols,
+    rows,
+  ])
+
+  // ── Wheel scroll (client-side viewport offset over scrollback) ─
+  //
+  // For Phase 5 first pass, scrolling is purely a client-side
+  // projection: we render different rows from the snapshot
+  // without telling the Term. Same pattern SessionStreamView
+  // uses. A future step can push scroll state into the Term
+  // via a new kessel_term_scroll command if needed.
+  const scrollAccumRef = useRef(0)
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const FLUSH_MS = 50
+    const onWheel = (e: WheelEvent): void => {
+      if (e.deltaY === 0) return
+      e.preventDefault()
+      const cellH = cellMetrics.height || 20
+      const pixelDelta =
+        e.deltaMode === WheelEvent.DOM_DELTA_LINE
+          ? e.deltaY * cellH
+          : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
+            ? e.deltaY * cellH * (snapshot?.rows ?? 24)
+            : e.deltaY
+      scrollAccumRef.current += pixelDelta
+      if (!scrollTimerRef.current) {
+        scrollTimerRef.current = setTimeout(() => {
+          scrollTimerRef.current = null
+          const accum = scrollAccumRef.current
+          scrollAccumRef.current = 0
+          if (accum === 0) return
+          const lines = Math.round(
+            (accum * config.scrolling.multiplier) / cellH,
+          )
+          if (lines === 0) return
+          const maxOffset = snapshot?.scrollback.length ?? 0
+          setViewportOffset((o) => {
+            const next = o - lines
+            if (next <= 0) return 0
+            if (next >= maxOffset) return maxOffset
+            return next
+          })
+        }, FLUSH_MS)
+      }
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => {
+      el.removeEventListener('wheel', onWheel)
+      if (scrollTimerRef.current) {
+        clearTimeout(scrollTimerRef.current)
+        scrollTimerRef.current = null
+      }
+    }
+  }, [config.scrolling.multiplier, cellMetrics.height, snapshot])
+
+  // Drop DOM text selection on viewport change — matches
+  // SessionStreamView's behavior until the proper content-space
+  // selection overlay lands.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const sel = window.getSelection()
+    if (sel && sel.rangeCount > 0) sel.removeAllRanges()
+  }, [viewportOffset])
+
+  // ── Compose visible rows ──────────────────────────────────────
+  const visibleRows = useMemo<string[]>(() => {
+    if (!snapshot) return []
+    if (viewportOffset === 0) return snapshot.grid
+    const { scrollback, grid, rows: r } = snapshot
+    const totalLen = scrollback.length + grid.length
+    const windowEnd = totalLen - viewportOffset
+    const windowStart = windowEnd - r
+    const out: string[] = []
+    for (let i = 0; i < r; i++) {
+      const abs = windowStart + i
+      if (abs < 0) out.push('')
+      else if (abs < scrollback.length) out.push(scrollback[abs])
+      else out.push(grid[abs - scrollback.length])
+    }
+    return out
+  }, [viewportOffset, snapshot])
+
+  // ── Container + cursor styles ─────────────────────────────────
+  const containerStyle = useMemo<React.CSSProperties>(
+    () => ({
+      fontFamily: config.font.family,
+      fontSize: `${fontSize}px`,
+      lineHeight: `${Math.ceil(fontSize * config.font.lineHeightMultiplier)}px`,
+      color: `rgb(${(config.colors.foreground >> 16) & 0xff},${(config.colors.foreground >> 8) & 0xff},${config.colors.foreground & 0xff})`,
+      backgroundColor: `rgb(${(config.colors.background >> 16) & 0xff},${(config.colors.background >> 8) & 0xff},${config.colors.background & 0xff})`,
+      whiteSpace: 'pre',
+      padding: '4px',
+      position: 'relative',
+      overflow: 'hidden',
+      width:
+        !autoResize && cellMetrics.width
+          ? `${cellMetrics.width * cols + 8}px`
+          : '100%',
+      height:
+        !autoResize && cellMetrics.height
+          ? `${cellMetrics.height * rows + 8}px`
+          : '100%',
+      flex: autoResize ? 1 : undefined,
+    }),
+    [
+      fontSize,
+      cellMetrics.width,
+      cellMetrics.height,
+      cols,
+      rows,
+      autoResize,
+      config.font.family,
+      config.font.lineHeightMultiplier,
+      config.colors.foreground,
+      config.colors.background,
+    ],
+  )
+
+  const cursorStyle = useMemo<React.CSSProperties>(() => {
+    if (!snapshot || !cellMetrics.width) return { display: 'none' }
+    const cursorVisibleRow = snapshot.cursor.row + viewportOffset
+    if (cursorVisibleRow < 0 || cursorVisibleRow >= snapshot.rows) {
+      return { display: 'none' }
+    }
+    const caretColor = 'rgb(224, 224, 224)'
+    const fill = isFocused ? caretColor : 'transparent'
+    const outline = isFocused ? undefined : `inset 0 0 0 1px ${caretColor}`
+    return {
+      position: 'absolute',
+      left: `${4 + cellMetrics.width * snapshot.cursor.col}px`,
+      top: `${4 + cellMetrics.height * cursorVisibleRow}px`,
+      width: `${cellMetrics.width}px`,
+      height: `${cellMetrics.height}px`,
+      backgroundColor: fill,
+      boxShadow: outline,
+      pointerEvents: 'none',
+      boxSizing: 'border-box',
+    }
+  }, [snapshot, cellMetrics, viewportOffset, isFocused])
+
+  return (
+    <div
+      ref={containerRef}
+      className="kessel-session-stream-view-term"
+      data-session-id={sessionId}
+      tabIndex={interactive ? 0 : -1}
+      style={{ ...containerStyle, outline: 'none' }}
+    >
+      {visibleRows.map((row, rowIdx) => (
+        <div key={`row-${rowIdx}`}>{row || '\u00a0'}</div>
+      ))}
+      <div aria-hidden="true" style={cursorStyle} />
+      {import.meta.env.DEV && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 2,
+            right: 2,
+            padding: '2px 6px',
+            background: 'rgba(0,0,0,0.8)',
+            color: '#ff0',
+            fontSize: '10px',
+            fontFamily: 'monospace',
+            zIndex: 999,
+            pointerEvents: 'none',
+            borderRadius: '3px',
+          }}
+        >
+          <strong style={{ color: '#fff' }}>Kessel Term</strong>{' '}
+          · cells:{snapshot?.cols ?? '?'}x{snapshot?.rows ?? '?'}{' '}
+          cursor:{snapshot?.cursor.col ?? 0},{snapshot?.cursor.row ?? 0}{' '}
+          off:{viewportOffset}{' '}
+          scr:{snapshot?.scrollback.length ?? 0}{' '}
+          v:{snapshot?.version ?? 0}
+        </div>
+      )}
+    </div>
+  )
+}

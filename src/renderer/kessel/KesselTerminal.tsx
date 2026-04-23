@@ -19,7 +19,25 @@
 import React, { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { SessionStreamView } from './SessionStreamView'
+import { SessionStreamViewTerm } from './SessionStreamViewTerm'
 import { invalidateDaemonWs } from './daemon-ws'
+
+/** Canvas Plan Phase 5: opt into the Tauri-local alacritty Term
+ *  renderer instead of the legacy Frame-stream TerminalGrid.
+ *  Controlled by `localStorage.kesselRenderer = 'term'` (set via
+ *  devtools). Default `'frame'` keeps 0.34.x-behavior users
+ *  untouched until the Term path is battle-tested. Read once per
+ *  pane mount; flip requires a pane remount (close + reopen tab).
+ *  Safe because the local storage value persists through reload. */
+function readKesselRendererPref(): 'frame' | 'term' {
+  try {
+    if (typeof window === 'undefined') return 'frame'
+    const v = window.localStorage.getItem('kesselRenderer')
+    return v === 'term' ? 'term' : 'frame'
+  } catch {
+    return 'frame'
+  }
+}
 
 export interface KesselTerminalProps {
   terminalId: string
@@ -219,6 +237,25 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
   // sessionId from null → real, the only thing that changes is the
   // WS connection starting — the pane is visually already there.
   const isReady = state.kind === 'ready'
+  const renderer = readKesselRendererPref()
+
+  if (renderer === 'term') {
+    // Canvas Plan Phase 5: Tauri-local alacritty Term path.
+    return (
+      <SessionStreamViewTerm
+        sessionId={isReady ? state.sessionId : null}
+        port={isReady ? state.port : 0}
+        token={isReady ? state.token : ''}
+        cols={80}
+        rows={24}
+        fontSize={fontSize}
+        autoResize
+        interactive
+      />
+    )
+  }
+
+  // Default / legacy: Frame-stream → TerminalGrid → DOM.
   return (
     <SessionStreamView
       sessionId={isReady ? state.sessionId : null}
