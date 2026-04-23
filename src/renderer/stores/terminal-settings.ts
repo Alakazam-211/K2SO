@@ -10,17 +10,21 @@ export type LinkClickMode = 'click' | 'cmd-click'
 export type ShortcutModifierLayout = 'cmd-active-cmdshift-pinned' | 'cmd-pinned-cmdshift-active'
 
 /**
- * Terminal rendering backend selection (Phase 4.5).
+ * Terminal rendering backend selection (Phase 4.5 / Canvas Plan).
  *
  * - `alacritty` (default): the classic in-process alacritty_terminal
  *   engine + DOM renderer. Production-hardened, full SGR / alt-screen /
- *   mouse support. The current render path for every tab since K2SO
- *   shipped.
- * - `kessel`: subscribes to the daemon's Session Stream WebSocket
- *   (`/cli/sessions/subscribe`) and renders from Frame events. Beta —
- *   SGR parity as of 4.5, cursor blinks, but alt-screen buffer + full
- *   mouse reporting are not yet wired. Changes to this setting only
- *   affect NEW tabs; already-open tabs keep their chosen renderer.
+ *   mouse support.
+ * - `kessel`: subscribes to the daemon's Session Stream and renders
+ *   from the byte stream through a Tauri-local
+ *   alacritty_terminal::Term (Canvas Plan Phase 4/5). Earlier
+ *   shipped as a Frame-based TypeScript TerminalGrid (0.34.x); now
+ *   upgraded to the Term path for pixel-perfect reflow + native
+ *   Alacritty scrollback. SGR parity + selection overlay +
+ *   find-in-scrollback still landing; BETA.
+ *
+ * Changes to this setting only affect NEW tabs; already-open tabs
+ * keep their chosen renderer.
  */
 export type TerminalRenderer = 'alacritty' | 'kessel'
 

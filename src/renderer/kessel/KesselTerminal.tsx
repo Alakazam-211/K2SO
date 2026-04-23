@@ -22,23 +22,6 @@ import { SessionStreamView } from './SessionStreamView'
 import { SessionStreamViewTerm } from './SessionStreamViewTerm'
 import { invalidateDaemonWs } from './daemon-ws'
 
-/** Canvas Plan Phase 5: opt into the Tauri-local alacritty Term
- *  renderer instead of the legacy Frame-stream TerminalGrid.
- *  Controlled by `localStorage.kesselRenderer = 'term'` (set via
- *  devtools). Default `'frame'` keeps 0.34.x-behavior users
- *  untouched until the Term path is battle-tested. Read once per
- *  pane mount; flip requires a pane remount (close + reopen tab).
- *  Safe because the local storage value persists through reload. */
-function readKesselRendererPref(): 'frame' | 'term' {
-  try {
-    if (typeof window === 'undefined') return 'frame'
-    const v = window.localStorage.getItem('kesselRenderer')
-    return v === 'term' ? 'term' : 'frame'
-  } catch {
-    return 'frame'
-  }
-}
-
 export interface KesselTerminalProps {
   terminalId: string
   cwd: string
@@ -52,6 +35,15 @@ export interface KesselTerminalProps {
    *  Present for both Kessel and Alacritty terminals so we have
    *  apples-to-apples comparisons. */
   spawnedAt?: number
+  /** Internal escape hatch. Defaults to 'term' (Canvas Plan Phase 5,
+   *  byte stream → Tauri-local alacritty_terminal::Term). Passing
+   *  'frame' routes through the legacy Frame-stream TerminalGrid
+   *  (shipped in 0.34.x). Exposed for A/B testing and for a safe
+   *  bail-out path if the Term renderer misbehaves on a specific
+   *  harness — PaneGroupView does not pass this; production tabs
+   *  always use 'term'. Expected to be removed once the Term path
+   *  is feature-complete and the Frame path is deleted. */
+  variant?: 'frame' | 'term'
 }
 
 /** Shape returned by the `kessel_spawn` Tauri command. The Rust side
@@ -84,7 +76,7 @@ type State =
   | { kind: 'error'; message: string }
 
 export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
-  const { terminalId, cwd, command, args, fontSize, spawnedAt } = props
+  const { terminalId, cwd, command, args, fontSize, spawnedAt, variant = 'term' } = props
   const [state, setState] = useState<State>({ kind: 'idle' })
 
   useEffect(() => {
@@ -237,12 +229,14 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
   // sessionId from null → real, the only thing that changes is the
   // WS connection starting — the pane is visually already there.
   const isReady = state.kind === 'ready'
-  const renderer = readKesselRendererPref()
 
-  if (renderer === 'term') {
-    // Canvas Plan Phase 5: Tauri-local alacritty Term path.
+  // `variant` defaults to 'term' (Canvas Plan Phase 5). Legacy
+  // Frame path is still accessible via the escape-hatch prop while
+  // we close parity gaps; PaneGroupView doesn't pass the prop, so
+  // production tabs always use the Term path.
+  if (variant === 'frame') {
     return (
-      <SessionStreamViewTerm
+      <SessionStreamView
         sessionId={isReady ? state.sessionId : null}
         port={isReady ? state.port : 0}
         token={isReady ? state.token : ''}
@@ -255,9 +249,8 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
     )
   }
 
-  // Default / legacy: Frame-stream → TerminalGrid → DOM.
   return (
-    <SessionStreamView
+    <SessionStreamViewTerm
       sessionId={isReady ? state.sessionId : null}
       port={isReady ? state.port : 0}
       token={isReady ? state.token : ''}
