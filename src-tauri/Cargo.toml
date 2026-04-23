@@ -1,6 +1,6 @@
 [package]
 name = "k2so"
-version = "0.34.1"
+version = "0.34.2"
 edition = "2021"
 description = "Developer workspace with terminals, git worktrees, and agent presets"
 license = "MIT"
@@ -62,6 +62,13 @@ ngrok = "0.18"
 argon2 = "0.5"
 subtle = "2.6"
 tungstenite = "0.24"
+# Async WebSocket client for Canvas Plan Phase 4 — Kessel panes
+# attach to the daemon's /cli/sessions/bytes endpoint and pipe
+# bytes into a local alacritty_terminal::Term. Same version we
+# use in the daemon for the server side.
+tokio-tungstenite = "0.23"
+vte = { version = "0.15", features = ["std", "ansi"] }
+futures-util = "0.3"
 
 # Non-cryptographic hash used on hot paths (terminal grid change detection
 # pre-seqno, future caching keys). Picked over FxHash for SIMD acceleration.

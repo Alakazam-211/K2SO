@@ -150,6 +150,84 @@ async fn grow_and_shrink_with_idle_trigger_on_simple_shell() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grow_boundary_apc_lands_in_byte_stream() {
+    // Canvas Plan Phase 3: verify that after grow-settle the daemon
+    // injects `\x1b_k2so:grow_boundary:...\x07` into the Session's
+    // byte stream, in addition to the existing Frame::SemanticEvent
+    // emission. Byte-stream subscribers read the APC inline and
+    // use it as their seam.
+    let cwd = tmp_cwd("apc-marker");
+    let cfg = SpawnConfig {
+        cwd: cwd.clone(),
+        command: Some(
+            "printf 'hello grow\\n'; sleep 30".to_string(),
+        ),
+        args: None,
+        cols: TARGET_COLS,
+        rows: TARGET_ROWS,
+        ..SpawnConfig::default()
+    };
+
+    let session = spawn_session_stream_and_grow(cfg)
+        .await
+        .expect("spawn should succeed");
+
+    let entry =
+        registry::lookup(&session.session_id).expect("entry still registered");
+
+    // Give the byte archive writer a beat to flush so both the
+    // ring and the on-disk file are observable.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Concatenate the full byte ring; scan for the APC marker.
+    let ring: Vec<u8> = entry
+        .bytes_snapshot_from(0)
+        .into_iter()
+        .flat_map(|c| c.data.to_vec())
+        .collect();
+    let needle = b"\x1b_k2so:grow_boundary:";
+    let pos = ring
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .expect("ring must contain APC grow_boundary introducer");
+
+    // Scan forward for the BEL terminator (\x07) and pull out the
+    // JSON payload between the colon and the BEL.
+    let after_intro = &ring[pos + needle.len()..];
+    let bel = after_intro
+        .iter()
+        .position(|b| *b == b'\x07')
+        .expect("APC must terminate with BEL");
+    let payload_bytes = &after_intro[..bel];
+    let payload_str =
+        std::str::from_utf8(payload_bytes).expect("payload must be UTF-8");
+    let payload: serde_json::Value =
+        serde_json::from_str(payload_str).expect("payload must parse as JSON");
+
+    assert_eq!(payload["target_cols"], TARGET_COLS);
+    assert_eq!(payload["target_rows"], TARGET_ROWS);
+    assert_eq!(payload["grow_rows"], GROW_ROWS);
+    assert!(
+        payload["reason"].is_string(),
+        "payload.reason should be present"
+    );
+
+    // Archive file should also have it (byte archive IS the ring +
+    // older evicted bytes appended).
+    let archive_path = std::path::PathBuf::from(&cwd)
+        .join(".k2so/sessions")
+        .join(session.session_id.to_string())
+        .join("archive.bytes");
+    let archive = std::fs::read(&archive_path).expect("archive exists");
+    assert!(
+        archive.windows(needle.len()).any(|w| w == needle),
+        "archive.bytes must contain the APC grow_boundary introducer"
+    );
+
+    drop(session);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grow_skipped_when_requested_rows_exceeds_grow_rows() {
     // Smoke: if the caller already asks for rows >= GROW_ROWS, the
     // grow phase is a no-op. Spawn should return promptly with the

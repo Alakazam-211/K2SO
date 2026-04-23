@@ -251,12 +251,40 @@ pub async fn spawn_session_stream_and_grow(
                     kind: "grow_boundary".into(),
                     payload: boundary_payload.clone(),
                 },
-                payload: boundary_payload,
+                payload: boundary_payload.clone(),
             });
+
+            // Canvas Plan Phase 3: also inject the marker into the
+            // byte stream as a `k2so:`-namespaced APC escape. Byte-
+            // stream subscribers (Phase 4 Kessel, running their own
+            // vte) read this inline at the exact byte offset of the
+            // seam — their pre-vte APC filter strips it, runs the
+            // sealGrowPhase-equivalent on their local Term, and
+            // passes the remaining bytes through. See
+            // `.k2so/prds/canvas-plan.md` §3.2 + §4 for the format
+            // and semantics.
+            //
+            // APC envelope: ESC _ k2so:grow_boundary:<json> BEL.
+            // Every terminal emulator that doesn't recognize the
+            // `k2so:` namespace silently discards APC escapes
+            // (xterm / iTerm2 / Alacritty all do), so the byte
+            // sequence is inert for any consumer that chooses not
+            // to implement the filter.
+            let apc_payload = serde_json::to_string(&boundary_payload)
+                .unwrap_or_else(|_| "{}".to_string());
+            let mut apc_bytes = Vec::with_capacity(apc_payload.len() + 32);
+            apc_bytes.extend_from_slice(b"\x1b_k2so:grow_boundary:");
+            apc_bytes.extend_from_slice(apc_payload.as_bytes());
+            apc_bytes.push(b'\x07');
+            let apc_arc: Arc<[u8]> = Arc::from(apc_bytes.into_boxed_slice());
+            let apc_offset = entry.publish_bytes(apc_arc);
+
             log_debug!(
                 "[session_stream/pty] grow-shrink: session {} emitted \
-                 grow_boundary frame (target={}x{}, grow_rows={})",
+                 grow_boundary — frame + APC@byte_offset={} \
+                 (target={}x{}, grow_rows={})",
                 session_id,
+                apc_offset,
                 target_cols,
                 target_rows,
                 grow_rows

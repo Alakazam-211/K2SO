@@ -1253,6 +1253,12 @@ pub fn run() {
             commands::kessel::kessel_resize,
             commands::kessel::kessel_warm_http,
             commands::kessel::kessel_close,
+            // Canvas Plan Phase 4 — client-side alacritty Term
+            // driven by the daemon's byte stream.
+            commands::kessel_term::kessel_term_attach,
+            commands::kessel_term::kessel_term_grid_snapshot,
+            commands::kessel_term::kessel_term_resize,
+            commands::kessel_term::kessel_term_detach,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {

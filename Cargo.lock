@@ -2899,7 +2899,7 @@ dependencies = [
 
 [[package]]
 name = "k2so"
-version = "0.34.1"
+version = "0.34.2"
 dependencies = [
  "ahash",
  "alacritty_terminal",
@@ -2912,6 +2912,7 @@ dependencies = [
  "encoding_rs",
  "fontdue",
  "futures",
+ "futures-util",
  "getrandom 0.2.17",
  "git2",
  "glob",
@@ -2950,15 +2951,17 @@ dependencies = [
  "tauri-plugin-shell",
  "tauri-plugin-updater",
  "tokio",
+ "tokio-tungstenite",
  "trash",
  "tungstenite 0.24.0",
  "url",
  "uuid",
+ "vte",
 ]
 
 [[package]]
 name = "k2so-core"
-version = "0.34.1"
+version = "0.34.2"
 dependencies = [
  "alacritty_terminal",
  "argon2",
@@ -2996,7 +2999,7 @@ dependencies = [
 
 [[package]]
 name = "k2so-daemon"
-version = "0.34.1"
+version = "0.34.2"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
