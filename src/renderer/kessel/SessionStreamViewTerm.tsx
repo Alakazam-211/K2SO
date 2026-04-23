@@ -67,15 +67,85 @@ interface TermCursor {
   visible: boolean
 }
 
+/** One run of consecutive cells in a row that share the same SGR
+ *  style. Matches the Rust-side `CellRun` — keep these in lockstep
+ *  with `src-tauri/src/commands/kessel_term.rs`. */
+interface CellRun {
+  text: string
+  /** 0xRRGGBB or null (terminal default). */
+  fg: number | null
+  /** 0xRRGGBB or null (terminal default). */
+  bg: number | null
+  bold: boolean
+  italic: boolean
+  underline: boolean
+  inverse: boolean
+  dim: boolean
+  strikeout: boolean
+}
+
 interface TermGridSnapshot {
   paneId: string
   cols: number
   rows: number
-  grid: string[]
-  scrollback: string[]
+  /** Each row is a list of style-homogeneous runs. */
+  grid: CellRun[][]
+  /** Scrollback, oldest-first. Same run-encoding as `grid`. */
+  scrollback: CellRun[][]
   cursor: TermCursor
   version: number
   displayOffset: number
+}
+
+/** Convert a 24-bit hex color int to a CSS `rgb(...)` string. */
+function hexToCss(n: number): string {
+  const r = (n >> 16) & 0xff
+  const g = (n >> 8) & 0xff
+  const b = n & 0xff
+  return `rgb(${r},${g},${b})`
+}
+
+/** Build a React CSS style for a run. Handles inverse, dim, and
+ *  all the SGR flags that map directly to CSS. */
+function runStyle(run: CellRun): React.CSSProperties {
+  const fg = run.fg !== null ? hexToCss(run.fg) : undefined
+  const bg = run.bg !== null ? hexToCss(run.bg) : undefined
+  // SGR 7 (inverse): swap fg/bg. If either side is null (=
+  // terminal default), the other side's color wins on its slot
+  // and we let the inverted slot fall through to theme defaults.
+  const color = run.inverse ? bg : fg
+  const backgroundColor = run.inverse ? fg : bg
+  const style: React.CSSProperties = {}
+  if (color !== undefined) style.color = color
+  if (backgroundColor !== undefined) style.backgroundColor = backgroundColor
+  if (run.bold) style.fontWeight = 'bold'
+  if (run.italic) style.fontStyle = 'italic'
+  if (run.underline && run.strikeout) {
+    style.textDecoration = 'underline line-through'
+  } else if (run.underline) {
+    style.textDecoration = 'underline'
+  } else if (run.strikeout) {
+    style.textDecoration = 'line-through'
+  }
+  if (run.dim) style.opacity = 0.6
+  return style
+}
+
+/** Render a single row as a sequence of styled spans. Empty row
+ *  (no runs) renders as a nbsp so the line is still selectable
+ *  and retains its height. */
+function renderRowRuns(row: CellRun[], rowIdx: number): React.ReactNode {
+  if (row.length === 0) return '\u00a0'
+  const spans: React.ReactNode[] = []
+  for (let i = 0; i < row.length; i++) {
+    const run = row[i]
+    spans.push(
+      <span key={`r${rowIdx}s${i}`} style={runStyle(run)}>
+        {run.text || '\u00a0'}
+      </span>,
+    )
+  }
+  return spans
 }
 
 /** Stable pane id. Derived from sessionId but prefixed so the
@@ -403,17 +473,17 @@ export function SessionStreamViewTerm(
   }, [viewportOffset])
 
   // ── Compose visible rows ──────────────────────────────────────
-  const visibleRows = useMemo<string[]>(() => {
+  const visibleRows = useMemo<CellRun[][]>(() => {
     if (!snapshot) return []
     if (viewportOffset === 0) return snapshot.grid
     const { scrollback, grid, rows: r } = snapshot
     const totalLen = scrollback.length + grid.length
     const windowEnd = totalLen - viewportOffset
     const windowStart = windowEnd - r
-    const out: string[] = []
+    const out: CellRun[][] = []
     for (let i = 0; i < r; i++) {
       const abs = windowStart + i
-      if (abs < 0) out.push('')
+      if (abs < 0) out.push([])
       else if (abs < scrollback.length) out.push(scrollback[abs])
       else out.push(grid[abs - scrollback.length])
     }
@@ -487,7 +557,7 @@ export function SessionStreamViewTerm(
       style={{ ...containerStyle, outline: 'none' }}
     >
       {visibleRows.map((row, rowIdx) => (
-        <div key={`row-${rowIdx}`}>{row || '\u00a0'}</div>
+        <div key={`row-${rowIdx}`}>{renderRowRuns(row, rowIdx)}</div>
       ))}
       <div aria-hidden="true" style={cursorStyle} />
       {import.meta.env.DEV && (

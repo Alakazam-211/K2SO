@@ -349,12 +349,12 @@ pub struct TermGridSnapshot {
     pub pane_id: String,
     pub cols: usize,
     pub rows: usize,
-    /// Live grid rows, top-to-bottom. Each row is a string of
-    /// character cells. Styling collapsed for Phase 4 — v2 can
-    /// serialize per-cell style for SGR fidelity.
-    pub grid: Vec<String>,
-    /// Scrollback rows, oldest-first.
-    pub scrollback: Vec<String>,
+    /// Live grid rows, top-to-bottom. Each row is a list of
+    /// style-homogeneous runs — adjacent cells sharing SGR state
+    /// coalesce into one run, keeping the wire compact.
+    pub grid: Vec<Vec<CellRun>>,
+    /// Scrollback rows, oldest-first. Same run-encoding as `grid`.
+    pub scrollback: Vec<Vec<CellRun>>,
     pub cursor: CursorSnapshot,
     /// Opaque version; frontend skips snapshot diff when this
     /// hasn't changed since last pull.
@@ -372,53 +372,171 @@ pub struct CursorSnapshot {
     pub visible: bool,
 }
 
+/// One run of consecutive cells sharing the same SGR style.
+/// Serialized as camelCase so the frontend can use the fields
+/// directly in JSX style attributes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CellRun {
+    /// The text of this run, already de-null-padded (spaces for
+    /// blanks) and ready to place inside a `<span>`.
+    pub text: String,
+    /// Foreground color as 0xRRGGBB, or null to mean "terminal
+    /// default" (rendered via the user's theme fg variable).
+    pub fg: Option<u32>,
+    /// Background color as 0xRRGGBB, or null to mean "terminal
+    /// default".
+    pub bg: Option<u32>,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    /// SGR 7 — inverse video. Renderer swaps fg/bg when true.
+    pub inverse: bool,
+    /// SGR 2 — dim. Renderer applies reduced opacity.
+    pub dim: bool,
+    /// SGR 9 — strikeout (line-through).
+    pub strikeout: bool,
+}
+
+impl CellRun {
+    /// Identity of a run is its style alone — `text` differs
+    /// between runs by definition. Used for coalescing during
+    /// build.
+    fn style_eq(&self, other: &Self) -> bool {
+        self.fg == other.fg
+            && self.bg == other.bg
+            && self.bold == other.bold
+            && self.italic == other.italic
+            && self.underline == other.underline
+            && self.inverse == other.inverse
+            && self.dim == other.dim
+            && self.strikeout == other.strikeout
+    }
+}
+
+/// Xterm-compatible default palette. Indices 0..15 are the
+/// basic 16 colors; 16..231 is the 6x6x6 color cube; 232..255
+/// is the 24-step grayscale. Used to resolve NamedColor /
+/// Indexed(u8) cell colors into 0xRRGGBB values for the DOM.
+///
+/// The values here match xterm's defaults which every modern
+/// terminal emulator riffs on. Custom theme support (per the
+/// user's K2SO theme) is a follow-up — for now, the daemon-side
+/// Term just uses the canonical palette.
+const PALETTE_16: [u32; 16] = [
+    0x000000, 0xcd0000, 0x00cd00, 0xcdcd00,
+    0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5,
+    0x7f7f7f, 0xff0000, 0x00ff00, 0xffff00,
+    0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
+];
+
+fn palette_256(idx: u8) -> u32 {
+    if (idx as usize) < 16 {
+        return PALETTE_16[idx as usize];
+    }
+    if idx < 232 {
+        let i = (idx - 16) as u32;
+        let r = i / 36;
+        let g = (i % 36) / 6;
+        let b = i % 6;
+        let component = |x: u32| if x == 0 { 0 } else { 55 + x * 40 };
+        return (component(r) << 16) | (component(g) << 8) | component(b);
+    }
+    let v = 8 + (idx as u32 - 232) * 10;
+    (v << 16) | (v << 8) | v
+}
+
+/// Resolve a vte Color (Named / Indexed / Spec) into an optional
+/// 0xRRGGBB value. Returns None for the "default" sentinels
+/// (Foreground / Background) so the DOM can fall back to the
+/// user's theme variables rather than baking in our palette's
+/// fg/bg guess.
+fn resolve_color(c: vte::ansi::Color) -> Option<u32> {
+    use vte::ansi::{Color, NamedColor};
+    match c {
+        Color::Named(NamedColor::Foreground)
+        | Color::Named(NamedColor::Background)
+        | Color::Named(NamedColor::Cursor)
+        | Color::Named(NamedColor::BrightForeground)
+        | Color::Named(NamedColor::DimForeground) => None,
+        Color::Named(n) => {
+            let idx = n as u32;
+            if idx < 16 {
+                Some(PALETTE_16[idx as usize])
+            } else {
+                None
+            }
+        }
+        Color::Spec(rgb) => {
+            Some(((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32)
+        }
+        Color::Indexed(i) => Some(palette_256(i)),
+    }
+}
+
+/// Turn a single cell into the styled-run view used by the
+/// snapshot. Blank cells render as a space so the row's column
+/// alignment survives.
+fn cell_to_run(cell: &Cell) -> CellRun {
+    use alacritty_terminal::term::cell::Flags;
+    let flags = cell.flags;
+    let ch = if cell.c == '\0' { ' ' } else { cell.c };
+    let mut text = String::new();
+    text.push(ch);
+    CellRun {
+        text,
+        fg: resolve_color(cell.fg),
+        bg: resolve_color(cell.bg),
+        bold: flags.contains(Flags::BOLD),
+        italic: flags.contains(Flags::ITALIC),
+        underline: flags.intersects(Flags::ALL_UNDERLINES),
+        inverse: flags.contains(Flags::INVERSE),
+        dim: flags.contains(Flags::DIM),
+        strikeout: flags.contains(Flags::STRIKEOUT),
+    }
+}
+
+/// Build a row's run list by coalescing adjacent style-equal
+/// cells into one run. Empty-trailing runs (default-styled blank
+/// suffixes) are retained so the cell-width of the row stays
+/// addressable on the client — trimming them here would lose
+/// alignment for subsequent content that drops back into the row.
+fn encode_row_runs(grid: &alacritty_terminal::grid::Grid<Cell>, line: Line, cols: usize) -> Vec<CellRun> {
+    let mut out: Vec<CellRun> = Vec::new();
+    for c in 0..cols {
+        let cell = &grid[Point::new(line, Column(c))];
+        let run = cell_to_run(cell);
+        match out.last_mut() {
+            Some(last) if last.style_eq(&run) => {
+                last.text.push_str(&run.text);
+            }
+            _ => out.push(run),
+        }
+    }
+    out
+}
+
 /// Project a Term into a serializable snapshot. Walks both the
-/// live viewport and scrollback, building one string per row. For
-/// Phase 4 this is text-only — SGR styling is dropped. Phase 5
-/// will enrich with per-cell style when the DOM renderer is
-/// ready to consume it.
+/// live viewport and scrollback, building run-encoded rows with
+/// per-run SGR state (fg, bg, bold, italic, underline, inverse,
+/// dim, strikeout). Matches the styling fidelity the legacy
+/// Frame-based renderer had.
 fn snapshot_term(pane_id: &str, state: &PaneState) -> TermGridSnapshot {
     let term = state.term.lock();
     let cols = term.columns();
     let rows = term.screen_lines();
     let grid = term.grid();
 
-    // Live rows: Line(0) to Line(rows-1).
-    let mut live_rows: Vec<String> = Vec::with_capacity(rows);
+    let mut live_rows: Vec<Vec<CellRun>> = Vec::with_capacity(rows);
     for r in 0..(rows as i32) {
-        let line = Line(r);
-        let mut s = String::with_capacity(cols);
-        for c in 0..cols {
-            let cell: &Cell = &grid[Point::new(line, Column(c))];
-            let ch = cell.c;
-            if ch == '\0' {
-                s.push(' ');
-            } else {
-                s.push(ch);
-            }
-        }
-        live_rows.push(s);
+        live_rows.push(encode_row_runs(grid, Line(r), cols));
     }
 
-    // Scrollback: lines above Line(0). Alacritty stores them at
-    // negative line indices up to -total_lines_above. display_offset
-    // tells us how far we've scrolled; we want the full history
-    // regardless, so we walk from (-history) up to (-1).
     let history_size = grid.history_size();
-    let mut scrollback_rows: Vec<String> = Vec::with_capacity(history_size);
+    let mut scrollback_rows: Vec<Vec<CellRun>> =
+        Vec::with_capacity(history_size);
     for r in (1..=history_size as i32).rev() {
-        let line = Line(-r);
-        let mut s = String::with_capacity(cols);
-        for c in 0..cols {
-            let cell: &Cell = &grid[Point::new(line, Column(c))];
-            let ch = cell.c;
-            if ch == '\0' {
-                s.push(' ');
-            } else {
-                s.push(ch);
-            }
-        }
-        scrollback_rows.push(s);
+        scrollback_rows.push(encode_row_runs(grid, Line(-r), cols));
     }
 
     let cursor_point = grid.cursor.point;
@@ -698,7 +816,54 @@ mod tests {
         let mut p = PaneState::new(80, 24);
         p.feed_bytes(b"hello\n");
         let snap = snapshot_term("test", &p);
-        assert!(snap.grid[0].starts_with("hello"));
+        // Row 0 must start with "hello" — walk its runs and
+        // concat `text` to reconstruct the row string, then
+        // assert. This also sanity-checks the run-encoding
+        // pipeline end-to-end.
+        let row0_text: String =
+            snap.grid[0].iter().map(|r| r.text.as_str()).collect();
+        assert!(row0_text.starts_with("hello"), "row 0 was {row0_text:?}");
+    }
+
+    #[test]
+    fn run_encoding_coalesces_same_style_cells() {
+        let mut p = PaneState::new(80, 24);
+        p.feed_bytes(b"plain text");
+        let snap = snapshot_term("test", &p);
+        // The whole printed word is one style (default), so the
+        // first run should contain all 10 chars plus any trailing
+        // blanks that share the default style.
+        let row0 = &snap.grid[0];
+        assert_eq!(row0.len(), 1, "plain text should be one run");
+        assert!(row0[0].text.starts_with("plain text"));
+        // Default style: fg/bg None, no flags.
+        assert_eq!(row0[0].fg, None);
+        assert_eq!(row0[0].bg, None);
+        assert!(!row0[0].bold);
+    }
+
+    #[test]
+    fn run_encoding_splits_on_sgr_change() {
+        let mut p = PaneState::new(80, 24);
+        // "red\x1b[31m red \x1b[0mnormal" — leading 'red' is
+        // default-styled, then SGR 31 paints ' red ' in red,
+        // then SGR 0 resets.
+        p.feed_bytes(b"red\x1b[31m red \x1b[0mnormal");
+        let snap = snapshot_term("test", &p);
+        let row0 = &snap.grid[0];
+        // Expect 3 runs: "red", " red ", "normal..." + possible
+        // trailing blank-default run.
+        assert!(
+            row0.len() >= 3,
+            "should have at least 3 style runs; got {:?}",
+            row0
+        );
+        // Find the run containing " red " — its fg should be red.
+        let red_run = row0.iter().find(|r| r.text.contains("red ")).unwrap();
+        assert!(
+            red_run.fg.is_some(),
+            "red run should have explicit fg color"
+        );
     }
 
     #[test]
