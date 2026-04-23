@@ -364,11 +364,45 @@ impl PaneState {
     }
 
     fn resize(&mut self, cols: u16, rows: u16) {
+        {
+            let mut term = self.term.lock();
+            term.resize(TermSize {
+                cols: cols.max(1) as usize,
+                rows: rows.max(1) as usize,
+            });
+        }
+
+        // Alacritty's resize has a quirk: when growing rows, it
+        // pulls rows from scrollback back into the live grid to
+        // fill the new space. That's usually what terminal users
+        // expect ("scrolling reveals history naturally"), but for
+        // us it produces a visible "stacked paint" regression
+        // during mid-session resize:
+        //
+        //   1. Grow-phase pushed Claude's cold-start content into
+        //      scrollback.
+        //   2. Client ResizeObserver grows the Tauri Term.
+        //   3. Alacritty pulls grow-phase content BACK into live.
+        //   4. Claude's SIGWINCH-repaint arrives shortly after and
+        //      paints its own UI wherever its cursor lands —
+        //      producing a second UI stacked below the pulled-back
+        //      content, or (worse) cells from different-width
+        //      paints interleaved on the same rows.
+        //
+        // Claude will emit its own ClearScreen as part of the
+        // SIGWINCH repaint, but the window between "alacritty
+        // pulled content" and "Claude's ClearScreen arrives"
+        // leaks a bad snapshot. Feed CSI 2J + CSI H ourselves so
+        // the live grid is blank from the moment resize
+        // completes. Claude's repaint lands on known-clean cells;
+        // user sees a brief blank flash (< 50 ms typically)
+        // instead of stacked garbage.
+        //
+        // Scrollback is untouched — users scrolling back still
+        // see their grow-phase history.
+        let clear: &[u8] = b"\x1b[2J\x1b[H";
         let mut term = self.term.lock();
-        term.resize(TermSize {
-            cols: cols.max(1) as usize,
-            rows: rows.max(1) as usize,
-        });
+        self.processor.advance(&mut *term, clear);
         self.dirty_counter = self.dirty_counter.wrapping_add(1);
     }
 }
