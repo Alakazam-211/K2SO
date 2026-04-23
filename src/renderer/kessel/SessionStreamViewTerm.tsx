@@ -282,6 +282,31 @@ export function SessionStreamViewTerm(
   // no paint churn.
   const initialDimsRef = useRef<{ cols: number; rows: number } | null>(null)
 
+  // ── Cell metrics (for cursor positioning + wheel math) ────────
+  //
+  // Declared before the attach effect because the attach effect
+  // gates on these values being non-zero and reads them in its
+  // closure — putting the state declaration later would put it in
+  // the temporal dead zone and crash the component on mount.
+  //
+  // useLayoutEffect (not useEffect) so the measurement completes
+  // synchronously after the DOM paints but before the browser
+  // yields — the attach effect runs right after with real dims
+  // already in hand.
+  const [cellMetrics, setCellMetrics] = useState({ width: 0, height: 0 })
+  useLayoutEffect(() => {
+    const el = document.createElement('span')
+    el.style.cssText = `font-family: ${config.font.family}; font-size: ${fontSize}px; position: absolute; visibility: hidden; white-space: pre;`
+    el.textContent = 'W'
+    document.body.appendChild(el)
+    const rect = el.getBoundingClientRect()
+    document.body.removeChild(el)
+    setCellMetrics({
+      width: rect.width,
+      height: Math.ceil(fontSize * config.font.lineHeightMultiplier),
+    })
+  }, [fontSize, config.font.family, config.font.lineHeightMultiplier])
+
   // Read tab visibility here (at the top of the component) so both
   // the attach lifecycle below AND the visibility effect further
   // down can use it. Mirror into a ref so the attach effect can
@@ -519,27 +544,6 @@ export function SessionStreamViewTerm(
         /* pane may have detached mid-flight; ignore */
       })
   }, [isTabVisible])
-
-  // ── Cell metrics (for cursor positioning + wheel math) ────────
-  //
-  // useLayoutEffect (not useEffect) so the measurement completes
-  // synchronously before browser paint. The attach effect below
-  // gates on these values being non-zero, so moving this sooner
-  // means attach fires with real dims in hand on the first paint
-  // cycle instead of one React tick later.
-  const [cellMetrics, setCellMetrics] = useState({ width: 0, height: 0 })
-  useLayoutEffect(() => {
-    const el = document.createElement('span')
-    el.style.cssText = `font-family: ${config.font.family}; font-size: ${fontSize}px; position: absolute; visibility: hidden; white-space: pre;`
-    el.textContent = 'W'
-    document.body.appendChild(el)
-    const rect = el.getBoundingClientRect()
-    document.body.removeChild(el)
-    setCellMetrics({
-      width: rect.width,
-      height: Math.ceil(fontSize * config.font.lineHeightMultiplier),
-    })
-  }, [fontSize, config.font.family, config.font.lineHeightMultiplier])
 
   // ── Keyboard input ────────────────────────────────────────────
   useEffect(() => {
