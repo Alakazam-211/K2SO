@@ -30,7 +30,31 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Epoch-milliseconds for log timestamps. Aligns Rust-side
+/// `[kessel-perf]` lines with the JS `performance.now()` timeline
+/// so a single trace can be correlated between both halves of the
+/// pipeline.
+fn now_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+/// Structured perf log on stderr. One line per event,
+/// space-separated `key=value` pairs so the user can grep or paste
+/// the whole trace. Consistent `[kessel-perf]` prefix makes a
+/// `tail -f ~/.k2so/*.log | grep kessel-perf` filter trivial.
+fn perf(op: &str, fields: &str) {
+    eprintln!(
+        "[kessel-perf] ts={} side=rust op={} {}",
+        now_ms(),
+        op,
+        fields
+    );
+}
 
 use alacritty_terminal::event::{
     Event as AlacEvent, EventListener, WindowSize,
@@ -257,7 +281,17 @@ impl PaneState {
             dirty_counter: 0,
             last_history_size: 0,
             has_emitted_since_attach: false,
-            paused: false,
+            // Default to paused. Frontend must explicitly call
+            // `kessel_term_resume` on mount for panes it actually
+            // wants to render. This prevents the mount-flood
+            // beachball at app launch: if 15 Kessel panes mount
+            // simultaneously (retained-view across tabs), only
+            // the visible one emits — the other 14 accumulate
+            // byte state silently and emit one full snapshot
+            // each when the user switches to their tab. Bytes
+            // are STILL being read by the reader task; only
+            // outbound emission is gated.
+            paused: true,
             reader_task: None,
         }
     }
@@ -266,15 +300,29 @@ impl PaneState {
     /// first, then anything non-k2so flows into the vte. APC
     /// events are applied as side effects on the Term.
     fn feed_bytes(&mut self, chunk: &[u8]) {
+        let t0 = Instant::now();
+        let input_len = chunk.len();
         let (clean, events) = self.apc_filter.feed(chunk);
+        let apc_events = events.len();
         for ev in events {
             self.apply_apc_event(ev);
         }
+        let clean_len = clean.len();
         if !clean.is_empty() {
             let mut term = self.term.lock();
             self.processor.advance(&mut *term, &clean);
             self.dirty_counter = self.dirty_counter.wrapping_add(1);
         }
+        perf(
+            "feed_bytes",
+            &format!(
+                "input_bytes={} clean_bytes={} apc_events={} dur_us={}",
+                input_len,
+                clean_len,
+                apc_events,
+                t0.elapsed().as_micros()
+            ),
+        );
     }
 
     /// Side-effect an APC event. `grow_boundary` seals the
@@ -353,6 +401,10 @@ impl PaneRegistry {
 
     fn remove(&self, pane_id: &str) -> Option<Arc<Mutex<PaneState>>> {
         self.panes.lock().remove(pane_id)
+    }
+
+    fn count(&self) -> usize {
+        self.panes.lock().len()
     }
 }
 
@@ -661,7 +713,16 @@ enum EmitDecision {
 /// after each feed_bytes chunk is absorbed. Resets Term damage
 /// after reading it so the next call starts with a clean slate.
 fn build_emit(pane_id: &str, state: &mut PaneState) -> EmitDecision {
+    let t0 = Instant::now();
     if state.paused {
+        perf(
+            "build_emit",
+            &format!(
+                "pane={} kind=skip reason=paused dur_us={}",
+                pane_id,
+                t0.elapsed().as_micros()
+            ),
+        );
         return EmitDecision::Skip;
     }
 
@@ -671,8 +732,21 @@ fn build_emit(pane_id: &str, state: &mut PaneState) -> EmitDecision {
         state.has_emitted_since_attach = true;
         let snap = snapshot_term(pane_id, state);
         state.last_history_size = snap.scrollback.len();
-        // Drain damage so the next tick builds a clean delta.
         state.term.lock().reset_damage();
+        let live_cells: usize = snap.grid.iter().map(|r| r.iter().map(|run| run.text.chars().count()).sum::<usize>()).sum();
+        let sb_cells: usize = snap.scrollback.iter().map(|r| r.iter().map(|run| run.text.chars().count()).sum::<usize>()).sum();
+        perf(
+            "build_emit",
+            &format!(
+                "pane={} kind=full reason=first_emit live_rows={} sb_rows={} live_cells={} sb_cells={} dur_us={}",
+                pane_id,
+                snap.grid.len(),
+                snap.scrollback.len(),
+                live_cells,
+                sb_cells,
+                t0.elapsed().as_micros()
+            ),
+        );
         return EmitDecision::Full(snap);
     }
 
@@ -704,6 +778,14 @@ fn build_emit(pane_id: &str, state: &mut PaneState) -> EmitDecision {
     let partial_empty =
         matches!(&damage_kind, DamageKind::Partial(lines) if lines.is_empty());
     if partial_empty && new_scrollback == 0 {
+        perf(
+            "build_emit",
+            &format!(
+                "pane={} kind=skip reason=clean dur_us={}",
+                pane_id,
+                t0.elapsed().as_micros()
+            ),
+        );
         return EmitDecision::Skip;
     }
 
@@ -712,6 +794,20 @@ fn build_emit(pane_id: &str, state: &mut PaneState) -> EmitDecision {
     if matches!(&damage_kind, DamageKind::Full) {
         let snap = snapshot_term(pane_id, state);
         state.last_history_size = snap.scrollback.len();
+        let live_cells: usize = snap.grid.iter().map(|r| r.iter().map(|run| run.text.chars().count()).sum::<usize>()).sum();
+        let sb_cells: usize = snap.scrollback.iter().map(|r| r.iter().map(|run| run.text.chars().count()).sum::<usize>()).sum();
+        perf(
+            "build_emit",
+            &format!(
+                "pane={} kind=full reason=full_damage live_rows={} sb_rows={} live_cells={} sb_cells={} dur_us={}",
+                pane_id,
+                snap.grid.len(),
+                snap.scrollback.len(),
+                live_cells,
+                sb_cells,
+                t0.elapsed().as_micros()
+            ),
+        );
         return EmitDecision::Full(snap);
     }
 
@@ -750,6 +846,21 @@ fn build_emit(pane_id: &str, state: &mut PaneState) -> EmitDecision {
     drop(term);
 
     state.last_history_size = history_size;
+
+    let delta_cells: usize = damaged_rows.iter().map(|r| r.runs.iter().map(|run| run.text.chars().count()).sum::<usize>()).sum();
+    let sb_append_cells: usize = scrollback_appended.iter().map(|r| r.iter().map(|run| run.text.chars().count()).sum::<usize>()).sum();
+    perf(
+        "build_emit",
+        &format!(
+            "pane={} kind=delta damaged_rows={} sb_append_rows={} damaged_cells={} sb_append_cells={} dur_us={}",
+            pane_id,
+            damaged_rows.len(),
+            scrollback_appended.len(),
+            delta_cells,
+            sb_append_cells,
+            t0.elapsed().as_micros()
+        ),
+    );
 
     let delta = TermGridDelta {
         pane_id: pane_id.to_string(),
@@ -858,10 +969,32 @@ async fn reader_loop(
                 match decision {
                     EmitDecision::Skip => {}
                     EmitDecision::Full(snap) => {
-                        let _ = app.emit("kessel:grid-snapshot", snap);
+                        let t_emit = Instant::now();
+                        let _ = app.emit("kessel:grid-snapshot", &snap);
+                        perf(
+                            "emit",
+                            &format!(
+                                "pane={} kind=full live_rows={} sb_rows={} dur_us={}",
+                                pane_id,
+                                snap.grid.len(),
+                                snap.scrollback.len(),
+                                t_emit.elapsed().as_micros()
+                            ),
+                        );
                     }
                     EmitDecision::Delta(delta) => {
-                        let _ = app.emit("kessel:grid-delta", delta);
+                        let t_emit = Instant::now();
+                        let _ = app.emit("kessel:grid-delta", &delta);
+                        perf(
+                            "emit",
+                            &format!(
+                                "pane={} kind=delta damaged_rows={} sb_append={} dur_us={}",
+                                pane_id,
+                                delta.damaged_rows.len(),
+                                delta.scrollback_appended.len(),
+                                t_emit.elapsed().as_micros()
+                            ),
+                        );
                     }
                 }
             }
@@ -896,12 +1029,26 @@ pub async fn kessel_term_attach(
     app: tauri::AppHandle,
     args: AttachArgs,
 ) -> Result<(), String> {
+    let t0 = Instant::now();
     // Allocate a pane at the GROW_ROWS size to absorb the grow-
     // phase paint. Alacritty will shrink-from-top to the target
     // when the APC arrives.
     let initial_rows = args.rows.max(500);
     let state = PaneState::new(args.cols, initial_rows);
     let pane_arc = registry().insert(args.pane_id.clone(), state);
+    let pane_count = registry().count();
+    perf(
+        "attach",
+        &format!(
+            "pane={} session={} cols={} rows={} pane_count={} dur_us={}",
+            args.pane_id,
+            args.session_id,
+            args.cols,
+            args.rows,
+            pane_count,
+            t0.elapsed().as_micros()
+        ),
+    );
 
     // Spawn the reader task; store its handle back into the pane
     // so detach can abort it.
@@ -979,52 +1126,157 @@ pub fn kessel_term_scrollback_slice(
 /// Pause outbound snapshot/delta emission for a pane. The pane's
 /// Term keeps absorbing bytes from the daemon — session state
 /// stays current — we just stop spending IPC + serialization on
-/// an audience of zero. Intended for tab-visibility changes:
-/// called when the user switches away from a Kessel pane's tab.
+/// an audience of zero.
+///
+/// **Note on defaults:** panes are created in the paused state,
+/// so explicit `kessel_term_pause` is only needed to *return* a
+/// pane to paused after it had been resumed (e.g. user switched
+/// away from a tab that was visible a moment ago). First-mount
+/// panes are already paused without this call.
 ///
 /// Idempotent. Unknown `pane_id` returns Ok — likely the pane
 /// already detached (e.g. tab closed while the visibility
 /// effect was mid-flight).
 #[tauri::command]
 pub fn kessel_term_pause(pane_id: String) -> Result<(), String> {
-    if let Some(pane) = registry().get(&pane_id) {
+    let t0 = Instant::now();
+    let hit = if let Some(pane) = registry().get(&pane_id) {
         let mut p = pane.lock();
         p.paused = true;
-    }
+        true
+    } else {
+        false
+    };
+    perf(
+        "pause",
+        &format!(
+            "pane={} hit={} dur_us={}",
+            pane_id,
+            hit,
+            t0.elapsed().as_micros()
+        ),
+    );
     Ok(())
 }
 
 /// Unpause emission. Forces the NEXT emit to be a full snapshot
 /// by clearing `has_emitted_since_attach` — since the frontend's
-/// mirror went stale during the pause window, a delta would
-/// dangle. Full snapshot catches it up in one shot.
+/// mirror went stale during the pause window (or was never
+/// populated if this is the first resume since attach), a delta
+/// would dangle. Full snapshot catches it up in one shot.
+///
+/// **Must be called at least once per pane for emission to
+/// start.** Panes default to paused at construction. The
+/// frontend calls this on mount for visible panes, and on
+/// visibility transitions `hidden → visible` for panes that
+/// were previously in a background tab.
 ///
 /// Idempotent; unknown `pane_id` returns Ok.
 #[tauri::command]
 pub fn kessel_term_resume(pane_id: String) -> Result<(), String> {
-    if let Some(pane) = registry().get(&pane_id) {
+    let t0 = Instant::now();
+    let hit = if let Some(pane) = registry().get(&pane_id) {
         let mut p = pane.lock();
         p.paused = false;
-        // Treat resume as a fresh attach for the emit state
-        // machine: next emit is full, scrollback baseline resets.
         p.has_emitted_since_attach = false;
-    }
+        true
+    } else {
+        false
+    };
+    perf(
+        "resume",
+        &format!(
+            "pane={} hit={} dur_us={}",
+            pane_id,
+            hit,
+            t0.elapsed().as_micros()
+        ),
+    );
     Ok(())
 }
 
 #[tauri::command]
 pub fn kessel_term_detach(pane_id: String) -> Result<(), String> {
-    if let Some(pane) = registry().remove(&pane_id) {
-        // Dropping the last Arc triggers PaneState's Drop which
-        // aborts the reader task. In case there are outstanding
-        // Arcs held by the reader task closure, the explicit abort
-        // below ensures we don't leak a long-running connection.
+    let t0 = Instant::now();
+    let hit = if let Some(pane) = registry().remove(&pane_id) {
         let mut p = pane.lock();
         if let Some(h) = p.reader_task.take() {
             h.abort();
         }
-    }
+        true
+    } else {
+        false
+    };
+    let pane_count = registry().count();
+    perf(
+        "detach",
+        &format!(
+            "pane={} hit={} pane_count={} dur_us={}",
+            pane_id,
+            hit,
+            pane_count,
+            t0.elapsed().as_micros()
+        ),
+    );
     Ok(())
+}
+
+/// Frontend-driven timeline marker. Lets the JS side drop labeled
+/// breadcrumbs into the perf log (workspace-switch-begin,
+/// workspace-switch-end, etc.) so a single trace shows what
+/// Rust-side work happened during a specific JS-observed window.
+#[tauri::command]
+pub fn kessel_term_perf_mark(label: String) -> Result<(), String> {
+    perf("mark", &format!("label={:?} pane_count={}", label, registry().count()));
+    Ok(())
+}
+
+/// Snapshot of the whole pane registry at the call instant.
+/// Useful as a one-shot "what's mounted right now" dump for
+/// diagnosis. Returns a structured list the frontend can log.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaneInventoryEntry {
+    pub pane_id: String,
+    pub paused: bool,
+    pub has_emitted_since_attach: bool,
+    pub last_history_size: usize,
+    pub dirty_counter: u64,
+    pub cols: usize,
+    pub rows: usize,
+}
+
+#[tauri::command]
+pub fn kessel_term_perf_inventory() -> Result<Vec<PaneInventoryEntry>, String> {
+    let t0 = Instant::now();
+    let entries: Vec<PaneInventoryEntry> = {
+        let panes = registry().panes.lock();
+        panes
+            .iter()
+            .map(|(pane_id, arc)| {
+                let p = arc.lock();
+                let term = p.term.lock();
+                PaneInventoryEntry {
+                    pane_id: pane_id.clone(),
+                    paused: p.paused,
+                    has_emitted_since_attach: p.has_emitted_since_attach,
+                    last_history_size: p.last_history_size,
+                    dirty_counter: p.dirty_counter,
+                    cols: term.columns(),
+                    rows: term.screen_lines(),
+                }
+            })
+            .collect()
+    };
+    perf(
+        "inventory",
+        &format!(
+            "pane_count={} dur_us={}",
+            entries.len(),
+            t0.elapsed().as_micros()
+        ),
+    );
+    Ok(entries)
 }
 
 // ── Tests ────────────────────────────────────────────────────────

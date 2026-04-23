@@ -177,6 +177,23 @@ function paneIdFor(sessionId: string): string {
   return `kessel-${sessionId}`
 }
 
+/** Phase 8 perf log: one-line structured entries on the browser
+ *  console, consistent `[kessel-perf]` prefix so the user can
+ *  copy-paste the output back. Aligned with the Rust-side
+ *  `[kessel-perf] ts=... side=rust op=...` lines so a complete
+ *  trace interleaves cleanly when timestamps are compared. */
+function perfLog(op: string, fields: Record<string, unknown>): void {
+  const parts = [`[kessel-perf]`, `ts=${Date.now()}`, `side=js`, `op=${op}`]
+  for (const [k, v] of Object.entries(fields)) {
+    if (v === undefined || v === null) continue
+    const str =
+      typeof v === 'string' && v.includes(' ') ? JSON.stringify(v) : String(v)
+    parts.push(`${k}=${str}`)
+  }
+  // eslint-disable-next-line no-console
+  console.info(parts.join(' '))
+}
+
 /** Apply a delta to a prior snapshot, returning the new snapshot
  *  that reflects the merged state. Returns `prev` unchanged if
  *  prev is null or its paneId doesn't match (frontend hasn't
@@ -246,6 +263,7 @@ export function SessionStreamViewTerm(
     let cancelled = false
 
     ;(async () => {
+      const t0 = performance.now()
       try {
         await invoke('kessel_term_attach', {
           args: {
@@ -257,48 +275,41 @@ export function SessionStreamViewTerm(
             rows,
           },
         })
-        // eslint-disable-next-line no-console
-        console.info(
-          `%c[KesselTerm] attached pane=${paneId}`,
-          'color:#0ff;font-weight:bold',
-        )
+        perfLog('attach_invoke', {
+          pane: paneId,
+          dur_ms: (performance.now() - t0).toFixed(2),
+        })
       } catch (e) {
         if (!cancelled) {
-          // eslint-disable-next-line no-console
-          console.warn('[KesselTerm] attach failed:', e)
+          perfLog('attach_invoke', {
+            pane: paneId,
+            dur_ms: (performance.now() - t0).toFixed(2),
+            error: String(e),
+          })
         }
       }
     })()
 
-    // Pull an initial snapshot once attach has had a chance to run.
-    const pullInitial = async () => {
-      try {
-        const snap = await invoke<TermGridSnapshot>(
-          'kessel_term_grid_snapshot',
-          { paneId },
-        )
-        if (!cancelled) setSnapshot(snap)
-      } catch {
-        // Retry once after 50ms — attach is racing with first pull.
-        setTimeout(async () => {
-          if (cancelled) return
-          try {
-            const snap = await invoke<TermGridSnapshot>(
-              'kessel_term_grid_snapshot',
-              { paneId },
-            )
-            setSnapshot(snap)
-          } catch {
-            /* fine — snapshots will flow via events */
-          }
-        }, 50)
-      }
-    }
-    void pullInitial()
+    // Deliberately NO pullInitial call here. Panes mount in the
+    // paused state, and the visibility effect below resumes them
+    // only if they're in the visible tab. On first resume, the
+    // reader emits a full snapshot — that's our initial state,
+    // arriving via the event listener, never via a synchronous
+    // invoke. This avoids the app-launch beachball where N
+    // simultaneously-mounting panes fire N heavy synchronous
+    // snapshot pulls concurrently through Tauri IPC.
 
     return () => {
       cancelled = true
-      void invoke('kessel_term_detach', { paneId }).catch(() => {})
+      const t0 = performance.now()
+      void invoke('kessel_term_detach', { paneId })
+        .then(() => {
+          perfLog('detach_invoke', {
+            pane: paneId,
+            dur_ms: (performance.now() - t0).toFixed(2),
+          })
+        })
+        .catch(() => {})
       paneIdRef.current = null
     }
   }, [sessionId, port, token, cols, rows])
@@ -324,15 +335,41 @@ export function SessionStreamViewTerm(
       unlistenSnap = await listen<TermGridSnapshot>(
         'kessel:grid-snapshot',
         (evt) => {
-          if (evt.payload.paneId !== paneIdRef.current) return
-          setSnapshot(evt.payload)
+          // NOTE: this callback fires for EVERY pane's snapshot
+          // (Tauri events are broadcast-all). The paneId filter
+          // below throws out non-matching events — but the
+          // callback *invocation* still costs main-thread time.
+          // The perf log records every invocation, matched or
+          // not, so the user can see the event fan-in cost.
+          const ours = evt.payload.paneId === paneIdRef.current
+          const t0 = performance.now()
+          if (ours) {
+            setSnapshot(evt.payload)
+          }
+          perfLog('rx_snapshot', {
+            pane: evt.payload.paneId,
+            ours,
+            live_rows: evt.payload.grid.length,
+            sb_rows: evt.payload.scrollback.length,
+            dur_ms: (performance.now() - t0).toFixed(2),
+          })
         },
       )
       unlistenDelta = await listen<TermGridDelta>(
         'kessel:grid-delta',
         (evt) => {
-          if (evt.payload.paneId !== paneIdRef.current) return
-          setSnapshot((prev) => mergeDelta(prev, evt.payload))
+          const ours = evt.payload.paneId === paneIdRef.current
+          const t0 = performance.now()
+          if (ours) {
+            setSnapshot((prev) => mergeDelta(prev, evt.payload))
+          }
+          perfLog('rx_delta', {
+            pane: evt.payload.paneId,
+            ours,
+            damaged_rows: evt.payload.damagedRows.length,
+            sb_append: evt.payload.scrollbackAppended.length,
+            dur_ms: (performance.now() - t0).toFixed(2),
+          })
         },
       )
     })()
@@ -388,9 +425,19 @@ export function SessionStreamViewTerm(
     const paneId = paneIdRef.current
     if (paneId === null) return
     const cmd = isTabVisible ? 'kessel_term_resume' : 'kessel_term_pause'
-    invoke(cmd, { paneId }).catch(() => {
-      /* pane may have detached mid-flight; ignore */
-    })
+    const t0 = performance.now()
+    invoke(cmd, { paneId })
+      .then(() => {
+        perfLog('visibility_invoke', {
+          pane: paneId,
+          cmd,
+          visible: isTabVisible,
+          dur_ms: (performance.now() - t0).toFixed(2),
+        })
+      })
+      .catch(() => {
+        /* pane may have detached mid-flight; ignore */
+      })
   }, [isTabVisible])
 
   // ── Cell metrics (for cursor positioning + wheel math) ────────

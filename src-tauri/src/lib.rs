@@ -1262,6 +1262,11 @@ pub fn run() {
             commands::kessel_term::kessel_term_pause,
             commands::kessel_term::kessel_term_resume,
             commands::kessel_term::kessel_term_detach,
+            // Canvas Plan Phase 8 — instrumentation for diagnosing
+            // workspace-switch latency. User drops perf-marks
+            // before/after a slow operation to frame the trace.
+            commands::kessel_term::kessel_term_perf_mark,
+            commands::kessel_term::kessel_term_perf_inventory,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {

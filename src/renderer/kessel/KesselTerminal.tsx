@@ -35,14 +35,22 @@ export interface KesselTerminalProps {
    *  Present for both Kessel and Alacritty terminals so we have
    *  apples-to-apples comparisons. */
   spawnedAt?: number
-  /** Internal escape hatch. Defaults to 'term' (Canvas Plan Phase 5,
-   *  byte stream → Tauri-local alacritty_terminal::Term). Passing
-   *  'frame' routes through the legacy Frame-stream TerminalGrid
-   *  (shipped in 0.34.x). Exposed for A/B testing and for a safe
-   *  bail-out path if the Term renderer misbehaves on a specific
-   *  harness — PaneGroupView does not pass this; production tabs
-   *  always use 'term'. Expected to be removed once the Term path
-   *  is feature-complete and the Frame path is deleted. */
+  /** Internal escape hatch. Defaults to 'frame' (Frame-stream
+   *  TerminalGrid shipped in 0.34.x) — production-proven, fast,
+   *  and the path users experience when they select "Kessel" in
+   *  Settings → Terminal Renderer today.
+   *
+   *  'term' selects the Canvas Plan Phase 4-7 byte-stream +
+   *  Tauri-local alacritty_terminal::Term path. Architecturally
+   *  the right end-state (pixel-perfect reflow, native scrollback,
+   *  SGR parity) but currently has perf issues with retained-view
+   *  multi-pane setups — per-pane reader tasks don't scale past
+   *  ~10 mounted panes without starving the UI thread.
+   *
+   *  Default returns to 'term' once the per-pane fanout cost is
+   *  amortized (likely: one shared multiplex task across panes
+   *  instead of one task per pane). Exposed as a prop so focused
+   *  benches / A/B consumers can still exercise it directly. */
   variant?: 'frame' | 'term'
 }
 

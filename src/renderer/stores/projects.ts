@@ -300,6 +300,18 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     const state = get()
     const tabsStore = useTabsStore.getState()
 
+    // Phase 8 perf instrumentation — bracket the switch so the
+    // Rust-side trace shows what runs during this window.
+    const switchStart = performance.now()
+    const fromProject = state.activeProjectId
+    // eslint-disable-next-line no-console
+    console.info(
+      `[kessel-perf] ts=${Date.now()} side=js op=workspace_switch_begin from=${fromProject ?? 'null'} to=${id ?? 'null'}`,
+    )
+    void invoke('kessel_term_perf_mark', {
+      label: `workspace_switch_begin from=${fromProject ?? 'null'} to=${id ?? 'null'}`,
+    }).catch(() => {})
+
     // Stash current workspace (PTYs stay alive in background)
     if (state.activeProjectId && state.activeWorkspaceId) {
       tabsStore.stashWorkspace(`${state.activeProjectId}:${state.activeWorkspaceId}`)
@@ -308,8 +320,21 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
       tabsStore.clearAllTabs()
     }
 
+    // Helper: fire the end marker + log. Called on every branch below.
+    const emitEnd = (): void => {
+      const dur = (performance.now() - switchStart).toFixed(2)
+      // eslint-disable-next-line no-console
+      console.info(
+        `[kessel-perf] ts=${Date.now()} side=js op=workspace_switch_end dur_ms=${dur}`,
+      )
+      void invoke('kessel_term_perf_mark', {
+        label: `workspace_switch_end dur_ms=${dur}`,
+      }).catch(() => {})
+    }
+
     if (id === null) {
       set({ activeProjectId: null, activeWorkspaceId: null })
+      emitEnd()
       return
     }
 
@@ -331,6 +356,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
         ensurePinnedAgentTabForMode(project.agentMode, project.path)
       }
     }
+    emitEnd()
   },
 
   setActiveWorkspace: (projectId: string, workspaceId: string) => {
