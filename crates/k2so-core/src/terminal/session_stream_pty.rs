@@ -160,9 +160,69 @@ pub const GROW_ROWS: u16 = 500;
 /// Callers that don't need the grow phase (tests, one-shot
 /// commands where ring contents don't matter) can still call the
 /// synchronous `spawn_session_stream` directly.
+/// Signal that a session's background grow task has completed
+/// (either via settle reason or because the session closed during
+/// grow). Returned alongside `Arc<SessionStreamSession>` from
+/// `spawn_session_stream_and_grow` so callers who need to know
+/// when grow is actually done (tests, pending-live drain) can
+/// await it; production callers that just want a session handle
+/// can drop it.
+///
+/// The background task sends through the channel exactly once
+/// before exiting. `None` from `.wait()` means the channel was
+/// dropped without sending — should only happen if the session
+/// skipped grow entirely (target_rows >= grow_rows).
+#[derive(Debug)]
+pub struct GrowHandle {
+    rx: tokio::sync::oneshot::Receiver<
+        Option<crate::terminal::grow_settle::SettleReason>,
+    >,
+}
+
+impl GrowHandle {
+    /// Await grow completion. Returns the settle reason if grow
+    /// actually ran, `None` if it was skipped (e.g. requested
+    /// rows already >= GROW_ROWS) or the session ended before
+    /// grow finished.
+    pub async fn wait(
+        self,
+    ) -> Option<crate::terminal::grow_settle::SettleReason> {
+        self.rx.await.ok().flatten()
+    }
+
+    /// Construct a handle that resolves to `None` immediately.
+    /// Used for the no-grow fast path.
+    fn skipped() -> Self {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = tx.send(None);
+        Self { rx }
+    }
+}
+
+/// Canvas Plan Phase A: non-blocking spawn. Returns as soon as the
+/// PTY is open + child is spawned + session is registered in the
+/// core registry — typically ~20 ms. The grow-settle + APC
+/// boundary emit + SIGWINCH sequence runs on a background tokio
+/// task that holds an Arc clone of the session.
+///
+/// Callers get a ready-to-use `Arc<SessionStreamSession>`
+/// immediately: writer is live, session_map registration can
+/// happen, inject paths work, byte stream is subscribable. The
+/// returned `GrowHandle` can be awaited for tests / pending-live
+/// drain coordination; production code can drop it.
+///
+/// **Heartbeat invariants preserved:**
+/// - Session registration in `session::registry` is synchronous
+///   inside `spawn_session_stream`.
+/// - `session.write()` locks its writer mutex, so concurrent
+///   bytes from egress-inject and the pending-live drain land
+///   atomically per call (ordering is first-come-first-served).
+/// - Grow-boundary APC still lands in the byte stream at the
+///   correct offset (between grow-phase paint and post-SIGWINCH
+///   repaint).
 pub async fn spawn_session_stream_and_grow(
     cfg: SpawnConfig,
-) -> Result<SessionStreamSession, String> {
+) -> Result<(Arc<SessionStreamSession>, GrowHandle), String> {
     let target_cols = cfg.cols;
     let target_rows = cfg.rows;
     let grow_rows = target_rows.max(GROW_ROWS);
@@ -172,13 +232,13 @@ pub async fn spawn_session_stream_and_grow(
         rows: grow_rows,
         ..cfg
     };
-    let session = spawn_session_stream(grow_cfg)?;
+    let session = Arc::new(spawn_session_stream(grow_cfg)?);
 
     if !should_grow {
         // cfg.rows >= GROW_ROWS already, or GROW_ROWS==0 — no need
         // to settle-and-shrink; the session is already at its
         // target size.
-        return Ok(session);
+        return Ok((session, GrowHandle::skipped()));
     }
 
     let session_id = session.session_id;
@@ -186,18 +246,55 @@ pub async fn spawn_session_stream_and_grow(
         Some(e) => e,
         None => {
             // Should not happen in practice — spawn_session_stream
-            // just registered this id. Defensive: skip settle and
-            // return the session as-is.
+            // just registered this id. Defensive: skip settle.
             log_debug!(
                 "[session_stream/pty] grow-shrink: registry lookup missed for \
                  freshly-spawned {}; skipping settle + shrink",
                 session_id
             );
-            return Ok(session);
+            return Ok((session, GrowHandle::skipped()));
         }
     };
 
+    // Spawn the grow-settle task. It holds a clone of the session
+    // Arc so it can call session.resize() after settle, and it
+    // holds the SessionEntry Arc via `entry`. Both drop when the
+    // task completes; if the caller drops their Arc before the
+    // task finishes, the task's clone keeps the session alive
+    // through grow-settle + SIGWINCH, which is what we want.
+    let session_for_task = Arc::clone(&session);
+    let (grow_done_tx, grow_done_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(run_grow_in_background(
+        session_for_task,
+        entry,
+        target_cols,
+        target_rows,
+        grow_rows,
+        grow_done_tx,
+    ));
+
+    Ok((session, GrowHandle { rx: grow_done_rx }))
+}
+
+/// Background task body for the grow-settle + APC + SIGWINCH
+/// sequence. Sends a completion signal on `done_tx` when it
+/// finishes (regardless of success or skip), so any caller
+/// awaiting the `GrowHandle` knows grow is done.
+async fn run_grow_in_background(
+    session: Arc<SessionStreamSession>,
+    entry: Arc<crate::session::SessionEntry>,
+    target_cols: u16,
+    target_rows: u16,
+    grow_rows: u16,
+    done_tx: tokio::sync::oneshot::Sender<
+        Option<crate::terminal::grow_settle::SettleReason>,
+    >,
+) {
+    let session_id = session.session_id;
     let reason = crate::terminal::grow_settle::run_grow_settle(&entry).await;
+    // SettleReason is Copy — keep an owned copy to send after the
+    // match consumes the original.
+    let reason_for_signal = reason;
 
     match reason {
         crate::terminal::grow_settle::SettleReason::Closed => {
@@ -307,7 +404,8 @@ pub async fn spawn_session_stream_and_grow(
         }
     }
 
-    Ok(session)
+    // Notify any awaiter (GrowHandle::wait) that grow is done.
+    let _ = done_tx.send(Some(reason_for_signal));
 }
 
 /// Lightweight ring inspection for instrumentation. Walks the replay

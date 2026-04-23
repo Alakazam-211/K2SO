@@ -146,17 +146,33 @@ async fn spawn_drains_pending_queue_and_injects_on_boot() {
         .get("pendingDrained")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    assert_eq!(drained, 1, "spawn should have drained 1 queued signal");
+    // Canvas Plan Phase A: `pendingDrained` now reflects how many
+    // signals were QUEUED at spawn time (will be drained by the
+    // async task). The actual drain runs off the hot path. Both
+    // counts agree here because no new signals arrive between
+    // queue + spawn.
+    assert_eq!(drained, 1, "spawn should have queued 1 signal for drain");
 
-    // Queue dir is now empty.
+    // Phase A: drain is async. Poll the queue directory for up to
+    // 3 seconds waiting for the background drain task to complete.
     let queue_root = pending_live::queue_root();
     let agent_dir = queue_root.join("drain-target");
-    if agent_dir.exists() {
-        let remaining: Vec<_> = std::fs::read_dir(&agent_dir)
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect();
-        assert!(remaining.is_empty(), "queue should be empty after drain");
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let empty = if agent_dir.exists() {
+            std::fs::read_dir(&agent_dir)
+                .map(|d| d.filter_map(|r| r.ok()).next().is_none())
+                .unwrap_or(true)
+        } else {
+            true
+        };
+        if empty {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("queue should become empty after async drain, but still contains entries after 3s");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
     tokio::time::sleep(Duration::from_millis(100)).await;

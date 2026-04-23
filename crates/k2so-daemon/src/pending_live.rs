@@ -150,6 +150,22 @@ pub fn enqueue(signal: &AgentSignal, target_agent: &str) -> io::Result<PathBuf> 
 /// every Cmd+T / Cmd+Shift+T), returns `Vec::new()` after a single
 /// mutex acquire + hashmap lookup. No disk I/O. This is the
 /// primary win of L1.1.
+/// Peek at how many pending-live signals are currently queued for
+/// `agent`, without draining them. Used by the Phase A async-drain
+/// path to report a "will-be-drained" count in the spawn response
+/// even though the actual drain happens on a background task.
+///
+/// Fast path reads the in-memory counter; empty returns 0 without
+/// touching disk. Safe to call frequently.
+pub fn count_for_agent(agent: &str) -> usize {
+    pending_state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(agent)
+        .copied()
+        .unwrap_or(0)
+}
+
 pub fn drain_for_agent(agent: &str) -> Vec<AgentSignal> {
     let mut state = pending_state()
         .lock()

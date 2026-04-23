@@ -66,15 +66,28 @@ async fn grow_and_shrink_with_bracketed_paste_mode_change() {
     };
 
     let t0 = Instant::now();
-    let session = spawn_session_stream_and_grow(cfg)
+    let (session, grow_handle) = spawn_session_stream_and_grow(cfg)
         .await
         .expect("spawn should succeed");
-    let elapsed = t0.elapsed();
+    let spawn_elapsed = t0.elapsed();
 
-    // Mode-change trigger should fire quickly — well under idle.
+    // Canvas Plan Phase A: spawn itself must return fast —
+    // background grow-settle is what takes time, not the spawn
+    // call. Upper bound is generous for CI load but well below
+    // the settle window.
     assert!(
-        elapsed < Duration::from_millis(1500),
-        "mode-change settle should be fast, took {elapsed:?}"
+        spawn_elapsed < Duration::from_millis(250),
+        "Phase A: spawn should return in < 250 ms, took {spawn_elapsed:?}"
+    );
+
+    // Now wait for the background grow task to actually finish
+    // so the settle + APC + SIGWINCH has landed in the ring.
+    let t_grow = Instant::now();
+    let _settle_reason = grow_handle.wait().await;
+    let grow_elapsed = t_grow.elapsed();
+    assert!(
+        grow_elapsed < Duration::from_millis(2000),
+        "background grow settle should fire well under the 3s ceiling, took {grow_elapsed:?}"
     );
 
     let entry =
@@ -118,20 +131,30 @@ async fn grow_and_shrink_with_idle_trigger_on_simple_shell() {
     };
 
     let t0 = Instant::now();
-    let session = spawn_session_stream_and_grow(cfg)
+    let (session, grow_handle) = spawn_session_stream_and_grow(cfg)
         .await
         .expect("spawn should succeed");
-    let elapsed = t0.elapsed();
+    let spawn_elapsed = t0.elapsed();
 
-    // Idle settle = ~400 ms plus PTY/shell startup overhead.
-    // Upper bound generous to keep the test non-flaky on loaded CI.
+    // Canvas Plan Phase A: spawn returns fast.
     assert!(
-        elapsed >= Duration::from_millis(300),
-        "idle settle should take at least ~400 ms, got {elapsed:?}"
+        spawn_elapsed < Duration::from_millis(250),
+        "Phase A: spawn should return in < 250 ms, took {spawn_elapsed:?}"
+    );
+
+    // The 400 ms idle wait + SIGWINCH now happens on a background
+    // task. Wait for it here so the ring has the post-settle
+    // state.
+    let t_grow = Instant::now();
+    let _settle_reason = grow_handle.wait().await;
+    let grow_elapsed = t_grow.elapsed();
+    assert!(
+        grow_elapsed >= Duration::from_millis(300),
+        "background idle settle should take at least ~400 ms, got {grow_elapsed:?}"
     );
     assert!(
-        elapsed < Duration::from_millis(2500),
-        "idle settle should fire well before the 3s ceiling, took {elapsed:?}"
+        grow_elapsed < Duration::from_millis(2500),
+        "background idle settle should fire well before the 3s ceiling, took {grow_elapsed:?}"
     );
 
     let entry =
@@ -168,13 +191,16 @@ async fn grow_boundary_apc_lands_in_byte_stream() {
         ..SpawnConfig::default()
     };
 
-    let session = spawn_session_stream_and_grow(cfg)
+    let (session, grow_handle) = spawn_session_stream_and_grow(cfg)
         .await
         .expect("spawn should succeed");
 
     let entry =
         registry::lookup(&session.session_id).expect("entry still registered");
 
+    // Phase A: wait for the background grow task to complete so the
+    // APC lands in the byte stream before we scan for it.
+    let _ = grow_handle.wait().await;
     // Give the byte archive writer a beat to flush so both the
     // ring and the on-disk file are observable.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -243,7 +269,7 @@ async fn grow_skipped_when_requested_rows_exceeds_grow_rows() {
     };
 
     let t0 = Instant::now();
-    let session = spawn_session_stream_and_grow(cfg)
+    let (session, _grow) = spawn_session_stream_and_grow(cfg)
         .await
         .expect("spawn should succeed");
     let elapsed = t0.elapsed();

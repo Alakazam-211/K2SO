@@ -27,8 +27,8 @@ pub use event_sink::TerminalEventSink;
 
 #[cfg(feature = "session_stream")]
 pub use session_stream_pty::{
-    spawn_session_stream, spawn_session_stream_and_grow, NoopListener,
-    SessionStreamSession, SpawnConfig, GROW_ROWS,
+    spawn_session_stream, spawn_session_stream_and_grow, GrowHandle,
+    NoopListener, SessionStreamSession, SpawnConfig, GROW_ROWS,
 };
 
 use parking_lot::Mutex;
