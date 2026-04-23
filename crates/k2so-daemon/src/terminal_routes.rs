@@ -21,6 +21,7 @@
 //!   - read:  `{"lines":["line1","line2",...]}`
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use k2so_core::session::{registry, Frame, SessionId};
@@ -151,6 +152,31 @@ pub fn handle_sessions_resize(params: &HashMap<String, String>) -> CliResponse {
             );
         }
     };
+
+    // Inject a `k2so:resize` APC into the byte stream BEFORE
+    // SIGWINCHing the PTY. Byte-stream subscribers (Kessel panes
+    // running their own alacritty Term) resize their local Term
+    // at the exact byte offset of this APC. Claude's post-SIGWINCH
+    // repaint bytes then arrive AFTER the APC and land in the new
+    // dimensions — no racing client/daemon resizes, no competing
+    // paints, one serialized event log. Same mechanism the
+    // grow-shrink path uses for `k2so:grow_boundary`.
+    if let Some(entry) = registry::lookup(&session_id) {
+        let payload = serde_json::json!({ "cols": cols, "rows": rows });
+        let payload_str = payload.to_string();
+        let mut apc_bytes = Vec::with_capacity(payload_str.len() + 32);
+        apc_bytes.extend_from_slice(b"\x1b_k2so:resize:");
+        apc_bytes.extend_from_slice(payload_str.as_bytes());
+        apc_bytes.push(b'\x07');
+        let apc_arc: Arc<[u8]> = Arc::from(apc_bytes.into_boxed_slice());
+        entry.publish_bytes(apc_arc);
+    }
+    // else: session has no registry entry (test harness with no
+    // byte stream, or a session type that doesn't publish bytes).
+    // Skipping the APC is fine; the SIGWINCH below still takes
+    // effect and any bytestream-less consumer was never going to
+    // read the APC anyway.
+
     if let Err(e) = session.resize(cols, rows) {
         return CliResponse::bad_request(format!("resize failed: {e}"));
     }

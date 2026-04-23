@@ -327,82 +327,80 @@ impl PaneState {
 
     /// Side-effect an APC event. `grow_boundary` seals the
     /// grow-phase paint into scrollback and resizes to the
-    /// daemon's target.
+    /// daemon's target. `resize` is the live user-window resize
+    /// path — same mechanism as grow_boundary, different trigger.
+    ///
+    /// Carrying resize inline with the byte stream (instead of as
+    /// a separate IPC command) guarantees ordering against
+    /// Claude's SIGWINCH-repaint bytes: the APC fires `term.resize`
+    /// at exactly the point in the stream where the daemon called
+    /// `session.resize`, so all subsequent bytes paint into the
+    /// new dimensions. The old `kessel_term_resize` Tauri command
+    /// still exists (see `resize` method below) for benchmarks
+    /// and ad-hoc diagnostics, but production panes route all
+    /// resizes through this APC path.
     fn apply_apc_event(&mut self, ev: ApcEvent) {
-        if ev.kind != "grow_boundary" {
-            // Unknown kinds are forward-compat — older panes
-            // running against newer daemons should just ignore
-            // them.
-            return;
-        }
-        let target_cols = ev
-            .payload
-            .get("target_cols")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(80) as usize;
-        let target_rows = ev
-            .payload
-            .get("target_rows")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(24) as usize;
+        match ev.kind.as_str() {
+            "grow_boundary" => {
+                let target_cols = ev
+                    .payload
+                    .get("target_cols")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(80) as usize;
+                let target_rows = ev
+                    .payload
+                    .get("target_rows")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(24) as usize;
 
-        let mut term = self.term.lock();
-        // Minimum viable seam: use alacritty's native resize,
-        // which shrinks-from-top and pushes overflow to its own
-        // scrollback. This means the bottom `target_rows` of the
-        // grow canvas stay in the live grid — those get wiped by
-        // Claude's post-SIGWINCH ClearScreen. Less precise than
-        // the TypeScript `sealGrowPhase` (which pushes ALL content
-        // rows to scrollback first), but simpler and gets Phase 4
-        // off the ground. Phase 5 can refine with explicit cursor-
-        // row-aware scrollback pushing if the loss is visible.
-        term.resize(TermSize {
-            cols: target_cols,
-            rows: target_rows,
-        });
-        self.dirty_counter = self.dirty_counter.wrapping_add(1);
+                let mut term = self.term.lock();
+                // Minimum viable seam: use alacritty's native
+                // resize, which shrinks-from-top and pushes
+                // overflow to its own scrollback. This means the
+                // bottom `target_rows` of the grow canvas stay in
+                // the live grid — those get wiped by Claude's
+                // post-SIGWINCH ClearScreen. Less precise than
+                // the TypeScript `sealGrowPhase` (which pushes
+                // ALL content rows to scrollback first), but
+                // simpler and gets Phase 4 off the ground.
+                term.resize(TermSize {
+                    cols: target_cols,
+                    rows: target_rows,
+                });
+                self.dirty_counter = self.dirty_counter.wrapping_add(1);
+            }
+            "resize" => {
+                let cols = ev
+                    .payload
+                    .get("cols")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(80) as usize;
+                let rows = ev
+                    .payload
+                    .get("rows")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(24) as usize;
+                let mut term = self.term.lock();
+                term.resize(TermSize {
+                    cols: cols.max(1),
+                    rows: rows.max(1),
+                });
+                self.dirty_counter = self.dirty_counter.wrapping_add(1);
+            }
+            _ => {
+                // Unknown kinds are forward-compat — older panes
+                // running against newer daemons should ignore
+                // them.
+            }
+        }
     }
 
     fn resize(&mut self, cols: u16, rows: u16) {
-        {
-            let mut term = self.term.lock();
-            term.resize(TermSize {
-                cols: cols.max(1) as usize,
-                rows: rows.max(1) as usize,
-            });
-        }
-
-        // Alacritty's resize has a quirk: when growing rows, it
-        // pulls rows from scrollback back into the live grid to
-        // fill the new space. That's usually what terminal users
-        // expect ("scrolling reveals history naturally"), but for
-        // us it produces a visible "stacked paint" regression
-        // during mid-session resize:
-        //
-        //   1. Grow-phase pushed Claude's cold-start content into
-        //      scrollback.
-        //   2. Client ResizeObserver grows the Tauri Term.
-        //   3. Alacritty pulls grow-phase content BACK into live.
-        //   4. Claude's SIGWINCH-repaint arrives shortly after and
-        //      paints its own UI wherever its cursor lands —
-        //      producing a second UI stacked below the pulled-back
-        //      content, or (worse) cells from different-width
-        //      paints interleaved on the same rows.
-        //
-        // Claude will emit its own ClearScreen as part of the
-        // SIGWINCH repaint, but the window between "alacritty
-        // pulled content" and "Claude's ClearScreen arrives"
-        // leaks a bad snapshot. Feed CSI 2J + CSI H ourselves so
-        // the live grid is blank from the moment resize
-        // completes. Claude's repaint lands on known-clean cells;
-        // user sees a brief blank flash (< 50 ms typically)
-        // instead of stacked garbage.
-        //
-        // Scrollback is untouched — users scrolling back still
-        // see their grow-phase history.
-        let clear: &[u8] = b"\x1b[2J\x1b[H";
         let mut term = self.term.lock();
-        self.processor.advance(&mut *term, clear);
+        term.resize(TermSize {
+            cols: cols.max(1) as usize,
+            rows: rows.max(1) as usize,
+        });
         self.dirty_counter = self.dirty_counter.wrapping_add(1);
     }
 }
@@ -1474,5 +1472,20 @@ mod tests {
         p.feed_bytes(apc);
         // After: rows = 24
         assert_eq!(p.term.lock().screen_lines(), 24);
+    }
+
+    #[test]
+    fn pane_state_resize_apc_resizes_term() {
+        // `k2so:resize` is the live user-window resize path. The
+        // daemon injects it before SIGWINCHing the PTY so that the
+        // client Term ends up at the new dims BEFORE Claude's
+        // post-SIGWINCH repaint bytes arrive.
+        let mut p = PaneState::new(80, 24);
+        assert_eq!(p.term.lock().columns(), 80);
+        assert_eq!(p.term.lock().screen_lines(), 24);
+        let apc = b"\x1b_k2so:resize:{\"cols\":120,\"rows\":40}\x07";
+        p.feed_bytes(apc);
+        assert_eq!(p.term.lock().columns(), 120);
+        assert_eq!(p.term.lock().screen_lines(), 40);
     }
 }

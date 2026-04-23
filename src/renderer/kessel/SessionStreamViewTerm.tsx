@@ -27,6 +27,7 @@
 import React, {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -177,6 +178,27 @@ function paneIdFor(sessionId: string): string {
   return `kessel-${sessionId}`
 }
 
+/** Measure the pane container's bounding rect and convert to a
+ *  `{cols, rows}` pair using the current cell metrics. Returns
+ *  `null` when the element isn't laid out yet (hidden tab, zero
+ *  rect), or when the computed dims are too small to be sane —
+ *  the caller falls back to its prop defaults in that case. */
+function measurePaneDims(
+  el: HTMLDivElement,
+  cellW: number,
+  cellH: number,
+): { cols: number; rows: number } | null {
+  if (cellW <= 0 || cellH <= 0) return null
+  const rect = el.getBoundingClientRect()
+  if (rect.width === 0 || rect.height === 0) return null
+  const availW = Math.max(0, rect.width - 8)
+  const availH = Math.max(0, rect.height - 8)
+  const cols = Math.floor(availW / cellW)
+  const rows = Math.floor(availH / cellH)
+  if (cols < 10 || rows < 3) return null
+  return { cols, rows }
+}
+
 /** Phase 8 perf log: one-line structured entries on the browser
  *  console, consistent `[kessel-perf]` prefix so the user can
  *  copy-paste the output back. Aligned with the Rust-side
@@ -254,6 +276,11 @@ export function SessionStreamViewTerm(
 
   const containerRef = useRef<HTMLDivElement>(null)
   const paneIdRef = useRef<string | null>(null)
+  // Dims we fed into kessel_term_attach. ResizeObserver seeds its
+  // "last" values from this so its first fire on the already-
+  // correctly-sized container is a no-op match — no resize invoke,
+  // no paint churn.
+  const initialDimsRef = useRef<{ cols: number; rows: number } | null>(null)
 
   // Read tab visibility here (at the top of the component) so both
   // the attach lifecycle below AND the visibility effect further
@@ -267,11 +294,34 @@ export function SessionStreamViewTerm(
   isTabVisibleRef.current = isTabVisible
 
   // ── Attach / detach lifecycle ─────────────────────────────────
+  //
+  // Gate on cellMetrics: without the font metrics we can't
+  // measure the container, and without the container dims we'd
+  // have to pass hardcoded 80×24 to attach and immediately
+  // resize when ResizeObserver fires. That initial-mismatch
+  // path was the source of the workspace-return paint race
+  // (Term created at 80×24 → immediate resize to real dims →
+  // clear + repaint stomps over in-flight replay bytes).
+  //
+  // Measure once the moment metrics are ready and feed the Tauri
+  // Term its final size from birth. ResizeObserver picks up the
+  // measured dims as its "lastCols/lastRows" seed below, so its
+  // first fire is a no-op match and no resize invoke happens
+  // during the replay burst.
   useEffect(() => {
     if (sessionId === null) return
+    if (!cellMetrics.width || !cellMetrics.height) return
     const paneId = paneIdFor(sessionId)
     paneIdRef.current = paneId
     let cancelled = false
+
+    const containerEl = containerRef.current
+    const measured = containerEl
+      ? measurePaneDims(containerEl, cellMetrics.width, cellMetrics.height)
+      : null
+    const initialCols = measured?.cols ?? cols
+    const initialRows = measured?.rows ?? rows
+    initialDimsRef.current = { cols: initialCols, rows: initialRows }
 
     ;(async () => {
       const t0 = performance.now()
@@ -282,8 +332,8 @@ export function SessionStreamViewTerm(
             sessionId,
             port,
             token,
-            cols,
-            rows,
+            cols: initialCols,
+            rows: initialRows,
             // Pass current visibility so the pane is created with
             // paused=false if this tab is visible. Prevents the
             // attach-vs-resume race that left newly-mounted panes
@@ -295,6 +345,9 @@ export function SessionStreamViewTerm(
         perfLog('attach_invoke', {
           pane: paneId,
           initially_visible: isTabVisibleRef.current,
+          measured_cols: initialCols,
+          measured_rows: initialRows,
+          from_measure: measured !== null,
           dur_ms: (performance.now() - t0).toFixed(2),
         })
       } catch (e) {
@@ -330,7 +383,7 @@ export function SessionStreamViewTerm(
         .catch(() => {})
       paneIdRef.current = null
     }
-  }, [sessionId, port, token, cols, rows])
+  }, [sessionId, port, token, cols, rows, cellMetrics.width, cellMetrics.height])
 
   // ── Snapshot + delta listeners ────────────────────────────────
   //
@@ -468,8 +521,14 @@ export function SessionStreamViewTerm(
   }, [isTabVisible])
 
   // ── Cell metrics (for cursor positioning + wheel math) ────────
+  //
+  // useLayoutEffect (not useEffect) so the measurement completes
+  // synchronously before browser paint. The attach effect below
+  // gates on these values being non-zero, so moving this sooner
+  // means attach fires with real dims in hand on the first paint
+  // cycle instead of one React tick later.
   const [cellMetrics, setCellMetrics] = useState({ width: 0, height: 0 })
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = document.createElement('span')
     el.style.cssText = `font-family: ${config.font.family}; font-size: ${fontSize}px; position: absolute; visibility: hidden; white-space: pre;`
     el.textContent = 'W'
@@ -538,8 +597,14 @@ export function SessionStreamViewTerm(
     if (!cellMetrics.width || !cellMetrics.height) return
 
     let timer: ReturnType<typeof setTimeout> | null = null
-    let lastCols = cols
-    let lastRows = rows
+    // Seed from the dims the attach effect actually used. If that
+    // hasn't populated yet (shouldn't happen since we share the
+    // same cellMetrics gate, but be defensive), fall back to the
+    // props. This is the linchpin that makes workspace-return
+    // quiet: ResizeObserver fires once on observe(), we compute
+    // the same dims we already told the Term, no-op out.
+    let lastCols = initialDimsRef.current?.cols ?? cols
+    let lastRows = initialDimsRef.current?.rows ?? rows
     const observer = new ResizeObserver((entries) => {
       if (timer) clearTimeout(timer)
       timer = setTimeout(() => {
@@ -555,16 +620,15 @@ export function SessionStreamViewTerm(
         if (newCols === lastCols && newRows === lastRows) return
         lastCols = newCols
         lastRows = newRows
-        const paneId = paneIdRef.current
-        if (paneId) {
-          invoke('kessel_term_resize', {
-            paneId,
-            cols: newCols,
-            rows: newRows,
-          }).catch(() => {})
-        }
-        // Also ask the daemon to SIGWINCH the PTY so Claude
-        // redraws at the new size.
+        // Single resize path: the daemon's `/cli/sessions/resize`
+        // handler injects a `k2so:resize` APC into the byte stream
+        // BEFORE SIGWINCHing the PTY. Our local alacritty Term
+        // picks up the APC inline (via `ApcFilter` in
+        // kessel_term.rs) and calls `term.resize` at exactly that
+        // byte offset. Claude's post-SIGWINCH repaint bytes then
+        // arrive after the APC and paint into the newly-sized
+        // grid. No racing `kessel_term_resize` invoke, no
+        // competing paints.
         if (sessionId !== null) {
           invoke('kessel_resize', {
             sessionId,
