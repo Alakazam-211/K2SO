@@ -720,13 +720,22 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     const tab = get().tabs.find((t) => t.id === tabId)
     if (tab?.isSystemAgent) return
 
-    // Kill all PTYs in the removed tab (PTYs survive tab switches for persistence)
+    // Kill all PTYs in the removed tab (PTYs survive tab switches
+    // and workspace stashes for persistence — only `removeTab`
+    // genuinely ends a session).
+    //
+    // Fires BOTH `terminal_kill` (Alacritty backend) and
+    // `kessel_close` (daemon-owned Session Stream). Each is
+    // idempotent — if the terminal belongs to the other backend,
+    // the call is a no-op. Avoids branching on `data.renderer`
+    // here, which could drift if a new backend is added later.
     if (tab) {
       for (const [, pg] of tab.paneGroups) {
         for (const item of pg.items) {
           if (item.type === 'terminal') {
             const data = item.data as TerminalItemData
             invoke('terminal_kill', { id: data.terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
+            invoke('kessel_close', { agentName: `tab-${data.terminalId}` }).catch((e) => console.warn('[tabs] kessel_close failed:', e))
           }
         }
       }
@@ -850,7 +859,9 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   },
 
   removePaneFromTab: (tabId, paneGroupId) => {
-    // Kill PTYs in the removed pane group
+    // Kill PTYs in the removed pane group. Fire both Alacritty
+    // and Kessel close paths; each is idempotent on wrong-backend
+    // terminal ids.
     const tab = get().tabs.find((t) => t.id === tabId)
     const pg = tab?.paneGroups.get(paneGroupId)
     if (pg) {
@@ -858,6 +869,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         if (item.type === 'terminal') {
           const data = item.data as TerminalItemData
           invoke('terminal_kill', { id: data.terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
+          invoke('kessel_close', { agentName: `tab-${data.terminalId}` }).catch((e) => console.warn('[tabs] kessel_close failed:', e))
         }
       }
     }
@@ -1378,13 +1390,15 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   },
 
   closeItemInPaneGroup: (tabId: string, paneGroupId: string, itemId: string) => {
-    // Kill the PTY for the removed terminal item
+    // Kill the PTY for the removed terminal item. Both backends
+    // get a close call; idempotent on wrong-backend ids.
     const tab = findTabAcrossGroups(get(), tabId)
     const pg = tab?.paneGroups.get(paneGroupId)
     const removedItem = pg?.items.find((item) => item.id === itemId)
     if (removedItem?.type === 'terminal') {
       const data = removedItem.data as TerminalItemData
       invoke('terminal_kill', { id: data.terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
+      invoke('kessel_close', { agentName: `tab-${data.terminalId}` }).catch((e) => console.warn('[tabs] kessel_close failed:', e))
     }
 
     set((state) => {
@@ -1571,13 +1585,15 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     if (gi < 0 || gi >= state.extraGroups.length) return
 
     const group = state.extraGroups[gi]
-    // Kill PTYs
+    // Kill PTYs on both backends; idempotent cross-backend.
     const tab = group.tabs.find((t) => t.id === tabId)
     if (tab) {
       for (const [, pg] of tab.paneGroups) {
         for (const item of pg.items) {
           if (item.type === 'terminal') {
-            invoke('terminal_kill', { id: (item.data as TerminalItemData).terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
+            const tid = (item.data as TerminalItemData).terminalId
+            invoke('terminal_kill', { id: tid }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
+            invoke('kessel_close', { agentName: `tab-${tid}` }).catch((e) => console.warn('[tabs] kessel_close failed:', e))
           }
         }
       }
@@ -2022,13 +2038,15 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
   clearAllTabs: () => {
     const state = get()
-    // Kill all PTYs in group 0
+    // Kill all PTYs in group 0. Fire both backend close paths;
+    // each is idempotent on wrong-backend ids.
     for (const tab of state.tabs) {
       for (const [, pg] of tab.paneGroups) {
         for (const item of pg.items) {
           if (item.type === 'terminal') {
             const data = item.data as TerminalItemData
             invoke('terminal_kill', { id: data.terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
+            invoke('kessel_close', { agentName: `tab-${data.terminalId}` }).catch((e) => console.warn('[tabs] kessel_close failed:', e))
           }
         }
       }
@@ -2041,6 +2059,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
             if (item.type === 'terminal') {
               const data = item.data as TerminalItemData
               invoke('terminal_kill', { id: data.terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
+              invoke('kessel_close', { agentName: `tab-${data.terminalId}` }).catch((e) => console.warn('[tabs] kessel_close failed:', e))
             }
           }
         }

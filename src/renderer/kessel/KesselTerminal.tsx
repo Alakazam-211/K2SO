@@ -195,19 +195,21 @@ export function KesselTerminal(props: KesselTerminalProps): React.JSX.Element {
     void boot()
     return () => {
       cancelled = true
-      // Tell the daemon to tear down this session when the tab
-      // unmounts. Without this, session_map accumulates entries
-      // and each one holds a PTY master FD + reader thread +
-      // archive handle — a hard leak that hits the per-process
-      // FD limit (ulimit -n = 256 default) around ~14 tabs.
+      // Deliberately do NOT call `kessel_close` on unmount.
       //
-      // Fire-and-forget. If the daemon is gone or the session
-      // already exited, the call no-ops. The Tauri command itself
-      // swallows errors.
-      const agentName = `tab-${terminalId}`
-      invoke('kessel_close', { agentName }).catch(() => {
-        /* best-effort cleanup */
-      })
+      // Matches `AlacrittyTerminalView`'s pattern: workspace
+      // stash / retained-view toggles / dev HMR all cause
+      // component unmounts that are NOT the user intentionally
+      // closing the tab. Killing the daemon session on every
+      // such unmount destroys running Claude sessions whenever
+      // the user switches workspaces — exactly the regression
+      // that broke the "start Claude on a long task, switch to
+      // another workspace, come back and see progress" flow.
+      //
+      // Daemon-side session lifecycle is driven by the tabs
+      // store's `removeTab` path, which fires `kessel_close`
+      // alongside `terminal_kill` when a tab is genuinely
+      // removed. See `stores/tabs.ts`.
     }
     // Re-spawn only when terminalId changes — same terminal tab
     // keeps its session across prop tweaks.
