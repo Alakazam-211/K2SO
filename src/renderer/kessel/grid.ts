@@ -397,6 +397,61 @@ export class TerminalGrid {
     this.cursor_.row = Math.min(this.cursor_.row, this.rows_ - 1)
   }
 
+  /** Seal a grow-phase paint into scrollback and reset the live
+   *  grid to a fresh canvas at target dimensions. This is the
+   *  correct operation for the `grow_boundary` handler — see
+   *  `.k2so/prds/canvas-plan.md` §4 for the full derivation.
+   *
+   *  The naive pattern (`trimRows(cursor.row + 1)` then
+   *  `resize(newCols, newRows)`) loses the BOTTOM `newRows` worth
+   *  of grow-phase content to Claude's post-SIGWINCH ClearScreen,
+   *  because alacritty's shrink-from-top pushes only the overflow
+   *  (oldRows − newRows) rows to scrollback and leaves the last
+   *  `newRows` in the live grid — which Claude then wipes on
+   *  repaint. That's fine for bottom-anchored TUIs but wrong for
+   *  CUP-based TUIs like Claude where the cursor sits at the END
+   *  of the rendered conversation.
+   *
+   *  `sealGrowPhase` instead pushes EVERY row 0..contentRows-1
+   *  into scrollback, then replaces the grid wholesale with
+   *  `newRows` blank rows at `newCols` width. Cursor resets to
+   *  (0, 0) so Claude's repaint starts from the top of a clean
+   *  canvas.
+   *
+   *  Typical call site:
+   *
+   *      grid.sealGrowPhase(cursor.row + 1, targetCols, targetRows)
+   *
+   *  where `cursor.row + 1` is the count of content rows (cursor
+   *  at row N means rows 0..N have been painted).
+   */
+  sealGrowPhase(contentRows: number, newCols: number, newRows: number): void {
+    const content = Math.max(0, Math.min(Math.floor(contentRows), this.rows_))
+    const cols = Math.max(1, newCols)
+    const rows = Math.max(1, newRows)
+
+    this.dirty_ = true
+
+    // Push rows 0..content-1 into scrollback via the standard
+    // pushScrollback path — respects scrollback cap and eviction
+    // exactly as a natural scroll would.
+    for (let r = 0; r < content; r++) {
+      this.pushScrollback(this.grid_[r])
+    }
+
+    // Replace the live grid wholesale at the target dimensions.
+    // No carry-over from the grow-phase rows — those that
+    // mattered are in scrollback; those that didn't (blank or
+    // about-to-be-overwritten) are discarded, which is the whole
+    // point of the seam.
+    this.grid_ = Array.from({ length: rows }, () => blankRow(cols))
+    this.rows_ = rows
+    this.cols_ = cols
+    this.scrollRegion_ = { top: 0, bottom: this.rows_ - 1 }
+    this.cursor_ = { row: 0, col: 0, visible: true, shape: this.cursor_.shape }
+    this.markAllRowsDamaged()
+  }
+
   /** Clear every live-grid cell back to blank, keeping the cursor's
    *  position intact and WITHOUT pushing anything to scrollback.
    *  Companion to `trimRows` — used when a caller (e.g. the Kessel

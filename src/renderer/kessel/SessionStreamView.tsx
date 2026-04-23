@@ -295,6 +295,20 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     }
   }, [snapshot.scrollback.length, viewportOffset])
 
+  // Drop any active DOM text selection when the viewport offset
+  // moves. Without this, the browser's Range anchors stay pinned to
+  // the same row-N <div> elements while scrolling recycles their
+  // content — so the highlight visually "sticks" at a fixed screen
+  // position even though the characters it was anchored to have
+  // moved. Clearing the selection matches every real terminal's
+  // behavior (Alacritty drops selection on scroll) and is strictly
+  // better than a phantom highlight over unrelated text.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const sel = window.getSelection()
+    if (sel && sel.rangeCount > 0) sel.removeAllRanges()
+  }, [viewportOffset])
+
   // Alt-screen cutover: when the TUI enters ?1049 / ?47, force the
   // viewport back to the bottom and stop honoring wheel scroll into
   // scrollback. Alt screen is an isolated buffer — the only thing
@@ -450,9 +464,8 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
   // Suppressed while awaitingBoundaryRef is true — the grid is
   // intentionally oversized during the grow window and must not be
   // shrunk before the daemon's grow_boundary marker arrives. Once
-  // boundary-handling fires `grid.resize(target_cols, target_rows)`
-  // the ref flips to false and subsequent prop changes apply
-  // normally.
+  // the boundary handler runs `grid.sealGrowPhase(...)` the ref
+  // flips to false and subsequent prop changes apply normally.
   useEffect(() => {
     if (!gridRef.current) return
     if (awaitingBoundaryRef.current) return
@@ -507,12 +520,14 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
         for (const frame of frames) {
           // grow_boundary — daemon's marker between "painted into the
           // oversized grow canvas" and "child is now running at the
-          // real size." Trim the live grid down to content rows
-          // (cursor.row + 1), then resize to the daemon's target so
-          // the overflow scrolls into scrollback via grid.resize's
-          // standard top-push shrink path. After this point the
-          // grid matches the real window and ResizeObserver fires
-          // behave normally.
+          // real size." Seal the grow-phase content into scrollback
+          // (all rows 0..cursor, not just the overflow) and reset
+          // the live grid to a blank canvas at the daemon's target
+          // size. Claude's post-SIGWINCH ClearScreen then wipes
+          // nothing useful, and the repaint lands in a clean live
+          // area. See canvas-plan.md §4 for the full derivation.
+          // After this point the grid matches the real window and
+          // ResizeObserver fires behave normally.
           if (
             awaitingBoundaryRef.current &&
             frame.frame === 'SemanticEvent' &&
@@ -530,8 +545,12 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
             const preCursor = grid.snapshot().cursor
             const preRows = grid.rows
             const preScrollbackLen = grid.snapshot().scrollback.length
-            grid.trimRows(preCursor.row + 1)
-            grid.resize(tCols, tRows)
+            // See canvas-plan.md §4: push all grow-phase content
+            // rows into scrollback, reset live grid to blank
+            // target-size. The old trim+resize pattern lost the
+            // bottom ~target_rows of content to Claude's post-
+            // SIGWINCH ClearScreen.
+            grid.sealGrowPhase(preCursor.row + 1, tCols, tRows)
             awaitingBoundaryRef.current = false
             if (boundaryFallback !== null) {
               clearTimeout(boundaryFallback)
@@ -641,8 +660,9 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
                 targetRows = r
               }
             }
-            grid.trimRows(preCursor.row + 1)
-            grid.resize(targetCols, targetRows)
+            // Same seam contract as the live boundary handler —
+            // see canvas-plan.md §4.
+            grid.sealGrowPhase(preCursor.row + 1, targetCols, targetRows)
             awaitingBoundaryRef.current = false
             scheduleRender()
             // eslint-disable-next-line no-console
@@ -1238,10 +1258,6 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     // the tab is focused, hollow outline when it isn't. Matches the
     // native macOS text-input caret convention.
     //
-    // Still hide while the viewport is scrolled up — the cursor is
-    // a live-grid coordinate and would render at a row that's
-    // showing historical scrollback content.
-    if (viewportOffset > 0) return { display: 'none' }
     if (!cellMetrics.width) return { display: 'none' }
 
     // When unfocused (or within the 200ms post-focus-gain settle
@@ -1255,6 +1271,18 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
         ? restingCursor
         : lastFocusedCursorRef.current
 
+    // Translate the live-grid cursor into visible-row coordinates.
+    // visibleRows[i] at offset O maps scrollback to [0, O) and grid
+    // to [O, rows). A cursor at grid row G is at visible row G + O;
+    // if that lands outside [0, snapshot.rows), the cursor has
+    // scrolled out of the viewport and we hide it. Otherwise we
+    // render at the translated row so the caret tracks the content
+    // it belongs to as the user moves through scrollback.
+    const cursorVisibleRow = effective.row + viewportOffset
+    if (cursorVisibleRow < 0 || cursorVisibleRow >= snapshot.rows) {
+      return { display: 'none' }
+    }
+
     // D13 — shape from TUI's DECSCUSR (effective.shape) or the
     // user's configured fallback. Blinking variants only animate
     // when focused; an unfocused pane's cursor is a static outline.
@@ -1262,7 +1290,7 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     const base: React.CSSProperties = {
       position: 'absolute',
       left: `${4 + cellMetrics.width * effective.col}px`,
-      top: `${4 + cellMetrics.height * effective.row}px`,
+      top: `${4 + cellMetrics.height * cursorVisibleRow}px`,
       pointerEvents: 'none',
       boxSizing: 'border-box',
     }
@@ -1305,7 +1333,7 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
           width: `${cellMetrics.width}px`,
           height: `${underscoreHeight}px`,
           // Nudge to the bottom of the cell.
-          top: `${4 + cellMetrics.height * effective.row + cellMetrics.height - underscoreHeight}px`,
+          top: `${4 + cellMetrics.height * cursorVisibleRow + cellMetrics.height - underscoreHeight}px`,
           backgroundColor: fill,
           boxShadow: outline,
           animation,
@@ -1316,6 +1344,7 @@ export function SessionStreamView(props: SessionStreamViewProps): React.JSX.Elem
     cellMetrics.width,
     cellMetrics.height,
     viewportOffset,
+    snapshot.rows,
     isFocused,
     liveCursorEnabled,
     config.cursor.defaultShape,

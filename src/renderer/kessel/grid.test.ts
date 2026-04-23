@@ -238,6 +238,98 @@ describe('TerminalGrid resize', () => {
   })
 })
 
+// ── sealGrowPhase — the grow_boundary seam ─────────────────────────
+
+describe('TerminalGrid sealGrowPhase', () => {
+  it('pushes all content rows into scrollback and starts a blank live grid', () => {
+    // Simulate grow-phase: 10-row grid with 4 rows of content.
+    // Cursor at row 3 (the last written row).
+    const g = new TerminalGrid({ rows: 10, cols: 10 })
+    g.applyFrame(text('row0\r\nrow1\r\nrow2\r\nrow3'))
+    // Cursor ends after 'row3' — at col 4 of row 3 after the last
+    // \r\n+row3 sequence.
+    expect(g.snapshot().cursor.row).toBe(3)
+
+    // Seal: content rows = cursor.row + 1 = 4. Target size 10x3.
+    g.sealGrowPhase(4, 10, 3)
+
+    const snap = g.snapshot()
+    // All 4 content rows should be in scrollback, in order.
+    expect(snap.scrollback.length).toBe(4)
+    expect(snap.scrollback[0].map((c) => c.char || ' ').join('').trimEnd()).toBe('row0')
+    expect(snap.scrollback[1].map((c) => c.char || ' ').join('').trimEnd()).toBe('row1')
+    expect(snap.scrollback[2].map((c) => c.char || ' ').join('').trimEnd()).toBe('row2')
+    expect(snap.scrollback[3].map((c) => c.char || ' ').join('').trimEnd()).toBe('row3')
+
+    // Live grid is 3 blank rows at target cols.
+    expect(snap.rows).toBe(3)
+    expect(snap.cols).toBe(10)
+    for (let r = 0; r < snap.rows; r++) {
+      expect(rawRow(g, r)).toBe('          ')
+    }
+
+    // Cursor reset to top-left, ready for the post-SIGWINCH paint.
+    expect(snap.cursor.row).toBe(0)
+    expect(snap.cursor.col).toBe(0)
+  })
+
+  it('does not reintroduce "bottom-of-content wiped by ClearScreen" bug', () => {
+    // Regression guard for the exact pathology canvas-plan.md §4
+    // describes: grid with content in rows 0..40 (cursor at row 40),
+    // shrink to 24 rows. The old trimRows+resize pattern preserved
+    // only rows 0..16 in scrollback and left rows 17..40 in the
+    // live grid — where Claude's ClearScreen then wiped them.
+    // sealGrowPhase must preserve ALL 41 rows.
+    const g = new TerminalGrid({ rows: 500, cols: 10 })
+    const lines: string[] = []
+    for (let i = 0; i <= 40; i++) {
+      lines.push(`row${i.toString().padStart(2, '0')}`)
+    }
+    g.applyFrame(text(lines.join('\r\n')))
+    expect(g.snapshot().cursor.row).toBe(40)
+
+    g.sealGrowPhase(41, 10, 24)
+
+    const snap = g.snapshot()
+    expect(snap.scrollback.length).toBe(41)
+    // First and last content rows both survived.
+    expect(snap.scrollback[0].map((c) => c.char || ' ').join('').trimEnd()).toBe('row00')
+    expect(snap.scrollback[40].map((c) => c.char || ' ').join('').trimEnd()).toBe('row40')
+    // Live grid is blank; ready for Claude's repaint.
+    expect(rawRow(g, 0)).toBe('          ')
+    expect(rawRow(g, 23)).toBe('          ')
+  })
+
+  it('accepts 0 content rows (no-op on scrollback, just resize)', () => {
+    const g = new TerminalGrid({ rows: 500, cols: 10 })
+    g.sealGrowPhase(0, 10, 24)
+    const snap = g.snapshot()
+    expect(snap.scrollback.length).toBe(0)
+    expect(snap.rows).toBe(24)
+    expect(snap.cursor).toMatchObject({ row: 0, col: 0 })
+  })
+
+  it('clamps contentRows to the current grid height', () => {
+    const g = new TerminalGrid({ rows: 5, cols: 10 })
+    g.applyFrame(text('a\r\nb\r\nc'))
+    // Ask to seal more rows than exist — should clamp at 5.
+    g.sealGrowPhase(1000, 10, 3)
+    expect(g.snapshot().scrollback.length).toBe(5)
+  })
+
+  it('respects scrollback cap on eviction during seal', () => {
+    // Cap is small enough that only the last 2 sealed rows survive.
+    const g = new TerminalGrid({ rows: 10, cols: 5, scrollbackCap: 2 })
+    g.applyFrame(text('aaaaa\r\nbbbbb\r\nccccc\r\nddddd'))
+    g.sealGrowPhase(4, 5, 3)
+    const snap = g.snapshot()
+    // Cap is 2 — only the newest 2 content rows should remain.
+    expect(snap.scrollback.length).toBe(2)
+    expect(snap.scrollback[0].map((c) => c.char).join('')).toBe('ccccc')
+    expect(snap.scrollback[1].map((c) => c.char).join('')).toBe('ddddd')
+  })
+})
+
 // ── Alt screen + save/restore cursor (hooks, no LineMux yet) ────────
 
 describe('TerminalGrid mode stubs', () => {
