@@ -48,7 +48,8 @@ pub use session_stream_pty::{
 
 #[cfg(feature = "session_stream")]
 pub use daemon_pty::{
-    DaemonEventListener, DaemonPtyConfig, DaemonPtySession, SCROLLBACK_CAP,
+    AlacEvent, DaemonEventListener, DaemonPtyConfig, DaemonPtySession,
+    SCROLLBACK_CAP,
 };
 
 #[cfg(feature = "session_stream")]

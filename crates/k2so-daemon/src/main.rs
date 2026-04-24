@@ -44,11 +44,13 @@ mod pending_live;
 mod providers;
 mod session_map;
 mod sessions_bytes_ws;
+mod sessions_grid_ws;
 mod sessions_ws;
 mod signal_format;
 mod spawn;
 mod terminal_routes;
 mod triage;
+mod v2_session_map;
 mod watchdog;
 
 use std::fs;
@@ -452,6 +454,24 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             }
             let params = parse_params(&path, &query);
             sessions_bytes_ws::serve_session_bytes_connection(stream, params).await;
+        }
+        // Alacritty_v2 (A3): grid snapshot + delta WS endpoint.
+        // Serves one Tauri thin client per session. Single-subscriber
+        // by design. See `.k2so/prds/alacritty-v2.md`.
+        "/cli/sessions/grid" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let params = parse_params(&path, &query);
+            sessions_grid_ws::serve_session_grid_connection(stream, params).await;
         }
         // Awareness Bus endpoints (0.34.0 Phase 3).
         // `/cli/awareness/publish` — POST JSON body → egress::deliver

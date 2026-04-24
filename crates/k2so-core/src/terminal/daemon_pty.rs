@@ -28,8 +28,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use alacritty_terminal::event::{
-    Event as AlacEvent, EventListener, Notify, OnResize, WindowSize,
+    EventListener, Notify, OnResize, WindowSize,
 };
+
+/// Re-exported so downstream crates (the daemon, tests) can pattern-
+/// match on alacritty's lifecycle events without needing their own
+/// direct `alacritty_terminal` dependency. The daemon crate only
+/// depends on k2so-core; this keeps that surface honest.
+pub use alacritty_terminal::event::Event as AlacEvent;
 use alacritty_terminal::event_loop::{EventLoop, Notifier};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::sync::FairMutex;
