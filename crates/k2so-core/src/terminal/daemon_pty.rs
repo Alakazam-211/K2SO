@@ -44,7 +44,7 @@ use alacritty_terminal::term::Config as TermConfig;
 use alacritty_terminal::tty::{self, Options as TtyOptions, Shell};
 use alacritty_terminal::Term;
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 
 use crate::session::SessionId;
 
@@ -75,24 +75,34 @@ impl Dimensions for TermSize {
     }
 }
 
-/// Minimal `EventListener` that forwards every alacritty lifecycle
-/// event to a tokio unbounded channel. Consumers (A3's WS handler)
-/// watch the `Wakeup` variant to know when the Term has damage
-/// worth serializing into a delta.
+/// Minimal `EventListener` that broadcasts every alacritty lifecycle
+/// event to any number of subscribers via `tokio::sync::broadcast`.
+/// Consumers (A3's WS handler) subscribe fresh on attach and pull
+/// from their own receiver; there's no ownership transfer, so a
+/// subscriber disconnecting + reconnecting works cleanly.
 ///
 /// `send_event` is invoked by alacritty's IO thread, which is a
-/// plain `std::thread` (not a tokio context). `mpsc::UnboundedSender::send`
+/// plain `std::thread` (not a tokio context). `broadcast::Sender::send`
 /// is thread-safe and non-blocking, so cross-context use is fine.
+///
+/// Channel capacity is 256 — enough to absorb a burst of Wakeup
+/// events during a heavy PTY read without lagging subscribers.
+/// Alacritty typically emits ~10-100 events/sec on active use;
+/// 256 is several seconds of headroom at worst case.
+pub const EVENT_CHANNEL_CAPACITY: usize = 256;
+
 #[derive(Clone)]
 pub struct DaemonEventListener {
-    tx: mpsc::UnboundedSender<AlacEvent>,
+    tx: broadcast::Sender<AlacEvent>,
 }
 
 impl EventListener for DaemonEventListener {
     fn send_event(&self, event: AlacEvent) {
-        // Fire-and-forget. If the receiver was dropped (consumer
-        // went away), the send fails silently — we're in shutdown
-        // and don't care.
+        // Fire-and-forget. If no subscribers, send returns `Err`
+        // and we ignore it — the daemon keeps advancing Term state
+        // regardless. Subscribers that reconnect later will get the
+        // current grid via an initial snapshot + subsequent live
+        // events from that point forward.
         let _ = self.tx.send(event);
     }
 }
@@ -160,11 +170,12 @@ pub struct DaemonPtySession {
     /// on_resize needs `&mut self`).
     pty_notifier: Mutex<Notifier>,
 
-    /// Event receiver for alacritty lifecycle events (Wakeup,
-    /// Title, Bell, ChildExit, etc.). Taken exactly once by the
-    /// A3 WS handler; subsequent calls to `take_events()` return
-    /// `None`.
-    events_rx: Mutex<Option<mpsc::UnboundedReceiver<AlacEvent>>>,
+    /// Broadcast sender for alacritty lifecycle events (Wakeup,
+    /// Title, Bell, ChildExit, etc.). Subscribers call
+    /// `subscribe_events()` to get a fresh receiver — any number
+    /// of subscribers can exist, and reconnects just subscribe
+    /// again (no ownership handoff).
+    events_tx: broadcast::Sender<AlacEvent>,
 }
 
 impl DaemonPtySession {
@@ -214,9 +225,17 @@ impl DaemonPtySession {
         // semantics. The daemon has no window, so we pass 0.
         let pty = tty::new(&pty_options, window_size, 0)?;
 
-        // Event listener + channel for alacritty's lifecycle events.
-        let (events_tx, events_rx) = mpsc::unbounded_channel();
-        let listener = DaemonEventListener { tx: events_tx };
+        // Event listener + broadcast channel for alacritty's
+        // lifecycle events. Subscribers attach lazily via
+        // `subscribe_events()`; we keep a clone of the sender here
+        // so they can all tap the same stream.
+        let (events_tx, _initial_rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        // Drop the initial receiver — we don't keep one ourselves;
+        // each subscriber calls `subscribe_events()` to get theirs.
+        drop(_initial_rx);
+        let listener = DaemonEventListener {
+            tx: events_tx.clone(),
+        };
 
         // Term config — scrollback + cursor + colors. Start from
         // defaults (which match Zed's behavior) and override only
@@ -261,7 +280,7 @@ impl DaemonPtySession {
             program: cfg.program,
             term,
             pty_notifier: Mutex::new(Notifier(pty_sender)),
-            events_rx: Mutex::new(Some(events_rx)),
+            events_tx,
         }))
     }
 
@@ -301,12 +320,23 @@ impl DaemonPtySession {
         Arc::clone(&self.term)
     }
 
-    /// Take ownership of the event receiver. Returns `None` if
-    /// already taken. The single consumer is A3's WS handler —
-    /// it loops on this receiver to know when to serialize a
-    /// delta (specifically on `AlacEvent::Wakeup`).
-    pub fn take_events(&self) -> Option<mpsc::UnboundedReceiver<AlacEvent>> {
-        self.events_rx.lock().take()
+    /// Subscribe to this session's alacritty event broadcast.
+    /// Each call returns a fresh `Receiver`; multiple subscribers
+    /// can coexist (though v2 is single-subscriber in practice).
+    ///
+    /// Why broadcast rather than an owned mpsc: remount scenarios
+    /// (workspace swap, Tauri window reload) unmount the old
+    /// subscriber while the next one is already connecting. A
+    /// take-once receiver loses the race on those transitions;
+    /// broadcast avoids the ownership handoff entirely.
+    ///
+    /// A subscriber that lags beyond the channel capacity gets
+    /// `RecvError::Lagged(n)` and can either skip ahead or
+    /// disconnect. Consumers should treat Wakeup as idempotent —
+    /// missing one just means the next one produces an emit that
+    /// covers the accumulated damage.
+    pub fn subscribe_events(&self) -> broadcast::Receiver<AlacEvent> {
+        self.events_tx.subscribe()
     }
 }
 

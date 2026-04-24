@@ -36,7 +36,6 @@
 //! `sessions_ws.rs` / the Awareness Bus.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -115,22 +114,12 @@ pub async fn serve_session_grid_connection(
     };
     let (mut write, mut read) = ws.split();
 
-    // Single-subscriber enforcement: grabbing the events receiver
-    // is what marks this session as "attached." If `take_events()`
-    // returns None, another handler already has it — reject with
-    // busy and close.
-    let mut events_rx = match session.take_events() {
-        Some(rx) => rx,
-        None => {
-            let err = Outbound::Error {
-                message: "session already has an attached subscriber"
-                    .to_string(),
-            };
-            send_outbound(&mut write, &err).await;
-            let _ = write.close().await;
-            return;
-        }
-    };
+    // Subscribe to the session's event broadcast. Multiple
+    // subscribers can coexist (though v2 is effectively
+    // single-subscriber); remount-during-swap sequences that used
+    // to fail with "busy" now subscribe fresh each time and
+    // render from a new initial snapshot.
+    let mut events_rx = session.subscribe_events();
 
     let pane_id = format!("alacritty-v2-{}", session.session_id);
 
@@ -155,9 +144,9 @@ pub async fn serve_session_grid_connection(
         .await
         .is_err()
     {
-        // Client disconnected before we could send — give the
-        // events receiver back so a future subscriber can take it.
-        restore_events(&session, events_rx);
+        // Client disconnected before we could send. `events_rx`
+        // drops implicitly on return; broadcast subscribers don't
+        // need to be restored.
         return;
     }
 
@@ -176,7 +165,7 @@ pub async fn serve_session_grid_connection(
         tokio::select! {
             ev = events_rx.recv() => {
                 match ev {
-                    Some(AlacEvent::Wakeup) => {
+                    Ok(AlacEvent::Wakeup) => {
                         let decision = {
                             let term_mutex = session.term();
                             let mut term = term_mutex.lock();
@@ -195,20 +184,47 @@ pub async fn serve_session_grid_connection(
                             break;
                         }
                     }
-                    Some(AlacEvent::ChildExit(status)) => {
+                    Ok(AlacEvent::ChildExit(status)) => {
                         let exit = Outbound::ChildExit {
                             exit_code: status.code(),
                         };
                         let _ = send_outbound(&mut write, &exit).await;
                         break;
                     }
-                    Some(_other) => {
+                    Ok(_other) => {
                         // Title / Bell / ClipboardStore / ColorRequest /
                         // etc. Ignored for v2 — not part of the
                         // minimal grid-rendering contract.
                     }
-                    None => {
-                        // Channel closed (session dropped). Exit.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        // Consumer fell behind. Term state still
+                        // advancing correctly on the daemon; we
+                        // just missed `n` events. Issue a fresh
+                        // full snapshot so client state catches up.
+                        log_debug!(
+                            "[daemon/sessions_grid_ws] subscriber lagged {n} events, sending fresh snapshot"
+                        );
+                        let snap = {
+                            let term_mutex = session.term();
+                            let mut term = term_mutex.lock();
+                            emit_state.has_emitted = false; // force Full on next build_emit
+                            let d = build_emit(&pane_id, &mut *term, &mut emit_state);
+                            match d {
+                                EmitDecision::Full(s) => Some(s),
+                                _ => None,
+                            }
+                        };
+                        if let Some(snap) = snap {
+                            if send_outbound(&mut write, &Outbound::Snapshot(&snap))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // Session dropped (last Arc released). Exit.
                         break;
                     }
                 }
@@ -254,40 +270,15 @@ pub async fn serve_session_grid_connection(
         }
     }
 
-    // Clean exit: hand the events receiver back to the session so
-    // a subsequent subscriber can attach.
-    restore_events(&session, events_rx);
+    // Drop `events_rx` implicitly on return. Broadcast subscribers
+    // don't need to be "restored" — the next connection just calls
+    // `subscribe_events()` for a fresh receiver.
+    drop(events_rx);
 
     log_debug!(
         "[daemon/sessions_grid_ws] subscriber detached from session {}",
         session.session_id,
     );
-}
-
-/// Put the events receiver back on the session so the next subscriber
-/// (or reattach after Tauri reload) can take it. If the session is
-/// already dropped this is a no-op — the call returns a new-state
-/// receiver-less session anyway. Using a free function keeps the
-/// borrow checker happy with the select-loop ownership.
-fn restore_events(
-    session: &Arc<k2so_core::terminal::DaemonPtySession>,
-    _rx: tokio::sync::mpsc::UnboundedReceiver<AlacEvent>,
-) {
-    // `_rx` is dropped here. The session has its own internal slot
-    // that holds events_rx (via `Mutex<Option<...>>`); after drop
-    // we're NOT putting the receiver back into it. That's
-    // intentional: v2 is strictly single-subscriber, so once the
-    // original handler exits, the session is effectively closed
-    // for further subscribers. A future reattach would use
-    // find-or-spawn (A4) to create a fresh session that has its
-    // own receiver.
-    //
-    // If we later want "subscriber A disconnects, subscriber B
-    // reconnects" support on the SAME session, we'd add a
-    // `session.restore_events(rx)` method that re-inserts the
-    // receiver into the Mutex<Option<...>>. Deferred — not in A3
-    // scope.
-    let _ = session;
 }
 
 async fn send_outbound<W>(write: &mut W, msg: &Outbound<'_>) -> Result<(), ()>
