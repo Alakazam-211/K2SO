@@ -2961,7 +2961,7 @@ dependencies = [
 
 [[package]]
 name = "k2so-core"
-version = "0.34.2"
+version = "0.34.1"
 dependencies = [
  "alacritty_terminal",
  "argon2",
@@ -2999,7 +2999,7 @@ dependencies = [
 
 [[package]]
 name = "k2so-daemon"
-version = "0.34.2"
+version = "0.34.1"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
