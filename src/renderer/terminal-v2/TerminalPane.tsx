@@ -239,9 +239,15 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     cwd,
     command,
     args,
-    fontSize = config.font.size,
   } = props
 
+  // Live-subscribe to the terminal settings store so Cmd+Shift+=
+  // / Cmd+Shift+- menu events (wired via listen('terminal:zoom-*')
+  // in terminal-settings.ts) update this component's font size
+  // immediately. Prop takes precedence for tests / ad-hoc consumers
+  // that want to override.
+  const storeFontSize = useTerminalSettingsStore((s) => s.fontSize)
+  const fontSize = props.fontSize ?? storeFontSize
   const linkClickMode = useTerminalSettingsStore((s) => s.linkClickMode)
 
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' })
