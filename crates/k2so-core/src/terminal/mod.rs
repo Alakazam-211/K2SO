@@ -12,6 +12,15 @@ mod font_renderer;
 // equivalent to v0.33.0.
 #[cfg(feature = "session_stream")]
 pub mod session_stream_pty;
+// Alacritty_v2 daemon-hosted PTY + Term module (Phase A1 of the
+// .k2so/prds/alacritty-v2.md plan). Parallel to `session_stream_pty`
+// but minimal: no LineMux, no byte broadcast, no ring, no APC. Uses
+// alacritty's built-in EventLoop::spawn() rather than a custom
+// reader. Intended to become the single daemon-side terminal type
+// once v1 retires; `session_stream_pty` stays alive only for the
+// Kessel-T0 fallback path during the transition.
+#[cfg(feature = "session_stream")]
+pub mod daemon_pty;
 // Grow-then-shrink settle watcher (2026-04-22). Every Session Stream
 // spawn opens the PTY at an artificially large rows value; this
 // module owns the "has the initial paint settled?" decision that
@@ -29,6 +38,11 @@ pub use event_sink::TerminalEventSink;
 pub use session_stream_pty::{
     spawn_session_stream, spawn_session_stream_and_grow, NoopListener,
     SessionStreamSession, SpawnConfig, GROW_ROWS,
+};
+
+#[cfg(feature = "session_stream")]
+pub use daemon_pty::{
+    DaemonEventListener, DaemonPtyConfig, DaemonPtySession, SCROLLBACK_CAP,
 };
 
 use parking_lot::Mutex;
