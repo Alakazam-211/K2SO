@@ -4,6 +4,7 @@ import type { MosaicNode, MosaicDirection } from 'react-mosaic-component'
 import { RESUMABLE_CLI_TOOLS } from '@shared/constants'
 import { useSettingsStore } from '@/stores/settings'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
+import { getDaemonWs } from '@/kessel/daemon-ws'
 
 // Lazy reference to presets store — avoids circular dependency (presets → tabs → presets).
 // Set by presets.ts on init via registerPresetsStore().
@@ -35,6 +36,64 @@ function broadcastTabChange(payload: TabSyncPayload): void {
   }).catch((e) => console.warn('[tabs] broadcast failed:', e))
 }
 
+// ── Terminal close helpers ───────────────────────────────────────────────
+
+/**
+ * Close a terminal session on the appropriate backend for its
+ * renderer. Called on every deliberate tab-close path in the
+ * store (removeTab, removePaneFromTab, closeItemInPaneGroup,
+ * clearAllTabs). Alacritty_v2 requires this explicit call
+ * because its component unmount cleanup intentionally does NOT
+ * close the daemon session — that's what makes workspace swap +
+ * Tauri restart retain sessions.
+ *
+ * Fire-and-forget: close failures are logged but don't block the
+ * UI, matching the pattern already used for terminal_kill.
+ */
+function closeTerminalForRenderer(data: TerminalItemData): void {
+  const renderer = data.renderer ?? 'alacritty'
+  switch (renderer) {
+    case 'alacritty':
+      // Tauri-local PTY; dies with TerminalManager.
+      invoke('terminal_kill', { id: data.terminalId }).catch((e) =>
+        console.warn('[tabs] terminal_kill failed:', e),
+      )
+      break
+    case 'alacritty-v2':
+      // Daemon-owned PTY; unregister from v2_session_map so the
+      // last Arc drops and DaemonPtySession tears down the child
+      // + PTY master. See .k2so/prds/alacritty-v2.md phase A6.
+      closeV2Session(`tab-${data.terminalId}`)
+      break
+    case 'kessel':
+      // Kessel sessions clean up via component unmount (Phase 6
+      // legacy behavior). No explicit close here.
+      break
+  }
+}
+
+async function closeV2Session(agentName: string): Promise<void> {
+  try {
+    const { port, token } = await getDaemonWs()
+    const res = await fetch(
+      `http://127.0.0.1:${port}/cli/sessions/v2/close?token=${token}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent_name: agentName }),
+      },
+    )
+    if (!res.ok) {
+      const body = await res.text()
+      console.warn(
+        `[tabs] v2 close ${res.status} for ${agentName}: ${body}`,
+      )
+    }
+  } catch (e) {
+    console.warn(`[tabs] v2 close failed for ${agentName}:`, e)
+  }
+}
+
 // ── Item Types ────────────────────────────────────────────────────────────
 
 export interface TerminalItemData {
@@ -51,13 +110,17 @@ export interface TerminalItemData {
    *  apples comparison (Alacritty vs Kessel). */
   spawnedAt?: number
   /**
-   * Phase 4.5 renderer selection — captured at tab creation from the
-   * user's terminal settings preference. Each tab remembers its own
+   * Renderer selection — captured at tab creation from the user's
+   * terminal settings preference. Each tab remembers its own
    * renderer so toggling the preference doesn't hot-swap existing
    * terminals mid-session. Missing / undefined = alacritty (the
    * historical default for every tab created pre-4.5).
+   *
+   *   - 'alacritty'     (Legacy) — Tauri-local PTY (terminal_kill).
+   *   - 'alacritty-v2'  — daemon-owned PTY (cli/sessions/v2/close).
+   *   - 'kessel'        — experimental multi-device (kessel_close).
    */
-  renderer?: 'alacritty' | 'kessel'
+  renderer?: 'alacritty' | 'alacritty-v2' | 'kessel'
   /**
    * Phase 4.5 — Kessel-specific SessionId UUID returned by the
    * daemon's /cli/sessions/spawn. Populated lazily by the Kessel
@@ -726,7 +789,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         for (const item of pg.items) {
           if (item.type === 'terminal') {
             const data = item.data as TerminalItemData
-            invoke('terminal_kill', { id: data.terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
+            closeTerminalForRenderer(data)
           }
         }
       }
@@ -857,7 +920,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       for (const item of pg.items) {
         if (item.type === 'terminal') {
           const data = item.data as TerminalItemData
-          invoke('terminal_kill', { id: data.terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
+          closeTerminalForRenderer(data)
         }
       }
     }
@@ -1384,7 +1447,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     const removedItem = pg?.items.find((item) => item.id === itemId)
     if (removedItem?.type === 'terminal') {
       const data = removedItem.data as TerminalItemData
-      invoke('terminal_kill', { id: data.terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
+      closeTerminalForRenderer(data)
     }
 
     set((state) => {
@@ -1577,7 +1640,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       for (const [, pg] of tab.paneGroups) {
         for (const item of pg.items) {
           if (item.type === 'terminal') {
-            invoke('terminal_kill', { id: (item.data as TerminalItemData).terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
+            closeTerminalForRenderer(item.data as TerminalItemData)
           }
         }
       }
@@ -2028,7 +2091,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         for (const item of pg.items) {
           if (item.type === 'terminal') {
             const data = item.data as TerminalItemData
-            invoke('terminal_kill', { id: data.terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
+            closeTerminalForRenderer(data)
           }
         }
       }
@@ -2040,7 +2103,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
           for (const item of pg.items) {
             if (item.type === 'terminal') {
               const data = item.data as TerminalItemData
-              invoke('terminal_kill', { id: data.terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
+              closeTerminalForRenderer(data)
             }
           }
         }
@@ -2283,7 +2346,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         for (const item of pg.items) {
           if (item.type === 'terminal') {
             const data = item.data as TerminalItemData
-            invoke('terminal_kill', { id: data.terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
+            closeTerminalForRenderer(data)
           }
         }
       }
@@ -2294,7 +2357,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
           for (const item of pg.items) {
             if (item.type === 'terminal') {
               const data = item.data as TerminalItemData
-              invoke('terminal_kill', { id: data.terminalId }).catch((e) => console.warn('[tabs] terminal_kill failed:', e))
+              closeTerminalForRenderer(data)
             }
           }
         }
