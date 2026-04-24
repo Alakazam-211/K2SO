@@ -21,6 +21,12 @@ pub mod session_stream_pty;
 // Kessel-T0 fallback path during the transition.
 #[cfg(feature = "session_stream")]
 pub mod daemon_pty;
+// Alacritty_v2 grid snapshot + delta wire types + serializers
+// (Phase A2). Shared between the daemon's WS endpoint (A3) and
+// the Tauri thin client (A5). Generic over `EventListener` so
+// it's usable with any Term variant.
+#[cfg(feature = "session_stream")]
+pub mod grid_snapshot;
 // Grow-then-shrink settle watcher (2026-04-22). Every Session Stream
 // spawn opens the PTY at an artificially large rows value; this
 // module owns the "has the initial paint settled?" decision that
@@ -43,6 +49,13 @@ pub use session_stream_pty::{
 #[cfg(feature = "session_stream")]
 pub use daemon_pty::{
     DaemonEventListener, DaemonPtyConfig, DaemonPtySession, SCROLLBACK_CAP,
+};
+
+#[cfg(feature = "session_stream")]
+pub use grid_snapshot::{
+    build_emit, cell_to_run, encode_row_runs, resolve_color, snapshot_term,
+    CellRun, CursorSnapshot, DamagedRow, EmitDecision, EmitState,
+    TermGridDelta, TermGridSnapshot,
 };
 
 use parking_lot::Mutex;
