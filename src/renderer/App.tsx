@@ -316,9 +316,17 @@ export default function App(): React.JSX.Element {
 
       // Find the last focused terminal container and refocus it
       requestAnimationFrame(() => {
-        const activeEl = document.activeElement
+        const activeEl = document.activeElement as HTMLElement | null
         // If something interactive already grabbed focus, leave it
-        if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || (activeEl as HTMLElement).isContentEditable)) return
+        if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || activeEl.isContentEditable)) return
+
+        // If a terminal container is already focused (e.g. the
+        // user clicked into a specific pane in a split layout),
+        // leave it alone. Without this, clicking column 2 in a
+        // split would briefly focus it, then the querySelector
+        // below would always resolve to column 1 (first match)
+        // and steal the focus back.
+        if (activeEl && activeEl.dataset && activeEl.dataset.terminalContainer !== undefined) return
 
         // Find the visible terminal container in the active tab
         const terminalContainer = document.querySelector('[data-terminal-container][data-terminal-visible="true"]') as HTMLElement
@@ -331,8 +339,14 @@ export default function App(): React.JSX.Element {
     // Refocus terminal when nothing has focus (after modal close, Esc, etc.)
     // Polls every 200ms — if activeElement is body or null (nothing focused)
     // and no overlay is open, refocus the terminal.
+    //
+    // NOTE: the `active !== body` check below is already the
+    // split-pane safety net (if a specific pane is focused it's
+    // not body/null, so we leave it) — but be explicit about it:
+    // never refocus if ANY terminal container currently has
+    // focus.
     const refocusInterval = setInterval(() => {
-      const active = document.activeElement
+      const active = document.activeElement as HTMLElement | null
       // Only refocus if nothing meaningful has focus
       if (active && active !== document.body) return
       // Don't refocus if settings is open
