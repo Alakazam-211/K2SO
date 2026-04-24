@@ -1019,7 +1019,7 @@ export function AlacrittyTerminalView({
           fontFamily: 'monospace', zIndex: 999, pointerEvents: 'none',
           borderRadius: '3px',
         }}>
-          <strong style={{ color: '#ff0' }}>Alacritty</strong> · frames:{debugInfo.frames} offset:{debugInfo.offset} wheel:{debugInfo.wheel} cells:{gridState.cols}x{gridState.rows} cursor:{gridState.cursorCol},{gridState.cursorRow} vis:{gridState.cursorVisible?'Y':'N'} cell:{cellW.toFixed(1)}x{cellH}
+          <strong style={{ color: '#ff0' }}>Alacritty (Legacy)</strong> · frames:{debugInfo.frames} offset:{debugInfo.offset} wheel:{debugInfo.wheel} cells:{gridState.cols}x{gridState.rows} cursor:{gridState.cursorCol},{gridState.cursorRow} vis:{gridState.cursorVisible?'Y':'N'} cell:{cellW.toFixed(1)}x{cellH}
         </div>
       )}
     </div>

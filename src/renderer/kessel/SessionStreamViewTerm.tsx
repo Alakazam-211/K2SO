@@ -576,7 +576,7 @@ export function SessionStreamViewTerm(
             borderRadius: '3px',
           }}
         >
-          <strong style={{ color: '#fff' }}>Kessel Term</strong>{' '}
+          <strong style={{ color: '#fff' }}>Kessel</strong>{' '}
           · cells:{snapshot?.cols ?? '?'}x{snapshot?.rows ?? '?'}{' '}
           cursor:{snapshot?.cursor.col ?? 0},{snapshot?.cursor.row ?? 0}{' '}
           off:{viewportOffset}{' '}
