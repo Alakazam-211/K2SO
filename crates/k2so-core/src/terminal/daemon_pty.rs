@@ -36,6 +36,7 @@ use alacritty_terminal::event::{
 /// direct `alacritty_terminal` dependency. The daemon crate only
 /// depends on k2so-core; this keeps that surface honest.
 pub use alacritty_terminal::event::Event as AlacEvent;
+
 use alacritty_terminal::event_loop::{EventLoop, Notifier};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::sync::FairMutex;

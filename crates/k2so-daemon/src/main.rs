@@ -51,6 +51,7 @@ mod spawn;
 mod terminal_routes;
 mod triage;
 mod v2_session_map;
+mod v2_spawn;
 mod watchdog;
 
 use std::fs;
@@ -325,7 +326,11 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
     let is_post = method == "POST";
     let post_allowed = matches!(
         path_and_query.split_once('?').map(|(p, _)| p).unwrap_or(path_and_query),
-        "/cli/awareness/publish" | "/cli/sessions/spawn" | "/cli/sessions/close"
+        "/cli/awareness/publish"
+            | "/cli/sessions/spawn"
+            | "/cli/sessions/close"
+            | "/cli/sessions/v2/spawn"
+            | "/cli/sessions/v2/close"
     );
     if method != "GET" && !(is_post && post_allowed) {
         let _ = stream.read(&mut buf).await;
@@ -546,6 +551,47 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             }
             let body_bytes = read_post_body(&mut stream, &mut buf).await;
             let result = awareness_ws::handle_sessions_close(&body_bytes);
+            send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/sessions/v2/spawn — Alacritty_v2 find-or-spawn
+        // (A4). Parallel to /cli/sessions/spawn but produces a
+        // DaemonPtySession (registered in v2_session_map) instead
+        // of a SessionStreamSession. Idempotent on agent_name: same
+        // name → same session, suitable for remount reattach.
+        "/cli/sessions/v2/spawn" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let result = v2_spawn::handle_v2_spawn(&body_bytes);
+            send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/sessions/v2/close — explicit teardown of a v2
+        // session. Called only from `tabs.ts::removeTab` (A6).
+        "/cli/sessions/v2/close" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let result = v2_spawn::handle_v2_close(&body_bytes);
             send_response(&mut stream, result.status, "application/json", &result.body)
                 .await;
         }

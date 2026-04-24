@@ -52,6 +52,12 @@ pub use daemon_pty::{
     SCROLLBACK_CAP,
 };
 
+/// Re-export alacritty's `Dimensions` trait so daemon + Tauri
+/// consumers can call `term.columns()` / `term.screen_lines()`
+/// without a direct `alacritty_terminal` dependency.
+#[cfg(feature = "session_stream")]
+pub use alacritty_terminal::grid::Dimensions;
+
 #[cfg(feature = "session_stream")]
 pub use grid_snapshot::{
     build_emit, cell_to_run, encode_row_runs, resolve_color, snapshot_term,

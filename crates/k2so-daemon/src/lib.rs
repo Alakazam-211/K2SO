@@ -21,4 +21,5 @@ pub mod spawn;
 pub mod terminal_routes;
 pub mod triage;
 pub mod v2_session_map;
+pub mod v2_spawn;
 pub mod watchdog;
