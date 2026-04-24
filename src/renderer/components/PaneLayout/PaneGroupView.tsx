@@ -205,6 +205,13 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
                   />
                 )
               } else {
+                // `alacritty-v2` tabs also fall into this branch as
+                // a temporary placeholder — while phases A1-A5 of
+                // .k2so/prds/alacritty-v2.md are landing, selecting
+                // v2 transparently renders through the legacy v1
+                // component so settings exploration doesn't crash.
+                // This branch routes to <TerminalPane /> for v2
+                // tabs once A5 ships.
                 content = (
                 <AlacrittyTerminalView
                   terminalId={td.terminalId}

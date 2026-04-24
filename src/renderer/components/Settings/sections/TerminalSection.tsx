@@ -134,16 +134,29 @@ export function TerminalSection(): React.JSX.Element {
           />
         </SettingRow>
 
-        {/* Terminal Renderer — Phase 4.5 Kessel opt-in */}
+        {/* Terminal Renderer.
+         *
+         *  - "Alacritty (Legacy)" = today's Tauri-local PTY renderer.
+         *    Default until v2 ships.
+         *  - "Alacritty" = v2, daemon-hosted. Currently placeholder
+         *    (falls back to v1 behavior) while A1-A5 land per
+         *    .k2so/prds/alacritty-v2.md.
+         *  - "Kessel (BETA)" = experimental JSON-stream multi-device
+         *    renderer for T1-capable CLI tools (see
+         *    .k2so/prds/kessel-t1.md).
+         *
+         *  Changing this setting only affects NEW tabs.
+         */}
         <SettingRow settingId="terminal.renderer" label={
-          <span title="Alacritty is the production-hardened default. Kessel subscribes to the daemon's Session Stream and is in BETA — changing this only affects NEW terminals; existing tabs keep their current renderer.">
+          <span title="Alacritty (Legacy) is the production default. Alacritty (v2) runs on the daemon and supports heartbeat continuity but is still under development. Kessel is experimental, for JSON-stream-capable CLI tools only. Changing this only affects NEW terminals; existing tabs keep their current renderer.">
             Terminal Renderer
           </span>
         }>
           <SettingDropdown
             value={renderer}
             options={[
-              { value: 'alacritty', label: 'Alacritty (legacy)' },
+              { value: 'alacritty', label: 'Alacritty (Legacy)' },
+              { value: 'alacritty-v2', label: 'Alacritty' },
               { value: 'kessel', label: 'Kessel (BETA)' },
             ]}
             onChange={(v) => setRenderer(v as TerminalRenderer)}
