@@ -24,6 +24,7 @@
 // Term + byte reader + APC filter. None of that here.
 
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 
 import { useKesselConfig } from '../kessel/config-context'
 import { useIsTabVisible } from '@/contexts/TabVisibilityContext'
@@ -32,6 +33,17 @@ import {
   naturalTextEditingSequence,
 } from '@/lib/key-mapping'
 import { getDaemonWs, invalidateDaemonWs } from '../kessel/daemon-ws'
+import { useTerminalSettingsStore } from '@/stores/terminal-settings'
+import { useTabsStore } from '@/stores/tabs'
+import {
+  detectLinks,
+  type DetectedLink,
+} from '@/components/Terminal/terminalLinkDetector'
+import {
+  bracketPaste,
+  isImagePath,
+  quotePathForImageDrop,
+} from '@/lib/file-drag'
 
 // ── Wire types (mirror k2so-core/src/terminal/grid_snapshot.rs) ───
 
@@ -130,6 +142,37 @@ function renderRowRuns(row: CellRun[], rowIdx: number): React.ReactNode {
   return spans
 }
 
+/** Join all run text in a row into a single plain string. Used
+ *  for link detection (which operates on raw text). */
+function rowToText(row: CellRun[]): string {
+  let out = ''
+  for (const run of row) out += run.text
+  return out
+}
+
+/** Shell-escape a path for safe paste into a terminal input line.
+ *  Mirrors the helper in AlacrittyTerminalView.tsx — duplicated
+ *  rather than imported to keep v2 decoupled from v1. */
+function shellEscape(path: string): string {
+  return path.replace(/[ '"\\()&|;<>$`!#*?[\]{}~]/g, '\\$&')
+}
+
+/** Images/PDFs skip backslash-escape so Claude Code's
+ *  `[Image #N]` detection (which fs.exists()s the literal string)
+ *  can resolve them. */
+function formatPathForTerminal(path: string): string {
+  return isImagePath(path) ? quotePathForImageDrop(path) : shellEscape(path)
+}
+
+/** Build terminal payload for a dropped/pasted set of paths.
+ *  Wraps in bracketed paste if any path is an image, so Claude's
+ *  paste-event handler fires. */
+function buildDropPayload(paths: string[]): string {
+  const formatted = paths.map(formatPathForTerminal).join(' ')
+  const trailing = formatted + ' '
+  return paths.some(isImagePath) ? bracketPaste(trailing) : trailing
+}
+
 /** Merge a delta into a prior snapshot. Pure. Returns `prev`
  *  unchanged if no prior snapshot exists yet (delta arrived
  *  before the initial snapshot — shouldn't happen per protocol,
@@ -166,6 +209,12 @@ function mergeDelta(
 
 export interface TerminalPaneProps {
   terminalId: string
+  /** Parent tab id — used to route file-link clicks to the right
+   *  sibling pane when the user's "open links in split pane"
+   *  preference is on. */
+  tabId?: string
+  /** This pane's pane-group id, for the same split-pane routing. */
+  paneGroupId?: string
   cwd: string
   command?: string
   args?: string[]
@@ -183,7 +232,17 @@ type Phase =
 
 export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   const config = useKesselConfig()
-  const { terminalId, cwd, command, args, fontSize = config.font.size } = props
+  const {
+    terminalId,
+    tabId,
+    paneGroupId,
+    cwd,
+    command,
+    args,
+    fontSize = config.font.size,
+  } = props
+
+  const linkClickMode = useTerminalSettingsStore((s) => s.linkClickMode)
 
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' })
   const [snapshot, setSnapshot] = useState<TermGridSnapshot | null>(null)
@@ -195,6 +254,18 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const isTabVisible = useIsTabVisible()
+
+  // Link detection state. Set on hover over a URL / file path
+  // that `detectLinks` recognizes in the row the mouse is over.
+  // Non-null → cursor becomes pointer and click opens the link.
+  const [hoveredLink, setHoveredLink] = useState<{
+    row: number
+    link: DetectedLink
+  } | null>(null)
+  const cmdHeldRef = useRef(false)
+  const mouseDownLinkRef = useRef<DetectedLink | null>(null)
+  const lastDetectPosRef = useRef({ x: 0, y: 0 })
+  const lastDetectTimeRef = useRef(0)
 
   // ── Spawn + WS lifecycle ──────────────────────────────────────
   //
@@ -339,6 +410,32 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     return () => cancelAnimationFrame(raf)
   }, [isTabVisible])
 
+  // Re-focus terminal when the OS window regains focus (e.g.,
+  // switching back from another app). Only re-focuses if THIS
+  // container held focus before the window blur — prevents
+  // stealing focus from an input/textarea that happens to be
+  // visible. Mirrors AlacrittyTerminalView.tsx's pattern.
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    let wasFocused = false
+    const onBlur = () => {
+      wasFocused =
+        document.activeElement === container ||
+        container.contains(document.activeElement)
+    }
+    const onFocus = () => {
+      if (!wasFocused) return
+      requestAnimationFrame(() => container.focus())
+    }
+    window.addEventListener('blur', onBlur)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      window.removeEventListener('blur', onBlur)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [])
+
   // ── Cell metrics (for cursor positioning + wheel math) ────────
   const [cellMetrics, setCellMetrics] = useState({ width: 0, height: 0 })
   useLayoutEffect(() => {
@@ -388,11 +485,26 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       sendInput(seq)
     }
     const onPaste = (e: ClipboardEvent) => {
-      const text = e.clipboardData?.getData('text')
-      if (!text) return
+      const text = e.clipboardData?.getData('text') ?? ''
       e.preventDefault()
       setViewportOffset(0)
-      sendInput(text)
+
+      // Finder's Cmd+C copies file refs via NSFilenamesPboardType,
+      // which WKWebView doesn't expose through the web clipboard
+      // API. Query the native pasteboard: if file paths are
+      // present, paste them shell-escaped (matching v1's drag-drop
+      // behavior). Fall back to text paste otherwise.
+      invoke<string[]>('clipboard_read_file_paths')
+        .then((paths) => {
+          if (paths && paths.length > 0) {
+            sendInput(buildDropPayload(paths))
+            return
+          }
+          if (text) sendInput(text)
+        })
+        .catch(() => {
+          if (text) sendInput(text)
+        })
     }
 
     el.addEventListener('keydown', onKey)
@@ -403,6 +515,166 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       el.removeEventListener('paste', onPaste)
     }
   }, [phase.kind, sendInput])
+
+  // ── Link detection: Cmd key tracking ──────────────────────────
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Meta') cmdHeldRef.current = true
+    }
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Meta') {
+        cmdHeldRef.current = false
+        if (linkClickMode === 'cmd-click') setHoveredLink(null)
+      }
+    }
+    const onBlur = () => {
+      cmdHeldRef.current = false
+      setHoveredLink(null)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    document.addEventListener('keyup', onKeyUp)
+    window.addEventListener('blur', onBlur)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('blur', onBlur)
+    }
+  }, [linkClickMode])
+
+  // ── Link detection: hover → {row, link} state ─────────────────
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent) => {
+      if (linkClickMode === 'cmd-click' && !cmdHeldRef.current) {
+        if (hoveredLink) setHoveredLink(null)
+        return
+      }
+      // Throttle: skip if mouse moved < 4px and < 80ms since last.
+      const now = Date.now()
+      const dx = e.clientX - lastDetectPosRef.current.x
+      const dy = e.clientY - lastDetectPosRef.current.y
+      if (dx * dx + dy * dy < 16 && now - lastDetectTimeRef.current < 80) return
+      lastDetectPosRef.current = { x: e.clientX, y: e.clientY }
+      lastDetectTimeRef.current = now
+
+      const el = containerRef.current
+      if (!el || !snapshot) return
+      const rect = el.getBoundingClientRect()
+      const { width: cw, height: ch } = cellMetrics
+      if (cw === 0 || ch === 0) return
+      // The 4px padding on the container biases cell positions —
+      // subtract before dividing.
+      const row = Math.floor((e.clientY - rect.top - 4) / ch)
+      const col = Math.floor((e.clientX - rect.left - 4) / cw)
+      const visibleRow = visibleRows[row]
+      if (!visibleRow) {
+        if (hoveredLink) setHoveredLink(null)
+        return
+      }
+      const text = rowToText(visibleRow)
+      if (!text.trim()) {
+        if (hoveredLink) setHoveredLink(null)
+        return
+      }
+      const links = detectLinks(text, cwd)
+      const hit = links.find((l) => col >= l.start && col < l.end)
+      if (hit) {
+        if (
+          !hoveredLink ||
+          hoveredLink.row !== row ||
+          hoveredLink.link.start !== hit.start
+        ) {
+          setHoveredLink({ row, link: hit })
+        }
+      } else if (hoveredLink) {
+        setHoveredLink(null)
+      }
+    },
+    [linkClickMode, hoveredLink, cellMetrics, snapshot, visibleRows, cwd],
+  )
+
+  const handleMouseLeave = useCallback(() => {
+    if (hoveredLink) setHoveredLink(null)
+  }, [hoveredLink])
+
+  const handleMouseDown = useCallback(() => {
+    mouseDownLinkRef.current = hoveredLink?.link ?? null
+  }, [hoveredLink])
+
+  const handleClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (linkClickMode === 'cmd-click' && !e.metaKey) return
+      if (!hoveredLink) return
+      // Validate: mouse-down must have been on the same link so a
+      // drag-to-link doesn't false-click.
+      const downLink = mouseDownLinkRef.current
+      mouseDownLinkRef.current = null
+      if (
+        !downLink ||
+        downLink.start !== hoveredLink.link.start ||
+        downLink.target !== hoveredLink.link.target
+      ) {
+        return
+      }
+
+      const clicked = hoveredLink.link
+      e.preventDefault()
+      e.stopPropagation()
+
+      if (clicked.type === 'url') {
+        invoke('open_external', { url: clicked.target }).catch((err) =>
+          console.warn('[terminal-v2/link]', err),
+        )
+      } else if (clicked.type === 'file' && clicked.filePath) {
+        const tabsStore = useTabsStore.getState()
+        const openInSplit =
+          useTerminalSettingsStore.getState().openLinksInSplitPane
+
+        if (openInSplit && tabId && paneGroupId) {
+          const tab = tabsStore.tabs.find((t) => t.id === tabId)
+          if (tab && tab.paneGroups.size > 1) {
+            const siblingId = [...tab.paneGroups.keys()].find(
+              (id) => id !== paneGroupId,
+            )
+            if (siblingId) {
+              tabsStore.openFileInPaneGroup(tabId, siblingId, clicked.filePath)
+              return
+            }
+          }
+        }
+        tabsStore.openFileInNewTab(clicked.filePath)
+      }
+    },
+    [linkClickMode, hoveredLink, tabId, paneGroupId],
+  )
+
+  // ── Drag + drop of files (from Finder or K2SO files tab) ──────
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+  }, [])
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const files = e.dataTransfer.files
+      if (files.length > 0) {
+        const paths: string[] = []
+        for (let i = 0; i < files.length; i++) {
+          // Tauri exposes full path via .path (non-standard field).
+          const p = (files[i] as unknown as { path?: string }).path
+          if (p) paths.push(p)
+        }
+        if (paths.length > 0) {
+          sendInput(buildDropPayload(paths))
+          return
+        }
+      }
+      const text = e.dataTransfer.getData('text/plain')
+      if (text) sendInput(text)
+    },
+    [sendInput],
+  )
 
   // ── ResizeObserver → send resize ──────────────────────────────
   useEffect(() => {
@@ -575,13 +847,33 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       ? phase.sessionId
       : null
 
+  // Container cursor hints at link-clickability without rewriting
+  // the row DOM (simpler than overlaying underlines per hovered
+  // link). Matches v1's affordance.
+  const finalContainerStyle: React.CSSProperties = {
+    ...containerStyle,
+    cursor: hoveredLink ? 'pointer' : 'text',
+  }
+
   return (
     <div
       ref={containerRef}
       className="alacritty-v2-pane"
       data-session-id={debugSessionId}
+      // App.tsx's global click + refocus-poll use these two data
+      // attributes to find the active terminal and keep it focused
+      // after (a) clicks on blank canvas, (b) Cmd+K / Cmd+L
+      // palette close, (c) any overlay Esc-out. Matches v1.
+      data-terminal-container=""
+      data-terminal-visible="true"
       tabIndex={0}
-      style={containerStyle}
+      style={finalContainerStyle}
+      onMouseMove={handleMouseMove}
+      onMouseLeave={handleMouseLeave}
+      onMouseDown={handleMouseDown}
+      onClick={handleClick}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
     >
       {visibleRows.map((row, rowIdx) => (
         <div key={`row-${rowIdx}`}>{renderRowRuns(row, rowIdx)}</div>

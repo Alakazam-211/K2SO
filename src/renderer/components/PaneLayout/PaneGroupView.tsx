@@ -211,6 +211,8 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
                 content = (
                   <TerminalPane
                     terminalId={td.terminalId}
+                    tabId={tabId}
+                    paneGroupId={paneGroupId}
                     cwd={td.cwd}
                     command={td.command}
                     args={td.args}
