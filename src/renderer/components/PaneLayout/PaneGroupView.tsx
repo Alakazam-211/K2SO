@@ -1,6 +1,7 @@
 import { useCallback, useContext, useState } from 'react'
 import { AlacrittyTerminalView } from '@/components/Terminal/AlacrittyTerminalView'
 import { KesselTerminal } from '@/kessel/KesselTerminal'
+import { TerminalPane } from '@/terminal-v2/TerminalPane'
 import { FileViewerPane } from '@/components/FileViewerPane/FileViewerPane'
 import { AgentPane } from '@/components/AgentPane/AgentPane'
 import { useTabsStore } from '@/stores/tabs'
@@ -204,14 +205,19 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
                     spawnedAt={td.spawnedAt}
                   />
                 )
+              } else if (raw.renderer === 'alacritty-v2') {
+                // A5: daemon-hosted v2 thin client.
+                // See .k2so/prds/alacritty-v2.md.
+                content = (
+                  <TerminalPane
+                    terminalId={td.terminalId}
+                    cwd={td.cwd}
+                    command={td.command}
+                    args={td.args}
+                    spawnedAt={td.spawnedAt}
+                  />
+                )
               } else {
-                // `alacritty-v2` tabs also fall into this branch as
-                // a temporary placeholder — while phases A1-A5 of
-                // .k2so/prds/alacritty-v2.md are landing, selecting
-                // v2 transparently renders through the legacy v1
-                // component so settings exploration doesn't crash.
-                // This branch routes to <TerminalPane /> for v2
-                // tabs once A5 ships.
                 content = (
                 <AlacrittyTerminalView
                   terminalId={td.terminalId}
