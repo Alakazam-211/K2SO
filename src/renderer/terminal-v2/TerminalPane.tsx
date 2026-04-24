@@ -516,6 +516,31 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     }
   }, [phase.kind, sendInput])
 
+  // ── Compose visible rows ──────────────────────────────────────
+  //
+  // Declared before the link-detection handlers below because
+  // `handleMouseMove` closes over `visibleRows` and JS temporal-
+  // dead-zone rules reject the closure at render time if the
+  // `const` is declared later. (Same class of fix as the
+  // cellMetrics hoist that happened earlier in the Kessel-T0
+  // work.)
+  const visibleRows = useMemo<CellRun[][]>(() => {
+    if (!snapshot) return []
+    if (viewportOffset === 0) return snapshot.grid
+    const { scrollback, grid, rows: r } = snapshot
+    const totalLen = scrollback.length + grid.length
+    const windowEnd = totalLen - viewportOffset
+    const windowStart = windowEnd - r
+    const out: CellRun[][] = []
+    for (let i = 0; i < r; i++) {
+      const abs = windowStart + i
+      if (abs < 0) out.push([])
+      else if (abs < scrollback.length) out.push(scrollback[abs])
+      else out.push(grid[abs - scrollback.length])
+    }
+    return out
+  }, [viewportOffset, snapshot])
+
   // ── Link detection: Cmd key tracking ──────────────────────────
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -757,24 +782,6 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       }
     }
   }, [config.scrolling.multiplier, cellMetrics.height, snapshot])
-
-  // ── Compose visible rows ──────────────────────────────────────
-  const visibleRows = useMemo<CellRun[][]>(() => {
-    if (!snapshot) return []
-    if (viewportOffset === 0) return snapshot.grid
-    const { scrollback, grid, rows: r } = snapshot
-    const totalLen = scrollback.length + grid.length
-    const windowEnd = totalLen - viewportOffset
-    const windowStart = windowEnd - r
-    const out: CellRun[][] = []
-    for (let i = 0; i < r; i++) {
-      const abs = windowStart + i
-      if (abs < 0) out.push([])
-      else if (abs < scrollback.length) out.push(scrollback[abs])
-      else out.push(grid[abs - scrollback.length])
-    }
-    return out
-  }, [viewportOffset, snapshot])
 
   // ── Styles ────────────────────────────────────────────────────
   const containerStyle: React.CSSProperties = useMemo(

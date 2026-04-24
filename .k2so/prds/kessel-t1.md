@@ -250,6 +250,69 @@ Symmetry with Alacritty_v2:
 Different where it should be different. Shared where it should be
 shared.
 
+## Creature-comfort parity requirements (learned during v2)
+
+When Alacritty_v2's TerminalPane shipped in A5/A7, we found that
+several "it just works" interaction affordances from Alacritty_v1
+weren't automatic — they had to be ported in deliberately. Kessel's
+rich-component renderer is architecturally different (it renders
+Message / ToolCall / Thinking cards, not terminal cells), but most
+of these affordances still apply and are easy to forget until a
+user hits the missing behavior. Capture them here as Day-1
+requirements for the Tauri Kessel view in K5:
+
+1. **Link detection and click handling.**
+   Text content (assistant messages, tool-call results, file
+   edits) regularly contains URLs and file paths. Use the same
+   `detectLinks` helper from
+   `src/renderer/components/Terminal/terminalLinkDetector.ts`
+   against rendered text. URL click →
+   `invoke('open_external', {url})`. File path click →
+   `useTabsStore.openFileInNewTab(path)` OR
+   `openFileInPaneGroup(siblingId, path)` if the user has
+   "Open Links in Split Pane" on. Respect the Cmd-click-vs-click
+   mode from `useTerminalSettingsStore`.
+
+2. **Paste handling with file-clipboard support.**
+   Cmd+V of a file copied in Finder comes through via
+   `NSFilenamesPboardType`, NOT the web Clipboard API. Always
+   call `invoke('clipboard_read_file_paths')` on paste; if it
+   returns paths, format them via the shared helpers in
+   `src/renderer/lib/file-drag.ts` (shell-escape + bracketed-
+   paste for images) before sending. For Kessel this means
+   sending the formatted path as a user-message payload (`{action: "input"}`
+   in A3's protocol, or the Kessel equivalent for "compose a
+   user message").
+
+3. **Drag and drop from Finder + files tab.**
+   `onDragOver` + `onDrop` on the pane container. Multi-file →
+   space-joined shell-escaped paths; any image path triggers
+   bracketed-paste wrapping so Claude Code's `[Image #N]`
+   detector fires.
+
+4. **Focus retention (the non-obvious one).**
+   App.tsx's global click handler + 200ms refocus-poll
+   (`useEffect` at `src/renderer/App.tsx:~315-348`) finds the
+   active terminal via `document.querySelector('[data-terminal-container][data-terminal-visible="true"]')`.
+   Kessel's top-level pane container MUST carry both of these
+   attributes or the app's "return focus to terminal after
+   clicking blank canvas / closing Cmd+K / closing Cmd+L"
+   behavior won't work. Also mirror the v1 window blur/focus
+   listener that records focus-before-blur and restores it on
+   window regain — gives you the Cmd+Tab-back-to-K2SO
+   behavior cleanly.
+
+5. **Auto-focus on tab-visible transition.**
+   `useIsTabVisible` from `@/contexts/TabVisibilityContext` →
+   when the pane becomes visible, `requestAnimationFrame(() =>
+   container.focus())`. Solves the "workspace swap return and
+   start typing doesn't land in the terminal" problem.
+
+These are tangential to Kessel's core architectural work
+(adapters, Frame schema, multi-subscriber) but they're what make
+a pane feel like a first-class terminal pane. Reserve ~half a
+day in K5 to port them over from TerminalPane.tsx.
+
 ## Heartbeat integration
 
 Kessel sessions are `SessionEntry`-hosted; heartbeat already works
