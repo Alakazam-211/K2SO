@@ -32,17 +32,20 @@
 //! registrars should `session_map::lookup` first and skip the
 //! spawn if an entry already exists.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use k2so_core::log_debug;
 use k2so_core::session::{registry, SessionId};
 use k2so_core::terminal::{
-    spawn_session_stream_and_grow, SessionStreamSession, SpawnConfig,
+    spawn_session_stream_and_grow, DaemonPtyConfig, DaemonPtySession, SpawnConfig,
 };
 
 use crate::pending_live;
 use crate::session_map;
 use crate::signal_format;
+use crate::v2_session_map;
 
 /// Input shape for a spawn. Shared by the HTTP handler
 /// (`handle_sessions_spawn`) and the scheduler-wake path
@@ -59,17 +62,18 @@ pub struct SpawnAgentSessionRequest {
     pub rows: u16,
 }
 
-/// Output shape. The HTTP handler serializes this as JSON; the
-/// scheduler-wake path logs it. No `Debug` derive because
-/// `SessionStreamSession` holds non-Debug portable-pty handles;
-/// downstream callers that need diagnostic output format the
-/// individual fields explicitly.
-#[derive(Clone)]
+/// Output shape returned by both legacy and v2 spawn variants.
+/// Renderer-agnostic on purpose — the caller only needs the
+/// session id (which is unique across both maps), the agent name
+/// it ended up registered as, and how many pending-live signals
+/// were drained on boot. The owning `Arc` lives in whichever map
+/// (`session_map` for legacy, `v2_session_map` for v2) registered
+/// the session.
+#[derive(Clone, Debug)]
 pub struct SpawnAgentSessionOutcome {
     pub session_id: SessionId,
     pub agent_name: String,
     pub pending_drained: usize,
-    pub session: Arc<SessionStreamSession>,
 }
 
 /// Execute the shared spawn flow. Returns the new session's id +
@@ -139,20 +143,94 @@ pub async fn spawn_agent_session(
         session_id,
         agent_name: req.agent_name,
         pending_drained: pending_count,
-        session: arc,
+    })
+}
+
+/// Alacritty_v2 spawn helper. The architectural counterpart to
+/// `spawn_agent_session`: takes the same `SpawnAgentSessionRequest`
+/// and returns the same `SpawnAgentSessionOutcome`, but the session
+/// it produces is a `DaemonPtySession` (registered in
+/// `v2_session_map`) instead of a `SessionStreamSession` (legacy
+/// `session_map`). End-state target after A9: every system-driven
+/// spawn flows through this. Only the explicit Kessel-T0 endpoint
+/// (`POST /cli/sessions/spawn` → `awareness_ws::handle_sessions_spawn`)
+/// stays on the legacy variant.
+///
+/// Synchronous: alacritty's IO thread is started in the background
+/// by `DaemonPtySession::spawn`; this fn returns as soon as the PTY
+/// is open and the Term + event loop are wired. No grow-then-shrink
+/// dance is needed (v2 doesn't have the replay-ring seeding the
+/// legacy path requires).
+pub fn spawn_agent_session_v2_blocking(
+    req: SpawnAgentSessionRequest,
+) -> Result<SpawnAgentSessionOutcome, String> {
+    if req.agent_name.is_empty() {
+        return Err("agent_name required".into());
+    }
+
+    // Convert the request shape into DaemonPtyConfig. v2 takes its
+    // working directory as `Option<PathBuf>` rather than a String,
+    // and stores `program: Option<String>` (vs legacy `command`),
+    // but the wire shape is otherwise identical.
+    let cfg = DaemonPtyConfig {
+        session_id: SessionId::new(),
+        cols: req.cols,
+        rows: req.rows,
+        cwd: Some(PathBuf::from(&req.cwd)),
+        program: req.command.clone(),
+        args: req.args.clone().unwrap_or_default(),
+        env: HashMap::new(),
+        drain_on_exit: true,
+    };
+    let session_id = cfg.session_id;
+
+    let session = DaemonPtySession::spawn(cfg)
+        .map_err(|e| format!("v2 spawn failed: {e}"))?;
+    v2_session_map::register(req.agent_name.clone(), session.clone());
+
+    // Drain any pending-live signals queued for this agent so they
+    // become input to the fresh session — same contract as the
+    // legacy spawn drain. Without this, signals enqueued by
+    // `DaemonWakeProvider::wake` while the agent was offline get
+    // silently dropped on v2 boot.
+    let pending = pending_live::drain_for_agent(&req.agent_name);
+    let pending_drained = pending.len();
+    for signal in pending {
+        let bytes = signal_format::inject_bytes(&signal);
+        session.write(bytes.into_bytes());
+    }
+
+    log_debug!(
+        "[daemon/spawn] v2 session={} agent={} pending_drained={}",
+        session_id,
+        req.agent_name,
+        pending_drained,
+    );
+
+    Ok(SpawnAgentSessionOutcome {
+        session_id,
+        agent_name: req.agent_name,
+        pending_drained,
     })
 }
 
 /// Synchronous wrapper around the async `spawn_agent_session`, for
 /// callers that live inside the daemon's sync `/cli/*` dispatch
-/// path (`terminal_routes`, `agents_routes`). Uses
-/// `tokio::task::block_in_place` to `block_on` the async spawn
-/// without deadlocking the multi-thread tokio runtime.
+/// path. Uses `tokio::task::block_in_place` to `block_on` the
+/// async spawn without deadlocking the multi-thread tokio runtime.
 ///
 /// Only safe inside a multi-thread tokio runtime — the daemon main
 /// is `#[tokio::main(flavor = "multi_thread")]`, which is the only
 /// production call site. Unit tests that want sync semantics should
 /// use a `#[tokio::test(flavor = "multi_thread")]` runtime.
+///
+/// **Currently unused** — A9 migrated all sync callers to
+/// `spawn_agent_session_v2_blocking`. Kept available for future
+/// callers that need the legacy spawn from a sync context (none in
+/// the production daemon today). `awareness_ws::handle_sessions_spawn`
+/// is the only direct legacy spawn site and is already async, so it
+/// calls the async `spawn_agent_session` directly.
+#[allow(dead_code)]
 pub fn spawn_agent_session_blocking(
     req: SpawnAgentSessionRequest,
 ) -> Result<SpawnAgentSessionOutcome, String> {

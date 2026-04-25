@@ -44,7 +44,9 @@ use k2so_core::session::{
     self, watchdog as core_watchdog, Escalation, EscalationState, Frame,
     SemanticKind, SessionEntry, SessionId, WatchdogConfig,
 };
-use k2so_core::terminal::SessionStreamSession;
+
+use crate::session_lookup::{self, LiveSession};
+use crate::v2_session_map;
 
 /// Spawn the watchdog as a background tokio task. Returns the
 /// JoinHandle so the daemon can abort it on graceful shutdown (not
@@ -130,19 +132,27 @@ pub fn tick(
     states: &mut HashMap<SessionId, EscalationState>,
 ) {
     let now = Instant::now();
-    let sessions = crate::session_map::snapshot();
+    let sessions = session_lookup::snapshot_all();
 
     // Prune state entries for sessions that have exited since the
     // last tick so the map doesn't accumulate dead ids indefinitely.
     let live_ids: HashSet<SessionId> =
-        sessions.iter().map(|(_, s)| s.session_id).collect();
+        sessions.iter().map(|(_, s)| s.session_id()).collect();
     states.retain(|id, _| live_ids.contains(id));
 
     for (agent, session) in sessions {
-        let Some(entry) = session::registry::lookup(&session.session_id) else {
-            // session_map has this session but registry doesn't —
-            // session is being torn down between lookups. Skip; the
-            // next tick will see it drop out of session_map too.
+        let session_id = session.session_id();
+        let Some(entry) = session::registry::lookup(&session_id) else {
+            // The map has this session but registry doesn't.
+            // Two reasons we land here:
+            //   - Legacy session is being torn down between lookups
+            //     (next tick won't see it).
+            //   - V2 session: alacritty_v2 doesn't register in
+            //     `k2so_core::session::registry` at all yet, so the
+            //     watchdog has no idle/created_at to consult.
+            //     Skipping leaves v2 sessions un-watchdogged for
+            //     now — wiring registry-backed activity tracking for
+            //     v2 is a follow-up to A9.
             continue;
         };
 
@@ -155,7 +165,7 @@ pub fn tick(
         }
 
         let idle = entry.idle_for(now);
-        let state = states.entry(session.session_id).or_default();
+        let state = states.entry(session_id).or_default();
         let decision = core_watchdog::evaluate(idle, state, config);
         if decision == Escalation::None {
             continue;
@@ -184,7 +194,7 @@ pub fn tick(
 fn execute(
     stage: Escalation,
     agent: &str,
-    session: &Arc<SessionStreamSession>,
+    session: &LiveSession,
     entry: &Arc<SessionEntry>,
     idle: Duration,
 ) -> std::io::Result<()> {
@@ -195,9 +205,10 @@ fn execute(
         Escalation::Kill => ("watchdog.killed", "killing child process"),
     };
 
+    let session_id = session.session_id();
     log_debug!(
         "[daemon/watchdog] agent={agent} session={} idle={}ms stage={kind_name} — {act_log}",
-        session.session_id,
+        session_id,
         idle.as_millis(),
     );
 
@@ -208,9 +219,21 @@ fn execute(
             session.write(&[0x03])?;
         }
         Escalation::Kill => {
-            session
-                .kill()
-                .map_err(std::io::Error::other)?;
+            // Legacy SessionStreamSession exposes an explicit kill();
+            // DaemonPtySession (v2) doesn't — dropping the registry
+            // Arc closes the PTY channel which SIGHUPs the child.
+            // Unregistering from v2_session_map releases the daemon's
+            // copy of the Arc; once any in-flight WS handler also
+            // drops its clone, the IO thread exits and the child
+            // dies. Same end state, slightly indirect path.
+            match session {
+                LiveSession::Legacy(s) => {
+                    s.kill().map_err(std::io::Error::other)?;
+                }
+                LiveSession::V2(_) => {
+                    v2_session_map::unregister(agent);
+                }
+            }
         }
         Escalation::None => unreachable!(),
     }
@@ -227,7 +250,7 @@ fn execute(
     // resetting with the warning frames themselves).
     let payload = serde_json::json!({
         "agent": agent,
-        "session_id": session.session_id.to_string(),
+        "session_id": session_id.to_string(),
         "idle_ms": idle.as_millis() as u64,
         "stage": kind_name,
     });

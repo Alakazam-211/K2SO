@@ -13,6 +13,7 @@ pub mod companion_routes;
 pub mod events;
 pub mod pending_live;
 pub mod providers;
+pub mod session_lookup;
 pub mod session_map;
 pub mod sessions_grid_ws;
 pub mod sessions_ws;

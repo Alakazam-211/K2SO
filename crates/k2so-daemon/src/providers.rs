@@ -14,20 +14,22 @@ use k2so_core::agents::launch_profile::{load_launch_profile, resolve_cwd, Launch
 use k2so_core::awareness::{AgentAddress, AgentSignal, InjectProvider, WakeProvider};
 use k2so_core::log_debug;
 
-use crate::session_map;
-use crate::spawn::{spawn_agent_session_blocking, SpawnAgentSessionRequest};
+use crate::session_lookup;
+use crate::spawn::{spawn_agent_session_v2_blocking, SpawnAgentSessionRequest};
 
-/// Looks up the target agent's session handle in `session_map` and
-/// writes the rendered signal bytes into its PTY. If no session is
-/// registered for the target agent, returns `NotFound` — the
-/// egress path sees this as "inject failed" and reports it in the
-/// `DeliveryReport`; the signal still lands in activity_feed and
-/// the bus, so nothing is silently lost.
+/// Looks up the target agent's session handle across BOTH the
+/// legacy `session_map` (Kessel-T0) and `v2_session_map`
+/// (Alacritty_v2) and writes the rendered signal bytes into its
+/// PTY. If no session is registered for the target agent in
+/// either map, returns `NotFound` — the egress path sees this as
+/// "inject failed" and reports it in the `DeliveryReport`; the
+/// signal still lands in activity_feed and the bus, so nothing is
+/// silently lost.
 pub struct DaemonInjectProvider;
 
 impl InjectProvider for DaemonInjectProvider {
     fn inject(&self, agent: &str, bytes: &[u8]) -> std::io::Result<()> {
-        let session = session_map::lookup(agent).ok_or_else(|| {
+        let session = session_lookup::lookup_any(agent).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("no live session for agent {agent}"),
@@ -121,9 +123,11 @@ impl WakeProvider for DaemonWakeProvider {
 ///   - spawn itself failed (bad command, PTY exhaustion, etc.)
 fn try_auto_launch(agent: &str, signal: &AgentSignal) -> Result<(), String> {
     // Single-flight: if a concurrent path already registered the
-    // session, skip. The pending-live drain on that session will
-    // pick up our enqueued signal.
-    if session_map::lookup(agent).is_some() {
+    // session in EITHER map, skip. The pending-live drain on that
+    // session will pick up our enqueued signal. Pre-A9 this only
+    // checked the legacy map and would re-spawn against live v2
+    // sessions, producing a duplicate child for the same agent.
+    if session_lookup::lookup_any(agent).is_some() {
         return Err("session already live".into());
     }
 
@@ -157,7 +161,10 @@ fn try_auto_launch(agent: &str, signal: &AgentSignal) -> Result<(), String> {
     // The signal we just enqueued is part of that drain and becomes
     // the target's first byte of input.
     let req = launch_request_for(agent, &project_path, &profile);
-    let outcome = spawn_agent_session_blocking(req)
+    // Heartbeat-driven headless wake produces v2 sessions per A9.
+    // The Tauri-open path goes through `BackgroundTerminalSpawner`
+    // → v2_spawn (also v2 since A8). Both wake paths now converge.
+    let outcome = spawn_agent_session_v2_blocking(req)
         .map_err(|e| format!("spawn failed: {e}"))?;
 
     log_debug!(

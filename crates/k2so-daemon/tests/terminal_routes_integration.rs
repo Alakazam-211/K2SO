@@ -22,8 +22,10 @@ use std::time::Duration;
 use k2so_core::session::{registry, Frame, SessionId};
 use k2so_core::terminal::{spawn_session_stream, SpawnConfig};
 
+use k2so_daemon::session_lookup;
 use k2so_daemon::session_map;
 use k2so_daemon::terminal_routes;
+use k2so_daemon::v2_session_map;
 
 /// Serialize the tests — all touch session_map + session::registry
 /// singletons.
@@ -379,6 +381,7 @@ async fn terminal_spawn_requires_agent_param() {
 async fn terminal_spawn_creates_session_and_registers_in_map() {
     let _g = lock();
     let agent = "h3-spawn-test";
+    let _ = v2_session_map::unregister(agent);
     let _ = session_map::unregister(agent);
 
     let resp = terminal_routes::handle_terminal_spawn(
@@ -396,13 +399,15 @@ async fn terminal_spawn_creates_session_and_registers_in_map() {
     let terminal_id = v["terminalId"].as_str().unwrap();
     assert!(!terminal_id.is_empty());
 
-    let session = session_map::lookup(agent).expect("registered");
-    assert_eq!(session.session_id.to_string(), terminal_id);
-    assert_eq!(session.cwd, "/tmp");
-    assert_eq!(session.command.as_deref(), Some("cat"));
+    // Post-A9, /cli/terminal/spawn produces a v2 session — assert via
+    // the unified lookup so the test is renderer-agnostic.
+    let session = session_lookup::lookup_any(agent).expect("registered");
+    assert_eq!(session.session_id().to_string(), terminal_id);
+    assert_eq!(session.cwd(), "/tmp");
+    assert_eq!(session.command().as_deref(), Some("cat"));
 
-    let _ = session.kill();
-    session_map::unregister(agent);
+    let _ = v2_session_map::unregister(agent);
+    let _ = session_map::unregister(agent);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -420,16 +425,21 @@ async fn terminal_spawn_background_allows_missing_agent() {
         "agent_name should be synthesized, got: {agent_name}"
     );
 
-    // Synthesized session must be addressable via session_map.
-    let session = session_map::lookup(agent_name).expect("registered");
-    let _ = session.kill();
-    session_map::unregister(agent_name);
+    // Synthesized session must be addressable via lookup_any (post-A9
+    // the spawn produces a v2 session in v2_session_map).
+    assert!(
+        session_lookup::lookup_any(agent_name).is_some(),
+        "synthesized agent_name {agent_name} not registered"
+    );
+    let _ = v2_session_map::unregister(agent_name);
+    let _ = session_map::unregister(agent_name);
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn terminal_spawn_applies_default_cwd_from_project() {
     let _g = lock();
     let agent = "h3-cwd-default";
+    let _ = v2_session_map::unregister(agent);
     let _ = session_map::unregister(agent);
 
     // Create a real directory so `resolve_cwd` (which falls back
@@ -450,14 +460,15 @@ async fn terminal_spawn_applies_default_cwd_from_project() {
         &project_str,
     );
     assert_eq!(resp.status, "200 OK");
-    let session = session_map::lookup(agent).expect("registered");
+    let session = session_lookup::lookup_any(agent).expect("registered");
     assert_eq!(
-        session.cwd, project_str,
+        session.cwd(),
+        project_str,
         "cwd should default to project_path when cwd param is absent"
     );
 
-    let _ = session.kill();
-    session_map::unregister(agent);
+    let _ = v2_session_map::unregister(agent);
+    let _ = session_map::unregister(agent);
     let _ = std::fs::remove_dir_all(&project_dir);
 }
 

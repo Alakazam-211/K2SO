@@ -138,7 +138,7 @@ async fn spawn_drains_pending_queue_and_injects_on_boot() {
     })
     .to_string();
     let spawn_result =
-        awareness_ws::handle_sessions_spawn(spawn_body.as_bytes());
+        awareness_ws::handle_sessions_spawn(spawn_body.as_bytes()).await;
     assert_eq!(spawn_result.status, "200 OK");
     let resp: serde_json::Value =
         serde_json::from_str(&spawn_result.body).unwrap();

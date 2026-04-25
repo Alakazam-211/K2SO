@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { AlacrittyTerminalView } from '../Terminal/AlacrittyTerminalView'
+import { TerminalPane } from '@/terminal-v2/TerminalPane'
 
 // ── Session file helpers ────────────────────────────────────────────
 
@@ -356,7 +356,10 @@ export function AIFileEditor({
         {/* Terminal (left) — wait for session resolution before mounting */}
         <div className="flex-1 min-w-0 border-r border-[var(--color-border)]">
           {argsReady ? (
-            <AlacrittyTerminalView
+            // Hardcoded to v2 — system-driven mount inside the file
+            // editor UI (not a workspace tab), so bypasses the user's
+            // Settings → Renderer choice. See A8 plan.
+            <TerminalPane
               terminalId={terminalIdRef.current}
               cwd={cwd}
               command={command}

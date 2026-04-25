@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use k2so_core::agent_hooks::{emit, HookEvent};
 
 use crate::cli_response::CliResponse;
-use crate::spawn::{spawn_agent_session_blocking, SpawnAgentSessionRequest};
+use crate::spawn::{spawn_agent_session_v2_blocking, SpawnAgentSessionRequest};
 
 /// H6: spawn a wake PTY via the Session Stream pipeline (same
 /// shape as `k2so_core::agents::wake::spawn_wake_headless` but
@@ -59,7 +59,7 @@ pub fn spawn_wake_via_session_stream(
         "--append-system-prompt".to_string(),
         wake_prompt.to_string(),
     ];
-    let outcome = spawn_agent_session_blocking(SpawnAgentSessionRequest {
+    let outcome = spawn_agent_session_v2_blocking(SpawnAgentSessionRequest {
         agent_name: agent_name.to_string(),
         cwd: project_path.to_string(),
         command: Some("claude".to_string()),
@@ -142,7 +142,7 @@ pub fn handle_agents_launch(
     let cwd = str_field(&launch_info, "cwd", project_path).to_string();
     let args = str_array(&launch_info, "args");
 
-    let outcome = match spawn_agent_session_blocking(SpawnAgentSessionRequest {
+    let outcome = match spawn_agent_session_v2_blocking(SpawnAgentSessionRequest {
         agent_name: agent.clone(),
         cwd: cwd.clone(),
         command: Some(command.clone()),
@@ -226,7 +226,7 @@ pub fn handle_agents_delegate(
     let agent_name = str_field(&launch_info, "agentName", &target).to_string();
     let args = str_array(&launch_info, "args");
 
-    let outcome = match spawn_agent_session_blocking(SpawnAgentSessionRequest {
+    let outcome = match spawn_agent_session_v2_blocking(SpawnAgentSessionRequest {
         agent_name: agent_name.clone(),
         cwd: cwd.clone(),
         command: Some(command.clone()),

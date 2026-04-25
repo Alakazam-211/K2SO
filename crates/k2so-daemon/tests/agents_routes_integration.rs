@@ -27,7 +27,9 @@ use std::sync::Mutex as StdMutex;
 use k2so_core::db::init_for_tests;
 
 use k2so_daemon::agents_routes;
+use k2so_daemon::session_lookup;
 use k2so_daemon::session_map;
+use k2so_daemon::v2_session_map;
 
 /// Serialize — the DB, session_map, and the global shared
 /// TerminalManager are all singletons; tests running in parallel
@@ -88,9 +90,15 @@ fn clear_projects() {
 }
 
 fn drain_session_map() {
+    // A9: agent spawn helpers now register in v2_session_map.
+    // Drain both so test isolation is preserved across the
+    // legacy/v2 boundary.
     for (name, s) in session_map::snapshot() {
         let _ = s.kill();
         session_map::unregister(&name);
+    }
+    for (name, _) in v2_session_map::snapshot() {
+        v2_session_map::unregister(&name);
     }
 }
 
@@ -205,14 +213,11 @@ async fn launch_fresh_agent_registers_in_session_map() {
     let tid = v["terminalId"].as_str().expect("terminalId present");
     assert!(!tid.is_empty());
 
-    // Check that the session is findable by agent name.
-    let entries: Vec<String> = session_map::snapshot()
-        .into_iter()
-        .map(|(n, _)| n)
-        .collect();
+    // Check that the session is findable by agent name across
+    // both maps. Post-A9, /cli/agents/launch produces v2 sessions.
     assert!(
-        entries.iter().any(|n| n == "alpha"),
-        "alpha missing from session_map: {entries:?}"
+        session_lookup::lookup_any("alpha").is_some(),
+        "alpha missing from session maps"
     );
 
     drain_session_map();
@@ -303,14 +308,12 @@ async fn delegate_creates_worktree_and_spawns_session() {
     };
     assert_eq!(n_workspaces, 1, "worktree not registered in workspaces");
 
-    // Session landed in session_map under the target agent.
-    let entries: Vec<String> = session_map::snapshot()
-        .into_iter()
-        .map(|(n, _)| n)
-        .collect();
+    // Session landed in one of the maps under the target agent.
+    // Post-A9 the daemon spawn helper produces v2 sessions, so
+    // builder lands in v2_session_map; lookup_any handles both.
     assert!(
-        entries.iter().any(|n| n == "builder"),
-        "builder missing from session_map: {entries:?}"
+        session_lookup::lookup_any("builder").is_some(),
+        "builder missing from session maps"
     );
 
     drain_session_map();

@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import type { MosaicNode, MosaicDirection } from 'react-mosaic-component'
 import { RESUMABLE_CLI_TOOLS } from '@shared/constants'
 import { useSettingsStore } from '@/stores/settings'
-import { useTerminalSettingsStore } from '@/stores/terminal-settings'
+import { useTerminalSettingsStore, type TerminalRenderer } from '@/stores/terminal-settings'
 import { getDaemonWs } from '@/kessel/daemon-ws'
 
 // Lazy reference to presets store — avoids circular dependency (presets → tabs → presets).
@@ -571,7 +571,7 @@ function mapTabAcrossGroups(
  *  setting mid-session doesn't hot-swap open panes — only new ones
  *  pick up the change. Safe to call from anywhere in the renderer
  *  process (every terminal-tab creation path below goes through this). */
-function currentRenderer(): 'alacritty' | 'kessel' {
+function currentRenderer(): TerminalRenderer {
   try {
     return useTerminalSettingsStore.getState().renderer
   } catch {

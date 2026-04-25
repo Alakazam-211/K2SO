@@ -24,8 +24,10 @@ use std::sync::Mutex as StdMutex;
 
 use k2so_core::db::init_for_tests;
 
+use k2so_daemon::session_lookup;
 use k2so_daemon::session_map;
 use k2so_daemon::triage;
+use k2so_daemon::v2_session_map;
 
 static TEST_LOCK: StdMutex<()> = StdMutex::new(());
 
@@ -79,9 +81,14 @@ fn clear_projects() {
 }
 
 fn drain_session_map() {
+    // A9: spawn helpers now produce v2 sessions. Drain both maps so
+    // tests don't leak across each other.
     for (name, s) in session_map::snapshot() {
         let _ = s.kill();
         session_map::unregister(&name);
+    }
+    for (name, _) in v2_session_map::snapshot() {
+        v2_session_map::unregister(&name);
     }
 }
 
@@ -179,12 +186,10 @@ async fn triage_summary_is_readonly_and_plaintext() {
         body.contains("high") || body.contains("Triage test"),
         "summary missing work-item details: {body}"
     );
-    // No spawning happened → session_map stays empty for this agent.
-    let entries: Vec<String> =
-        session_map::snapshot().into_iter().map(|(n, _)| n).collect();
+    // No spawning happened → neither map has the agent.
     assert!(
-        !entries.iter().any(|n| n == "readonly-probe"),
-        "read-only triage should NOT spawn; session_map leaked: {entries:?}"
+        session_lookup::lookup_any("readonly-probe").is_none(),
+        "read-only triage should NOT spawn; lookup found a leaked session"
     );
 
     clear_projects();
@@ -210,13 +215,11 @@ async fn triage_with_flag_on_spawns_via_session_stream() {
 
     // Prove H6's target behavior: regardless of whether the
     // scheduler picked the agent, IF it did spawn, the session is
-    // daemon-owned (session_map has an entry under the agent name).
-    // We assert the strong form: an entry exists.
-    let entries: Vec<String> =
-        session_map::snapshot().into_iter().map(|(n, _)| n).collect();
+    // daemon-owned. Post-A9 the spawn helper produces v2 sessions
+    // so the agent lands in v2_session_map; lookup_any handles both.
     assert!(
-        entries.iter().any(|n| n == "runner"),
-        "expected 'runner' in session_map under flag-on scheduler fire; got {entries:?}"
+        session_lookup::lookup_any("runner").is_some(),
+        "expected 'runner' in a daemon session map under flag-on scheduler fire"
     );
 
     drain_session_map();
@@ -240,12 +243,10 @@ async fn triage_with_flag_off_does_not_land_in_session_map() {
 
     // Flag-off path uses `spawn_wake_headless` which owns the PTY
     // through the legacy TerminalManager — no entry should appear
-    // in the daemon's session_map.
-    let entries: Vec<String> =
-        session_map::snapshot().into_iter().map(|(n, _)| n).collect();
+    // in any daemon session map.
     assert!(
-        !entries.iter().any(|n| n == "legacy"),
-        "flag-off triage leaked into session_map: {entries:?}"
+        session_lookup::lookup_any("legacy").is_none(),
+        "flag-off triage leaked into daemon session map"
     );
 
     // Best-effort cleanup: the legacy path DID spawn a PTY into

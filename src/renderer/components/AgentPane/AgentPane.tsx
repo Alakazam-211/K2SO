@@ -4,7 +4,7 @@ import { useTabsStore } from '@/stores/tabs'
 import { useProjectsStore } from '@/stores/projects'
 import { addNavWorktree } from '@/components/Sidebar/Sidebar'
 import { AgentPersonaEditor } from '@/components/AgentPersonaEditor/AgentPersonaEditor'
-import { AlacrittyTerminalView } from '@/components/Terminal/AlacrittyTerminalView'
+import { TerminalPane } from '@/terminal-v2/TerminalPane'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -257,9 +257,14 @@ function AgentChatTerminal({ agentName, agentDir, projectPath, autoFocus }: { ag
     )
   }
 
+  // Hardcoded to v2 (`<TerminalPane>`) — see A8 plan in
+  // `~/.claude/plans/happy-hatching-locket.md`. Agent persona chat
+  // is a system-driven mount (lives inside the agent panel UI, not
+  // a workspace tab), so it bypasses the user's Settings → Renderer
+  // choice and goes straight to the daemon-hosted v2 path.
   return (
     <div ref={containerRef} className="h-full">
-      <AlacrittyTerminalView
+      <TerminalPane
         key={terminalKey}
         terminalId={terminalIdRef.current}
         cwd={launchConfig?.cwd ?? agentDir}

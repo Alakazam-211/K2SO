@@ -26,7 +26,7 @@ use std::time::Instant;
 use k2so_core::session::{registry, Frame, SessionId};
 
 use crate::cli_response::CliResponse;
-use crate::session_map;
+use crate::session_lookup;
 
 /// Handler for `GET /cli/terminal/read?id=<session>&lines=<n>[&scrollback=true]`.
 ///
@@ -143,11 +143,11 @@ pub fn handle_sessions_resize(params: &HashMap<String, String>) -> CliResponse {
         _ => return CliResponse::bad_request("missing or invalid rows (>=1)"),
     };
 
-    let session = match session_map::lookup_by_session_id(&session_id) {
+    let session = match session_lookup::lookup_by_session_id(&session_id) {
         Some(s) => s,
         None => {
             return CliResponse::bad_request(
-                "session not found in daemon session_map",
+                "session not found (checked legacy + v2 maps)",
             );
         }
     };
@@ -183,11 +183,11 @@ pub fn handle_write(params: &HashMap<String, String>) -> CliResponse {
         .map(|v| matches!(v.as_str(), "true" | "1"))
         .unwrap_or(false);
 
-    let session = match session_map::lookup_by_session_id(&session_id) {
+    let session = match session_lookup::lookup_by_session_id(&session_id) {
         Some(s) => s,
         None => {
             return CliResponse::bad_request(
-                "session not found in daemon session_map",
+                "session not found (checked legacy + v2 maps)",
             );
         }
     };
@@ -263,7 +263,7 @@ fn spawn_terminal_impl(
     event: k2so_core::agent_hooks::HookEvent,
     require_agent: bool,
 ) -> CliResponse {
-    use crate::spawn::{spawn_agent_session_blocking, SpawnAgentSessionRequest};
+    use crate::spawn::{spawn_agent_session_v2_blocking, SpawnAgentSessionRequest};
 
     let agent_param = params.get("agent").cloned().unwrap_or_default();
     if require_agent && agent_param.is_empty() {
@@ -309,7 +309,7 @@ fn spawn_terminal_impl(
         agent_param
     };
 
-    let outcome = match spawn_agent_session_blocking(SpawnAgentSessionRequest {
+    let outcome = match spawn_agent_session_v2_blocking(SpawnAgentSessionRequest {
         agent_name: agent_name.clone(),
         cwd: cwd.clone(),
         command: command.clone(),
@@ -379,26 +379,26 @@ fn spawn_terminal_impl(
 /// endpoint that groups sessions by project.
 pub fn handle_agents_running(_params: &HashMap<String, String>) -> CliResponse {
     let now = Instant::now();
-    let sessions = session_map::snapshot();
+    let sessions = session_lookup::snapshot_all();
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(sessions.len());
     for (agent_name, session) in sessions {
-        let idle_ms = registry::lookup(&session.session_id)
+        // v2 sessions don't register in `k2so_core::session::registry`
+        // (only legacy session_stream_pty.rs does). For those, idle
+        // and subscriber counts surface as 0 — accurate enough for
+        // the listing endpoint, since v2's idle tracking lives in
+        // the alacritty Term update path, not the registry.
+        let session_id = session.session_id();
+        let idle_ms = registry::lookup(&session_id)
             .map(|entry| entry.idle_for(now).as_millis() as u64)
             .unwrap_or(0);
-        let subscriber_count = registry::lookup(&session.session_id)
+        let subscriber_count = registry::lookup(&session_id)
             .map(|entry| entry.subscriber_count())
             .unwrap_or(0);
-        // `createdAtMs`: we don't have a wall-clock creation time
-        // handy (SessionEntry::created_at is a monotonic Instant),
-        // so expose the monotonic age as `idleMs` for now and let
-        // a future commit wire a SystemTime-typed created_at if a
-        // caller needs a wall-clock timestamp. For now emit the
-        // field as `null` to make the shape explicit to callers.
         out.push(serde_json::json!({
-            "terminalId": session.session_id.to_string(),
+            "terminalId": session_id.to_string(),
             "agentName": agent_name,
-            "cwd": session.cwd,
-            "command": session.command,
+            "cwd": session.cwd(),
+            "command": session.command(),
             "idleMs": idle_ms,
             "subscriberCount": subscriber_count,
         }));

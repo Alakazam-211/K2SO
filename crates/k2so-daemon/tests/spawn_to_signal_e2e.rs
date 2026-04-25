@@ -55,7 +55,7 @@ async fn spawn_via_http_then_signal_reaches_target_pty() {
     })
     .to_string();
     let spawn_result =
-        awareness_ws::handle_sessions_spawn(spawn_body.as_bytes());
+        awareness_ws::handle_sessions_spawn(spawn_body.as_bytes()).await;
     assert_eq!(spawn_result.status, "200 OK", "spawn body: {}", spawn_result.body);
     let spawn_resp: serde_json::Value =
         serde_json::from_str(&spawn_result.body).expect("spawn response is JSON");
@@ -124,7 +124,7 @@ async fn spawn_via_http_then_signal_reaches_target_pty() {
 async fn spawn_with_missing_agent_name_returns_400() {
     let _g = lock();
     let body = r#"{"cwd":"/tmp"}"#; // missing agent_name
-    let result = awareness_ws::handle_sessions_spawn(body.as_bytes());
+    let result = awareness_ws::handle_sessions_spawn(body.as_bytes()).await;
     assert_eq!(result.status, "400 Bad Request");
     assert!(result.body.contains("agent_name"));
 }
@@ -133,7 +133,7 @@ async fn spawn_with_missing_agent_name_returns_400() {
 async fn spawn_with_bad_json_returns_400() {
     let _g = lock();
     let body = b"not json at all";
-    let result = awareness_ws::handle_sessions_spawn(body);
+    let result = awareness_ws::handle_sessions_spawn(body).await;
     assert_eq!(result.status, "400 Bad Request");
     assert!(result.body.contains("parse"));
 }

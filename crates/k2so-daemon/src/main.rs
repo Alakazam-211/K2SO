@@ -42,6 +42,7 @@ mod companion_routes;
 mod events;
 mod pending_live;
 mod providers;
+mod session_lookup;
 mod session_map;
 mod sessions_bytes_ws;
 mod sessions_grid_ws;

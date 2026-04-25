@@ -20,6 +20,7 @@ use k2so_core::terminal::{spawn_session_stream, SpawnConfig};
 
 use k2so_daemon::providers;
 use k2so_daemon::session_map;
+use k2so_daemon::v2_session_map;
 
 /// Serialize the tests — all touch the global k2so-core provider
 /// slot and the daemon's global session map.
@@ -174,4 +175,112 @@ async fn daemon_inject_provider_reports_missing_agent_as_error() {
     assert!(report.inbox_path.is_none());
     assert!(report.published_to_bus);
     assert!(report.activity_feed_row_id > 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// A9 regression — DaemonInjectProvider must reach v2 sessions too.
+// Before A9, providers only checked the legacy session_map and were
+// blind to every session registered via /cli/sessions/v2/spawn or
+// the migrated spawn_agent_session_v2_blocking. These tests pin the
+// fix in place: register a v2 session, call the provider directly,
+// assert inject succeeds (lookup_any fell through legacy and hit v2).
+// ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "current_thread")]
+async fn daemon_inject_provider_writes_bytes_to_v2_session() {
+    use k2so_core::awareness::InjectProvider;
+    use k2so_core::terminal::{DaemonPtyConfig, DaemonPtySession};
+    use std::path::PathBuf;
+
+    let _g = lock();
+    init_for_tests();
+    ensure_project("k2so-ws-v2");
+
+    // Spawn a v2 DaemonPtySession running `cat`. v2 doesn't register
+    // in `k2so_core::session::registry` — it lives in a parallel map
+    // entirely. The InjectProvider has to look in v2_session_map for
+    // it, which is exactly what A9's session_lookup::lookup_any does.
+    let v2_cfg = DaemonPtyConfig {
+        session_id: SessionId::new(),
+        cols: 80,
+        rows: 24,
+        cwd: Some(PathBuf::from("/tmp")),
+        program: Some("cat".to_string()),
+        args: vec![],
+        env: Default::default(),
+        drain_on_exit: true,
+    };
+    let v2_session = DaemonPtySession::spawn(v2_cfg).expect("v2 spawn");
+    v2_session_map::register("v2-only-bar", v2_session.clone());
+
+    // Call the provider directly. Pre-A9 this would return NotFound
+    // because the legacy session_map has no entry for "v2-only-bar".
+    let provider = providers::DaemonInjectProvider;
+    provider
+        .inject("v2-only-bar", b"a9-inject-probe\n")
+        .expect("inject must reach v2 session via lookup_any");
+
+    // Asking for an unknown agent must still return NotFound — the
+    // dual-map walk doesn't make every name resolvable.
+    let err = provider
+        .inject("never-existed", b"x")
+        .expect_err("unknown agent must fail with NotFound");
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+
+    // Cleanup.
+    v2_session_map::unregister("v2-only-bar");
+    drop(v2_session);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn daemon_inject_provider_finds_legacy_first_then_v2() {
+    use k2so_core::awareness::InjectProvider;
+    use k2so_core::terminal::{DaemonPtyConfig, DaemonPtySession};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    let _g = lock();
+    init_for_tests();
+
+    // Register the SAME agent_name in both maps. Provider is
+    // documented as "legacy first" — verify by writing to legacy
+    // and asserting it didn't fail (doesn't prove ordering, but
+    // does prove both paths work without the registration order
+    // mattering).
+    let legacy_id = SessionId::new();
+    let legacy = spawn_session_stream(SpawnConfig {
+        session_id: legacy_id,
+        cwd: "/tmp".into(),
+        command: Some("cat".into()),
+        args: None,
+        cols: 80,
+        rows: 24,
+        track_alacritty_term: false,
+    })
+    .expect("legacy spawn");
+    let legacy_arc = Arc::new(legacy);
+    session_map::register("dual-name", Arc::clone(&legacy_arc));
+
+    let v2 = DaemonPtySession::spawn(DaemonPtyConfig {
+        session_id: SessionId::new(),
+        cols: 80,
+        rows: 24,
+        cwd: Some(PathBuf::from("/tmp")),
+        program: Some("cat".to_string()),
+        args: vec![],
+        env: Default::default(),
+        drain_on_exit: true,
+    })
+    .expect("v2 spawn");
+    v2_session_map::register("dual-name", v2.clone());
+
+    let provider = providers::DaemonInjectProvider;
+    provider
+        .inject("dual-name", b"both-maps\n")
+        .expect("inject must succeed when agent_name lives in both maps");
+
+    session_map::unregister("dual-name");
+    v2_session_map::unregister("dual-name");
+    legacy_arc.kill().ok();
+    drop(v2);
 }

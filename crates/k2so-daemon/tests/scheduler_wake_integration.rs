@@ -18,7 +18,9 @@ use k2so_core::awareness::{
 use k2so_core::db::init_for_tests;
 
 use k2so_daemon::providers;
+use k2so_daemon::session_lookup;
 use k2so_daemon::session_map;
+use k2so_daemon::v2_session_map;
 
 /// Serialize every test — all touch the global session::registry,
 /// session_map, awareness providers, and the shared in-memory DB.
@@ -118,8 +120,8 @@ async fn wake_auto_launches_agent_with_launch_profile() {
         "---\nname: auto-target\nlaunch:\n  command: cat\n  cwd: /tmp\n---\n",
     );
 
-    // Sanity: session_map starts empty for this agent.
-    assert!(session_map::lookup("auto-target").is_none());
+    // Sanity: neither map has the agent yet.
+    assert!(session_lookup::lookup_any("auto-target").is_none());
 
     // Send a Live signal. egress sees target=offline → calls wake.
     // Our G4 wake enqueues + auto-launches via AGENT.md.
@@ -132,9 +134,12 @@ async fn wake_auto_launches_agent_with_launch_profile() {
         "wake must have fired — target was offline at delivery time"
     );
 
-    // G4 outcome: session_map now has the agent (auto-launched).
-    let session = session_map::lookup("auto-target")
-        .expect("auto-target should have been auto-launched by wake");
+    // G4 outcome: post-A9 wake auto-launches into v2_session_map
+    // (the unified lookup_any handles both legacy + v2).
+    assert!(
+        session_lookup::lookup_any("auto-target").is_some(),
+        "auto-target should have been auto-launched by wake"
+    );
 
     // The pending queue was drained as part of the spawn flow —
     // the signal file should not linger on disk.
@@ -153,10 +158,16 @@ async fn wake_auto_launches_agent_with_launch_profile() {
     );
 
     // Let the reader thread start; then clean up. Give a small
-    // delay so the PTY has time to fully init before drop.
+    // delay so the PTY has time to fully init before drop. v2
+    // sessions teardown via unregister; legacy needs an explicit
+    // kill.
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let _ = session.kill();
-    session_map::unregister("auto-target");
+    if let Some(legacy) = session_map::lookup("auto-target") {
+        let _ = legacy.kill();
+        session_map::unregister("auto-target");
+    } else {
+        v2_session_map::unregister("auto-target");
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -185,11 +196,11 @@ async fn wake_falls_back_to_queue_only_without_launch_profile() {
     let report = egress::deliver(&signal, &inbox_root);
     assert!(report.woke_offline_target);
 
-    // Expected: no auto-launch — session_map stays empty for this
-    // agent, and the queue retains the signal file for a future
-    // user-triggered spawn to drain.
+    // Expected: no auto-launch — neither map has the agent, and
+    // the queue retains the signal file for a future user-triggered
+    // spawn to drain.
     assert!(
-        session_map::lookup("profileless-target").is_none(),
+        session_lookup::lookup_any("profileless-target").is_none(),
         "agent without launch profile must not be auto-launched"
     );
 
@@ -224,7 +235,7 @@ async fn wake_falls_back_when_workspace_id_is_unknown() {
     let _ = egress::deliver(&signal, &inbox_root);
 
     assert!(
-        session_map::lookup("ghost-agent").is_none(),
+        session_lookup::lookup_any("ghost-agent").is_none(),
         "unknown workspace must not trigger auto-launch"
     );
 

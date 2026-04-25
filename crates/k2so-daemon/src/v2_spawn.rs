@@ -27,6 +27,8 @@ use k2so_core::session::SessionId;
 use k2so_core::terminal::{DaemonPtyConfig, DaemonPtySession};
 
 use crate::awareness_ws::HandlerResult;
+use crate::pending_live;
+use crate::signal_format;
 use crate::v2_session_map;
 
 /// Handler for `POST /cli/sessions/v2/spawn`.
@@ -162,16 +164,28 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
     };
     let dpty_spawn_ms = __t_spawn.elapsed().as_secs_f64() * 1000.0;
 
-    v2_session_map::register(req.agent_name.clone(), session);
+    v2_session_map::register(req.agent_name.clone(), session.clone());
+
+    // Drain any pending-live signals that were queued while this
+    // agent was offline so they become input to the fresh session.
+    // Mirrors `crate::spawn::spawn_agent_session`'s legacy drain so
+    // wake-queued signals to v2 agents aren't silently lost on boot.
+    let pending = pending_live::drain_for_agent(&req.agent_name);
+    let pending_drained = pending.len();
+    for signal in pending {
+        let bytes = signal_format::inject_bytes(&signal);
+        session.write(bytes.into_bytes());
+    }
 
     let total_ms = __t_total.elapsed().as_secs_f64() * 1000.0;
     log_debug!(
-        "[v2-perf] side=daemon SPAWN_SUMMARY session={} agent={} reused=false total_ms={:.3} lookup_ms={:.3} dpty_spawn_ms={:.3}",
+        "[v2-perf] side=daemon SPAWN_SUMMARY session={} agent={} reused=false total_ms={:.3} lookup_ms={:.3} dpty_spawn_ms={:.3} pending_drained={}",
         session_id_for_response,
         req.agent_name,
         total_ms,
         lookup_ms,
-        dpty_spawn_ms
+        dpty_spawn_ms,
+        pending_drained
     );
 
     let out = serde_json::json!({

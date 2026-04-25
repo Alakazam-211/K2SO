@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 
 use crate::cli_response::CliResponse;
-use crate::session_map;
+use crate::session_lookup;
 
 /// Minimal projects row shape the companion routes need.
 struct ProjectRow {
@@ -176,23 +176,24 @@ fn derive_agent_and_label(
 /// dropped (same behavior as the legacy Tauri endpoint).
 pub fn handle_companion_sessions(_params: &HashMap<String, String>) -> CliResponse {
     let projects = list_projects();
-    let live = session_map::snapshot();
+    let live = session_lookup::snapshot_all();
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(live.len());
     for (agent_name, session) in live {
-        let Some(ws) = match_workspace(&session.cwd, &projects) else {
+        let cwd = session.cwd();
+        let Some(ws) = match_workspace(&cwd, &projects) else {
             continue;
         };
         let (agent, label) =
-            derive_agent_and_label(&agent_name, &session.cwd, &ws.path, &ws.name);
+            derive_agent_and_label(&agent_name, &cwd, &ws.path, &ws.name);
         out.push(serde_json::json!({
             "workspaceName": ws.name,
             "workspaceId": ws.id,
             "workspaceColor": ws.color,
             "agentName": agent,
             "label": label,
-            "terminalId": session.session_id.to_string(),
-            "command": session.command,
-            "cwd": session.cwd,
+            "terminalId": session.session_id().to_string(),
+            "command": session.command(),
+            "cwd": cwd,
         }));
     }
     CliResponse::ok_json(serde_json::to_string(&out).unwrap_or_else(|_| "[]".into()))
@@ -213,15 +214,16 @@ pub fn handle_companion_projects_summary(
     _params: &HashMap<String, String>,
 ) -> CliResponse {
     let workspaces = list_projects_for_summary();
-    let live_sessions = session_map::snapshot();
+    let live_sessions = session_lookup::snapshot_all();
 
     // Tally live sessions per workspace via longest-prefix match,
     // identical to the /cli/companion/sessions grouping rule.
     let mut counts: HashMap<String, usize> = HashMap::new();
     for (_, session) in &live_sessions {
+        let cwd = session.cwd();
         let matched = workspaces
             .iter()
-            .filter(|p| session.cwd.starts_with(&p.path))
+            .filter(|p| cwd.starts_with(&p.path))
             .max_by_key(|p| p.path.len());
         if let Some(ws) = matched {
             *counts.entry(ws.id.clone()).or_insert(0) += 1;
