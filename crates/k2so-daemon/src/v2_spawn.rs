@@ -22,6 +22,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use k2so_core::log_debug;
 use k2so_core::session::SessionId;
 use k2so_core::terminal::{DaemonPtyConfig, DaemonPtySession};
 
@@ -84,6 +85,8 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
         24
     }
 
+    let __t_total = std::time::Instant::now();
+
     let req: SpawnRequest = match serde_json::from_slice(body) {
         Ok(r) => r,
         Err(e) => {
@@ -106,10 +109,20 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
     // Find-or-spawn: existing session wins. The response preserves
     // whatever cols/rows the existing session was opened at — the
     // caller will ResizeObserver-correct if its viewport differs.
-    if let Some(existing) = v2_session_map::lookup_by_agent_name(&req.agent_name) {
+    let __t_lookup = std::time::Instant::now();
+    let existing = v2_session_map::lookup_by_agent_name(&req.agent_name);
+    let lookup_ms = __t_lookup.elapsed().as_secs_f64() * 1000.0;
+
+    if let Some(existing) = existing {
         let (cols, rows) = current_dims(&existing);
+        let session_id_str = existing.session_id.to_string();
+        let total_ms = __t_total.elapsed().as_secs_f64() * 1000.0;
+        log_debug!(
+            "[v2-perf] side=daemon SPAWN_SUMMARY session={} agent={} reused=true total_ms={:.3} lookup_ms={:.3} dpty_spawn_ms=0",
+            session_id_str, req.agent_name, total_ms, lookup_ms
+        );
         let out = serde_json::json!({
-            "sessionId": existing.session_id.to_string(),
+            "sessionId": session_id_str,
             "agentName": req.agent_name,
             "cols": cols,
             "rows": rows,
@@ -134,6 +147,7 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
     };
     let session_id_for_response = cfg.session_id;
 
+    let __t_spawn = std::time::Instant::now();
     let session = match DaemonPtySession::spawn(cfg) {
         Ok(s) => s,
         Err(e) => {
@@ -146,8 +160,19 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
             }
         }
     };
+    let dpty_spawn_ms = __t_spawn.elapsed().as_secs_f64() * 1000.0;
 
     v2_session_map::register(req.agent_name.clone(), session);
+
+    let total_ms = __t_total.elapsed().as_secs_f64() * 1000.0;
+    log_debug!(
+        "[v2-perf] side=daemon SPAWN_SUMMARY session={} agent={} reused=false total_ms={:.3} lookup_ms={:.3} dpty_spawn_ms={:.3}",
+        session_id_for_response,
+        req.agent_name,
+        total_ms,
+        lookup_ms,
+        dpty_spawn_ms
+    );
 
     let out = serde_json::json!({
         "sessionId": session_id_for_response.to_string(),

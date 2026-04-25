@@ -128,13 +128,13 @@ function runStyle(run: CellRun): React.CSSProperties {
   return style
 }
 
-function renderRowRuns(row: CellRun[], rowIdx: number): React.ReactNode {
+function renderRowRuns(row: CellRun[], absRow: number): React.ReactNode {
   if (row.length === 0) return '\u00a0'
   const spans: React.ReactNode[] = []
   for (let i = 0; i < row.length; i++) {
     const run = row[i]
     spans.push(
-      <span key={`r${rowIdx}s${i}`} style={runStyle(run)}>
+      <span key={`a${absRow}s${i}`} style={runStyle(run)}>
         {run.text || '\u00a0'}
       </span>,
     )
@@ -171,6 +171,20 @@ function buildDropPayload(paths: string[]): string {
   const formatted = paths.map(formatPathForTerminal).join(' ')
   const trailing = formatted + ' '
   return paths.some(isImagePath) ? bracketPaste(trailing) : trailing
+}
+
+/** Whether a snapshot's visible grid contains any non-blank cell.
+ *  Used by the [v2-perf] instrumentation to detect when the child
+ *  process actually paints something (e.g. shell prompt). Empty
+ *  initial snapshots are expected on cold spawn — the daemon's Term
+ *  has no content until the child writes its first bytes. */
+function isGridEmpty(snap: TermGridSnapshot): boolean {
+  for (const row of snap.grid) {
+    for (const run of row) {
+      if (run.text && run.text.trim().length > 0) return false
+    }
+  }
+  return true
 }
 
 /** Merge a delta into a prior snapshot. Pure. Returns `prev`
@@ -239,6 +253,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     cwd,
     command,
     args,
+    spawnedAt,
   } = props
 
   // Live-subscribe to the terminal settings store so Cmd+Shift+=
@@ -260,6 +275,36 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const isTabVisible = useIsTabVisible()
+
+  // ── A7.5 perf instrumentation (DEV-only) ─────────────────────
+  // mountT0 is captured once via lazy useRef init so re-renders
+  // don't reset it. Stage timings accumulate into stageMsRef so
+  // SUMMARY can break down totals at first_render / tui_first_paint.
+  const mountT0Ref = useRef<number | null>(null)
+  if (mountT0Ref.current === null) mountT0Ref.current = performance.now()
+  const stageMsRef = useRef<Record<string, number>>({})
+  const firstSnapshotEmptyRef = useRef<boolean>(true)
+  const firstSnapshotSeenRef = useRef<boolean>(false)
+  const firstSnapshotReusedRef = useRef<boolean | null>(null)
+  const firstRenderFiredRef = useRef<boolean>(false)
+  const tuiFirstPaintFiredRef = useRef<boolean>(false)
+
+  const perfLog = useCallback(
+    (stage: string, extra?: Record<string, unknown>) => {
+      if (!import.meta.env.DEV) return
+      const t = performance.now() - (mountT0Ref.current ?? performance.now())
+      stageMsRef.current[stage] = t
+      let line = `[v2-perf] t=${t.toFixed(0)}ms stage=${stage}`
+      if (extra) {
+        for (const [k, v] of Object.entries(extra)) {
+          line += ` ${k}=${v}`
+        }
+      }
+      // eslint-disable-next-line no-console
+      console.info(line)
+    },
+    [],
+  )
 
   // Link detection state. Set on hover over a URL / file path
   // that `detectLinks` recognizes in the row the mouse is over.
@@ -284,14 +329,20 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     const agentName = `tab-${terminalId}`
 
     async function boot() {
+      perfLog('mount', spawnedAt
+        ? { since_keystroke_ms: Math.round(performance.now() - spawnedAt) }
+        : undefined)
       setPhase({ kind: 'spawning' })
       let creds: { port: number; token: string }
+      perfLog('creds_start')
+      const __t_creds = performance.now()
       try {
         creds = await getDaemonWs()
       } catch (e) {
         if (!cancelled) setPhase({ kind: 'error', message: `daemon unreachable: ${String(e)}` })
         return
       }
+      perfLog('creds_end', { elapsed_ms: (performance.now() - __t_creds).toFixed(1) })
 
       const spawnBody = {
         agent_name: agentName,
@@ -305,6 +356,8 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
         rows: 40,
       }
       let spawnRes: Response
+      perfLog('spawn_fetch_start')
+      const __t_spawn = performance.now()
       try {
         spawnRes = await fetch(
           `http://127.0.0.1:${creds.port}/cli/sessions/v2/spawn?token=${creds.token}`,
@@ -331,14 +384,26 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
         rows: number
         reused: boolean
       }
+      perfLog('spawn_fetch_end', {
+        elapsed_ms: (performance.now() - __t_spawn).toFixed(1),
+        reused: String(spawn.reused),
+        sid: spawn.sessionId.slice(0, 8),
+      })
+      firstSnapshotReusedRef.current = spawn.reused
       if (cancelled) return
 
       setPhase({ kind: 'connecting', sessionId: spawn.sessionId })
 
+      perfLog('ws_opening')
+      const __t_ws = performance.now()
       const ws = new WebSocket(
         `ws://127.0.0.1:${creds.port}/cli/sessions/grid?session=${spawn.sessionId}&token=${creds.token}`,
       )
       wsRef.current = ws
+
+      ws.onopen = () => {
+        perfLog('ws_open', { elapsed_ms: (performance.now() - __t_ws).toFixed(1) })
+      }
 
       ws.onmessage = (evt) => {
         if (typeof evt.data !== 'string') return
@@ -349,10 +414,23 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
           return
         }
         switch (parsed.event) {
-          case 'snapshot':
+          case 'snapshot': {
+            const isFirst = !firstSnapshotSeenRef.current
+            if (isFirst) {
+              firstSnapshotSeenRef.current = true
+              const empty = isGridEmpty(parsed.payload)
+              firstSnapshotEmptyRef.current = empty
+              perfLog('first_snapshot', {
+                rows: parsed.payload.rows,
+                cols: parsed.payload.cols,
+                empty: String(empty),
+                scrollback: parsed.payload.scrollback.length,
+              })
+            }
             setSnapshot(parsed.payload)
             setPhase({ kind: 'ready', sessionId: spawn.sessionId })
             break
+          }
           case 'delta':
             setSnapshot((prev) => mergeDelta(prev, parsed.payload))
             break
@@ -370,7 +448,13 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       }
 
       ws.onerror = () => {
-        if (!cancelled) setPhase({ kind: 'error', message: 'ws error' })
+        if (cancelled) return
+        // If we already received child_exit, the daemon initiated the
+        // teardown and any onerror that follows is a concurrent TCP
+        // close, not a real failure. Don't clobber the 'exited' state.
+        setPhase((prev) =>
+          prev.kind === 'exited' ? prev : { kind: 'error', message: 'ws error' },
+        )
       }
       ws.onclose = () => {
         // Clean client-side state. Session on daemon is unaffected
@@ -392,6 +476,73 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       wsRef.current = null
     }
   }, [terminalId, cwd, command, args?.join('\0')])
+
+  // ── A7.5 perf: first_render + tui_first_paint + SUMMARY ──────
+  // first_render fires once after `setSnapshot` causes a paint.
+  // tui_first_paint fires once when the grid transitions from
+  // empty → non-empty (cold spawn — child wrote its first bytes)
+  // OR collapses with first_render when the initial snapshot was
+  // already non-empty (reattach).
+  useEffect(() => {
+    if (!import.meta.env.DEV) return
+    if (!snapshot) return
+
+    if (!firstRenderFiredRef.current) {
+      firstRenderFiredRef.current = true
+      perfLog('first_render')
+      const stages = stageMsRef.current
+      const total = Math.round(
+        performance.now() - (mountT0Ref.current ?? 0),
+      )
+      const reused = firstSnapshotReusedRef.current
+      // eslint-disable-next-line no-console
+      console.info(
+        `[v2-perf] SUMMARY total_render_ms=${total} reused=${reused}` +
+          ` mount=${Math.round(stages.mount ?? 0)}` +
+          ` creds_end=${Math.round(stages.creds_end ?? 0)}` +
+          ` spawn_fetch_end=${Math.round(stages.spawn_fetch_end ?? 0)}` +
+          ` ws_open=${Math.round(stages.ws_open ?? 0)}` +
+          ` first_snapshot=${Math.round(stages.first_snapshot ?? 0)}` +
+          ` first_render=${Math.round(stages.first_render ?? 0)}`,
+      )
+      // Reattach scenario: initial snapshot already had content.
+      // Collapse tui_first_paint with first_render.
+      if (
+        !firstSnapshotEmptyRef.current &&
+        !tuiFirstPaintFiredRef.current
+      ) {
+        tuiFirstPaintFiredRef.current = true
+        perfLog('tui_first_paint', { collapsed: 'true' })
+        // eslint-disable-next-line no-console
+        console.info(
+          `[v2-perf] TUI_SUMMARY total_tui_ms=${total} reused=${reused} collapsed=true`,
+        )
+      }
+    }
+
+    // Cold spawn path: wait for the first non-empty grid update.
+    if (
+      !tuiFirstPaintFiredRef.current &&
+      firstSnapshotEmptyRef.current &&
+      !isGridEmpty(snapshot)
+    ) {
+      tuiFirstPaintFiredRef.current = true
+      perfLog('tui_first_paint')
+      const stages = stageMsRef.current
+      const total = Math.round(
+        performance.now() - (mountT0Ref.current ?? 0),
+      )
+      const renderToTui = Math.round(
+        (stages.tui_first_paint ?? 0) - (stages.first_render ?? 0),
+      )
+      // eslint-disable-next-line no-console
+      console.info(
+        `[v2-perf] TUI_SUMMARY total_tui_ms=${total}` +
+          ` reused=${firstSnapshotReusedRef.current}` +
+          ` render_to_tui_ms=${renderToTui}`,
+      )
+    }
+  }, [snapshot, perfLog])
 
   // ── Focus tracking ────────────────────────────────────────────
   useEffect(() => {
@@ -530,21 +681,32 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   // `const` is declared later. (Same class of fix as the
   // cellMetrics hoist that happened earlier in the Kessel-T0
   // work.)
-  const visibleRows = useMemo<CellRun[][]>(() => {
-    if (!snapshot) return []
-    if (viewportOffset === 0) return snapshot.grid
+  // Visible rows + their absolute (scrollback-anchored) row indices.
+  // Keying the rendered row divs by absolute index — instead of by
+  // visual 0..N position — keeps the same DOM node attached to the
+  // same logical row across scrolls. The browser's text selection is
+  // anchored to text nodes inside those divs; if the divs survive
+  // (just move position), native selection follows the content as
+  // expected. Without this, scrolling reused row divs with new
+  // content and the highlight visually "stayed" while text moved.
+  const { visibleRows, visibleRowAbsRows } = useMemo(() => {
+    if (!snapshot) {
+      return { visibleRows: [] as CellRun[][], visibleRowAbsRows: [] as number[] }
+    }
     const { scrollback, grid, rows: r } = snapshot
     const totalLen = scrollback.length + grid.length
     const windowEnd = totalLen - viewportOffset
     const windowStart = windowEnd - r
-    const out: CellRun[][] = []
+    const rows: CellRun[][] = []
+    const abs: number[] = []
     for (let i = 0; i < r; i++) {
-      const abs = windowStart + i
-      if (abs < 0) out.push([])
-      else if (abs < scrollback.length) out.push(scrollback[abs])
-      else out.push(grid[abs - scrollback.length])
+      const a = windowStart + i
+      abs.push(a)
+      if (a < 0) rows.push([])
+      else if (a < scrollback.length) rows.push(scrollback[a])
+      else rows.push(grid[a - scrollback.length])
     }
-    return out
+    return { visibleRows: rows, visibleRowAbsRows: abs }
   }, [viewportOffset, snapshot])
 
   // ── Link detection: Cmd key tracking ──────────────────────────
@@ -888,9 +1050,12 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
-      {visibleRows.map((row, rowIdx) => (
-        <div key={`row-${rowIdx}`}>{renderRowRuns(row, rowIdx)}</div>
-      ))}
+      {visibleRows.map((row, rowIdx) => {
+        const absRow = visibleRowAbsRows[rowIdx] ?? rowIdx
+        return (
+          <div key={`abs-${absRow}`}>{renderRowRuns(row, absRow)}</div>
+        )
+      })}
       <div aria-hidden="true" style={cursorStyle} />
       {import.meta.env.DEV && (
         <div

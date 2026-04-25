@@ -139,8 +139,11 @@ pub fn daemon_uninstall() -> Result<(), String> {
 /// SIGTERM to the running daemon and lets launchd respawn it (because
 /// `KeepAlive: true`). Preferred over unload+load because the plist
 /// config stays untouched.
-#[tauri::command]
-pub fn daemon_restart() -> Result<(), String> {
+///
+/// Internal-call-friendly version (no Tauri command attribute) used by
+/// the version-mismatch auto-restart path in `lib.rs`. The
+/// `#[tauri::command]` wrapper just delegates to this.
+pub fn kickstart_daemon() -> Result<(), String> {
     let uid = unsafe { libc::getuid() };
     let target = format!("gui/{}/com.k2so.k2so-daemon", uid);
     let out = Command::new("launchctl")
@@ -162,6 +165,11 @@ pub fn daemon_restart() -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[tauri::command]
+pub fn daemon_restart() -> Result<(), String> {
+    kickstart_daemon()
 }
 
 /// Return the path to the daemon's stdout log file, regardless of

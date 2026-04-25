@@ -46,6 +46,7 @@ use alacritty_terminal::Term;
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
 
+use crate::log_debug;
 use crate::session::SessionId;
 
 /// Scrollback depth (in rows) retained by the daemon-side Term.
@@ -223,7 +224,14 @@ impl DaemonPtySession {
         // Window ID is used on macOS/Windows to associate the PTY
         // with a specific OS window for controlling-terminal
         // semantics. The daemon has no window, so we pass 0.
+        let __t_pty = std::time::Instant::now();
         let pty = tty::new(&pty_options, window_size, 0)?;
+        let pty_ms = __t_pty.elapsed().as_secs_f64() * 1000.0;
+        log_debug!(
+            "[v2-perf] side=daemon stage=pty_open ms={:.3} session={}",
+            pty_ms,
+            cfg.session_id
+        );
 
         // Event listener + broadcast channel for alacritty's
         // lifecycle events. Subscribers attach lazily via
@@ -250,12 +258,20 @@ impl DaemonPtySession {
             rows: rows as usize,
         };
 
+        let __t_term = std::time::Instant::now();
         let term = Term::new(term_config, &term_size, listener.clone());
+        let term_ms = __t_term.elapsed().as_secs_f64() * 1000.0;
+        log_debug!(
+            "[v2-perf] side=daemon stage=term_new ms={:.3} session={}",
+            term_ms,
+            cfg.session_id
+        );
         let term = Arc::new(FairMutex::new(term));
 
         // Alacritty's built-in event loop drives the PTY reader +
         // Term feeding + input writer. This replaces the custom
         // reader thread the Kessel-T0 path hand-rolls.
+        let __t_loop = std::time::Instant::now();
         let event_loop = EventLoop::new(
             Arc::clone(&term),
             listener,
@@ -273,6 +289,12 @@ impl DaemonPtySession {
         // Not joining means thread cleanup happens implicitly via
         // OS reaping; acceptable for a daemon.
         let _io_thread = event_loop.spawn();
+        let event_loop_ms = __t_loop.elapsed().as_secs_f64() * 1000.0;
+        log_debug!(
+            "[v2-perf] side=daemon stage=event_loop_spawn ms={:.3} session={}",
+            event_loop_ms,
+            cfg.session_id
+        );
 
         Ok(Arc::new(Self {
             session_id: cfg.session_id,

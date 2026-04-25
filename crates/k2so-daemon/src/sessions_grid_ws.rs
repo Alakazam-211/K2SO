@@ -105,6 +105,7 @@ pub async fn serve_session_grid_connection(
         }
     };
 
+    let __t_accept = std::time::Instant::now();
     let ws = match tokio_tungstenite::accept_async(stream).await {
         Ok(ws) => ws,
         Err(e) => {
@@ -112,6 +113,12 @@ pub async fn serve_session_grid_connection(
             return;
         }
     };
+    let ws_accept_ms = __t_accept.elapsed().as_secs_f64() * 1000.0;
+    log_debug!(
+        "[v2-perf] side=daemon stage=ws_accept ms={:.3} session={}",
+        ws_accept_ms,
+        session.session_id
+    );
     let (mut write, mut read) = ws.split();
 
     // Subscribe to the session's event broadcast. Multiple
@@ -128,6 +135,7 @@ pub async fn serve_session_grid_connection(
     // take an explicit snapshot first so the WS contract reads
     // cleanly ("first message is always Snapshot").
     let mut emit_state = EmitState::default();
+    let __t_first_snap = std::time::Instant::now();
     let initial_snapshot = {
         // Bind the Arc<FairMutex<...>> to a local so it outlives
         // the guard. `session.term()` returns a temporary Arc.
@@ -140,6 +148,9 @@ pub async fn serve_session_grid_connection(
         term.reset_damage();
         snap
     };
+    let snap_rows = initial_snapshot.rows;
+    let snap_cols = initial_snapshot.cols;
+    let snap_scrollback = initial_snapshot.scrollback.len();
     if send_outbound(&mut write, &Outbound::Snapshot(&initial_snapshot))
         .await
         .is_err()
@@ -149,6 +160,16 @@ pub async fn serve_session_grid_connection(
         // need to be restored.
         return;
     }
+    let first_snap_ms = __t_first_snap.elapsed().as_secs_f64() * 1000.0;
+    log_debug!(
+        "[v2-perf] side=daemon CONNECT-SUMMARY session={} ws_accept_ms={:.3} first_snap_ms={:.3} rows={} cols={} scrollback={}",
+        session.session_id,
+        ws_accept_ms,
+        first_snap_ms,
+        snap_rows,
+        snap_cols,
+        snap_scrollback
+    );
 
     log_debug!(
         "[daemon/sessions_grid_ws] subscriber attached to session {} (pane {})",
@@ -189,6 +210,12 @@ pub async fn serve_session_grid_connection(
                             exit_code: status.code(),
                         };
                         let _ = send_outbound(&mut write, &exit).await;
+                        // Send a Close frame before tearing down the
+                        // socket so the browser sees a graceful close.
+                        // Without this, WebKit fires `onerror` →
+                        // frontend renders "ws error" instead of the
+                        // child_exit message that just preceded it.
+                        let _ = write.send(Message::Close(None)).await;
                         break;
                     }
                     Ok(_other) => {
@@ -257,7 +284,17 @@ pub async fn serve_session_grid_connection(
                         }
                     }
                     Some(Ok(Message::Pong(_))) => {}
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(frame))) => {
+                        // Echo a Close frame so the client sees a clean
+                        // graceful-close handshake. Without this, WebKit
+                        // logs "The network connection was lost" because
+                        // it gets TCP FIN before our Close frame, which
+                        // RFC 6455 §7 calls an abnormal close. The frame
+                        // payload is mirrored per spec recommendation.
+                        let _ = write.send(Message::Close(frame)).await;
+                        break;
+                    }
+                    None => break,
                     Some(Ok(Message::Frame(_))) => {}
                     Some(Err(e)) => {
                         log_debug!(

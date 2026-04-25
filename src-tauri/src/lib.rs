@@ -127,6 +127,63 @@ fn prime_hook_config_from_daemon() {
     });
 }
 
+/// Detect daemon/Tauri version mismatch on app startup and bounce the
+/// running daemon when they disagree.
+///
+/// Background: the daemon is launchd-managed (`KeepAlive=true`), so a
+/// drag-replace install of K2SO.app overwrites the binary on disk while
+/// launchd keeps the OLD daemon process running with the deleted inode
+/// — meaning a freshly-installed K2SO talks to last-version's daemon
+/// until the user reboots or manually clicks Settings → Restart Daemon.
+/// `daemon_restart()` exists for that manual path; this function is
+/// the automatic version of the same idea.
+///
+/// Runs on a background thread (mirrors `prime_hook_config_from_daemon`)
+/// because we must wait for the daemon to be reachable + we don't want
+/// to block Tauri's setup hook on a synchronous HTTP round-trip. Polls
+/// up to 10× at 500ms intervals; if the daemon stays unreachable we
+/// log and bow out — bigger problem than version skew at that point.
+fn check_daemon_version_and_restart() {
+    use std::time::Duration;
+    std::thread::spawn(|| {
+        let app_version = env!("CARGO_PKG_VERSION");
+        for attempt in 0..10 {
+            std::thread::sleep(Duration::from_millis(500));
+            let client = match crate::daemon_client::DaemonClient::try_connect() {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let status = match client.status() {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if status.version == app_version {
+                log_debug!(
+                    "[version-check] daemon v{} matches app v{} (attempt={})",
+                    status.version,
+                    app_version,
+                    attempt
+                );
+                return;
+            }
+            log_debug!(
+                "[version-check] MISMATCH daemon=v{} app=v{} (attempt={}); restarting daemon via launchctl kickstart",
+                status.version,
+                app_version,
+                attempt
+            );
+            match crate::commands::daemon::kickstart_daemon() {
+                Ok(()) => log_debug!("[version-check] launchctl kickstart succeeded"),
+                Err(e) => log_debug!("[version-check] launchctl kickstart failed: {e}"),
+            }
+            return;
+        }
+        log_debug!(
+            "[version-check] daemon unreachable after 10 attempts; skipping version check"
+        );
+    });
+}
+
 /// Entry point for the LLM worker subprocess.
 /// Loads the model, runs inference, prints the result to stdout, then exits.
 pub fn llm_worker_main(payload_path: &str) {
@@ -770,6 +827,7 @@ pub fn run() {
                 }
             }
             prime_hook_config_from_daemon();
+            check_daemon_version_and_restart();
             {
                 // One-shot migration: ensure every registered project has
                 // a workspace `.k2so/wakeup.md` and every existing agent
