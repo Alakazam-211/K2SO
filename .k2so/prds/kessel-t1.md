@@ -308,10 +308,87 @@ requirements for the Tauri Kessel view in K5:
    container.focus())`. Solves the "workspace swap return and
    start typing doesn't land in the terminal" problem.
 
+6. **Activity detection / braille spinners (0.35.6).**
+   `useActiveAgentsStore.recordOutput(paneId)` on every grid
+   update bumps the per-pane heartbeat that drives the
+   tab-spinner + sidebar Active section. `recordTitleActivity(
+   paneId, isWorking)` flips the per-pane working/idle status —
+   for v2 it's wired off the WS `{event:"title"}` channel
+   (Claude's braille-spinner glyph in the title prefix → working;
+   `✱✲✳✴` family glyphs → idle), with a viewport-text fallback
+   in `src/renderer/lib/agent-signals.ts` for tools that don't
+   cycle the title.
+
+   Kessel won't have an alacritty Term to scan for status-line
+   text, but it CAN tap two cleaner sources directly:
+   - The harness adapter's parsed events themselves — every
+     adapter emits a `Frame::AgentSignal` (or equivalent) when
+     an LLM turn starts/ends. Drive `recordTitleActivity` off
+     those transitions; no string scanning required.
+   - The native lifecycle hooks (`agent:lifecycle` Tauri event,
+     `handleLifecycleEvent` in `active-agents.ts`). Already
+     fires for any Claude Code / Codex session regardless of
+     renderer; just keep wiring it.
+
+   Crucially, **bind paneId → activeProjectId in
+   `paneProjectMap` on the first 'working' transition** (we now
+   do this in `recordTitleActivity`). Without it the per-project
+   sidebar spinner and the Active Bar's `getProjectStatus` can't
+   attribute a working pane to a workspace.
+
+7. **Active Bar 24h tenure (0.35.6).**
+   `setActiveWorkspace` now calls `touchInteraction(projectId)`,
+   so any workspace you visit stays in the Active Bar for 24h
+   and expires on its own. Kessel panes share the same store —
+   nothing renderer-specific to do here, but verify the user's
+   first Cmd+T into a Kessel-mode workspace lights up the
+   sidebar entry the same way v2 does. If Kessel chooses to
+   build its own pane store path (it shouldn't), it has to
+   touch the same projects-store API.
+
+8. **TUI cursor visibility / hollow-on-defocus (0.35.6).**
+   Doesn't directly apply — Kessel renders rich Message /
+   ToolCall cards, not terminal cells, so there's no
+   alacritty-cursor concept to hide. BUT: when the pane is
+   unfocused, render SOME visual indication of focus state on
+   the input composer ("▌" caret in muted color when blurred,
+   bright when focused — the macOS NSTextView convention).
+   Users complain fast when v2 doesn't differentiate focused
+   from backgrounded panes; assume the same threshold for
+   Kessel.
+
+9. **Bell + title from the daemon (0.35.6).**
+   The daemon's `sessions_grid_ws.rs` now forwards alacritty's
+   `AlacEvent::Title` / `ResetTitle` / `Bell` over the v2 WS as
+   `{event:"title",payload:{title}}` and `{event:"bell"}`.
+   Kessel uses a different transport (harness adapter → JSON
+   stream), but the same TWO signals are valuable:
+   - **Title** — adapters that surface a terminal title or
+     conversation name should expose it as a Frame so the
+     Tauri tab title can update without polling.
+   - **Bell** — the universal "agent waiting for input"
+     transition. Most CLI LLMs ring the bell when they finish
+     a turn; the OpenAI/Anthropic JSON streams have explicit
+     `turn_complete` markers that give us this signal even
+     more reliably. Wire it as a definitive idle transition
+     (same path as v2's `case 'bell'` handler).
+
+10. **Auto-update spawn retry (0.35.5).**
+    v2's `TerminalPane.tsx` retries the daemon-spawn fetch with
+    exponential backoff (250 → 2000 ms, 10s ceiling) so the
+    auto-updater's "install + relaunch" cycle doesn't leave
+    panes in a "spawn fetch failed" state during the ~3-5s
+    daemon-restart window. Kessel's spawn path goes through the
+    same daemon HTTP API and will hit the same window — copy
+    the retry shape verbatim. 4xx surfaces immediately, 5xx +
+    network errors retry until the deadline.
+
 These are tangential to Kessel's core architectural work
 (adapters, Frame schema, multi-subscriber) but they're what make
 a pane feel like a first-class terminal pane. Reserve ~half a
-day in K5 to port them over from TerminalPane.tsx.
+day in K5 to port them over from TerminalPane.tsx, plus another
+half-day for the activity / Active Bar / lifecycle plumbing in
+items 6–10 above.
 
 ## Heartbeat integration
 
