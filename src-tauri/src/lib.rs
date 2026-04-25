@@ -245,6 +245,14 @@ pub fn run() {
     #[cfg(unix)]
     terminal::ignore_sigpipe();
 
+    // launchd-launched .app processes inherit a sparse PATH that lacks
+    // ~/.local/bin, /opt/homebrew/bin, and other user-installed prefixes.
+    // Source the user's login shell once and adopt its PATH so legacy
+    // alacritty spawns + every Command::new call site can resolve user
+    // tools. See docs in k2so_core::enrich_path_from_login_shell.
+    #[cfg(unix)]
+    k2so_core::enrich_path_from_login_shell();
+
     // Rustls 0.23 compiles both aws-lc-rs (via reqwest rustls-tls) and ring
     // (via ngrok) into the binary; it refuses to auto-pick and panics on
     // first TLS use unless a provider is explicitly installed.

@@ -92,6 +92,14 @@ async fn main() {
     // at build-time until we actually use it for real work.
     k2so_core::__scaffolding_marker();
 
+    // launchd hands us a sparse PATH; enrich from the user's login shell
+    // BEFORE anything else, so child posix_spawn calls (alacritty's
+    // tty::new for v2 sessions, plus any Command::new in handlers) can
+    // resolve user-installed tools like `claude`, `cursor-agent`,
+    // homebrew binaries, etc. See docs in k2so_core::enrich_path_from_login_shell.
+    #[cfg(unix)]
+    k2so_core::enrich_path_from_login_shell();
+
     log_debug!("[daemon] {}", BANNER);
 
     let k2so_dir = match dirs::home_dir() {
