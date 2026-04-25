@@ -35,6 +35,8 @@ import {
 import { getDaemonWs, invalidateDaemonWs } from '../kessel/daemon-ws'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import { useTabsStore } from '@/stores/tabs'
+import { useActiveAgentsStore } from '@/stores/active-agents'
+import { detectWorkingSignal } from '@/lib/agent-signals'
 import {
   detectLinks,
   type DetectedLink,
@@ -318,6 +320,61 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   const lastDetectPosRef = useRef({ x: 0, y: 0 })
   const lastDetectTimeRef = useRef(0)
 
+  // ── Activity detection ────────────────────────────────────────
+  // Mirrors AlacrittyTerminalView.tsx so v2 panes drive the same
+  // sidebar braille spinner / "Active" indicators as legacy. Two
+  // signals feed the active-agents store:
+  //   1. recordOutput(terminalId) on every grid change — the
+  //      heartbeat-style "this pane just produced bytes" signal.
+  //   2. detectWorkingSignal(rows) viewport scan — the stable
+  //      "is a CLI LLM mid-request" hint ("esc to interrupt",
+  //      "thinking…", etc.). Gated on displayOffset === 0 so a
+  //      scrolled-up user can't pin the pane in 'working' state.
+  // Idle transition fires from a 500ms interval that watches a
+  // 1s grace window since the last working signal.
+  const lastSeenWorkingAtRef = useRef<number>(0)
+
+  // Process one snapshot/delta payload for activity-store updates.
+  // Bumps the per-pane heartbeat unconditionally and runs the
+  // working-signal viewport scan when the user isn't scrolled.
+  const recordActivityFromSnapshot = useCallback(
+    (snap: TermGridSnapshot) => {
+      useActiveAgentsStore.getState().recordOutput(terminalId)
+      if (snap.displayOffset !== 0) return
+      // Build the row→{text} map detectWorkingSignal expects.
+      // Only the bottom window matters (the function scans the
+      // last `windowRows` rows), but the cost of building all
+      // rows is dominated by the network payload anyway.
+      const lines = new Map<number, { text: string }>()
+      for (let r = 0; r < snap.grid.length; r++) {
+        lines.set(r, { text: rowToText(snap.grid[r]) })
+      }
+      if (detectWorkingSignal(lines, snap.rows)) {
+        lastSeenWorkingAtRef.current = Date.now()
+        useActiveAgentsStore.getState().recordTitleActivity(terminalId, true)
+      }
+    },
+    [terminalId],
+  )
+
+  // ── Working-state idle watcher ────────────────────────────────
+  // Working → idle transitions when no signal has been seen for
+  // 1 s. Same 500 ms cadence as legacy so the transition is at
+  // most ~1.5 s after the real one but never flickers on a
+  // single-frame status-line gap.
+  useEffect(() => {
+    const IDLE_GRACE_MS = 1000
+    const interval = setInterval(() => {
+      const last = lastSeenWorkingAtRef.current
+      if (last === 0) return
+      if (Date.now() - last > IDLE_GRACE_MS) {
+        useActiveAgentsStore.getState().recordTitleActivity(terminalId, false)
+        lastSeenWorkingAtRef.current = 0
+      }
+    }, 500)
+    return () => clearInterval(interval)
+  }, [terminalId])
+
   // ── Spawn + WS lifecycle ──────────────────────────────────────
   //
   // One effect handles the whole flow: HTTP POST to v2 spawn, then
@@ -483,11 +540,16 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
               })
             }
             setSnapshot(parsed.payload)
+            recordActivityFromSnapshot(parsed.payload)
             setPhase({ kind: 'ready', sessionId: spawn.sessionId })
             break
           }
           case 'delta':
-            setSnapshot((prev) => mergeDelta(prev, parsed.payload))
+            setSnapshot((prev) => {
+              const next = mergeDelta(prev, parsed.payload)
+              if (next) recordActivityFromSnapshot(next)
+              return next
+            })
             break
           case 'child_exit':
             setPhase({
