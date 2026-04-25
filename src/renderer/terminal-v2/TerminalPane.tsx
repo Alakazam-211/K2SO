@@ -333,16 +333,6 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
         ? { since_keystroke_ms: Math.round(performance.now() - spawnedAt) }
         : undefined)
       setPhase({ kind: 'spawning' })
-      let creds: { port: number; token: string }
-      perfLog('creds_start')
-      const __t_creds = performance.now()
-      try {
-        creds = await getDaemonWs()
-      } catch (e) {
-        if (!cancelled) setPhase({ kind: 'error', message: `daemon unreachable: ${String(e)}` })
-        return
-      }
-      perfLog('creds_end', { elapsed_ms: (performance.now() - __t_creds).toFixed(1) })
 
       const spawnBody = {
         agent_name: agentName,
@@ -355,40 +345,105 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
         cols: 120,
         rows: 40,
       }
-      let spawnRes: Response
-      perfLog('spawn_fetch_start')
-      const __t_spawn = performance.now()
-      try {
-        spawnRes = await fetch(
-          `http://127.0.0.1:${creds.port}/cli/sessions/v2/spawn?token=${creds.token}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(spawnBody),
-          },
-        )
-      } catch (e) {
-        invalidateDaemonWs()
-        if (!cancelled) setPhase({ kind: 'error', message: `spawn fetch failed: ${String(e)}` })
-        return
-      }
-      if (!spawnRes.ok) {
-        const body = await spawnRes.text()
-        if (!cancelled) setPhase({ kind: 'error', message: `spawn ${spawnRes.status}: ${body}` })
-        return
-      }
-      const spawn = (await spawnRes.json()) as {
+
+      // Boot with retry. `Tauri auto-update → relaunch` produces a
+      // ~2–5 s window where the renderer is back up but the daemon
+      // is mid-restart (version-mismatch handshake from 0.35.0 kicks
+      // it). Without retry, every v2 pane that mounts in that window
+      // surfaces "spawn fetch failed: TypeError: Load failed" until
+      // the user manually closes + reopens it. Legacy panes are
+      // immune because they spawn in-process via Tauri IPC and never
+      // hit the daemon HTTP socket; this retry brings v2 to parity.
+      //
+      // Strategy: retry on network-level failures and 5xx for up to
+      // ~10 s with exponential backoff (250 → 500 → 1000 → 2000 ms,
+      // capped at 2000). 4xx surfaces immediately — it's a real
+      // request error, not a transient unreachability.
+      const BOOT_DEADLINE_MS = 10_000
+      const __t_boot_start = performance.now()
+      let creds: { port: number; token: string } | null = null
+      let spawn: {
         sessionId: string
         agentName: string
         cols: number
         rows: number
         reused: boolean
+      } | null = null
+      let attempt = 0
+      while (true) {
+        if (cancelled) return
+        attempt += 1
+        const __t_attempt = performance.now()
+        try {
+          if (!creds) {
+            perfLog('creds_start', { attempt: String(attempt) })
+            creds = await getDaemonWs()
+            perfLog('creds_end', { elapsed_ms: (performance.now() - __t_attempt).toFixed(1) })
+          }
+          perfLog('spawn_fetch_start', { attempt: String(attempt) })
+          const __t_spawn_fetch = performance.now()
+          const spawnRes = await fetch(
+            `http://127.0.0.1:${creds.port}/cli/sessions/v2/spawn?token=${creds.token}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(spawnBody),
+            },
+          )
+          if (spawnRes.status >= 500) {
+            // Daemon answered but failed — likely mid-init right
+            // after restart. Retryable.
+            const body = await spawnRes.text().catch(() => '')
+            invalidateDaemonWs()
+            throw new Error(`spawn ${spawnRes.status}: ${body || 'no body'}`)
+          }
+          if (!spawnRes.ok) {
+            // 4xx — genuine request error, surface immediately. Bad
+            // body, missing field, etc. Won't get better by waiting.
+            const body = await spawnRes.text()
+            if (!cancelled) {
+              setPhase({ kind: 'error', message: `spawn ${spawnRes.status}: ${body}` })
+            }
+            return
+          }
+          spawn = (await spawnRes.json()) as typeof spawn
+          perfLog('spawn_fetch_end', {
+            elapsed_ms: (performance.now() - __t_spawn_fetch).toFixed(1),
+            reused: String(spawn!.reused),
+            sid: spawn!.sessionId.slice(0, 8),
+            attempt: String(attempt),
+          })
+          break
+        } catch (e) {
+          // Network errors (TypeError 'Load failed' from fetch when
+          // socket is closed) and 5xx land here. Daemon-creds errors
+          // also land here (Tauri command failed). All are retryable
+          // until the deadline.
+          invalidateDaemonWs()
+          creds = null
+          const elapsedTotalMs = performance.now() - __t_boot_start
+          if (elapsedTotalMs > BOOT_DEADLINE_MS) {
+            if (!cancelled) {
+              setPhase({
+                kind: 'error',
+                message: `spawn failed after ${Math.round(elapsedTotalMs / 1000)}s: ${String(e)}`,
+              })
+            }
+            return
+          }
+          // Exponential backoff capped at 2 s.
+          const delayMs = Math.min(250 * 2 ** Math.min(attempt - 1, 3), 2000)
+          perfLog('spawn_retry', {
+            attempt: String(attempt),
+            delay_ms: String(delayMs),
+            elapsed_ms: Math.round(elapsedTotalMs).toString(),
+            err: String(e).slice(0, 60),
+          })
+          await new Promise((r) => setTimeout(r, delayMs))
+        }
       }
-      perfLog('spawn_fetch_end', {
-        elapsed_ms: (performance.now() - __t_spawn).toFixed(1),
-        reused: String(spawn.reused),
-        sid: spawn.sessionId.slice(0, 8),
-      })
+
+      if (!creds || !spawn) return // unreachable; satisfies TS
       firstSnapshotReusedRef.current = spawn.reused
       if (cancelled) return
 
