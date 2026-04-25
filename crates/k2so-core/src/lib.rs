@@ -73,9 +73,22 @@ pub mod term;
 /// later inherit the rich PATH naturally — no per-spawn shell wrapper
 /// or per-spawn lookup needed.
 ///
-/// Costs ~30-50ms once at startup (one shell exec). Best-effort:
-/// silently leaves the existing PATH alone if the shell exec fails,
-/// so we never block startup on a misconfigured shell.
+/// Costs ~30-100ms once at startup (one shell exec; the upper bound
+/// covers users with heavy `.zshrc` plugins like oh-my-zsh / p10k).
+/// Best-effort: silently leaves the existing PATH alone if the shell
+/// exec fails or returns nothing useful, so we never block startup
+/// on a misconfigured shell.
+///
+/// Why **`-ilc`** instead of just `-lc`: zsh sources `~/.zshrc` only
+/// for *interactive* shells, not login-only ones. Many users (Rosson
+/// included) set `export PATH="$HOME/.local/bin:$PATH"` in `~/.zshrc`,
+/// not in `~/.zprofile`. Without `-i`, `~/.local/bin` and tool-manager
+/// dirs (`~/.bun/bin`, `~/.cargo/bin`, npm globals, etc.) are missing
+/// from the captured PATH — exactly the bug 0.35.1 shipped. We use
+/// `-ilc` to source the full chain (zshenv → zprofile → zshrc → zlogin
+/// for zsh). Stderr is dropped so noisy `.zshrc` plugins don't pollute
+/// our capture, and we take only the last line of stdout in case the
+/// rc files emit anything before our `printf`.
 ///
 /// Call this at the top of `main()` / `run()` in every binary that
 /// might `posix_spawn` user-installed tools (the daemon spawns them
@@ -84,15 +97,31 @@ pub mod term;
 /// sites).
 #[cfg(unix)]
 pub fn enrich_path_from_login_shell() {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    use std::process::Stdio;
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let output = std::process::Command::new(&shell)
-        .args(["-lc", "printf %s \"$PATH\""])
+        .args(["-ilc", "printf %s \"$PATH\""])
+        .stderr(Stdio::null())
         .output();
     if let Ok(out) = output {
         if out.status.success() {
-            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !path.is_empty() && path != std::env::var("PATH").unwrap_or_default() {
-                std::env::set_var("PATH", path);
+            // Take the last non-empty line of stdout. If the user's
+            // rc files print anything before us, our `printf %s` (no
+            // newline) lands at the end — split-rsplit-find-non-empty
+            // recovers our payload regardless of preamble noise.
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let captured = stdout
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !captured.is_empty()
+                && captured.contains('/')
+                && captured != std::env::var("PATH").unwrap_or_default()
+            {
+                std::env::set_var("PATH", captured);
             }
         }
     }
@@ -121,8 +150,14 @@ mod path_enrichment_tests {
     /// test runner uses multiple threads.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Lock + recover from poison so a panic in one test doesn't
+    /// fail the next one with an opaque PoisonError.
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     fn with_sparse_path<F: FnOnce()>(f: F) {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = lock_env();
         let original = std::env::var("PATH").ok();
         // Standard launchd default — what `/Applications/K2SO.app` and
         // the daemon actually see in production after a fresh install.
@@ -156,20 +191,33 @@ mod path_enrichment_tests {
     }
 
     #[test]
-    fn enrich_path_is_idempotent_on_already_rich_path() {
-        let _g = ENV_LOCK.lock().unwrap();
-        // Run from already-enriched ambient PATH (cargo test's parent
-        // shell). The helper should be safe to call repeatedly without
-        // corrupting state.
+    fn enrich_path_safe_to_call_multiple_times() {
+        // Production calls the helper exactly once at startup, so
+        // strict idempotency isn't required — but it must be safe to
+        // invoke repeatedly without crashing or producing an empty
+        // PATH. (Some users' rc files reorder dirs across invocations,
+        // so equality across calls is too strict an assertion.)
+        let _g = lock_env();
         let before = std::env::var("PATH").unwrap_or_default();
         enrich_path_from_login_shell();
         let after_one = std::env::var("PATH").unwrap_or_default();
         enrich_path_from_login_shell();
         let after_two = std::env::var("PATH").unwrap_or_default();
-        assert_eq!(after_one, after_two, "helper should be idempotent");
-        // The before vs after may differ (a login shell's PATH can
-        // legitimately diverge from `cargo test`'s inherited PATH);
-        // just assert we ended up non-empty.
-        assert!(!after_one.is_empty(), "PATH must not become empty: before={before}");
+        assert!(
+            !after_one.is_empty(),
+            "PATH must not become empty after first enrich (before={before})"
+        );
+        assert!(
+            !after_two.is_empty(),
+            "PATH must not become empty after second enrich"
+        );
+        // Bound any drift: a second call shouldn't massively grow the
+        // string (e.g. by re-prepending user dirs over and over). 2x
+        // headroom catches real runaway growth without flaking on
+        // legitimate reordering.
+        assert!(
+            after_two.len() < after_one.len() * 2,
+            "second enrich call doubled PATH length — likely a runaway prepend"
+        );
     }
 }
