@@ -21,7 +21,7 @@ use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::{Dimensions, Grid};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::{Cell, Flags};
-use alacritty_terminal::term::TermDamage;
+use alacritty_terminal::term::{TermDamage, TermMode};
 use alacritty_terminal::Term;
 use serde::{Deserialize, Serialize};
 
@@ -274,7 +274,14 @@ pub fn snapshot_term<L: EventListener>(
     let cursor = CursorSnapshot {
         row: (cursor_point.line.0.max(0)) as usize,
         col: cursor_point.column.0,
-        visible: true,
+        // Honor the child's `\e[?25h` / `\e[?25l` (DECTCEM). TUIs
+        // like Cursor Agent / claude / vim hide the alacritty
+        // cursor while they paint their own visual cursor inside
+        // their input box. Without this, a stale cursor block
+        // sits at the alacritty cursor position (typically the
+        // bottom-left of the screen) regardless of what the TUI
+        // is drawing.
+        visible: term.mode().contains(TermMode::SHOW_CURSOR),
     };
 
     TermGridSnapshot {
@@ -348,6 +355,10 @@ pub fn build_emit<L: EventListener>(
     let history_size = term.grid().history_size();
     let display_offset = term.grid().display_offset();
     let cursor_point = term.grid().cursor.point;
+    // Honor DECTCEM (`\e[?25h` / `\e[?25l`) the same way the full-
+    // snapshot path does. Captured here before the `let grid =
+    // term.grid()` borrow below takes `term` immutably.
+    let cursor_visible = term.mode().contains(TermMode::SHOW_CURSOR);
     let cols = term.columns();
     let rows = term.screen_lines();
 
@@ -414,7 +425,7 @@ pub fn build_emit<L: EventListener>(
     let cursor = CursorSnapshot {
         row: (cursor_point.line.0.max(0)) as usize,
         col: cursor_point.column.0,
-        visible: true,
+        visible: cursor_visible,
     };
 
     EmitDecision::Delta(TermGridDelta {

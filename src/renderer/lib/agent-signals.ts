@@ -20,15 +20,22 @@
  */
 
 export const WORKING_SIGNALS: readonly string[] = [
-  'esc to interrupt',    // claude, codex
-  'esc to cancel',       // gemini
-  'waiting for ',        // aider ("Waiting for gpt-4o")
-  'thinking...',         // goose, copilot (default), gemini fallback
-  'pondering...',        // copilot
-  'unravelling...',      // copilot
-  'working...',          // opencode
-  'agent is working',    // opencode (typed-mid-generation warning)
-  ' is thinking...',     // codepuppy ("Rex is thinking...")
+  'esc to interrupt',     // claude, codex
+  'esc to cancel',        // gemini
+  'waiting for ',         // aider ("Waiting for gpt-4o")
+  'thinking...',          // goose, copilot (default), gemini fallback,
+                          // pi-mono (defaultHiddenThinkingLabel),
+                          // ollama reasoning models
+  'pondering...',         // copilot
+  'unravelling...',       // copilot
+  'working...',           // opencode, pi-mono (defaultWorkingMessage)
+  'agent is working',     // opencode (typed-mid-generation warning)
+  ' is thinking...',      // codepuppy ("Rex is thinking..."),
+                          // also catches "<model> is thinking..." patterns
+  'planning next moves',  // cursor-agent
+  'taking longer than expected', // cursor-agent (stall state)
+  'loading...',           // llm-tui-rs (placeholder while streaming)
+  '🤖: waiting',          // tenere ("🤖: Waiting <spinner>")
 ]
 
 interface CompactLineLike {

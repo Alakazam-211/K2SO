@@ -64,6 +64,18 @@ enum Outbound<'a> {
     /// server closes the WS. `exit_code` is `None` on signal-kill.
     #[allow(dead_code)]
     ChildExit { exit_code: Option<i32> },
+    /// Terminal title change (`OSC 0/1/2`). Used by the renderer
+    /// for the same fast-idle / fast-working hints legacy pulls
+    /// from `terminal:title:<id>` Tauri events: Claude Code's
+    /// braille-spinner prefix while working, the ✱-family glyphs
+    /// the moment it goes idle, etc.
+    Title { title: String },
+    /// Bell character (`\a`, OSC 7). Mirrors how iTerm decides
+    /// "agent is now waiting for input": Claude rings the bell
+    /// when it's done and ready for a reply. Renderer can use
+    /// this as a definitive "idle, waiting" transition signal,
+    /// independent of any viewport-text scan.
+    Bell,
     /// Pre-handshake or handshake-time fatal error. Client should
     /// treat as terminal and may retry once.
     Error { message: String },
@@ -218,10 +230,40 @@ pub async fn serve_session_grid_connection(
                         let _ = write.send(Message::Close(None)).await;
                         break;
                     }
+                    Ok(AlacEvent::Title(title)) => {
+                        // Forward as Outbound::Title so the renderer
+                        // can use the same idle/working hints legacy
+                        // pulls from `terminal:title:<id>` Tauri
+                        // events. Claude Code's title cycles between
+                        // braille-spinner glyphs (working) and the
+                        // ✱-family idle marker (done).
+                        let _ = send_outbound(
+                            &mut write,
+                            &Outbound::Title { title },
+                        )
+                        .await;
+                    }
+                    Ok(AlacEvent::ResetTitle) => {
+                        // OSC 0 reset → empty title. Treated by the
+                        // renderer the same as a non-marker title
+                        // (no idle hint).
+                        let _ = send_outbound(
+                            &mut write,
+                            &Outbound::Title { title: String::new() },
+                        )
+                        .await;
+                    }
+                    Ok(AlacEvent::Bell) => {
+                        // Bell — used by Claude / Codex to signal
+                        // "I'm done and waiting for input." Same
+                        // signal iTerm uses for its "agent waiting"
+                        // notifications.
+                        let _ = send_outbound(&mut write, &Outbound::Bell).await;
+                    }
                     Ok(_other) => {
-                        // Title / Bell / ClipboardStore / ColorRequest /
-                        // etc. Ignored for v2 — not part of the
-                        // minimal grid-rendering contract.
+                        // ClipboardStore / ColorRequest / etc.
+                        // Ignored for v2 — not part of the minimal
+                        // grid-rendering contract.
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         // Consumer fell behind. Term state still

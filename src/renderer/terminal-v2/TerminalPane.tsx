@@ -98,6 +98,8 @@ type OutboundMsg =
   | { event: 'snapshot'; payload: TermGridSnapshot }
   | { event: 'delta'; payload: TermGridDelta }
   | { event: 'child_exit'; payload: { exit_code: number | null } }
+  | { event: 'title'; payload: { title: string } }
+  | { event: 'bell'; payload: null }
   | { event: 'error'; payload: { message: string } }
 
 // ── Helpers ───────────────────────────────────────────────────────
@@ -109,14 +111,36 @@ function hexToCss(n: number): string {
   return `rgb(${r},${g},${b})`
 }
 
-function runStyle(run: CellRun): React.CSSProperties {
-  const fg = run.fg !== null ? hexToCss(run.fg) : undefined
-  const bg = run.bg !== null ? hexToCss(run.bg) : undefined
+function runStyle(
+  run: CellRun,
+  defaultFg: string,
+  defaultBg: string,
+): React.CSSProperties {
+  // Resolve fg/bg, falling back to terminal defaults so the
+  // INVERSE flag actually produces a swap when a cell has only
+  // the flag set (no explicit colors). TUIs that paint their own
+  // visual cursor by inverting a default-colored cell — Cursor
+  // Agent's "P" highlight, vim's normal-mode cursor, etc — rely
+  // on this behavior. Without resolving defaults, an inverse
+  // cell with null fg/null bg was rendering as plain text and
+  // the TUI's cursor block was invisible.
+  const fg = run.fg !== null ? hexToCss(run.fg) : defaultFg
+  const bg = run.bg !== null ? hexToCss(run.bg) : defaultBg
   const color = run.inverse ? bg : fg
   const backgroundColor = run.inverse ? fg : bg
   const style: React.CSSProperties = {}
-  if (color !== undefined) style.color = color
-  if (backgroundColor !== undefined) style.backgroundColor = backgroundColor
+  // Only emit color/background when (a) inverse is on (so the
+  // span actually has a visible block) or (b) the cell explicitly
+  // set a non-default value. Always emitting `color: defaultFg`
+  // would unnecessarily bloat the DOM and break inheritance for
+  // cells that meant to use the parent's default.
+  if (run.inverse) {
+    style.color = color
+    style.backgroundColor = backgroundColor
+  } else {
+    if (run.fg !== null) style.color = color
+    if (run.bg !== null) style.backgroundColor = backgroundColor
+  }
   if (run.bold) style.fontWeight = 'bold'
   if (run.italic) style.fontStyle = 'italic'
   if (run.underline && run.strikeout) {
@@ -130,13 +154,18 @@ function runStyle(run: CellRun): React.CSSProperties {
   return style
 }
 
-function renderRowRuns(row: CellRun[], absRow: number): React.ReactNode {
+function renderRowRuns(
+  row: CellRun[],
+  absRow: number,
+  defaultFg: string,
+  defaultBg: string,
+): React.ReactNode {
   if (row.length === 0) return '\u00a0'
   const spans: React.ReactNode[] = []
   for (let i = 0; i < row.length; i++) {
     const run = row[i]
     spans.push(
-      <span key={`a${absRow}s${i}`} style={runStyle(run)}>
+      <span key={`a${absRow}s${i}`} style={runStyle(run, defaultFg, defaultBg)}>
         {run.text || '\u00a0'}
       </span>,
     )
@@ -337,25 +366,87 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   // Process one snapshot/delta payload for activity-store updates.
   // Bumps the per-pane heartbeat unconditionally and runs the
   // working-signal viewport scan when the user isn't scrolled.
+  const lastDetectLogAtRef = useRef(0)
+  const lastWorkingStateRef = useRef(false)
   const recordActivityFromSnapshot = useCallback(
     (snap: TermGridSnapshot) => {
       useActiveAgentsStore.getState().recordOutput(terminalId)
-      if (snap.displayOffset !== 0) return
-      // Build the row→{text} map detectWorkingSignal expects.
-      // Only the bottom window matters (the function scans the
-      // last `windowRows` rows), but the cost of building all
-      // rows is dominated by the network payload anyway.
+
+      // Build the row→{text} map detectWorkingSignal expects from
+      // the WHOLE viewport. We deliberately do NOT gate on
+      // `displayOffset === 0` because some renderers / rapid output
+      // can leave the daemon-side display_offset non-zero even when
+      // the user is effectively at the bottom — and the false-
+      // positive cost (showing 'working' while scrolled-up) is much
+      // smaller than the false-negative cost (no spinner ever).
       const lines = new Map<number, { text: string }>()
       for (let r = 0; r < snap.grid.length; r++) {
         lines.set(r, { text: rowToText(snap.grid[r]) })
       }
-      if (detectWorkingSignal(lines, snap.rows)) {
+      const isWorking = detectWorkingSignal(lines, snap.rows)
+      if (isWorking) {
         lastSeenWorkingAtRef.current = Date.now()
         useActiveAgentsStore.getState().recordTitleActivity(terminalId, true)
+      }
+
+      // DEV breadcrumbs.
+      //
+      // LOG-1: every working-state TRANSITION (idle→working,
+      // working→idle), so we can see exactly when the spinner
+      // should flip. Loud log level (warn) so it's easy to spot.
+      //
+      // LOG-2: throttled status — at most one info-level line per
+      // second showing whether detection matched + a sample of the
+      // bottom rows. Lets us see what text the scanner is actually
+      // looking at when the user reports "no spinner."
+      if (import.meta.env.DEV) {
+        const wasWorking = lastWorkingStateRef.current
+        if (isWorking !== wasWorking) {
+          lastWorkingStateRef.current = isWorking
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[v2-activity] FLIP tid=${terminalId.slice(0, 8)} ${wasWorking ? 'working→idle' : 'idle→working'}`,
+          )
+        }
+        const now = Date.now()
+        if (now - lastDetectLogAtRef.current > 1000) {
+          lastDetectLogAtRef.current = now
+          const tail = Math.max(0, snap.rows - 5)
+          const sample: string[] = []
+          for (let r = tail; r < snap.rows; r++) {
+            const t = lines.get(r)?.text ?? ''
+            if (t.trim()) sample.push(t.slice(0, 90))
+          }
+          // eslint-disable-next-line no-console
+          console.info(
+            `[v2-activity] tid=${terminalId.slice(0, 8)} working=${isWorking} ` +
+              `displayOffset=${snap.displayOffset} rows=${snap.rows} ` +
+              `gridRows=${snap.grid.length}\n  bottom=${JSON.stringify(sample, null, 2)}`,
+          )
+        }
       }
     },
     [terminalId],
   )
+
+  // Drive activity detection off snapshot-state changes so it
+  // re-binds cleanly across Vite HMR / React Fast Refresh. (If
+  // we called recordActivityFromSnapshot from inside the
+  // ws.onmessage handler — captured in the boot effect's
+  // closure — HMR'd activity code wouldn't take effect on
+  // already-mounted sessions until the user closed and reopened
+  // the tab.) React batches setSnapshot calls so this effect
+  // runs once per coalesced grid update, not once per byte.
+  const activityWiredLoggedRef = useRef(false)
+  useEffect(() => {
+    if (!activityWiredLoggedRef.current && import.meta.env.DEV) {
+      activityWiredLoggedRef.current = true
+      // eslint-disable-next-line no-console
+      console.warn(`[v2-activity] WIRED tid=${terminalId.slice(0, 8)} — snapshot-driven detection is active`)
+    }
+    if (!snapshot) return
+    recordActivityFromSnapshot(snapshot)
+  }, [snapshot, recordActivityFromSnapshot, terminalId])
 
   // ── Working-state idle watcher ────────────────────────────────
   // Working → idle transitions when no signal has been seen for
@@ -540,17 +631,67 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
               })
             }
             setSnapshot(parsed.payload)
-            recordActivityFromSnapshot(parsed.payload)
+            // Activity detection runs in a snapshot-driven useEffect
+            // below, NOT inline here. ws.onmessage is captured in the
+            // boot effect's closure and does not re-bind across Vite
+            // HMR / React Fast Refresh — calling activity from here
+            // means HMR'd code wouldn't take effect on existing
+            // sessions. Driving it from setSnapshot's downstream
+            // effect avoids that whole class of bug.
             setPhase({ kind: 'ready', sessionId: spawn.sessionId })
             break
           }
           case 'delta':
-            setSnapshot((prev) => {
-              const next = mergeDelta(prev, parsed.payload)
-              if (next) recordActivityFromSnapshot(next)
-              return next
-            })
+            setSnapshot((prev) => mergeDelta(prev, parsed.payload))
             break
+          case 'title': {
+            // Mirror legacy's `terminal:title:<id>` handling. Claude
+            // Code uses braille-spinner glyphs in the title prefix
+            // while working and the ✱-family glyphs the moment it
+            // goes idle, so the title is the fastest, most reliable
+            // working/idle hint we have. See
+            // AlacrittyTerminalView.tsx:510-518 for the legacy
+            // version. We use the SAME regex so v2 and legacy agree.
+            const raw = parsed.payload.title ?? ''
+            const isIdleMarker = /^[*✱✲✳✴✵✶✷✸✹⚹⁎∗※]/.test(raw)
+            const isWorkingMarker = /^[\u2800-\u28FF]/.test(raw)
+            if (import.meta.env.DEV) {
+              // eslint-disable-next-line no-console
+              console.warn(
+                `[v2-activity] TITLE tid=${terminalId.slice(0, 8)} raw=${JSON.stringify(raw.slice(0, 60))} idleMarker=${isIdleMarker} workingMarker=${isWorkingMarker}`,
+              )
+            }
+            if (isIdleMarker) {
+              lastSeenWorkingAtRef.current = 0
+              useActiveAgentsStore.getState().recordTitleActivity(terminalId, false)
+            } else if (isWorkingMarker) {
+              lastSeenWorkingAtRef.current = Date.now()
+              useActiveAgentsStore.getState().recordTitleActivity(terminalId, true)
+            }
+            // Strip the leading marker chars + collapse whitespace
+            // so the user-visible title doesn't have spinner noise
+            // in it. Mirrors the legacy substitution.
+            const cleanTitle = raw
+              .replace(/^[\u2800-\u28FF*✱✲✳✴✵✶✷✸✹⚹⁎∗※·•●◦‣⏺]\s*/g, '')
+              .trim()
+            if (cleanTitle && tabId) {
+              useTabsStore.getState().setTabTitle(tabId, cleanTitle)
+            }
+            break
+          }
+          case 'bell': {
+            // Bell — same signal iTerm uses for "agent waiting"
+            // notifications. Claude / Codex ring the bell when
+            // they're done and ready for input. Use it as a
+            // definitive idle transition.
+            if (import.meta.env.DEV) {
+              // eslint-disable-next-line no-console
+              console.warn(`[v2-activity] BELL tid=${terminalId.slice(0, 8)}`)
+            }
+            lastSeenWorkingAtRef.current = 0
+            useActiveAgentsStore.getState().recordTitleActivity(terminalId, false)
+            break
+          }
           case 'child_exit':
             setPhase({
               kind: 'exited',
@@ -1094,27 +1235,129 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     ],
   )
 
-  const cursorStyle: React.CSSProperties = useMemo(() => {
-    if (!snapshot || !cellMetrics.width) return { display: 'none' }
-    const cursorVisibleRow = snapshot.cursor.row + viewportOffset
-    if (cursorVisibleRow < 0 || cursorVisibleRow >= snapshot.rows) {
-      return { display: 'none' }
-    }
+  // Default fg/bg as CSS strings — passed to runStyle so cells
+  // with `inverse=true` and null colors render the proper swap
+  // (default-bg text on default-fg block) instead of looking
+  // like ordinary text. Used by TUI-drawn cursors.
+  const defaultFgCss = useMemo(
+    () => hexToCss(config.colors.foreground),
+    [config.colors.foreground],
+  )
+  const defaultBgCss = useMemo(
+    () => hexToCss(config.colors.background),
+    [config.colors.background],
+  )
+
+  const cursorOverlay: {
+    style: React.CSSProperties
+    char?: string
+  } | null = useMemo(() => {
+    if (!snapshot || !cellMetrics.width) return null
     const caretColor = 'rgb(224, 224, 224)'
-    const fill = isFocused ? caretColor : 'transparent'
-    const outline = isFocused ? undefined : `inset 0 0 0 1px ${caretColor}`
-    return {
-      position: 'absolute',
-      left: `${4 + cellMetrics.width * snapshot.cursor.col}px`,
-      top: `${4 + cellMetrics.height * cursorVisibleRow}px`,
-      width: `${cellMetrics.width}px`,
-      height: `${cellMetrics.height}px`,
-      backgroundColor: fill,
-      boxShadow: outline,
-      pointerEvents: 'none',
-      boxSizing: 'border-box',
+
+    // Scenario A — DECTCEM on (regular shell): overlay a block at
+    // alacritty's reported cursor position. Focused = solid fill,
+    // unfocused = hollow outline. No character needed; the cell
+    // span underneath already renders it.
+    if (snapshot.cursor.visible && viewportOffset === 0) {
+      const cursorVisibleRow = snapshot.cursor.row + viewportOffset
+      if (cursorVisibleRow >= 0 && cursorVisibleRow < snapshot.rows) {
+        const baseStyle: React.CSSProperties = {
+          position: 'absolute',
+          left: `${4 + cellMetrics.width * snapshot.cursor.col}px`,
+          top: `${4 + cellMetrics.height * cursorVisibleRow}px`,
+          width: `${cellMetrics.width}px`,
+          height: `${cellMetrics.height}px`,
+          pointerEvents: 'none',
+          boxSizing: 'border-box',
+        }
+        // `border` not `box-shadow inset` for the same reason as
+        // scenario B — uniform 1px rendering on retina without
+        // the half-pixel snapping that thickens the top edge.
+        if (isFocused) {
+          return {
+            style: {
+              ...baseStyle,
+              backgroundColor: caretColor,
+            },
+          }
+        }
+        return {
+          style: {
+            ...baseStyle,
+            backgroundColor: 'transparent',
+            border: `1px solid ${caretColor}`,
+          },
+        }
+      }
+      return null
     }
-  }, [snapshot, cellMetrics, viewportOffset, isFocused])
+
+    // Scenario B — DECTCEM off (TUI), unfocused. The TUI drew a
+    // solid white inverse-cell block at the cursor position with
+    // the character rendered in default-bg color (black-on-white).
+    // To turn that into a HOLLOW cursor where the character also
+    // inverts back to its normal foreground color, we overlay a
+    // div with default-bg fill + caret-color hollow outline + the
+    // character redrawn in default-fg color. Net effect: the cell
+    // visually flips from solid-block-with-inverted-char to
+    // outlined-rect-with-normal-char. Skip when focused — the
+    // TUI's bright solid block is the cursor we want to see.
+    if (!isFocused && !snapshot.cursor.visible && viewportOffset === 0) {
+      let found: { row: number; col: number; char: string } | null = null
+      for (let r = 0; r < snapshot.grid.length && !found; r++) {
+        const row = snapshot.grid[r]
+        let cellCol = 0
+        for (const run of row) {
+          if (run.inverse) {
+            // Use the first character of the run — TUI cursors
+            // are single-cell so the run's text is one char (or
+            // empty for a cursor-on-blank-cell).
+            found = {
+              row: r,
+              col: cellCol,
+              char: run.text.charAt(0) || '',
+            }
+            break
+          }
+          cellCol += run.text.length
+        }
+      }
+      if (found) {
+        // The underlying inverse-cell paints its white bg over
+        // the line-box, which on retina + this font extends ~1px
+        // above the row's nominal top (font ascender + half-
+        // leading). If we sit the overlay exactly on the row's
+        // top, that leftover 1px of white peeks above and looks
+        // like a 2px top border. Bumping the overlay 1px upward
+        // and growing height by 1px absorbs the bleed without
+        // disturbing the bottom edge.
+        return {
+          style: {
+            position: 'absolute',
+            left: `${4 + cellMetrics.width * found.col}px`,
+            top: `${4 + cellMetrics.height * found.row - 1}px`,
+            width: `${cellMetrics.width}px`,
+            height: `${cellMetrics.height + 1}px`,
+            backgroundColor: defaultBgCss,
+            color: defaultFgCss,
+            border: `1px solid ${caretColor}`,
+            pointerEvents: 'none',
+            boxSizing: 'border-box',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 0,
+            margin: 0,
+            lineHeight: 1,
+          },
+          char: found.char,
+        }
+      }
+    }
+
+    return null
+  }, [snapshot, cellMetrics, viewportOffset, isFocused, defaultBgCss, defaultFgCss])
 
   // ── Render ────────────────────────────────────────────────────
   if (phase.kind === 'error') {
@@ -1170,10 +1413,16 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       {visibleRows.map((row, rowIdx) => {
         const absRow = visibleRowAbsRows[rowIdx] ?? rowIdx
         return (
-          <div key={`abs-${absRow}`}>{renderRowRuns(row, absRow)}</div>
+          <div key={`abs-${absRow}`}>
+            {renderRowRuns(row, absRow, defaultFgCss, defaultBgCss)}
+          </div>
         )
       })}
-      <div aria-hidden="true" style={cursorStyle} />
+      {cursorOverlay && (
+        <div aria-hidden="true" style={cursorOverlay.style}>
+          {cursorOverlay.char ?? ''}
+        </div>
+      )}
       {import.meta.env.DEV && (
         <div
           style={{

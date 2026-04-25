@@ -57,8 +57,16 @@ function useActiveBarItems(): ProjectWithWorkspaces[] {
       // 2. Recently interacted (within 24h, set when agent message sent)
       if (p.lastInteractionAt && (now - p.lastInteractionAt) < TWENTY_FOUR_HOURS) return true
 
-      // 3. Is the active project with running agents (hook or poll detected)
-      if (p.id === activeProjectId && (hasActiveAgents || hasHookActivity)) return true
+      // 3. Is the currently-active workspace. The user is looking at
+      // it right now; surfacing it in Active gives them an obvious
+      // landing spot when they navigate away and come back. Pre-A
+      // this rule additionally required `hasActiveAgents ||
+      // hasHookActivity`, which meant v2 tabs whose agent-detection
+      // hadn't lit up yet would never enter the bar — and once the
+      // user navigated away they'd lose any "I was just here" trail.
+      // Always-include-when-active matches the legacy Tauri behavior
+      // users expect from iTerm-style tabbed shells.
+      if (p.id === activeProjectId) return true
 
       // 4. Has background workspaces (stashed terminals)
       const hasBackground = Object.keys(backgroundWorkspaces).some(
@@ -257,13 +265,7 @@ export function getActiveBarItems(): ProjectWithWorkspaces[] {
   const projects = useProjectsStore.getState().projects
   const activeProjectId = useProjectsStore.getState().activeProjectId
   const backgroundWorkspaces = useTabsStore.getState().backgroundWorkspaces
-  const hasActiveAgents = useActiveAgentsStore.getState().hasActiveAgents()
-  const paneStatuses = useActiveAgentsStore.getState().paneStatuses
   const now = Math.floor(Date.now() / 1000)
-
-  const hasHookActivity = paneStatuses.size > 0 && Array.from(paneStatuses.values()).some(
-    (s) => s === 'working' || s === 'permission' || s === 'review'
-  )
 
   return projects.filter((p) => {
     if (p.pinned) return false
@@ -271,7 +273,7 @@ export function getActiveBarItems(): ProjectWithWorkspaces[] {
     if (p.agentMode === 'agent' || p.agentMode === 'custom') return false
     if (p.manuallyActive) return true
     if (p.lastInteractionAt && (now - p.lastInteractionAt) < TWENTY_FOUR_HOURS) return true
-    if (p.id === activeProjectId && (hasActiveAgents || hasHookActivity)) return true
+    if (p.id === activeProjectId) return true
     if (Object.keys(backgroundWorkspaces).some((k) => k.startsWith(`${p.id}:`))) return true
     if (_activeBarMemory.has(p.id)) return true
     return false

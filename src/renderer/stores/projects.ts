@@ -356,6 +356,13 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     // Persist for session restore
     invoke('settings_update', { updates: { lastActiveProjectId: projectId, lastActiveWorkspaceId: workspaceId } }).catch(() => {})
 
+    // 24h Active Bar persistence — bumping lastInteractionAt on every
+    // workspace activation means a workspace stays in the Active Bar
+    // for 24h after the user last touched it, then expires. The
+    // touchInteraction call is debounced to 5min/project so rapid
+    // tab-switching doesn't hammer the DB.
+    get().touchInteraction(projectId)
+
     const project = state.projects.find((p) => p.id === projectId)
     const workspace = project?.workspaces.find((w) => w.id === workspaceId)
     const cwd = workspace?.worktreePath ?? project?.path ?? '~'

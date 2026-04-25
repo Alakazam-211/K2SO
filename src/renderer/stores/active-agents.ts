@@ -161,7 +161,7 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
    * come from the Tauri lifecycle hook and have higher priority.
    */
   recordTitleActivity: (paneId: string, isWorking: boolean) => {
-    const { paneStatuses } = get()
+    const { paneStatuses, paneProjectMap } = get()
     const current = paneStatuses.get(paneId) ?? 'idle'
     if (current === 'permission' || current === 'review') return
     const next: PaneStatus = isWorking ? 'working' : 'idle'
@@ -169,6 +169,25 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
     const newStatuses = new Map(paneStatuses)
     newStatuses.set(paneId, next)
     set({ paneStatuses: newStatuses })
+
+    // Bind paneId → activeProjectId on the first 'working' transition
+    // so getProjectStatus() can attribute the spinner to a workspace
+    // (drives the sidebar Active section + IconRail dots). Mirrors
+    // what handleLifecycleEvent does on a 'start' hook event — but
+    // for v2 panes whose working state comes from terminal-title
+    // OSC events rather than from agent lifecycle hooks, this is the
+    // only path that populates the map. Without it, paneStatuses
+    // says 'working' but no project owns the spinner.
+    if (isWorking && !paneProjectMap.has(paneId)) {
+      const ps = useProjectsStore.getState()
+      if (ps.activeProjectId) {
+        const newPaneProjectMap = new Map(paneProjectMap)
+        newPaneProjectMap.set(paneId, ps.activeProjectId)
+        set({ paneProjectMap: newPaneProjectMap })
+        // Also touches lastInteractionAt → 24h Active Bar tenure.
+        ps.touchInteraction(ps.activeProjectId)
+      }
+    }
   },
 
   handleLifecycleEvent: (paneId: string, _tabId: string, eventType: string) => {
@@ -460,9 +479,19 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
     const cleanedStatuses = new Map(paneStatuses)
     let statusesChanged = false
     for (const terminalId of outputTimestamps.keys()) {
-      if (!newAgents.has(terminalId)) {
-        outputTimestamps.delete(terminalId)
-      }
+      if (newAgents.has(terminalId)) continue
+      // Preserve the timestamp for panes with an active hook-driven
+      // status — it's the OUTPUT_TRUST_GRACE_MS signal that keeps the
+      // working state alive through the cleanup branch below. v2
+      // (Alacritty) panes never appear in `newAgents` because
+      // `terminal_get_foreground_command` only sees legacy
+      // TerminalManager sessions; without this exemption their
+      // 'working' state would get clobbered on every poll cycle and
+      // the braille spinner would never stay lit. Hook-driven legacy
+      // panes are unaffected (they're already in newAgents via the
+      // KNOWN_AGENT_COMMANDS check).
+      if (paneStatuses.has(terminalId)) continue
+      outputTimestamps.delete(terminalId)
     }
     const cleanupNow = Date.now()
     for (const [paneId, status] of paneStatuses) {
