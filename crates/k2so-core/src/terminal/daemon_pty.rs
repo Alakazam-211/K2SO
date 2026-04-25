@@ -212,11 +212,30 @@ impl DaemonPtySession {
             .as_ref()
             .map(|prog| Shell::new(prog.clone(), cfg.args.clone()));
 
+        // Build the env we hand to alacritty's tty::new. Without an
+        // explicit TERM/COLORTERM, child processes inherit alacritty's
+        // default (TERM=dumb on this version), which makes Claude Code,
+        // bash prompts, ls --color, vim — basically every TUI — turn
+        // OFF colors. Mirror what `alacritty_backend.rs` does for the
+        // legacy renderer (TERM=xterm-256color + COLORTERM=truecolor +
+        // TERM_PROGRAM=K2SO) so v2 children render the same colors as
+        // legacy children.
+        let mut child_env = cfg.env.clone();
+        child_env
+            .entry("TERM".to_string())
+            .or_insert_with(|| "xterm-256color".to_string());
+        child_env
+            .entry("COLORTERM".to_string())
+            .or_insert_with(|| "truecolor".to_string());
+        child_env
+            .entry("TERM_PROGRAM".to_string())
+            .or_insert_with(|| "K2SO".to_string());
+
         let pty_options = TtyOptions {
             shell,
             working_directory: cfg.cwd.clone(),
             drain_on_exit: cfg.drain_on_exit,
-            env: cfg.env.clone(),
+            env: child_env,
             #[cfg(target_os = "windows")]
             escape_args: false,
         };
