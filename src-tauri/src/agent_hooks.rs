@@ -311,15 +311,20 @@ pub fn k2so_heartbeat_force_fire(
         return Err(format!("wakeup.md missing at {}", hb.wakeup_path));
     }
 
-    if crate::commands::k2so_agents::is_agent_locked(&project_path, &agent_name) {
-        let _ = HeartbeatFire::insert_with_schedule(
-            &conn, &project_id, Some(&agent_name), Some(&hb.name),
-            &hb.frequency, "skipped_locked",
-            Some("forced fire refused: agent already running"),
-            None, None, None,
-        );
-        return Err(format!("agent '{}' is already running — close its session first", agent_name));
-    }
+    // Per-heartbeat sessions (post-0.36.0): each heartbeat owns its
+    // own Claude session via agent_heartbeats.last_session_id, distinct
+    // from the agent's main Chat tab session in agent_sessions. The
+    // old is_agent_locked check refused fires whenever the Chat tab
+    // was open — but that's not a real conflict, since a new heartbeat
+    // fire spawns its own PTY with its own terminal id and resumes
+    // its own session id. Removing the lock here is what enables the
+    // user-facing "click Launch on a heartbeat while my chat is open"
+    // flow.
+    //
+    // (The scheduler-tick path keeps its is_agent_locked check below,
+    // since back-to-back tick fires of the SAME row are still a
+    // concern there. A per-(agent, heartbeat) lock would be the
+    // longer-term fix.)
 
     // Use the full launch-args builder (same as /cli/agents/launch) so heartbeats
     // --resume the saved session, --fork-session past the stale-session dialog,

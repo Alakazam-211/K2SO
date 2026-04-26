@@ -209,26 +209,14 @@ pub fn handle_heartbeat_fire(project_path: &str, name: &str) -> String {
         (hb, agent_name, project_id)
     };
 
-    // Lock check (single-flight: refuse to double-spawn against an agent
-    // that's already running). Stamps an audit row so the user sees
-    // why nothing happened.
-    if scheduler::is_agent_locked(project_path, &agent_name) {
-        let db = k2so_core::db::shared();
-        let conn = db.lock();
-        let _ = HeartbeatFire::insert_with_schedule(
-            &conn, &project_id, Some(&agent_name), Some(&hb.name),
-            &hb.frequency, "skipped_locked",
-            Some("manual fire refused: agent already running"),
-            None, None, None,
-        );
-        return serde_json::json!({
-            "success": false,
-            "decision": "skipped_locked",
-            "reason": format!("agent '{agent_name}' is already running"),
-            "name": name,
-            "agent": agent_name,
-        }).to_string();
-    }
+    // No agent-level lock check. Each heartbeat owns its own Claude
+    // session via agent_heartbeats.last_session_id, which is distinct
+    // from the agent's main Chat tab session. Refusing because the
+    // Chat tab is open would be a false conflict — the heartbeat
+    // spawns its own PTY with its own terminal id and resumes its
+    // own session id. (The scheduler-tick path uses the agent lock
+    // for back-to-back same-row protection; manual fires are by
+    // definition opt-in and must not be silently refused.)
 
     // Read the heartbeat's WAKEUP.md (workspace-relative path).
     let wakeup_abs = std::path::Path::new(project_path).join(&hb.wakeup_path);
