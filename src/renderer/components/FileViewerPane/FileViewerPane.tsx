@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react'
+import React, { useState, useEffect, useCallback, useRef, useLayoutEffect, useImperativeHandle } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
@@ -13,6 +13,17 @@ import { FILE_POLL_INTERVAL } from '@shared/constants'
 
 // ── Types ────────────────────────────────────────────────────────────────
 
+/**
+ * Imperative handle exposed by FileViewerPane via the optional
+ * `commandRef` prop. Lets a parent (e.g. AIFileEditor) wire its own
+ * Save/Discard buttons to the editor's dirty buffer without having to
+ * mirror all of the pane's internal state.
+ */
+export interface FileViewerHandle {
+  save: () => Promise<void>
+  discard: () => void
+}
+
 interface FileViewerPaneProps {
   filePath: string
   mode?: 'edit' | 'diff'
@@ -22,6 +33,14 @@ interface FileViewerPaneProps {
   initialScrollTop?: number
   initialCursorPos?: number
   onClose?: () => void
+  /** Imperative handle for parent-controlled Save/Discard. The
+   *  FileViewerPane writes into this ref on mount; parents can call
+   *  `commandRef.current?.save()` / `.discard()` from their own UI. */
+  commandRef?: React.RefObject<FileViewerHandle | null>
+  /** Notifies the parent on every dirty-state transition. Lets the
+   *  parent enable/disable a Save button or show an unsaved-changes
+   *  indicator without coupling to the internal state. */
+  onDirtyChange?: (isDirty: boolean) => void
 }
 
 type FileCategory = 'markdown' | 'image' | 'pdf' | 'docx' | 'text'
@@ -89,7 +108,7 @@ class EditorErrorBoundary extends React.Component<
 // ── Component ────────────────────────────────────────────────────────────
 
 export function FileViewerPane(props: FileViewerPaneProps): React.JSX.Element {
-  const { filePath, mode, paneId, paneGroupId, tabId, initialScrollTop, initialCursorPos, onClose } = props
+  const { filePath, mode, paneId, paneGroupId, tabId, initialScrollTop, initialCursorPos, onClose, commandRef, onDirtyChange } = props
   // Diff mode — render DiffViewer instead of editor
   if (mode === 'diff') {
     return <DiffViewer filePath={filePath} className="h-full" />
@@ -105,12 +124,14 @@ export function FileViewerPane(props: FileViewerPaneProps): React.JSX.Element {
         initialScrollTop={initialScrollTop}
         initialCursorPos={initialCursorPos}
         onClose={onClose}
+        commandRef={commandRef}
+        onDirtyChange={onDirtyChange}
       />
     </EditorErrorBoundary>
   )
 }
 
-function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScrollTop, initialCursorPos, onClose }: Omit<FileViewerPaneProps, 'mode'>): React.JSX.Element {
+function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScrollTop, initialCursorPos, onClose, commandRef, onDirtyChange }: Omit<FileViewerPaneProps, 'mode'>): React.JSX.Element {
   const [content, setContent] = useState<string>('')
   const [editedContent, setEditedContent] = useState<string | null>(null) // null = not edited
   const [loading, setLoading] = useState(true)
@@ -267,6 +288,27 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
       setSaving(false)
     }
   }, [filePath, editedContent, content])
+
+  // Discard unsaved edits — drops the in-memory edited buffer so the
+  // pane re-renders against the on-disk content. Used by the parent's
+  // optional Discard button (e.g. AIFileEditor's heartbeat editor).
+  const discardEdits = useCallback(() => {
+    setEditedContent(null)
+  }, [])
+
+  // Imperative handle for parent-controlled Save/Discard. The handle
+  // re-binds whenever saveFile/discardEdits change so the parent's
+  // ref always points at fresh closures (i.e. the latest editedContent
+  // is captured when save() is called).
+  useImperativeHandle(commandRef, () => ({
+    save: () => saveFile(),
+    discard: () => discardEdits(),
+  }), [saveFile, discardEdits])
+
+  // Notify parent on every dirty-state transition.
+  useEffect(() => {
+    onDirtyChange?.(isDirty)
+  }, [isDirty, onDirtyChange])
 
   // Cmd+F search (only in rendered/markdown mode — CodeMirror handles its own search in raw mode)
   // Cmd+S save shortcut

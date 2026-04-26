@@ -55,14 +55,18 @@ pub fn k2so_heartbeat_add(
         .map_err(|e| format!("Failed to create heartbeat folder: {}", e))?;
     let wakeup_file = hb_dir.join("WAKEUP.md");
     if !wakeup_file.exists() {
-        let template = format!(
-            "---\ndescription: One-line summary of what this heartbeat does (shown in other wakeup's context)\n---\n\n\
-            # Wake procedure: {}\n\n\
-            Replace this with the operational instructions for this heartbeat.\n\
-            Keep it focused on what to do for this specific cadence — other heartbeats\n\
-            live in sibling folders and run on their own schedules.\n",
-            name
-        );
+        // Empty body by design. WAKEUP.md is sent verbatim (frontmatter
+        // stripped) on every fire — Launch button or cron — so any
+        // placeholder text would become noise in the actual wake
+        // message. The HTML comment below is markdown-comment syntax
+        // that ALSO gets stripped from the wake send (see
+        // wake::strip_frontmatter), so it serves as a hint to the user
+        // viewing the file in the editor without polluting fires.
+        // The optional `description:` frontmatter is shown in other
+        // wakeups' cross-context display when set; left blank here so
+        // the user can fill it in.
+        let _ = name; // template is name-agnostic now
+        let template = "---\ndescription:\n---\n\n";
         fs::write(&wakeup_file, template)
             .map_err(|e| format!("Failed to write wakeup.md: {}", e))?;
     }

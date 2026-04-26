@@ -143,11 +143,21 @@ pub fn compose_wake_prompt_for_lead(project_path: &str) -> String {
 /// surfaced inside Claude's chat panel and felt like noise from
 /// the user's perspective. The wakeup.md author already knows
 /// they're writing the wake instructions — they don't need K2SO
-/// re-explaining the context to them. Returns `None` when input
-/// is `None`, matching the "no wake for agent-template" semantic.
+/// re-explaining the context to them.
+///
+/// Returns `None` for: missing body input, OR body whose post-
+/// frontmatter content is empty/whitespace. The empty-body case
+/// matches a scaffolded-but-not-yet-edited WAKEUP.md — firing
+/// claude with an empty prompt is a confusing no-op, so the
+/// caller (smart_launch) records this as a fire-time error
+/// instead of spawning.
 pub fn compose_agent_wake_from_body(raw_body: Option<&str>) -> Option<String> {
     let body = raw_body?;
-    Some(strip_frontmatter(body))
+    let stripped = strip_frontmatter(body);
+    if stripped.trim().is_empty() {
+        return None;
+    }
+    Some(stripped)
 }
 
 /// Compose the `--append-system-prompt` text for a regular agent

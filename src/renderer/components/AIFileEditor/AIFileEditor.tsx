@@ -105,6 +105,26 @@ interface AIFileEditorProps {
    * using `files` for multi-file watching.
    */
   showTabs?: boolean
+  /**
+   * Optional unsaved-changes signal from the parent's preview pane.
+   * When true, the editor's header shows Save/Discard buttons and
+   * the Back button surfaces a confirm dialog. When undefined (the
+   * default), no Save/Discard UI appears — preserves the legacy
+   * behavior for callers (CustomThemeCreator, AgentPersonaEditor)
+   * that don't yet wire dirty state.
+   */
+  isDirty?: boolean
+  /**
+   * Called when the user clicks Save in the header. Implementations
+   * typically forward to a `FileViewerHandle.save()` exposed by the
+   * preview pane.
+   */
+  onSaveRequested?: () => Promise<void> | void
+  /**
+   * Called when the user clicks Discard in the header. Reverts the
+   * preview's in-memory buffer to the on-disk content.
+   */
+  onDiscardRequested?: () => void
 }
 
 // ── Component ────────────────────────────────────────────────────────
@@ -126,6 +146,9 @@ export function AIFileEditor({
   trackFileRename = false,
   onActiveFileChange,
   showTabs,
+  isDirty,
+  onSaveRequested,
+  onDiscardRequested,
 }: AIFileEditorProps): React.JSX.Element {
   const terminalIdRef = useRef(`ai-editor-${crypto.randomUUID()}`)
   const [terminalReady, setTerminalReady] = useState(false)
@@ -281,13 +304,28 @@ export function AIFileEditor({
     }
   }, [])
 
-  // Explicit close: save session, kill terminal, then notify parent
+  // Explicit close: save session, kill terminal, then notify parent.
+  // If the parent has signaled `isDirty`, prompt before discarding —
+  // gives the user a chance to keep edits the AI just made or undo
+  // them, rather than silently losing both on a click of Back.
   const handleClose = useCallback(async () => {
-    // Save the current Claude session ID so we can resume next time
+    if (isDirty) {
+      const choice = window.confirm(
+        'You have unsaved changes.\n\nClick OK to save and exit.\nClick Cancel to stay (use Discard then Back if you want to drop the changes).',
+      )
+      if (!choice) return
+      if (onSaveRequested) {
+        try {
+          await onSaveRequested()
+        } catch (e) {
+          console.error('[ai-file-editor] save before close failed:', e)
+        }
+      }
+    }
     await saveEditorSession(cwd, commandRef.current)
     invoke('terminal_kill', { id: terminalIdRef.current }).catch(() => {})
     onClose()
-  }, [cwd, onClose])
+  }, [cwd, onClose, isDirty, onSaveRequested])
 
   const fileName = filePath.split('/').pop() || 'file'
 
@@ -301,10 +339,44 @@ export function AIFileEditor({
         >
           &larr; Back
         </button>
-        <span className="text-xs font-medium text-[var(--color-text-primary)]">{title}</span>
+        <span className="text-xs font-medium text-[var(--color-text-primary)] flex items-center gap-1.5">
+          {title}
+          {/* Dirty indicator (vim-style dot) — only when parent wires
+              isDirty. Hidden otherwise so existing callers without
+              dirty-state plumbing render unchanged. */}
+          {isDirty && (
+            <span
+              className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400"
+              title="Unsaved changes"
+            />
+          )}
+        </span>
         <span className="text-[10px] font-mono text-[var(--color-text-muted)] ml-auto truncate max-w-[40%]">
           {activeFilePath}
         </span>
+        {/* Save / Discard appear only when the parent supplies the
+            handlers — keeps existing AIFileEditor consumers
+            (CustomThemeCreator, AgentPersonaEditor) untouched. */}
+        {onSaveRequested && (
+          <button
+            onClick={() => { void onSaveRequested() }}
+            disabled={!isDirty}
+            title={isDirty ? 'Save changes to disk' : 'No unsaved changes'}
+            className="px-2 py-0.5 text-[10px] font-medium text-white bg-[var(--color-accent)] hover:opacity-90 transition-opacity no-drag cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
+          >
+            Save
+          </button>
+        )}
+        {onDiscardRequested && (
+          <button
+            onClick={() => { onDiscardRequested() }}
+            disabled={!isDirty}
+            title={isDirty ? 'Revert to the last saved version (drops user + AI edits)' : 'No unsaved changes'}
+            className="px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-secondary)] transition-colors cursor-pointer no-drag disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
+          >
+            Discard
+          </button>
+        )}
         {onManualRefresh && (
           <button
             onClick={onManualRefresh}

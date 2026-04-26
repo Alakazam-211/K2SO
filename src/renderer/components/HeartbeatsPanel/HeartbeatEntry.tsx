@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { type HeartbeatEntry } from '@/stores/heartbeat-sessions'
+import {
+  type HeartbeatEntry,
+  useHeartbeatSessionsStore,
+} from '@/stores/heartbeat-sessions'
 import { useTabsStore } from '@/stores/tabs'
 import { useToastStore } from '@/stores/toast'
 
@@ -104,6 +107,19 @@ export function HeartbeatEntryRow({
       }
       const verb = parsed.branch ? branchLabel[parsed.branch] : 'Fired'
       toast.addToast(`${verb} "${entry.row.name}"`, 'success', 2500)
+      // Refetch heartbeat rows so the "Next run" line picks up the
+      // freshly-stamped last_fired immediately. Without this, the
+      // store's cached row still shows the OLD last_fired and the
+      // countdown looks frozen until the next periodic refresh.
+      //
+      // The schedule logic does the right thing per frequency type:
+      //   - hourly (every_seconds): last_fired bumps → next run is
+      //     `every_seconds` from now → countdown resets
+      //   - daily/weekly/monthly/yearly: last_fired = today → the
+      //     "already fired today" guard kicks in → next run rolls
+      //     forward to tomorrow / next-matching-day at the same
+      //     wall-clock time. NEVER drifts mid-day.
+      void useHeartbeatSessionsStore.getState().refresh(projectPath)
     } catch (err) {
       toast.addToast(`Launch failed: ${String(err)}`, 'error', 4000)
     } finally {
@@ -140,9 +156,15 @@ export function HeartbeatEntryRow({
       title={`${entry.row.name} — ${entry.state}${entry.row.enabled ? '' : ' (disabled)'}`}
     >
       <div className="flex items-center gap-2">
-        <span className="flex-shrink-0">
-          {indicatorFor(entry)}
-        </span>
+        {/* Indicator only renders for the 'live' state (braille spinner —
+            real-time activity that the section header can't convey).
+            Resumable / Scheduled / Archived are already communicated by
+            the collapsible section the row sits under, so the
+            filled/hollow square just duplicated that grouping. */}
+        {(() => {
+          const indicator = indicatorFor(entry)
+          return indicator ? <span className="flex-shrink-0">{indicator}</span> : null
+        })()}
         <span
           className={`text-[11px] font-mono truncate flex-shrink-0 ${
             entry.state === 'archived'
@@ -160,20 +182,14 @@ export function HeartbeatEntryRow({
         <button
           onClick={handleLaunch}
           disabled={busy || archivedOrDisabled}
-          title={
-            entry.state === 'archived'
-              ? 'Restore from archive before launching'
-              : !entry.row.enabled
-                ? 'Enable this heartbeat before launching'
-                : 'Force-fire this heartbeat now'
-          }
+          title={launchTooltip(entry)}
           className="px-2 py-0.5 text-[9px] font-medium text-white bg-[var(--color-accent)] hover:opacity-90 transition-opacity no-drag cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
         >
           {busy ? '…' : 'Launch'}
         </button>
       </div>
       {nextRun && (
-        <div className="text-[9px] text-[var(--color-text-muted)] truncate pl-4 pt-0.5">
+        <div className="text-[9px] text-[var(--color-text-muted)] truncate pt-0.5">
           Next run: {nextRun}
         </div>
       )}
@@ -181,35 +197,51 @@ export function HeartbeatEntryRow({
   )
 }
 
-function indicatorFor(entry: HeartbeatEntry): React.ReactNode {
-  // Squares (not circles) match the WorkspacePanel's status block
-  // convention — same shape as the agent-status indicator at the top
-  // of the panel keeps the visual language consistent.
-  switch (entry.state) {
-    case 'live':
-      return <span className="braille-spinner text-[10px] text-[var(--color-accent)]" />
-    case 'resumable':
-      return (
-        <span
-          className="block w-2 h-2 bg-[var(--color-text-secondary)]"
-          aria-label="Resumable"
-        />
-      )
-    case 'scheduled':
-      return (
-        <span
-          className="block w-2 h-2 border border-[var(--color-text-muted)]"
-          aria-label="Scheduled"
-        />
-      )
-    case 'archived':
-      return (
-        <span
-          className="block w-2 h-2 border border-[var(--color-text-muted)]/40"
-          aria-label="Archived"
-        />
-      )
+/**
+ * Tooltip shown on hover over the Launch button. Communicates how
+ * a manual click affects the schedule for this row's frequency type:
+ *
+ *   - Hourly (`every_seconds`): manual fire stamps `last_fired` so
+ *     the next cron tick is `every_seconds` from now — the countdown
+ *     visibly resets. Useful for spreading load if the user notices
+ *     two heartbeats clustered at the same moment.
+ *
+ *   - Scheduled (daily/weekly/monthly/yearly): manual fire stamps
+ *     today's date but the next cron tick stays anchored to the
+ *     calendar slot (next 6 AM, next Monday, etc.). Mid-day clicks
+ *     never drift the schedule to a random new wall-clock time.
+ */
+function launchTooltip(entry: HeartbeatEntry): string {
+  if (entry.state === 'archived') return 'Restore from archive before launching'
+  if (!entry.row.enabled) return 'Enable this heartbeat before launching'
+  let mode: string
+  try {
+    const v = JSON.parse(entry.row.specJson) as { frequency?: string }
+    mode = v.frequency ?? entry.row.frequency
+  } catch {
+    mode = entry.row.frequency
   }
+  if (mode === 'hourly') {
+    return 'Fire now. The cron timer resets — next scheduled fire will be the full interval from this click.'
+  }
+  if (mode === 'daily' || mode === 'weekly' || mode === 'monthly' || mode === 'yearly') {
+    return 'Fire now. The next scheduled fire stays on its calendar slot — daily/weekly/monthly schedules don\'t drift.'
+  }
+  return 'Fire this heartbeat now.'
+}
+
+function indicatorFor(entry: HeartbeatEntry): React.ReactNode {
+  // Only the 'live' state gets an indicator — the braille spinner
+  // signals real-time activity (claude is processing right now)
+  // which isn't conveyed by the collapsible section header.
+  //
+  // Resumable / Scheduled / Archived used to render filled / hollow /
+  // muted squares, but those duplicated information already shown by
+  // the section the row lives under. Removed to reduce visual noise.
+  if (entry.state === 'live') {
+    return <span className="braille-spinner text-[10px] text-[var(--color-accent)]" />
+  }
+  return null
 }
 
 /**

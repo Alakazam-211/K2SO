@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useToastStore } from '@/stores/toast'
 import type { SettingEntry } from '../searchManifest'
 import { AIFileEditor } from '@/components/AIFileEditor/AIFileEditor'
+import { FileViewerPane, type FileViewerHandle } from '@/components/FileViewerPane/FileViewerPane'
 import { useSettingsStore } from '@/stores/settings'
 import { usePresetsStore, parseCommand } from '@/stores/presets'
 import { SettingDropdown } from '../controls/SettingControls'
@@ -414,6 +415,21 @@ export function WakeupEditor({ projectPath, agentName, heartbeat, otherHeartbeat
     return baseArgs
   }, [agentCommand, systemPrompt, wakeupAbs])
 
+  // Bridge between FileViewerPane (which owns the editor's dirty
+  // buffer) and AIFileEditor (which renders the Save/Discard
+  // buttons). The ref lets the parent imperatively call save/discard;
+  // the dirty boolean flows up via a callback so the buttons can
+  // disable themselves when there's nothing to do.
+  const fileViewerRef = useRef<FileViewerHandle | null>(null)
+  const [isDirty, setIsDirty] = useState(false)
+
+  const handleSave = useCallback(async () => {
+    await fileViewerRef.current?.save()
+  }, [])
+  const handleDiscard = useCallback(() => {
+    fileViewerRef.current?.discard()
+  }, [])
+
   if (!agentCommand) return null
 
   // No outer positioning wrapper — the caller (ProjectDetail) renders
@@ -435,28 +451,54 @@ export function WakeupEditor({ projectPath, agentName, heartbeat, otherHeartbeat
       warningText={`This AI session has full system access in ${projectPath}.`}
       onClose={onClose}
       onFileChange={() => { /* preview rendered inline below */ }}
-      preview={<WakeupPreview path={wakeupAbs} />}
+      isDirty={isDirty}
+      onSaveRequested={handleSave}
+      onDiscardRequested={handleDiscard}
+      preview={
+        <WakeupPreview
+          path={wakeupAbs}
+          heartbeatName={heartbeat.name}
+          commandRef={fileViewerRef}
+          onDirtyChange={setIsDirty}
+        />
+      }
     />
   )
 }
 
-function WakeupPreview({ path }: { path: string }): React.JSX.Element {
-  const [content, setContent] = useState<string>('(loading…)')
-  useEffect(() => {
-    let cancel = false
-    const read = (): void => {
-      invoke<{ content: string }>('fs_read_file', { path })
-        .then((r) => { if (!cancel) setContent(r.content) })
-        .catch(() => { if (!cancel) setContent('(file not found — will be created on first save)') })
-    }
-    read()
-    const t = setInterval(read, 2000)
-    return () => { cancel = true; clearInterval(t) }
-  }, [path])
+/**
+ * Right-side preview pane for the heartbeat's WAKEUP.md inside the
+ * AIFileEditor takeover. Reuses the project's standard markdown
+ * file viewer (FileViewerPane) so users get the same Preview/Edit
+ * toggle, syntax highlighting, scroll persistence, search, and
+ * autosave they get when opening a .md file as a regular tab.
+ *
+ * The synthetic paneId/tabId scope FileViewerPane's scroll-position
+ * persistence to this specific heartbeat — switching between
+ * heartbeats keeps each one's scroll separate without colliding
+ * with real workspace tabs.
+ */
+function WakeupPreview({
+  path,
+  heartbeatName,
+  commandRef,
+  onDirtyChange,
+}: {
+  path: string
+  heartbeatName: string
+  commandRef?: React.RefObject<FileViewerHandle | null>
+  onDirtyChange?: (dirty: boolean) => void
+}): React.JSX.Element {
+  const scopeId = `heartbeat-wakeup:${heartbeatName}:${path}`
   return (
-    <div className="h-full overflow-auto p-4 text-xs text-[var(--color-text-primary)]">
-      <div className="text-[10px] text-[var(--color-text-muted)] mb-2 font-mono truncate">{path}</div>
-      <pre className="whitespace-pre-wrap font-mono">{content}</pre>
+    <div className="h-full overflow-hidden">
+      <FileViewerPane
+        filePath={path}
+        paneId={scopeId}
+        tabId={scopeId}
+        commandRef={commandRef}
+        onDirtyChange={onDirtyChange}
+      />
     </div>
   )
 }

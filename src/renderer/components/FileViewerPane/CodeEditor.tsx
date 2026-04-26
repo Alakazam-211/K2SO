@@ -258,6 +258,14 @@ const FILENAME_LANG_MAP: Record<string, LanguageFn> = {
   'Pipfile': sl(toml),
 }
 
+/** Markdown files always soft-wrap in the editor regardless of the
+ *  global editor.wordWrap setting — prose shouldn't scroll
+ *  horizontally. Code files keep the user's chosen behavior. */
+function isMarkdownPath(filePath: string): boolean {
+  const lower = filePath.toLowerCase()
+  return lower.endsWith('.md') || lower.endsWith('.markdown') || lower.endsWith('.mdx')
+}
+
 function getLanguageExtension(filePath: string): Extension | null {
   const name = filePath.split('/').pop() || ''
 
@@ -1232,7 +1240,12 @@ export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, r
       closeBrackets(),
       highlightSelectionMatches(),
       // Settings-driven compartments
-      wrapCompartment.of(es.wordWrap ? EditorView.lineWrapping : []),
+      // Markdown files always soft-wrap regardless of the global
+      // editor.wordWrap setting — prose with horizontal scrolling
+      // forces users to scroll mid-paragraph, which is awful UX.
+      // Code files (TS, Rust, etc.) keep the user's chosen behavior
+      // because indentation and column alignment matter there.
+      wrapCompartment.of((es.wordWrap || isMarkdownPath(filePath)) ? EditorView.lineWrapping : []),
       tabSizeCompartment.of([EditorState.tabSize.of(effectiveTabSize), indentUnit.of(' '.repeat(effectiveTabSize))]),
       whitespaceCompartment.of(es.showWhitespace ? highlightWhitespace() : []),
       indentGuidesCompartment.of(es.indentGuides ? indentationMarkers({ highlightActiveBlock: true, hideFirstIndent: false }) : []),
@@ -1370,7 +1383,7 @@ export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, r
 
     view.dispatch({
       effects: [
-        wrapCompartment.reconfigure(editorSettings.wordWrap ? EditorView.lineWrapping : []),
+        wrapCompartment.reconfigure((editorSettings.wordWrap || isMarkdownPath(filePath)) ? EditorView.lineWrapping : []),
         tabSizeCompartment.reconfigure([EditorState.tabSize.of(editorSettings.tabSize), indentUnit.of(' '.repeat(editorSettings.tabSize))]),
         whitespaceCompartment.reconfigure(editorSettings.showWhitespace ? highlightWhitespace() : []),
         indentGuidesCompartment.reconfigure(editorSettings.indentGuides ? indentationMarkers({ highlightActiveBlock: true, hideFirstIndent: false }) : []),
