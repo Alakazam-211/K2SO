@@ -321,8 +321,58 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
             if (cliAgent) break
           }
 
-          // Pinned system agent tab — compact with just icon
+          // Pinned system agent tab — compact with just icon.
+          // Post-0.36.0 the agent UI is split across two pinned tabs;
+          // each gets its own icon based on the agent item's section.
+          // Legacy rows (section === undefined) keep the K2SO mascot.
           if (tab.isSystemAgent) {
+            const firstItem = Array.from(tab.paneGroups.values())[0]?.items[0]
+            const section: 'inbox' | 'chat' | undefined =
+              firstItem?.type === 'agent'
+                ? (firstItem.data as { section?: 'inbox' | 'chat' }).section
+                : undefined
+
+            const iconSvg = (() => {
+              if (isAgentActive) {
+                return <span className="braille-spinner text-[11px]" />
+              }
+              if (section === 'inbox') {
+                // Inbox tray with downward arrow into it
+                return (
+                  <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M2 9.5 L4.5 4 H11.5 L14 9.5" />
+                    <path d="M2 9.5 V13 a1 1 0 0 0 1 1 H13 a1 1 0 0 0 1 -1 V9.5" />
+                    <path d="M2 9.5 H5.5 L6.5 11 H9.5 L10.5 9.5 H14" />
+                    <path d="M8 1 V5.5" />
+                    <path d="M6 3.5 L8 5.5 L10 3.5" />
+                  </svg>
+                )
+              }
+              if (section === 'chat') {
+                // Speech-bubble outline with three dots
+                return (
+                  <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M2 4 a1.5 1.5 0 0 1 1.5 -1.5 H12.5 a1.5 1.5 0 0 1 1.5 1.5 V10 a1.5 1.5 0 0 1 -1.5 1.5 H7.5 L4 14 V11.5 H3.5 a1.5 1.5 0 0 1 -1.5 -1.5 Z" />
+                    <circle cx="5.5" cy="7" r="0.6" fill="currentColor" />
+                    <circle cx="8" cy="7" r="0.6" fill="currentColor" />
+                    <circle cx="10.5" cy="7" r="0.6" fill="currentColor" />
+                  </svg>
+                )
+              }
+              // Legacy fallback — K2SO mascot for pre-split serialized rows
+              return (
+                <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M2 8 C2 2.5 4 0.5 8 0.5 C12 0.5 14 2.5 14 8 L13 9.5 L3 9.5 Z" />
+                  <path d="M4 9.5 L3.5 11 L5 13.5 L11 13.5 L12.5 11 L12 9.5" />
+                  <circle cx="4.8" cy="5.8" r="1.5" />
+                  <circle cx="11.2" cy="5.8" r="1.5" />
+                  <line x1="5.5" y1="10.8" x2="10.5" y2="10.8" />
+                  <line x1="5.2" y1="11.8" x2="10.8" y2="11.8" />
+                  <line x1="5.8" y1="12.8" x2="10.2" y2="12.8" />
+                </svg>
+              )
+            })()
+
             return (
               <div
                 key={tab.id}
@@ -335,24 +385,7 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
                 onClick={() => setActiveTabInGroup(groupIndex, tab.id)}
                 title={tab.title}
               >
-                {isAgentActive ? (
-                  <span className="braille-spinner text-[11px]" />
-                ) : (
-                  <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round">
-                    {/* K2SO — round cranium, wide-set eyes, protruding jaw with grille */}
-                    {/* Round cranium — top 2/3 of head */}
-                    <path d="M2 8 C2 2.5 4 0.5 8 0.5 C12 0.5 14 2.5 14 8 L13 9.5 L3 9.5 Z" />
-                    {/* Protruding jaw/chin plate below the cranium */}
-                    <path d="M4 9.5 L3.5 11 L5 13.5 L11 13.5 L12.5 11 L12 9.5" />
-                    {/* Wide-set eyes — pushed to edges */}
-                    <circle cx="4.8" cy="5.8" r="1.5" />
-                    <circle cx="11.2" cy="5.8" r="1.5" />
-                    {/* Horizontal grille slats on jaw */}
-                    <line x1="5.5" y1="10.8" x2="10.5" y2="10.8" />
-                    <line x1="5.2" y1="11.8" x2="10.8" y2="11.8" />
-                    <line x1="5.8" y1="12.8" x2="10.2" y2="12.8" />
-                  </svg>
-                )}
+                {iconSvg}
                 {/* Activity underline */}
                 {isAgentActive && (
                   <div className="absolute bottom-0 left-1 right-1 h-[2px] bg-[var(--color-accent)] rounded-full" />
