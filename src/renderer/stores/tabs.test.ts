@@ -40,16 +40,52 @@ describe('ensureSystemAgentTabs', () => {
     const systemTabs = tabs.filter((t) => t.isSystemAgent)
     expect(systemTabs).toHaveLength(2)
 
-    // Order: Inbox first, Chat second — matters for left-to-right pinned strip
-    expect(systemTabs[0].title).toBe('Inbox')
-    expect(systemTabs[1].title).toBe('Chat')
+    // Canonical order: Chat first, Inbox second.
+    expect(systemTabs[0].title).toBe('Chat')
+    expect(systemTabs[1].title).toBe('Inbox')
 
-    const inboxItem = getAgentItem(0)
-    const chatItem = getAgentItem(1)
-    expect(inboxItem?.section).toBe('inbox')
+    const chatItem = getAgentItem(0)
+    const inboxItem = getAgentItem(1)
     expect(chatItem?.section).toBe('chat')
-    expect(inboxItem?.agentName).toBe('manager')
+    expect(inboxItem?.section).toBe('inbox')
     expect(chatItem?.agentName).toBe('manager')
+    expect(inboxItem?.agentName).toBe('manager')
+  })
+
+  it('forces canonical order even when only one section pre-existed', () => {
+    // Simulate a half-migrated layout: only the Inbox tab is in place.
+    useTabsStore.setState({
+      tabs: [{
+        id: 'existing-inbox',
+        title: 'Inbox',
+        mosaicTree: 'pg-1',
+        paneGroups: new Map([['pg-1', {
+          id: 'pg-1',
+          items: [{
+            id: 'item-1',
+            type: 'agent',
+            data: { agentName: 'manager', projectPath: '/tmp/proj', section: 'inbox' },
+          }],
+          activeItemIndex: 0,
+        }]]),
+        isSystemAgent: true,
+      }],
+      activeTabId: 'existing-inbox',
+      splitCount: 1,
+      extraGroups: [],
+      activeGroupIndex: 0,
+    })
+
+    useTabsStore.getState().ensureSystemAgentTabs('manager', '/tmp/proj', 'Manager')
+
+    // After the call, Chat must come first even though Inbox was the
+    // only pre-existing tab. Pre-existing tab keeps its id (state
+    // preservation); only ordering changes.
+    const systemTabs = useTabsStore.getState().tabs.filter((t) => t.isSystemAgent)
+    expect(systemTabs).toHaveLength(2)
+    expect(systemTabs[0].title).toBe('Chat')
+    expect(systemTabs[1].title).toBe('Inbox')
+    expect(systemTabs[1].id).toBe('existing-inbox')
   })
 
   it('creates only the Inbox tab for the workspace board (no chat surface)', () => {

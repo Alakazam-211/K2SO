@@ -1241,30 +1241,42 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   ensureSystemAgentTabs: (agentName: string, projectPath: string, _title: string) => {
     const state = get()
 
-    // The split landed in 0.36.0: each agent gets up to two pinned tabs
-    // (Inbox + Chat). Workspace-board mode (`__workspace__`) is the
+    // The split landed in 0.36.0: each agent gets up to two pinned tabs.
+    // Canonical order is Chat first, Inbox second — fixed regardless of
+    // creation history. Workspace-board mode (`__workspace__`) is the
     // exception — it has no chat surface, just the kanban — so we
     // create only the Inbox tab in that case.
     const isWorkspaceBoard = agentName === '__workspace__'
+    const wantSections: Array<'inbox' | 'chat'> = isWorkspaceBoard
+      ? ['inbox']
+      : ['chat', 'inbox']
 
+    // Index existing system tabs by section so we can keep their state
+    // (active item, pane group ids) when re-ordering.
     const existingTabs = state.tabs.filter((t) => t.isSystemAgent)
-    const existingSections = new Set<string>()
+    const nonSystemTabs = state.tabs.filter((t) => !t.isSystemAgent)
+    const bySection = new Map<string, Tab>()
     for (const t of existingTabs) {
       const item = Array.from(t.paneGroups.values())[0]?.items[0]
       if (item?.type === 'agent') {
         const d = item.data as AgentItemData
-        existingSections.add(d.section ?? 'inbox')
+        bySection.set(d.section ?? 'inbox', t)
       }
     }
 
-    const wantSections: Array<'inbox' | 'chat'> = isWorkspaceBoard
-      ? ['inbox']
-      : ['inbox', 'chat']
-
-    const newTabs: Tab[] = []
+    // Build the canonical-ordered system tab list, creating any
+    // missing sections as we go. Idempotent: existing tabs are
+    // preserved with all their state; only the ordering changes
+    // when a previous insertion landed sections out of order.
+    const orderedSystemTabs: Tab[] = []
     let firstTabId: string | null = null
     for (const section of wantSections) {
-      if (existingSections.has(section)) continue
+      const existing = bySection.get(section)
+      if (existing) {
+        orderedSystemTabs.push(existing)
+        if (!firstTabId) firstTabId = existing.id
+        continue
+      }
       const tabId = crypto.randomUUID()
       if (!firstTabId) firstTabId = tabId
       const pgId = crypto.randomUUID()
@@ -1278,12 +1290,12 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         items: [agentItem],
         activeItemIndex: 0,
       }
-      // Inbox uses the workspace-board label when in board mode, otherwise
-      // the section name. Chat tab title is always "Chat".
+      // Chat tab title is always "Chat". Inbox uses the workspace-board
+      // label when in board mode, otherwise the section name.
       const tabTitle = section === 'chat'
         ? 'Chat'
         : isWorkspaceBoard ? 'Work Board' : 'Inbox'
-      newTabs.push({
+      orderedSystemTabs.push({
         id: tabId,
         title: tabTitle,
         mosaicTree: pgId,
@@ -1292,14 +1304,12 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       })
     }
 
-    if (newTabs.length === 0) {
-      // All pinned tabs already exist; return the first existing one.
-      return existingTabs[0]?.id ?? ''
-    }
-
-    // Insert pinned tabs at position 0 (Inbox first, Chat second).
-    set((s) => ({ tabs: [...newTabs, ...s.tabs] }))
-    return firstTabId ?? newTabs[0].id
+    // Always write the canonical order back. Cheap when nothing
+    // changed (Zustand's shallow eq sees a new array but the items
+    // are the same references), and guarantees the strip looks
+    // right after a back-fill or a half-migrated layout restore.
+    set({ tabs: [...orderedSystemTabs, ...nonSystemTabs] })
+    return firstTabId ?? orderedSystemTabs[0]?.id ?? ''
   },
 
   removeSystemAgentTab: () => {
