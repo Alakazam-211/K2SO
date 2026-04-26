@@ -84,26 +84,46 @@ echo ""
 # ── 2. Projects (global — no project param) ─────────────────────────────
 echo -e "${CYAN}2. GET /companion/projects${NC} — List all workspaces"
 RESP=$(api GET "/companion/projects" -H "$AUTH_HEADER")
-echo "   Response: $(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d,indent=2)[:500])" 2>/dev/null || echo "$RESP")"
+echo "   Response: $(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d,indent=2)[:500])")"
 
-PROJECT_COUNT=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('data',[])))" 2>/dev/null || echo "0")
+PROJECT_COUNT=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('data',[])))")
 if [ "$PROJECT_COUNT" -gt 0 ] 2>/dev/null; then
     passed
     echo "   Found $PROJECT_COUNT workspace(s)"
     # Extract first project path for subsequent tests
-    PROJECT_PATH=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data'][0]['path'])" 2>/dev/null || echo "")
+    PROJECT_PATH=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data'][0]['path'])")
 else
     failed "Expected at least 1 project"
     PROJECT_PATH=""
 fi
 echo ""
 
+# ── 2b. Projects sentinel filter ───────────────────────────────────────
+# Assert audit-bucket sentinels (_orphan, _broadcast) are filtered server-side.
+# These rows live in the projects table but aren't real workspaces; if they leak
+# into the companion response the mobile drawer renders bogus "Broadcast audit
+# bucket" entries the user can't navigate into.
+echo -e "${CYAN}2b. /companion/projects sentinel filter${NC} — _orphan/_broadcast must be excluded"
+SENTINEL_CHECK=$(echo "$RESP" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+ids={p['id'] for p in d.get('data',[])}
+leaked=[s for s in ('_orphan','_broadcast') if s in ids]
+print('ok' if not leaked else 'leaked:'+','.join(leaked))
+")
+if [ "$SENTINEL_CHECK" = "ok" ]; then
+    passed
+else
+    failed "Sentinel rows leaked into /companion/projects: $SENTINEL_CHECK"
+fi
+echo ""
+
 # ── 3. Projects Summary (global) ────────────────────────────────────────
 echo -e "${CYAN}3. GET /companion/projects/summary${NC} — Workspaces with counts"
 RESP=$(api GET "/companion/projects/summary" -H "$AUTH_HEADER")
-echo "   Response: $(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d,indent=2)[:500])" 2>/dev/null || echo "$RESP")"
+echo "   Response: $(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d,indent=2)[:500])")"
 
-SUMMARY_OK=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print('ok' if d.get('ok') and isinstance(d.get('data'),list) else 'fail')" 2>/dev/null || echo "fail")
+SUMMARY_OK=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print('ok' if d.get('ok') and isinstance(d.get('data'),list) else 'fail')")
 if [ "$SUMMARY_OK" = "ok" ]; then
     passed
 else
@@ -111,12 +131,51 @@ else
 fi
 echo ""
 
+# ── 3b. Projects-summary sentinel filter ───────────────────────────────
+echo -e "${CYAN}3b. /companion/projects/summary sentinel filter${NC}"
+SENTINEL_CHECK=$(echo "$RESP" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+ids={p['id'] for p in d.get('data',[])}
+leaked=[s for s in ('_orphan','_broadcast') if s in ids]
+print('ok' if not leaked else 'leaked:'+','.join(leaked))
+")
+if [ "$SENTINEL_CHECK" = "ok" ]; then
+    passed
+else
+    failed "Sentinel rows leaked into /companion/projects/summary: $SENTINEL_CHECK"
+fi
+echo ""
+
+# ── 3c. Projects-summary fields ────────────────────────────────────────
+# Verify each record carries the count fields the mobile app depends on.
+echo -e "${CYAN}3c. /companion/projects/summary record shape${NC}"
+SHAPE_CHECK=$(echo "$RESP" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+required={'id','name','path','color','agentMode','agentsRunning','reviewsPending'}
+records=d.get('data',[])
+if not records:
+    print('fail:no records')
+    sys.exit(0)
+missing=set()
+for r in records:
+    missing |= required - set(r.keys())
+print('ok' if not missing else 'missing:'+','.join(sorted(missing)))
+")
+if [ "$SHAPE_CHECK" = "ok" ]; then
+    passed
+else
+    failed "Summary record missing required fields: $SHAPE_CHECK"
+fi
+echo ""
+
 # ── 4. Sessions (global) ────────────────────────────────────────────────
 echo -e "${CYAN}4. GET /companion/sessions${NC} — Active sessions across workspaces"
 RESP=$(api GET "/companion/sessions" -H "$AUTH_HEADER")
-echo "   Response: $(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d,indent=2)[:500])" 2>/dev/null || echo "$RESP")"
+echo "   Response: $(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d,indent=2)[:500])")"
 
-SESSIONS_OK=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print('ok' if d.get('ok') and isinstance(d.get('data'),list) else 'fail')" 2>/dev/null || echo "fail")
+SESSIONS_OK=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print('ok' if d.get('ok') and isinstance(d.get('data'),list) else 'fail')")
 if [ "$SESSIONS_OK" = "ok" ]; then
     passed
 else

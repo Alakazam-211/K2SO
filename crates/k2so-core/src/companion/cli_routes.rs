@@ -46,12 +46,16 @@ pub fn list_projects() -> Result<String, String> {
     let db = crate::db::shared();
     let conn = db.lock();
 
+    // Skip sentinel rows (`_orphan`, `_broadcast`) — audit buckets seeded by
+    // `db::seed_audit_sentinels`, not real workspaces. They'd otherwise clutter
+    // the companion app's workspace drawer with non-clickable entries.
     let mut stmt = conn
         .prepare(
             "SELECT p.id, p.name, p.path, p.color, p.icon_url, p.agent_mode, p.pinned, \
              p.tab_order, p.focus_group_id, fg.name, fg.color \
              FROM projects p \
              LEFT JOIN focus_groups fg ON p.focus_group_id = fg.id \
+             WHERE p.id NOT IN ('_orphan', '_broadcast') \
              ORDER BY p.pinned DESC, p.tab_order ASC, p.name ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -84,4 +88,58 @@ pub fn list_projects() -> Result<String, String> {
         .collect();
 
     Ok(serde_json::to_string(&projects).unwrap_or_else(|_| "[]".to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ensure_project(id: &str, path: &str, name: &str) {
+        let db = crate::db::shared();
+        let conn = db.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO projects \
+             (id, path, name, color, agent_mode, pinned, tab_order) \
+             VALUES (?1, ?2, ?3, '#123456', 'off', 0, 0)",
+            rusqlite::params![id, path, name],
+        )
+        .unwrap();
+    }
+
+    fn delete_project(id: &str) {
+        let db = crate::db::shared();
+        let conn = db.lock();
+        let _ = conn.execute("DELETE FROM projects WHERE id = ?1", rusqlite::params![id]);
+    }
+
+    #[test]
+    fn list_projects_excludes_audit_sentinels() {
+        crate::db::init_for_tests();
+        // init_for_tests already seeds `_orphan` + `_broadcast`. Add one
+        // real workspace so the response isn't empty either way.
+        ensure_project("real-ws-cli", "/tmp/k2so-cli-routes-test", "RealOne");
+
+        let body = list_projects().expect("list_projects ok");
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&body).expect("response is JSON array");
+        let ids: Vec<&str> = parsed
+            .iter()
+            .filter_map(|p| p.get("id").and_then(|v| v.as_str()))
+            .collect();
+
+        assert!(
+            !ids.contains(&"_orphan"),
+            "/cli/companion/projects must not leak the _orphan audit sentinel: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"_broadcast"),
+            "/cli/companion/projects must not leak the _broadcast audit sentinel: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"real-ws-cli"),
+            "real workspace should still appear: {ids:?}"
+        );
+
+        delete_project("real-ws-cli");
+    }
 }
