@@ -4,59 +4,9 @@ import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
 import { useSettingsStore } from '@/stores/settings'
 import { useActiveAgentsStore, type PaneStatus } from '@/stores/active-agents'
-import { useToastStore } from '@/stores/toast'
 import { showContextMenu } from '@/lib/context-menu'
 import WorktreeDialog from '@/components/Sidebar/WorktreeDialog'
-
-/** Convert "HH:MM" to "h:MM AM/PM" */
-function fmt12h(time: string): string {
-  const [hStr, mStr] = time.split(':')
-  let h = parseInt(hStr, 10)
-  const m = mStr ?? '00'
-  const ampm = h >= 12 ? 'PM' : 'AM'
-  if (h === 0) h = 12
-  else if (h > 12) h -= 12
-  return m === '00' ? `${h} ${ampm}` : `${h}:${m} ${ampm}`
-}
-
-/** Multi-heartbeat spec summary — mirrors HeartbeatsSection's describeSpec.
- *  Reads `specJson` from a heartbeat row and renders a compact one-liner. */
-function describeHeartbeatSpec(specJson: string): string {
-  try {
-    const v = JSON.parse(specJson) as {
-      frequency?: string
-      time?: string
-      days?: string[]
-      days_of_month?: number[]
-      months?: string[]
-      every_seconds?: number
-      start?: string
-      end?: string
-    }
-    const freq = v.frequency ?? 'daily'
-    const at = v.time ? ` ${fmt12h(v.time)}` : ''
-    if (freq === 'daily') return `Daily${at}`
-    if (freq === 'weekly') {
-      const days = (v.days ?? []).map((d) => d.charAt(0).toUpperCase() + d.slice(1, 3)).join('/')
-      return days ? `${days}${at}` : `Weekly${at}`
-    }
-    if (freq === 'monthly') {
-      const days = (v.days_of_month ?? []).join(',')
-      return days ? `Day ${days}${at}` : `Monthly${at}`
-    }
-    if (freq === 'yearly') {
-      const months = (v.months ?? []).join(',')
-      return months ? `${months}${at}` : `Yearly${at}`
-    }
-    if (freq === 'hourly') {
-      const mins = Math.round((v.every_seconds ?? 3600) / 60)
-      return `Every ${mins}m`
-    }
-    return freq
-  } catch {
-    return 'Invalid spec'
-  }
-}
+import { HeartbeatsPanel } from '@/components/HeartbeatsPanel/HeartbeatsPanel'
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -127,24 +77,11 @@ const modeLabels: Record<string, string> = {
 
 // ── Component ────────────────────────────────────────────────────────────
 
-interface HeartbeatRow {
-  id: string
-  projectId: string
-  name: string
-  frequency: string
-  specJson: string
-  wakeupPath: string
-  enabled: boolean
-  lastFired: string | null
-  createdAt: number
-}
-
 export default function WorkspacePanel(): React.JSX.Element {
   const [agents, setAgents] = useState<K2soAgentInfo[]>([])
   const [wsInboxCount, setWsInboxCount] = useState(0)
   const [showWorktreeDialog, setShowWorktreeDialog] = useState(false)
   const [states, setStates] = useState<StateData[]>([])
-  const [heartbeats, setHeartbeats] = useState<HeartbeatRow[]>([])
 
   // Fetch workspace states once
   useEffect(() => {
@@ -162,7 +99,8 @@ export default function WorkspacePanel(): React.JSX.Element {
     activeProjectId ? s.getProjectStatus(activeProjectId) : 'idle' as PaneStatus
   , [activeProjectId]))
 
-  // Fetch agents — keyed on stable ID, not object reference
+  // Heartbeat data is fetched + polled by HeartbeatsPanel via its own
+  // store; we no longer duplicate that fetch here.
   const activeProjectPath = activeProject?.path
   useEffect(() => {
     if (!activeProjectId || !activeProjectPath) return
@@ -178,12 +116,6 @@ export default function WorkspacePanel(): React.JSX.Element {
         })
         if (!cancelled) setWsInboxCount(items.length)
       } catch { if (!cancelled) setWsInboxCount(0) }
-      try {
-        const hbs = await invoke<HeartbeatRow[]>('k2so_heartbeat_list', {
-          projectPath: activeProjectPath,
-        })
-        if (!cancelled) setHeartbeats(hbs)
-      } catch { if (!cancelled) setHeartbeats([]) }
     }
     load()
     const interval = setInterval(load, 30000) // 30s, not 15s — reduce IPC chatter
@@ -326,40 +258,19 @@ export default function WorkspacePanel(): React.JSX.Element {
               </div>
             )}
 
-            {/* Heartbeats list — each row shows schedule summary (or
-                Disabled) and a Launch button that force-fires that
-                specific heartbeat via k2so_heartbeat_force_fire. Empty
-                state points the user at workspace Settings. */}
-            <div className="mt-3">
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-[11px] text-[var(--color-text-secondary)]">Heartbeats</span>
-                <button
-                  onClick={() => useSettingsStore.getState().openSettings('projects')}
-                  className="text-[9px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] no-drag cursor-pointer"
-                  title="Manage in Settings"
-                >
-                  manage
-                </button>
-              </div>
-              {heartbeats.length === 0 ? (
-                <div className="text-[10px] text-[var(--color-text-muted)] px-1 py-1">
-                  No heartbeats yet.
-                </div>
-              ) : (
-                <div className="flex flex-col gap-1">
-                  {heartbeats.map((hb) => (
-                    <HeartbeatRowEntry
-                      key={hb.id}
-                      hb={hb}
-                      projectPath={activeProject.path}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
           </>
         )}
       </div>
+
+      {/* ── Heartbeats ── (its own block with a bottom divider so the
+          section visually mirrors how Worktrees is delimited below it.
+          Squares — not circles — for state indicators per K2SO's
+          status-block convention.) */}
+      {agentMode !== 'off' && (
+        <div className="px-3 py-3 border-b border-[var(--color-border)]">
+          <HeartbeatsPanel />
+        </div>
+      )}
 
       {/* ── Connected Agents (incoming) ── */}
       <ConnectedAgentsSection projectId={activeProject.id} />
@@ -425,60 +336,6 @@ export default function WorkspacePanel(): React.JSX.Element {
           })
         )}
       </div>
-    </div>
-  )
-}
-
-// ── HeartbeatRowEntry ────────────────────────────────────────────────────
-// Per-heartbeat row in the drawer. Shows schedule summary (or "Disabled"
-// in muted grey) and a Launch button that force-fires via the
-// k2so_heartbeat_force_fire Tauri command. On force-fire success we
-// route into the pinned agent tab so the user sees the session.
-
-function HeartbeatRowEntry({
-  hb,
-  projectPath,
-}: {
-  hb: HeartbeatRow
-  projectPath: string
-}): React.JSX.Element {
-  const [busy, setBusy] = useState(false)
-  const toast = useToastStore.getState()
-
-  const handleLaunch = useCallback(async () => {
-    if (busy) return
-    setBusy(true)
-    try {
-      await invoke<string>('k2so_heartbeat_force_fire', {
-        projectPath,
-        name: hb.name,
-      })
-      toast.addToast(`Fired heartbeat "${hb.name}"`, 'success', 2500)
-      // Jump to the pinned agent tab so the user sees the new session
-      useTabsStore.getState().activateSystemAgentTab()
-    } catch (e) {
-      toast.addToast(`Launch failed: ${e}`, 'error', 4000)
-    } finally {
-      setBusy(false)
-    }
-  }, [busy, projectPath, hb.name, toast])
-
-  return (
-    <div className="flex items-center gap-2 text-[10px]">
-      <span className={`font-mono truncate ${hb.enabled ? 'text-[var(--color-text-primary)]' : 'text-[var(--color-text-muted)]'}`}>
-        {hb.name}
-      </span>
-      <span className="text-[9px] text-[var(--color-text-muted)] truncate flex-1">
-        {hb.enabled ? describeHeartbeatSpec(hb.specJson) : 'Disabled'}
-      </span>
-      <button
-        onClick={handleLaunch}
-        disabled={busy || !hb.enabled}
-        title={!hb.enabled ? 'Enable this heartbeat before launching' : 'Force-fire this heartbeat now'}
-        className="px-2 py-0.5 text-[9px] font-medium text-white bg-[var(--color-accent)] hover:opacity-90 transition-opacity no-drag cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
-      >
-        {busy ? '…' : 'Launch'}
-      </button>
     </div>
   )
 }

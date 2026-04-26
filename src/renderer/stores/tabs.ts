@@ -290,6 +290,16 @@ interface TabsState {
   getActiveTab: () => Tab | undefined
   openFileInPane: (tabId: string, filePath: string) => void
   openAgentPane: (agentName: string, projectPath: string, title?: string) => void
+  /** Open a tab bound to a specific heartbeat's chat session, or focus
+   *  the existing tab if one is already open. Resolves the launch
+   *  config (incl. --resume on agent_heartbeats.last_session_id) via
+   *  k2so_agents_build_launch with the heartbeat name. Returns the
+   *  tab id that was opened or focused. */
+  openHeartbeatTab: (
+    projectPath: string,
+    heartbeatName: string,
+    options?: { existingTerminalId?: string },
+  ) => Promise<string | null>
   openFileAsTab: (filePath: string) => void
   openFileInPaneGroup: (tabId: string, paneGroupId: string, filePath: string) => void
   openDiffInPane: (tabId: string, filePath: string) => void
@@ -1108,6 +1118,124 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       paneGroups: new Map([[pgId, pg]]),
     }
     set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tabId }))
+  },
+
+  openHeartbeatTab: async (
+    projectPath: string,
+    heartbeatName: string,
+    options?: { existingTerminalId?: string },
+  ): Promise<string | null> => {
+    // Look up project_id for the post-0.36.0 namespaced terminal id.
+    const project = useProjectsStore.getState().projects.find(
+      (p) => p.path === projectPath,
+    )
+    if (!project) {
+      console.warn('[openHeartbeatTab] project not registered for', projectPath)
+      return null
+    }
+
+    // Resolve primary agent name (manager/k2so/custom) — the heartbeat
+    // attaches to whichever the workspace's primary agent is.
+    let agentName: string
+    try {
+      const list = await invoke<Array<{ name: string; isManager?: boolean; agentType?: string }>>(
+        'k2so_agents_list',
+        { projectPath },
+      )
+      if (list.length === 0) {
+        console.warn('[openHeartbeatTab] no agents in', projectPath)
+        return null
+      }
+      const manager = list.find((a) => a.isManager || a.agentType === 'manager' || a.agentType === 'coordinator')
+      agentName = manager?.name ?? list[0].name
+    } catch (err) {
+      console.warn('[openHeartbeatTab] agent list failed', err)
+      return null
+    }
+
+    const { heartbeatChatId } = await import('@/lib/terminal-id')
+    const terminalId = options?.existingTerminalId ?? heartbeatChatId(project.id, agentName, heartbeatName)
+
+    // Live PTY: focus the existing tab if one already renders this id.
+    {
+      const state = get()
+      for (const tab of state.tabs) {
+        for (const [, pg] of tab.paneGroups) {
+          for (const item of pg.items) {
+            if (item.type === 'terminal') {
+              const td = item.data as TerminalItemData
+              if (td.terminalId === terminalId) {
+                set({ activeTabId: tab.id })
+                return tab.id
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Build the launch config. heartbeat_name in the build call makes
+    // the resume target lookup prefer agent_heartbeats.last_session_id
+    // over the agent-global session.
+    let command = 'claude'
+    let args: string[] = ['--dangerously-skip-permissions']
+    let cwd = projectPath
+    try {
+      const wakeupAbs = `${projectPath}/.k2so/agents/${agentName}/heartbeats/${heartbeatName}/WAKEUP.md`
+      const launch = await invoke<{
+        command: string
+        args: string[]
+        cwd: string
+      }>('k2so_agents_build_launch', {
+        projectPath,
+        agentName,
+        agentCliCommand: null,
+        wakeupOverride: wakeupAbs,
+        skipForkSession: true,
+        heartbeatName,
+      })
+      command = launch.command
+      args = launch.args
+      cwd = launch.cwd
+    } catch (err) {
+      console.warn(
+        '[openHeartbeatTab] build_launch failed, falling back to fresh:',
+        err,
+      )
+    }
+
+    // Create a new terminal tab with the explicit heartbeat terminal id
+    // (NOT auto-derived from paneGroupId — we want the deterministic
+    // namespaced form so the next click can find this PTY by id).
+    tabCounter++
+    const tabId = crypto.randomUUID()
+    const paneGroupId = crypto.randomUUID()
+    const itemId = crypto.randomUUID()
+    const paneGroup: PaneGroup = {
+      id: paneGroupId,
+      items: [{
+        id: itemId,
+        type: 'terminal',
+        data: {
+          terminalId,
+          cwd,
+          command,
+          args,
+          renderer: currentRenderer(),
+          spawnedAt: performance.now(),
+        },
+      }],
+      activeItemIndex: 0,
+    }
+    const title = `${heartbeatName} (heartbeat)`
+    const tab: Tab = {
+      id: tabId,
+      title,
+      mosaicTree: paneGroupId,
+      paneGroups: new Map([[paneGroupId, paneGroup]]),
+    }
+    set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tabId }))
+    return tabId
   },
 
   ensureSystemAgentTabs: (agentName: string, projectPath: string, _title: string) => {
