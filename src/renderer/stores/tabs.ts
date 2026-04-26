@@ -1123,113 +1123,82 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   openHeartbeatTab: async (
     projectPath: string,
     heartbeatName: string,
-    options?: { existingTerminalId?: string },
+    _options?: { existingTerminalId?: string },
   ): Promise<string | null> => {
-    // Look up project_id for the post-0.36.0 namespaced terminal id.
-    const project = useProjectsStore.getState().projects.find(
-      (p) => p.path === projectPath,
-    )
-    if (!project) {
-      console.warn('[openHeartbeatTab] project not registered for', projectPath)
+    // Mirror the Chat History tab's resume flow — that's the proven
+    // pattern for opening a tab with `claude --resume <session_id>`.
+    // Pre-0.36.0 this used build_launch + a deterministic
+    // heartbeat-namespaced terminal id, but build_launch's three
+    // wake branches (active worktree, inbox delegate, fresh launch)
+    // are tuned for FIRING a heartbeat, not VIEWING one. Resuming a
+    // saved session needs neither — just claude --resume against
+    // the project root with the user's preset args.
+    const list = await invoke<Array<{
+      name: string
+      lastSessionId: string | null
+      enabled: boolean
+    }>>('k2so_heartbeat_list', { projectPath }).catch(() => [])
+    const hb = list.find((h) => h.name === heartbeatName)
+    if (!hb) {
+      console.warn('[openHeartbeatTab] heartbeat not found:', heartbeatName)
+      return null
+    }
+    if (!hb.lastSessionId) {
+      // Scheduled (no fire yet). Caller should fire it first; we
+      // don't auto-launch here because it'd surprise the user (the
+      // Launch button is the explicit fire action).
+      console.info('[openHeartbeatTab] heartbeat has no saved session yet; click Launch first')
       return null
     }
 
-    // Resolve primary agent via the heartbeat-sessions store helper —
-    // agentMode-aware resolution so a `custom` workspace that ALSO
-    // keeps a `k2so-agent` template alongside its custom agent
-    // doesn't pick the alphabetically-first dir (the template) and
-    // send build_launch hunting for a WAKEUP.md at the wrong path.
-    const { resolvePrimaryAgent } = await import('@/stores/heartbeat-sessions')
-    const resolved = await resolvePrimaryAgent(projectPath)
-    if (!resolved) {
-      console.warn('[openHeartbeatTab] no primary agent for', projectPath)
-      return null
-    }
-    const agentName: string = resolved
+    // Read the user's claude preset args (e.g. --dangerously-skip-permissions)
+    // so the resumed session has the same permissions as a fresh launch.
+    // Same shape ChatHistory uses — kept inline (small) instead of
+    // importing the whole component module.
+    let presetArgs: string[] = []
+    try {
+      // Lazy import — pulling presets at module top would cascade
+      // through settings.ts's `invoke` call at load time, which
+      // breaks the vitest environment (no `window`). Same pattern
+      // as the resolvePrimaryAgent import above.
+      const { usePresetsStore } = await import('@/stores/presets')
+      const presets = usePresetsStore.getState().presets
+      const preset = presets.find((p) => p.command.split(/\s+/)[0] === 'claude' && p.enabled)
+      if (preset) {
+        const parts = preset.command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || []
+        const cleaned = parts.map((p: string) => p.replace(/^["']|["']$/g, ''))
+        presetArgs = cleaned.slice(1).filter((a: string) => a !== '--resume')
+      }
+    } catch { /* presets unavailable; fall back to empty */ }
 
-    const { heartbeatChatId } = await import('@/lib/terminal-id')
-    const terminalId = options?.existingTerminalId ?? heartbeatChatId(project.id, agentName, heartbeatName)
+    const args = [...presetArgs, '--resume', hb.lastSessionId]
+    const title = `${heartbeatName} (heartbeat)`
 
-    // Live PTY: focus the existing tab if one already renders this id.
+    // Focus an existing tab that's already running this resume if
+    // one is open — match by command + sessionId in args, the same
+    // hook ChatHistory's tab-search uses for chat resumes.
     {
       const state = get()
       for (const tab of state.tabs) {
         for (const [, pg] of tab.paneGroups) {
           for (const item of pg.items) {
-            if (item.type === 'terminal') {
-              const td = item.data as TerminalItemData
-              if (td.terminalId === terminalId) {
-                set({ activeTabId: tab.id })
-                return tab.id
-              }
+            if (item.type !== 'terminal') continue
+            const td = item.data as TerminalItemData
+            if (td.command !== 'claude') continue
+            if (td.args?.includes(hb.lastSessionId)) {
+              set({ activeTabId: tab.id })
+              return tab.id
             }
           }
         }
       }
     }
 
-    // Build the launch config. heartbeat_name in the build call makes
-    // the resume target lookup prefer agent_heartbeats.last_session_id
-    // over the agent-global session.
-    let command = 'claude'
-    let args: string[] = ['--dangerously-skip-permissions']
-    let cwd = projectPath
-    try {
-      const wakeupAbs = `${projectPath}/.k2so/agents/${agentName}/heartbeats/${heartbeatName}/WAKEUP.md`
-      const launch = await invoke<{
-        command: string
-        args: string[]
-        cwd: string
-      }>('k2so_agents_build_launch', {
-        projectPath,
-        agentName,
-        agentCliCommand: null,
-        wakeupOverride: wakeupAbs,
-        skipForkSession: true,
-        heartbeatName,
-      })
-      command = launch.command
-      args = launch.args
-      cwd = launch.cwd
-    } catch (err) {
-      console.warn(
-        '[openHeartbeatTab] build_launch failed, falling back to fresh:',
-        err,
-      )
-    }
-
-    // Create a new terminal tab with the explicit heartbeat terminal id
-    // (NOT auto-derived from paneGroupId — we want the deterministic
-    // namespaced form so the next click can find this PTY by id).
-    tabCounter++
-    const tabId = crypto.randomUUID()
-    const paneGroupId = crypto.randomUUID()
-    const itemId = crypto.randomUUID()
-    const paneGroup: PaneGroup = {
-      id: paneGroupId,
-      items: [{
-        id: itemId,
-        type: 'terminal',
-        data: {
-          terminalId,
-          cwd,
-          command,
-          args,
-          renderer: currentRenderer(),
-          spawnedAt: performance.now(),
-        },
-      }],
-      activeItemIndex: 0,
-    }
-    const title = `${heartbeatName} (heartbeat)`
-    const tab: Tab = {
-      id: tabId,
-      title,
-      mosaicTree: paneGroupId,
-      paneGroups: new Map([[paneGroupId, paneGroup]]),
-    }
-    set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tabId }))
-    return tabId
+    // Open a new tab. addTabToGroup handles the rest — auto-generates
+    // a terminal id, registers in the active group, broadcasts the
+    // tab-add event, etc.
+    const targetGroup = get().splitCount > 1 ? get().splitCount - 1 : 0
+    return get().addTabToGroup(targetGroup, projectPath, { title, command: 'claude', args })
   },
 
   ensureSystemAgentTabs: (agentName: string, projectPath: string, _title: string) => {
