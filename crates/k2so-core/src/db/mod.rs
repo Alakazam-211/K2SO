@@ -245,6 +245,7 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
         ("0031_skill_regen_version", include_str!("../../drizzle_sql/0031_skill_regen_version.sql")),
         ("0032_add_use_session_stream", include_str!("../../drizzle_sql/0032_add_use_session_stream.sql")),
         ("0033_agent_session_terminal_id_namespace", include_str!("../../drizzle_sql/0033_agent_session_terminal_id_namespace.sql")),
+        ("0034_heartbeat_session_archive_show", include_str!("../../drizzle_sql/0034_heartbeat_session_archive_show.sql")),
     ];
 
     for (name, sql) in migrations {

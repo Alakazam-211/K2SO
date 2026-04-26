@@ -1170,6 +1170,16 @@ pub struct AgentHeartbeat {
     pub wakeup_path: String,
     pub enabled: bool,
     pub last_fired: Option<String>,
+    /// Claude session id from the most recent successful spawn for this
+    /// heartbeat. The next fire passes this to `--resume` so the
+    /// heartbeat keeps its own dedicated chat thread instead of
+    /// reusing the agent's global session.
+    pub last_session_id: Option<String>,
+    /// RFC3339 timestamp set when the user archives the heartbeat from
+    /// Settings. NULL = active. Archived rows are hidden from the
+    /// Settings list but appear in the sidebar's collapsed Archived
+    /// section so chat history stays auditable.
+    pub archived_at: Option<String>,
     pub created_at: i64,
 }
 
@@ -1221,11 +1231,16 @@ impl AgentHeartbeat {
         Ok(())
     }
 
+    /// Column list for SELECTs. Centralised so adding a new column means
+    /// updating one constant + `from_row`, not five query strings.
+    const COLS: &'static str = "id, project_id, name, frequency, spec_json, wakeup_path, enabled, last_fired, last_session_id, archived_at, created_at";
+
     pub fn get_by_name(conn: &Connection, project_id: &str, name: &str) -> Result<Option<AgentHeartbeat>> {
-        let mut stmt = conn.prepare(
-            "SELECT id, project_id, name, frequency, spec_json, wakeup_path, enabled, last_fired, created_at \
-             FROM agent_heartbeats WHERE project_id = ?1 AND name = ?2"
-        )?;
+        let sql = format!(
+            "SELECT {} FROM agent_heartbeats WHERE project_id = ?1 AND name = ?2",
+            Self::COLS,
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let mut rows = stmt.query_map(params![project_id, name], Self::from_row)?;
         match rows.next() {
             Some(Ok(h)) => Ok(Some(h)),
@@ -1235,19 +1250,53 @@ impl AgentHeartbeat {
     }
 
     pub fn list_by_project(conn: &Connection, project_id: &str) -> Result<Vec<AgentHeartbeat>> {
-        let mut stmt = conn.prepare(
-            "SELECT id, project_id, name, frequency, spec_json, wakeup_path, enabled, last_fired, created_at \
-             FROM agent_heartbeats WHERE project_id = ?1 ORDER BY name"
-        )?;
+        let sql = format!(
+            "SELECT {} FROM agent_heartbeats WHERE project_id = ?1 ORDER BY name",
+            Self::COLS,
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![project_id], Self::from_row)?;
+        rows.collect()
+    }
+
+    /// Active (non-archived) rows for a project. The Settings list and the
+    /// sidebar's Live/Resumable/Scheduled sections both use this.
+    pub fn list_active(conn: &Connection, project_id: &str) -> Result<Vec<AgentHeartbeat>> {
+        let sql = format!(
+            "SELECT {} FROM agent_heartbeats \
+             WHERE project_id = ?1 AND archived_at IS NULL ORDER BY name",
+            Self::COLS,
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![project_id], Self::from_row)?;
+        rows.collect()
+    }
+
+    /// Archived rows for a project. The sidebar's collapsed Archived
+    /// section uses this; ordered by archive recency (newest first).
+    pub fn list_archived(conn: &Connection, project_id: &str) -> Result<Vec<AgentHeartbeat>> {
+        let sql = format!(
+            "SELECT {} FROM agent_heartbeats \
+             WHERE project_id = ?1 AND archived_at IS NOT NULL \
+             ORDER BY archived_at DESC",
+            Self::COLS,
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params![project_id], Self::from_row)?;
         rows.collect()
     }
 
     pub fn list_enabled(conn: &Connection, project_id: &str) -> Result<Vec<AgentHeartbeat>> {
-        let mut stmt = conn.prepare(
-            "SELECT id, project_id, name, frequency, spec_json, wakeup_path, enabled, last_fired, created_at \
-             FROM agent_heartbeats WHERE project_id = ?1 AND enabled = 1 ORDER BY name"
-        )?;
+        // Tick-time evaluator. Skip archived heartbeats — they no longer
+        // fire on schedule even if `enabled` was never flipped before
+        // archiving.
+        let sql = format!(
+            "SELECT {} FROM agent_heartbeats \
+             WHERE project_id = ?1 AND enabled = 1 AND archived_at IS NULL \
+             ORDER BY name",
+            Self::COLS,
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params![project_id], Self::from_row)?;
         rows.collect()
     }
@@ -1296,6 +1345,44 @@ impl AgentHeartbeat {
         )
     }
 
+    /// Record the Claude session id from a successful heartbeat spawn.
+    /// The next fire's `--resume` target. Called by `spawn_wake_headless`
+    /// alongside the existing `agent_sessions::save_session_id` write.
+    pub fn save_session_id(
+        conn: &Connection,
+        project_id: &str,
+        name: &str,
+        session_id: &str,
+    ) -> Result<usize> {
+        conn.execute(
+            "UPDATE agent_heartbeats SET last_session_id = ?1 \
+             WHERE project_id = ?2 AND name = ?3",
+            params![session_id, project_id, name],
+        )
+    }
+
+    /// Soft-archive: set archived_at to now. Idempotent — re-archiving an
+    /// already-archived row is a no-op (timestamp unchanged). Called by
+    /// the Settings "Archive" button (replaced the previous hard-delete
+    /// "Remove" behaviour in 0.36.0).
+    pub fn archive(conn: &Connection, project_id: &str, name: &str) -> Result<usize> {
+        conn.execute(
+            "UPDATE agent_heartbeats SET archived_at = ?1 \
+             WHERE project_id = ?2 AND name = ?3 AND archived_at IS NULL",
+            params![chrono::Utc::now().to_rfc3339(), project_id, name],
+        )
+    }
+
+    /// Restore a soft-archived heartbeat. Reserved for a future "Restore
+    /// from Archive" UI affordance — no caller in 0.36.0.
+    pub fn unarchive(conn: &Connection, project_id: &str, name: &str) -> Result<usize> {
+        conn.execute(
+            "UPDATE agent_heartbeats SET archived_at = NULL \
+             WHERE project_id = ?1 AND name = ?2",
+            params![project_id, name],
+        )
+    }
+
     pub fn delete(conn: &Connection, project_id: &str, name: &str) -> Result<usize> {
         conn.execute(
             "DELETE FROM agent_heartbeats WHERE project_id = ?1 AND name = ?2",
@@ -1313,7 +1400,9 @@ impl AgentHeartbeat {
             wakeup_path: row.get(5)?,
             enabled: row.get::<_, i64>(6)? == 1,
             last_fired: row.get(7)?,
-            created_at: row.get(8)?,
+            last_session_id: row.get(8)?,
+            archived_at: row.get(9)?,
+            created_at: row.get(10)?,
         })
     }
 }
@@ -2080,6 +2169,140 @@ mod unit_tests {
         // RFC3339 sanity — "YYYY-MM-DDTHH:MM:SS..."
         assert!(ts.contains('T'), "expected RFC3339 timestamp, got: {}", ts);
         assert!(chrono::DateTime::parse_from_rfc3339(&ts).is_ok(), "parseable RFC3339: {}", ts);
+    }
+
+    // ── 0.36.0 fields: last_session_id + archived_at ──────────────
+
+    #[test]
+    fn heartbeat_save_session_id_writes_value() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/hb-sid");
+        AgentHeartbeat::insert(
+            &conn, "hb1", &pid, "triage", "60m", "{}", "p", true,
+        )
+        .unwrap();
+        let pre = AgentHeartbeat::get_by_name(&conn, &pid, "triage").unwrap().unwrap();
+        assert!(pre.last_session_id.is_none(), "fresh row has no session id");
+
+        let n = AgentHeartbeat::save_session_id(&conn, &pid, "triage", "claude-xyz").unwrap();
+        assert_eq!(n, 1);
+
+        let h = AgentHeartbeat::get_by_name(&conn, &pid, "triage").unwrap().unwrap();
+        assert_eq!(h.last_session_id.as_deref(), Some("claude-xyz"));
+    }
+
+    #[test]
+    fn heartbeat_archive_sets_timestamp_and_is_idempotent() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/hb-arch");
+        AgentHeartbeat::insert(
+            &conn, "hb1", &pid, "weekly", "7d", "{}", "p", true,
+        )
+        .unwrap();
+
+        // First archive — sets the timestamp.
+        let n1 = AgentHeartbeat::archive(&conn, &pid, "weekly").unwrap();
+        assert_eq!(n1, 1, "first archive updates one row");
+        let archived_first = AgentHeartbeat::get_by_name(&conn, &pid, "weekly")
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .expect("archived_at set after archive");
+
+        // Second archive — no-op (the WHERE clause excludes already-archived rows).
+        let n2 = AgentHeartbeat::archive(&conn, &pid, "weekly").unwrap();
+        assert_eq!(n2, 0, "re-archive of an archived row is a no-op");
+
+        let archived_second = AgentHeartbeat::get_by_name(&conn, &pid, "weekly")
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .expect("archived_at preserved after no-op re-archive");
+        assert_eq!(
+            archived_first, archived_second,
+            "archived_at timestamp must NOT change on re-archive"
+        );
+    }
+
+    #[test]
+    fn heartbeat_unarchive_clears_timestamp() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/hb-un");
+        AgentHeartbeat::insert(
+            &conn, "hb1", &pid, "monthly", "30d", "{}", "p", true,
+        )
+        .unwrap();
+        AgentHeartbeat::archive(&conn, &pid, "monthly").unwrap();
+        assert!(AgentHeartbeat::get_by_name(&conn, &pid, "monthly").unwrap().unwrap().archived_at.is_some());
+
+        let n = AgentHeartbeat::unarchive(&conn, &pid, "monthly").unwrap();
+        assert_eq!(n, 1);
+        assert!(AgentHeartbeat::get_by_name(&conn, &pid, "monthly").unwrap().unwrap().archived_at.is_none());
+    }
+
+    #[test]
+    fn heartbeat_list_active_excludes_archived() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/hb-lact");
+        AgentHeartbeat::insert(&conn, "hb1", &pid, "alpha", "60m", "{}", "p", true).unwrap();
+        AgentHeartbeat::insert(&conn, "hb2", &pid, "beta",  "60m", "{}", "p", true).unwrap();
+        AgentHeartbeat::insert(&conn, "hb3", &pid, "gamma", "60m", "{}", "p", true).unwrap();
+        AgentHeartbeat::archive(&conn, &pid, "beta").unwrap();
+
+        let active = AgentHeartbeat::list_active(&conn, &pid).unwrap();
+        let names: Vec<&str> = active.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "gamma"], "archived row must not appear in list_active");
+    }
+
+    #[test]
+    fn heartbeat_list_archived_returns_only_archived_rows() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/hb-larc");
+        AgentHeartbeat::insert(&conn, "hb1", &pid, "alpha", "60m", "{}", "p", true).unwrap();
+        AgentHeartbeat::insert(&conn, "hb2", &pid, "beta",  "60m", "{}", "p", true).unwrap();
+        AgentHeartbeat::archive(&conn, &pid, "beta").unwrap();
+
+        let archived = AgentHeartbeat::list_archived(&conn, &pid).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].name, "beta");
+        assert!(archived[0].archived_at.is_some());
+    }
+
+    #[test]
+    fn heartbeat_list_enabled_excludes_archived_even_when_enabled() {
+        // The scheduler-tick path uses list_enabled; archiving must
+        // stop a heartbeat from firing even if enabled was never
+        // toggled off before archive.
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/hb-len");
+        AgentHeartbeat::insert(&conn, "hb1", &pid, "live",     "60m", "{}", "p", true).unwrap();
+        AgentHeartbeat::insert(&conn, "hb2", &pid, "retired",  "60m", "{}", "p", true).unwrap();
+        AgentHeartbeat::archive(&conn, &pid, "retired").unwrap();
+
+        let enabled = AgentHeartbeat::list_enabled(&conn, &pid).unwrap();
+        let names: Vec<&str> = enabled.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["live"],
+            "archived heartbeat must be skipped by the tick evaluator"
+        );
+    }
+
+    #[test]
+    fn migration_0034_default_show_heartbeat_sessions_is_zero() {
+        // Bare projects row — no explicit show_heartbeat_sessions value.
+        // Migration 0034 sets DEFAULT 0, so freshly-inserted rows must
+        // have it as 0 (silent autonomous mode is the v2-headless default).
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/proj-0034");
+        let v: i64 = conn
+            .query_row(
+                "SELECT show_heartbeat_sessions FROM projects WHERE id = ?1",
+                params![pid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, 0, "show_heartbeat_sessions must default to 0 (off)");
     }
 
     // ── ActivityFeedEntry ─────────────────────────────────────────
