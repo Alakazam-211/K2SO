@@ -838,6 +838,18 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
 
+        // P5.6: DB-as-source-of-truth replacement for the legacy
+        // ~/.k2so/heartbeat-projects.txt file. heartbeat.sh now calls
+        // this once per cron tick and iterates the response, calling
+        // /cli/scheduler-tick per project. Newline-delimited plain
+        // text so bash can `while read` without a JSON parser.
+        // Returns every project path with at least one enabled,
+        // non-archived agent_heartbeats row — derived state, never
+        // stale.
+        "/cli/heartbeat/active-projects" => {
+            CliResponse::ok_text(crate::triage::handle_active_projects())
+        }
+
         // ── Heartbeat CRUD + fires ──────────────────────────────────
         p if p.starts_with("/cli/heartbeat/") || p == "/cli/heartbeat-log" => {
             match need_project(params) {

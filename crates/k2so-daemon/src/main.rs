@@ -127,6 +127,37 @@ async fn main() {
         std::process::exit(2);
     }
 
+    // P5.3: clear stale heartbeat leases left behind by a daemon that
+    // crashed mid-spawn. Without this, a row's `in_flight_started_at`
+    // would stay set forever under `concurrency_policy='forbid'` and
+    // the heartbeat would never fire again. River + Oban use the same
+    // boot-sweep pattern. Threshold matches the largest reasonable
+    // active_deadline_secs (5 min) — anything older than that is
+    // definitely an abandoned lease, not an in-progress spawn.
+    {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        match k2so_core::db::schema::AgentHeartbeat::sweep_stale_leases(&conn, 300) {
+            Ok(0) => {}
+            Ok(n) => log_debug!("[daemon] swept {} stale heartbeat lease(s) from prior crash", n),
+            Err(e) => log_debug!("[daemon] WARN: sweep_stale_leases: {e}"),
+        }
+    }
+
+    // P5.6: legacy heartbeat-projects.txt has been retired in favor
+    // of `/cli/heartbeat/active-projects`. If it's still on disk from
+    // a pre-P5 install (or if the user only ever runs the daemon
+    // headlessly without Tauri's `k2so_agents_install_heartbeat`),
+    // delete it so heartbeat.sh can't be tempted to read stale data
+    // even if a stray pre-P5 script is still around.
+    let legacy_projects_file = k2so_dir.join("heartbeat-projects.txt");
+    if legacy_projects_file.exists() {
+        match fs::remove_file(&legacy_projects_file) {
+            Ok(_) => log_debug!("[daemon] removed legacy heartbeat-projects.txt"),
+            Err(e) => log_debug!("[daemon] WARN: remove heartbeat-projects.txt: {e}"),
+        }
+    }
+
     let listener = match TcpListener::bind("127.0.0.1:0").await {
         Ok(l) => l,
         Err(e) => {

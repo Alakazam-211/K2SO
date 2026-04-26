@@ -184,7 +184,13 @@ fn default_wake_mode() -> String {
     "on_demand".to_string()
 }
 fn default_wake_interval() -> u32 {
-    5
+    // P5.7: dropped from 5 (300s) to 1 (60s). Matches K8s CronJob's
+    // 1-minute granularity and lets sub-5-minute heartbeats (e.g.
+    // hourly with every_seconds=120) actually fire on time. The
+    // P5.2 CAS + P5.4 bounded pool make this safe — every tick that
+    // has no work returns in microseconds; ticks with work are
+    // capped to MAX_PARALLEL_HEARTBEAT_SPAWNS in flight.
+    1
 }
 
 impl Default for WakeSchedulerSettings {

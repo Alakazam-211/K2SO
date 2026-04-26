@@ -273,6 +273,27 @@ pub fn k2so_agents_heartbeat_tick(project_path: &str) -> Vec<HeartbeatFireCandid
             continue;
         }
 
+        // P5.5: starting_deadline_secs guard. If the scheduled fire is
+        // significantly older than now, we skip rather than fire a
+        // stale wakeup. Mirrors K8s CronJob's `startingDeadlineSeconds`.
+        // Default (600s) tolerates one missed launchd tick at the
+        // post-P5.7 60s cadence; long-asleep daemons skip catch-up.
+        if let Some(reason) = is_past_deadline(&hb) {
+            let _ = HeartbeatFire::insert_with_schedule(
+                &conn,
+                &project_id,
+                Some(&agent_name),
+                Some(&hb.name),
+                &hb.frequency,
+                "skipped_deadline",
+                Some(&reason),
+                None,
+                None,
+                Some(tick_start.elapsed().as_millis() as i64),
+            );
+            continue;
+        }
+
         let wakeup_abs = std::path::Path::new(project_path).join(&hb.wakeup_path);
         if !wakeup_abs.exists() {
             let _ = AgentHeartbeat::set_enabled(&conn, &project_id, &hb.name, false);
@@ -307,6 +328,80 @@ pub fn k2so_agents_heartbeat_tick(project_path: &str) -> Vec<HeartbeatFireCandid
         });
     }
     candidates
+}
+
+/// P5.5: starting_deadline_secs check. Returns `Some(reason)` if the
+/// fire is past its deadline and should be skipped, `None` otherwise.
+///
+/// Semantics differ per frequency:
+///
+/// - **hourly** (`{every_seconds}`): scheduled time = last_fired +
+///   every_seconds; deadline = scheduled + starting_deadline_secs.
+///   When last_fired is None (first fire), no deadline applies.
+/// - **scheduled / daily / weekly / monthly / yearly** (`{time:"HH:MM",...}`):
+///   scheduled time = today at HH:MM; deadline = scheduled +
+///   starting_deadline_secs. Only enforced when scheduled is in the
+///   past today — future scheduled times haven't deadline-expired.
+///
+/// Conservative default — if we can't parse the spec, we don't skip.
+/// Better to fire a maybe-stale wakeup than silently swallow a fire
+/// we can't reason about.
+fn is_past_deadline(hb: &AgentHeartbeat) -> Option<String> {
+    if hb.starting_deadline_secs <= 0 {
+        return None; // 0 or negative disables the check.
+    }
+    let deadline_secs = hb.starting_deadline_secs;
+    let now = chrono::Local::now();
+
+    // Normalize frequency mode the same way scheduler.rs does.
+    let mode = match hb.frequency.as_str() {
+        "daily" | "weekly" | "monthly" | "yearly" => "scheduled",
+        other => other,
+    };
+
+    match mode {
+        "hourly" => {
+            let last_fire_time = hb.last_fired.as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())?;
+            let v: serde_json::Value = serde_json::from_str(&hb.spec_json).ok()?;
+            let every_secs = v.get("every_seconds").and_then(|s| s.as_i64()).unwrap_or(300);
+            let elapsed = now.timestamp() - last_fire_time.timestamp();
+            let lateness = elapsed - every_secs;
+            if lateness > deadline_secs {
+                Some(format!(
+                    "fire is {}s late (deadline {}s)",
+                    lateness, deadline_secs
+                ))
+            } else {
+                None
+            }
+        }
+        "scheduled" => {
+            // Compute today's scheduled HH:MM in local time.
+            let v: serde_json::Value = serde_json::from_str(&hb.spec_json).ok()?;
+            let time_str = v.get("time").and_then(|s| s.as_str()).unwrap_or("09:00");
+            let parts: Vec<&str> = time_str.split(':').collect();
+            if parts.len() != 2 { return None; }
+            let h: u32 = parts[0].parse().ok()?;
+            let m: u32 = parts[1].parse().ok()?;
+            let today = now.date_naive();
+            let scheduled_naive = today.and_hms_opt(h, m, 0)?;
+            let scheduled_local = scheduled_naive
+                .and_local_timezone(chrono::Local)
+                .single()?;
+            let lateness = (now - scheduled_local).num_seconds();
+            // Only late if we're past the scheduled time today.
+            if lateness > deadline_secs {
+                Some(format!(
+                    "fire is {}s late (scheduled {}, deadline {}s)",
+                    lateness, time_str, deadline_secs
+                ))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Stamp `last_fired` on a heartbeat row. Called AFTER `spawn_wake_pty`

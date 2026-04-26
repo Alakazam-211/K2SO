@@ -1181,6 +1181,22 @@ pub struct AgentHeartbeat {
     /// section so chat history stays auditable.
     pub archived_at: Option<String>,
     pub created_at: i64,
+    /// `forbid` | `allow` | `replace`. Mirrors K8s CronJob's
+    /// concurrencyPolicy. `forbid` (default) skips a fire if the
+    /// previous spawn is still in flight. See migration 0035.
+    pub concurrency_policy: String,
+    /// Skip-if-late window in seconds. If `now() - scheduled_fire_at`
+    /// exceeds this, the tick is logged `skipped_deadline` and not
+    /// spawned. Default 600s. Mirrors K8s `startingDeadlineSeconds`.
+    pub starting_deadline_secs: i64,
+    /// Per-spawn timeout in seconds. The async wrapper around
+    /// smart_launch wraps each call in tokio::time::timeout. Default 30s
+    /// — covers spawn only, not the long-running session that results.
+    pub active_deadline_secs: i64,
+    /// RFC3339 lease timestamp. Set by `try_acquire_heartbeat` on
+    /// entry, cleared by `stamp_heartbeat_fired` on completion.
+    /// Boot-time sweep clears stale leases (>5min old). NULL = idle.
+    pub in_flight_started_at: Option<String>,
 }
 
 impl AgentHeartbeat {
@@ -1233,7 +1249,7 @@ impl AgentHeartbeat {
 
     /// Column list for SELECTs. Centralised so adding a new column means
     /// updating one constant + `from_row`, not five query strings.
-    const COLS: &'static str = "id, project_id, name, frequency, spec_json, wakeup_path, enabled, last_fired, last_session_id, archived_at, created_at";
+    const COLS: &'static str = "id, project_id, name, frequency, spec_json, wakeup_path, enabled, last_fired, last_session_id, archived_at, created_at, concurrency_policy, starting_deadline_secs, active_deadline_secs, in_flight_started_at";
 
     pub fn get_by_name(conn: &Connection, project_id: &str, name: &str) -> Result<Option<AgentHeartbeat>> {
         let sql = format!(
@@ -1390,6 +1406,132 @@ impl AgentHeartbeat {
         )
     }
 
+    /// Atomic claim of a heartbeat row's in-flight lease.
+    ///
+    /// Returns `true` if this caller won the race and should proceed to
+    /// spawn; `false` if the row is already in-flight (under `forbid`)
+    /// and this fire should be skipped.
+    ///
+    /// Mirrors `AgentSession::try_acquire_running` — `BEGIN IMMEDIATE`
+    /// upgrades the connection to a write lock at BEGIN time so two
+    /// concurrent readers can't both think they can proceed. This is
+    /// the load-bearing fix for the pre-existing TOCTOU between the
+    /// scheduler's `is_agent_locked` check and the spawn that follows.
+    ///
+    /// Honors `concurrency_policy`:
+    /// - `forbid` (default): refuse if `in_flight_started_at IS NOT NULL`
+    /// - `allow`: always succeed (still leases for sweep semantics)
+    /// - `replace`: same as `allow` here; the caller is responsible for
+    ///   killing the prior spawn before this returns. (P5.5 wires up
+    ///   the kill side; until then `replace` behaves as `allow`.)
+    ///
+    /// Stale leases (left behind by a daemon crash mid-spawn) are
+    /// handled by the boot-time sweep in `sweep_stale_leases`, not
+    /// here — keeping the CAS path tiny.
+    pub fn try_acquire_heartbeat(
+        conn: &Connection,
+        project_id: &str,
+        name: &str,
+    ) -> Result<bool> {
+        conn.execute_batch("BEGIN IMMEDIATE;")?;
+
+        let row: Option<(String, Option<String>)> = conn
+            .query_row(
+                "SELECT concurrency_policy, in_flight_started_at \
+                 FROM agent_heartbeats \
+                 WHERE project_id = ?1 AND name = ?2",
+                params![project_id, name],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .ok();
+
+        let (policy, in_flight) = match row {
+            Some(r) => r,
+            None => {
+                conn.execute_batch("ROLLBACK;")?;
+                return Ok(false);
+            }
+        };
+
+        if policy == "forbid" && in_flight.is_some() {
+            conn.execute_batch("ROLLBACK;")?;
+            return Ok(false);
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let result = conn.execute(
+            "UPDATE agent_heartbeats SET in_flight_started_at = ?1 \
+             WHERE project_id = ?2 AND name = ?3",
+            params![now, project_id, name],
+        );
+
+        match result {
+            Ok(_) => {
+                conn.execute_batch("COMMIT;")?;
+                Ok(true)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                Err(e)
+            }
+        }
+    }
+
+    /// Release the in-flight lease without stamping `last_fired`.
+    ///
+    /// Called when smart_launch returned an error — the heartbeat
+    /// stays eligible for the next tick. Symmetric counterpart to
+    /// `stamp_heartbeat_fired` for the failure path.
+    pub fn release_heartbeat_lease(
+        conn: &Connection,
+        project_id: &str,
+        name: &str,
+    ) -> Result<usize> {
+        conn.execute(
+            "UPDATE agent_heartbeats SET in_flight_started_at = NULL \
+             WHERE project_id = ?1 AND name = ?2",
+            params![project_id, name],
+        )
+    }
+
+    /// Combined success path: stamp `last_fired` AND clear the lease in
+    /// a single statement, so a tick never observes the row in a
+    /// half-finished state.
+    pub fn stamp_fired_and_release(
+        conn: &Connection,
+        project_id: &str,
+        name: &str,
+    ) -> Result<usize> {
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE agent_heartbeats \
+             SET last_fired = ?1, in_flight_started_at = NULL \
+             WHERE project_id = ?2 AND name = ?3",
+            params![now, project_id, name],
+        )
+    }
+
+    /// Boot-time recovery sweep. Clears `in_flight_started_at` on rows
+    /// whose lease is older than `older_than_secs` — these were left
+    /// behind by a daemon that crashed between lease acquisition and
+    /// completion. Without this, a crashed-mid-spawn row would stay
+    /// locked forever under `concurrency_policy='forbid'`.
+    ///
+    /// River + Oban use the same pattern. Threshold passed in (rather
+    /// than hardcoded) so callers can tune it to their longest
+    /// expected `active_deadline_secs`.
+    pub fn sweep_stale_leases(conn: &Connection, older_than_secs: i64) -> Result<usize> {
+        let cutoff = (chrono::Utc::now()
+            - chrono::Duration::seconds(older_than_secs))
+        .to_rfc3339();
+        conn.execute(
+            "UPDATE agent_heartbeats SET in_flight_started_at = NULL \
+             WHERE in_flight_started_at IS NOT NULL \
+               AND in_flight_started_at < ?1",
+            params![cutoff],
+        )
+    }
+
     fn from_row(row: &rusqlite::Row<'_>) -> Result<AgentHeartbeat> {
         Ok(AgentHeartbeat {
             id: row.get(0)?,
@@ -1403,6 +1545,10 @@ impl AgentHeartbeat {
             last_session_id: row.get(8)?,
             archived_at: row.get(9)?,
             created_at: row.get(10)?,
+            concurrency_policy: row.get(11)?,
+            starting_deadline_secs: row.get(12)?,
+            active_deadline_secs: row.get(13)?,
+            in_flight_started_at: row.get(14)?,
         })
     }
 }
@@ -2706,6 +2852,173 @@ mod concurrency_tests {
         )
         .unwrap();
         assert!(third, "re-acquire after release should win");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Heartbeat lease (try_acquire_heartbeat) ──────────────────────
+    //
+    // Mirrors the AgentSession CAS tests above. The pre-P5 production
+    // path had no concurrency control on heartbeat fires — two ticks
+    // overlapping (which becomes a real risk once StartInterval drops
+    // from 300 to 60 in P5.7) would spawn the same heartbeat twice.
+    // These tests prove the new CAS prevents that.
+
+    fn make_heartbeat(conn: &Connection, project_id: &str, name: &str) {
+        AgentHeartbeat::insert(
+            conn,
+            &uuid::Uuid::new_v4().to_string(),
+            project_id,
+            name,
+            "hourly",
+            r#"{"every_seconds":3600}"#,
+            ".k2so/agents/x/wakeups/test/WAKEUP.md",
+            true,
+        )
+        .expect("insert heartbeat");
+    }
+
+    #[test]
+    fn try_acquire_heartbeat_exactly_one_winner_under_parallel_contention() {
+        let (dir, db_path) = scratch_db();
+        let project = {
+            let conn = open_conn(&db_path);
+            let project = make_project(&conn, "/tmp/proj-hb-a");
+            make_heartbeat(&conn, &project, "test-hb");
+            project
+        };
+
+        let db_path = Arc::new(db_path);
+        let project = Arc::new(project);
+        let n_threads = 20usize;
+
+        let handles: Vec<_> = (0..n_threads)
+            .map(|_| {
+                let db_path = db_path.clone();
+                let project = project.clone();
+                std::thread::spawn(move || -> bool {
+                    let conn = open_conn(&db_path);
+                    AgentHeartbeat::try_acquire_heartbeat(&conn, &project, "test-hb")
+                        .expect("try_acquire_heartbeat")
+                })
+            })
+            .collect();
+
+        let winners: usize = handles
+            .into_iter()
+            .map(|h| h.join().unwrap() as usize)
+            .sum();
+        assert_eq!(winners, 1, "expected exactly 1 winner under contention");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn try_acquire_heartbeat_release_allows_reacquire() {
+        let (dir, db_path) = scratch_db();
+        let conn = open_conn(&db_path);
+        let project = make_project(&conn, "/tmp/proj-hb-b");
+        make_heartbeat(&conn, &project, "test-hb");
+
+        let first = AgentHeartbeat::try_acquire_heartbeat(&conn, &project, "test-hb")
+            .expect("first acquire");
+        assert!(first, "first acquire should win");
+
+        let second = AgentHeartbeat::try_acquire_heartbeat(&conn, &project, "test-hb")
+            .expect("second acquire");
+        assert!(!second, "second acquire (lease held) should lose");
+
+        AgentHeartbeat::release_heartbeat_lease(&conn, &project, "test-hb")
+            .expect("release lease");
+
+        let third = AgentHeartbeat::try_acquire_heartbeat(&conn, &project, "test-hb")
+            .expect("third acquire");
+        assert!(third, "re-acquire after release should win");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stamp_fired_and_release_clears_lease() {
+        let (dir, db_path) = scratch_db();
+        let conn = open_conn(&db_path);
+        let project = make_project(&conn, "/tmp/proj-hb-c");
+        make_heartbeat(&conn, &project, "test-hb");
+
+        AgentHeartbeat::try_acquire_heartbeat(&conn, &project, "test-hb")
+            .expect("acquire");
+        AgentHeartbeat::stamp_fired_and_release(&conn, &project, "test-hb")
+            .expect("stamp");
+
+        let row = AgentHeartbeat::get_by_name(&conn, &project, "test-hb")
+            .expect("get")
+            .expect("row exists");
+        assert!(row.in_flight_started_at.is_none(), "lease should be cleared");
+        assert!(row.last_fired.is_some(), "last_fired should be stamped");
+
+        // Re-acquire works because the lease was cleared.
+        let next = AgentHeartbeat::try_acquire_heartbeat(&conn, &project, "test-hb")
+            .expect("re-acquire");
+        assert!(next, "post-stamp re-acquire should win");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweep_stale_leases_clears_old_in_flight_rows() {
+        let (dir, db_path) = scratch_db();
+        let conn = open_conn(&db_path);
+        let project = make_project(&conn, "/tmp/proj-hb-d");
+        make_heartbeat(&conn, &project, "stale-hb");
+        make_heartbeat(&conn, &project, "fresh-hb");
+
+        // Stale lease: 1 hour old.
+        let stale_ts = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        conn.execute(
+            "UPDATE agent_heartbeats SET in_flight_started_at = ?1 WHERE name = 'stale-hb'",
+            params![stale_ts],
+        )
+        .unwrap();
+        // Fresh lease: just now.
+        AgentHeartbeat::try_acquire_heartbeat(&conn, &project, "fresh-hb")
+            .expect("acquire fresh");
+
+        // Sweep anything older than 5 minutes.
+        let cleared = AgentHeartbeat::sweep_stale_leases(&conn, 300).expect("sweep");
+        assert_eq!(cleared, 1, "exactly one stale lease should be cleared");
+
+        let stale = AgentHeartbeat::get_by_name(&conn, &project, "stale-hb")
+            .unwrap()
+            .unwrap();
+        assert!(stale.in_flight_started_at.is_none(), "stale lease cleared");
+
+        let fresh = AgentHeartbeat::get_by_name(&conn, &project, "fresh-hb")
+            .unwrap()
+            .unwrap();
+        assert!(fresh.in_flight_started_at.is_some(), "fresh lease preserved");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn try_acquire_heartbeat_allow_policy_skips_lease_check() {
+        let (dir, db_path) = scratch_db();
+        let conn = open_conn(&db_path);
+        let project = make_project(&conn, "/tmp/proj-hb-e");
+        make_heartbeat(&conn, &project, "allow-hb");
+
+        // Flip policy to 'allow'.
+        conn.execute(
+            "UPDATE agent_heartbeats SET concurrency_policy = 'allow' WHERE name = 'allow-hb'",
+            [],
+        )
+        .unwrap();
+
+        let first = AgentHeartbeat::try_acquire_heartbeat(&conn, &project, "allow-hb")
+            .expect("first");
+        let second = AgentHeartbeat::try_acquire_heartbeat(&conn, &project, "allow-hb")
+            .expect("second");
+        assert!(first && second, "allow policy permits both fires");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

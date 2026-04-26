@@ -2294,27 +2294,20 @@ pub fn k2so_agents_preview_schedule(
 /// and triggers triage for projects that have heartbeat enabled.
 #[tauri::command]
 pub fn k2so_agents_install_heartbeat(
-    state: tauri::State<'_, crate::state::AppState>,
+    _state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<(), String> {
     let k2so_home = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".k2so");
     fs::create_dir_all(&k2so_home).map_err(|e| e.to_string())?;
 
-    // Collect heartbeat-enabled project paths from DB
-    let conn = state.db.lock();
-    let projects = crate::db::schema::Project::list(&conn).map_err(|e| e.to_string())?;
-    let heartbeat_paths: Vec<String> = projects
-        .iter()
-        .filter(|p| p.heartbeat_mode != "off")
-        .map(|p| p.path.clone())
-        .collect();
-    drop(conn);
-
-    // Write the project paths list for the heartbeat script
-    let paths_file = k2so_home.join("heartbeat-projects.txt");
-    fs::write(&paths_file, heartbeat_paths.join("\n"))
-        .map_err(|e| format!("Failed to write heartbeat projects: {}", e))?;
+    // P5.6: heartbeat-projects.txt has been retired. The daemon now
+    // serves the active project list from `agent_heartbeats` directly
+    // via `/cli/heartbeat/active-projects`, so heartbeat.sh queries
+    // it on every tick. Self-healing — a stale file can no longer
+    // make a workspace silent. Clean up the legacy artifact if it
+    // still exists on disk.
+    let _ = fs::remove_file(k2so_home.join("heartbeat-projects.txt"));
 
     // Generate heartbeat script
     let script_path = k2so_home.join("heartbeat.sh");
@@ -2495,10 +2488,11 @@ fn generate_heartbeat_script() -> String {
 
     format!(r##"#!/bin/bash
 # K2SO Agent Heartbeat — DO NOT EDIT (managed by K2SO)
-# Checks if K2SO is running, then triggers triage for heartbeat-enabled projects.
+# Asks the daemon which projects have active heartbeats, then ticks each.
+# P5.6: replaces the legacy heartbeat-projects.txt file with a daemon
+# query so the project list never goes stale.
 
 PORT_FILE="{home}/.k2so/heartbeat.port"
-PROJECTS_FILE="{home}/.k2so/heartbeat-projects.txt"
 LOG_FILE="{home}/.k2so/heartbeat.log"
 TOKEN_FILE="{home}/.k2so/heartbeat.token"
 
@@ -2533,11 +2527,6 @@ if ! echo "$HEALTH" | grep -q '"ok"'; then
     exit 0
 fi
 
-# Read project paths
-if [ ! -f "$PROJECTS_FILE" ]; then
-    exit 0
-fi
-
 # Read auth token
 TOKEN=""
 if [ -f "$TOKEN_FILE" ]; then
@@ -2549,10 +2538,22 @@ if [ -z "$TOKEN" ]; then
     exit 0
 fi
 
+# Ask the daemon for the current list of projects with active heartbeats.
+# Newline-delimited plain text — derived from agent_heartbeats so it's
+# always in sync with the user's actual configuration. Empty response =
+# no work to do this tick.
+PROJECTS=$(curl -s --connect-timeout 2 --max-time 5 \
+    "http://127.0.0.1:$PORT/cli/heartbeat/active-projects?token=$TOKEN" 2>>"$LOG_FILE")
+if [ -z "$PROJECTS" ]; then
+    # No heartbeat-enabled projects — silent no-op. Trim log and exit.
+    if [ -f "$LOG_FILE" ]; then
+        tail -200 "$LOG_FILE" > "$LOG_FILE.tmp" 2>/dev/null && mv -f "$LOG_FILE.tmp" "$LOG_FILE" 2>/dev/null
+    fi
+    exit 0
+fi
+
 # Trigger triage for each heartbeat-enabled project. We log EVERY tick
-# (fires, skips, errors) so users can see when the heartbeat ran — the
-# old version only logged successful launches, which made it look like
-# nothing was firing even when everything was working.
+# (fires, skips, errors) so users can see when the heartbeat ran.
 while IFS= read -r project_path; do
     [ -z "$project_path" ] && continue
     ENCODED_PATH=$(urlencode "$project_path")
@@ -2571,7 +2572,7 @@ while IFS= read -r project_path; do
     else
         echo "$(ts) tick project=$project_path launched=0" >> "$LOG_FILE"
     fi
-done < "$PROJECTS_FILE"
+done <<< "$PROJECTS"
 
 # Trim log (atomic: write to tmp then move)
 if [ -f "$LOG_FILE" ]; then

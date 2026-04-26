@@ -78,6 +78,23 @@ pub fn smart_launch(project_path: &str, name: &str) -> serde_json::Value {
             &format!("WAKEUP.md missing at {}", hb.wakeup_path), name);
     }
 
+    // Atomic claim of the in-flight lease — fixes the pre-existing
+    // TOCTOU between scheduler eval and spawn. Honors the row's
+    // `concurrency_policy`: under `forbid` (default) a second caller
+    // sees `in_flight_started_at IS NOT NULL` and gets `false`.
+    // Boot-time `sweep_stale_leases` clears leases left behind by
+    // a daemon that crashed mid-spawn.
+    if !acquire_lease(&project_id, &hb.name) {
+        write_audit(&project_id, &agent_name, &hb, "skipped_locked",
+            "smart_launch: heartbeat already in flight");
+        return serde_json::json!({
+            "success": false,
+            "decision": "skipped_locked",
+            "reason": "heartbeat already in flight",
+            "name": hb.name,
+        });
+    }
+
     let saved_session = hb.last_session_id
         .as_deref()
         .filter(|s| !s.is_empty())
@@ -147,6 +164,7 @@ fn run_fresh_fire(
     wakeup_abs: &Path,
 ) -> serde_json::Value {
     let Some(prompt) = wake::compose_wake_prompt_from_path(wakeup_abs) else {
+        release_lease(project_id, &hb.name);
         write_audit(project_id, agent_name, hb, "error", "failed to compose wake prompt");
         return error_value("error", "failed to compose wake prompt", &hb.name);
     };
@@ -162,7 +180,7 @@ fn run_fresh_fire(
 
     match result {
         Ok(terminal_id) => {
-            stamp_fired(project_path, &hb.name);
+            stamp_fired_and_release(project_id, &hb.name);
             write_audit(project_id, agent_name, hb, "fired",
                 "smart_launch: no saved session — fresh fire");
             serde_json::json!({
@@ -175,6 +193,7 @@ fn run_fresh_fire(
             })
         }
         Err(e) => {
+            release_lease(project_id, &hb.name);
             write_audit(project_id, agent_name, hb, "error",
                 &format!("fresh fire spawn failed: {e}"));
             error_value("error", &format!("spawn failed: {e}"), &hb.name)
@@ -195,6 +214,7 @@ fn run_inject(
     let body_raw = match std::fs::read_to_string(wakeup_abs) {
         Ok(s) => s,
         Err(e) => {
+            release_lease(project_id, &hb.name);
             write_audit(project_id, agent_name, hb, "error",
                 &format!("inject failed reading WAKEUP.md: {e}"));
             return error_value("error",
@@ -204,11 +224,13 @@ fn run_inject(
     let body = wake::strip_frontmatter(&body_raw);
     let body_trimmed = body.trim();
     if body_trimmed.is_empty() {
+        release_lease(project_id, &hb.name);
         write_audit(project_id, agent_name, hb, "error", "WAKEUP.md body empty");
         return error_value("error", "WAKEUP.md body is empty", &hb.name);
     }
 
     if let Err(e) = live.write(body_trimmed.as_bytes()) {
+        release_lease(project_id, &hb.name);
         write_audit(project_id, agent_name, hb, "error",
             &format!("inject write failed: {e}"));
         return error_value("error",
@@ -219,7 +241,7 @@ fn run_inject(
     std::thread::sleep(std::time::Duration::from_millis(150));
     let _ = live.write(b"\r");
 
-    stamp_fired(project_path, &hb.name);
+    stamp_fired_and_release(project_id, &hb.name);
     let target_id = live.session_id().to_string();
     write_audit(project_id, agent_name, hb, "fired",
         &format!("smart_launch: injected into live session {target_id}"));
@@ -243,6 +265,7 @@ fn run_resume_and_fire(
     session_id: &str,
 ) -> serde_json::Value {
     let Some(prompt) = wake::compose_wake_prompt_from_path(wakeup_abs) else {
+        release_lease(project_id, &hb.name);
         write_audit(project_id, agent_name, hb, "error", "failed to compose wake prompt");
         return error_value("error", "failed to compose wake prompt", &hb.name);
     };
@@ -292,7 +315,7 @@ fn run_resume_and_fire(
                     "heartbeatName": hb.name,
                 }),
             );
-            stamp_fired(project_path, &hb.name);
+            stamp_fired_and_release(&project_id, &hb.name);
             write_audit(project_id, agent_name, hb, "fired",
                 "smart_launch: resumed session, fired wakeup");
             serde_json::json!({
@@ -306,6 +329,7 @@ fn run_resume_and_fire(
             })
         }
         Err(e) => {
+            release_lease(project_id, &hb.name);
             write_audit(project_id, agent_name, hb, "error",
                 &format!("resume spawn failed: {e}"));
             error_value("error", &format!("resume spawn failed: {e}"), &hb.name)
@@ -313,10 +337,28 @@ fn run_resume_and_fire(
     }
 }
 
-// ── Audit helpers ─────────────────────────────────────────────────
+// ── Lease + stamp helpers ─────────────────────────────────────────
 
-fn stamp_fired(project_path: &str, hb_name: &str) {
-    k2so_core::agents::heartbeat::stamp_heartbeat_fired(project_path, hb_name);
+fn acquire_lease(project_id: &str, hb_name: &str) -> bool {
+    let db = k2so_core::db::shared();
+    let conn = db.lock();
+    AgentHeartbeat::try_acquire_heartbeat(&conn, project_id, hb_name).unwrap_or(false)
+}
+
+fn release_lease(project_id: &str, hb_name: &str) {
+    let db = k2so_core::db::shared();
+    let conn = db.lock();
+    let _ = AgentHeartbeat::release_heartbeat_lease(&conn, project_id, hb_name);
+}
+
+/// Atomic stamp of `last_fired` + clear the in-flight lease. Called
+/// only on successful spawn paths; the failure paths use
+/// `release_lease` and leave `last_fired` untouched so the heartbeat
+/// stays eligible for the next tick.
+fn stamp_fired_and_release(project_id: &str, hb_name: &str) {
+    let db = k2so_core::db::shared();
+    let conn = db.lock();
+    let _ = AgentHeartbeat::stamp_fired_and_release(&conn, project_id, hb_name);
 }
 
 fn write_audit(

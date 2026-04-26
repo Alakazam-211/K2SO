@@ -52,6 +52,21 @@ pub fn should_project_fire_with_now(
     let last_fire_time =
         last_fire.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
 
+    // P5.5: normalize legacy `agent_heartbeats.frequency` values that
+    // were stored as the inner JSON frequency (`daily`, `weekly`,
+    // `monthly`, `yearly`) when the outer mode column should be
+    // `scheduled`. This was a 0.32-era migration mistake — the row
+    // shape is { frequency: "daily", spec_json: {"frequency":"daily",...} }
+    // and the scheduler's match arm only knew "hourly" / "scheduled".
+    // Rather than churn data with a backfill migration, alias at the
+    // boundary so both old rows and new "scheduled" rows work.
+    // Without this, daily/weekly/monthly/yearly heartbeats never
+    // fired from cron (they were silently `_ => false`-d).
+    let mode = match mode {
+        "daily" | "weekly" | "monthly" | "yearly" => "scheduled",
+        other => other,
+    };
+
     match mode {
         "hourly" => {
             // {"start":"09:00","end":"17:00","every_seconds":1800}
@@ -284,6 +299,35 @@ mod tests {
             None,
             now
         ));
+    }
+
+    #[test]
+    fn daily_mode_aliases_to_scheduled_and_fires() {
+        // Pre-P5.5 regression: agent_heartbeats rows with frequency='daily'
+        // never fired because scheduler's match arm only handled 'hourly'
+        // and 'scheduled'. P5.5 aliases daily/weekly/monthly/yearly to
+        // 'scheduled' at the boundary so legacy data + the daemon's
+        // tick converge.
+        // Pick a time well after schedule so all timezones are past 09:00.
+        let now = mk_now(2026, 4, 19, 23, 0);
+        assert!(should_project_fire_with_now(
+            "daily",
+            Some(r#"{"frequency":"daily","interval":1,"time":"09:00"}"#),
+            None,
+            now
+        ), "daily-as-mode should alias to scheduled and fire after 9 AM");
+    }
+
+    #[test]
+    fn weekly_mode_aliases_to_scheduled() {
+        // 2026-04-20 is a Monday at UTC 23:00 (well past 09:00 in any tz).
+        let now = mk_now(2026, 4, 20, 23, 0);
+        assert!(should_project_fire_with_now(
+            "weekly",
+            Some(r#"{"frequency":"weekly","time":"09:00","days":["mon","wed","fri"]}"#),
+            None,
+            now
+        ), "weekly-as-mode should alias to scheduled");
     }
 
     #[test]
