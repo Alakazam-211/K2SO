@@ -141,7 +141,11 @@ export function HeartbeatsPanel(): React.JSX.Element {
         <span
           onClick={(e) => {
             e.stopPropagation()
-            useSettingsStore.getState().openSettings('projects')
+            // Pass the active project's id so Settings opens to THIS
+            // workspace's heartbeats, not whichever workspace the
+            // Settings module last had selected. Same call shape the
+            // Sidebar's right-click → Workspace Settings uses.
+            useSettingsStore.getState().openSettings('projects', project.id)
           }}
           className="text-[9px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] no-drag cursor-pointer"
           title="Manage in Settings"
