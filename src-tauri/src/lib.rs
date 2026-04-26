@@ -1254,6 +1254,9 @@ pub fn run() {
             // Multi-heartbeat (agent_heartbeats table)
             commands::k2so_agents::k2so_heartbeat_add,
             commands::k2so_agents::k2so_heartbeat_list,
+            commands::k2so_agents::k2so_heartbeat_list_archived,
+            commands::k2so_agents::k2so_heartbeat_archive,
+            commands::k2so_agents::k2so_heartbeat_unarchive,
             commands::k2so_agents::k2so_heartbeat_remove,
             commands::k2so_agents::k2so_heartbeat_set_enabled,
             commands::k2so_agents::k2so_heartbeat_edit,

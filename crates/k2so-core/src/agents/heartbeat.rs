@@ -94,13 +94,69 @@ pub fn k2so_heartbeat_add(
     }))
 }
 
-/// List all heartbeat rows for a workspace (enabled + disabled).
+/// List active (non-archived) heartbeat rows for a workspace,
+/// enabled + disabled. Archived rows are hidden — they appear only in
+/// the sidebar's Archived collapsed section, sourced from
+/// `k2so_heartbeat_list_archived`.
+///
+/// Pre-0.36.0 this returned every row; the post-archive filter went in
+/// when soft-archive replaced hard-delete.
 pub fn k2so_heartbeat_list(project_path: String) -> Result<Vec<AgentHeartbeat>, String> {
     let db = crate::db::shared();
     let conn = db.lock();
     let project_id = resolve_project_id(&conn, &project_path)
         .ok_or_else(|| format!("Project not found: {}", project_path))?;
-    AgentHeartbeat::list_by_project(&conn, &project_id).map_err(|e| e.to_string())
+    AgentHeartbeat::list_active(&conn, &project_id).map_err(|e| e.to_string())
+}
+
+/// List archived heartbeat rows for a workspace, newest archive first.
+/// Powers the sidebar Heartbeats panel's collapsed Archived section so
+/// past chat threads remain auditable after a heartbeat is retired.
+pub fn k2so_heartbeat_list_archived(
+    project_path: String,
+) -> Result<Vec<AgentHeartbeat>, String> {
+    let db = crate::db::shared();
+    let conn = db.lock();
+    let project_id = resolve_project_id(&conn, &project_path)
+        .ok_or_else(|| format!("Project not found: {}", project_path))?;
+    AgentHeartbeat::list_archived(&conn, &project_id).map_err(|e| e.to_string())
+}
+
+/// Soft-archive a heartbeat. Sets `archived_at` to the current
+/// timestamp; the row is then hidden from `k2so_heartbeat_list` and
+/// excluded from `list_enabled` so the scheduler-tick evaluator stops
+/// firing it. Idempotent — re-archiving an already-archived row is a
+/// no-op (timestamp preserved).
+///
+/// Replaces the previous "Remove" delete in the Settings UI from
+/// 0.36.0 onward; users who want a real delete can use
+/// `k2so_heartbeat_remove` (kept for power-user flows).
+pub fn k2so_heartbeat_archive(
+    project_path: String,
+    name: String,
+) -> Result<(), String> {
+    let db = crate::db::shared();
+    let conn = db.lock();
+    let project_id = resolve_project_id(&conn, &project_path)
+        .ok_or_else(|| format!("Project not found: {}", project_path))?;
+    AgentHeartbeat::archive(&conn, &project_id, &name)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Restore a soft-archived heartbeat. Reserved for a future
+/// "Restore from Archive" UI affordance — no caller in 0.36.0.
+pub fn k2so_heartbeat_unarchive(
+    project_path: String,
+    name: String,
+) -> Result<(), String> {
+    let db = crate::db::shared();
+    let conn = db.lock();
+    let project_id = resolve_project_id(&conn, &project_path)
+        .ok_or_else(|| format!("Project not found: {}", project_path))?;
+    AgentHeartbeat::unarchive(&conn, &project_id, &name)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// Delete a heartbeat row + best-effort remove its `WAKEUP.md` folder.

@@ -339,6 +339,29 @@ pub fn k2so_heartbeat_list(project_path: String) -> Result<Vec<AgentHeartbeat>, 
 }
 
 #[tauri::command]
+pub fn k2so_heartbeat_list_archived(
+    project_path: String,
+) -> Result<Vec<AgentHeartbeat>, String> {
+    k2so_core::agents::heartbeat::k2so_heartbeat_list_archived(project_path)
+}
+
+#[tauri::command]
+pub fn k2so_heartbeat_archive(
+    project_path: String,
+    name: String,
+) -> Result<(), String> {
+    k2so_core::agents::heartbeat::k2so_heartbeat_archive(project_path, name)
+}
+
+#[tauri::command]
+pub fn k2so_heartbeat_unarchive(
+    project_path: String,
+    name: String,
+) -> Result<(), String> {
+    k2so_core::agents::heartbeat::k2so_heartbeat_unarchive(project_path, name)
+}
+
+#[tauri::command]
 pub fn k2so_heartbeat_remove(project_path: String, name: String) -> Result<(), String> {
     k2so_core::agents::heartbeat::k2so_heartbeat_remove(project_path, name)
 }
