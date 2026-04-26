@@ -21,7 +21,7 @@ import { CAP_LABELS, CAP_COLORS, CAPABILITIES, type StateData } from '@shared/co
 import { showContextMenu } from '@/lib/context-menu'
 import { SectionErrorBoundary } from '../SectionErrorBoundary'
 import type { SettingEntry } from '../searchManifest'
-import { HeartbeatsPanel, HistoryPanel } from './HeartbeatsSection'
+import { HeartbeatsPanel, HistoryPanel, WakeupEditor, type HeartbeatRow } from './HeartbeatsSection'
 import { ContextLayersPreview } from './ContextLayersPreview'
 
 export const PROJECTS_MANIFEST: SettingEntry[] = [
@@ -960,6 +960,16 @@ function ProjectDetail({
   const [cropImage, setCropImage] = useState<string | null>(null)
   const [agentEditorOpen, setAgentEditorOpen] = useState(false)
   const [agentEditorName, setAgentEditorName] = useState('')
+  // The WakeupEditor lives alongside the other "agent editor"
+  // takeovers (ClaudeMdEditor, AgentPersonaEditor, ProjectContextEditor)
+  // so it fills the Settings content area without colliding with the
+  // workspaces sidebar's stacking context. State is lifted from
+  // HeartbeatsPanel so the editor can render at this level.
+  const [wakeupEditingHb, setWakeupEditingHb] = useState<HeartbeatRow | null>(null)
+  // Heartbeat refresh nonce — incremented when the wakeup editor
+  // closes so the panel's k2so_heartbeat_list query re-runs and
+  // picks up any edits the agent made to the row.
+  const [hbRefreshNonce, setHbRefreshNonce] = useState(0)
   // When agentMode is 'off' and there are no historical fires for this
   // workspace, there's no audit to show — collapse the right column so
   // we don't leave an empty frame next to every Off workspace.
@@ -970,6 +980,7 @@ function ProjectDetail({
   useEffect(() => {
     setAgentEditorOpen(false)
     setAgentEditorName('')
+    setWakeupEditingHb(null)
   }, [project.id])
 
 
@@ -1054,6 +1065,37 @@ function ProjectDetail({
               onClose={() => setAgentEditorOpen(false)}
             />
           )}
+        </div>
+      </SectionErrorBoundary>
+    )
+  }
+
+  // Heartbeat WAKEUP.md takeover — same pattern as ClaudeMdEditor.
+  // The state lives at this level (not in HeartbeatsPanel) so the
+  // editor fills the Settings content area cleanly instead of being
+  // squeezed inside the right-rail aside or fighting the workspaces
+  // sidebar's stacking context with a fixed overlay.
+  if (wakeupEditingHb) {
+    const mode = (project.agentMode || 'off') as string
+    const wakeupAgentName =
+      mode === 'manager' || mode === 'coordinator' || mode === 'pod'
+        ? '__lead__'
+        : mode === 'agent'
+          ? 'k2so-agent'
+          : project.name.toLowerCase().replace(/\s+/g, '-')
+    return (
+      <SectionErrorBoundary>
+        <div className="absolute inset-0 overflow-hidden bg-[var(--color-bg)]">
+          <WakeupEditor
+            projectPath={project.path}
+            agentName={wakeupAgentName}
+            heartbeat={wakeupEditingHb}
+            otherHeartbeats={[]}
+            onClose={() => {
+              setWakeupEditingHb(null)
+              setHbRefreshNonce((n) => n + 1)
+            }}
+          />
         </div>
       </SectionErrorBoundary>
     )
@@ -1440,6 +1482,7 @@ function ProjectDetail({
         {(project.agentMode || 'off') !== 'off' && (
           <>
             <HeartbeatsPanel
+              key={`hb-${hbRefreshNonce}`}
               projectPath={project.path}
               agentMode={project.agentMode || null}
               agentName={(() => {
@@ -1452,6 +1495,7 @@ function ProjectDetail({
                 // reasonable fallback until we wire a lookup.
                 return project.name.toLowerCase().replace(/\s+/g, '-')
               })()}
+              onConfigureWakeup={(row) => setWakeupEditingHb(row)}
             />
             <ShowHeartbeatSessionsToggle projectPath={project.path} />
           </>

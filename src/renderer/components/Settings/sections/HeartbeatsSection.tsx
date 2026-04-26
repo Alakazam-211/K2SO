@@ -9,7 +9,7 @@ import { SettingDropdown } from '../controls/SettingControls'
 
 // ── Types mirroring the backend agent_heartbeats table ────────────────
 
-interface HeartbeatRow {
+export interface HeartbeatRow {
   id: string
   projectId: string
   name: string
@@ -339,7 +339,7 @@ interface WakeupEditorProps {
   onClose: () => void
 }
 
-function WakeupEditor({ projectPath, agentName, heartbeat, otherHeartbeats, onClose }: WakeupEditorProps): React.JSX.Element | null {
+export function WakeupEditor({ projectPath, agentName, heartbeat, otherHeartbeats, onClose }: WakeupEditorProps): React.JSX.Element | null {
   const wakeupAbs = `${projectPath}/${heartbeat.wakeupPath}`
   const wakeupDir = wakeupAbs.slice(0, wakeupAbs.lastIndexOf('/'))
 
@@ -416,27 +416,27 @@ function WakeupEditor({ projectPath, agentName, heartbeat, otherHeartbeats, onCl
 
   if (!agentCommand) return null
 
-  // Use `fixed` (viewport-relative) instead of `absolute` (nearest
-  // positioned ancestor). HeartbeatsPanel now lives inside a sticky
-  // right-column aside, which acts as the containing block for
-  // `absolute` children — the editor would otherwise render only in
-  // that narrow column. Fixed covers the whole Settings surface
-  // regardless of which column launched it.
+  // No outer positioning wrapper — the caller (ProjectDetail) renders
+  // us inside an `absolute inset-0` takeover at the Settings content
+  // level, matching the pattern used by ClaudeMdEditor and
+  // ProjectContextEditor. A previous version used `fixed inset-0 z-50`
+  // here, which collided with the workspaces sidebar's stacking
+  // context (the sidebar painted on top of the wakeup editor). The
+  // takeover pattern keeps the workspaces sidebar visible alongside
+  // the editor — same UX as the "Manage Knowledge" button.
   return (
-    <div className="fixed inset-0 overflow-hidden bg-[var(--color-bg)] z-50">
-      <AIFileEditor
-        filePath={wakeupAbs}
-        watchDir={wakeupDir}
-        cwd={projectPath}
-        command={agentCommand.command}
-        args={terminalArgs}
-        title={`Heartbeat: ${heartbeat.name}`}
-        warningText={`This AI session has full system access in ${projectPath}.`}
-        onClose={onClose}
-        onFileChange={() => { /* preview rendered inline below */ }}
-        preview={<WakeupPreview path={wakeupAbs} />}
-      />
-    </div>
+    <AIFileEditor
+      filePath={wakeupAbs}
+      watchDir={wakeupDir}
+      cwd={projectPath}
+      command={agentCommand.command}
+      args={terminalArgs}
+      title={`Heartbeat: ${heartbeat.name}`}
+      warningText={`This AI session has full system access in ${projectPath}.`}
+      onClose={onClose}
+      onFileChange={() => { /* preview rendered inline below */ }}
+      preview={<WakeupPreview path={wakeupAbs} />}
+    />
   )
 }
 
@@ -645,6 +645,13 @@ interface HeartbeatsPanelProps {
       Manager" instead of the raw dir name (`pod-leader` / `__lead__`) or the
       internal sentinel. Optional for backwards compatibility. */
   agentMode?: string | null
+  /** Open the WakeupEditor for a heartbeat row. The Settings page lifts
+   *  this state to ProjectDetail so the editor can render inside the
+   *  same `absolute inset-0` takeover that ClaudeMdEditor and the
+   *  agent-persona editor use — keeping the workspaces sidebar visible
+   *  alongside the editor instead of letting a fixed overlay collide
+   *  with the sidebar's stacking context. */
+  onConfigureWakeup?: (row: HeartbeatRow) => void
 }
 
 function agentModeLabel(mode: string | null | undefined, fallbackName: string | null): string {
@@ -663,7 +670,12 @@ function agentModeLabel(mode: string | null | undefined, fallbackName: string | 
   }
 }
 
-export function HeartbeatsPanel({ projectPath, agentName: agentNameProp, agentMode }: HeartbeatsPanelProps): React.JSX.Element {
+export function HeartbeatsPanel({
+  projectPath,
+  agentName: agentNameProp,
+  agentMode,
+  onConfigureWakeup,
+}: HeartbeatsPanelProps): React.JSX.Element {
   // Shape compat: the old section component took no props and resolved
   // project from the active-project store. The panel version takes
   // explicit props so it can be embedded anywhere and still work.
@@ -673,7 +685,6 @@ export function HeartbeatsPanel({ projectPath, agentName: agentNameProp, agentMo
   const agentName = agentNameProp
   const [showAdd, setShowAdd] = useState(false)
   const [editing, setEditing] = useState<HeartbeatRow | null>(null)
-  const [wakeupEditing, setWakeupEditing] = useState<HeartbeatRow | null>(null)
   // Inline rename: id of the row currently being edited and the draft value.
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
@@ -875,10 +886,14 @@ export function HeartbeatsPanel({ projectPath, agentName: agentNameProp, agentMo
                   {describeSpec(r)}
                 </button>
 
-                {/* Col 3 — Configure Wakeup button */}
+                {/* Col 3 — Configure Wakeup button. Hands the row to the
+                    parent (ProjectDetail), which renders the WakeupEditor
+                    inside the Settings content takeover so the workspaces
+                    sidebar stays visible alongside the editor. */}
                 <button
-                  onClick={() => setWakeupEditing(r)}
-                  className="px-2 py-1 text-[10px] bg-[var(--color-accent)] text-white cursor-pointer no-drag justify-self-end"
+                  onClick={() => onConfigureWakeup?.(r)}
+                  disabled={!onConfigureWakeup}
+                  className="px-2 py-1 text-[10px] bg-[var(--color-accent)] text-white cursor-pointer no-drag justify-self-end disabled:opacity-50"
                 >
                   Configure Wakeup
                 </button>
@@ -917,15 +932,10 @@ export function HeartbeatsPanel({ projectPath, agentName: agentNameProp, agentMo
         />
       )}
 
-      {wakeupEditing && agentName && (
-        <WakeupEditor
-          projectPath={project.path}
-          agentName={agentName}
-          heartbeat={wakeupEditing}
-          otherHeartbeats={rows.filter((r) => r.id !== wakeupEditing.id)}
-          onClose={() => { setWakeupEditing(null); refresh() }}
-        />
-      )}
+      {/* WakeupEditor is rendered by the parent (ProjectDetail) so it
+          fills the Settings content area without colliding with the
+          workspaces sidebar's stacking context. We just notify via
+          onConfigureWakeup above. */}
     </div>
   )
 }
