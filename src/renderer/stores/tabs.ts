@@ -1331,20 +1331,60 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   openFileAsTab: (filePath: string) => {
     const state = get()
 
-    // Check if a tab for this file already exists — switch to it
-    for (const tab of state.tabs) {
-      for (const [, pg] of tab.paneGroups) {
-        const match = pg.items.find(
+    // Locate a matching file-viewer item within a tab's pane groups.
+    const findFileInTab = (tab: Tab): { pgId: string; itemIdx: number } | null => {
+      for (const [pgId, pg] of tab.paneGroups) {
+        const itemIdx = pg.items.findIndex(
           (item) => item.type === 'file-viewer' && (item.data as FileViewerItemData).filePath === filePath
         )
-        if (match) {
-          set({ activeTabId: tab.id })
+        if (itemIdx !== -1) return { pgId, itemIdx }
+      }
+      return null
+    }
+
+    // Activate the matching item inside its pane group (no-op if already active).
+    const activateMatch = (tab: Tab, pgId: string, itemIdx: number): Tab => {
+      const pg = tab.paneGroups.get(pgId)
+      if (!pg || pg.activeItemIndex === itemIdx) return tab
+      const newPaneGroups = new Map(tab.paneGroups)
+      newPaneGroups.set(pgId, { ...pg, activeItemIndex: itemIdx })
+      return { ...tab, paneGroups: newPaneGroups }
+    }
+
+    // Search the main tab group first.
+    for (const tab of state.tabs) {
+      const found = findFileInTab(tab)
+      if (found) {
+        const newTabs = state.tabs.map((t) =>
+          t.id === tab.id ? activateMatch(t, found.pgId, found.itemIdx) : t
+        )
+        set({ tabs: newTabs, activeTabId: tab.id, activeGroupIndex: 0 })
+        return
+      }
+    }
+
+    // Search split-column groups so a file already open in another column
+    // gets focused instead of duplicated.
+    for (let gi = 0; gi < state.extraGroups.length; gi++) {
+      const group = state.extraGroups[gi]
+      for (const tab of group.tabs) {
+        const found = findFileInTab(tab)
+        if (found) {
+          const newGroups = [...state.extraGroups]
+          newGroups[gi] = {
+            ...group,
+            activeTabId: tab.id,
+            tabs: group.tabs.map((t) =>
+              t.id === tab.id ? activateMatch(t, found.pgId, found.itemIdx) : t
+            ),
+          }
+          set({ extraGroups: newGroups, activeGroupIndex: gi + 1 })
           return
         }
       }
     }
 
-    // Create a new tab with a file-viewer pane
+    // No existing tab — create a new one in the main group.
     tabCounter++
     const tabId = crypto.randomUUID()
     const pgId = crypto.randomUUID()
