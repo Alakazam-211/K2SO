@@ -1,25 +1,28 @@
+import { useCallback, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { type HeartbeatEntry } from '@/stores/heartbeat-sessions'
 import { useTabsStore } from '@/stores/tabs'
+import { useToastStore } from '@/stores/toast'
 
 /**
- * One row in the sidebar Heartbeats panel.
+ * One row in the Workspace panel's Heartbeats section.
  *
- * Layout:
- *   [indicator]  <name>           <relative-fired-time>
- *                <schedule-summary>
+ * Layout (single line):
+ *   [indicator]  <name>   <Daily 9 AM>           [Launch]
  *
- * Indicators:
+ * Indicators (squares, not circles, per K2SO status convention):
  *   - 'live'       : braille spinner (animated)
- *   - 'resumable'  : filled dot
- *   - 'scheduled'  : hollow ring
- *   - 'archived'   : muted hollow ring
+ *   - 'resumable'  : filled square
+ *   - 'scheduled'  : hollow square
+ *   - 'archived'   : muted hollow square
  *
- * Click semantics (wired in P3.3 via openHeartbeatTab):
- *   - live      : focus existing tab (no spawn)
- *   - resumable : open new tab + spawn with --resume
- *   - scheduled : open new tab + spawn fresh
- *   - archived  : open new tab + spawn with --resume (read-back; user
- *                 can keep interacting if they want)
+ * Click semantics:
+ *   - Click row body → openHeartbeatTab (focus live, spawn-and-resume
+ *     otherwise) — connects the user to the actual chat session.
+ *   - Click `Launch` → k2so_heartbeat_force_fire (spawns a fresh fire
+ *     using the heartbeat's WAKEUP.md, regardless of whether a live
+ *     session exists). The agent-lock check still prevents
+ *     double-spawn against an already-running session.
  */
 export function HeartbeatEntryRow({
   entry,
@@ -29,6 +32,7 @@ export function HeartbeatEntryRow({
   projectPath: string
 }): React.JSX.Element {
   const openHeartbeatTab = useTabsStore((s) => s.openHeartbeatTab)
+  const [busy, setBusy] = useState(false)
 
   const handleClick = (): void => {
     if (!projectPath) {
@@ -47,30 +51,64 @@ export function HeartbeatEntryRow({
     })
   }
 
+  const handleLaunch = useCallback(async (e: React.MouseEvent) => {
+    // Stop the row click from also firing — Launch is its own action
+    // (force-fire) distinct from "open the chat tab".
+    e.stopPropagation()
+    if (busy || !projectPath) return
+    setBusy(true)
+    try {
+      await invoke<string>('k2so_heartbeat_force_fire', {
+        projectPath,
+        name: entry.row.name,
+      })
+      useToastStore.getState().addToast(`Fired heartbeat "${entry.row.name}"`, 'success', 2500)
+    } catch (err) {
+      useToastStore.getState().addToast(`Launch failed: ${String(err)}`, 'error', 4000)
+    } finally {
+      setBusy(false)
+    }
+  }, [busy, projectPath, entry.row.name])
+
+  const archivedOrDisabled = entry.state === 'archived' || !entry.row.enabled
+
   return (
     <button
       onClick={handleClick}
       className="w-full px-1 py-1 flex items-center gap-2 text-left hover:bg-white/[0.04] cursor-pointer no-drag transition-colors"
-      title={`${entry.row.name} — ${entry.state}`}
+      title={`${entry.row.name} — ${entry.state}${entry.row.enabled ? '' : ' (disabled)'}`}
     >
       <span className="flex-shrink-0">
         {indicatorFor(entry)}
       </span>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-baseline gap-2">
-          <span className={`text-[11px] font-mono truncate ${entry.state === 'archived' ? 'text-[var(--color-text-muted)] line-through' : 'text-[var(--color-text-primary)]'}`}>
-            {entry.row.name}
-          </span>
-          {entry.row.lastFired && entry.state !== 'archived' && (
-            <span className="text-[9px] text-[var(--color-text-muted)] tabular-nums flex-shrink-0">
-              {relativeTime(entry.row.lastFired)}
-            </span>
-          )}
-        </div>
-        <div className="text-[9px] text-[var(--color-text-muted)] truncate">
-          {scheduleHint(entry)}
-        </div>
-      </div>
+      <span
+        className={`text-[11px] font-mono truncate flex-shrink-0 ${
+          entry.state === 'archived'
+            ? 'text-[var(--color-text-muted)] line-through'
+            : entry.row.enabled
+              ? 'text-[var(--color-text-primary)]'
+              : 'text-[var(--color-text-muted)]'
+        }`}
+      >
+        {entry.row.name}
+      </span>
+      <span className="text-[9px] text-[var(--color-text-muted)] truncate flex-1">
+        {entry.row.enabled ? describeSpec(entry.row.frequency, entry.row.specJson) : 'Disabled'}
+      </span>
+      <button
+        onClick={handleLaunch}
+        disabled={busy || archivedOrDisabled}
+        title={
+          entry.state === 'archived'
+            ? 'Restore from archive before launching'
+            : !entry.row.enabled
+              ? 'Enable this heartbeat before launching'
+              : 'Force-fire this heartbeat now'
+        }
+        className="px-2 py-0.5 text-[9px] font-medium text-white bg-[var(--color-accent)] hover:opacity-90 transition-opacity no-drag cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
+      >
+        {busy ? '…' : 'Launch'}
+      </button>
     </button>
   )
 }
@@ -106,35 +144,59 @@ function indicatorFor(entry: HeartbeatEntry): React.ReactNode {
   }
 }
 
-function scheduleHint(entry: HeartbeatEntry): string {
-  if (entry.state === 'archived') {
-    return entry.row.archivedAt ? `Archived ${relativeTime(entry.row.archivedAt)}` : 'Archived'
+/**
+ * Compact schedule summary derived from the heartbeat row's specJson.
+ * Mirrors the formatter used in HeartbeatsSection's table so users see
+ * the same "Daily 9 AM" / "Weekly Mon/Wed 7 AM" / "Every 30m" labels
+ * everywhere a heartbeat surfaces.
+ */
+function describeSpec(frequency: string, specJson: string): string {
+  let v: {
+    frequency?: string
+    time?: string
+    days?: string[]
+    days_of_month?: number[]
+    months?: string[]
+    every_seconds?: number
+  } = {}
+  try {
+    v = JSON.parse(specJson)
+  } catch {
+    return frequency
   }
-  if (entry.state === 'scheduled') {
-    return `${entry.row.frequency} · not yet fired`
+  const freq = v.frequency ?? frequency
+  const at = v.time ? ` ${fmt12h(v.time)}` : ''
+  if (freq === 'daily') return `Daily${at}`
+  if (freq === 'weekly') {
+    const days = (v.days ?? [])
+      .map((d) => d.charAt(0).toUpperCase() + d.slice(1, 3))
+      .join('/')
+    return days ? `${days}${at}` : `Weekly${at}`
   }
-  if (entry.state === 'resumable') {
-    return `${entry.row.frequency} · resume on next fire`
+  if (freq === 'monthly') {
+    const days = (v.days_of_month ?? []).join(',')
+    return days ? `Day ${days}${at}` : `Monthly${at}`
   }
-  return entry.row.frequency
+  if (freq === 'yearly') {
+    const months = (v.months ?? []).join(',')
+    return months ? `${months}${at}` : `Yearly${at}`
+  }
+  if (freq === 'hourly') {
+    const mins = Math.round((v.every_seconds ?? 3600) / 60)
+    return `Every ${mins}m`
+  }
+  return freq
 }
 
-/**
- * Compact relative time formatter ("2m", "3h", "yesterday", "Apr 12").
- * Tight by design — the row has tiny horizontal real estate.
- */
-function relativeTime(iso: string): string {
-  const date = new Date(iso)
-  if (isNaN(date.getTime())) return ''
-  const ms = Date.now() - date.getTime()
-  const sec = Math.floor(ms / 1000)
-  if (sec < 60) return `${sec}s ago`
-  const min = Math.floor(sec / 60)
-  if (min < 60) return `${min}m ago`
-  const hrs = Math.floor(min / 60)
-  if (hrs < 24) return `${hrs}h ago`
-  const days = Math.floor(hrs / 24)
-  if (days === 1) return 'yesterday'
-  if (days < 7) return `${days}d ago`
-  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+/** Convert "HH:MM" → "h AM/PM" (minute elided when 00 to keep the
+ *  schedule line tight in the narrow Workspace panel). */
+function fmt12h(time: string): string {
+  const [hStr, mStr] = time.split(':')
+  let h = parseInt(hStr, 10)
+  if (isNaN(h)) return time
+  const m = mStr ?? '00'
+  const ampm = h >= 12 ? 'PM' : 'AM'
+  if (h === 0) h = 12
+  else if (h > 12) h -= 12
+  return m === '00' ? `${h} ${ampm}` : `${h}:${m} ${ampm}`
 }
