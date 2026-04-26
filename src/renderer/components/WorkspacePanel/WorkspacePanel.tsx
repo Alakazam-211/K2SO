@@ -281,15 +281,11 @@ export default function WorkspacePanel(): React.JSX.Element {
         )}
       </div>
 
-      {/* ── Heartbeats ── (its own block with a bottom divider so the
-          section visually mirrors how Worktrees is delimited below it.
-          Squares — not circles — for state indicators per K2SO's
-          status-block convention.) */}
-      {agentMode !== 'off' && (
-        <div className="px-3 py-3 border-b border-[var(--color-border)]">
-          <HeartbeatsPanel />
-        </div>
-      )}
+      {/* ── Heartbeats ── HeartbeatsPanel renders its own full-width
+          collapsible header (matching the Worktrees pattern below)
+          and a content area, both with their own border-b dividers
+          that span edge-to-edge. */}
+      {agentMode !== 'off' && <HeartbeatsPanel />}
 
       {/* ── Connected Agents (incoming) ── */}
       <ConnectedAgentsSection projectId={activeProject.id} />
@@ -301,9 +297,9 @@ export default function WorkspacePanel(): React.JSX.Element {
         className="w-full flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)] cursor-pointer no-drag hover:bg-white/[0.02] transition-colors"
         title={worktreesOpen ? 'Collapse Worktrees' : 'Expand Worktrees'}
       >
-        <span className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider flex items-center gap-1.5">
+        <span className="flex items-center gap-1.5 text-[11px] text-[var(--color-text-secondary)]">
           <svg
-            className={`w-2 h-2 transition-transform ${worktreesOpen ? 'rotate-90' : ''}`}
+            className={`w-2 h-2 text-[var(--color-text-muted)] transition-transform ${worktreesOpen ? 'rotate-90' : ''}`}
             viewBox="0 0 8 8"
             fill="none"
             stroke="currentColor"
@@ -312,6 +308,24 @@ export default function WorkspacePanel(): React.JSX.Element {
             strokeLinejoin="round"
           >
             <path d="M2 1 L6 4 L2 7" />
+          </svg>
+          {/* Same branch-fork glyph used on each worktree row below
+              (line ~466). Tinted blue (accent) here so the section
+              header matches the Heartbeats heart-EKG icon's visual
+              weight. Items in the list keep the muted variant. */}
+          <svg
+            className="w-3 h-3 text-[var(--color-accent)] flex-shrink-0"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <circle cx="4" cy="4" r="1.5" />
+            <circle cx="12" cy="4" r="1.5" />
+            <circle cx="4" cy="12" r="1.5" />
+            <path d="M4 5.5v5M4 8h6c1.1 0 2-.9 2-2v-.5" />
           </svg>
           Worktrees
           {worktrees.length > 0 && (

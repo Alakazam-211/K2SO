@@ -504,20 +504,22 @@ export default function App(): React.JSX.Element {
   // Sync state across all windows (main, focus, new)
   useWindowSync()
 
-  // macOS close button dot — show when active agents or dirty tabs
-  const agentCount = useActiveAgentsStore((s) => s.agents.size)
-  const workingPanes = useActiveAgentsStore((s) => {
-    let count = 0
-    for (const status of s.paneStatuses.values()) {
-      if (status === 'working' || status === 'permission') count++
-    }
-    return count
-  })
+  // macOS close-button dot — only lights up for unsaved file edits.
+  //
+  // Used to also signal "active agents" / "working panes", but the
+  // post-daemon architecture makes that misleading: agents and PTY
+  // sessions live in k2so-daemon and keep running across Tauri
+  // window closes. Reopening the app reconnects to whatever was
+  // already in flight. Closing isn't destructive for sessions, so
+  // there's nothing to warn about.
+  //
+  // Dirty tabs are different — those are in-memory edits the user
+  // (or the AI) made to a file but haven't saved. Those WOULD be
+  // lost on close, so the dot still surfaces here.
   const hasDirtyTabs = useTabsStore((s) => s.tabs.some((t) => t.isDirty))
   useEffect(() => {
-    const edited = agentCount > 0 || workingPanes > 0 || hasDirtyTabs
-    invoke('set_document_edited', { edited }).catch(() => {})
-  }, [agentCount, workingPanes, hasDirtyTabs])
+    invoke('set_document_edited', { edited: hasDirtyTabs }).catch(() => {})
+  }, [hasDirtyTabs])
 
   // Check for unmigrated Cursor IDE conversations
   useCursorMigrationCheck()

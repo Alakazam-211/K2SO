@@ -37,33 +37,44 @@ use crate::fs_atomic::{atomic_write_str, log_if_err};
 // agents' CLAUDE.md when the user hasn't overridden it in AGENT.md.
 // Moved from src-tauri/src/commands/k2so_agents.rs alongside the
 // generators that use it.
-pub const CUSTOM_AGENT_HEARTBEAT_DOCS: &str = r#"## Heartbeat Control
+pub const CUSTOM_AGENT_HEARTBEAT_DOCS: &str = r#"## Heartbeats
 
-You run on an adaptive heartbeat. Adjust your check-in frequency based on your current work phase:
+Your wake schedule is controlled by **named heartbeats** the user
+configures in Settings → Heartbeats (or via the CLI). Each
+heartbeat has its own WAKEUP.md file and its own cron-style
+schedule — daily at a clock time, weekly on specific days,
+hourly at a fixed interval, etc. You don't adjust your own
+cadence; the user owns the schedule and you focus on responding
+to whatever the heartbeat woke you to do.
+
+When a heartbeat fires, you receive its WAKEUP.md content as
+your first user message. Do what it asks, then exit.
+
+## Inspecting + managing heartbeats from your terminal
 
 ```
-k2so heartbeat set --agent <your-name> --interval 60 --phase "active"       # Every minute — actively building
-k2so heartbeat set --agent <your-name> --interval 300 --phase "monitoring"   # Every 5 min — watching
-k2so heartbeat set --agent <your-name> --interval 3600 --phase "idle"        # Every hour — dormant
+k2so heartbeat list                                  # Heartbeats configured for this workspace
+k2so heartbeat show <name>                           # Schedule + last fire details
+k2so heartbeat add --name <name> --hourly --interval-seconds 300
+k2so heartbeat add --name <name> --daily --time 09:00
+k2so heartbeat edit <name> --hourly --interval-seconds 600
+k2so heartbeat remove <name>
 ```
 
-**Important — report your status after each wake:**
-- If you checked your inbox and had nothing to do: `k2so heartbeat noop --agent <your-name>`
-  (This triggers auto-backoff and saves money by not waking you unnecessarily)
-- If you took action (delegated, built, reviewed): `k2so heartbeat action --agent <your-name>`
-  (This resets the backoff counter so you stay responsive)
-
-The system auto-backs off after 3 consecutive no-ops, increasing your interval by 1.5x each time.
+The user can also drive the same actions from Settings →
+Heartbeats. Both paths converge on the same `agent_heartbeats`
+table; whichever you prefer is fine.
 
 ## Available Tools
 
-Standard CLI tools are available in your terminal (`gh`, `git`, `curl`, etc.).
-K2SO tools:
+Standard CLI tools are available in your terminal (`gh`, `git`,
+`curl`, etc.). K2SO tools:
+
 ```
 k2so terminal spawn --title "..." --command "..."   # Run parallel tasks
-k2so heartbeat set --agent <name> --interval N      # Adjust check-in frequency
-k2so heartbeat noop --agent <name>                  # Report no work found (saves cost)
-k2so heartbeat action --agent <name>                # Report action taken (stay responsive)
+k2so checkin --agent <your-name>                    # Read your inbox + peer status + activity
+k2so status "<message>" --agent <your-name>         # Update your visible status
+k2so done                                           # Signal task completion
 ```
 "#;
 

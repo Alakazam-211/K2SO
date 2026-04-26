@@ -113,17 +113,16 @@ export function HeartbeatsPanel(): React.JSX.Element {
 
   return (
     <div>
-      {/* Header — clickable to collapse/expand. Chevron animates,
-          EKG-heart icon stays static, `manage` opens Settings. The
-          `manage` link uses stopPropagation so clicking it doesn't
-          also toggle the section. A divider underneath gives the
-          header weight (matches the Worktrees pattern below). */}
+      {/* Header — full-width clickable collapse/expand bar. Same
+          structural pattern as the Worktrees button below in
+          WorkspacePanel: px-3 py-2, edge-to-edge bottom border so
+          the divider runs the full width of the workspace panel. */}
       <button
         onClick={toggleSection}
-        className="w-full flex items-center justify-between cursor-pointer no-drag pb-1.5 border-b border-[var(--color-border)]"
+        className="w-full flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)] cursor-pointer no-drag hover:bg-white/[0.02] transition-colors"
         title={sectionOpen ? 'Collapse Heartbeats' : 'Expand Heartbeats'}
       >
-        <div className="flex items-center gap-1.5">
+        <span className="flex items-center gap-1.5 text-[11px] text-[var(--color-text-secondary)]">
           <svg
             className={`w-2 h-2 text-[var(--color-text-muted)] transition-transform ${sectionOpen ? 'rotate-90' : ''}`}
             viewBox="0 0 8 8"
@@ -136,8 +135,8 @@ export function HeartbeatsPanel(): React.JSX.Element {
             <path d="M2 1 L6 4 L2 7" />
           </svg>
           <IconHeartEKG className="w-3 h-3 text-[var(--color-accent)]" />
-          <span className="text-[11px] text-[var(--color-text-secondary)]">Heartbeats</span>
-        </div>
+          Heartbeats
+        </span>
         <span
           onClick={(e) => {
             e.stopPropagation()
@@ -155,7 +154,7 @@ export function HeartbeatsPanel(): React.JSX.Element {
       </button>
 
       {sectionOpen && (
-        <div className="mt-1.5">
+        <div className="px-3 py-2 border-b border-[var(--color-border)]">
       {!showingForLoadedProject ? (
         <div className="px-1 py-1 text-[10px] text-[var(--color-text-muted)]">Loading…</div>
       ) : lastError ? (

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef, useLayoutEffect, useImperativeHandle } from 'react'
+import React, { useState, useEffect, useCallback, useRef, useLayoutEffect, useImperativeHandle, useMemo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
@@ -52,6 +52,74 @@ const MARKDOWN_EXTS = ['.md', '.markdown', '.mdx']
 const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico']
 const PDF_EXTS = ['.pdf']
 const DOCX_EXTS = ['.docx', '.doc']
+
+/** True if the current document selection overlaps `container` and
+ *  has non-empty text. Used to suppress the markdown-preview
+ *  auto-refresh while the user is dragging or copying — ReactMarkdown
+ *  re-renders rebuild the DOM and the selection collapses, which
+ *  silently breaks Cmd+C from the preview. */
+function hasSelectionWithin(container: HTMLElement | null): boolean {
+  if (!container) return false
+  const sel = window.getSelection()
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return false
+  if (sel.toString().length === 0) return false
+  for (let i = 0; i < sel.rangeCount; i++) {
+    const range = sel.getRangeAt(i)
+    if (
+      container.contains(range.startContainer) ||
+      container.contains(range.endContainer)
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * Module-level ReactMarkdown components map. Hoisted out of the
+ * render function so its reference is stable across renders — if
+ * we rebuilt this object inside the component body, ReactMarkdown
+ * would get a new prop ref every render and rebuild its element
+ * tree, which destroys any active DOM text selection (the user
+ * loses their highlight every time the parent re-renders).
+ */
+const MARKDOWN_COMPONENTS = {
+  code({ className, children, ...props }: React.HTMLAttributes<HTMLElement> & { children?: React.ReactNode }) {
+    const match = /language-(\w+)/.exec(className || '')
+    const codeStr = String(children).replace(/\n$/, '')
+    if (match) {
+      return <HighlightedCodeBlock code={codeStr} language={match[1]} />
+    }
+    return <code className={className} {...props}>{children}</code>
+  },
+}
+const MARKDOWN_REMARK_PLUGINS = [remarkGfm]
+
+/**
+ * Memoized markdown body. Only re-renders when `content` actually
+ * changes — without this, every parent FileViewerPane re-render
+ * (for any unrelated reason: dirty-state ticks, settings polls,
+ * tab activity, etc.) rebuilt ReactMarkdown's element tree, and
+ * React's reconciliation rebuilt enough of the DOM that the
+ * browser's active text selection collapsed. Wrapping in
+ * React.memo with default shallow prop comparison stops the
+ * cascade — content only changes when the file changes on disk
+ * (or the user types in edit mode).
+ */
+const MemoizedMarkdown = React.memo(function MemoizedMarkdown({
+  content,
+}: {
+  content: string
+}): React.JSX.Element {
+  return (
+    <ReactMarkdown
+      remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+      components={MARKDOWN_COMPONENTS}
+    >
+      {content}
+    </ReactMarkdown>
+  )
+})
 
 function getFileCategory(filePath: string): FileCategory {
   const ext = filePath.toLowerCase().replace(/^.*(\.[^.]+)$/, '$1')
@@ -166,6 +234,12 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
   const searchInputRef = useRef<HTMLInputElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const editorContainerRef = useRef<HTMLDivElement>(null)
+  // Root container of the entire pane — covers the rendered preview,
+  // toolbar, AND the filepath bar at the bottom. Used by the
+  // auto-refresh selection guard so a user highlighting the filename
+  // (or any other text in the pane chrome) doesn't have their
+  // selection wiped by the next poll's re-render.
+  const rootRef = useRef<HTMLDivElement>(null)
 
 
   const fileName = getFileName(filePath)
@@ -260,6 +334,16 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
     if (isDirty) return // Don't overwrite user edits
 
     const interval = setInterval(async () => {
+      // Skip the refresh while the user has an active text selection
+      // anywhere inside this pane — the rendered markdown body, the
+      // filename bar at the bottom, the toolbar, etc. React re-renders
+      // collapse selection ranges, so polling would silently break
+      // Cmd+C copy. Scoped to `rootRef` so a selection in another tab
+      // or pane doesn't block this pane's refresh. The next poll cycle
+      // picks up any disk changes once the user releases the selection.
+      if (hasSelectionWithin(rootRef.current)) {
+        return
+      }
       try {
         const result = await invoke<{ content: string }>('fs_read_file', { path: filePath })
         // Functional update avoids stale closure over content
@@ -445,7 +529,7 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
   }
 
   return (
-    <div className="flex h-full w-full flex-col bg-[#0a0a0a] no-drag" tabIndex={-1}>
+    <div ref={rootRef} className="flex h-full w-full flex-col bg-[#0a0a0a] no-drag" tabIndex={-1}>
       {/* Toolbar */}
       <div className="flex items-center gap-2 border-b border-[var(--color-border)] bg-[#111111] px-3 py-1.5 flex-shrink-0">
         {/* File info */}
@@ -642,22 +726,8 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
         </div>
       ) : category === 'markdown' && viewMode === 'rendered' ? (
         <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef}>
-          <div className="markdown-content p-4">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={{
-                code({ className, children, ...props }) {
-                  const match = /language-(\w+)/.exec(className || '')
-                  const codeStr = String(children).replace(/\n$/, '')
-                  if (match) {
-                    return <HighlightedCodeBlock code={codeStr} language={match[1]} />
-                  }
-                  return <code className={className} {...props}>{children}</code>
-                }
-              }}
-            >
-              {content}
-            </ReactMarkdown>
+          <div className="markdown-content p-4" style={{ userSelect: 'text', WebkitUserSelect: 'text' }}>
+            <MemoizedMarkdown content={content} />
           </div>
         </div>
       ) : (
