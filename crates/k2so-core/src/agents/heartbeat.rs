@@ -86,6 +86,23 @@ pub fn k2so_heartbeat_add(
     )
     .map_err(|e| format!("Failed to insert heartbeat: {}", e))?;
 
+    // Drop the DB lock before the cron-install path runs — it shells
+    // out to launchctl which can be slow on first install.
+    drop(conn);
+
+    // Daemon-first cron bootstrap: ensure ~/.k2so/heartbeat.sh + the
+    // launchd plist (or crontab) are installed so this heartbeat
+    // actually fires on schedule. Idempotent — a no-op when the
+    // infrastructure is already in place. Errors are logged, not
+    // returned: we don't want to fail the user's heartbeat add over
+    // a launchctl quirk; they can re-apply Settings → Wake Scheduler
+    // to recover.
+    match crate::agents::heartbeat_install::ensure_cron_installed() {
+        Ok(true) => log_debug!("[heartbeat-add] cron infrastructure installed for first time"),
+        Ok(false) => {}
+        Err(e) => log_debug!("[heartbeat-add] WARN: ensure_cron_installed: {e}"),
+    }
+
     Ok(serde_json::json!({
         "id": id,
         "name": name,

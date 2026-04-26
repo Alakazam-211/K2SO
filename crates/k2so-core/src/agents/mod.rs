@@ -29,6 +29,7 @@ pub mod connections;
 pub mod delegate;
 pub mod events;
 pub mod heartbeat;
+pub mod heartbeat_install;
 pub mod launch_profile;
 pub mod reviews;
 pub mod scheduler;

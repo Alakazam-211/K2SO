@@ -310,11 +310,31 @@ pub fn spawn_wake_headless(
         let agent_name_owned = agent_name.to_string();
         let project_path_owned = project_path.to_string();
         let heartbeat_name_owned = heartbeat_name.map(str::to_string);
+        // Capture spawn time so the deferred-save thread can match
+        // its claude session id by *proximity to this spawn*, not
+        // "newest session in the project". Without this, two
+        // heartbeats firing on the same agent within a short window
+        // both pick the same (highest-timestamp) session id and
+        // stamp it on both rows. See `detect_claude_session_near`.
+        let spawn_ms = chrono::Utc::now().timestamp_millis();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(5));
-            if let Ok(Some(session_id)) =
+            // For heartbeat fires, use the proximity-matched lookup
+            // so concurrent fires on the same agent don't clobber
+            // each other. For non-heartbeat (Chat-tab) wakes the
+            // legacy "newest session" semantics still apply — there
+            // is no concurrency contention there.
+            let detected = if heartbeat_name_owned.is_some() {
+                crate::chat_history::detect_claude_session_near(
+                    &project_path_owned,
+                    spawn_ms,
+                )
+            } else {
                 crate::chat_history::detect_active_session("claude", &project_path_owned)
-            {
+                    .ok()
+                    .flatten()
+            };
+            if let Some(session_id) = detected {
                 if session_id.is_empty() {
                     return;
                 }

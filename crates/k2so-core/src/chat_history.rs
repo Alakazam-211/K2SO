@@ -149,6 +149,112 @@ pub fn detect_claude_session(project_path: &str) -> Option<String> {
     })
 }
 
+/// Return the Claude session ID for a project path whose history
+/// entry timestamp is **closest to `target_ms`**.
+///
+/// Disambiguates concurrent spawns: when two heartbeats fire on the
+/// same agent within a short window, each spawn's deferred-save
+/// thread calls this with its own spawn timestamp, picking the
+/// session id whose creation is nearest in time to its own spawn.
+/// Without this, both threads would race-pick the highest-timestamp
+/// session via [`detect_claude_session`] and stamp the same id on
+/// both heartbeat rows.
+///
+/// `target_ms` is unix-epoch milliseconds (e.g.
+/// `chrono::Utc::now().timestamp_millis()` captured at spawn).
+/// Considers only sessions whose history timestamp is in
+/// `[target_ms - 60_000, target_ms + 60_000]` so we don't pick up
+/// an unrelated old session if Claude failed to write history at
+/// all for the new spawn.
+pub fn detect_claude_session_near(
+    project_path: &str,
+    target_ms: i64,
+) -> Option<String> {
+    let path = claude_history_path()?;
+    let file = File::open(&path).ok()?;
+
+    let metadata = file.metadata().ok()?;
+    let file_size = metadata.len();
+    let read_from = if file_size > 65536 {
+        file_size - 65536
+    } else {
+        0
+    };
+
+    let mut file = file;
+    file.seek(SeekFrom::Start(read_from)).ok()?;
+
+    let mut buf = String::new();
+    file.read_to_string(&mut buf).ok()?;
+
+    let is_subpath =
+        project_path.contains("/.worktrees/") || project_path.contains("/.k2so/");
+    let root = resolve_root_project_path(project_path);
+    const WINDOW_MS: i64 = 60_000;
+    let mut best: Option<(i64, String)> = None; // (|distance|, id)
+
+    for line in buf.lines() {
+        let parsed: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let project = parsed.get("project").and_then(|v| v.as_str()).unwrap_or("");
+        if is_subpath {
+            if project != project_path {
+                continue;
+            }
+        } else if !matches_project_family(project, root) {
+            continue;
+        }
+
+        let session_id = match parsed.get("sessionId").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+
+        let ts = parsed.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+        // Claude history timestamps in this codebase are observed in
+        // milliseconds. Defensive: if the value looks like seconds,
+        // upscale.
+        let ts_ms = if ts < 10_000_000_000 { ts * 1000 } else { ts };
+
+        let distance = (ts_ms - target_ms).abs();
+        if distance > WINDOW_MS {
+            continue;
+        }
+
+        match &best {
+            Some((bd, _)) if distance < *bd => {
+                best = Some((distance, session_id));
+            }
+            None => {
+                best = Some((distance, session_id));
+            }
+            _ => {}
+        }
+    }
+
+    best.and_then(|(_, id)| {
+        let home = dirs::home_dir()?;
+        let project_hash = claude_project_hash(resolve_root_project_path(project_path));
+        let projects_dir = home.join(".claude").join("projects");
+        if let Ok(entries) = fs::read_dir(&projects_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name == project_hash
+                    || name.starts_with(&format!("{}-", project_hash))
+                {
+                    if entry.path().join(format!("{}.jsonl", id)).exists() {
+                        return Some(id);
+                    }
+                }
+            }
+        }
+        None
+    })
+}
+
 /// Does a Claude session `.jsonl` file exist on disk for this
 /// `session_id` + `project_path` (including any worktree siblings)?
 /// Used before a `--resume` to avoid "No conversation found" when
