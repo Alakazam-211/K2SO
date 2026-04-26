@@ -461,10 +461,20 @@ mod tests {
 
     #[test]
     fn compose_manager_wake_falls_back_to_shipped_template_on_none() {
+        // P8: composer no longer adds a "K2SO Heartbeat Wake — Workspace
+        // Manager" preamble — the wakeup body itself is the message.
+        // Falling back means the shipped WAKEUP_TEMPLATE_WORKSPACE
+        // content appears verbatim. Assert the template's first line
+        // is in the output as a structural sanity check.
         let composed = compose_manager_wake_from_body(None);
-        assert!(composed.contains("K2SO Heartbeat Wake — Workspace Manager"));
-        // Shipped template text should appear in the composed prompt.
-        assert!(composed.len() > 200, "composed prompt too short: {}", composed.len());
+        assert!(!composed.is_empty(), "fallback should produce non-empty output");
+        let template_lead = WAKEUP_TEMPLATE_WORKSPACE.trim().lines().next().unwrap_or("");
+        assert!(!template_lead.is_empty());
+        assert!(
+            composed.contains(template_lead),
+            "expected fallback to contain template's first line '{}', got: {}",
+            template_lead, composed
+        );
     }
 
     #[test]
@@ -482,10 +492,28 @@ mod tests {
     }
 
     #[test]
-    fn compose_agent_wake_wraps_body() {
+    fn compose_agent_wake_returns_body_verbatim() {
+        // P8: composer returns body itself (frontmatter stripped),
+        // no boilerplate preamble. The wakeup body IS the message.
         let composed = compose_agent_wake_from_body(Some("do the thing")).unwrap();
-        assert!(composed.contains("K2SO Heartbeat Wake"));
         assert!(composed.contains("do the thing"));
+        assert!(!composed.contains("K2SO Heartbeat Wake"), "preamble retired in P8");
+    }
+
+    #[test]
+    fn compose_agent_wake_strips_frontmatter() {
+        let composed = compose_agent_wake_from_body(Some("---\ntag: x\n---\nbody")).unwrap();
+        assert!(composed.contains("body"));
+        assert!(!composed.contains("tag:"));
+    }
+
+    #[test]
+    fn compose_agent_wake_returns_none_for_empty_body() {
+        // Empty body (after frontmatter strip) is treated as
+        // "nothing to wake with" — smart_launch records this as
+        // a fire-time error instead of spawning claude with no prompt.
+        assert!(compose_agent_wake_from_body(Some("---\ndescription:\n---\n\n")).is_none());
+        assert!(compose_agent_wake_from_body(Some("   \n  ")).is_none());
     }
 
     #[test]

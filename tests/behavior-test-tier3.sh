@@ -247,11 +247,15 @@ else
     fail "template: custom Heartbeat Control" "Section not found"
 fi
 
-# Verify heartbeat docs include noop/action commands
-if grep -q 'heartbeat noop' "$AGENTS_SRC" && grep -q 'heartbeat action' "$AGENTS_SRC"; then
-    pass "template: heartbeat docs include noop and action commands"
+# P9: CUSTOM_AGENT_HEARTBEAT_DOCS rewritten — `heartbeat noop` and
+# `heartbeat action` retired with the adaptive-backoff model. The
+# new doc points custom agents at the named-heartbeat CRUD verbs
+# (heartbeat add/list/show/edit/remove) which is what actually
+# exists in the multi-heartbeat world.
+if grep -q 'heartbeat add' "$AGENTS_SRC" && grep -q 'heartbeat list' "$AGENTS_SRC"; then
+    pass "template: heartbeat docs include named-heartbeat CRUD verbs"
 else
-    fail "template: heartbeat noop/action" "Commands not found in CUSTOM_AGENT_HEARTBEAT_DOCS"
+    fail "template: heartbeat add/list" "Commands not found in CUSTOM_AGENT_HEARTBEAT_DOCS"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1131,8 +1135,14 @@ else
     fail "Phase 2: wakeup editor AI context" "Expected WakeupEditor with persona + other-heartbeat context"
 fi
 
-# CRUD actions call the backend commands we shipped in 0.32.0/0.32.1
-for cmd in k2so_heartbeat_add k2so_heartbeat_list k2so_heartbeat_remove k2so_heartbeat_set_enabled k2so_heartbeat_edit k2so_heartbeat_rename; do
+# CRUD actions call the backend commands. Note: the pre-0.36.0
+# `k2so_heartbeat_remove` (hard-delete) was replaced by
+# `k2so_heartbeat_archive` (soft-archive) in the heartbeats UI —
+# rows now move to a collapsed Archived section instead of being
+# destroyed, so chat history stays auditable. The hard-delete
+# Tauri command still exists on the backend for CLI use, but the
+# UI doesn't invoke it.
+for cmd in k2so_heartbeat_add k2so_heartbeat_list k2so_heartbeat_archive k2so_heartbeat_set_enabled k2so_heartbeat_edit k2so_heartbeat_rename; do
     if grep -q "'$cmd'" "$HB_SECTION"; then
         pass "Phase 2: HeartbeatsSection invokes $cmd"
     else

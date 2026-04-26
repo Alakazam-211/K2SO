@@ -5543,17 +5543,24 @@ mod pure_helper_tests {
     }
 
     // ── compose_manager_wake_from_body ───────────────────────────
+    //
+    // P8 retired the "K2SO Heartbeat Wake — Workspace Manager" boilerplate
+    // preamble that used to wrap the body. The composer now returns the
+    // wakeup body verbatim (frontmatter stripped). These tests exercise
+    // the post-P8 contract: body content survives, fallback template
+    // kicks in for empty/missing input, no boilerplate added.
+
     #[test]
     fn compose_manager_wake_uses_provided_body() {
         let out = compose_manager_wake_from_body(Some("custom manager instructions"));
-        assert!(out.contains("Workspace Manager"), "header present");
         assert!(out.contains("custom manager instructions"), "body inlined");
+        // No K2SO boilerplate prefix anymore — body is the message.
+        assert!(!out.contains("K2SO Heartbeat Wake"), "preamble retired in P8: {}", out);
     }
 
     #[test]
     fn compose_manager_wake_falls_back_when_body_none() {
         let out = compose_manager_wake_from_body(None);
-        assert!(out.contains("Workspace Manager"));
         // Fallback uses WAKEUP_TEMPLATE_WORKSPACE — assert its trim()'d
         // first line is in the output.
         let template_lead = WAKEUP_TEMPLATE_WORKSPACE.trim().lines().next().unwrap_or("");
@@ -5593,29 +5600,34 @@ mod pure_helper_tests {
     }
 
     #[test]
-    fn compose_agent_wake_wraps_body_with_header() {
-        let out = compose_agent_wake_from_body(Some("  agent instructions  \n"))
+    fn compose_agent_wake_returns_body_verbatim() {
+        // P8: composer returns the body itself (frontmatter stripped),
+        // no boilerplate preamble. The wakeup.md content is the message.
+        let out = compose_agent_wake_from_body(Some("agent instructions"))
             .expect("body present -> Some");
-        assert!(out.contains("K2SO Heartbeat Wake"));
-        assert!(
-            out.contains("agent instructions"),
-            "body trimmed and included: {}",
-            out
-        );
-        // Leading/trailing whitespace on input is trimmed in the
-        // output body — the header+separator structure is preserved.
-        assert!(!out.contains("  agent instructions"), "leading spaces should be trimmed");
+        assert!(out.contains("agent instructions"), "body in output: {}", out);
+        // No "K2SO Heartbeat Wake" preamble anymore.
+        assert!(!out.contains("K2SO Heartbeat Wake"), "preamble retired in P8: {}", out);
     }
 
     #[test]
-    fn compose_agent_wake_does_not_strip_frontmatter() {
-        // Unlike manager wake, the agent composer operates on the body
-        // as-given — if the caller wants frontmatter stripped, they do
-        // it before calling. Verify the "as-given" behavior by passing
-        // frontmatter and seeing it stay.
+    fn compose_agent_wake_strips_frontmatter() {
+        // P8: composer now strips frontmatter symmetrically with the
+        // manager composer. Pre-P8 it left frontmatter intact and
+        // expected callers to strip; post-P8 the composer owns it.
         let body = "---\nname: foo\n---\nbody";
         let out = compose_agent_wake_from_body(Some(body)).unwrap();
-        assert!(out.contains("name: foo"), "agent composer keeps frontmatter: {}", out);
+        assert!(!out.contains("name: foo"), "frontmatter stripped: {}", out);
+        assert!(out.contains("body"), "body survived: {}", out);
+    }
+
+    #[test]
+    fn compose_agent_wake_returns_none_for_empty_body() {
+        // P8: empty body (after frontmatter strip) returns None so
+        // smart_launch can record a "wakeup body empty" audit instead
+        // of firing claude with no prompt.
+        let body = "---\ndescription:\n---\n\n";
+        assert!(compose_agent_wake_from_body(Some(body)).is_none());
     }
 
     // ── parse_work_item_content ──────────────────────────────────
