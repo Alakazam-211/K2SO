@@ -1777,8 +1777,13 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                             let conn = db.lock();
                             let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
 
+                            // Skip sentinel rows (`_orphan`, `_broadcast`) — audit buckets,
+                            // not real workspaces. Their `path` strings would never match a real
+                            // cwd anyway, but filtering at SQL-time is cheaper.
                             let mut stmt = conn.prepare(
-                                "SELECT id, name, path, color FROM projects ORDER BY name ASC"
+                                "SELECT id, name, path, color FROM projects \
+                                 WHERE id NOT IN ('_orphan', '_broadcast') \
+                                 ORDER BY name ASC"
                             ).map_err(|e| e.to_string())?;
 
                             let workspaces: Vec<(String, String, String, String)> = stmt.query_map([], |row| {
@@ -1851,11 +1856,15 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                             let conn = db.lock();
                             let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
 
+                            // Skip sentinel rows (`_orphan`, `_broadcast`) — audit buckets,
+                            // not real workspaces. They'd inflate the companion drawer with
+                            // non-clickable entries.
                             let mut stmt = conn.prepare(
                                 "SELECT p.id, p.name, p.path, p.color, p.agent_mode, p.pinned, p.tab_order, \
                                  p.focus_group_id, fg.name, fg.color \
                                  FROM projects p \
                                  LEFT JOIN focus_groups fg ON p.focus_group_id = fg.id \
+                                 WHERE p.id NOT IN ('_orphan', '_broadcast') \
                                  ORDER BY p.pinned DESC, p.tab_order ASC, p.name ASC"
                             ).map_err(|e| e.to_string())?;
 
