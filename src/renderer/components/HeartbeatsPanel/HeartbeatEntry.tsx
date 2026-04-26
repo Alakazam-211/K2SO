@@ -72,10 +72,26 @@ export function HeartbeatEntryRow({
 
   const archivedOrDisabled = entry.state === 'archived' || !entry.row.enabled
 
+  // Row is a div, not a button — the Launch button nests inside, and
+  // HTML5 disallows nested interactive elements (browsers eject the
+  // inner <button> during parsing, which broke the row click target
+  // in some renderers and explained why clicking the row name did
+  // nothing while Launch still worked). div + role="button" gives us
+  // a clean click surface that can host the inner Launch button.
+  const handleKey = (e: React.KeyboardEvent): void => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      handleClick()
+    }
+  }
+
   return (
-    <button
+    <div
+      role="button"
+      tabIndex={0}
       onClick={handleClick}
-      className="w-full px-1 py-1 flex items-center gap-2 text-left hover:bg-white/[0.04] cursor-pointer no-drag transition-colors"
+      onKeyDown={handleKey}
+      className="w-full px-1 py-1 flex items-center gap-2 text-left hover:bg-white/[0.04] cursor-pointer no-drag transition-colors focus:outline-none focus:bg-white/[0.04]"
       title={`${entry.row.name} — ${entry.state}${entry.row.enabled ? '' : ' (disabled)'}`}
     >
       <span className="flex-shrink-0">
@@ -109,7 +125,7 @@ export function HeartbeatEntryRow({
       >
         {busy ? '…' : 'Launch'}
       </button>
-    </button>
+    </div>
   )
 }
 
