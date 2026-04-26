@@ -683,6 +683,12 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                     } else {
                                         let _ = crate::commands::k2so_agents::k2so_agents_generate_workspace_claude_md(project_path.clone());
                                     }
+                                    // Workspace just flipped to manager — make sure it has
+                                    // the default `triage` heartbeat. Idempotent and
+                                    // skips silently for non-manager modes.
+                                    if mode == "manager" {
+                                        crate::commands::k2so_agents::migrate_or_scaffold_lead_heartbeat(&project_path);
+                                    }
                                     // Notify frontend to refresh
                                     k2so_core::agent_hooks::emit(k2so_core::agent_hooks::HookEvent::SyncProjects, serde_json::Value::Null);
                                     Ok(serde_json::json!({"success": true, "mode": mode}).to_string())

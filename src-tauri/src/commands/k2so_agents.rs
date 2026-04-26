@@ -877,12 +877,19 @@ pub fn migrate_or_scaffold_lead_heartbeat(project_path: &str) {
         return;
     }
 
-    let has_rows: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM agent_heartbeats WHERE project_id = ?1)",
+    // Idempotency: skip if a `triage` row already exists for this project,
+    // active OR archived. Archived means the user explicitly removed it
+    // — recreating it on every startup would defeat the user's intent.
+    // We deliberately do NOT skip when the project has *other* heartbeats
+    // but no triage row — every manager workspace gets a default triage
+    // row regardless of what other custom heartbeats the user has added.
+    let has_triage: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_heartbeats \
+         WHERE project_id = ?1 AND name = 'triage')",
         rusqlite::params![&project_id],
         |row| row.get(0),
     ).unwrap_or(false);
-    if has_rows {
+    if has_triage {
         return;
     }
 
