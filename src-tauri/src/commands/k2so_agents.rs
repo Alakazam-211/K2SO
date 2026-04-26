@@ -366,6 +366,48 @@ pub fn k2so_heartbeat_remove(project_path: String, name: String) -> Result<(), S
     k2so_core::agents::heartbeat::k2so_heartbeat_remove(project_path, name)
 }
 
+/// Read the workspace's `show_heartbeat_sessions` flag.
+///
+/// 0 (default) = silent autonomous mode; heartbeat fires never open
+/// tabs. Audit via the sidebar Heartbeats panel on demand.
+/// 1 = each scheduled heartbeat fire opens a background tab in the
+/// Tauri window. Tab persists until the user closes it.
+#[tauri::command]
+pub fn k2so_workspace_get_show_heartbeat_sessions(
+    project_path: String,
+) -> Result<bool, String> {
+    let db = crate::db::shared();
+    let conn = db.lock();
+    let v: i64 = conn
+        .query_row(
+            "SELECT show_heartbeat_sessions FROM projects WHERE path = ?1",
+            rusqlite::params![project_path],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("workspace not found: {e}"))?;
+    Ok(v != 0)
+}
+
+/// Flip the workspace's `show_heartbeat_sessions` flag.
+#[tauri::command]
+pub fn k2so_workspace_set_show_heartbeat_sessions(
+    project_path: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let db = crate::db::shared();
+    let conn = db.lock();
+    let rows = conn
+        .execute(
+            "UPDATE projects SET show_heartbeat_sessions = ?1 WHERE path = ?2",
+            rusqlite::params![enabled as i64, project_path],
+        )
+        .map_err(|e| format!("workspace update failed: {e}"))?;
+    if rows == 0 {
+        return Err(format!("workspace not found: {project_path}"));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn k2so_heartbeat_set_enabled(
     project_path: String,

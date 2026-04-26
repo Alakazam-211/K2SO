@@ -1438,20 +1438,23 @@ function ProjectDetail({
     {!((project.agentMode || 'off') === 'off' && historyEmpty) && (
       <aside className="min-w-0 sticky top-0 self-start space-y-4">
         {(project.agentMode || 'off') !== 'off' && (
-          <HeartbeatsPanel
-            projectPath={project.path}
-            agentMode={project.agentMode || null}
-            agentName={(() => {
-              const mode = project.agentMode || 'off'
-              if (mode === 'manager' || mode === 'coordinator' || mode === 'pod') return '__lead__'
-              if (mode === 'agent') return 'k2so-agent'
-              // Custom mode — backend find_primary_agent scans for the
-              // custom-typed agent by reading AGENT.md frontmatter. The
-              // UI just needs a display name; use the project.name as a
-              // reasonable fallback until we wire a lookup.
-              return project.name.toLowerCase().replace(/\s+/g, '-')
-            })()}
-          />
+          <>
+            <HeartbeatsPanel
+              projectPath={project.path}
+              agentMode={project.agentMode || null}
+              agentName={(() => {
+                const mode = project.agentMode || 'off'
+                if (mode === 'manager' || mode === 'coordinator' || mode === 'pod') return '__lead__'
+                if (mode === 'agent') return 'k2so-agent'
+                // Custom mode — backend find_primary_agent scans for the
+                // custom-typed agent by reading AGENT.md frontmatter. The
+                // UI just needs a display name; use the project.name as a
+                // reasonable fallback until we wire a lookup.
+                return project.name.toLowerCase().replace(/\s+/g, '-')
+              })()}
+            />
+            <ShowHeartbeatSessionsToggle projectPath={project.path} />
+          </>
         )}
         {(project.agentMode || 'off') !== 'off' && (
           <ContextLayersPreview
@@ -1469,6 +1472,89 @@ function ProjectDetail({
     )}
     </div>
     </>
+  )
+}
+
+// ── Show Heartbeat Sessions Toggle ──────────────────────────────────
+//
+// Per-workspace flag controlling whether heartbeat fires open a tab in
+// the Tauri window. Default OFF (silent autonomous run, the v2-headless
+// vision default). When ON, each fire opens a background tab (no focus
+// steal); the user closes it when done auditing. State lives in
+// `projects.show_heartbeat_sessions` (migration 0034).
+
+function ShowHeartbeatSessionsToggle({ projectPath }: { projectPath: string }): React.JSX.Element {
+  const [enabled, setEnabled] = useState<boolean | null>(null) // null = loading
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    invoke<boolean>('k2so_workspace_get_show_heartbeat_sessions', { projectPath })
+      .then((v) => { if (!cancelled) setEnabled(v) })
+      .catch((err) => {
+        // Surface the error rather than silently defaulting — a missing
+        // row here means the project_id resolution broke and the toggle
+        // would otherwise lie to the user about its state.
+        console.error('[show-heartbeat-sessions] read failed', err)
+      })
+    return () => { cancelled = true }
+  }, [projectPath])
+
+  const toggle = async (): Promise<void> => {
+    if (enabled === null || busy) return
+    const next = !enabled
+    setBusy(true)
+    setEnabled(next) // optimistic
+    try {
+      await invoke('k2so_workspace_set_show_heartbeat_sessions', {
+        projectPath,
+        enabled: next,
+      })
+    } catch (err) {
+      console.error('[show-heartbeat-sessions] write failed', err)
+      setEnabled(!next) // revert on failure
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (enabled === null) {
+    return (
+      <div className="text-[10px] text-[var(--color-text-muted)]">Loading…</div>
+    )
+  }
+
+  return (
+    <div className="border border-[var(--color-border)] p-3">
+      <div className="flex items-start gap-3">
+        <button
+          onClick={toggle}
+          role="switch"
+          aria-checked={enabled}
+          disabled={busy}
+          className={`mt-0.5 w-7 h-3.5 flex items-center transition-colors no-drag cursor-pointer flex-shrink-0 disabled:opacity-50 ${
+            enabled ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
+          }`}
+          title={enabled ? 'Heartbeat fires open background tabs' : 'Heartbeat fires run silently'}
+        >
+          <span
+            className={`w-2.5 h-2.5 bg-white block transition-transform ${
+              enabled ? 'translate-x-3.5' : 'translate-x-0.5'
+            }`}
+          />
+        </button>
+        <div className="flex-1 min-w-0">
+          <div className="text-xs font-medium text-[var(--color-text-primary)]">
+            Show heartbeat sessions in tabs
+          </div>
+          <div className="text-[10px] text-[var(--color-text-muted)] mt-1 leading-relaxed">
+            {enabled
+              ? 'Each heartbeat fire opens a background tab in this window. Tabs persist until you close them. Audit the agent\'s work as it happens.'
+              : 'Heartbeat fires run silently in the daemon (recommended). Audit them on demand from the sidebar Heartbeats panel.'}
+          </div>
+        </div>
+      </div>
+    </div>
   )
 }
 

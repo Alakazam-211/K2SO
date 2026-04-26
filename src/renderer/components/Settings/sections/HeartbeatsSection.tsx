@@ -719,11 +719,15 @@ export function HeartbeatsPanel({ projectPath, agentName: agentNameProp, agentMo
     await refresh()
   }
 
-  const handleRemove = async (name: string): Promise<void> => {
+  const handleArchive = async (name: string): Promise<void> => {
     if (!project) return
-    if (!confirm(`Remove heartbeat "${name}" and its folder?`)) return
-    await invoke('k2so_heartbeat_remove', { projectPath: project.path, name })
-    toast.addToast(`Removed heartbeat "${name}"`, 'info', 3000)
+    if (!confirm(
+      `Archive heartbeat "${name}"?\n\n` +
+      `It will stop firing on its schedule and disappear from this list.\n` +
+      `The chat history stays available in the sidebar's Archived section.`
+    )) return
+    await invoke('k2so_heartbeat_archive', { projectPath: project.path, name })
+    toast.addToast(`Archived heartbeat "${name}"`, 'info', 3000)
     await refresh()
   }
 
@@ -881,9 +885,9 @@ export function HeartbeatsPanel({ projectPath, agentName: agentNameProp, agentMo
 
                 {/* Col 4 — Remove (same x as Connected Workspaces) */}
                 <button
-                  onClick={() => handleRemove(r.name)}
+                  onClick={() => handleArchive(r.name)}
                   className="w-5 h-5 flex items-center justify-center text-[var(--color-text-muted)] hover:text-red-400 transition-colors no-drag cursor-pointer flex-shrink-0"
-                  title="Remove heartbeat"
+                  title="Archive heartbeat"
                 >
                   <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5">
                     <line x1="1" y1="1" x2="7" y2="7" />
