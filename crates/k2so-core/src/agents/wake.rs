@@ -285,13 +285,17 @@ pub fn spawn_wake_headless(
 
     // Tell any connected UI. Wire format matches what the existing
     // src-tauri spawn_wake_pty emits so the React frontend's listener
-    // doesn't need to branch on origin.
+    // doesn't need to branch on origin. The `heartbeatName` field
+    // gates tab creation on the workspace's show_heartbeat_sessions
+    // flag — silent autonomous heartbeats never surface a tab unless
+    // the user opts in.
     crate::agent_hooks::emit(
         crate::agent_hooks::HookEvent::CliTerminalSpawnBackground,
         serde_json::json!({
             "terminalId": &terminal_id,
             "command": "claude",
             "cwd": project_path,
+            "heartbeatName": heartbeat_name,
             "projectPath": project_path,
             "agentName": agent_name,
         }),

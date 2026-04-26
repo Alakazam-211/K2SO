@@ -740,9 +740,43 @@ export function startAgentPolling(): void {
       projectPath: string
     }> = []
 
-    listen<{ terminalId: string; command: string; cwd: string; projectPath: string }>(
-      'cli:terminal-spawn-background', (event) => {
-        const { terminalId, command, cwd, projectPath } = event.payload
+    listen<{
+      terminalId: string
+      command: string
+      cwd: string
+      projectPath: string
+      /** Set when the spawn was driven by a scheduled heartbeat fire.
+       *  Tab creation is gated on the workspace's
+       *  show_heartbeat_sessions flag — silent autonomous heartbeats
+       *  never surface a tab unless the user opted in. Manual launches
+       *  and awareness-bus wakes leave this null/undefined and always
+       *  surface a tab as before. */
+      heartbeatName?: string | null
+    }>(
+      'cli:terminal-spawn-background', async (event) => {
+        const { terminalId, command, cwd, projectPath, heartbeatName } = event.payload
+
+        // Heartbeat-driven spawn: check the workspace's preference before
+        // creating a tab. Default OFF means silent autonomous mode —
+        // the audit surface is the sidebar Heartbeats panel, not a tab.
+        if (heartbeatName) {
+          let allow = false
+          try {
+            allow = await invoke<boolean>(
+              'k2so_workspace_get_show_heartbeat_sessions',
+              { projectPath },
+            )
+          } catch (err) {
+            console.warn(
+              '[cli:terminal-spawn-background] show_heartbeat_sessions read failed; defaulting to silent:',
+              err,
+            )
+          }
+          if (!allow) {
+            // Silent autonomous mode — daemon owns the PTY; no tab.
+            return
+          }
+        }
 
         // Find which project this terminal belongs to
         const projects = useProjectsStore.getState().projects

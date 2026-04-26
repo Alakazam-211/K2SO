@@ -183,13 +183,17 @@ fn spawn_wake_pty(
 
     // Tab-creation event for any currently-open window. Uses the same
     // event name the companion-spawn path already emits so the frontend
-    // discovery code doesn't need a second listener.
+    // discovery code doesn't need a second listener. The renderer
+    // gates tab creation on heartbeat_name + the workspace's
+    // show_heartbeat_sessions flag — silent autonomous heartbeats
+    // never surface a tab unless the user opts in.
     k2so_core::agent_hooks::emit(
         k2so_core::agent_hooks::HookEvent::CliTerminalSpawnBackground,
         serde_json::json!({
             "terminalId": &terminal_id,
             "command": command,
             "cwd": cwd,
+            "heartbeatName": heartbeat_name,
             "projectPath": project_path,
             "agentName": agent_name,
         }),

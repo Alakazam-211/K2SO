@@ -59,7 +59,7 @@ pub fn spawn_wake_via_session_stream(
     agent_name: &str,
     project_path: &str,
     wake_prompt: &str,
-    _heartbeat_name: Option<&str>,
+    heartbeat_name: Option<&str>,
 ) -> Result<String, String> {
     let args = vec![
         "--dangerously-skip-permissions".to_string(),
@@ -90,6 +90,7 @@ pub fn spawn_wake_via_session_stream(
             "cwd": project_path,
             "projectPath": project_path,
             "agentName": agent_name,
+            "heartbeatName": heartbeat_name,
         }),
     );
 
