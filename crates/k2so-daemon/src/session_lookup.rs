@@ -105,6 +105,18 @@ impl LiveSession {
         }
     }
 
+    /// Args the child was spawned with. Empty for legacy sessions
+    /// (the legacy struct never persisted args; not relevant for the
+    /// post-A9 heartbeat path which is v2-only). v2 returns the
+    /// stored arg vector — used by smart-launch to find a live PTY
+    /// running `--resume <session_id>` for a given heartbeat.
+    pub fn args(&self) -> Vec<String> {
+        match self {
+            LiveSession::Legacy(_) => Vec::new(),
+            LiveSession::V2(s) => s.args.clone(),
+        }
+    }
+
     /// True if this is a v2 (DaemonPtySession) session. Used by
     /// callers that need to branch on per-renderer behavior — e.g.
     /// kill semantics differ (legacy has `child.kill()`, v2 relies

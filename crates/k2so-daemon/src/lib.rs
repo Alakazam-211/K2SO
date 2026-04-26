@@ -11,6 +11,7 @@ pub mod awareness_ws;
 pub mod cli_response;
 pub mod companion_routes;
 pub mod events;
+pub mod heartbeat_launch;
 pub mod pending_live;
 pub mod providers;
 pub mod session_lookup;

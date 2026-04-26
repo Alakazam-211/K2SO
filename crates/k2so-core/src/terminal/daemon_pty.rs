@@ -156,6 +156,12 @@ pub struct DaemonPtySession {
     pub session_id: SessionId,
     pub cwd: Option<PathBuf>,
     pub program: Option<String>,
+    /// Args the child was spawned with. Persisted on the session so
+    /// post-spawn callers (e.g. heartbeat smart-launch's "is there a
+    /// live PTY running --resume <session_id>?" check) can match by
+    /// arg contents without keeping a parallel map. Empty when the
+    /// shell was spawned with the user's default login args only.
+    pub args: Vec<String>,
 
     /// The daemon-side alacritty Term. Locked briefly by the WS
     /// handler to snapshot the grid or by `resize()` to reshape it.
@@ -207,10 +213,14 @@ impl DaemonPtySession {
         // Build alacritty's `tty::Options`. None-shell gets the
         // user's login shell, same as opening a terminal.app window
         // with no command override.
+        // We clone args here because we also persist them on the
+        // session below — used by smart-launch's "is there a live
+        // PTY for this --resume <session_id>?" check.
+        let spawn_args = cfg.args.clone();
         let shell = cfg
             .program
             .as_ref()
-            .map(|prog| Shell::new(prog.clone(), cfg.args.clone()));
+            .map(|prog| Shell::new(prog.clone(), spawn_args.clone()));
 
         // Build the env we hand to alacritty's tty::new. Without an
         // explicit TERM/COLORTERM, child processes inherit alacritty's
@@ -319,6 +329,7 @@ impl DaemonPtySession {
             session_id: cfg.session_id,
             cwd: cfg.cwd,
             program: cfg.program,
+            args: spawn_args,
             term,
             pty_notifier: Mutex::new(Notifier(pty_sender)),
             events_tx,

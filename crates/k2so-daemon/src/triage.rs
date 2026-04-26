@@ -97,44 +97,21 @@ pub fn handle_scheduler_fire(project_path: &str) -> String {
     let candidates = heartbeat::k2so_agents_heartbeat_tick(project_path);
     let mut hb_fired: Vec<String> = Vec::new();
     for cand in &candidates {
-        if scheduler::is_agent_locked(project_path, &cand.agent_name) {
+        // Cron tick uses the same smart_launch decision tree the
+        // Launch button + `k2so heartbeat launch` CLI use. The
+        // decision tree (fresh / inject-into-live / resume-and-fire)
+        // handles per-heartbeat session resume + audit row writing,
+        // so this loop just records success/failure for the response.
+        let outcome = crate::heartbeat_launch::smart_launch(project_path, &cand.name);
+        if outcome.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+            hb_fired.push(cand.name.clone());
+        } else {
+            let decision = outcome.get("decision").and_then(|v| v.as_str()).unwrap_or("?");
+            let reason = outcome.get("reason").and_then(|v| v.as_str()).unwrap_or("");
             k2so_core::log_debug!(
-                "[daemon/scheduler-fire] skipped_locked hb={} agent={}",
-                cand.name,
-                cand.agent_name
+                "[daemon/scheduler-fire] hb {} decision={} reason={}",
+                cand.name, decision, reason
             );
-            continue;
-        }
-        let prompt = match wake::compose_wake_prompt_from_path(std::path::Path::new(
-            &cand.wakeup_path_abs,
-        )) {
-            Some(p) => p,
-            None => continue,
-        };
-        // Multi-heartbeat tick — pass the candidate's heartbeat name so
-        // the spawn helper saves to agent_heartbeats.last_session_id and
-        // the next tick resumes THIS heartbeat's chat thread (not the
-        // agent's global session).
-        let result = dispatch_wake(
-            use_stream,
-            &cand.agent_name,
-            project_path,
-            &prompt,
-            Some(&cand.name),
-        );
-        match result {
-            Ok(_tid) => {
-                heartbeat::stamp_heartbeat_fired(project_path, &cand.name);
-                hb_fired.push(cand.name.clone());
-            }
-            Err(e) => {
-                k2so_core::log_debug!(
-                    "[daemon/scheduler-fire] hb spawn failed for {}/{}: {}",
-                    cand.agent_name,
-                    cand.name,
-                    e
-                );
-            }
         }
     }
 
@@ -146,148 +123,6 @@ pub fn handle_scheduler_fire(project_path: &str) -> String {
         "heartbeats": hb_fired,
     })
     .to_string()
-}
-
-/// Manually fire a single heartbeat by name (the CLI's
-/// `k2so heartbeat fire <name>`). Unlike the scheduler tick this
-/// does NOT consult the schedule window — if the row is enabled
-/// and not archived, it spawns. Locked agents are skipped (matches
-/// the scheduler's contract: never double-spawn).
-///
-/// Returns a JSON string the CLI can parse: `{success, decision,
-/// reason?, terminalId?, agent?, name}` — same shape as the
-/// audit row decisions so `k2so heartbeat status` and a fired
-/// `k2so heartbeat fire` print consistent feedback.
-pub fn handle_heartbeat_fire(project_path: &str, name: &str) -> String {
-    use k2so_core::agents::resolve_project_id;
-    use k2so_core::db::schema::{AgentHeartbeat, HeartbeatFire};
-
-    if name.is_empty() {
-        return serde_json::json!({
-            "success": false,
-            "decision": "error",
-            "reason": "missing 'name' parameter",
-        }).to_string();
-    }
-
-    // Look up the row + validate.
-    let (hb, agent_name, project_id) = {
-        let db = k2so_core::db::shared();
-        let conn = db.lock();
-        let Some(project_id) = resolve_project_id(&conn, project_path) else {
-            return serde_json::json!({
-                "success": false,
-                "decision": "error",
-                "reason": format!("project not found: {project_path}"),
-                "name": name,
-            }).to_string();
-        };
-        let Some(hb) = AgentHeartbeat::get_by_name(&conn, &project_id, name).ok().flatten() else {
-            return serde_json::json!({
-                "success": false,
-                "decision": "error",
-                "reason": format!("no heartbeat named '{name}'"),
-                "name": name,
-            }).to_string();
-        };
-        if hb.archived_at.is_some() {
-            return serde_json::json!({
-                "success": false,
-                "decision": "skipped_archived",
-                "reason": format!("heartbeat '{name}' is archived"),
-                "name": name,
-            }).to_string();
-        }
-        let Some(agent_name) = k2so_core::agents::find_primary_agent(project_path) else {
-            return serde_json::json!({
-                "success": false,
-                "decision": "error",
-                "reason": "no scheduleable agent in this workspace",
-                "name": name,
-            }).to_string();
-        };
-        (hb, agent_name, project_id)
-    };
-
-    // No agent-level lock check. Each heartbeat owns its own Claude
-    // session via agent_heartbeats.last_session_id, which is distinct
-    // from the agent's main Chat tab session. Refusing because the
-    // Chat tab is open would be a false conflict — the heartbeat
-    // spawns its own PTY with its own terminal id and resumes its
-    // own session id. (The scheduler-tick path uses the agent lock
-    // for back-to-back same-row protection; manual fires are by
-    // definition opt-in and must not be silently refused.)
-
-    // Read the heartbeat's WAKEUP.md (workspace-relative path).
-    let wakeup_abs = std::path::Path::new(project_path).join(&hb.wakeup_path);
-    if !wakeup_abs.exists() {
-        let db = k2so_core::db::shared();
-        let conn = db.lock();
-        let _ = HeartbeatFire::insert_with_schedule(
-            &conn, &project_id, Some(&agent_name), Some(&hb.name),
-            &hb.frequency, "wakeup_file_missing",
-            Some(&format!("manual fire failed: {} not found", hb.wakeup_path)),
-            None, None, None,
-        );
-        return serde_json::json!({
-            "success": false,
-            "decision": "wakeup_file_missing",
-            "reason": format!("WAKEUP.md missing at {}", hb.wakeup_path),
-            "name": name,
-            "agent": agent_name,
-        }).to_string();
-    }
-
-    let Some(prompt) = wake::compose_wake_prompt_from_path(&wakeup_abs) else {
-        return serde_json::json!({
-            "success": false,
-            "decision": "error",
-            "reason": "failed to compose wake prompt",
-            "name": name,
-            "agent": agent_name,
-        }).to_string();
-    };
-
-    // Spawn via the same path the scheduler tick uses, threading
-    // heartbeat_name so post-spawn save targets agent_heartbeats.last_session_id.
-    let use_stream = settings::get_use_session_stream(project_path);
-    match dispatch_wake(use_stream, &agent_name, project_path, &prompt, Some(&hb.name)) {
-        Ok(terminal_id) => {
-            heartbeat::stamp_heartbeat_fired(project_path, &hb.name);
-            let db = k2so_core::db::shared();
-            let conn = db.lock();
-            let _ = HeartbeatFire::insert_with_schedule(
-                &conn, &project_id, Some(&agent_name), Some(&hb.name),
-                &hb.frequency, "fired",
-                Some("manual fire via CLI"),
-                None, None, None,
-            );
-            serde_json::json!({
-                "success": true,
-                "decision": "fired",
-                "name": name,
-                "agent": agent_name,
-                "terminalId": terminal_id,
-            }).to_string()
-        }
-        Err(e) => {
-            let db = k2so_core::db::shared();
-            let conn = db.lock();
-            let _ = HeartbeatFire::insert_with_schedule(
-                &conn, &project_id, Some(&agent_name), Some(&hb.name),
-                &hb.frequency, "error",
-                Some(&format!("manual fire spawn failed: {e}")),
-                None, None, None,
-            );
-            serde_json::json!({
-                "success": false,
-                "decision": "error",
-                "reason": format!("spawn failed: {e}"),
-                "name": name,
-                "agent": agent_name,
-            }).to_string()
-        }
-    }
 }
 
 /// Choose the spawn path based on the project's

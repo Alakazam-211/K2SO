@@ -285,90 +285,43 @@ fn spawn_wake_pty(
 /// the row → read its wakeup.md → spawn_wake_pty → stamp last_fired →
 /// write a heartbeat_fires audit row (decision='fired', reason='forced').
 ///
-/// Returns the spawned terminal_id on success so the caller can focus it.
+/// Force-fire a specific heartbeat by name. Thin proxy to the daemon's
+/// `/cli/heartbeat/launch` route which runs the smart-launch decision
+/// tree (fresh-fire / inject-into-live-session / resume-and-fire) —
+/// the same path the cron tick and `k2so heartbeat launch <name>`
+/// CLI verb take. All real logic lives in
+/// `crates/k2so-daemon/src/heartbeat_launch.rs`; this Tauri command
+/// exists only so the React Launch button can trigger it via invoke
+/// without a separate HTTP client. Kept under the legacy
+/// `k2so_heartbeat_force_fire` name since the renderer still
+/// references it from the WorkspacePanel header path; the new
+/// `k2so_heartbeat_smart_launch` is the canonical name going forward.
 #[tauri::command]
 pub fn k2so_heartbeat_force_fire(
-    app_handle: AppHandle,
     project_path: String,
     name: String,
 ) -> Result<String, String> {
-    use crate::db::schema::{AgentHeartbeat, HeartbeatFire};
+    let client = crate::daemon_client::DaemonClient::try_connect()?;
+    client.cli_get(
+        "/cli/heartbeat/launch",
+        &[("project", &project_path), ("name", &name)],
+    )
+}
 
-    let db = crate::db::shared();
-    let conn = db.lock();
-    let project_id: String = conn.query_row(
-        "SELECT id FROM projects WHERE path = ?1",
-        rusqlite::params![project_path],
-        |row| row.get(0),
-    ).map_err(|e| format!("Project not found: {}", e))?;
-
-    let hb = AgentHeartbeat::get_by_name(&conn, &project_id, &name)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Heartbeat '{}' not found", name))?;
-
-    let agent_name = crate::commands::k2so_agents::find_primary_agent(&project_path)
-        .ok_or("No scheduleable agent in this workspace")?;
-
-    let wakeup_abs = std::path::Path::new(&project_path).join(&hb.wakeup_path);
-    if !wakeup_abs.exists() {
-        let _ = HeartbeatFire::insert_with_schedule(
-            &conn, &project_id, Some(&agent_name), Some(&hb.name),
-            &hb.frequency, "wakeup_file_missing",
-            Some(&format!("forced fire failed: {} not found", hb.wakeup_path)),
-            None, None, None,
-        );
-        return Err(format!("wakeup.md missing at {}", hb.wakeup_path));
-    }
-
-    // Per-heartbeat sessions (post-0.36.0): each heartbeat owns its
-    // own Claude session via agent_heartbeats.last_session_id, distinct
-    // from the agent's main Chat tab session in agent_sessions. The
-    // old is_agent_locked check refused fires whenever the Chat tab
-    // was open — but that's not a real conflict, since a new heartbeat
-    // fire spawns its own PTY with its own terminal id and resumes
-    // its own session id. Removing the lock here is what enables the
-    // user-facing "click Launch on a heartbeat while my chat is open"
-    // flow.
-    //
-    // (The scheduler-tick path keeps its is_agent_locked check below,
-    // since back-to-back tick fires of the SAME row are still a
-    // concern there. A per-(agent, heartbeat) lock would be the
-    // longer-term fix.)
-
-    // Use the full launch-args builder (same as /cli/agents/launch) so heartbeats
-    // --resume the saved session, --fork-session past the stale-session dialog,
-    // attach the agent's CLAUDE.md as --append-system-prompt, and honor the
-    // wakes-since-compact counter. Prior code here shipped only
-    // `--dangerously-skip-permissions <prompt>`, which (a) spawned a fresh
-    // claude each fire (breaking session continuity) and (b) let claude
-    // v2.1.114 silently drop the argv prompt in minimal-argv mode — agents
-    // looked "fired" in the audit log but never read their wakeup.md.
-    let launch = crate::commands::k2so_agents::k2so_agents_build_launch(
-        project_path.clone(),
-        agent_name.clone(),
-        None,
-        Some(wakeup_abs.to_string_lossy().to_string()),
-        Some(true), // skip --fork-session so wakes resume the same session (one chat per agent)
-        Some(hb.name.clone()), // per-heartbeat session resume: this fire keeps its own thread
-    )?;
-    let command = launch.get("command").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
-    let cwd = launch.get("cwd").and_then(|v| v.as_str()).unwrap_or(&project_path).to_string();
-    let args: Vec<String> = launch.get("args")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-
-    let terminal_id = spawn_wake_pty(
-        &app_handle, &agent_name, &project_path, &command, args, &cwd, Some(&hb.name),
-    )?;
-    dismiss_stale_session_dialog_async(app_handle.clone(), terminal_id.clone());
-    crate::commands::k2so_agents::stamp_heartbeat_fired(&project_path, &hb.name);
-    let _ = HeartbeatFire::insert_with_schedule(
-        &conn, &project_id, Some(&agent_name), Some(&hb.name),
-        &hb.frequency, "fired",
-        Some("forced from UI"), None, None, None,
-    );
-    Ok(terminal_id)
+/// Smart-launch a heartbeat — invoked by the React Launch button.
+/// Identical impl to `k2so_heartbeat_force_fire`; the rename is a
+/// signal that this is the daemon-first path going forward and that
+/// callers shouldn't expect Tauri-side spawn behaviour.
+#[tauri::command]
+pub fn k2so_heartbeat_smart_launch(
+    project_path: String,
+    name: String,
+) -> Result<String, String> {
+    let client = crate::daemon_client::DaemonClient::try_connect()?;
+    client.cli_get(
+        "/cli/heartbeat/launch",
+        &[("project", &project_path), ("name", &name)],
+    )
 }
 
 // `push_agent_event` moved to k2so_core::agents::events.

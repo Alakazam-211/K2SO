@@ -40,6 +40,7 @@ mod cli;
 mod cli_response;
 mod companion_routes;
 mod events;
+mod heartbeat_launch;
 mod pending_live;
 mod providers;
 mod session_lookup;
@@ -808,12 +809,15 @@ fn handle_cli_heartbeat(
             hb::k2so_heartbeat_unarchive(project_path.to_string(), name)
                 .map(|_| r#"{"success":true}"#.to_string())
         }
-        "/cli/heartbeat/fire" => {
-            // Manual single-heartbeat fire — does NOT consult schedule
-            // window. Stamps an audit row regardless of outcome so
-            // `k2so heartbeat status <name>` shows the manual fire.
+        "/cli/heartbeat/fire" | "/cli/heartbeat/launch" => {
+            // Manual single-heartbeat launch — does NOT consult schedule
+            // window. Routes through the smart-launch decision tree
+            // (fresh-fire / inject-into-live / resume-and-fire) so the
+            // CLI, the Tauri Launch button, and the cron tick all share
+            // one canonical path. `fire` kept as an alias since the
+            // existing CLI verb predates `launch`.
             let name = params.get("name").cloned().unwrap_or_default();
-            Ok(crate::triage::handle_heartbeat_fire(project_path, &name))
+            Ok(crate::heartbeat_launch::smart_launch(project_path, &name).to_string())
         }
         "/cli/heartbeat/remove" => {
             let name = params.get("name").cloned().unwrap_or_default();

@@ -74,6 +74,31 @@ impl DaemonClient {
             .unwrap_or(false)
     }
 
+    /// Hit a `/cli/*` route on the daemon, returning the raw response
+    /// body (the CLI text/JSON the daemon emits). `params` are
+    /// percent-encoded into the query string alongside the auth
+    /// token. Any non-2xx status is surfaced as Err with the body.
+    pub fn cli_get(&self, path: &str, params: &[(&str, &str)]) -> Result<String, String> {
+        let mut url = format!("http://127.0.0.1:{}{}?token={}", self.port, path, self.token);
+        for (k, v) in params {
+            url.push('&');
+            url.push_str(&pct_encode(k));
+            url.push('=');
+            url.push_str(&pct_encode(v));
+        }
+        let response = self
+            .http
+            .get(&url)
+            .send()
+            .map_err(|e| format!("daemon {path}: {e}"))?;
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!("daemon {path} {}: {body}", status.as_u16()));
+        }
+        Ok(body)
+    }
+
     /// Hit `GET /status?token=<t>` and decode the JSON body.
     pub fn status(&self) -> Result<DaemonStatus, String> {
         let url = format!("http://127.0.0.1:{}/status?token={}", self.port, self.token);
@@ -89,6 +114,22 @@ impl DaemonClient {
         }
         serde_json::from_str(&body).map_err(|e| format!("decode /status: {e}: body={body}"))
     }
+}
+
+/// Percent-encode a query-string component without pulling a new
+/// crate. RFC 3986 unreserved set is letters, digits, `-`, `_`, `.`,
+/// `~`. Everything else gets `%HH`-encoded.
+fn pct_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
 }
 
 fn k2so_dir() -> Result<PathBuf, String> {
