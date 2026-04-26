@@ -99,6 +99,29 @@ export default function WorkspacePanel(): React.JSX.Element {
     activeProjectId ? s.getProjectStatus(activeProjectId) : 'idle' as PaneStatus
   , [activeProjectId]))
 
+  // Worktrees section collapse state, persisted per-workspace.
+  // Default OPEN — worktrees are the action surface for review work,
+  // most users want them visible by default.
+  const worktreesKey = activeProjectId ? `worktrees.section-collapsed.${activeProjectId}` : null
+  const [worktreesOpen, setWorktreesOpen] = useState<boolean>(() => {
+    if (!worktreesKey) return true
+    return localStorage.getItem(worktreesKey) !== 'closed'
+  })
+  useEffect(() => {
+    if (!worktreesKey) {
+      setWorktreesOpen(true)
+      return
+    }
+    setWorktreesOpen(localStorage.getItem(worktreesKey) !== 'closed')
+  }, [worktreesKey])
+  const toggleWorktrees = useCallback((): void => {
+    setWorktreesOpen((cur) => {
+      const next = !cur
+      if (worktreesKey) localStorage.setItem(worktreesKey, next ? 'open' : 'closed')
+      return next
+    })
+  }, [worktreesKey])
+
   // Heartbeat data is fetched + polled by HeartbeatsPanel via its own
   // store; we no longer duplicate that fetch here.
   const activeProjectPath = activeProject?.path
@@ -275,9 +298,25 @@ export default function WorkspacePanel(): React.JSX.Element {
       {/* ── Connected Agents (incoming) ── */}
       <ConnectedAgentsSection projectId={activeProject.id} />
 
-      {/* ── Worktrees ── */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)]">
+      {/* ── Worktrees ── (collapsible; chevron toggles, count badge
+          and new-worktree button stay clickable via stopPropagation) */}
+      <button
+        onClick={toggleWorktrees}
+        className="w-full flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)] cursor-pointer no-drag hover:bg-white/[0.02] transition-colors"
+        title={worktreesOpen ? 'Collapse Worktrees' : 'Expand Worktrees'}
+      >
         <span className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wider flex items-center gap-1.5">
+          <svg
+            className={`w-2 h-2 transition-transform ${worktreesOpen ? 'rotate-90' : ''}`}
+            viewBox="0 0 8 8"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M2 1 L6 4 L2 7" />
+          </svg>
           Worktrees
           {worktrees.length > 0 && (
             <span className="text-[9px] tabular-nums font-medium px-1 py-0.5 bg-white/5 text-[var(--color-text-muted)]">
@@ -285,8 +324,11 @@ export default function WorkspacePanel(): React.JSX.Element {
             </span>
           )}
         </span>
-        <button
-          onClick={() => setShowWorktreeDialog(true)}
+        <span
+          onClick={(e) => {
+            e.stopPropagation()
+            setShowWorktreeDialog(true)
+          }}
           className="w-5 h-5 flex items-center justify-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-white/10 transition-colors no-drag cursor-pointer"
           title="New worktree"
         >
@@ -294,8 +336,8 @@ export default function WorkspacePanel(): React.JSX.Element {
             <line x1="5" y1="1" x2="5" y2="9" />
             <line x1="1" y1="5" x2="9" y2="5" />
           </svg>
-        </button>
-      </div>
+        </span>
+      </button>
 
       {showWorktreeDialog && (
         <WorktreeDialog
@@ -306,36 +348,38 @@ export default function WorkspacePanel(): React.JSX.Element {
         />
       )}
 
-      <div className="flex-1 overflow-y-auto">
-        {worktrees.length === 0 ? (
-          <div className="p-3">
-            <p className="text-[10px] text-[var(--color-text-muted)]">
-              No worktrees open. Click + to create one or let the manager delegate work.
-            </p>
-          </div>
-        ) : (
-          worktrees.map((ws) => {
-            // Strip agent/<name>/ prefix from display name
-            const displayName = ws.name?.replace(/^agent\/[^/]+\//, '') || ws.branch || 'worktree'
-            // Check if this was created by our agent system
-            const agentMatch = ws.name?.match(/^agent\/([^/]+)\//)
-            const agentTemplate = agentMatch?.[1]
+      {worktreesOpen && (
+        <div className="flex-1 overflow-y-auto">
+          {worktrees.length === 0 ? (
+            <div className="p-3">
+              <p className="text-[10px] text-[var(--color-text-muted)]">
+                No worktrees open. Click + to create one or let the manager delegate work.
+              </p>
+            </div>
+          ) : (
+            worktrees.map((ws) => {
+              // Strip agent/<name>/ prefix from display name
+              const displayName = ws.name?.replace(/^agent\/[^/]+\//, '') || ws.branch || 'worktree'
+              // Check if this was created by our agent system
+              const agentMatch = ws.name?.match(/^agent\/([^/]+)\//)
+              const agentTemplate = agentMatch?.[1]
 
-            return (
-              <WorktreeRow
-                key={ws.id}
-                workspaceId={ws.id}
-                projectId={activeProject.id}
-                projectPath={activeProject.path}
-                worktreePath={ws.worktreePath}
-                displayName={displayName}
-                branch={ws.branch}
-                agentTemplate={agentTemplate}
-              />
-            )
-          })
-        )}
-      </div>
+              return (
+                <WorktreeRow
+                  key={ws.id}
+                  workspaceId={ws.id}
+                  projectId={activeProject.id}
+                  projectPath={activeProject.path}
+                  worktreePath={ws.worktreePath}
+                  displayName={displayName}
+                  branch={ws.branch}
+                  agentTemplate={agentTemplate}
+                />
+              )
+            })
+          )}
+        </div>
+      )}
     </div>
   )
 }

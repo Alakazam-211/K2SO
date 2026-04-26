@@ -71,6 +71,21 @@ export function HeartbeatsPanel(): React.JSX.Element {
     setArchivedOpen(localStorage.getItem(archivedKey) === 'open')
   }, [archivedKey])
 
+  // Whole-section collapse state, persisted per-workspace. Default
+  // OPEN — most users expect to see their heartbeats at a glance.
+  const sectionKey = project ? `heartbeats.section-collapsed.${project.id}` : null
+  const [sectionOpen, setSectionOpen] = useState<boolean>(() => {
+    if (!sectionKey) return true
+    return localStorage.getItem(sectionKey) !== 'closed'
+  })
+  useEffect(() => {
+    if (!sectionKey) {
+      setSectionOpen(true)
+      return
+    }
+    setSectionOpen(localStorage.getItem(sectionKey) !== 'closed')
+  }, [sectionKey])
+
   // The Workspace panel only mounts this section when a project is
   // selected and agentMode !== 'off', so we no longer need the
   // standalone empty-state messages. Defensive guard kept (returns
@@ -90,24 +105,53 @@ export function HeartbeatsPanel(): React.JSX.Element {
     if (archivedKey) localStorage.setItem(archivedKey, next ? 'open' : 'closed')
   }
 
+  const toggleSection = (): void => {
+    const next = !sectionOpen
+    setSectionOpen(next)
+    if (sectionKey) localStorage.setItem(sectionKey, next ? 'open' : 'closed')
+  }
+
   return (
     <div>
-      {/* Header — EKG-heart icon + label + manage link. Inline-styled
-          to match the State row above (text-[11px] secondary). */}
-      <div className="flex items-center justify-between mb-1.5">
+      {/* Header — clickable to collapse/expand. Chevron animates,
+          EKG-heart icon stays static, `manage` opens Settings. The
+          `manage` link uses stopPropagation so clicking it doesn't
+          also toggle the section. A divider underneath gives the
+          header weight (matches the Worktrees pattern below). */}
+      <button
+        onClick={toggleSection}
+        className="w-full flex items-center justify-between cursor-pointer no-drag pb-1.5 border-b border-[var(--color-border)]"
+        title={sectionOpen ? 'Collapse Heartbeats' : 'Expand Heartbeats'}
+      >
         <div className="flex items-center gap-1.5">
+          <svg
+            className={`w-2 h-2 text-[var(--color-text-muted)] transition-transform ${sectionOpen ? 'rotate-90' : ''}`}
+            viewBox="0 0 8 8"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M2 1 L6 4 L2 7" />
+          </svg>
           <IconHeartEKG className="w-3 h-3 text-[var(--color-accent)]" />
           <span className="text-[11px] text-[var(--color-text-secondary)]">Heartbeats</span>
         </div>
-        <button
-          onClick={() => useSettingsStore.getState().openSettings('projects')}
+        <span
+          onClick={(e) => {
+            e.stopPropagation()
+            useSettingsStore.getState().openSettings('projects')
+          }}
           className="text-[9px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] no-drag cursor-pointer"
           title="Manage in Settings"
         >
           manage
-        </button>
-      </div>
+        </span>
+      </button>
 
+      {sectionOpen && (
+        <div className="mt-1.5">
       {!showingForLoadedProject ? (
         <div className="px-1 py-1 text-[10px] text-[var(--color-text-muted)]">Loading…</div>
       ) : lastError ? (
@@ -164,6 +208,8 @@ export function HeartbeatsPanel(): React.JSX.Element {
               )}
             </div>
           )}
+        </div>
+      )}
         </div>
       )}
     </div>
