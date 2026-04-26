@@ -1126,6 +1126,10 @@ pub fn k2so_agents_generate_claude_md(
 /// k2so_core::agents::build_launch; this Tauri wrapper is a
 /// thin forward so the React frontend's invoke keeps
 /// working.
+// `heartbeat_name`: heartbeat-scoped resume target (post-0.36.0). When
+// `Some`, the build prefers `agent_heartbeats.last_session_id` for the
+// row before falling back to the per-agent global session. React
+// callers (Chat tab, manual agent launches) leave this `None`.
 #[tauri::command]
 pub fn k2so_agents_build_launch(
     project_path: String,
@@ -1133,6 +1137,7 @@ pub fn k2so_agents_build_launch(
     agent_cli_command: Option<String>,
     wakeup_override: Option<String>,
     skip_fork_session: Option<bool>,
+    heartbeat_name: Option<String>,
 ) -> Result<serde_json::Value, String> {
     k2so_core::agents::build_launch::k2so_agents_build_launch(
         project_path,
@@ -1140,6 +1145,7 @@ pub fn k2so_agents_build_launch(
         agent_cli_command,
         wakeup_override,
         skip_fork_session,
+        heartbeat_name,
     )
 }
 

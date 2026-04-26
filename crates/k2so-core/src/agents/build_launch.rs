@@ -41,12 +41,20 @@ use crate::db::schema::AgentSession;
 /// branch. Errors only for filesystem / DB failures during the
 /// chosen branch; empty inbox + missing active worktree + missing
 /// wakeup.md are all handled gracefully.
+// `heartbeat_name`: when Some, the launch is on behalf of a specific
+// heartbeat fire. Resume target lookup prefers
+// `agent_heartbeats.last_session_id` for that row over
+// `agent_sessions.session_id`, so each heartbeat keeps its own
+// dedicated chat thread that the user can audit independently from
+// the Chat tab session. None = manual launch / Chat tab — use the
+// per-agent global.
 pub fn k2so_agents_build_launch(
     project_path: String,
     agent_name: String,
     agent_cli_command: Option<String>,
     wakeup_override: Option<String>,
     skip_fork_session: Option<bool>,
+    heartbeat_name: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let command = agent_cli_command.unwrap_or_else(|| "claude".to_string());
     let skip_fork = skip_fork_session.unwrap_or(false);
@@ -144,39 +152,63 @@ pub fn k2so_agents_build_launch(
     // no-ops and relies on Tauri's next startup for freshness.
     let _ = super::workspace_regen::regen_workspace_skill(&project_path);
 
-    // Check for previous session to resume. Priority: DB → Claude
-    // history scan (agent dir) → Claude history scan (project root).
-    // The `.last_session` file fallback is retired; the DB's
-    // agent_sessions.session_id row is the source of truth.
+    // Check for previous session to resume. Lookup order:
+    //   1. Heartbeat-scoped: agent_heartbeats.last_session_id (only when
+    //      heartbeat_name was passed — keeps each heartbeat's chat thread
+    //      separate from the user's Chat tab thread).
+    //   2. Agent-global:    agent_sessions.session_id
+    //   3. Filesystem scan: claude history under agent dir then project root
+    // Each layer only returns a value if the underlying session file
+    // still exists on disk — Claude prunes session JSONLs and stale ids
+    // would cause "No conversation found" on resume; we clear the
+    // stored id when that happens so the next wake starts fresh
+    // instead of fighting the stale pointer indefinitely.
     let agent_cwd = agent_dir(&project_path, &agent_name);
     let resume_session = (|| -> Option<String> {
         let db = crate::db::shared();
         let conn = db.lock();
-        if let Some(project_id) = resolve_project_id(&conn, &project_path) {
-            if let Ok(Some(session)) =
-                AgentSession::get_by_agent(&conn, &project_id, &agent_name)
+        let project_id = resolve_project_id(&conn, &project_path)?;
+
+        // Layer 1: heartbeat-scoped resume target.
+        if let Some(ref hb_name) = heartbeat_name {
+            if let Ok(Some(hb)) =
+                crate::db::schema::AgentHeartbeat::get_by_name(&conn, &project_id, hb_name)
             {
-                if let Some(sid) = session.session_id {
+                if let Some(sid) = hb.last_session_id {
                     if !sid.is_empty() {
-                        // Validate the session file still exists. Stale
-                        // session IDs survive workspace remove+readd +
-                        // Claude-side pruning; with --fork-session
-                        // skipped (heartbeats), Claude bails with "No
-                        // conversation found" rather than minting a new
-                        // session. Clear the row so the next wake starts
-                        // fresh, then fall through to the history-scan.
                         if chat_history::claude_session_file_exists(&sid, &project_path) {
                             return Some(sid);
                         }
-                        let _ = AgentSession::clear_session_id(
+                        // Stale — clear to fail forward.
+                        let _ = crate::db::schema::AgentHeartbeat::save_session_id(
                             &conn,
                             &project_id,
-                            &agent_name,
+                            hb_name,
+                            "",
                         );
                     }
                 }
             }
         }
+
+        // Layer 2: agent-global resume target.
+        if let Ok(Some(session)) =
+            AgentSession::get_by_agent(&conn, &project_id, &agent_name)
+        {
+            if let Some(sid) = session.session_id {
+                if !sid.is_empty() {
+                    if chat_history::claude_session_file_exists(&sid, &project_path) {
+                        return Some(sid);
+                    }
+                    let _ = AgentSession::clear_session_id(
+                        &conn,
+                        &project_id,
+                        &agent_name,
+                    );
+                }
+            }
+        }
+
         None
     })()
     .or_else(|| {

@@ -126,6 +126,11 @@ fn dismiss_stale_session_dialog_async(app_handle: AppHandle, terminal_id: String
     });
 }
 
+// `heartbeat_name`: when Some, the wake is on behalf of a specific
+// scheduled heartbeat. The deferred session-id save additionally
+// writes to `agent_heartbeats.last_session_id` for that row so the
+// heartbeat keeps its own dedicated chat thread separate from the
+// agent's global session. None = manual launch / non-heartbeat wake.
 fn spawn_wake_pty(
     app_handle: &AppHandle,
     agent_name: &str,
@@ -133,6 +138,7 @@ fn spawn_wake_pty(
     command: &str,
     args: Vec<String>,
     cwd: &str,
+    heartbeat_name: Option<&str>,
 ) -> Result<String, String> {
     let terminal_id = format!("wake-{}-{}", agent_name, uuid::Uuid::new_v4());
     let state = app_handle
@@ -201,6 +207,7 @@ fn spawn_wake_pty(
     let agent_name_owned = agent_name.to_string();
     let project_path_owned = project_path.to_string();
     let cwd_owned = cwd.to_string();
+    let heartbeat_name_owned = heartbeat_name.map(str::to_string);
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(5));
         let detected = crate::commands::chat_history::chat_history_detect_active_session(
@@ -209,6 +216,8 @@ fn spawn_wake_pty(
         );
         if let Ok(Some(session_id)) = detected {
             if !session_id.is_empty() {
+                // Layer 1: per-agent global. Used by Chat tab + non-heartbeat
+                // wake paths.
                 if let Err(e) = crate::commands::k2so_agents::k2so_agents_save_session_id(
                     project_path_owned.clone(),
                     agent_name_owned.clone(),
@@ -217,6 +226,37 @@ fn spawn_wake_pty(
                     log_debug!("[agent-hooks] Failed to save session ID for {}: {}", agent_name_owned, e);
                 } else {
                     log_debug!("[agent-hooks] Saved session ID for {}: {}", agent_name_owned, session_id);
+                }
+
+                // Layer 2: per-heartbeat (post-0.36.0). Each heartbeat
+                // fire keeps its own chat thread that resumes on the
+                // next tick, independent of the user's Chat tab.
+                if let Some(ref hb_name) = heartbeat_name_owned {
+                    let db = crate::db::shared();
+                    let conn = db.lock();
+                    if let Ok(Some(project_id)) = conn
+                        .query_row(
+                            "SELECT id FROM projects WHERE path = ?1",
+                            rusqlite::params![project_path_owned],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .map(Some)
+                        .or(Ok::<_, rusqlite::Error>(None))
+                    {
+                        if let Err(e) = crate::db::schema::AgentHeartbeat::save_session_id(
+                            &conn, &project_id, hb_name, &session_id,
+                        ) {
+                            log_debug!(
+                                "[agent-hooks] Failed to save heartbeat '{}' session ID: {}",
+                                hb_name, e
+                            );
+                        } else {
+                            log_debug!(
+                                "[agent-hooks] Saved heartbeat '{}' session ID: {}",
+                                hb_name, session_id
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -291,6 +331,7 @@ pub fn k2so_heartbeat_force_fire(
         None,
         Some(wakeup_abs.to_string_lossy().to_string()),
         Some(true), // skip --fork-session so wakes resume the same session (one chat per agent)
+        Some(hb.name.clone()), // per-heartbeat session resume: this fire keeps its own thread
     )?;
     let command = launch.get("command").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
     let cwd = launch.get("cwd").and_then(|v| v.as_str()).unwrap_or(&project_path).to_string();
@@ -300,7 +341,7 @@ pub fn k2so_heartbeat_force_fire(
         .unwrap_or_default();
 
     let terminal_id = spawn_wake_pty(
-        &app_handle, &agent_name, &project_path, &command, args, &cwd,
+        &app_handle, &agent_name, &project_path, &command, args, &cwd, Some(&hb.name),
     )?;
     dismiss_stale_session_dialog_async(app_handle.clone(), terminal_id.clone());
     crate::commands::k2so_agents::stamp_heartbeat_fired(&project_path, &hb.name);
@@ -507,7 +548,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                     .and_then(|v| v.as_array())
                                     .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
                                     .unwrap_or_default();
-                                let _ = spawn_wake_pty(&app_handle, &agent_name, &project_path, &command, args, &cwd);
+                                let _ = spawn_wake_pty(&app_handle, &agent_name, &project_path, &command, args, &cwd, None);
                                 // Refresh sidebar — new worktree was registered in DB
                                 k2so_core::agent_hooks::emit(k2so_core::agent_hooks::HookEvent::SyncProjects, serde_json::Value::Null);
                                 Ok(serde_json::to_string(&launch_info).unwrap_or_default())
@@ -589,7 +630,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                         let cli_command = params.get("command").cloned();
                         let agent_clone = agent.clone();
                         match crate::commands::k2so_agents::k2so_agents_build_launch(
-                            project_path.clone(), agent, cli_command, None, None,
+                            project_path.clone(), agent, cli_command, None, None, None,
                         ) {
                             Ok(launch_info) => {
                                 // Backend-direct spawn — works when K2SO window is closed.
@@ -599,7 +640,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                     .and_then(|v| v.as_array())
                                     .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
                                     .unwrap_or_default();
-                                let _ = spawn_wake_pty(&app_handle, &agent_clone, &project_path, &command, args, &cwd);
+                                let _ = spawn_wake_pty(&app_handle, &agent_clone, &project_path, &command, args, &cwd, None);
                                 Ok(serde_json::json!({
                                     "success": true,
                                     "note": "Agent session will be launched by K2SO"
@@ -717,7 +758,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                                     .unwrap_or_else(|| "__lead__".to_string());
                                                 let wakeup_override = crate::commands::k2so_agents::default_heartbeat_wakeup_abs(&project_path, &primary);
                                                 if let Ok(launch) = crate::commands::k2so_agents::k2so_agents_build_launch(
-                                                    project_path.clone(), primary.clone(), None, wakeup_override, Some(true),
+                                                    project_path.clone(), primary.clone(), None, wakeup_override, Some(true), None,
                                                 ) {
                                                     let command = launch.get("command").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
                                                     let cwd = launch.get("cwd").and_then(|v| v.as_str()).unwrap_or(&project_path).to_string();
@@ -725,10 +766,10 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                                         .and_then(|v| v.as_array())
                                                         .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
                                                         .unwrap_or_default();
-                                                    let _ = spawn_wake_pty(&app_handle, &primary, &project_path, &command, args, &cwd);
+                                                    let _ = spawn_wake_pty(&app_handle, &primary, &project_path, &command, args, &cwd, None);
                                                 }
                                             } else if let Ok(launch) = crate::commands::k2so_agents::k2so_agents_build_launch(
-                                                project_path.clone(), agent_name.clone(), None, None, None,
+                                                project_path.clone(), agent_name.clone(), None, None, None, None,
                                             ) {
                                                 // Backend-direct spawn so wakes fire regardless of window state.
                                                 let command = launch.get("command").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
@@ -737,7 +778,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                                     .and_then(|v| v.as_array())
                                                     .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
                                                     .unwrap_or_default();
-                                                let _ = spawn_wake_pty(&app_handle, agent_name, &project_path, &command, args, &cwd);
+                                                let _ = spawn_wake_pty(&app_handle, agent_name, &project_path, &command, args, &cwd, None);
                                             }
                                         }
                                         serde_json::json!({"count": agents.len(), "launched": agents}).to_string()
@@ -1083,7 +1124,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                         .unwrap_or_else(|| "__lead__".to_string());
                                     let wakeup_override = crate::commands::k2so_agents::default_heartbeat_wakeup_abs(&project_path, &primary);
                                     if let Ok(launch) = crate::commands::k2so_agents::k2so_agents_build_launch(
-                                        project_path.clone(), primary.clone(), None, wakeup_override, Some(true),
+                                        project_path.clone(), primary.clone(), None, wakeup_override, Some(true), None,
                                     ) {
                                         let command = launch.get("command").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
                                         let cwd = launch.get("cwd").and_then(|v| v.as_str()).unwrap_or(&project_path).to_string();
@@ -1091,10 +1132,10 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                             .and_then(|v| v.as_array())
                                             .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
                                             .unwrap_or_default();
-                                        let _ = spawn_wake_pty(&app_handle, &primary, &project_path, &command, args, &cwd);
+                                        let _ = spawn_wake_pty(&app_handle, &primary, &project_path, &command, args, &cwd, None);
                                     }
                                 } else if let Ok(launch) = crate::commands::k2so_agents::k2so_agents_build_launch(
-                                    project_path.clone(), agent_name.clone(), None, None, None,
+                                    project_path.clone(), agent_name.clone(), None, None, None, None,
                                 ) {
                                     let command = launch.get("command").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
                                     let cwd = launch.get("cwd").and_then(|v| v.as_str()).unwrap_or(&project_path).to_string();
@@ -1102,7 +1143,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                         .and_then(|v| v.as_array())
                                         .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
                                         .unwrap_or_default();
-                                    let _ = spawn_wake_pty(&app_handle, agent_name, &project_path, &command, args, &cwd);
+                                    let _ = spawn_wake_pty(&app_handle, agent_name, &project_path, &command, args, &cwd, None);
                                 }
                             }
 
@@ -1128,6 +1169,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                     None,
                                     Some(cand.wakeup_path_abs.clone()),
                                     Some(true), // skip --fork-session (see forced-fire site)
+                                    Some(cand.name.clone()), // per-heartbeat session resume
                                 )
                                 .ok()
                                 .and_then(|launch| {
@@ -1144,6 +1186,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                         &command,
                                         args,
                                         &cwd,
+                                        Some(&cand.name), // per-heartbeat session resume
                                     ).ok().map(|tid| {
                                         dismiss_stale_session_dialog_async(app_handle.clone(), tid.clone());
                                         tid
@@ -1592,7 +1635,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                                 let session = crate::db::schema::AgentSession::get_by_agent(&conn, wpid, &wake_agent).ok().flatten();
                                                 let has_prior = session.as_ref().map(|s| s.session_id.is_some()).unwrap_or(false);
                                                 if let Ok(info) = crate::commands::k2so_agents::k2so_agents_build_launch(
-                                                    wp.clone(), wake_agent.clone(), None, None, None,
+                                                    wp.clone(), wake_agent.clone(), None, None, None, None,
                                                 ) {
                                                     // Backend-direct spawn — work-send wake fires regardless of window state.
                                                     let command = info.get("command").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
@@ -1601,7 +1644,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                                         .and_then(|v| v.as_array())
                                                         .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
                                                         .unwrap_or_default();
-                                                    let _ = spawn_wake_pty(&app_handle, &wake_agent, &wp, &command, args, &cwd);
+                                                    let _ = spawn_wake_pty(&app_handle, &wake_agent, &wp, &command, args, &cwd, None);
                                                     wake_status = if has_prior { "resumed".to_string() } else { "launched_fresh".to_string() };
                                                 }
                                             }

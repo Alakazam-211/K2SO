@@ -231,10 +231,16 @@ impl TerminalEventSink for NoOpTerminalEventSink {
 /// 3. `AgentHookEventSink` fires `HookEvent::CliTerminalSpawnBackground`
 ///    — lets any connected Tauri UI create a tab for the new PTY via
 ///    the daemon's /events WebSocket.
+// `heartbeat_name`: when Some, the wake is on behalf of a specific
+// scheduled heartbeat. The deferred session-id save additionally
+// writes to `agent_heartbeats.last_session_id` so the heartbeat keeps
+// its own dedicated chat thread separate from the agent's global
+// session. None = manual / awareness-bus / non-heartbeat wake.
 pub fn spawn_wake_headless(
     agent_name: &str,
     project_path: &str,
     wake_prompt: &str,
+    heartbeat_name: Option<&str>,
 ) -> Result<String, String> {
     let terminal_id = format!("wake-{}-{}", agent_name, uuid::Uuid::new_v4());
 
@@ -299,6 +305,7 @@ pub fn spawn_wake_headless(
     {
         let agent_name_owned = agent_name.to_string();
         let project_path_owned = project_path.to_string();
+        let heartbeat_name_owned = heartbeat_name.map(str::to_string);
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(5));
             if let Ok(Some(session_id)) =
@@ -307,6 +314,7 @@ pub fn spawn_wake_headless(
                 if session_id.is_empty() {
                     return;
                 }
+                // Layer 1: per-agent global session.
                 match crate::agents::session::k2so_agents_save_session_id(
                     project_path_owned.clone(),
                     agent_name_owned.clone(),
@@ -322,6 +330,28 @@ pub fn spawn_wake_headless(
                         agent_name_owned,
                         e
                     ),
+                }
+
+                // Layer 2: per-heartbeat (post-0.36.0). Each heartbeat
+                // fire keeps its own chat thread so users can audit
+                // each heartbeat independently from the Chat tab.
+                if let Some(ref hb_name) = heartbeat_name_owned {
+                    let db = crate::db::shared();
+                    let conn = db.lock();
+                    if let Some(project_id) = crate::agents::resolve_project_id(&conn, &project_path_owned) {
+                        match crate::db::schema::AgentHeartbeat::save_session_id(
+                            &conn, &project_id, hb_name, &session_id,
+                        ) {
+                            Ok(_) => crate::log_debug!(
+                                "[daemon/wake] saved heartbeat '{}' session id: {}",
+                                hb_name, session_id
+                            ),
+                            Err(e) => crate::log_debug!(
+                                "[daemon/wake] save heartbeat '{}' session id failed: {}",
+                                hb_name, e
+                            ),
+                        }
+                    }
                 }
             }
         });

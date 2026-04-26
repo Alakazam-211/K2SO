@@ -80,7 +80,8 @@ pub fn handle_scheduler_fire(project_path: &str) -> String {
                 None => continue, // agent-template: never wakes autonomously
             }
         };
-        let result = dispatch_wake(use_stream, agent_name, project_path, &prompt);
+        // Workspace-manager / non-multi-heartbeat path — no specific heartbeat row.
+        let result = dispatch_wake(use_stream, agent_name, project_path, &prompt, None);
         match result {
             Ok(_tid) => launched.push(agent_name.clone()),
             Err(e) => {
@@ -110,7 +111,17 @@ pub fn handle_scheduler_fire(project_path: &str) -> String {
             Some(p) => p,
             None => continue,
         };
-        let result = dispatch_wake(use_stream, &cand.agent_name, project_path, &prompt);
+        // Multi-heartbeat tick — pass the candidate's heartbeat name so
+        // the spawn helper saves to agent_heartbeats.last_session_id and
+        // the next tick resumes THIS heartbeat's chat thread (not the
+        // agent's global session).
+        let result = dispatch_wake(
+            use_stream,
+            &cand.agent_name,
+            project_path,
+            &prompt,
+            Some(&cand.name),
+        );
         match result {
             Ok(_tid) => {
                 heartbeat::stamp_heartbeat_fired(project_path, &cand.name);
@@ -146,10 +157,13 @@ fn dispatch_wake(
     agent_name: &str,
     project_path: &str,
     prompt: &str,
+    heartbeat_name: Option<&str>,
 ) -> Result<String, String> {
     if use_stream {
-        crate::agents_routes::spawn_wake_via_session_stream(agent_name, project_path, prompt)
+        crate::agents_routes::spawn_wake_via_session_stream(
+            agent_name, project_path, prompt, heartbeat_name,
+        )
     } else {
-        wake::spawn_wake_headless(agent_name, project_path, prompt)
+        wake::spawn_wake_headless(agent_name, project_path, prompt, heartbeat_name)
     }
 }

@@ -49,10 +49,17 @@ use crate::spawn::{spawn_agent_session_v2_blocking, SpawnAgentSessionRequest};
 ///      the new session.
 ///
 /// Returns the session id (as a String) on success.
+// `heartbeat_name`: when Some, the wake is on behalf of a specific
+// scheduled heartbeat. Per-heartbeat session save is currently
+// handled by the v2 session-stream itself (the saved session_id is
+// the v2 session UUID, not Claude's resume id), so this parameter
+// is reserved for symmetry with `spawn_wake_headless` and a future
+// hook that mirrors the per-heartbeat resume contract for v2 wakes.
 pub fn spawn_wake_via_session_stream(
     agent_name: &str,
     project_path: &str,
     wake_prompt: &str,
+    _heartbeat_name: Option<&str>,
 ) -> Result<String, String> {
     let args = vec![
         "--dangerously-skip-permissions".to_string(),
@@ -133,6 +140,7 @@ pub fn handle_agents_launch(
         cli_command,
         None,
         None,
+        None, // /cli/agents/launch is a manual launch — use the per-agent global session
     ) {
         Ok(v) => v,
         Err(e) => return CliResponse::bad_request(format!("build_launch failed: {e}")),
