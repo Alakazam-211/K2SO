@@ -1259,7 +1259,17 @@ function ProjectDetail({
       </SettingsGroup>
 
       {/* ── Group 2: Agent Settings — Mode tabs, Heartbeat, Agents list ── */}
-      {useSettingsStore.getState().agenticSystemsEnabled && <SettingsGroup title="Agent Settings (BETA)">
+      {useSettingsStore.getState().agenticSystemsEnabled && <SettingsGroup
+        title="Agent Settings"
+        badge={
+          <span
+            className="text-[8px] uppercase tracking-wider font-semibold px-1.5 py-0.5 bg-[var(--color-accent)]/15 text-[var(--color-accent)] rounded-sm"
+            title="Agentic systems are in beta — interface and behavior may change"
+          >
+            beta
+          </span>
+        }
+      >
         <div className="space-y-2">
           {/* Mode selector */}
           <div className="flex gap-1">

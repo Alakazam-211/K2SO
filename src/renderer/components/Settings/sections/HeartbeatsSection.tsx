@@ -834,7 +834,15 @@ export function HeartbeatsPanel({
     <div data-settings-id="heartbeats">
       <div className="flex items-center justify-between mb-2">
         <div>
-          <h3 className="text-xs font-medium text-[var(--color-text-primary)]">Heartbeats</h3>
+          <h3 className="text-xs font-medium text-[var(--color-text-primary)] flex items-center gap-2">
+            Heartbeats
+            <span
+              className="text-[8px] uppercase tracking-wider font-semibold px-1.5 py-0.5 bg-[var(--color-accent)]/15 text-[var(--color-accent)] rounded-sm"
+              title="This feature is in beta — interface and behavior may change"
+            >
+              beta
+            </span>
+          </h3>
           <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
             Scheduled wakeups for <span className="text-[var(--color-text-secondary)]">{agentModeLabel(agentMode, agentName)}</span>. Each fires on its own cadence with its own <span className="font-mono">WAKEUP.md</span>.
           </p>
@@ -861,7 +869,13 @@ export function HeartbeatsPanel({
             <div className="text-right pr-[28px]">Wakeup</div>
             <div></div>
           </div>
-          {rows.map((r) => {
+          {/* Disabled rows pinned to the bottom — they don't fire,
+              so the user's eye should land on the active ones first.
+              Stable sort preserves the existing alphabetical order
+              within each group. */}
+          {[...rows]
+            .sort((a, b) => Number(b.enabled) - Number(a.enabled))
+            .map((r) => {
             const isRenaming = renamingId === r.id
             return (
               <div

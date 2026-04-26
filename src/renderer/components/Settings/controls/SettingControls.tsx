@@ -28,15 +28,21 @@ export function SettingRow({
 
 export function SettingsGroup({
   title,
+  badge,
   children
 }: {
   title: string
+  /** Optional inline badge rendered next to the title — used for
+   *  `beta` / status tags. Stays opt-in so existing callers
+   *  (Workspace, Worktrees, Chat Migrations) render unchanged. */
+  badge?: React.ReactNode
   children: React.ReactNode
 }): React.JSX.Element {
   return (
     <div className="space-y-2">
-      <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
-        {title}
+      <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider flex items-center gap-2">
+        <span>{title}</span>
+        {badge}
       </h3>
       <div className="ml-2 pl-3 border-l-2 border-[var(--color-border)] space-y-1">
         {children}

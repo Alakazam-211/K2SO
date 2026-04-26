@@ -94,9 +94,18 @@ export function HeartbeatsPanel(): React.JSX.Element {
     return <></>
   }
 
-  const live = active.filter((e) => e.state === 'live')
-  const resumable = active.filter((e) => e.state === 'resumable')
-  const scheduled = active.filter((e) => e.state === 'scheduled')
+  // Within each section (Resumable / Scheduled / Live), pin disabled
+  // rows to the bottom — they don't fire on their own, so they're
+  // visually de-prioritized. Stable sort preserves the store's
+  // alphabetical order within each enabled / disabled group, and the
+  // section grouping still reflects the heartbeat's actual state
+  // (resumable stays resumable, just sorted last).
+  const sortedActive = [...active].sort(
+    (a, b) => Number(b.row.enabled) - Number(a.row.enabled),
+  )
+  const live = sortedActive.filter((e) => e.state === 'live')
+  const resumable = sortedActive.filter((e) => e.state === 'resumable')
+  const scheduled = sortedActive.filter((e) => e.state === 'scheduled')
   const showingForLoadedProject = loadedFor === projectPath
 
   const toggleArchived = (): void => {
@@ -136,6 +145,16 @@ export function HeartbeatsPanel(): React.JSX.Element {
           </svg>
           <IconHeartEKG className="w-3 h-3 text-[var(--color-accent)]" />
           Heartbeats
+          {/* Count badge — active (non-archived) only, matching the
+              Worktrees count next to the Worktrees header below.
+              Archived rows already live in their own collapsed
+              section inside the panel; counting them here would
+              inflate the visible "you have N heartbeats" cue. */}
+          {active.length > 0 && (
+            <span className="text-[9px] tabular-nums font-medium px-1 py-0.5 bg-white/5 text-[var(--color-text-muted)]">
+              {active.length}
+            </span>
+          )}
         </span>
         <span
           onClick={(e) => {
