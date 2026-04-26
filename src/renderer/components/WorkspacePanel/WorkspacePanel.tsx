@@ -125,11 +125,31 @@ export default function WorkspacePanel(): React.JSX.Element {
 
   const agentMode = activeProject?.agentMode || 'off'
   const isManagerMode = agentMode === 'manager' || agentMode === 'coordinator' || agentMode === 'pod'
-  // Primary agent for any mode: manager for manager mode, first agent for custom/k2so
+  // Primary agent for the workspace — match the resolution that
+  // ensurePinnedAgentTabForMode uses when wiring the Inbox/Chat
+  // tabs, so the WorkspacePanel header shows the same agent name
+  // those tabs render. Falling back to alphabetical agents[0] was
+  // wrong for `custom` workspaces that also keep a `k2so-agent`
+  // template alongside their custom agent (the alphabetically
+  // earlier `k2so-agent` would win, hiding the actual primary).
   const primaryAgent = useMemo(() => {
-    if (isManagerMode) return agents.find((a) => a.isCoordinator) ?? null
-    return agents.length > 0 ? agents[0] : null
-  }, [agents, isManagerMode])
+    if (isManagerMode) {
+      return (
+        agents.find((a) => a.isCoordinator)
+        ?? agents.find((a) => a.agentType === 'manager')
+        ?? agents.find((a) => a.agentType === 'coordinator')
+        ?? agents[0]
+        ?? null
+      )
+    }
+    if (agentMode === 'custom') {
+      return agents.find((a) => a.agentType === 'custom') ?? agents[0] ?? null
+    }
+    if (agentMode === 'agent') {
+      return agents.find((a) => a.agentType === 'k2so') ?? agents[0] ?? null
+    }
+    return agents[0] ?? null
+  }, [agents, agentMode, isManagerMode])
   const workspaces = activeProject?.workspaces ?? []
   // Filter to only worktree workspaces (not the main workspace)
   const worktrees = useMemo(() =>
