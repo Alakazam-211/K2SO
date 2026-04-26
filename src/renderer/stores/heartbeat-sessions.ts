@@ -101,15 +101,40 @@ function deriveState(
   return { state: 'scheduled', liveTerminalId: null }
 }
 
-async function resolvePrimaryAgent(projectPath: string): Promise<string | null> {
+/**
+ * Pick the workspace's primary agent. Same resolution the
+ * WorkspacePanel header uses so the live-state liveness check
+ * keys on the right agent. Without this, a `custom` workspace
+ * that also keeps a `k2so-agent` template alongside its custom
+ * agent would resolve to the alphabetically-first dir
+ * (`k2so-agent`) and miss the actual primary's wake- PTYs.
+ */
+export async function resolvePrimaryAgent(projectPath: string): Promise<string | null> {
   try {
     const list = await invoke<Array<{ name: string; isManager?: boolean; agentType?: string }>>(
       'k2so_agents_list',
       { projectPath },
     )
     if (list.length === 0) return null
-    const manager = list.find((a) => a.isManager || a.agentType === 'manager' || a.agentType === 'coordinator')
-    if (manager) return manager.name
+    // Read agentMode from the projects store (no IPC needed; already
+    // synced). Fall back to alphabetical first only when the store
+    // doesn't have the project — defensive, shouldn't happen in normal
+    // flows since refresh is only called for active workspaces.
+    const { useProjectsStore } = await import('@/stores/projects')
+    const project = useProjectsStore.getState().projects.find((p) => p.path === projectPath)
+    const agentMode = project?.agentMode ?? 'off'
+    if (agentMode === 'manager' || agentMode === 'coordinator' || agentMode === 'pod') {
+      return (
+        list.find((a) => a.isManager || a.agentType === 'manager' || a.agentType === 'coordinator')?.name
+        ?? list[0].name
+      )
+    }
+    if (agentMode === 'custom') {
+      return list.find((a) => a.agentType === 'custom')?.name ?? list[0].name
+    }
+    if (agentMode === 'agent') {
+      return list.find((a) => a.agentType === 'k2so')?.name ?? list[0].name
+    }
     return list[0].name
   } catch {
     return null

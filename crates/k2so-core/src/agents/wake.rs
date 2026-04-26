@@ -318,25 +318,30 @@ pub fn spawn_wake_headless(
                 if session_id.is_empty() {
                     return;
                 }
-                // Layer 1: per-agent global session.
-                match crate::agents::session::k2so_agents_save_session_id(
-                    project_path_owned.clone(),
-                    agent_name_owned.clone(),
-                    session_id.clone(),
-                ) {
-                    Ok(_) => crate::log_debug!(
-                        "[daemon/wake] saved session id for {}: {}",
-                        agent_name_owned,
-                        session_id
-                    ),
-                    Err(e) => crate::log_debug!(
-                        "[daemon/wake] save session id for {} failed: {}",
-                        agent_name_owned,
-                        e
-                    ),
+                // Heartbeat fires must NOT touch agent_sessions.session_id
+                // (the Chat tab's resume target). Each heartbeat's session
+                // is independent of the user's Chat tab — see the
+                // matching comment in src-tauri's spawn_wake_pty.
+                if heartbeat_name_owned.is_none() {
+                    match crate::agents::session::k2so_agents_save_session_id(
+                        project_path_owned.clone(),
+                        agent_name_owned.clone(),
+                        session_id.clone(),
+                    ) {
+                        Ok(_) => crate::log_debug!(
+                            "[daemon/wake] saved session id for {}: {}",
+                            agent_name_owned,
+                            session_id
+                        ),
+                        Err(e) => crate::log_debug!(
+                            "[daemon/wake] save session id for {} failed: {}",
+                            agent_name_owned,
+                            e
+                        ),
+                    }
                 }
 
-                // Layer 2: per-heartbeat (post-0.36.0). Each heartbeat
+                // Per-heartbeat save (post-0.36.0). Each heartbeat
                 // fire keeps its own chat thread so users can audit
                 // each heartbeat independently from the Chat tab.
                 if let Some(ref hb_name) = heartbeat_name_owned {

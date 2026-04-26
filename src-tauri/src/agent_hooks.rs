@@ -220,21 +220,30 @@ fn spawn_wake_pty(
         );
         if let Ok(Some(session_id)) = detected {
             if !session_id.is_empty() {
-                // Layer 1: per-agent global. Used by Chat tab + non-heartbeat
-                // wake paths.
-                if let Err(e) = crate::commands::k2so_agents::k2so_agents_save_session_id(
-                    project_path_owned.clone(),
-                    agent_name_owned.clone(),
-                    session_id.clone(),
-                ) {
-                    log_debug!("[agent-hooks] Failed to save session ID for {}: {}", agent_name_owned, e);
-                } else {
-                    log_debug!("[agent-hooks] Saved session ID for {}: {}", agent_name_owned, session_id);
+                // Heartbeat fires must NOT touch agent_sessions.session_id
+                // (the Chat tab's resume target). Each heartbeat's session
+                // is independent of the user's Chat tab — writing to both
+                // would have heartbeat fires overwrite the Chat tab's
+                // resume id, so the next chat-tab open would resume into
+                // the heartbeat's thread.
+                //
+                // Non-heartbeat wakes (manual launches, awareness-bus
+                // wakes) keep the per-agent-global save behavior.
+                if heartbeat_name_owned.is_none() {
+                    if let Err(e) = crate::commands::k2so_agents::k2so_agents_save_session_id(
+                        project_path_owned.clone(),
+                        agent_name_owned.clone(),
+                        session_id.clone(),
+                    ) {
+                        log_debug!("[agent-hooks] Failed to save session ID for {}: {}", agent_name_owned, e);
+                    } else {
+                        log_debug!("[agent-hooks] Saved session ID for {}: {}", agent_name_owned, session_id);
+                    }
                 }
 
-                // Layer 2: per-heartbeat (post-0.36.0). Each heartbeat
-                // fire keeps its own chat thread that resumes on the
-                // next tick, independent of the user's Chat tab.
+                // Per-heartbeat save (post-0.36.0). Each heartbeat fire
+                // keeps its own chat thread that resumes on the next
+                // tick, independent of the user's Chat tab.
                 if let Some(ref hb_name) = heartbeat_name_owned {
                     let db = crate::db::shared();
                     let conn = db.lock();

@@ -1134,24 +1134,18 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       return null
     }
 
-    // Resolve primary agent name (manager/k2so/custom) — the heartbeat
-    // attaches to whichever the workspace's primary agent is.
-    let agentName: string
-    try {
-      const list = await invoke<Array<{ name: string; isManager?: boolean; agentType?: string }>>(
-        'k2so_agents_list',
-        { projectPath },
-      )
-      if (list.length === 0) {
-        console.warn('[openHeartbeatTab] no agents in', projectPath)
-        return null
-      }
-      const manager = list.find((a) => a.isManager || a.agentType === 'manager' || a.agentType === 'coordinator')
-      agentName = manager?.name ?? list[0].name
-    } catch (err) {
-      console.warn('[openHeartbeatTab] agent list failed', err)
+    // Resolve primary agent via the heartbeat-sessions store helper —
+    // agentMode-aware resolution so a `custom` workspace that ALSO
+    // keeps a `k2so-agent` template alongside its custom agent
+    // doesn't pick the alphabetically-first dir (the template) and
+    // send build_launch hunting for a WAKEUP.md at the wrong path.
+    const { resolvePrimaryAgent } = await import('@/stores/heartbeat-sessions')
+    const resolved = await resolvePrimaryAgent(projectPath)
+    if (!resolved) {
+      console.warn('[openHeartbeatTab] no primary agent for', projectPath)
       return null
     }
+    const agentName: string = resolved
 
     const { heartbeatChatId } = await import('@/lib/terminal-id')
     const terminalId = options?.existingTerminalId ?? heartbeatChatId(project.id, agentName, heartbeatName)
