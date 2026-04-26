@@ -3,7 +3,6 @@ import { invoke } from '@tauri-apps/api/core'
 import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
 import { useSettingsStore } from '@/stores/settings'
-import { useActiveAgentsStore, type PaneStatus } from '@/stores/active-agents'
 import { showContextMenu } from '@/lib/context-menu'
 import WorktreeDialog from '@/components/Sidebar/WorktreeDialog'
 import { HeartbeatsPanel } from '@/components/HeartbeatsPanel/HeartbeatsPanel'
@@ -48,26 +47,8 @@ interface WorkItem {
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-function statusColor(status: PaneStatus): string {
-  switch (status) {
-    case 'working': return '#3b82f6'
-    case 'permission': return '#ef4444'
-    case 'review': return '#22c55e'
-    default: return '#6b7280'
-  }
-}
-
-function statusLabel(status: PaneStatus): string {
-  switch (status) {
-    case 'working': return 'Working'
-    case 'permission': return 'Needs Permission'
-    case 'review': return 'Review Ready'
-    default: return 'Idle'
-  }
-}
-
 const modeLabels: Record<string, string> = {
-  off: 'Off',
+  off: 'None',
   custom: 'Custom Agent',
   agent: 'K2SO Agent',
   manager: 'Workspace Manager',
@@ -95,9 +76,6 @@ export default function WorkspacePanel(): React.JSX.Element {
   }, []))
   const agenticEnabled = useSettingsStore((s) => s.agenticSystemsEnabled)
   const openAgentPane = useTabsStore((s) => s.openAgentPane)
-  const projectStatus = useActiveAgentsStore(useCallback((s) =>
-    activeProjectId ? s.getProjectStatus(activeProjectId) : 'idle' as PaneStatus
-  , [activeProjectId]))
 
   // Worktrees section collapse state, persisted per-workspace.
   // Default OPEN — worktrees are the action surface for review work,
@@ -173,32 +151,30 @@ export default function WorkspacePanel(): React.JSX.Element {
     <div className="h-full flex flex-col overflow-hidden">
       {/* ── Status ── */}
       <div className="px-3 py-3 border-b border-[var(--color-border)]">
-        {/* Agent name (no single global Launch — each heartbeat now gets
-            its own Launch button via force-fire). Clicking the name
-            activates the pinned system agent tab, same as before. */}
-        <div
-          className={`flex items-center gap-2 ${agentMode !== 'off' && primaryAgent ? 'cursor-pointer hover:opacity-80 transition-opacity' : ''}`}
-          onClick={() => {
-            if (agentMode !== 'off') {
-              useTabsStore.getState().activateSystemAgentTab()
-            }
-          }}
-        >
-          <span
-            className="w-2.5 h-2.5 flex-shrink-0"
-            style={{ backgroundColor: statusColor(projectStatus) }}
-          />
-          <span className="text-xs font-medium text-[var(--color-text-primary)] font-mono truncate">
-            {agentMode === 'off'
-              ? modeLabels[agentMode]
-              : primaryAgent?.name ?? modeLabels[agentMode] ?? agentMode}
+        {/* Workspace identity — two static labels. The colored
+            status indicator + click-to-activate-agent-tab affordance
+            were retired when per-heartbeat session indicators arrived;
+            users now click individual heartbeat rows below to
+            launch / resume their sessions, so the agent name no
+            longer needs to be interactive at the workspace level. */}
+        <div className="flex items-baseline gap-2">
+          <span className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] flex-shrink-0">
+            Workspace Type
           </span>
-          {agentMode !== 'off' && projectStatus !== 'idle' && (
-            <span className="text-[9px] text-[var(--color-text-muted)] ml-auto">
-              {statusLabel(projectStatus)}
-            </span>
-          )}
+          <span className="text-xs text-[var(--color-text-primary)] truncate">
+            {modeLabels[agentMode] ?? 'None'}
+          </span>
         </div>
+        {agentMode !== 'off' && (
+          <div className="flex items-baseline gap-2 mt-1">
+            <span className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] flex-shrink-0">
+              Agent Name
+            </span>
+            <span className="text-xs font-mono text-[var(--color-text-primary)] truncate">
+              {primaryAgent?.name ?? '—'}
+            </span>
+          </div>
+        )}
 
         {/* Work summary — inbox / delegated / review */}
         {agentMode !== 'off' && (() => {
