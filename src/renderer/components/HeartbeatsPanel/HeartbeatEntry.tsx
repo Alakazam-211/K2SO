@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { type HeartbeatEntry } from '@/stores/heartbeat-sessions'
 import { useTabsStore } from '@/stores/tabs'
@@ -33,6 +33,18 @@ export function HeartbeatEntryRow({
 }): React.JSX.Element {
   const openHeartbeatTab = useTabsStore((s) => s.openHeartbeatTab)
   const [busy, setBusy] = useState(false)
+
+  // 1Hz re-render so the "Next run: in Xs" countdown ticks smoothly.
+  // describeNextRun reads `new Date()` on every render and the
+  // computation is cheap (one JSON.parse + arithmetic), so doing this
+  // once a second per row is well within the per-frame budget. The
+  // useState bump is intentionally discarded — we only need the
+  // re-render side effect.
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1000)
+    return () => clearInterval(id)
+  }, [])
 
   const handleClick = (): void => {
     if (!projectPath) {
@@ -114,46 +126,57 @@ export function HeartbeatEntryRow({
     }
   }
 
+  const nextRun = entry.row.enabled && entry.state !== 'archived'
+    ? describeNextRun(entry.row.frequency, entry.row.specJson, entry.row.lastFired)
+    : null
+
   return (
     <div
       role="button"
       tabIndex={0}
       onClick={handleClick}
       onKeyDown={handleKey}
-      className="w-full px-1 py-1 flex items-center gap-2 text-left hover:bg-white/[0.04] cursor-pointer no-drag transition-colors focus:outline-none focus:bg-white/[0.04]"
+      className="w-full px-1 py-1 flex flex-col text-left hover:bg-white/[0.04] cursor-pointer no-drag transition-colors focus:outline-none focus:bg-white/[0.04]"
       title={`${entry.row.name} — ${entry.state}${entry.row.enabled ? '' : ' (disabled)'}`}
     >
-      <span className="flex-shrink-0">
-        {indicatorFor(entry)}
-      </span>
-      <span
-        className={`text-[11px] font-mono truncate flex-shrink-0 ${
-          entry.state === 'archived'
-            ? 'text-[var(--color-text-muted)] line-through'
-            : entry.row.enabled
-              ? 'text-[var(--color-text-primary)]'
-              : 'text-[var(--color-text-muted)]'
-        }`}
-      >
-        {entry.row.name}
-      </span>
-      <span className="text-[9px] text-[var(--color-text-muted)] truncate flex-1">
-        {entry.row.enabled ? describeSpec(entry.row.frequency, entry.row.specJson) : 'Disabled'}
-      </span>
-      <button
-        onClick={handleLaunch}
-        disabled={busy || archivedOrDisabled}
-        title={
-          entry.state === 'archived'
-            ? 'Restore from archive before launching'
-            : !entry.row.enabled
-              ? 'Enable this heartbeat before launching'
-              : 'Force-fire this heartbeat now'
-        }
-        className="px-2 py-0.5 text-[9px] font-medium text-white bg-[var(--color-accent)] hover:opacity-90 transition-opacity no-drag cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
-      >
-        {busy ? '…' : 'Launch'}
-      </button>
+      <div className="flex items-center gap-2">
+        <span className="flex-shrink-0">
+          {indicatorFor(entry)}
+        </span>
+        <span
+          className={`text-[11px] font-mono truncate flex-shrink-0 ${
+            entry.state === 'archived'
+              ? 'text-[var(--color-text-muted)] line-through'
+              : entry.row.enabled
+                ? 'text-[var(--color-text-primary)]'
+                : 'text-[var(--color-text-muted)]'
+          }`}
+        >
+          {entry.row.name}
+        </span>
+        <span className="text-[9px] text-[var(--color-text-muted)] truncate flex-1">
+          {entry.row.enabled ? describeSpec(entry.row.frequency, entry.row.specJson) : 'Disabled'}
+        </span>
+        <button
+          onClick={handleLaunch}
+          disabled={busy || archivedOrDisabled}
+          title={
+            entry.state === 'archived'
+              ? 'Restore from archive before launching'
+              : !entry.row.enabled
+                ? 'Enable this heartbeat before launching'
+                : 'Force-fire this heartbeat now'
+          }
+          className="px-2 py-0.5 text-[9px] font-medium text-white bg-[var(--color-accent)] hover:opacity-90 transition-opacity no-drag cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
+        >
+          {busy ? '…' : 'Launch'}
+        </button>
+      </div>
+      {nextRun && (
+        <div className="text-[9px] text-[var(--color-text-muted)] truncate pl-4 pt-0.5">
+          Next run: {nextRun}
+        </div>
+      )}
     </div>
   )
 }
@@ -242,6 +265,147 @@ function stripFrontmatter(content: string): string {
   const end = content.slice(3).indexOf('---')
   if (end < 0) return content.trim()
   return content.slice(3 + end + 3).trim()
+}
+
+/**
+ * Compute and format the next scheduled fire time for a heartbeat.
+ *
+ * Mirrors the daemon's schedule resolution in `crates/k2so-core/src/scheduler.rs`
+ * — keeping the two in lockstep matters because the user expects the
+ * "Next run" hint to match what cron actually does. We accept the same
+ * frequency-mode aliasing the daemon does (daily/weekly/monthly/yearly
+ * → scheduled).
+ *
+ * Returns a compact human label like:
+ *   - "in 1m 47s"           (hourly, sub-minute precision near 0)
+ *   - "Today 9 AM"          (scheduled, today still in window)
+ *   - "Tomorrow 9 AM"       (scheduled, today already fired or past)
+ *   - "Mon 9 AM"            (weekly, in the next 7 days)
+ *   - "Apr 27 9 AM"         (further out)
+ */
+function describeNextRun(
+  frequency: string,
+  specJson: string,
+  lastFired: string | null,
+): string | null {
+  let v: {
+    frequency?: string
+    time?: string
+    days?: string[]
+    days_of_month?: number[]
+    months?: string[]
+    every_seconds?: number
+    start?: string
+    end?: string
+  } = {}
+  try {
+    v = JSON.parse(specJson)
+  } catch {
+    return null
+  }
+  const mode = v.frequency ?? frequency
+  const now = new Date()
+
+  // Hourly with every_seconds — relative time until next fire.
+  if (mode === 'hourly') {
+    const everySecs = v.every_seconds ?? 3600
+    const last = lastFired ? new Date(lastFired) : null
+    const nextAt = last
+      ? new Date(last.getTime() + everySecs * 1000)
+      : now
+    const deltaSec = Math.max(0, Math.round((nextAt.getTime() - now.getTime()) / 1000))
+    if (deltaSec === 0) return 'now'
+    if (deltaSec < 60) return `in ${deltaSec}s`
+    const m = Math.floor(deltaSec / 60)
+    const s = deltaSec % 60
+    return s === 0 ? `in ${m}m` : `in ${m}m ${s}s`
+  }
+
+  // scheduled / daily / weekly / monthly / yearly — find next occurrence.
+  const time = v.time ?? '09:00'
+  const [hStr, mStr] = time.split(':')
+  const hour = parseInt(hStr, 10)
+  const minute = parseInt(mStr ?? '0', 10)
+  if (isNaN(hour) || isNaN(minute)) return null
+
+  const lastDate = lastFired ? new Date(lastFired) : null
+  const firedToday = lastDate
+    ? isSameLocalDay(lastDate, now)
+    : false
+
+  // Build a candidate "today at HH:MM" and see if it's still in the future.
+  const todayAtTime = new Date(now)
+  todayAtTime.setHours(hour, minute, 0, 0)
+
+  // Look up to 366 days ahead for a matching day.
+  for (let offset = 0; offset < 366; offset++) {
+    const candidate = new Date(todayAtTime)
+    candidate.setDate(todayAtTime.getDate() + offset)
+
+    // If today, skip if we've already fired today or the time has passed.
+    if (offset === 0) {
+      if (firedToday) continue
+      if (candidate.getTime() <= now.getTime()) continue
+    }
+
+    if (!matchesScheduleDay(mode, candidate, v)) continue
+
+    return formatNextLabel(candidate, now)
+  }
+
+  return null
+}
+
+function isSameLocalDay(a: Date, b: Date): boolean {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  )
+}
+
+function matchesScheduleDay(
+  mode: string,
+  candidate: Date,
+  spec: { days?: string[]; days_of_month?: number[]; months?: string[] },
+): boolean {
+  const dowShort = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'][candidate.getDay()]
+  const monthShort = [
+    'jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec',
+  ][candidate.getMonth()]
+
+  if (mode === 'daily' || mode === 'scheduled') return true
+  if (mode === 'weekly') {
+    const days = spec.days ?? []
+    return days.length === 0 || days.includes(dowShort)
+  }
+  if (mode === 'monthly') {
+    const dom = spec.days_of_month ?? []
+    return dom.length === 0 || dom.includes(candidate.getDate())
+  }
+  if (mode === 'yearly') {
+    const months = spec.months ?? []
+    return months.length === 0 || months.includes(monthShort)
+  }
+  return false
+}
+
+/** Format the next-run label relative to `now`.
+ *  Today/Tomorrow/<weekday> within 7 days, absolute date otherwise. */
+function formatNextLabel(when: Date, now: Date): string {
+  const time = fmt12h(`${when.getHours().toString().padStart(2, '0')}:${when.getMinutes().toString().padStart(2, '0')}`)
+  if (isSameLocalDay(when, now)) return `Today ${time}`
+  const tomorrow = new Date(now)
+  tomorrow.setDate(now.getDate() + 1)
+  if (isSameLocalDay(when, tomorrow)) return `Tomorrow ${time}`
+  // Within a week → weekday name. Beyond → MMM DD.
+  const daysAhead = Math.round((when.getTime() - now.getTime()) / (24 * 60 * 60 * 1000))
+  if (daysAhead < 7) {
+    const dow = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][when.getDay()]
+    return `${dow} ${time}`
+  }
+  const month = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][when.getMonth()]
+  return `${month} ${when.getDate()} ${time}`
 }
 
 /** Convert "HH:MM" → "h AM/PM" (minute elided when 00 to keep the

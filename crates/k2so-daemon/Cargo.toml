@@ -58,6 +58,11 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # tokio-tungstenite's async message loop.
 futures-util = "0.3"
 
+# UUIDs — pre-allocated for `claude --session-id` pinning so each
+# heartbeat fire owns a deterministic, unique session id from spawn
+# time (closes the concurrent-fires-share-session race).
+uuid = { version = "1", features = ["v4"] }
+
 [dev-dependencies]
 # Enable k2so-core's `test-util` feature for integration tests that
 # need the in-memory DB helper (`db::init_for_tests`). Production

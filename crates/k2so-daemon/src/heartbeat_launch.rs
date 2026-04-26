@@ -141,19 +141,44 @@ fn resolve_row(
 }
 
 fn find_live_for_resume(session_id: &str) -> Option<(String, session_lookup::LiveSession)> {
-    // Walk every live session in the daemon's two maps; match the one
-    // whose args contain `--resume <session_id>`. This is the
-    // post-A9 way to ask "is the user already viewing this session?"
-    // — the args are persisted on DaemonPtyConfig at spawn time.
+    // Walk every live session in the daemon's two maps; collect every
+    // PTY whose args claim ownership of this session_id via either:
+    //
+    //   --session-id <uuid>   pinned at spawn time (fresh fire path,
+    //                         post-P6 default — eliminates the
+    //                         deferred-save race)
+    //   --resume <uuid>       attached on a resume_and_fire branch,
+    //                         on the user's tab, or any subsequent
+    //                         interactive resume
+    //
+    // Multiple PTYs CAN match (e.g. user opens a tab on a session
+    // that was just resumed by cron, or has multiple tabs). When that
+    // happens we prefer `tab-*` agent names — those are tabs the user
+    // is actively watching in the UI — over `__lead__` / agent-named
+    // sessions, which are daemon-internal PTYs the user never sees.
+    // Without this preference, inject writes into a hidden PTY and
+    // the user wonders where their wakeup went.
+    let mut matches: Vec<(String, session_lookup::LiveSession)> = Vec::new();
     for (agent, live) in session_lookup::snapshot_all() {
         let args = live.args();
-        if let Some(idx) = args.iter().position(|a| a == "--resume") {
-            if args.get(idx + 1).map(|s| s.as_str()) == Some(session_id) {
-                return Some((agent, live));
+        let mut i = 0;
+        let mut found = false;
+        while i + 1 < args.len() {
+            if (args[i] == "--session-id" || args[i] == "--resume")
+                && args[i + 1] == session_id
+            {
+                found = true;
+                break;
             }
+            i += 1;
+        }
+        if found {
+            matches.push((agent, live));
         }
     }
-    None
+    // Stable sort: tab-* first (rank 0), everything else (rank 1).
+    matches.sort_by_key(|(agent, _)| if agent.starts_with("tab-") { 0 } else { 1 });
+    matches.into_iter().next()
 }
 
 fn run_fresh_fire(
@@ -270,13 +295,17 @@ fn run_resume_and_fire(
         return error_value("error", "failed to compose wake prompt", &hb.name);
     };
 
-    // Spawn a fresh PTY but with --resume so Claude rejoins the saved
-    // conversation, plus --append-system-prompt for the wakeup body.
+    // Resume + --print: rejoin the saved conversation, deliver the
+    // wakeup as the next user turn, claude responds + exits. PTY is
+    // ephemeral so it doesn't accumulate stale entries in the daemon
+    // session map. The user's tab (if/when they open one) becomes
+    // the canonical long-lived view via openHeartbeatTab's interactive
+    // --resume.
     let args = vec![
         "--dangerously-skip-permissions".to_string(),
+        "--print".to_string(),
         "--resume".to_string(),
         session_id.to_string(),
-        "--append-system-prompt".to_string(),
         prompt,
     ];
 

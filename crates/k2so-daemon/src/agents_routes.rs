@@ -61,9 +61,22 @@ pub fn spawn_wake_via_session_stream(
     wake_prompt: &str,
     heartbeat_name: Option<&str>,
 ) -> Result<String, String> {
+    // Pre-allocate Claude's session id (P6 fix). Without this, two
+    // concurrent fires in the same project root attach to the same
+    // claude session via implicit "continue most recent" behavior,
+    // and both heartbeat rows end up stamped with the same id.
+    // Pinning at spawn time gives each fire a deterministic, unique
+    // session — see matching comment in `wake::spawn_wake_headless`.
+    let pinned_session_id = uuid::Uuid::new_v4().to_string();
+
+    // --print so claude delivers + exits (no lingering daemon PTY
+    // that competes with the user's tab in find_live_for_resume).
+    // See longer rationale in wake::spawn_wake_headless.
     let args = vec![
         "--dangerously-skip-permissions".to_string(),
-        "--append-system-prompt".to_string(),
+        "--print".to_string(),
+        "--session-id".to_string(),
+        pinned_session_id.clone(),
         wake_prompt.to_string(),
     ];
     let outcome = spawn_agent_session_v2_blocking(SpawnAgentSessionRequest {
@@ -81,6 +94,19 @@ pub fn spawn_wake_via_session_stream(
         Some(outcome.session_id.to_string()),
         Some("system".to_string()),
     );
+
+    // Synchronous per-heartbeat session stamp.
+    if let Some(hb_name) = heartbeat_name {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        if let Some(project_id) =
+            k2so_core::agents::resolve_project_id(&conn, project_path)
+        {
+            let _ = k2so_core::db::schema::AgentHeartbeat::save_session_id(
+                &conn, &project_id, hb_name, &pinned_session_id,
+            );
+        }
+    }
 
     emit(
         HookEvent::CliTerminalSpawnBackground,

@@ -114,22 +114,15 @@ pub fn default_heartbeat_wakeup_abs(
 }
 
 /// Pure composer for the Workspace Manager wake prompt. Given an
-/// optional raw wakeup body (as read from disk), produces the full
-/// wake message — frontmatter stripped, fallback to
+/// optional raw wakeup body (as read from disk), returns the body
+/// itself — frontmatter stripped, fallback to
 /// [`WAKEUP_TEMPLATE_WORKSPACE`] if the body is empty or missing.
+/// No "K2SO Heartbeat Wake" preamble — the wakeup.md is the message.
 pub fn compose_manager_wake_from_body(raw_body: Option<&str>) -> String {
-    let wakeup_body = raw_body
+    raw_body
         .map(|s| strip_frontmatter(s).trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| WAKEUP_TEMPLATE_WORKSPACE.trim().to_string());
-    format!(
-        "# K2SO Heartbeat Wake — Workspace Manager\n\n\
-         The heartbeat scheduler woke you because new work has arrived in the \
-         workspace inbox. Your wake-up instructions are below; follow them \
-         and exit when done.\n\n\
-         ----\n\n{}",
-        wakeup_body
-    )
+        .unwrap_or_else(|| WAKEUP_TEMPLATE_WORKSPACE.trim().to_string())
 }
 
 /// Compose the `--append-system-prompt` text for `__lead__` at wake
@@ -142,18 +135,19 @@ pub fn compose_wake_prompt_for_lead(project_path: &str) -> String {
 }
 
 /// Pure composer for a regular-agent wake prompt. Given the raw
-/// wakeup body string (already read from disk), produces the full
-/// wake message. Returns `None` when the input is `None`, matching
-/// the "no wake for agent-template" semantic.
+/// wakeup body string (already read from disk), returns the body
+/// itself — frontmatter stripped, no boilerplate prefix added.
+///
+/// Earlier versions wrapped the body in a "# K2SO Heartbeat Wake /
+/// The heartbeat scheduler woke you..." preamble; this got
+/// surfaced inside Claude's chat panel and felt like noise from
+/// the user's perspective. The wakeup.md author already knows
+/// they're writing the wake instructions — they don't need K2SO
+/// re-explaining the context to them. Returns `None` when input
+/// is `None`, matching the "no wake for agent-template" semantic.
 pub fn compose_agent_wake_from_body(raw_body: Option<&str>) -> Option<String> {
     let body = raw_body?;
-    Some(format!(
-        "# K2SO Heartbeat Wake\n\n\
-         The heartbeat scheduler woke you. Your wake-up instructions are below; \
-         follow them and exit when done.\n\n\
-         ----\n\n{}",
-        body.trim()
-    ))
+    Some(strip_frontmatter(body))
 }
 
 /// Compose the `--append-system-prompt` text for a regular agent
@@ -244,9 +238,39 @@ pub fn spawn_wake_headless(
 ) -> Result<String, String> {
     let terminal_id = format!("wake-{}-{}", agent_name, uuid::Uuid::new_v4());
 
+    // Pre-allocate the Claude session UUID and pin it via
+    // `--session-id`. Without this, two concurrent claude invocations
+    // in the same project root attach to whichever session Claude
+    // considers most recent — the deferred-save thread then stamps
+    // both heartbeat rows with the same id (proven in production:
+    // TestingK2SO fast-test + triage at 22:50/22:51 both got
+    // f13453c8). Pinning the UUID at spawn time means each spawn
+    // owns a distinct session id deterministically; we stamp the
+    // row immediately, no race window, no async lookup heuristic.
+    let pinned_session_id = uuid::Uuid::new_v4().to_string();
+
+    // Daemon-spawned wakes use `--print` so claude delivers its
+    // response and EXITS. Without this, every fresh fire leaves a
+    // long-lived interactive claude PTY in the daemon's session
+    // map, and cron's `find_live_for_resume` returns *that* ghost
+    // PTY instead of the tab the user is watching — wakes go to a
+    // hidden background process instead of the visible session.
+    //
+    // With --print:
+    //   - Claude reads the positional prompt (the wakeup body)
+    //   - Responds, persists the session jsonl (so --resume works)
+    //   - Exits cleanly, PTY removed from session map
+    //   - Next fire's find_live_for_resume sees only the user's tab
+    //     (if open) and injects there, or spawns another short-lived
+    //     -p claude (if no tab) — never a stale daemon PTY.
+    //
+    // Session persistence is on by default with --print (see
+    // claude --help: --no-session-persistence is the OPPOSITE flag).
     let args = vec![
         "--dangerously-skip-permissions".to_string(),
-        "--append-system-prompt".to_string(),
+        "--print".to_string(),
+        "--session-id".to_string(),
+        pinned_session_id.clone(),
         wake_prompt.to_string(),
     ];
 
@@ -282,6 +306,25 @@ pub fn spawn_wake_headless(
         Some(terminal_id.clone()),
         Some("system".to_string()),
     );
+
+    // Synchronous per-heartbeat session stamp. With --session-id
+    // pinning above, we know exactly what session id Claude will
+    // use, so we can write it to agent_heartbeats.last_session_id
+    // immediately — no need to wait for the deferred-save thread to
+    // poll claude history, no race between concurrent fires.
+    if let Some(hb_name) = heartbeat_name {
+        let db = crate::db::shared();
+        let conn = db.lock();
+        if let Some(project_id) = crate::agents::resolve_project_id(&conn, project_path) {
+            let _ = crate::db::schema::AgentHeartbeat::save_session_id(
+                &conn, &project_id, hb_name, &pinned_session_id,
+            );
+        }
+        crate::log_debug!(
+            "[daemon/wake] pinned heartbeat '{}' session id: {}",
+            hb_name, pinned_session_id
+        );
+    }
 
     // Tell any connected UI. Wire format matches what the existing
     // src-tauri spawn_wake_pty emits so the React frontend's listener
@@ -324,16 +367,17 @@ pub fn spawn_wake_headless(
             // each other. For non-heartbeat (Chat-tab) wakes the
             // legacy "newest session" semantics still apply — there
             // is no concurrency contention there.
-            let detected = if heartbeat_name_owned.is_some() {
-                crate::chat_history::detect_claude_session_near(
-                    &project_path_owned,
-                    spawn_ms,
-                )
-            } else {
-                crate::chat_history::detect_active_session("claude", &project_path_owned)
-                    .ok()
-                    .flatten()
-            };
+            // Heartbeat fires now stamp last_session_id synchronously
+            // at spawn time via --session-id pinning, so the deferred
+            // poll is only needed for non-heartbeat (Chat-tab) wakes.
+            if heartbeat_name_owned.is_some() {
+                return;
+            }
+            let detected = crate::chat_history::detect_active_session(
+                "claude", &project_path_owned,
+            )
+            .ok()
+            .flatten();
             if let Some(session_id) = detected {
                 if session_id.is_empty() {
                     return;
