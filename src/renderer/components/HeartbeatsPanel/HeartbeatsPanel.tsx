@@ -99,13 +99,13 @@ export function HeartbeatsPanel(): React.JSX.Element | null {
           {/* Active sections — render in display priority order so live work
               sits at the top of the panel where it's most visible. */}
           {live.length > 0 && (
-            <Section title="Live" entries={live} />
+            <Section title="Live" entries={live} projectPath={projectPath ?? ''} />
           )}
           {resumable.length > 0 && (
-            <Section title="Resumable" entries={resumable} />
+            <Section title="Resumable" entries={resumable} projectPath={projectPath ?? ''} />
           )}
           {scheduled.length > 0 && (
-            <Section title="Scheduled" entries={scheduled} />
+            <Section title="Scheduled" entries={scheduled} projectPath={projectPath ?? ''} />
           )}
           {/* Archived section — collapsed by default, stays on disk for
               auditability of retired heartbeats. */}
@@ -144,7 +144,15 @@ export function HeartbeatsPanel(): React.JSX.Element | null {
   )
 }
 
-function Section({ title, entries }: { title: string; entries: HeartbeatEntry[] }): React.JSX.Element {
+function Section({
+  title,
+  entries,
+  projectPath,
+}: {
+  title: string
+  entries: HeartbeatEntry[]
+  projectPath: string
+}): React.JSX.Element {
   return (
     <div>
       <div className="px-3 py-1 text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">
@@ -152,7 +160,7 @@ function Section({ title, entries }: { title: string; entries: HeartbeatEntry[] 
       </div>
       <div className="space-y-0.5">
         {entries.map((entry) => (
-          <HeartbeatEntryRow key={entry.row.id} entry={entry} projectPath="" />
+          <HeartbeatEntryRow key={entry.row.id} entry={entry} projectPath={projectPath} />
         ))}
       </div>
     </div>

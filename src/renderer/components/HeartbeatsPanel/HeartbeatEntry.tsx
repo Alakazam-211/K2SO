@@ -1,4 +1,5 @@
 import { type HeartbeatEntry } from '@/stores/heartbeat-sessions'
+import { useTabsStore } from '@/stores/tabs'
 
 /**
  * One row in the sidebar Heartbeats panel.
@@ -22,21 +23,28 @@ import { type HeartbeatEntry } from '@/stores/heartbeat-sessions'
  */
 export function HeartbeatEntryRow({
   entry,
-  projectPath: _projectPath,
+  projectPath,
 }: {
   entry: HeartbeatEntry
   projectPath: string
 }): React.JSX.Element {
+  const openHeartbeatTab = useTabsStore((s) => s.openHeartbeatTab)
+
   const handleClick = (): void => {
-    // P3.3 wires openHeartbeatTab here. Until then, log so a developer
-    // testing the sidebar in dev mode sees that clicks are recognised
-    // even though navigation isn't connected yet.
-    console.info(
-      '[heartbeats-panel] click stub:',
-      entry.row.name,
-      entry.state,
-      entry.liveTerminalId,
-    )
+    if (!projectPath) {
+      console.warn('[heartbeats-panel] click ignored — projectPath missing')
+      return
+    }
+    // The store handles all four states:
+    //  - live      : focus existing tab via existingTerminalId match
+    //  - resumable : build_launch reads agent_heartbeats.last_session_id
+    //  - scheduled : build_launch finds no resume target, spawns fresh
+    //  - archived  : build_launch resumes if the saved session still exists
+    openHeartbeatTab(projectPath, entry.row.name, {
+      existingTerminalId: entry.liveTerminalId ?? undefined,
+    }).catch((err) => {
+      console.warn('[heartbeats-panel] openHeartbeatTab failed:', err)
+    })
   }
 
   return (
