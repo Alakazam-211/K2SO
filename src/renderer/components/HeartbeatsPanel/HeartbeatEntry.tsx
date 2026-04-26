@@ -51,24 +51,131 @@ export function HeartbeatEntryRow({
     })
   }
 
+  const openHeartbeatTab = useTabsStore((s) => s.openHeartbeatTab)
+
   const handleLaunch = useCallback(async (e: React.MouseEvent) => {
-    // Stop the row click from also firing — Launch is its own action
-    // (force-fire) distinct from "open the chat tab".
+    // Stop the row click from also firing — Launch is its own action.
     e.stopPropagation()
     if (busy || !projectPath) return
     setBusy(true)
+    const toast = useToastStore.getState()
     try {
-      await invoke<string>('k2so_heartbeat_force_fire', {
-        projectPath,
-        name: entry.row.name,
-      })
-      useToastStore.getState().addToast(`Fired heartbeat "${entry.row.name}"`, 'success', 2500)
+      // Step 1 — saved session?
+      if (!entry.row.lastSessionId) {
+        // No saved session yet — first fire. Goes through the
+        // existing spawn path which composes WAKEUP.md as
+        // --append-system-prompt and saves the new session id back
+        // to agent_heartbeats.last_session_id once Claude writes
+        // the JSONL.
+        await invoke<string>('k2so_heartbeat_force_fire', {
+          projectPath,
+          name: entry.row.name,
+        })
+        toast.addToast(`Fired heartbeat "${entry.row.name}"`, 'success', 2500)
+        return
+      }
+
+      const sessionId = entry.row.lastSessionId
+
+      // Read WAKEUP.md body (frontmatter stripped). Same content the
+      // first-fire path injects via --append-system-prompt; here we
+      // send it as user input into the running session.
+      let wakeupBody = ''
+      try {
+        const wakeupAbs = `${projectPath}/${entry.row.wakeupPath}`
+        const result = await invoke<{ content: string }>('fs_read_file', { path: wakeupAbs })
+        wakeupBody = stripFrontmatter(result.content).trim()
+      } catch (err) {
+        toast.addToast(`Failed to read WAKEUP.md: ${String(err)}`, 'error', 4000)
+        return
+      }
+      if (!wakeupBody) {
+        toast.addToast(`WAKEUP.md is empty for "${entry.row.name}"`, 'error', 4000)
+        return
+      }
+
+      // Step 2 — find running tab for this session_id.
+      const tabsStore = useTabsStore.getState()
+      let runningTabId: string | null = null
+      let runningTerminalId: string | null = null
+      for (const t of tabsStore.tabs) {
+        for (const [, pg] of t.paneGroups) {
+          for (const item of pg.items) {
+            if (item.type !== 'terminal') continue
+            const td = item.data as { command?: string; args?: string[]; terminalId: string }
+            if (td.command === 'claude' && td.args?.includes(sessionId)) {
+              runningTabId = t.id
+              runningTerminalId = td.terminalId
+              break
+            }
+          }
+          if (runningTabId) break
+        }
+        if (runningTabId) break
+      }
+
+      if (runningTabId && runningTerminalId) {
+        const exists = await invoke<boolean>('terminal_exists', { id: runningTerminalId })
+        if (exists) {
+          // Direct inject — paste body, then send Enter after a
+          // brief delay so the paste settles. Same two-phase write
+          // pattern the awareness-bus wake injection uses.
+          await invoke('terminal_write', { id: runningTerminalId, data: wakeupBody })
+          setTimeout(() => {
+            invoke('terminal_write', { id: runningTerminalId, data: '\r' }).catch(() => {})
+          }, 150)
+          tabsStore.setActiveTab(runningTabId)
+          toast.addToast(`Sent wakeup to "${entry.row.name}"`, 'success', 2500)
+          return
+        }
+      }
+
+      // Resume + inject. Open the tab via the same flow click-on-row
+      // uses, then wait for the PTY to settle and write the wakeup.
+      const newTabId = await openHeartbeatTab(projectPath, entry.row.name)
+      if (!newTabId) {
+        toast.addToast(`Couldn't open session for "${entry.row.name}"`, 'error', 4000)
+        return
+      }
+      // Find the terminal id for the just-opened tab.
+      const opened = useTabsStore.getState().tabs.find((t) => t.id === newTabId)
+      const newTermId = opened
+        ? (() => {
+            for (const [, pg] of opened.paneGroups) {
+              const item = pg.items[0]
+              if (item?.type === 'terminal') {
+                return (item.data as { terminalId: string }).terminalId
+              }
+            }
+            return null
+          })()
+        : null
+      if (!newTermId) {
+        toast.addToast(`Resumed "${entry.row.name}" but couldn't inject wakeup`, 'warning', 4000)
+        return
+      }
+      // Claude needs a few seconds to come up + render its prompt
+      // before it accepts pasted input. 3s mirrors the
+      // chat_history_detect_active_session post-spawn delay used
+      // elsewhere when waiting for the JSONL to land.
+      setTimeout(() => {
+        invoke('terminal_write', { id: newTermId, data: wakeupBody })
+          .then(() => {
+            setTimeout(() => {
+              invoke('terminal_write', { id: newTermId, data: '\r' }).catch(() => {})
+            }, 150)
+          })
+          .catch((err) => {
+            console.warn('[heartbeat-launch] post-spawn inject failed:', err)
+          })
+      }, 3000)
+      toast.addToast(`Resumed + queued wakeup for "${entry.row.name}"`, 'success', 2500)
     } catch (err) {
-      useToastStore.getState().addToast(`Launch failed: ${String(err)}`, 'error', 4000)
+      toast.addToast(`Launch failed: ${String(err)}`, 'error', 4000)
     } finally {
       setBusy(false)
     }
-  }, [busy, projectPath, entry.row.name])
+  }, [busy, projectPath, entry.row.name, entry.row.lastSessionId, entry.row.wakeupPath, openHeartbeatTab])
 
   const archivedOrDisabled = entry.state === 'archived' || !entry.row.enabled
 
@@ -202,6 +309,17 @@ function describeSpec(frequency: string, specJson: string): string {
     return `Every ${mins}m`
   }
   return freq
+}
+
+/** Strip a leading YAML frontmatter block (if any) from a markdown
+ *  body. Mirrors wake.rs::strip_frontmatter so the wakeup body the
+ *  Launch button pastes into a running session is the same content
+ *  scheduled fires send via --append-system-prompt. */
+function stripFrontmatter(content: string): string {
+  if (!content.startsWith('---')) return content.trim()
+  const end = content.slice(3).indexOf('---')
+  if (end < 0) return content.trim()
+  return content.slice(3 + end + 3).trim()
 }
 
 /** Convert "HH:MM" → "h AM/PM" (minute elided when 00 to keep the
