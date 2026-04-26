@@ -145,6 +145,13 @@ export interface FileViewerItemData {
 export interface AgentItemData {
   agentName: string
   projectPath: string
+  /** Which section of the agent UI this pinned tab renders.
+   *  'inbox' = work-queue kanban; 'chat' = persistent Claude chat.
+   *  Pre-0.36.0 a single AgentPane held both as sub-tabs; the split
+   *  promotes them to two top-level pinned tabs. Optional for
+   *  backwards-compat with pre-split serialized rows (defaults to
+   *  'inbox' on restore so existing tabs land on the work board). */
+  section?: 'inbox' | 'chat'
 }
 
 export interface Item {
@@ -184,7 +191,7 @@ export interface MarkdownPaneData {
   filePath: string
 }
 
-export type PaneData = TerminalPaneData | FileViewerPaneData | { type: 'agent'; agentName: string; projectPath: string }
+export type PaneData = TerminalPaneData | FileViewerPaneData | { type: 'agent'; agentName: string; projectPath: string; section?: 'inbox' | 'chat' }
 
 // Keep backward-compat alias
 export type TerminalPane = TerminalPaneData
@@ -204,6 +211,10 @@ export interface SerializedItem {
   cursorPos?: number   // file-viewer cursor offset (for session restore)
   agentName?: string
   projectPath?: string
+  /** Which section the system-pinned agent tab renders.
+   *  See AgentItemData.section for semantics. Defaults to 'inbox'
+   *  on deserialize when missing (legacy layouts). */
+  section?: 'inbox' | 'chat'
   /** Phase 4.5+ renderer choice stamped when the tab was first
    *  spawned. Preserved across app restarts so Kessel tabs come back
    *  as Kessel tabs. Missing on rows serialized before the field
@@ -356,7 +367,7 @@ interface TabsState {
   // Pinned system agent tab
   /** Ensure a pinned agent tab exists for this workspace. Creates one if missing.
    *  Returns the tab ID. No-op if tab already exists. */
-  ensureSystemAgentTab: (agentName: string, projectPath: string, title: string) => string
+  ensureSystemAgentTabs: (agentName: string, projectPath: string, title: string) => string
   /** Remove the pinned system agent tab (when agent mode is turned off). */
   removeSystemAgentTab: () => void
   /** Activate the pinned system agent tab (switches to it). */
@@ -418,7 +429,7 @@ export function ensurePinnedAgentTabForMode(
       // Fall back to __lead__ if agent list fails
     }
 
-    tabsStore.ensureSystemAgentTab(agentName, projectPath, title)
+    tabsStore.ensureSystemAgentTabs(agentName, projectPath, title)
   }, 0)
 }
 
@@ -448,6 +459,7 @@ function serializeTab(tab: Tab): SerializedTab {
           type: 'agent' as const,
           agentName: d.agentName,
           projectPath: d.projectPath,
+          section: d.section,
         }
       } else {
         const d = item.data as FileViewerItemData
@@ -684,6 +696,7 @@ export function paneGroupToActivePaneData(pg: PaneGroup): PaneData {
       type: 'agent',
       agentName: d.agentName,
       projectPath: d.projectPath,
+      section: d.section,
     }
   } else {
     const d = item.data as FileViewerItemData
@@ -1097,36 +1110,68 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tabId }))
   },
 
-  ensureSystemAgentTab: (agentName: string, projectPath: string, title: string) => {
+  ensureSystemAgentTabs: (agentName: string, projectPath: string, _title: string) => {
     const state = get()
 
-    // Already exists? Return its ID
-    const existing = state.tabs.find((t) => t.isSystemAgent)
-    if (existing) return existing.id
+    // The split landed in 0.36.0: each agent gets up to two pinned tabs
+    // (Inbox + Chat). Workspace-board mode (`__workspace__`) is the
+    // exception — it has no chat surface, just the kanban — so we
+    // create only the Inbox tab in that case.
+    const isWorkspaceBoard = agentName === '__workspace__'
 
-    // Create pinned agent tab at position 0
-    const tabId = crypto.randomUUID()
-    const pgId = crypto.randomUUID()
-    const agentItem: Item = {
-      id: crypto.randomUUID(),
-      type: 'agent',
-      data: { agentName, projectPath },
+    const existingTabs = state.tabs.filter((t) => t.isSystemAgent)
+    const existingSections = new Set<string>()
+    for (const t of existingTabs) {
+      const item = Array.from(t.paneGroups.values())[0]?.items[0]
+      if (item?.type === 'agent') {
+        const d = item.data as AgentItemData
+        existingSections.add(d.section ?? 'inbox')
+      }
     }
-    const pg: PaneGroup = {
-      id: pgId,
-      items: [agentItem],
-      activeItemIndex: 0,
+
+    const wantSections: Array<'inbox' | 'chat'> = isWorkspaceBoard
+      ? ['inbox']
+      : ['inbox', 'chat']
+
+    const newTabs: Tab[] = []
+    let firstTabId: string | null = null
+    for (const section of wantSections) {
+      if (existingSections.has(section)) continue
+      const tabId = crypto.randomUUID()
+      if (!firstTabId) firstTabId = tabId
+      const pgId = crypto.randomUUID()
+      const agentItem: Item = {
+        id: crypto.randomUUID(),
+        type: 'agent',
+        data: { agentName, projectPath, section },
+      }
+      const pg: PaneGroup = {
+        id: pgId,
+        items: [agentItem],
+        activeItemIndex: 0,
+      }
+      // Inbox uses the workspace-board label when in board mode, otherwise
+      // the section name. Chat tab title is always "Chat".
+      const tabTitle = section === 'chat'
+        ? 'Chat'
+        : isWorkspaceBoard ? 'Work Board' : 'Inbox'
+      newTabs.push({
+        id: tabId,
+        title: tabTitle,
+        mosaicTree: pgId,
+        paneGroups: new Map([[pgId, pg]]),
+        isSystemAgent: true,
+      })
     }
-    const tab: Tab = {
-      id: tabId,
-      title: title,
-      mosaicTree: pgId,
-      paneGroups: new Map([[pgId, pg]]),
-      isSystemAgent: true,
+
+    if (newTabs.length === 0) {
+      // All pinned tabs already exist; return the first existing one.
+      return existingTabs[0]?.id ?? ''
     }
-    // Insert at position 0 (pinned to left)
-    set((s) => ({ tabs: [tab, ...s.tabs] }))
-    return tabId
+
+    // Insert pinned tabs at position 0 (Inbox first, Chat second).
+    set((s) => ({ tabs: [...newTabs, ...s.tabs] }))
+    return firstTabId ?? newTabs[0].id
   },
 
   removeSystemAgentTab: () => {
@@ -1832,7 +1877,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
             return {
               id: crypto.randomUUID(),
               type: 'agent' as const,
-              data: { agentName: si.agentName ?? '', projectPath: si.projectPath ?? cwd },
+              data: { agentName: si.agentName ?? '', projectPath: si.projectPath ?? cwd, section: si.section ?? 'inbox' },
             }
           } else {
             return {

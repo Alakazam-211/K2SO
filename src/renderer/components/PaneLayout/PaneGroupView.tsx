@@ -268,6 +268,7 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
                 <AgentPane
                   agentName={ad.agentName}
                   projectPath={ad.projectPath}
+                  section={ad.section}
                   onClose={() => handleClose(item.id)}
                 />
               )
