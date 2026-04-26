@@ -4,13 +4,15 @@ import {
   useHeartbeatSessionsStore,
   type HeartbeatEntry,
 } from '@/stores/heartbeat-sessions'
-import { IconHeartEKG } from '@/components/icons/IconHeartEKG'
 import { HeartbeatEntryRow } from './HeartbeatEntry'
 
 /**
- * Sidebar Heartbeats panel — workspace-scoped audit surface for
- * scheduled heartbeat chat sessions. Drawer-swappable (P3.3 wires the
- * left/right placement); for v1 lives in the right rail.
+ * Heartbeats drawer tab — workspace-scoped audit surface for scheduled
+ * heartbeat chat sessions. Mounted as a `PanelTab` value 'heartbeats'
+ * in `usePanelsStore`; renders inside `<TabbedPanel>` on either left
+ * or right rail (right by default; user can swap via right-click →
+ * Move to Other Panel). The drawer's tab strip provides the
+ * "Heartbeats" label so the panel itself doesn't repeat it.
  *
  * Sections:
  *   - Live      : PTY currently running (braille spinner indicator)
@@ -18,10 +20,10 @@ import { HeartbeatEntryRow } from './HeartbeatEntry'
  *   - Scheduled : configured but never fired (hollow dot)
  *   - Archived  : collapsed by default, persisted per-workspace
  *
- * Hidden entirely when the active workspace has no agent enabled —
- * the panel only renders when the audit surface is meaningful.
+ * Empty / off-mode state shows guidance text rather than disappearing
+ * entirely — the user opened this drawer tab on purpose.
  */
-export function HeartbeatsPanel(): React.JSX.Element | null {
+export function HeartbeatsPanel(): React.JSX.Element {
   const projects = useProjectsStore((s) => s.projects)
   const activeProjectId = useProjectsStore((s) => s.activeProjectId)
   const project = useMemo(
@@ -67,7 +69,28 @@ export function HeartbeatsPanel(): React.JSX.Element | null {
     setArchivedOpen(localStorage.getItem(archivedKey) === 'open')
   }, [archivedKey])
 
-  if (!project || agentMode === 'off') return null
+  // Off / no-project state — the drawer was opened on purpose, so
+  // explain instead of rendering nothing.
+  if (!project) {
+    return (
+      <div className="h-full overflow-y-auto px-3 py-3">
+        <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed">
+          Select a workspace to see its heartbeat sessions.
+        </p>
+      </div>
+    )
+  }
+  if (agentMode === 'off') {
+    return (
+      <div className="h-full overflow-y-auto px-3 py-3">
+        <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed">
+          This workspace has no agent enabled. Set an agent mode in
+          <span className="font-semibold"> Settings → Workspace</span> to
+          schedule heartbeats.
+        </p>
+      </div>
+    )
+  }
 
   const live = active.filter((e) => e.state === 'live')
   const resumable = active.filter((e) => e.state === 'resumable')
@@ -81,14 +104,7 @@ export function HeartbeatsPanel(): React.JSX.Element | null {
   }
 
   return (
-    <div className="border-t border-[var(--color-border)] py-2">
-      <div className="flex items-center gap-2 px-3 mb-2">
-        <IconHeartEKG className="w-3.5 h-3.5 text-[var(--color-accent)]" />
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-          Heartbeats
-        </span>
-      </div>
-
+    <div className="h-full overflow-y-auto py-2">
       {!showingForLoadedProject ? (
         <div className="px-3 py-2 text-[10px] text-[var(--color-text-muted)]">Loading…</div>
       ) : lastError ? (

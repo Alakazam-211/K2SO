@@ -20,7 +20,6 @@ import ProjectAvatar from './ProjectAvatar'
 import SectionItem from './SectionItem'
 import FocusGroupDropdown from './FocusGroupDropdown'
 import ActiveBar from './ActiveBar'
-import { HeartbeatsPanel } from '@/components/HeartbeatsPanel/HeartbeatsPanel'
 import { KeyCombo } from '@/components/KeySymbol'
 
 // ── Nav-visible worktrees (DB-backed via workspace.navVisible field) ─────────
@@ -1169,12 +1168,6 @@ export default function Sidebar(): React.JSX.Element {
 
       {/* Active workspaces dock */}
       <ActiveBar />
-
-      {/* Heartbeats panel — workspace-scoped audit surface for scheduled
-          chat sessions. Hidden when the active workspace has no agent.
-          Drawer-swappable left/right comes in a follow-up; for v1 lives
-          in the existing left sidebar like ActiveBar. */}
-      <HeartbeatsPanel />
 
       {/* Workspace limit warning */}
       {!focusGroupsEnabled && projects.length >= 15 && (
