@@ -49,14 +49,21 @@ export function HeartbeatsPanel(): React.JSX.Element | null {
     return () => clearInterval(t)
   }, [projectPath, agentMode, refresh, clear])
 
-  const archivedKey = projectPath ? `heartbeats.archive-collapsed.${project?.id}` : null
+  // Per-workspace localStorage key for the Archived section's collapse
+  // state. Strictly tied to project.id (not path or undefined) so the
+  // user's "I always collapse archived for project X" preference
+  // survives workspace switches.
+  const archivedKey = project ? `heartbeats.archive-collapsed.${project.id}` : null
   const [archivedOpen, setArchivedOpen] = useState<boolean>(() => {
     if (!archivedKey) return false
     return localStorage.getItem(archivedKey) === 'open'
   })
-  // Persist + reset when workspace changes.
+  // Reset to the new workspace's persisted value on switch.
   useEffect(() => {
-    if (!archivedKey) return
+    if (!archivedKey) {
+      setArchivedOpen(false)
+      return
+    }
     setArchivedOpen(localStorage.getItem(archivedKey) === 'open')
   }, [archivedKey])
 
