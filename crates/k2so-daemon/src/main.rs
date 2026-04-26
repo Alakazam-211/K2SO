@@ -788,6 +788,33 @@ fn handle_cli_heartbeat(
         }
         "/cli/heartbeat/list" => hb::k2so_heartbeat_list(project_path.to_string())
             .map(|rows| serde_json::to_string(&rows).unwrap_or_default()),
+        "/cli/heartbeat/list-archived" => {
+            hb::k2so_heartbeat_list_archived(project_path.to_string())
+                .map(|rows| serde_json::to_string(&rows).unwrap_or_default())
+        }
+        "/cli/heartbeat/archive" => {
+            let name = params.get("name").cloned().unwrap_or_default();
+            if name.is_empty() {
+                return Err("Missing 'name' parameter".to_string());
+            }
+            hb::k2so_heartbeat_archive(project_path.to_string(), name)
+                .map(|_| r#"{"success":true}"#.to_string())
+        }
+        "/cli/heartbeat/unarchive" => {
+            let name = params.get("name").cloned().unwrap_or_default();
+            if name.is_empty() {
+                return Err("Missing 'name' parameter".to_string());
+            }
+            hb::k2so_heartbeat_unarchive(project_path.to_string(), name)
+                .map(|_| r#"{"success":true}"#.to_string())
+        }
+        "/cli/heartbeat/fire" => {
+            // Manual single-heartbeat fire — does NOT consult schedule
+            // window. Stamps an audit row regardless of outcome so
+            // `k2so heartbeat status <name>` shows the manual fire.
+            let name = params.get("name").cloned().unwrap_or_default();
+            Ok(crate::triage::handle_heartbeat_fire(project_path, &name))
+        }
         "/cli/heartbeat/remove" => {
             let name = params.get("name").cloned().unwrap_or_default();
             if name.is_empty() {

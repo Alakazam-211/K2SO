@@ -148,6 +148,160 @@ pub fn handle_scheduler_fire(project_path: &str) -> String {
     .to_string()
 }
 
+/// Manually fire a single heartbeat by name (the CLI's
+/// `k2so heartbeat fire <name>`). Unlike the scheduler tick this
+/// does NOT consult the schedule window — if the row is enabled
+/// and not archived, it spawns. Locked agents are skipped (matches
+/// the scheduler's contract: never double-spawn).
+///
+/// Returns a JSON string the CLI can parse: `{success, decision,
+/// reason?, terminalId?, agent?, name}` — same shape as the
+/// audit row decisions so `k2so heartbeat status` and a fired
+/// `k2so heartbeat fire` print consistent feedback.
+pub fn handle_heartbeat_fire(project_path: &str, name: &str) -> String {
+    use k2so_core::agents::resolve_project_id;
+    use k2so_core::db::schema::{AgentHeartbeat, HeartbeatFire};
+
+    if name.is_empty() {
+        return serde_json::json!({
+            "success": false,
+            "decision": "error",
+            "reason": "missing 'name' parameter",
+        }).to_string();
+    }
+
+    // Look up the row + validate.
+    let (hb, agent_name, project_id) = {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        let Some(project_id) = resolve_project_id(&conn, project_path) else {
+            return serde_json::json!({
+                "success": false,
+                "decision": "error",
+                "reason": format!("project not found: {project_path}"),
+                "name": name,
+            }).to_string();
+        };
+        let Some(hb) = AgentHeartbeat::get_by_name(&conn, &project_id, name).ok().flatten() else {
+            return serde_json::json!({
+                "success": false,
+                "decision": "error",
+                "reason": format!("no heartbeat named '{name}'"),
+                "name": name,
+            }).to_string();
+        };
+        if hb.archived_at.is_some() {
+            return serde_json::json!({
+                "success": false,
+                "decision": "skipped_archived",
+                "reason": format!("heartbeat '{name}' is archived"),
+                "name": name,
+            }).to_string();
+        }
+        let Some(agent_name) = k2so_core::agents::find_primary_agent(project_path) else {
+            return serde_json::json!({
+                "success": false,
+                "decision": "error",
+                "reason": "no scheduleable agent in this workspace",
+                "name": name,
+            }).to_string();
+        };
+        (hb, agent_name, project_id)
+    };
+
+    // Lock check (single-flight: refuse to double-spawn against an agent
+    // that's already running). Stamps an audit row so the user sees
+    // why nothing happened.
+    if scheduler::is_agent_locked(project_path, &agent_name) {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        let _ = HeartbeatFire::insert_with_schedule(
+            &conn, &project_id, Some(&agent_name), Some(&hb.name),
+            &hb.frequency, "skipped_locked",
+            Some("manual fire refused: agent already running"),
+            None, None, None,
+        );
+        return serde_json::json!({
+            "success": false,
+            "decision": "skipped_locked",
+            "reason": format!("agent '{agent_name}' is already running"),
+            "name": name,
+            "agent": agent_name,
+        }).to_string();
+    }
+
+    // Read the heartbeat's WAKEUP.md (workspace-relative path).
+    let wakeup_abs = std::path::Path::new(project_path).join(&hb.wakeup_path);
+    if !wakeup_abs.exists() {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        let _ = HeartbeatFire::insert_with_schedule(
+            &conn, &project_id, Some(&agent_name), Some(&hb.name),
+            &hb.frequency, "wakeup_file_missing",
+            Some(&format!("manual fire failed: {} not found", hb.wakeup_path)),
+            None, None, None,
+        );
+        return serde_json::json!({
+            "success": false,
+            "decision": "wakeup_file_missing",
+            "reason": format!("WAKEUP.md missing at {}", hb.wakeup_path),
+            "name": name,
+            "agent": agent_name,
+        }).to_string();
+    }
+
+    let Some(prompt) = wake::compose_wake_prompt_from_path(&wakeup_abs) else {
+        return serde_json::json!({
+            "success": false,
+            "decision": "error",
+            "reason": "failed to compose wake prompt",
+            "name": name,
+            "agent": agent_name,
+        }).to_string();
+    };
+
+    // Spawn via the same path the scheduler tick uses, threading
+    // heartbeat_name so post-spawn save targets agent_heartbeats.last_session_id.
+    let use_stream = settings::get_use_session_stream(project_path);
+    match dispatch_wake(use_stream, &agent_name, project_path, &prompt, Some(&hb.name)) {
+        Ok(terminal_id) => {
+            heartbeat::stamp_heartbeat_fired(project_path, &hb.name);
+            let db = k2so_core::db::shared();
+            let conn = db.lock();
+            let _ = HeartbeatFire::insert_with_schedule(
+                &conn, &project_id, Some(&agent_name), Some(&hb.name),
+                &hb.frequency, "fired",
+                Some("manual fire via CLI"),
+                None, None, None,
+            );
+            serde_json::json!({
+                "success": true,
+                "decision": "fired",
+                "name": name,
+                "agent": agent_name,
+                "terminalId": terminal_id,
+            }).to_string()
+        }
+        Err(e) => {
+            let db = k2so_core::db::shared();
+            let conn = db.lock();
+            let _ = HeartbeatFire::insert_with_schedule(
+                &conn, &project_id, Some(&agent_name), Some(&hb.name),
+                &hb.frequency, "error",
+                Some(&format!("manual fire spawn failed: {e}")),
+                None, None, None,
+            );
+            serde_json::json!({
+                "success": false,
+                "decision": "error",
+                "reason": format!("spawn failed: {e}"),
+                "name": name,
+                "agent": agent_name,
+            }).to_string()
+        }
+    }
+}
+
 /// Choose the spawn path based on the project's
 /// `use_session_stream` flag. Exposed for callers (like tests)
 /// that want to exercise one branch explicitly without a DB

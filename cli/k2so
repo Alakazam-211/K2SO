@@ -687,14 +687,102 @@ except Exception as e:
 }
 
 cmd_heartbeat_remove() {
+    local name=""
+    local purge=false
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --purge) purge=true; shift ;;
+            -*) shift ;;
+            *) [ -z "$name" ] && name="$1"; shift ;;
+        esac
+    done
+    [ -z "$name" ] && { echo "Usage: k2so heartbeat remove <name> [--purge]" >&2; exit 1; }
+
+    if $purge; then
+        cli_request "/cli/heartbeat/remove" "name=$(urlencode "$name")" | NAME="$name" python3 -c "
+import json, os, sys
+try:
+    d = json.loads(sys.stdin.read())
+    n = os.environ['NAME']
+    if d.get('success'): print(f'Purged heartbeat: {n} (row deleted, folder removed)')
+    else: print(f'Error: {d.get(\"error\", \"unknown\")}', file=sys.stderr); sys.exit(1)
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr); sys.exit(1)
+"
+    else
+        # Default: soft-archive (matches Settings UI's Archive button).
+        # Stops firing on schedule, hidden from `heartbeat list`, but
+        # the WAKEUP.md and chat history stay readable via
+        # `heartbeat list-archived` and the sidebar's Archived section.
+        cli_request "/cli/heartbeat/archive" "name=$(urlencode "$name")" | NAME="$name" python3 -c "
+import json, os, sys
+try:
+    d = json.loads(sys.stdin.read())
+    n = os.environ['NAME']
+    if d.get('success'): print(f'Archived heartbeat: {n}')
+    else: print(f'Error: {d.get(\"error\", \"unknown\")}', file=sys.stderr); sys.exit(1)
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr); sys.exit(1)
+"
+    fi
+}
+
+cmd_heartbeat_unarchive() {
     local name="${1:-}"
-    [ -z "$name" ] && { echo "Usage: k2so heartbeat remove <name>" >&2; exit 1; }
-    cli_request "/cli/heartbeat/remove" "name=$(urlencode "$name")" | python3 -c "
+    [ -z "$name" ] && { echo "Usage: k2so heartbeat unarchive <name>" >&2; exit 1; }
+    cli_request "/cli/heartbeat/unarchive" "name=$(urlencode "$name")" | NAME="$name" python3 -c "
+import json, os, sys
+try:
+    d = json.loads(sys.stdin.read())
+    n = os.environ['NAME']
+    if d.get('success'): print(f'Unarchived heartbeat: {n}')
+    else: print(f'Error: {d.get(\"error\", \"unknown\")}', file=sys.stderr); sys.exit(1)
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr); sys.exit(1)
+"
+}
+
+cmd_heartbeat_list_archived() {
+    cli_request "/cli/heartbeat/list-archived" | python3 -c "
+import json, sys
+try:
+    rows = json.loads(sys.stdin.read())
+    if not rows:
+        print('No archived heartbeats in this workspace.'); sys.exit(0)
+    print(f'{\"NAME\":<20} {\"FREQ\":<10} {\"ARCHIVED\":<22} {\"LAST FIRED\":<22}')
+    for r in rows:
+        archived = (r.get('archivedAt') or '')[:19].replace('T',' ') or '—'
+        last = (r.get('lastFired') or '')[:19].replace('T',' ') or '—'
+        print(f'{r.get(\"name\",\"?\"):<20} {r.get(\"frequency\",\"?\"):<10} {archived:<22} {last:<22}')
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr); sys.exit(1)
+"
+}
+
+# Manually fire one specific heartbeat (skips the schedule window
+# but respects the agent lock so this never double-spawns).
+cmd_heartbeat_fire() {
+    local name="${1:-}"
+    [ -z "$name" ] && { echo "Usage: k2so heartbeat fire <name>" >&2; exit 1; }
+    cli_request "/cli/heartbeat/fire" "name=$(urlencode "$name")" | python3 -c "
 import json, sys
 try:
     d = json.loads(sys.stdin.read())
-    if d.get('success'): print(f'Removed heartbeat: $name')
-    else: print(f'Error: {d.get(\"error\", \"unknown\")}', file=sys.stderr); sys.exit(1)
+    decision = d.get('decision', '?')
+    name = d.get('name', '?')
+    agent = d.get('agent', '?')
+    if d.get('success'):
+        tid = d.get('terminalId', '?')
+        print(f'Fired heartbeat: {name} (agent: {agent})')
+        print(f'  terminal: {tid}')
+        print(f'  audit:    decision=fired (manual fire via CLI)')
+    else:
+        reason = d.get('reason', 'unknown')
+        print(f'Did not fire \"{name}\": {decision}', file=sys.stderr)
+        print(f'  reason: {reason}', file=sys.stderr)
+        sys.exit(1)
+except SystemExit:
+    raise
 except Exception as e:
     print(f'Error: {e}', file=sys.stderr); sys.exit(1)
 "
@@ -2757,10 +2845,17 @@ for completeness. See `k2so help` for the curated general list.
 ════════════════════════════════════════════════════════════════
   heartbeat add --name <n> <spec>        Create a named heartbeat
     --daily|--weekly|--monthly|--yearly|--hourly plus --time, --days, etc.
-  heartbeat list                         Table of heartbeats.
+  heartbeat list                         Table of active heartbeats.
+  heartbeat list-archived                Soft-archived rows (chat history kept).
   heartbeat show <n>                     Single heartbeat details [--json].
   heartbeat edit <n> <spec>              Change schedule.
-  heartbeat remove <n>                   Delete heartbeat + folder.
+  heartbeat fire <n>                     Manually fire one heartbeat now.
+                                         Skips schedule window; respects agent lock.
+  heartbeat archive <n>                  Soft-archive (alias of remove without --purge).
+                                         Stops firing; chat stays auditable.
+  heartbeat unarchive <n>                Restore from archive.
+  heartbeat remove <n> [--purge]         Soft-archive (default) or hard-delete (--purge).
+                                         --purge removes the row + WAKEUP.md folder.
   heartbeat rename <old> <new>           Rename folder + DB row.
   heartbeat enable <n>|disable <n>       Resume/pause scheduling.
   heartbeat status <n> [-n N]            Recent fire history.
@@ -3042,19 +3137,23 @@ case "${1:-help}" in
         ;;
     heartbeat)
         case "${2:-}" in
-            wake)    shift 2; cmd_heartbeat_wake "$@" ;;
-            log)     shift 2; cmd_heartbeat_log "$@" ;;
-            add)     shift 2; cmd_heartbeat_add "$@" ;;
-            list)    shift 2; cmd_heartbeat_list "$@" ;;
-            remove)  shift 2; cmd_heartbeat_remove "$@" ;;
-            enable)  shift 2; cmd_heartbeat_enable_disable true "$@" ;;
-            disable) shift 2; cmd_heartbeat_enable_disable false "$@" ;;
-            rename)  shift 2; cmd_heartbeat_rename "$@" ;;
-            edit)    shift 2; cmd_heartbeat_edit "$@" ;;
-            show)    shift 2; cmd_heartbeat_show "$@" ;;
-            wakeup)  shift 2; cmd_heartbeat_wakeup "$@" ;;
-            status)  shift 2; cmd_heartbeat_status "$@" ;;
-            *)       shift; cmd_heartbeat_toggle "$@" ;;
+            wake)           shift 2; cmd_heartbeat_wake "$@" ;;
+            log)            shift 2; cmd_heartbeat_log "$@" ;;
+            add)            shift 2; cmd_heartbeat_add "$@" ;;
+            list)           shift 2; cmd_heartbeat_list "$@" ;;
+            list-archived)  shift 2; cmd_heartbeat_list_archived "$@" ;;
+            archive)        shift 2; cmd_heartbeat_remove "$@" ;;     # alias — soft-archive default
+            unarchive)      shift 2; cmd_heartbeat_unarchive "$@" ;;
+            remove)         shift 2; cmd_heartbeat_remove "$@" ;;
+            fire)           shift 2; cmd_heartbeat_fire "$@" ;;
+            enable)         shift 2; cmd_heartbeat_enable_disable true "$@" ;;
+            disable)        shift 2; cmd_heartbeat_enable_disable false "$@" ;;
+            rename)         shift 2; cmd_heartbeat_rename "$@" ;;
+            edit)           shift 2; cmd_heartbeat_edit "$@" ;;
+            show)           shift 2; cmd_heartbeat_show "$@" ;;
+            wakeup)         shift 2; cmd_heartbeat_wakeup "$@" ;;
+            status)         shift 2; cmd_heartbeat_status "$@" ;;
+            *)              shift; cmd_heartbeat_toggle "$@" ;;
         esac
         ;;
     hooks)
