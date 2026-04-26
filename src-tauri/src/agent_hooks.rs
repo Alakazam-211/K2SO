@@ -1528,22 +1528,31 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                 // Wake chain (only if --wake flag set)
                                 let mut wake_status = "inbox_only".to_string();
                                 if wake {
-                                    // Determine which agent to wake and in which project
-                                    let wake_project_path = if let Some(ref tpid) = to_project_id {
-                                        conn.query_row(
-                                            "SELECT path FROM projects WHERE id = ?1",
-                                            rusqlite::params![tpid],
-                                            |row| row.get::<_, String>(0),
-                                        ).ok()
-                                    } else {
-                                        Some(project_path.to_string())
-                                    };
+                                    // Determine which agent to wake and in which project.
+                                    // Resolve both path and id together so the terminal id can
+                                    // be project-namespaced (post-0.36.0 format) — without
+                                    // project_id we'd fall back to the legacy collision-prone
+                                    // form `agent-chat-<agent>`.
+                                    let (wake_project_path, wake_project_id): (Option<String>, Option<String>) =
+                                        if let Some(ref tpid) = to_project_id {
+                                            let path = conn.query_row(
+                                                "SELECT path FROM projects WHERE id = ?1",
+                                                rusqlite::params![tpid],
+                                                |row| row.get::<_, String>(0),
+                                            ).ok();
+                                            (path, Some(tpid.clone()))
+                                        } else {
+                                            (Some(project_path.to_string()), Some(project_id.clone()))
+                                        };
 
                                     // Resolve the agent name to wake — for :inbox targets, wake the manager (__lead__)
                                     let wake_agent = to_agent_name.clone().unwrap_or_else(|| "__lead__".to_string());
 
                                     if let Some(ref wp) = wake_project_path {
-                                        let terminal_id = format!("agent-chat-{}", wake_agent);
+                                        let terminal_id = match wake_project_id.as_deref() {
+                                            Some(pid) => k2so_core::agents::terminal_id::agent_chat_id(pid, &wake_agent),
+                                            None => format!("agent-chat-{}", wake_agent),
+                                        };
 
                                         // Step 1: Try direct PTY injection — send the message inline
                                         use tauri::Manager;
@@ -1577,10 +1586,8 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                         if injected {
                                             wake_status = "injected".to_string();
                                         } else {
-                                            // Step 2: Check DB for session to resume
-                                            let wake_project_id = to_project_id.clone()
-                                                .or_else(|| Some(project_id.clone()));
-
+                                            // Step 2: Check DB for session to resume.
+                                            // wake_project_id was resolved alongside wake_project_path above.
                                             if let Some(ref wpid) = wake_project_id {
                                                 let session = crate::db::schema::AgentSession::get_by_agent(&conn, wpid, &wake_agent).ok().flatten();
                                                 let has_prior = session.as_ref().map(|s| s.session_id.is_some()).unwrap_or(false);

@@ -6,6 +6,7 @@ import { useProjectsStore } from './projects'
 import { usePresetsStore, parseCommand } from './presets'
 import { useSettingsStore } from './settings'
 import { KNOWN_AGENT_COMMANDS, AGENT_IDLE_THRESHOLD_MS } from '@shared/constants'
+import { agentChatId, worktreeChatId } from '@/lib/terminal-id'
 
 export type PaneStatus = 'idle' | 'working' | 'permission' | 'review'
 
@@ -608,7 +609,7 @@ export function startAgentPolling(): void {
       const tabOpts = { title: `Agent: ${agentName}`, command, args }
 
       // If this launch is for a worktree, create the PTY in the background
-      // with the same terminal ID the Chat tab will use (agent-chat-wt-{wsId}).
+      // with the same terminal ID the Chat tab will use (agent-chat:wt:<wsId>).
       if (worktreePath) {
         // Wait briefly for sync:projects to register the new workspace
         let wsId: string | null = null
@@ -623,7 +624,7 @@ export function startAgentPolling(): void {
         }
 
         if (wsId) {
-          const bgTerminalId = `agent-chat-wt-${wsId}`
+          const bgTerminalId = worktreeChatId(wsId)
           try {
             const exists = await invoke<boolean>('terminal_exists', { id: bgTerminalId })
             if (!exists) {
@@ -642,9 +643,20 @@ export function startAgentPolling(): void {
       }
 
       // For agent launches without a worktree (e.g. manager), create the PTY
-      // in the background with a deterministic ID. The Chat tab discovers it via
-      // terminal_list_running_agents when the user navigates there.
-      const bgTerminalId = `agent-chat-${agentName}`
+      // in the background with a project-namespaced ID. The Chat tab
+      // discovers it via terminal_list_running_agents when the user navigates
+      // there. Project-namespacing is required so two workspaces sharing an
+      // agent name don't collide on a single PTY.
+      const projectsStore = useProjectsStore.getState()
+      const owningProject = projectsStore.projects.find((p) => p.path === cwd)
+      if (!owningProject) {
+        console.warn(
+          '[cli:agent-launch] No project registered for cwd, skipping background PTY:',
+          cwd,
+        )
+        return
+      }
+      const bgTerminalId = agentChatId(owningProject.id, agentName)
       try {
         const exists = await invoke<boolean>('terminal_exists', { id: bgTerminalId })
         if (!exists) {

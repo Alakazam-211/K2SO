@@ -1341,12 +1341,27 @@ except Exception as e:
         running=$(cli_request "/cli/agents/running" 2>/dev/null)
         manager_terminal=$(echo "$running" | python3 -c "
 import json, sys
+def agent_from_tid(tid):
+    # New format: agent-chat:<project_id>:<agent>[:hb:<heartbeat>]
+    # Worktree:   agent-chat:wt:<workspace_id>     -> no agent name
+    # Legacy:     agent-chat-<agent>               (and -wt-<wsid>)
+    if tid.startswith('agent-chat:'):
+        rest = tid[len('agent-chat:'):]
+        if rest.startswith('wt:'):
+            return None
+        parts = rest.split(':')
+        return parts[1] if len(parts) >= 2 and parts[0] and parts[1] else None
+    if tid.startswith('agent-chat-') and not tid.startswith('agent-chat-wt-'):
+        return tid[len('agent-chat-'):] or None
+    return None
+
 try:
     data = json.loads(sys.stdin.read())
     for t in data:
         cwd = t.get('cwd', '')
         tid = t.get('terminalId', '')
-        if '.k2so/agents/manager' in cwd or '.k2so/agents/coordinator' in cwd or tid.startswith('agent-chat-manager') or tid.startswith('agent-chat-coordinator'):
+        agent = agent_from_tid(tid)
+        if '.k2so/agents/manager' in cwd or '.k2so/agents/coordinator' in cwd or agent in ('manager', 'coordinator'):
             print(tid)
             break
 except: pass

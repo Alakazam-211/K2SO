@@ -226,7 +226,8 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
       invoke('fs_copy_path', { path: fileViewerPath }).catch((err) => console.warn('[tab-bar] copy-file-path', err))
     } else if (clickedId === 'copy-terminal-id' && tabTerminalId) {
       // Copy workspace:agent qualified identifier
-      const agName = tabTerminalId.replace(/^agent-chat-(?:wt-)?/, '')
+      const { agentNameFromId } = await import('@/lib/terminal-id')
+      const agName = agentNameFromId(tabTerminalId) ?? tabTerminalId
       // Resolve workspace name from tab title or CWD
       const tabForCopy = allTabs.find((t) => t.id === tabId)
       let wsName = tabForCopy?.title || ''
