@@ -7,14 +7,13 @@ import {
 import { usePanelsStore } from '../../stores/panels'
 import { showContextMenu } from '../../lib/context-menu'
 
-type PanelTab = 'files' | 'changes' | 'history' | 'workspace' | 'heartbeats'
+type PanelTab = 'files' | 'changes' | 'history' | 'workspace'
 
 const TAB_LABELS: Record<PanelTab, string> = {
   files: 'Files',
   changes: 'Changes',
   history: 'Chats',
-  workspace: 'Workspace',
-  heartbeats: 'Heartbeats'
+  workspace: 'Workspace'
 }
 
 interface TabbedPanelProps {

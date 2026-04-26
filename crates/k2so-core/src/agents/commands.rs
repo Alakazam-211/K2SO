@@ -125,6 +125,16 @@ pub fn list(project_path: String) -> Result<Vec<K2soAgentInfo>, String> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
+        // Skip hidden / system directories. `.archive` is the trash bin
+        // for retired agents (see `archive_orphan_top_tier_agents`); it
+        // sits inside `.k2so/agents/` for proximity but must never
+        // appear in the workspace's agent list. Pre-0.36.0 it leaked
+        // through and the WorkspacePanel rendered ".archive" as the
+        // primary agent name. Any other dotfile dir is excluded for
+        // the same reason.
+        if name.starts_with('.') {
+            continue;
+        }
         let agent_md = entry.path().join("AGENT.md");
 
         let (role, is_manager, agent_type) = if agent_md.exists() {

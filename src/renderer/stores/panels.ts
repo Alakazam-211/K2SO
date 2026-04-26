@@ -7,7 +7,7 @@ import {
 import { invoke } from '@tauri-apps/api/core'
 import type { AppSettingsResponse } from '@shared/types'
 
-type PanelTab = 'files' | 'changes' | 'history' | 'workspace' | 'heartbeats'
+type PanelTab = 'files' | 'changes' | 'history' | 'workspace'
 
 interface PanelsState {
   // Left auxiliary panel (between projects sidebar and terminal)
@@ -57,7 +57,7 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
   rightPanelOpen: true,
   rightPanelWidth: SIDEBAR_DEFAULT_WIDTH,
   rightPanelActiveTab: 'history',
-  rightPanelTabs: ['history', 'changes', 'heartbeats'],
+  rightPanelTabs: ['history', 'changes'],
 
   focusWorkspaceHeaderSide: 'left',
 
@@ -155,9 +155,14 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
       const settings = await invoke<AppSettingsResponse>('settings_get')
 
       // Migrate old tab names to new ones
-      const VALID_TABS: PanelTab[] = ['files', 'changes', 'history', 'workspace', 'heartbeats']
+      const VALID_TABS: PanelTab[] = ['files', 'changes', 'history', 'workspace']
       const migrateTab = (t: string): PanelTab | null => {
         if (t === 'agents' || t === 'reviews') return 'workspace'
+        // 0.36.0 had a short-lived 'heartbeats' drawer tab that has
+        // since folded back into the Workspace panel. Drop it from
+        // saved layouts so users don't see a stale tab they can't
+        // populate.
+        if (t === 'heartbeats') return null
         if (VALID_TABS.includes(t as PanelTab)) return t as PanelTab
         return null
       }
@@ -172,14 +177,7 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
         : ['files', 'workspace'] as PanelTab[]
       let rightTabs = settings.rightPanelTabs?.length
         ? migrateTabs(settings.rightPanelTabs as string[])
-        : ['history', 'changes', 'heartbeats'] as PanelTab[]
-
-      // Backfill 'heartbeats' for users who saved their layout before
-      // 0.36.0. Add to the right panel by default; users can swap to
-      // the left via right-click → Move to Left Panel.
-      if (!leftTabs.includes('heartbeats') && !rightTabs.includes('heartbeats')) {
-        rightTabs = [...rightTabs, 'heartbeats']
-      }
+        : ['history', 'changes'] as PanelTab[]
 
       // Ensure 'workspace' only appears on one side — prefer left
       if (leftTabs.includes('workspace') && rightTabs.includes('workspace')) {
