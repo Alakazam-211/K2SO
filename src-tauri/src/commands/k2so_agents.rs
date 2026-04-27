@@ -2136,8 +2136,39 @@ pub fn k2so_agents_triage_summary(project_path: String) -> Result<String, String
 /// Triage order:
 /// 1. Workspace inbox has items → wake lead agent ("__lead__")
 /// 2. Sub-agent inboxes have items → wake those agents (one launch per inbox item)
+///
+/// **DEPRECATED — `legacy-per-agent-heartbeat` chokepoint.**
+/// Pre-0.30s K2SO used inbox contents to decide whether to autonomously
+/// wake an agent. The new model lives in the `agent_heartbeats` table
+/// (workspace-scoped, explicit schedules). This function is being kept
+/// alive only for the launch-failure-retry path in active-agents.ts;
+/// gated on `projects.heartbeat_mode != 'off'` so opted-out workspaces
+/// don't get auto-launched even if a stray caller invokes us. Planned
+/// for removal in 0.37.x.
+#[deprecated(
+    note = "Inbox-driven triage — superseded by agent_heartbeats. \
+            Planned for removal in 0.37.x. See `legacy-per-agent-heartbeat` tag."
+)]
 #[tauri::command]
 pub fn k2so_agents_triage_decide(project_path: String) -> Result<Vec<String>, String> {
+    // Gate 0: project must have heartbeats enabled. Without this, an
+    // inbox with items unconditionally fires wakes — which is what was
+    // happening to the K2SO workspace in 0.36.3 even with all DB
+    // heartbeat rows disabled.
+    let project_mode = {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        conn.query_row(
+            "SELECT heartbeat_mode FROM projects WHERE path = ?1",
+            rusqlite::params![&project_path],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+    };
+    if project_mode.as_deref() == Some("off") {
+        return Ok(Vec::new());
+    }
+
     let mut launchable = Vec::new();
 
     // Step 1: Check workspace inbox

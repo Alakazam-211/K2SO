@@ -225,16 +225,6 @@ fn safe_generate(
     }
 }
 
-/// Public wrapper for safe_generate — used by the agent triage system.
-/// Runs LLM inference in a subprocess to isolate Metal/ggml crashes.
-pub fn safe_generate_for_triage(
-    manager: &crate::llm::LlmManager,
-    system_prompt: &str,
-    user_message: &str,
-) -> Result<String, String> {
-    safe_generate(manager, system_prompt, user_message)
-}
-
 #[tauri::command]
 pub fn assistant_chat(
     state: State<'_, AppState>,
