@@ -42,18 +42,18 @@ export function startTabDrag(data: { groupIndex: number; tabId: string; tabTitle
     notifyDragListeners()
   }
 
-  const handleMouseUp = (): void => {
-    // Find which column the mouse is over
+  const handleMouseUp = (e: MouseEvent): void => {
+    // Use the event's coordinates rather than globalDrag.mouseX/Y so the
+    // drop hit-test always reflects the exact release position even if the
+    // last mousemove arrived slightly stale.
     if (globalDrag) {
-      const elements = document.elementsFromPoint(globalDrag.mouseX, globalDrag.mouseY)
-      for (const el of elements) {
-        const groupAttr = (el as HTMLElement).dataset?.tabGroupIndex
-        if (groupAttr !== undefined) {
-          const targetGroup = parseInt(groupAttr, 10)
-          if (targetGroup !== globalDrag.groupIndex) {
-            useTabsStore.getState().moveTabToGroup(globalDrag.groupIndex, targetGroup, globalDrag.tabId)
-          }
-          break
+      const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null
+      const col = el?.closest('[data-tab-group-index]') as HTMLElement | null
+      const attr = col?.dataset?.tabGroupIndex
+      if (attr !== undefined) {
+        const targetGroup = parseInt(attr, 10)
+        if (targetGroup !== globalDrag.groupIndex) {
+          useTabsStore.getState().moveTabToGroup(globalDrag.groupIndex, targetGroup, globalDrag.tabId)
         }
       }
     }

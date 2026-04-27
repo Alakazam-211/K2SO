@@ -184,3 +184,65 @@ describe('removeSystemAgentTab', () => {
     expect(useTabsStore.getState().tabs.filter((t) => t.isSystemAgent)).toHaveLength(0)
   })
 })
+
+describe('moveTabToGroup (cross-column drag)', () => {
+  function makeTab(id: string, title: string): import('./tabs').Tab {
+    return {
+      id,
+      title,
+      mosaicTree: `pg-${id}`,
+      paneGroups: new Map([
+        [`pg-${id}`, { id: `pg-${id}`, items: [], activeItemIndex: 0 }],
+      ]),
+    }
+  }
+
+  beforeEach(() => {
+    useTabsStore.setState({
+      tabs: [makeTab('a', 'A'), makeTab('b', 'B')],
+      activeTabId: 'a',
+      splitCount: 2,
+      extraGroups: [{ tabs: [makeTab('c', 'C')], activeTabId: 'c' }],
+      activeGroupIndex: 0,
+    })
+  })
+
+  it('moves a tab from group 0 to group 1 and activates it there', () => {
+    useTabsStore.getState().moveTabToGroup(0, 1, 'a')
+
+    const s = useTabsStore.getState()
+    expect(s.tabs.map((t) => t.id)).toEqual(['b'])
+    expect(s.extraGroups[0].tabs.map((t) => t.id)).toEqual(['c', 'a'])
+    expect(s.extraGroups[0].activeTabId).toBe('a')
+  })
+
+  it('moves a tab from group 1 back to group 0', () => {
+    useTabsStore.getState().moveTabToGroup(1, 0, 'c')
+
+    const s = useTabsStore.getState()
+    expect(s.tabs.map((t) => t.id)).toEqual(['a', 'b', 'c'])
+    expect(s.extraGroups[0].tabs).toHaveLength(0)
+    expect(s.activeTabId).toBe('c')
+  })
+
+  it('updates source activeTabId when moving the active tab away', () => {
+    useTabsStore.getState().moveTabToGroup(0, 1, 'a')
+    expect(useTabsStore.getState().activeTabId).toBe('b')
+  })
+
+  it('is a no-op when source and target groups match', () => {
+    const before = useTabsStore.getState().tabs.map((t) => t.id)
+    useTabsStore.getState().moveTabToGroup(0, 0, 'a')
+    expect(useTabsStore.getState().tabs.map((t) => t.id)).toEqual(before)
+  })
+
+  it('is a no-op when the tab does not exist in the source group', () => {
+    const before = JSON.parse(JSON.stringify({
+      tabs: useTabsStore.getState().tabs.map((t) => t.id),
+      extra: useTabsStore.getState().extraGroups[0].tabs.map((t) => t.id),
+    }))
+    useTabsStore.getState().moveTabToGroup(0, 1, 'does-not-exist')
+    expect(useTabsStore.getState().tabs.map((t) => t.id)).toEqual(before.tabs)
+    expect(useTabsStore.getState().extraGroups[0].tabs.map((t) => t.id)).toEqual(before.extra)
+  })
+})
