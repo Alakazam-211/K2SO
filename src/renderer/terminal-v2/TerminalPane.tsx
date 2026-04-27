@@ -1099,6 +1099,26 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   )
 
   // ── Drag + drop of files (from Finder or K2SO files tab) ──────
+  //
+  // V2 needs TWO drop entry points because Tauri intercepts external
+  // (Finder → window) drops at the webview level — the React onDrop
+  // never fires for those:
+  //
+  //   1. `tauri://drag-drop` window-level event (from Finder /
+  //      external apps). Mirrors `AlacrittyTerminalView` (legacy).
+  //      Hit-tests the drop position against this terminal's
+  //      container so split layouts only inject into the pane the
+  //      drop actually landed on.
+  //
+  //   2. `k2so:terminal-write` CustomEvent dispatched by
+  //      `lib/file-drag.ts` on mouseup over a v2 container.
+  //      Internal FileTree drags never leave the webview so they
+  //      don't generate `tauri://drag-drop` — the file-drag helper
+  //      tracks the drag manually and dispatches this event when
+  //      mouseup is over `data-terminal-kind="v2"`.
+  //
+  // The React-level `onDrop` handler stays as a no-op fallback
+  // (handles the rare case where Tauri's dragDropEnabled is off).
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     e.stopPropagation()
@@ -1126,6 +1146,52 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     },
     [sendInput],
   )
+
+  // External drag-drop from Finder / other apps. Window-level event,
+  // hit-test against container so split-pane drops route correctly.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    let cancelled = false
+    import('@tauri-apps/api/event').then(({ listen }) => {
+      if (cancelled) return
+      listen<{ paths: string[]; position: { x: number; y: number } }>(
+        'tauri://drag-drop',
+        (event) => {
+          const { paths, position } = event.payload
+          if (!paths || paths.length === 0) return
+          if (!position) return
+          const el = document.elementFromPoint(position.x, position.y)
+          if (!el) return
+          // File tree handles its own internal drops.
+          if ((el as HTMLElement).closest?.('[data-path]')) return
+          // Only accept if the drop landed inside *this* container.
+          const container = containerRef.current
+          if (!container || !container.contains(el)) return
+          sendInput(buildDropPayload(paths))
+        },
+      ).then((fn) => {
+        if (cancelled) fn()
+        else unlisten = fn
+      })
+    })
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [sendInput])
+
+  // Internal drag-drop from K2SO's file tree. file-drag.ts dispatches
+  // this CustomEvent on the v2 container when mouseup lands here.
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const onWrite = (e: Event) => {
+      const detail = (e as CustomEvent<{ data: string }>).detail
+      if (detail?.data) sendInput(detail.data)
+    }
+    el.addEventListener('k2so:terminal-write', onWrite)
+    return () => el.removeEventListener('k2so:terminal-write', onWrite)
+  }, [sendInput])
 
   // ── ResizeObserver → send resize ──────────────────────────────
   useEffect(() => {
@@ -1401,6 +1467,16 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       // palette close, (c) any overlay Esc-out. Matches v1.
       data-terminal-container=""
       data-terminal-visible="true"
+      // file-drag.ts (internal FileTree drag) hit-tests for these
+      // attributes on mouseup. `data-terminal-id` matches the
+      // contract legacy AlacrittyTerminalView established;
+      // `data-terminal-kind="v2"` tells file-drag.ts to dispatch a
+      // CustomEvent (which TerminalPane's effect routes to sendInput
+      // over the WS) instead of calling the legacy `terminal_write`
+      // Tauri command — that command only knows about the legacy
+      // terminal_manager and would 404 on a v2 session id.
+      data-terminal-id={debugSessionId ?? undefined}
+      data-terminal-kind="v2"
       tabIndex={0}
       style={finalContainerStyle}
       onMouseMove={handleMouseMove}

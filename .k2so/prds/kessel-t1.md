@@ -284,11 +284,69 @@ requirements for the Tauri Kessel view in K5:
    in A3's protocol, or the Kessel equivalent for "compose a
    user message").
 
+   **Also: K2SO's in-app file-tree Copy / Cut writes paths
+   shell-escaped to the OS clipboard via
+   `navigator.clipboard.writeText` (see
+   `src/renderer/stores/file-clipboard.ts`). Kessel paste
+   handlers can rely on `e.clipboardData.getData('text')`
+   picking up file-tree-copied paths the same way it picks
+   up any other text — no special path needed for in-app
+   Copy.**
+
 3. **Drag and drop from Finder + files tab.**
    `onDragOver` + `onDrop` on the pane container. Multi-file →
    space-joined shell-escaped paths; any image path triggers
    bracketed-paste wrapping so Claude Code's `[Image #N]`
    detector fires.
+
+   **Important footguns we hit in v2 (late 0.36.x), worth
+   front-loading here:**
+
+   - **Tauri intercepts external drops at the webview level**
+     when `dragDropEnabled` is on (the default). The React
+     `onDrop` handler **never fires** for drags that originate
+     outside the window (Finder, other apps). The drop arrives
+     as a window-level `tauri://drag-drop` event with `paths` +
+     `position` payload. Subscribe in the pane via
+     `listen('tauri://drag-drop', ...)`, hit-test the position
+     against the pane's `containerRef`, and skip if the drop
+     landed in the file tree (`closest('[data-path]')`) so
+     internal moves don't double-fire.
+
+   - **Internal FileTree drags use `lib/file-drag.ts`**, not
+     standard HTML5 drag-drop. That helper tracks the mouse
+     manually (the native Tauri `startDrag` plugin gives
+     control to the OS, so re-entering the same window doesn't
+     fire `tauri://drag-drop`). On mouseup it hit-tests for
+     `[data-terminal-id]` and routes the paths. Kessel pane
+     containers MUST carry:
+
+       - `data-terminal-id={session_id}` — so the helper
+         finds the pane on mouseup, AND
+       - `data-terminal-kind="kessel"` (or whatever the
+         harness name is) — so the helper dispatches a
+         `k2so:terminal-write` CustomEvent rather than calling
+         the legacy `terminal_write` Tauri command. The legacy
+         command only knows about `state.terminal_manager`
+         (in-process portable-pty); v2 already taught
+         file-drag.ts to dispatch CustomEvent for
+         `data-terminal-kind="v2"`. Kessel needs its own
+         branch.
+
+     The pane component then attaches a listener for the
+     CustomEvent on its container ref and routes the payload
+     to its harness-specific input channel (WS, post-message,
+     daemon HTTP, etc.).
+
+   - **`terminal_write` IS NOT a universal write IPC.** It
+     was the v1 legacy bridge to the in-process terminal
+     manager. v2 sessions write over their own WS, Kessel
+     will write through its harness adapter. Don't add
+     fallthroughs in `terminal_write` to "find the right
+     map" — that couples src-tauri to every renderer's
+     internal state. The CustomEvent + per-pane listener
+     pattern keeps each renderer's write path scoped to its
+     own component.
 
 4. **Focus retention (the non-obvious one).**
    App.tsx's global click handler + 200ms refocus-poll

@@ -205,10 +205,22 @@ export function beginFileDrag(paths: string[], startX: number, startY: number, c
           isImagePath(p) ? quotePathForImageDrop(p) : shellEscape(p)
         ).join(' ')
         const data = dragPaths.some(isImagePath) ? bracketPaste(formatted) : formatted
-        invoke('terminal_write', {
-          id: termContainer.dataset.terminalId,
-          data
-        }).catch((e) => console.warn('[file-drag]', e))
+        if (termContainer.dataset.terminalKind === 'v2') {
+          // V2 sessions live in the daemon's session_lookup and
+          // accept input over a WS owned by the React TerminalPane.
+          // The legacy `terminal_write` Tauri command knows only the
+          // in-process terminal_manager and would error here. Fire a
+          // CustomEvent on the container; TerminalPane has an
+          // effect that listens and forwards to its own sendInput.
+          termContainer.dispatchEvent(
+            new CustomEvent('k2so:terminal-write', { detail: { data } }),
+          )
+        } else {
+          invoke('terminal_write', {
+            id: termContainer.dataset.terminalId,
+            data
+          }).catch((e) => console.warn('[file-drag]', e))
+        }
         dragPaths = []
         return
       }
