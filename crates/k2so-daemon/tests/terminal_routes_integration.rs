@@ -472,6 +472,79 @@ async fn terminal_spawn_applies_default_cwd_from_project() {
     let _ = std::fs::remove_dir_all(&project_dir);
 }
 
+/// Regression: spawn-background → write → read must round-trip end-to-end.
+///
+/// Pre-fix the daemon's `handle_read` only consulted
+/// `k2so_core::session::registry`, which only knows about legacy
+/// SessionStream sessions. Every v2 spawn (companion background spawn,
+/// agent launch, Tauri tab post-A9) lands in `v2_session_map` and was
+/// invisible to `/cli/terminal/read` — write succeeded, read returned
+/// `session not found`. The companion mobile client uses this exact
+/// triple to drive remote sessions, so the gap broke companion E2E.
+#[tokio::test(flavor = "current_thread")]
+async fn spawn_background_then_read_round_trips_via_v2() {
+    let _g = lock();
+
+    // Spawn a `cat` background session. cat echoes stdin straight back,
+    // so a write should appear on the alacritty grid via the PTY loop.
+    let spawn_resp = terminal_routes::handle_terminal_spawn_background(
+        &params(&[("command", "cat"), ("cwd", "/tmp")]),
+        "/tmp/test-project",
+    );
+    assert_eq!(spawn_resp.status, "200 OK");
+    let v: serde_json::Value = serde_json::from_str(&spawn_resp.body).unwrap();
+    let agent_name = v["agentName"].as_str().unwrap().to_string();
+    let terminal_id = v["terminalId"].as_str().unwrap().to_string();
+
+    // Write a marker. no_submit=true keeps the test deterministic —
+    // the 150 ms follow-up \r is irrelevant for grid presence.
+    let write_resp = terminal_routes::handle_write(&params(&[
+        ("id", &terminal_id),
+        ("message", "hello-companion-roundtrip"),
+        ("no_submit", "true"),
+    ]));
+    assert_eq!(write_resp.status, "200 OK");
+
+    // Submit a newline so cat echoes the buffered line back into the
+    // PTY → alacritty Term grid. Without this, cat keeps the bytes
+    // buffered and they never land on a grid row.
+    let submit_resp = terminal_routes::handle_write(&params(&[
+        ("id", &terminal_id),
+        ("message", "\r"),
+        ("no_submit", "true"),
+    ]));
+    assert_eq!(submit_resp.status, "200 OK");
+
+    // Give the alacritty IO thread time to read PTY output and
+    // commit it to the grid before snapshotting.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let read_resp = terminal_routes::handle_read(&params(&[
+        ("id", &terminal_id),
+        ("lines", "20"),
+    ]));
+    assert_eq!(
+        read_resp.status, "200 OK",
+        "read must succeed for v2-spawned sessions, got: {}",
+        read_resp.body,
+    );
+    let body: serde_json::Value = serde_json::from_str(&read_resp.body).unwrap();
+    let lines: Vec<String> = body["lines"]
+        .as_array()
+        .expect("lines array")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let joined = lines.join("\n");
+    assert!(
+        joined.contains("hello-companion-roundtrip"),
+        "expected echoed marker in grid output, got lines: {lines:?}",
+    );
+
+    let _ = v2_session_map::unregister(&agent_name);
+    let _ = session_map::unregister(&agent_name);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn agents_running_returns_empty_array_when_no_sessions() {
     let _g = lock();
