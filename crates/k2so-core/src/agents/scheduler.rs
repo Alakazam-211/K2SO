@@ -114,6 +114,23 @@ fn default_updated_by() -> String {
     "user".to_string()
 }
 
+/// **DEPRECATED — per-agent adaptive heartbeats are being removed.**
+///
+/// Replaced by the workspace-scoped scheduled heartbeats stored in
+/// the `agent_heartbeats` table (see `db/schema.rs::AgentHeartbeat`).
+/// This struct backs the legacy on-disk config file at
+/// `<project>/.k2so/agents/<name>/heartbeat.json` which the UI
+/// stopped writing in 0.36.x. Existing files are tolerated for
+/// rollback safety; new installs do not create them.
+///
+/// Planned for removal in 0.37.x along with all `read_heartbeat_config`
+/// callers and the `cmd_heartbeat_noop` / `cmd_heartbeat_action`
+/// CLI handlers. Search for `legacy-per-agent-heartbeat` to find
+/// every call site that must be retired together.
+#[deprecated(
+    note = "Per-agent heartbeats — superseded by AgentHeartbeat (DB-backed, workspace-scoped). \
+            Planned for removal in 0.37.x. See `legacy-per-agent-heartbeat` tag."
+)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentHeartbeatConfig {
@@ -169,9 +186,31 @@ impl Default for AgentHeartbeatConfig {
     }
 }
 
-/// Read `<project>/.k2so/agents/<name>/heartbeat.json`. Missing or
-/// corrupt file yields `Default`.
+/// **DEPRECATED — `legacy-per-agent-heartbeat` chokepoint.**
+///
+/// Reads `<project>/.k2so/agents/<name>/heartbeat.json` (the legacy
+/// per-agent config). Replaced by `AgentHeartbeat::list_enabled` which
+/// reads from the DB instead. Planned for removal in 0.37.x.
+///
+/// Until then we instrument every call so the in-flight investigation
+/// of "why is workspace X firing wakes when it has no DB heartbeat row"
+/// can pinpoint the caller — the trace prints the file:line of the
+/// reader and a backtrace to `daemon.stderr.log` / dev console. Disable
+/// the trace by setting `K2SO_TRACE_HEARTBEAT_JSON=0`.
+#[deprecated(
+    note = "Per-agent heartbeats — superseded by AgentHeartbeat (DB-backed). \
+            Planned for removal in 0.37.x. See `legacy-per-agent-heartbeat` tag."
+)]
+#[allow(deprecated)] // self-references for rollback safety
 pub fn read_heartbeat_config(project_path: &str, agent_name: &str) -> AgentHeartbeatConfig {
+    // Opt-in trace to identify any remaining caller on the legacy path.
+    // Set `K2SO_TRACE_HEARTBEAT_JSON=1` to dump a backtrace on every read.
+    if std::env::var("K2SO_TRACE_HEARTBEAT_JSON").map(|v| v == "1").unwrap_or(false) {
+        let bt = std::backtrace::Backtrace::force_capture();
+        eprintln!(
+            "[legacy-per-agent-heartbeat] read_heartbeat_config({project_path:?}, {agent_name:?})\n{bt}"
+        );
+    }
     let path = agent_dir(project_path, agent_name).join("heartbeat.json");
     if path.exists() {
         fs::read_to_string(&path)
@@ -183,7 +222,12 @@ pub fn read_heartbeat_config(project_path: &str, agent_name: &str) -> AgentHeart
     }
 }
 
-/// Write `<project>/.k2so/agents/<name>/heartbeat.json` atomically.
+/// **DEPRECATED — `legacy-per-agent-heartbeat` writer.** Planned for removal in 0.37.x.
+#[deprecated(
+    note = "Per-agent heartbeats — superseded by AgentHeartbeat (DB-backed). \
+            Planned for removal in 0.37.x. See `legacy-per-agent-heartbeat` tag."
+)]
+#[allow(deprecated)]
 pub fn write_heartbeat_config(
     project_path: &str,
     agent_name: &str,

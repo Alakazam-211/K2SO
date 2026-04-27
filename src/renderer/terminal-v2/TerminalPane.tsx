@@ -399,6 +399,13 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       // second showing whether detection matched + a sample of the
       // bottom rows. Lets us see what text the scanner is actually
       // looking at when the user reports "no spinner."
+      // FLIP fires once per working/idle transition — kept always-on in
+      // dev because it's infrequent and load-bearing for "did the
+      // spinner switch?" debugging.
+      // The per-second snapshot sample below is now opt-in via
+      // `localStorage.K2SO_V2_ACTIVITY_VERBOSE='1'`. It used to fire
+      // unconditionally and was the loudest single source of dev
+      // console noise (~1/sec per active agent).
       if (import.meta.env.DEV) {
         const wasWorking = lastWorkingStateRef.current
         if (isWorking !== wasWorking) {
@@ -408,21 +415,23 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
             `[v2-activity] FLIP tid=${terminalId.slice(0, 8)} ${wasWorking ? 'working→idle' : 'idle→working'}`,
           )
         }
-        const now = Date.now()
-        if (now - lastDetectLogAtRef.current > 1000) {
-          lastDetectLogAtRef.current = now
-          const tail = Math.max(0, snap.rows - 5)
-          const sample: string[] = []
-          for (let r = tail; r < snap.rows; r++) {
-            const t = lines.get(r)?.text ?? ''
-            if (t.trim()) sample.push(t.slice(0, 90))
+        if (typeof localStorage !== 'undefined' && localStorage.getItem('K2SO_V2_ACTIVITY_VERBOSE') === '1') {
+          const now = Date.now()
+          if (now - lastDetectLogAtRef.current > 1000) {
+            lastDetectLogAtRef.current = now
+            const tail = Math.max(0, snap.rows - 5)
+            const sample: string[] = []
+            for (let r = tail; r < snap.rows; r++) {
+              const t = lines.get(r)?.text ?? ''
+              if (t.trim()) sample.push(t.slice(0, 90))
+            }
+            // eslint-disable-next-line no-console
+            console.info(
+              `[v2-activity] tid=${terminalId.slice(0, 8)} working=${isWorking} ` +
+                `displayOffset=${snap.displayOffset} rows=${snap.rows} ` +
+                `gridRows=${snap.grid.length}\n  bottom=${JSON.stringify(sample, null, 2)}`,
+            )
           }
-          // eslint-disable-next-line no-console
-          console.info(
-            `[v2-activity] tid=${terminalId.slice(0, 8)} working=${isWorking} ` +
-              `displayOffset=${snap.displayOffset} rows=${snap.rows} ` +
-              `gridRows=${snap.grid.length}\n  bottom=${JSON.stringify(sample, null, 2)}`,
-          )
         }
       }
     },
@@ -655,7 +664,13 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
             const raw = parsed.payload.title ?? ''
             const isIdleMarker = /^[*✱✲✳✴✵✶✷✸✹⚹⁎∗※]/.test(raw)
             const isWorkingMarker = /^[\u2800-\u28FF]/.test(raw)
-            if (import.meta.env.DEV) {
+            // Per-title-change log. Fires every ~1s for any active
+            // agent. Opt-in via `localStorage.K2SO_V2_ACTIVITY_VERBOSE='1'`.
+            if (
+              import.meta.env.DEV &&
+              typeof localStorage !== 'undefined' &&
+              localStorage.getItem('K2SO_V2_ACTIVITY_VERBOSE') === '1'
+            ) {
               // eslint-disable-next-line no-console
               console.warn(
                 `[v2-activity] TITLE tid=${terminalId.slice(0, 8)} raw=${JSON.stringify(raw.slice(0, 60))} idleMarker=${isIdleMarker} workingMarker=${isWorkingMarker}`,

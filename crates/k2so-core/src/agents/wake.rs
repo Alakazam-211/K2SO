@@ -246,6 +246,15 @@ pub fn spawn_wake_headless(
     wake_prompt: &str,
     heartbeat_name: Option<&str>,
 ) -> Result<String, String> {
+    // Opt-in trace for wake-spawn investigation. Set `K2SO_TRACE_WAKE_SPAWN=1` to enable.
+    if std::env::var("K2SO_TRACE_WAKE_SPAWN").map(|v| v == "1").unwrap_or(false) {
+        let bt = std::backtrace::Backtrace::force_capture();
+        eprintln!(
+            "[wake-spawn-trace] spawn_wake_headless agent={agent_name:?} project={project_path:?} \
+             heartbeat_name={heartbeat_name:?} prompt_len={}\n{bt}",
+            wake_prompt.len()
+        );
+    }
     let terminal_id = format!("wake-{}-{}", agent_name, uuid::Uuid::new_v4());
 
     // Pre-allocate the Claude session UUID and pin it via

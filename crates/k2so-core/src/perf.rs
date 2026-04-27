@@ -46,11 +46,13 @@ static ENABLED: OnceLock<bool> = OnceLock::new();
 
 /// Returns true if performance instrumentation should record samples.
 /// Cached on first call so repeated lookups are a single atomic read.
+///
+/// Opt-in via `K2SO_PERF=1`. Pre-0.36.2 this was auto-on in debug
+/// builds, which drowned the dev console in `[perf] *_tick` lines and
+/// made other tracing (e.g. `[legacy-per-agent-heartbeat]`) hard to
+/// spot. If you actually want a perf measurement run, set the env.
 pub fn is_enabled() -> bool {
     *ENABLED.get_or_init(|| {
-        if cfg!(debug_assertions) {
-            return true;
-        }
         std::env::var("K2SO_PERF")
             .map(|v| !v.is_empty() && v != "0")
             .unwrap_or(false)

@@ -21,9 +21,6 @@ export interface ActiveAgent {
   hookStatus: PaneStatus
 }
 
-/** Track in-flight triage calls per project to prevent duplicate launches */
-const _triageInFlight = new Set<string>()
-
 /** Last time the Tauri `agent:lifecycle` hook fired for a pane. Used by the
  *  poll-based cleanup to avoid clobbering hook-driven 'working' states while
  *  hooks are actively reporting. A long grace covers quiet Claude turns
@@ -315,44 +312,21 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
       }
     }
 
-    // Re-triage: if an agent session just stopped, check if there's more work
-    // to do for heartbeat-enabled projects (with concurrency guard)
-    // Only runs when agentic systems are enabled
-    if (eventType === 'stop') {
-      const projectId = get().paneProjectMap.get(paneId)
-      if (projectId && useSettingsStore.getState().agenticSystemsEnabled) {
-        const project = useProjectsStore.getState().projects.find(p => p.id === projectId)
-        if (project && project.heartbeatEnabled) {
-          // Skip if triage already in flight for this project
-          if (_triageInFlight.has(project.path)) return
-
-          // Small delay to let the session clean up, then triage
-          setTimeout(() => {
-            if (_triageInFlight.has(project.path)) return
-            _triageInFlight.add(project.path)
-
-            invoke('k2so_agents_triage_decide', { projectPath: project.path })
-              .then((agents: unknown) => {
-                const agentList = agents as string[]
-                for (const agentName of agentList) {
-                  invoke('k2so_agents_build_launch', { projectPath: project.path, agentName })
-                    .then((launchInfo: unknown) => {
-                      const info = launchInfo as { command: string; args: string[]; cwd: string; agentName: string }
-                      useTabsStore.getState().addTab(info.cwd, {
-                        title: `Agent: ${info.agentName}`,
-                        command: info.command,
-                        args: info.args,
-                      })
-                    })
-                    .catch(console.error)
-                }
-              })
-              .catch(console.error)
-              .finally(() => { _triageInFlight.delete(project.path) })
-          }, 3000)
-        }
-      }
-    }
+    // RETIRED 0.36.3 — legacy auto-retriage loop.
+    //
+    // Pre-0.36.x model: every Claude-session 'stop' event triggered a
+    // renderer-driven triage that read `.k2so/agents/<name>/heartbeat.json`
+    // (legacy per-agent config) and immediately re-spawned the agent in a
+    // new tab. The loop was self-perpetuating — agent ends, retriage,
+    // spawn, agent ends, retriage… autoBackoff slowed it but never
+    // stopped it — and it bypassed `projects.heartbeat_mode='off'`
+    // because it called `triage_decide` (legacy) instead of
+    // `scheduler_tick` (gated). This is what was firing wakes against
+    // workspaces with no DB heartbeat rows (Cortana, etc.).
+    //
+    // Replaced by `agent_heartbeats` (DB-backed scheduled heartbeats
+    // owned by the workspace, fired by the daemon's heartbeat tick).
+    // Sessions now end and stay ended until their next scheduled fire.
   },
 
   pollOnce: async () => {
