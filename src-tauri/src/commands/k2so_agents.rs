@@ -3910,7 +3910,7 @@ fn safe_symlink_harness_file(
 /// canonical `.k2so/skills/k2so/SKILL.md`:
 ///
 ///   - `./GEMINI.md`                         → symlink (Gemini auto-loads)
-///   - `./AGENT.md`                          → symlink (Code Puppy)
+///   - `./AGENT.md`                          → symlink (agent.md spec)
 ///   - `./.goosehints`                       → symlink (Goose plain-text)
 ///   - `./.cursor/rules/k2so.mdc`            → generated (Cursor needs MDC
 ///                                            frontmatter, can't symlink)
@@ -4371,7 +4371,7 @@ pub fn k2so_agents_preview_workspace_ingest(
     let collision_targets: &[(&str, &str)] = &[
         ("CLAUDE.md", "Claude Code memory"),
         ("GEMINI.md", "Gemini CLI instructions"),
-        ("AGENT.md", "Code Puppy agent file"),
+        ("AGENT.md", "agent.md spec file"),
         (".goosehints", "Goose hints"),
         (".cursor/rules/k2so.mdc", "Cursor rule"),
     ];
@@ -4898,7 +4898,7 @@ mod migration_safety_tests {
         // Root-level discovery files — every harness's convention path.
         fs::write(proj.join("CLAUDE.md"), "# Claude memory\nMy codebase notes from # memory writes.\n").unwrap();
         fs::write(proj.join("GEMINI.md"), "# Gemini instructions\nCustom Gemini behavior for this repo.\n").unwrap();
-        fs::write(proj.join("AGENT.md"), "# Code Puppy\nAgent persona customizations.\n").unwrap();
+        fs::write(proj.join("AGENT.md"), "# AGENT.md\nAgent persona customizations.\n").unwrap();
         fs::write(proj.join(".goosehints"), "Goose hints — how to navigate this codebase.\n").unwrap();
         fs::write(
             proj.join(".aider.conf.yml"),

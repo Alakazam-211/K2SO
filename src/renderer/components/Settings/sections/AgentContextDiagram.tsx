@@ -37,7 +37,7 @@ const FILE_DISCOVERY: DeliveryChannel = {
   reaches: [
     './CLAUDE.md → SKILL.md',
     './GEMINI.md → SKILL.md',
-    './AGENT.md → SKILL.md (Code Puppy)',
+    './AGENT.md → SKILL.md (agent.md spec)',
     './.goosehints → SKILL.md',
     './.cursor/rules/k2so.mdc (generated)',
     './AGENTS.md (marker-injected)',

@@ -28,7 +28,6 @@ export const EDITORS_AGENTS_MANIFEST: SettingEntry[] = [
   { id: 'editors-agents.cli-aider', section: 'editors-agents', group: 'CLI Tools', label: 'Aider', description: 'Install instructions for Aider', keywords: ['aider', 'install', 'cli', 'pip'] },
   { id: 'editors-agents.cli-cursor-agent', section: 'editors-agents', group: 'CLI Tools', label: 'Cursor Agent', description: 'Install instructions for Cursor Agent', keywords: ['cursor', 'install', 'cli'] },
   { id: 'editors-agents.cli-opencode', section: 'editors-agents', group: 'CLI Tools', label: 'OpenCode', description: 'Install instructions for OpenCode', keywords: ['opencode', 'install', 'cli'] },
-  { id: 'editors-agents.cli-code-puppy', section: 'editors-agents', group: 'CLI Tools', label: 'Code Puppy', description: 'Install instructions for Code Puppy', keywords: ['puppy', 'install', 'cli'] },
   { id: 'editors-agents.cli-goose', section: 'editors-agents', group: 'CLI Tools', label: 'Goose', description: 'Install instructions for Goose', keywords: ['goose', 'block', 'install', 'cli'] },
   { id: 'editors-agents.cli-pi', section: 'editors-agents', group: 'CLI Tools', label: 'Pi', description: 'Install instructions for Pi', keywords: ['pi', 'install', 'cli'] },
   { id: 'editors-agents.cli-ollama', section: 'editors-agents', group: 'CLI Tools', label: 'Ollama', description: 'Install instructions for Ollama (local models)', keywords: ['ollama', 'install', 'cli', 'local llm'] },
@@ -578,13 +577,6 @@ const CLI_INSTALL_ENTRIES: {
     installCommand: 'curl -fsSL https://opencode.ai/install | bash',
     docs: 'https://opencode.ai',
     notes: 'A terminal-based AI coding assistant. Supports multiple model providers.'
-  },
-  {
-    name: 'Code Puppy',
-    command: 'codepuppy',
-    installCommand: 'npm install -g codepuppy',
-    docs: 'https://codepuppy.ai',
-    notes: 'Lightweight AI coding assistant for the terminal.'
   },
   {
     name: 'Goose',

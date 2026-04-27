@@ -48,7 +48,7 @@ export const AGENT_IDLE_THRESHOLD_MS = 5000  // 5 seconds without grid output â†
 export const KNOWN_AGENT_COMMANDS = new Set([
   // Cloud CLI agents
   'claude', 'cursor-agent', 'codex', 'gemini', 'copilot',
-  'aider', 'opencode', 'codepuppy', 'gpt', 'goose', 'pi',
+  'aider', 'opencode', 'gpt', 'goose', 'pi',
   // Local/on-device LLM tools
   'ollama', 'llamafile', 'llama-cli', 'interpreter',
   'tenere', 'llm-tui-rs',

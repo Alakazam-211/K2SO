@@ -53,7 +53,7 @@ Rules:
 - Do NOT include "cwd" — handled automatically
 - For side-by-side panes, use arrange_layout
 - For multiple tabs in ONE pane, use add_to_pane multiple times OR items array in arrange_layout
-- Agent CLI names: claude, codex, gemini, aider, cursor-agent, opencode, codepuppy
+- Agent CLI names: claude, codex, gemini, cursor-agent, pi, opencode, goose, aider, ollama, copilot, interpreter
 - Do NOT duplicate tool calls
 - One arrange_layout per request is enough
 - You can chain multiple tool_calls to accomplish multi-step requests

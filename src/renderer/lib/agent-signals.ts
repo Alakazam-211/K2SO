@@ -30,8 +30,7 @@ export const WORKING_SIGNALS: readonly string[] = [
   'unravelling...',       // copilot
   'working...',           // opencode, pi-mono (defaultWorkingMessage)
   'agent is working',     // opencode (typed-mid-generation warning)
-  ' is thinking...',      // codepuppy ("Rex is thinking..."),
-                          // also catches "<model> is thinking..." patterns
+  ' is thinking...',      // catches "<model> is thinking..." patterns
   'planning next moves',  // cursor-agent
   'taking longer than expected', // cursor-agent (stall state)
   'loading...',           // llm-tui-rs (placeholder while streaming)

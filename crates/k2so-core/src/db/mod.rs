@@ -345,29 +345,44 @@ pub fn mark_code_migration_applied(conn: &Connection, id: &str, notes: Option<&s
     );
 }
 
-/// Seed built-in agent presets. Uses INSERT OR IGNORE so new presets
-/// are added on upgrade without duplicating existing ones.
+/// Seed built-in agent presets.
+///
+/// Existing users may have re-ordered or customized their presets — to
+/// avoid clobbering that, we INSERT new entries by *label* uniqueness
+/// (not id), and never UPDATE existing rows. The id column on built-ins
+/// is otherwise ignored once a row exists, since older versions of
+/// `db/mod.rs` and `commands/agents.rs` disagreed on which id mapped
+/// to which label for Pi/Goose/Ollama/Interpreter.
 pub(crate) fn seed_agent_presets(conn: &Connection) -> Result<()> {
+    // Migration: drop Code Puppy from existing DBs (removed as a built-in
+    // in this version — users can still add it as a custom preset).
+    conn.execute(
+        "DELETE FROM agent_presets WHERE id = ?1 AND is_built_in = 1",
+        params!["b0a1c2d3-e4f5-6789-abcd-ef0123456008"],
+    )?;
+
+    // Default order for fresh installs. Existing built-ins keep their
+    // current sort_order — `INSERT … WHERE NOT EXISTS` only inserts
+    // entries the user is missing entirely (e.g. Pi on upgrade).
     let presets: &[(&str, &str, &str, &str, i64)] = &[
-        // Cloud CLI agents (no emoji — use custom AgentIcon SVGs)
         ("b0a1c2d3-e4f5-6789-abcd-ef0123456001", "Claude", "claude --dangerously-skip-permissions", "", 0),
         ("b0a1c2d3-e4f5-6789-abcd-ef0123456002", "Codex", "codex -c model_reasoning_effort=\"high\" --dangerously-bypass-approvals-and-sandbox", "", 1),
         ("b0a1c2d3-e4f5-6789-abcd-ef0123456003", "Gemini", "gemini --yolo", "", 2),
-        ("b0a1c2d3-e4f5-6789-abcd-ef0123456004", "Copilot", "copilot --allow-all", "", 3),
-        ("b0a1c2d3-e4f5-6789-abcd-ef0123456005", "Aider", "aider", "", 4),
-        ("b0a1c2d3-e4f5-6789-abcd-ef0123456006", "Cursor Agent", "cursor-agent", "", 5),
-        ("b0a1c2d3-e4f5-6789-abcd-ef0123456007", "OpenCode", "opencode", "", 6),
-        ("b0a1c2d3-e4f5-6789-abcd-ef0123456008", "Code Puppy", "codepuppy", "", 7),
-        // Local/on-device LLM tools (keep emoji — no custom icon)
-        ("b0a1c2d3-e4f5-6789-abcd-ef0123456009", "Ollama", "ollama run llama3.2", "\u{1F999}", 8),
-        ("b0a1c2d3-e4f5-6789-abcd-ef0123456010", "Interpreter", "interpreter", "\u{1F310}", 9),
-        ("b0a1c2d3-e4f5-6789-abcd-ef0123456011", "Goose", "goose", "\u{1FABF}", 10),
+        ("b0a1c2d3-e4f5-6789-abcd-ef0123456006", "Cursor Agent", "cursor-agent", "", 3),
+        ("b0a1c2d3-e4f5-6789-abcd-ef0123456012", "Pi", "pi", "", 4),
+        ("b0a1c2d3-e4f5-6789-abcd-ef0123456007", "OpenCode", "opencode", "", 5),
+        ("b0a1c2d3-e4f5-6789-abcd-ef0123456011", "Goose", "goose", "", 6),
+        ("b0a1c2d3-e4f5-6789-abcd-ef0123456005", "Aider", "aider", "", 7),
+        ("b0a1c2d3-e4f5-6789-abcd-ef0123456009", "Ollama", "ollama run llama3.2", "", 8),
+        ("b0a1c2d3-e4f5-6789-abcd-ef0123456004", "Copilot", "copilot --allow-all", "", 9),
+        ("b0a1c2d3-e4f5-6789-abcd-ef0123456010", "Interpreter", "interpreter", "", 10),
     ];
 
     for (id, label, command, icon, sort_order) in presets {
         conn.execute(
-            "INSERT OR IGNORE INTO agent_presets (id, label, command, icon, enabled, sort_order, is_built_in) \
-             VALUES (?1, ?2, ?3, ?4, 1, ?5, 1)",
+            "INSERT INTO agent_presets (id, label, command, icon, enabled, sort_order, is_built_in) \
+             SELECT ?1, ?2, ?3, ?4, 1, ?5, 1 \
+             WHERE NOT EXISTS (SELECT 1 FROM agent_presets WHERE label = ?2 AND is_built_in = 1)",
             params![id, label, command, icon, sort_order],
         )?;
     }

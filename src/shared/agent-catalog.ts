@@ -73,30 +73,39 @@ export const builtInAgentPresets: BuiltInAgentPreset[] = [
     sortOrder: 6
   },
   {
-    id: 'b0a1c2d3-e4f5-6789-abcd-ef0123456008',
-    label: 'Code Puppy',
-    command: 'codepuppy',
-    icon: '\u{1F436}',
+    id: 'b0a1c2d3-e4f5-6789-abcd-ef0123456012',
+    label: 'Pi',
+    command: 'pi',
+    icon: null,
     enabled: 1,
     isBuiltIn: 1,
-    sortOrder: 7
+    sortOrder: 4
+  },
+  {
+    id: 'b0a1c2d3-e4f5-6789-abcd-ef0123456011',
+    label: 'Goose',
+    command: 'goose',
+    icon: null,
+    enabled: 1,
+    isBuiltIn: 1,
+    sortOrder: 6
   },
   {
     id: 'b0a1c2d3-e4f5-6789-abcd-ef0123456009',
-    label: 'Goose',
-    command: 'goose',
-    icon: '\u{1FABF}',
+    label: 'Ollama',
+    command: 'ollama run llama3.2',
+    icon: null,
     enabled: 1,
     isBuiltIn: 1,
     sortOrder: 8
   },
   {
     id: 'b0a1c2d3-e4f5-6789-abcd-ef0123456010',
-    label: 'Pi',
-    command: 'pi',
-    icon: '\u{03C0}',
+    label: 'Interpreter',
+    command: 'interpreter',
+    icon: null,
     enabled: 1,
     isBuiltIn: 1,
-    sortOrder: 9
+    sortOrder: 10
   }
 ]

@@ -1263,7 +1263,7 @@ function ProjectDetail({
         title="Agent Settings"
         badge={
           <span
-            className="text-[8px] uppercase tracking-wider font-semibold px-1.5 py-0.5 bg-[var(--color-accent)]/15 text-[var(--color-accent)] rounded-sm"
+            className="text-[8px] uppercase tracking-wider font-semibold px-1.5 py-0.5 bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
             title="Agentic systems are in beta — interface and behavior may change"
           >
             beta
@@ -2085,7 +2085,7 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
     ``,
     `This is the one-source-of-truth file every CLI LLM in this workspace reads.`,
     `Symlinked to: .claude/skills/k2so/SKILL.md, .opencode/agent/k2so.md, .pi/skills/k2so/SKILL.md`,
-    `Marker-injected into: AGENTS.md (Codex / Copilot CLI / Code Puppy), .github/copilot-instructions.md (Copilot)`,
+    `Marker-injected into: AGENTS.md (Codex / Copilot CLI / agent.md spec), .github/copilot-instructions.md (Copilot)`,
     ``,
     `Every CLI LLM — Claude, Codex, Gemini, Cursor, Copilot, Pi, OpenCode — reads this file`,
     `via its own preferred discovery path. Edit here once; changes propagate everywhere.`,

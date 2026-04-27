@@ -837,7 +837,7 @@ export function HeartbeatsPanel({
           <h3 className="text-xs font-medium text-[var(--color-text-primary)] flex items-center gap-2">
             Heartbeats
             <span
-              className="text-[8px] uppercase tracking-wider font-semibold px-1.5 py-0.5 bg-[var(--color-accent)]/15 text-[var(--color-accent)] rounded-sm"
+              className="text-[8px] uppercase tracking-wider font-semibold px-1.5 py-0.5 bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
               title="This feature is in beta — interface and behavior may change"
             >
               beta

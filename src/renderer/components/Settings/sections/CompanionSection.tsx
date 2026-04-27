@@ -137,10 +137,36 @@ export function CompanionSection(): React.JSX.Element {
 
   return (
     <div className="max-w-xl">
-      <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-1">Mobile Companion <span className="text-[10px] text-[var(--color-text-muted)] font-normal">(BETA)</span></h2>
-      <p className="text-[10px] text-[var(--color-text-muted)] mb-4">
+      <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-1 flex items-center gap-2">
+        Mobile Companion
+        <span
+          className="text-[8px] uppercase tracking-wider font-semibold px-1.5 py-0.5 bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
+          title="This feature is in beta — interface and behavior may change"
+        >
+          beta
+        </span>
+      </h2>
+      <p className="text-[10px] text-[var(--color-text-muted)] mb-3">
         Access your K2SO agents remotely through the companion app. Requires an ngrok account.
       </p>
+
+      {/* Deprecation notice — the mobile app pairing surface predates
+          the daemon-first / multi-heartbeat architecture and needs a
+          rewrite against the new session model before it can ship
+          again. The settings here still work for users on 0.29.x who
+          have a paired companion, but new pairings won't connect
+          against current K2SO builds. */}
+      <div className="flex items-start gap-2 mb-4 px-3 py-2 border border-amber-400/30 bg-amber-400/5">
+        <span className="text-amber-400 text-sm leading-none flex-shrink-0 mt-0.5">&#9888;</span>
+        <div className="text-[10px] text-amber-300/80 leading-relaxed">
+          <strong className="text-amber-300">Mobile app support paused.</strong>{' '}
+          K2SO <span className="font-mono">0.29.x</span> is the last version that
+          fully supports the mobile companion app. The settings on this page still
+          work for ngrok tunnel + auth setup, but the mobile app itself isn&apos;t
+          compatible with the current K2SO session model. Full mobile support is
+          coming back in a later release.
+        </div>
+      </div>
 
       <div className="flex items-center gap-2 mb-4 px-3 py-2 border border-[var(--color-border)]">
         <span className="w-2 h-2 flex-shrink-0" style={{ backgroundColor: tunnelUrl ? '#22c55e' : enabled ? '#eab308' : '#6b7280' }} />
