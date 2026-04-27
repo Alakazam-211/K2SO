@@ -29,43 +29,15 @@ pub struct CompanionState {
     /// Per-IP rate limiter gating /companion/auth attempts.
     pub auth_limiter: Mutex<AuthRateLimiter>,
     /// Cache for reflowed grid JSON strings, keyed by
-    /// `(terminal_id, (cols, rows))`. Hit when the stored seqno matches
-    /// the current grid seqno — the reflow+serialize is reused instead
-    /// of recomputed per-tick. Entries for a terminal are auto-invalidated
-    /// on the next tick whose seqno is newer: the old entry is simply
-    /// overwritten. Bounded in practice by active mobile client count
-    /// (a handful per session).
-    ///
-    /// Carries `cumulative_offset` and `line_hashes` so the next tick can
-    /// detect how many reflowed lines scrolled off the top of the mobile
-    /// viewport (suffix-prefix match against the prior frame's hashes)
-    /// and stamp the new frame's `display_offset` with the running tally.
-    /// This lets the companion app reconstruct a continuous scrollback
-    /// thread: `absolute_row = display_offset + ws_row`.
-    pub reflow_cache: Mutex<std::collections::HashMap<(String, (u16, u16)), ReflowCacheEntry>>,
+    /// `(terminal_id, (cols, rows))`. Value is `(seqno, serialized_json)`.
+    /// Hit when the stored seqno matches the current grid seqno — the
+    /// reflow+serialize is reused instead of recomputed per-tick. Entries
+    /// for a terminal are auto-invalidated on the next tick whose seqno
+    /// is newer: the old string is simply overwritten. Bounded in practice
+    /// by active mobile client count (a handful per session).
+    pub reflow_cache: Mutex<std::collections::HashMap<(String, (u16, u16)), (u64, String)>>,
     /// Keeps the ngrok runtime thread alive — drop this to stop the tunnel
     pub _tunnel_keepalive: Mutex<Option<std::sync::mpsc::Sender<()>>>,
-}
-
-/// One entry in `CompanionState::reflow_cache`. See the field docstring
-/// on `reflow_cache` for the cumulative-offset contract.
-pub struct ReflowCacheEntry {
-    /// Source grid seqno that produced `json`. Used to short-circuit the
-    /// reflow + serialize when multiple ticks land on the same source frame.
-    pub seqno: u64,
-    /// Running tally of reflowed lines that have scrolled off the top of
-    /// this `(terminal, dims)` viewport across all ticks. Stamped into the
-    /// reflowed `GridUpdate.display_offset` so the companion can compute
-    /// `absolute_row = display_offset + ws_row`.
-    pub cumulative_offset: u64,
-    /// Per-line hashes of the most recently emitted visible reflowed lines.
-    /// Compared against the next frame's hashes (suffix-prefix match) to
-    /// derive how many lines scrolled off this tick.
-    pub line_hashes: Vec<u64>,
-    /// Serialized `GridUpdate` JSON for this entry — handed to every WS
-    /// client subscribed at these dims. `display_offset` inside is already
-    /// stamped with `cumulative_offset`.
-    pub json: String,
 }
 
 /// An authenticated companion session (24hr TTL).
