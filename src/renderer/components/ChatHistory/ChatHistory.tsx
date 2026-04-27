@@ -26,10 +26,20 @@ type DateGroup = 'Pinned' | 'Today' | 'Yesterday' | 'This Week' | 'This Month' |
 const PROVIDER_CONFIG: Record<string, { command: string; label: string; resumeFlag: string }> = {
   claude: { command: 'claude', label: 'Claude', resumeFlag: '--resume' },
   cursor: { command: 'cursor-agent', label: 'Cursor', resumeFlag: '--resume' },
+  gemini: { command: 'gemini', label: 'Gemini', resumeFlag: '--resume' },
+  pi: { command: 'pi', label: 'Pi', resumeFlag: '--session' },
 }
 
 /// Get the preset args (e.g. --dangerously-skip-permissions) for a provider command.
 /// Parses the user's agent preset to extract flags that should carry over to resumed sessions.
+///
+/// Strips any session-selection flag the preset may already carry (`--resume`,
+/// `--continue`, `-c`, `-r`, `--session`) so it can't conflict with the
+/// explicit `<resumeFlag> <sessionId>` we append. This matters most for Pi:
+/// `--resume` opens an interactive picker, so leaving it in the preset would
+/// shadow our `--session <uuid>` and trap the uuid as a chat message.
+const SESSION_FLAGS_TO_STRIP = new Set(['--resume', '-r', '--continue', '-c', '--session'])
+
 function getPresetArgsForProvider(provider: string): string[] {
   const config = PROVIDER_CONFIG[provider]
   if (!config) return []
@@ -40,8 +50,7 @@ function getPresetArgsForProvider(provider: string): string[] {
       // Parse the preset command to extract args after the command name
       const parts = preset.command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || []
       const cleaned = parts.map((p: string) => p.replace(/^["']|["']$/g, ''))
-      // Return args only (skip the command itself), excluding --resume which we add separately
-      return cleaned.slice(1).filter((a: string) => a !== '--resume')
+      return cleaned.slice(1).filter((a: string) => !SESSION_FLAGS_TO_STRIP.has(a))
     }
   } catch { /* preset store not available */ }
   return []
@@ -98,6 +107,8 @@ function getRightmostLeaf(tree: unknown): string | null {
 const PROVIDER_AGENT_NAME: Record<string, string> = {
   claude: 'Claude',
   cursor: 'Cursor Agent',
+  gemini: 'Gemini',
+  pi: 'Pi',
 }
 
 function ProviderIcon({ provider }: { provider: string }): React.JSX.Element {
@@ -109,6 +120,8 @@ interface ChatStoragePaths {
   claudeHistoryFile: string | null
   claudeSessionsDirs: string[]
   cursorChatsDirs: string[]
+  geminiChatsDirs: string[]
+  piChatsDirs: string[]
 }
 
 function SearchIcon(): React.JSX.Element {
@@ -287,6 +300,8 @@ export default function ChatHistory(): React.JSX.Element {
     if (paths.claudeHistoryFile) locationLines.push(`- Claude session index: ${paths.claudeHistoryFile}`)
     for (const dir of paths.claudeSessionsDirs) locationLines.push(`- Claude sessions: ${dir}`)
     for (const dir of paths.cursorChatsDirs) locationLines.push(`- Cursor chats: ${dir}`)
+    for (const dir of paths.geminiChatsDirs) locationLines.push(`- Gemini chats: ${dir}`)
+    for (const dir of paths.piChatsDirs) locationLines.push(`- Pi chats: ${dir}`)
 
     const prompt = [
       `Search through my conversation history for: "${searchQuery.trim()}"`,
@@ -446,9 +461,15 @@ export default function ChatHistory(): React.JSX.Element {
         || (sessionFromWorktree !== isCurrentlyInWorktree)
 
       // Build resume args: include preset flags (e.g. --dangerously-skip-permissions)
-      // so the resumed session has the same permissions as a fresh launch
+      // so the resumed session has the same permissions as a fresh launch.
+      //
+      // Per-provider resume flag (config.resumeFlag) — Claude/Cursor/Gemini all
+      // use `--resume <uuid>`, but Pi uses `--session <uuid>` (its `--resume` is
+      // an interactive picker that takes no arg). Hardcoding `--resume` here
+      // sent the uuid through to Pi as a positional message, which then got
+      // typed into the chat after the picker closed.
       const presetArgs = getPresetArgsForProvider(session.provider)
-      const args = [...presetArgs, '--resume', session.sessionId]
+      const args = [...presetArgs, config.resumeFlag, session.sessionId]
       if (isCrossWorktree && config.command === 'claude') {
         args.push('--fork-session')
       }

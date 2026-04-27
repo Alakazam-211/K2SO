@@ -483,6 +483,394 @@ fn parse_cursor_ide_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSes
     Ok(results)
 }
 
+// ── Gemini chat parsing ─────────────────────────────────────────────────
+//
+// Layout (verified against a live install on macOS):
+//
+//   ~/.gemini/projects.json
+//     { "projects": { "/abs/cwd": "<slug>", … } }
+//   ~/.gemini/tmp/<slug>/chats/session-<iso>-<short-uuid>.jsonl
+//     line 1: {"sessionId","projectHash","startTime","lastUpdated","kind":"main"}
+//     subsequent: {"id","timestamp","type":"user"|"gemini","content":[{"text":…}],…}
+//                 OR {"$set":{"lastUpdated":"…"}} mutation lines
+//
+// Key advantage over Codex: filename only contains an 8-char prefix of
+// the uuid, so we MUST read line 1 to get the full `sessionId` for
+// `gemini --resume <uuid>`. The `projects.json` slug map gives us the
+// cwd → slug mapping for free, so per-project filtering is trivial.
+
+/// Parse the Gemini RFC3339 timestamp shape ("2026-04-27T09:19:05.013Z")
+/// into unix-epoch milliseconds. Returns None on any parse failure or
+/// empty input.
+fn parse_rfc3339_to_ms(s: &str) -> Option<i64> {
+    if s.is_empty() {
+        return None;
+    }
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
+}
+
+/// Read `~/.gemini/projects.json` and return a `slug → absolute_cwd` map.
+/// Returns an empty map if the file is missing or unparseable.
+fn gemini_slug_to_cwd_map() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return map,
+    };
+    let projects_json = home.join(".gemini").join("projects.json");
+    let content = match fs::read_to_string(&projects_json) {
+        Ok(c) => c,
+        Err(_) => return map,
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return map,
+    };
+    if let Some(obj) = parsed.get("projects").and_then(|v| v.as_object()) {
+        for (cwd, slug_v) in obj {
+            if let Some(slug) = slug_v.as_str() {
+                map.insert(slug.to_string(), cwd.clone());
+            }
+        }
+    }
+    map
+}
+
+fn parse_gemini_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSession>, String> {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return Ok(vec![]),
+    };
+    let tmp_dir = home.join(".gemini").join("tmp");
+    if !tmp_dir.exists() {
+        return Ok(vec![]);
+    }
+
+    let slug_to_cwd = gemini_slug_to_cwd_map();
+
+    // Pick the slugs to scan. With a project filter, match against the
+    // filter's resolved root + any worktree path inside it (same family
+    // semantics as the Claude path).
+    let target_slugs: Vec<(String, String)> = if let Some(filter) = project_filter {
+        let root = resolve_root_project_path(filter);
+        slug_to_cwd
+            .iter()
+            .filter(|(_slug, cwd)| matches_project_family(cwd, root))
+            .map(|(slug, cwd)| (slug.clone(), cwd.clone()))
+            .collect()
+    } else {
+        slug_to_cwd
+            .iter()
+            .map(|(slug, cwd)| (slug.clone(), cwd.clone()))
+            .collect()
+    };
+
+    let mut results = Vec::new();
+    for (slug, cwd) in target_slugs {
+        let chats_dir = tmp_dir.join(&slug).join("chats");
+        if !chats_dir.is_dir() {
+            continue;
+        }
+        let entries = match fs::read_dir(&chats_dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+
+            let file = match File::open(&path) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+            let reader = BufReader::new(file);
+            let mut lines = reader.lines();
+
+            // Header line: {"sessionId","projectHash","startTime","lastUpdated","kind":"main"}.
+            // Skip the file if the header is malformed or missing sessionId —
+            // there's nothing useful to surface without a uuid for `--resume`.
+            let header_line = match lines.next() {
+                Some(Ok(l)) => l,
+                _ => continue,
+            };
+            let header: serde_json::Value = match serde_json::from_str(&header_line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let session_id = match header.get("sessionId").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+
+            let mut latest_ts_ms = parse_rfc3339_to_ms(
+                header.get("lastUpdated").and_then(|v| v.as_str()).unwrap_or(""),
+            )
+            .unwrap_or(0);
+            let start_ts_ms = parse_rfc3339_to_ms(
+                header.get("startTime").and_then(|v| v.as_str()).unwrap_or(""),
+            )
+            .unwrap_or(0);
+
+            // Walk the body. First user message wins for the title; track
+            // every $set mutation to keep `latest_ts_ms` honest.
+            let mut title = String::new();
+            let mut message_count: usize = 0;
+            for line in lines.flatten() {
+                let parsed: serde_json::Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                // Mutation line: {"$set":{"lastUpdated":"…"}} — bumps the timestamp.
+                if let Some(set) = parsed.get("$set") {
+                    if let Some(s) = set.get("lastUpdated").and_then(|v| v.as_str()) {
+                        if let Some(ms) = parse_rfc3339_to_ms(s) {
+                            if ms > latest_ts_ms {
+                                latest_ts_ms = ms;
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if msg_type != "user" && msg_type != "gemini" {
+                    continue;
+                }
+                message_count += 1;
+
+                if title.is_empty() && msg_type == "user" {
+                    let content = parsed.get("content");
+                    let extracted = if let Some(arr) = content.and_then(|v| v.as_array()) {
+                        arr.iter()
+                            .find_map(|item| item.get("text").and_then(|v| v.as_str()))
+                            .map(String::from)
+                    } else {
+                        content.and_then(|v| v.as_str()).map(String::from)
+                    };
+                    if let Some(s) = extracted {
+                        title = s.trim().to_string();
+                    }
+                }
+            }
+
+            // Timestamp fallback chain: latest $set / lastUpdated → startTime → file mtime → 0.
+            let timestamp = if latest_ts_ms > 0 {
+                latest_ts_ms
+            } else if start_ts_ms > 0 {
+                start_ts_ms
+            } else {
+                fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0)
+            };
+
+            let truncated_title = if title.is_empty() {
+                "Untitled".to_string()
+            } else if title.chars().count() > 80 {
+                let truncated: String = title.chars().take(77).collect();
+                format!("{}...", truncated)
+            } else {
+                title
+            };
+
+            results.push(ChatSession {
+                session_id,
+                project: cwd.clone(),
+                origin_branch: extract_worktree_branch(&cwd),
+                title: truncated_title,
+                timestamp,
+                provider: "gemini".to_string(),
+                message_count,
+            });
+        }
+    }
+
+    Ok(results)
+}
+
+// ── Pi chat parsing ─────────────────────────────────────────────────────
+//
+// Layout (verified against a live install on macOS — pi-mono source at
+// https://github.com/badlogic/pi-mono):
+//
+//   ~/.pi/agent/sessions/<cwd-slug>/<ISO-ts>_<uuidv7>.jsonl
+//     line 1: {"type":"session","id":"<uuid>","cwd":"/abs/path","timestamp":"<ISO>","version":…}
+//     subsequent: {"type":"message","message":{"role":"user"|"assistant","content":[{"type":"text","text":…}]}}
+//                 plus thinking_level_change / model_change / tool_use lines.
+//
+// The slug encoding is `--<cwd-with-/-replaced-by->--` (literal spaces
+// preserved) — but we don't depend on it. Instead we walk every slug
+// dir and read the literal `cwd` from line 1, which is more robust
+// across worktree layouts and any encoding edge case.
+
+fn parse_pi_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSession>, String> {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return Ok(vec![]),
+    };
+    let sessions_root = home.join(".pi").join("agent").join("sessions");
+    if !sessions_root.exists() {
+        return Ok(vec![]);
+    }
+
+    let filter_root = project_filter.map(resolve_root_project_path);
+
+    let slug_dirs = match fs::read_dir(&sessions_root) {
+        Ok(e) => e,
+        Err(_) => return Ok(vec![]),
+    };
+
+    let mut results = Vec::new();
+    for slug_entry in slug_dirs.filter_map(|e| e.ok()) {
+        let slug_path = slug_entry.path();
+        if !slug_path.is_dir() {
+            continue;
+        }
+
+        let session_files = match fs::read_dir(&slug_path) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for f_entry in session_files.filter_map(|e| e.ok()) {
+            let path = f_entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+
+            let file = match File::open(&path) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+            let reader = BufReader::new(file);
+            let mut lines = reader.lines();
+
+            // Line 1: session header. Skip the file if missing required fields.
+            let header_line = match lines.next() {
+                Some(Ok(l)) => l,
+                _ => continue,
+            };
+            let header: serde_json::Value = match serde_json::from_str(&header_line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if header.get("type").and_then(|v| v.as_str()) != Some("session") {
+                continue;
+            }
+            let session_id = match header.get("id").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let cwd = header
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            // Filter against the project family (root + worktrees).
+            if let Some(ref root) = filter_root {
+                if !matches_project_family(&cwd, root) {
+                    continue;
+                }
+            }
+
+            let mut latest_ts_ms = parse_rfc3339_to_ms(
+                header.get("timestamp").and_then(|v| v.as_str()).unwrap_or(""),
+            )
+            .unwrap_or(0);
+
+            // Walk body for first user message + latest timestamp.
+            let mut title = String::new();
+            let mut message_count: usize = 0;
+            for line in lines.flatten() {
+                let parsed: serde_json::Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                if let Some(ts) = parsed.get("timestamp").and_then(|v| v.as_str()) {
+                    if let Some(ms) = parse_rfc3339_to_ms(ts) {
+                        if ms > latest_ts_ms {
+                            latest_ts_ms = ms;
+                        }
+                    }
+                }
+
+                if parsed.get("type").and_then(|v| v.as_str()) != Some("message") {
+                    continue;
+                }
+                let msg = match parsed.get("message") {
+                    Some(m) => m,
+                    None => continue,
+                };
+                let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                if role != "user" && role != "assistant" {
+                    continue;
+                }
+                message_count += 1;
+
+                if title.is_empty() && role == "user" {
+                    let extracted = msg
+                        .get("content")
+                        .and_then(|c| c.as_array())
+                        .and_then(|arr| {
+                            arr.iter().find_map(|item| {
+                                if item.get("type").and_then(|v| v.as_str()) == Some("text") {
+                                    item.get("text").and_then(|v| v.as_str()).map(String::from)
+                                } else {
+                                    None
+                                }
+                            })
+                        });
+                    if let Some(s) = extracted {
+                        title = s.trim().to_string();
+                    }
+                }
+            }
+
+            // Timestamp fallback: file mtime if everything else failed.
+            let timestamp = if latest_ts_ms > 0 {
+                latest_ts_ms
+            } else {
+                fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0)
+            };
+
+            let truncated_title = if title.is_empty() {
+                "Untitled".to_string()
+            } else if title.chars().count() > 80 {
+                let truncated: String = title.chars().take(77).collect();
+                format!("{}...", truncated)
+            } else {
+                title
+            };
+
+            results.push(ChatSession {
+                session_id,
+                project: cwd.clone(),
+                origin_branch: extract_worktree_branch(&cwd),
+                title: truncated_title,
+                timestamp,
+                provider: "pi".to_string(),
+                message_count,
+            });
+        }
+    }
+
+    Ok(results)
+}
+
 // ── Session detection for resume ──────────────────────────────────────── moved to k2so_core::chat_history (re-exported).
 
 /// Check whether a claude session file exists on disk for the given
@@ -500,8 +888,9 @@ fn parse_cursor_ide_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSes
 #[tauri::command]
 pub fn chat_history_list(project_path: Option<String>) -> Result<Vec<ChatSession>, String> {
     let mut all = parse_claude_sessions(project_path.as_deref())?;
-    let cursor_cli = parse_cursor_sessions(project_path.as_deref())?;
-    all.extend(cursor_cli);
+    all.extend(parse_cursor_sessions(project_path.as_deref())?);
+    all.extend(parse_gemini_sessions(project_path.as_deref())?);
+    all.extend(parse_pi_sessions(project_path.as_deref())?);
     all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     all.truncate(100);
     Ok(all)
@@ -511,8 +900,9 @@ pub fn chat_history_list(project_path: Option<String>) -> Result<Vec<ChatSession
 pub async fn chat_history_list_for_project(project_path: String) -> Result<Vec<ChatSession>, String> {
     tokio::task::spawn_blocking(move || {
         let mut all = parse_claude_sessions(Some(&project_path))?;
-        let cursor_cli = parse_cursor_sessions(Some(&project_path))?;
-        all.extend(cursor_cli);
+        all.extend(parse_cursor_sessions(Some(&project_path))?);
+        all.extend(parse_gemini_sessions(Some(&project_path))?);
+        all.extend(parse_pi_sessions(Some(&project_path))?);
         all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         all.truncate(100);
         Ok(all)
@@ -529,6 +919,8 @@ pub struct ChatStoragePaths {
     pub claude_history_file: Option<String>,
     pub claude_sessions_dirs: Vec<String>,
     pub cursor_chats_dirs: Vec<String>,
+    pub gemini_chats_dirs: Vec<String>,
+    pub pi_chats_dirs: Vec<String>,
 }
 
 // Convert a project path to Claude's project hash format. moved to k2so_core::chat_history (re-exported).
@@ -576,10 +968,73 @@ pub fn chat_history_get_storage_paths(project_path: String) -> Result<ChatStorag
         }
     };
 
+    // Gemini chats: re-use the slug map. Each `cwd → slug` whose cwd is
+    // in the same project family as our root contributes its
+    // `~/.gemini/tmp/<slug>/chats` dir.
+    let gemini_chats_dirs = {
+        let tmp_dir = home.join(".gemini").join("tmp");
+        let slug_to_cwd = gemini_slug_to_cwd_map();
+        slug_to_cwd
+            .iter()
+            .filter(|(_slug, cwd)| matches_project_family(cwd, root))
+            .map(|(slug, _cwd)| tmp_dir.join(slug).join("chats").to_string_lossy().to_string())
+            .filter(|p| std::path::Path::new(p).is_dir())
+            .collect()
+    };
+
+    // Pi chats: walk every slug folder under ~/.pi/agent/sessions and
+    // keep the ones whose first-line cwd matches our project family.
+    // (Pi's slug encoding is reverseable but reading line 1 is more
+    // robust across worktree layouts and any encoding edge case.)
+    let pi_chats_dirs = {
+        let sessions_root = home.join(".pi").join("agent").join("sessions");
+        let mut out: Vec<String> = Vec::new();
+        if let Ok(entries) = fs::read_dir(&sessions_root) {
+            for slug_entry in entries.filter_map(|e| e.ok()) {
+                let slug_path = slug_entry.path();
+                if !slug_path.is_dir() {
+                    continue;
+                }
+                // Peek at any session file to read its declared cwd.
+                let session_files = match fs::read_dir(&slug_path) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                let mut matched = false;
+                for f_entry in session_files.filter_map(|e| e.ok()) {
+                    let p = f_entry.path();
+                    if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                        continue;
+                    }
+                    if let Ok(file) = File::open(&p) {
+                        let mut reader = BufReader::new(file);
+                        let mut first = String::new();
+                        if reader.read_line(&mut first).is_ok() {
+                            if let Ok(header) = serde_json::from_str::<serde_json::Value>(first.trim()) {
+                                if let Some(cwd) = header.get("cwd").and_then(|v| v.as_str()) {
+                                    if matches_project_family(cwd, root) {
+                                        matched = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if matched {
+                    out.push(slug_path.to_string_lossy().to_string());
+                }
+            }
+        }
+        out
+    };
+
     Ok(ChatStoragePaths {
         claude_history_file,
         claude_sessions_dirs,
         cursor_chats_dirs,
+        gemini_chats_dirs,
+        pi_chats_dirs,
     })
 }
 

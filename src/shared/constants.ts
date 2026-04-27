@@ -35,7 +35,10 @@ export const CONTEXT_MENU_DISMISS_DELAY = 50  // ms
 export const RESUMABLE_CLI_TOOLS: Record<string, { resumeFlag: string; provider: string }> = {
   'claude': { resumeFlag: '--resume', provider: 'claude' },
   'cursor-agent': { resumeFlag: '--resume', provider: 'cursor' },
-  'pi': { resumeFlag: '--resume', provider: 'pi' },
+  'gemini': { resumeFlag: '--resume', provider: 'gemini' },
+  // Pi uses `--session <uuid>` for deterministic resume — `--resume`
+  // is its interactive picker (no id arg), so don't confuse them.
+  'pi': { resumeFlag: '--session', provider: 'pi' },
 }
 
 // ── Agent activity ────────────────────────────────────────────────

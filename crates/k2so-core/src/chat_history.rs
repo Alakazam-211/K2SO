@@ -339,6 +339,171 @@ pub fn detect_cursor_session(project_path: &str) -> Option<String> {
     best.map(|(_, id)| id)
 }
 
+/// Return the most recent Gemini session uuid for a project path.
+///
+/// Gemini's storage layout (verified against a live install):
+///   ~/.gemini/projects.json     — { "projects": { "/abs/cwd": "<slug>" } }
+///   ~/.gemini/tmp/<slug>/chats/session-<iso>-<short-uuid>.jsonl
+///
+/// The on-disk filename only carries an 8-char prefix of the uuid, so we
+/// MUST read line 1 of the JSONL header to extract the full `sessionId`
+/// — that's what `gemini --resume <uuid>` expects. The "most recent"
+/// session is picked by file mtime across every project-family slug
+/// (matching root + worktree paths the same way detect_cursor_session
+/// does).
+pub fn detect_gemini_session(project_path: &str) -> Option<String> {
+    let home = dirs::home_dir()?;
+    let projects_json = home.join(".gemini").join("projects.json");
+    let tmp_dir = home.join(".gemini").join("tmp");
+    if !tmp_dir.exists() {
+        return None;
+    }
+
+    let content = fs::read_to_string(&projects_json).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let projects_obj = parsed.get("projects")?.as_object()?;
+
+    let root = resolve_root_project_path(project_path);
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+
+    // Scan every slug whose cwd is in this project's family (root +
+    // worktrees), then pick the newest session file.
+    for (cwd, slug_v) in projects_obj {
+        if !matches_project_family(cwd, root) {
+            continue;
+        }
+        let slug = match slug_v.as_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        let chats_dir = tmp_dir.join(slug).join("chats");
+        let entries = match fs::read_dir(&chats_dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if let Ok(meta) = fs::metadata(&path) {
+                if let Ok(modified) = meta.modified() {
+                    match &best {
+                        Some((best_time, _)) if modified > *best_time => {
+                            best = Some((modified, path));
+                        }
+                        None => {
+                            best = Some((modified, path));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    // Read line 1 → extract the full uuid from `sessionId`.
+    let path = best.map(|(_, p)| p)?;
+    let file = std::fs::File::open(&path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut first_line = String::new();
+    use std::io::BufRead;
+    reader.read_line(&mut first_line).ok()?;
+    let header: serde_json::Value = serde_json::from_str(first_line.trim()).ok()?;
+    header
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+/// Return the most recent Pi session uuid for a project path.
+///
+/// Pi's storage layout (verified against pi-mono — github.com/badlogic/pi-mono):
+///   ~/.pi/agent/sessions/<cwd-slug>/<ISO-ts>_<uuidv7>.jsonl
+///   line 1: {"type":"session","id":"<uuid>","cwd":"/abs/path","timestamp":…}
+///
+/// Pi's slug encoding is reversible (`/`→`-` with `--…--` wrapping) but
+/// we don't depend on it: walk every slug dir, read line 1's literal
+/// `cwd`, and keep the matching ones. More robust across worktrees and
+/// any encoding edge case. Picks the newest by file mtime, then reads
+/// line 1 again to extract the full uuid for `pi --session <uuid>`.
+pub fn detect_pi_session(project_path: &str) -> Option<String> {
+    let home = dirs::home_dir()?;
+    let sessions_root = home.join(".pi").join("agent").join("sessions");
+    if !sessions_root.exists() {
+        return None;
+    }
+
+    let root = resolve_root_project_path(project_path);
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+
+    let slug_dirs = fs::read_dir(&sessions_root).ok()?;
+    for slug_entry in slug_dirs.flatten() {
+        let slug_path = slug_entry.path();
+        if !slug_path.is_dir() {
+            continue;
+        }
+        let session_files = match fs::read_dir(&slug_path) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for f_entry in session_files.flatten() {
+            let path = f_entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+
+            // Peek at line 1 to confirm cwd is in our project family
+            // before considering this file as a candidate.
+            let file = match std::fs::File::open(&path) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+            let mut reader = std::io::BufReader::new(file);
+            let mut first_line = String::new();
+            use std::io::BufRead;
+            if reader.read_line(&mut first_line).is_err() {
+                continue;
+            }
+            let header: serde_json::Value = match serde_json::from_str(first_line.trim()) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let cwd = match header.get("cwd").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => continue,
+            };
+            if !matches_project_family(cwd, root) {
+                continue;
+            }
+
+            let modified = match fs::metadata(&path).and_then(|m| m.modified()) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            match &best {
+                Some((best_time, _)) if modified > *best_time => {
+                    best = Some((modified, path));
+                }
+                None => {
+                    best = Some((modified, path));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Re-read the winner's line 1 to extract the uuid.
+    let path = best.map(|(_, p)| p)?;
+    let file = std::fs::File::open(&path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut first_line = String::new();
+    use std::io::BufRead;
+    reader.read_line(&mut first_line).ok()?;
+    let header: serde_json::Value = serde_json::from_str(first_line.trim()).ok()?;
+    header.get("id").and_then(|v| v.as_str()).map(String::from)
+}
+
 /// Provider dispatcher used by the daemon's post-spawn session-save
 /// task (and the Tauri UI's session-rediscovery). Returns `Ok(None)`
 /// when no session is detected — distinct from `Err` so callers can
@@ -350,6 +515,8 @@ pub fn detect_active_session(
     let session = match provider {
         "claude" => detect_claude_session(project_path),
         "cursor" => detect_cursor_session(project_path),
+        "gemini" => detect_gemini_session(project_path),
+        "pi" => detect_pi_session(project_path),
         _ => None,
     };
     Ok(session)
