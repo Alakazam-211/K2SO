@@ -5,7 +5,8 @@ use std::time::Instant;
 use tungstenite::{accept, Message};
 use super::auth;
 use super::proxy::{parse_query, dispatch_ws_method};
-use super::types::{CompanionState, WsClient};
+use super::types::{CompanionState, ReflowCacheEntry, WsClient};
+use crate::terminal::grid_types::CompactLine;
 
 /// Handle a WebSocket upgrade request.
 /// Accepts the connection, then runs the WS protocol:
@@ -394,9 +395,9 @@ pub fn broadcast_terminal_grid(state: &CompanionState, terminal_id: &str, grid: 
             let cache_key = (terminal_id.to_string(), (cols, rows));
             let cached = {
                 let cache = state.reflow_cache.lock();
-                cache.get(&cache_key).and_then(|(cached_seqno, json)| {
-                    if *cached_seqno == grid.seqno && grid.seqno != 0 {
-                        Some(json.clone())
+                cache.get(&cache_key).and_then(|entry| {
+                    if entry.seqno == grid.seqno && grid.seqno != 0 {
+                        Some(entry.json.clone())
                     } else {
                         None
                     }
@@ -405,14 +406,40 @@ pub fn broadcast_terminal_grid(state: &CompanionState, terminal_id: &str, grid: 
             if let Some(json) = cached {
                 json
             } else {
-                let reflowed = crate::terminal::reflow::reflow_grid(grid, cols, rows);
+                let mut reflowed = crate::terminal::reflow::reflow_grid(grid, cols, rows);
+
+                // Read the prior frame's tally + hashes BEFORE we overwrite the
+                // cache entry. First frame defaults to (0, empty); the next
+                // miss will compare against this frame's hashes.
+                let (prev_offset, prev_hashes) = {
+                    let cache = state.reflow_cache.lock();
+                    cache
+                        .get(&cache_key)
+                        .map(|e| (e.cumulative_offset, e.line_hashes.clone()))
+                        .unwrap_or((0, Vec::new()))
+                };
+
+                let new_hashes = compute_line_hashes(&reflowed.lines);
+                let scrolled_off = compute_scroll_delta(&prev_hashes, &new_hashes) as u64;
+                let new_offset = prev_offset.saturating_add(scrolled_off);
+                // Stamp the cumulative offset over the per-frame trim count
+                // that reflow_grid put here. The companion uses this to
+                // build a continuous scrollback thread:
+                //   absolute_row = display_offset + ws_row.
+                reflowed.display_offset = new_offset as usize;
+
                 let json = serde_json::to_string(&reflowed).unwrap_or_default();
                 // Store for subsequent clients this tick + future ticks at
                 // the same seqno + dims.
-                state
-                    .reflow_cache
-                    .lock()
-                    .insert(cache_key, (grid.seqno, json.clone()));
+                state.reflow_cache.lock().insert(
+                    cache_key,
+                    ReflowCacheEntry {
+                        seqno: grid.seqno,
+                        cumulative_offset: new_offset,
+                        line_hashes: new_hashes,
+                        json: json.clone(),
+                    },
+                );
                 json
             }
         } else {
@@ -428,5 +455,145 @@ pub fn broadcast_terminal_grid(state: &CompanionState, terminal_id: &str, grid: 
             terminal_id, grid_json
         );
         let _ = client.sender.send(event);
+    }
+}
+
+/// Hash a reflowed line by its visible text. Style spans don't affect
+/// scroll detection — two lines that render the same text are "the same"
+/// for the purposes of detecting how many rows scrolled off the top.
+fn hash_line(line: &CompactLine) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    line.text.hash(&mut h);
+    h.finish()
+}
+
+fn compute_line_hashes(lines: &[CompactLine]) -> Vec<u64> {
+    lines.iter().map(hash_line).collect()
+}
+
+/// Count reflowed lines that scrolled off the top of the viewport since
+/// the previous frame at this `(terminal, dims)`.
+///
+/// Uses the longest suffix-of-prev that matches a prefix-of-current. For
+/// the streaming case (Claude responding, content appended at the bottom)
+/// this nails the scroll amount exactly:
+///
+///   prev    = [a, b, c, d, e]
+///   current = [c, d, e, f, g]   ← suffix [c,d,e] == prefix [c,d,e]
+///   scroll  = prev.len() - 3 = 2
+///
+/// On no overlap (clear screen, full TUI redraw, etc.) the whole prior
+/// frame is treated as "scrolled off". The cumulative offset advances by
+/// `prev.len()`, which keeps `display_offset` monotonic. Fine-grained
+/// in-place updates (vim, htop) aren't represented well by this model —
+/// they aren't the streaming case the companion is solving for.
+pub(crate) fn compute_scroll_delta(prev: &[u64], current: &[u64]) -> usize {
+    if prev.is_empty() {
+        return 0;
+    }
+    let max_n = prev.len().min(current.len());
+    for n in (1..=max_n).rev() {
+        if prev[prev.len() - n..] == current[..n] {
+            return prev.len() - n;
+        }
+    }
+    prev.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(text: &str) -> CompactLine {
+        CompactLine { row: 0, text: text.to_string(), spans: vec![], wrapped: false }
+    }
+
+    #[test]
+    fn scroll_delta_first_frame_is_zero() {
+        // No prior state → nothing has scrolled yet.
+        let prev: Vec<u64> = vec![];
+        let current = compute_line_hashes(&[line("a"), line("b")]);
+        assert_eq!(compute_scroll_delta(&prev, &current), 0);
+    }
+
+    #[test]
+    fn scroll_delta_no_change_is_zero() {
+        // Same content → no scroll.
+        let lines = [line("a"), line("b"), line("c")];
+        let prev = compute_line_hashes(&lines);
+        let current = prev.clone();
+        assert_eq!(compute_scroll_delta(&prev, &current), 0);
+    }
+
+    #[test]
+    fn scroll_delta_pure_scroll_matches_overlap() {
+        // [a,b,c,d,e] → [c,d,e,f,g] : two lines fell off the top.
+        let prev = compute_line_hashes(&[line("a"), line("b"), line("c"), line("d"), line("e")]);
+        let current =
+            compute_line_hashes(&[line("c"), line("d"), line("e"), line("f"), line("g")]);
+        assert_eq!(compute_scroll_delta(&prev, &current), 2);
+    }
+
+    #[test]
+    fn scroll_delta_total_replacement_is_prev_len() {
+        // No overlap (clear+redraw) → the whole prior frame scrolled off.
+        let prev = compute_line_hashes(&[line("a"), line("b"), line("c")]);
+        let current = compute_line_hashes(&[line("x"), line("y"), line("z")]);
+        assert_eq!(compute_scroll_delta(&prev, &current), 3);
+    }
+
+    #[test]
+    fn scroll_delta_appended_only_is_zero() {
+        // prev is shorter than current AND is a prefix of it → nothing scrolled,
+        // content was simply appended at the bottom.
+        let prev = compute_line_hashes(&[line("a"), line("b"), line("c")]);
+        let current =
+            compute_line_hashes(&[line("a"), line("b"), line("c"), line("d"), line("e")]);
+        assert_eq!(compute_scroll_delta(&prev, &current), 0);
+    }
+
+    #[test]
+    fn scroll_delta_resize_down() {
+        // [a,b,c,d,e] → [d,e,f] : viewport is smaller AND scrolled. Suffix
+        // [d,e] of prev matches prefix [d,e] of current; 3 fell off.
+        let prev = compute_line_hashes(&[line("a"), line("b"), line("c"), line("d"), line("e")]);
+        let current = compute_line_hashes(&[line("d"), line("e"), line("f")]);
+        assert_eq!(compute_scroll_delta(&prev, &current), 3);
+    }
+
+    #[test]
+    fn scroll_delta_picks_longest_overlap() {
+        // Repeating pattern admits multiple suffix-prefix matches; the
+        // algorithm must pick the LONGEST (= smallest scroll).
+        //
+        //   prev    = [a, b, a, b, a]
+        //   current = [a, b, a, b, c]
+        //
+        // Both [a] (n=1) and [a,b,a] (n=3) match. Picking n=3 means
+        // scroll = 2; picking n=1 would mean scroll = 4. The smaller
+        // scroll is the right answer (every shorter answer also works,
+        // so the smallest is the conservative pick that doesn't double-
+        // count lines as "scrolled off" prematurely).
+        let prev = compute_line_hashes(&[line("a"), line("b"), line("a"), line("b"), line("a")]);
+        let current =
+            compute_line_hashes(&[line("a"), line("b"), line("a"), line("b"), line("c")]);
+        assert_eq!(compute_scroll_delta(&prev, &current), 2);
+    }
+
+    #[test]
+    fn hash_line_collides_only_on_text() {
+        // Different style spans + wrap flag, same text → same hash.
+        let a = line("hello");
+        let b = CompactLine {
+            row: 99,
+            text: "hello".to_string(),
+            spans: vec![crate::terminal::grid_types::StyleSpan {
+                s: 0, e: 4, fg: Some(0xff0000), bg: None, fl: None,
+            }],
+            wrapped: true,
+        };
+        assert_eq!(hash_line(&a), hash_line(&b));
     }
 }
