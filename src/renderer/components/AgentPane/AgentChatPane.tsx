@@ -75,14 +75,29 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
         }
       } catch { /* fall through */ }
 
-      // Step 2: Build launch config (handles --resume from agent_sessions row)
+      // Step 2: Build a *bare resume* command for the chat tab.
+      //
+      // We deliberately do NOT use `k2so_agents_build_launch` here.
+      // build_launch is the wake-with-full-context path: it injects the
+      // agent's WAKEUP.md as the positional first user message and
+      // sometimes prefixes `/compact`. That's correct for an explicit
+      // "Launch agent" click or a scheduled heartbeat fire — the agent
+      // is supposed to wake up and triage. It is NOT correct for the
+      // Chat tab re-mounting on app relaunch (the daemon's PTY dies on
+      // K2SO upgrade → tab re-mounts → was firing a fresh wake every
+      // time, surprising users by auto-triaging without their consent).
+      //
+      // `k2so_agents_resume_chat_args` returns just
+      // `claude --resume <saved-session-id>` (or fresh `claude` if no
+      // saved session) — no system prompt, no WAKEUP body, no
+      // `/compact`.
       try {
         const result = await invoke<{
           command: string
           args: string[]
           cwd: string
           resumeSession?: string
-        }>('k2so_agents_build_launch', {
+        }>('k2so_agents_resume_chat_args', {
           projectPath,
           agentName,
         })
@@ -102,7 +117,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
           return
         }
       } catch (err) {
-        console.warn('[AgentChatPane] build_launch failed, falling back:', err)
+        console.warn('[AgentChatPane] resume_chat_args failed, falling back:', err)
       }
 
       // Step 3: Last-resort fallback — fresh session

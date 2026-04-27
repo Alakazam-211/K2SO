@@ -1221,6 +1221,61 @@ pub fn k2so_agents_build_launch(
     )
 }
 
+/// Build a *bare resume* launch command for the AgentChatPane (the
+/// pinned Chat tab). Unlike `k2so_agents_build_launch`, this does NOT
+/// inject the agent's WAKEUP.md as a positional message and does NOT
+/// prepend `/compact` — the Chat tab is for chatting with an existing
+/// agent session, not for autonomously firing a triage. If we have a
+/// saved session id for this agent, we add `--resume <id>`; otherwise
+/// we open a fresh `claude` PTY in the project root.
+///
+/// This deliberately skips the heartbeat-style "wake the agent up"
+/// behavior that 0.36.7 and earlier injected on every app relaunch
+/// (the daemon's PTY dies on app upgrade → tab re-mounts → was firing
+/// a wake every time, which surprised users).
+#[tauri::command]
+pub fn k2so_agents_resume_chat_args(
+    project_path: String,
+    agent_name: String,
+) -> Result<serde_json::Value, String> {
+    let mut args: Vec<String> = vec!["--dangerously-skip-permissions".to_string()];
+
+    // Look up saved session_id for this agent. Missing project / missing
+    // agent_session row → fall through to a fresh `claude`; that's not
+    // an error — it's a first-run for that agent.
+    let session_id: Option<String> = (|| {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        let project_id: String = conn
+            .query_row(
+                "SELECT id FROM projects WHERE path = ?1",
+                rusqlite::params![&project_path],
+                |row| row.get(0),
+            )
+            .ok()?;
+        let row = k2so_core::db::schema::AgentSession::get_by_agent(&conn, &project_id, &agent_name).ok().flatten()?;
+        row.session_id.filter(|s| !s.is_empty())
+    })();
+
+    // Verify the session file actually exists on disk before we pass
+    // `--resume`. Stale rows happen (workspace remove+readd, claude
+    // pruning) — `--resume` against a missing id makes claude bail with
+    // "No conversation found", which is uglier than just opening fresh.
+    if let Some(ref id) = session_id {
+        if k2so_core::chat_history::claude_session_file_exists(id, &project_path) {
+            args.push("--resume".to_string());
+            args.push(id.clone());
+        }
+    }
+
+    Ok(serde_json::json!({
+        "command": "claude",
+        "args": args,
+        "cwd": project_path,
+        "resumeSession": session_id,
+    }))
+}
+
 // `add_worktree_to_frontmatter` moved to k2so_core::agents::delegate (re-exported).
 
 // `strip_worktree_from_frontmatter` moved to k2so_core::agents::delegate (re-exported).

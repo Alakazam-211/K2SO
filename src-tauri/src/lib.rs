@@ -1236,6 +1236,7 @@ pub fn run() {
             commands::k2so_agents::k2so_agents_generate_workspace_claude_md,
             commands::k2so_agents::k2so_agents_disable_workspace_claude_md,
             commands::k2so_agents::k2so_agents_build_launch,
+            commands::k2so_agents::k2so_agents_resume_chat_args,
             commands::k2so_agents::k2so_agents_review_queue,
             commands::k2so_agents::k2so_agents_review_approve,
             commands::k2so_agents::k2so_agents_review_reject,
