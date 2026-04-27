@@ -12,24 +12,25 @@ export type ShortcutModifierLayout = 'cmd-active-cmdshift-pinned' | 'cmd-pinned-
 /**
  * Terminal rendering backend selection.
  *
- * - `alacritty` (default today): in-process alacritty_terminal engine +
- *   DOM renderer. PTY lives in the Tauri process; session dies with
- *   the app. Production-hardened, full SGR / alt-screen / mouse.
- *   Labeled "Alacritty (Legacy)" in the UI and retires after v2
- *   proves stable.
- * - `alacritty-v2`: daemon-hosted PTY + alacritty_terminal::Term.
- *   Tauri is a pure viewer rendering daemon-pushed grid snapshots +
- *   deltas. Session survives Tauri quit; heartbeats can target it.
- *   Labeled "Alacritty" in the UI. Tracks `.k2so/prds/alacritty-v2.md`
- *   phase plan; placeholder while A1-A5 land — selecting it currently
- *   falls back to `alacritty` behavior.
+ * - `alacritty-v2` (default since 0.36.7): daemon-hosted PTY +
+ *   alacritty_terminal::Term. Tauri is a pure viewer rendering
+ *   daemon-pushed grid snapshots + deltas. Session survives Tauri
+ *   quit; heartbeats can target it. Labeled "Alacritty" in the UI.
+ *   The A1–A5 phase plan from `.k2so/prds/alacritty-v2.md` landed
+ *   in 0.34–0.36; v2 is now production-hardened.
+ * - `alacritty` (legacy): in-process alacritty_terminal engine + DOM
+ *   renderer. PTY lives in the Tauri process; session dies with the
+ *   app. Labeled "Alacritty (Legacy)" in the UI; retires once we're
+ *   confident v2 covers every workflow.
  * - `kessel`: experimental JSON-stream renderer for the six T1-capable
  *   CLI tools (Claude, Gemini, Cursor Agent, Codex, Goose, pi-mono).
  *   Multi-subscriber, per-device native reflow. Tracks
  *   `.k2so/prds/kessel-t1.md`. Labeled "Kessel (BETA)".
  *
  * Changes to this setting only affect NEW tabs; already-open tabs
- * keep their chosen renderer.
+ * keep their chosen renderer. Zustand's persist middleware means
+ * existing users keep whatever they had set — only fresh installs
+ * see the new `alacritty-v2` default.
  */
 export type TerminalRenderer = 'alacritty' | 'alacritty-v2' | 'kessel'
 
@@ -61,10 +62,11 @@ export const useTerminalSettingsStore = create<TerminalSettingsState>()(
       linkClickMode: 'click' as LinkClickMode,
       openLinksInSplitPane: true,
       shortcutLayout: 'cmd-active-cmdshift-pinned' as ShortcutModifierLayout,
-      // Default to alacritty while Kessel finishes baking. Users can opt
-      // in per-preference; each new tab captures the preference at spawn
-      // time so the choice doesn't hot-swap mid-session.
-      renderer: 'alacritty' as TerminalRenderer,
+      // 0.36.7+: default to alacritty-v2 (the daemon-hosted renderer
+      // that survives Tauri quit and supports heartbeats). Existing
+      // users keep their persisted choice via zustand's persist
+      // middleware — only fresh installs land on v2 by default.
+      renderer: 'alacritty-v2' as TerminalRenderer,
 
       incrementFontSize: () => {
         set((state) => ({

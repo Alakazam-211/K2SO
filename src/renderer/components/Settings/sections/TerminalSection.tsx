@@ -15,7 +15,7 @@ export const TERMINAL_MANIFEST: SettingEntry[] = [
   { id: 'terminal.natural-text-editing', section: 'terminal', label: 'Natural Text Editing', description: 'Opt+Arrow word motion, Cmd+Arrow line motion', keywords: ['keyboard', 'edit', 'opt', 'alt'] },
   { id: 'terminal.link-click-mode', section: 'terminal', label: 'Link Click Mode', description: 'Click vs Cmd+Click to activate links', keywords: ['link', 'url', 'click'] },
   { id: 'terminal.open-links-in-split', section: 'terminal', label: 'Open Links in Split Pane', description: 'Open file links in a sibling pane when splits are active', keywords: ['link', 'split', 'pane'] },
-  { id: 'terminal.renderer', section: 'terminal', label: 'Terminal Renderer', description: 'Alacritty (legacy) vs Kessel (BETA)', keywords: ['renderer', 'engine', 'kessel', 'alacritty', 'session stream', 'beta'] },
+  { id: 'terminal.renderer', section: 'terminal', label: 'Terminal Renderer', description: 'Alacritty (default), Alacritty (Legacy), or Kessel (BETA)', keywords: ['renderer', 'engine', 'kessel', 'alacritty', 'v2', 'session stream', 'beta', 'legacy'] },
 ]
 
 export function TerminalSection(): React.JSX.Element {
@@ -136,19 +136,23 @@ export function TerminalSection(): React.JSX.Element {
 
         {/* Terminal Renderer.
          *
-         *  - "Alacritty (Legacy)" = today's Tauri-local PTY renderer.
-         *    Default until v2 ships.
-         *  - "Alacritty" = v2, daemon-hosted. Currently placeholder
-         *    (falls back to v1 behavior) while A1-A5 land per
-         *    .k2so/prds/alacritty-v2.md.
+         *  - "Alacritty" = v2, daemon-hosted. Default for fresh installs
+         *    since 0.36.7. Survives Tauri quit, supports heartbeat
+         *    continuity, and is the path forward.
+         *  - "Alacritty (Legacy)" = the original Tauri-local PTY
+         *    renderer. Kept available for users who relied on the
+         *    in-Tauri lifecycle; will retire once v2 covers every
+         *    workflow.
          *  - "Kessel (BETA)" = experimental JSON-stream multi-device
          *    renderer for T1-capable CLI tools (see
          *    .k2so/prds/kessel-t1.md).
          *
-         *  Changing this setting only affects NEW tabs.
+         *  Changing this setting only affects NEW tabs. Existing users
+         *  keep whatever they had previously chosen — only fresh
+         *  installs land on the v2 default.
          */}
         <SettingRow settingId="terminal.renderer" label={
-          <span title="Alacritty (Legacy) is the production default. Alacritty (v2) runs on the daemon and supports heartbeat continuity but is still under development. Kessel is experimental, for JSON-stream-capable CLI tools only. Changing this only affects NEW terminals; existing tabs keep their current renderer.">
+          <span title="Alacritty (the new default since 0.36.7) runs on the daemon, survives Tauri quit, and supports heartbeats. Alacritty (Legacy) is the original Tauri-local renderer, kept for backwards-compat. Kessel is experimental, for JSON-stream-capable CLI tools only. Changing this only affects NEW terminals; existing tabs keep their current renderer.">
             Terminal Renderer
           </span>
         }>

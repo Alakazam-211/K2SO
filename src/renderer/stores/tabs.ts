@@ -217,10 +217,10 @@ export interface SerializedItem {
   section?: 'inbox' | 'chat'
   /** Phase 4.5+ renderer choice stamped when the tab was first
    *  spawned. Preserved across app restarts so Kessel tabs come back
-   *  as Kessel tabs. Missing on rows serialized before the field
-   *  existed — restoreLayout falls back to the user's current
-   *  setting in that case. */
-  renderer?: 'alacritty' | 'kessel'
+   *  as Kessel tabs and v2 tabs come back as v2 tabs. Missing on rows
+   *  serialized before the field existed — restoreLayout falls back
+   *  to the user's current setting in that case. */
+  renderer?: 'alacritty' | 'alacritty-v2' | 'kessel'
 }
 
 export interface SerializedPaneGroup {
