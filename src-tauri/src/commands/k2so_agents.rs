@@ -3122,10 +3122,24 @@ pub fn write_workspace_skill_file_with_body(project_path: &str, base_body: Optio
 
     // Step 3: Compose K2SO-managed body only. PROJECT.md and AGENT.md bodies
     // go below the END marker in step 5, not inside the managed region.
-    let managed_body = match base_body {
+    let mut managed_body = match base_body {
         Some(body) => body.to_string(),
         None => generate_workspace_skill_content(&project_name),
     };
+
+    // Append the "how to update" footer pointing at the source files so
+    // the AI knows that this SKILL is compiled and where to make actual
+    // changes. Cite the workspace's primary agent if we can find one,
+    // otherwise emit the generic agent-name placeholder line.
+    let primary_agent = find_primary_agent(project_path);
+    if !managed_body.ends_with('\n') {
+        managed_body.push('\n');
+    }
+    managed_body.push('\n');
+    managed_body.push_str(&k2so_core::agents::skill_writer::skill_update_footer(
+        project_path,
+        primary_agent.as_deref(),
+    ));
 
     // Step 4: Write managed body to canonical + harness symlinks. We pass
     // write_shared_markers=false because the marker-injected AGENTS.md /

@@ -2045,13 +2045,14 @@ function ProjectContextEditor({ projectPath, projectName, onClose }: { projectPa
 // `.k2so/WAKEUP.md` retired; manager wake content now lives in the
 // per-row `triage` heartbeat's WAKEUP.md (see Heartbeats panel).
 
-// ── Workspace Knowledge editor (canonical SKILL.md) ──────
-// Edits the workspace's canonical SKILL file — one source of truth,
-// symlinked to Claude/OpenCode/Pi and marker-injected into AGENTS.md +
-// .github/copilot-instructions.md by write_skill_to_all_harnesses.
-// Every CLI LLM (Claude, Codex, Gemini, Cursor, Copilot, etc.) reads
-// this content via its own preferred discovery path, so a single edit
-// here propagates everywhere.
+// ── Workspace Knowledge editor (PROJECT.md — the source) ─────────────
+// PROJECT.md is the single source for workspace knowledge. K2SO's
+// regen pipeline compiles it (plus each agent's AGENT.md) into the
+// per-agent SKILL.md files, then symlinks/marker-injects those into
+// every CLI harness file (Claude/OpenCode/Pi/Codex/Gemini/Cursor/etc.).
+// Editing PROJECT.md is the right surface; editing the compiled
+// SKILL.md (the prior shape of this editor) led to silent overwrites
+// because the regen pipeline owns the output.
 
 function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: string; projectName: string; onClose: () => void }): React.JSX.Element {
   const [content, setContent] = useState('')
@@ -2059,8 +2060,8 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
   const [previewScale, setPreviewScale] = useState(100)
   const cssScale = Math.round(previewScale * 0.7)
 
-  const filePath = `${projectPath}/.k2so/skills/k2so/SKILL.md`
-  const watchDir = `${projectPath}/.k2so/skills/k2so`
+  const filePath = `${projectPath}/.k2so/PROJECT.md`
+  const watchDir = `${projectPath}/.k2so`
 
   const defaultAgent = useSettingsStore((s) => s.defaultAgent)
   const presets = usePresetsStore((s) => s.presets)
@@ -2078,17 +2079,28 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
 
   const handleFileChange = useCallback((c: string) => setContent(c), [])
 
+  // Trigger workspace SKILL.md regen on close so PROJECT.md edits
+  // propagate to every harness file before the user closes the editor.
+  const handleClose = useCallback(async () => {
+    try {
+      await invoke('k2so_agents_regenerate_workspace_skill', { projectPath })
+    } catch (err) {
+      console.warn('[workspace-knowledge] regen on close failed:', err)
+    }
+    onClose()
+  }, [projectPath, onClose])
+
   const systemPrompt = useMemo(() => [
-    `You're helping the user edit the canonical workspace knowledge file for "${projectName}".`,
+    `You're helping the user edit the workspace knowledge for "${projectName}".`,
     ``,
-    `File: .k2so/skills/k2so/SKILL.md (canonical — every CLI LLM reads it)`,
+    `File: .k2so/PROJECT.md (source)`,
+    `Path: ${filePath}`,
     ``,
-    `This is the one-source-of-truth file every CLI LLM in this workspace reads.`,
-    `Symlinked to: .claude/skills/k2so/SKILL.md, .opencode/agent/k2so.md, .pi/skills/k2so/SKILL.md`,
-    `Marker-injected into: AGENTS.md (Codex / Copilot CLI / agent.md spec), .github/copilot-instructions.md (Copilot)`,
-    ``,
-    `Every CLI LLM — Claude, Codex, Gemini, Cursor, Copilot, Pi, OpenCode — reads this file`,
-    `via its own preferred discovery path. Edit here once; changes propagate everywhere.`,
+    `This is the SOURCE file. K2SO compiles it (plus each agent's AGENT.md)`,
+    `into per-agent SKILL.md files, then propagates that content into every`,
+    `CLI harness file (CLAUDE.md, AGENTS.md, GEMINI.md, .cursor/rules/k2so.mdc,`,
+    `.goosehints, .opencode/agent/k2so.md, .pi/skills/k2so/SKILL.md, etc.).`,
+    `Edit here once; the regen pipeline updates everywhere on save.`,
     ``,
     `Good content for this file:`,
     `• Project overview — what this codebase does`,
@@ -2096,15 +2108,15 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
     `• Key directories — important paths and what lives in them`,
     `• Conventions — code style, commit format, branch naming, PR process`,
     `• Build & test — how to build, run tests, deploy`,
-    `• K2SO CLI — mention the workspace is K2SO-managed so agents know about \`k2so\` commands`,
     `• Important notes — gotchas, known issues, things to watch out for`,
     ``,
-    `The user sees a live preview on the right. Make sure the frontmatter keeps the`,
-    `\`name: k2so\` and \`description:\` fields intact — Claude Code's skill loader uses them.`,
+    `Do NOT include agent-specific role/persona content — that lives in each`,
+    `agent's AGENT.md (one per agent under .k2so/agents/<name>/AGENT.md) and`,
+    `the user can edit it via Settings → Workspaces → "Manage Persona".`,
     ``,
     `Current contents:`,
     content,
-  ].join('\n'), [projectName, content])
+  ].join('\n'), [projectName, filePath, content])
 
   const terminalCommand = agentCommand?.command
   const terminalArgs = useMemo(() => {
@@ -2128,17 +2140,17 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
       command={terminalCommand}
       args={terminalArgs}
       title={`Workspace Knowledge: ${projectName}`}
-      instructions="Editing the canonical SKILL.md — every CLI LLM in this workspace reads it via its own discovery path. Edits propagate to Claude, OpenCode, Pi, AGENTS.md, and Copilot automatically."
-      warningText="This is the canonical knowledge file for the workspace. Edits propagate to every CLI LLM — Claude, Codex, Gemini, Cursor, Copilot, etc."
+      instructions="Editing .k2so/PROJECT.md — the source for workspace knowledge. K2SO compiles this into every agent's SKILL.md and propagates to CLAUDE.md, AGENTS.md, GEMINI.md, .cursor/rules, .goosehints, etc. Regen runs automatically when you close this editor."
+      warningText="This is the source file for the workspace's shared knowledge. Edits compile into every CLI LLM harness on save."
       onFileChange={handleFileChange}
-      onClose={onClose}
+      onClose={handleClose}
       preview={
         <div className="h-full flex flex-col">
           <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--color-border)] flex-shrink-0">
             <div className="text-xs text-[var(--color-text-muted)]">
-              <span className="font-medium text-[var(--color-text-primary)]">SKILL.md</span>
+              <span className="font-medium text-[var(--color-text-primary)]">PROJECT.md</span>
               <span className="mx-2">&middot;</span>
-              <span>Workspace knowledge (read by every CLI LLM)</span>
+              <span>Source — compiled into every agent's SKILL.md</span>
             </div>
             <div className="flex items-center gap-2 flex-shrink-0">
               {previewMode === 'preview' && (
