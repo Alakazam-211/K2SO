@@ -390,46 +390,6 @@ impl DaemonPtySession {
     pub fn subscribe_events(&self) -> broadcast::Receiver<AlacEvent> {
         self.events_tx.subscribe()
     }
-
-    /// Render the last `count` non-empty lines of the alacritty grid,
-    /// walking scrollback history first then the visible screen. Used
-    /// by `/cli/terminal/read` so v2-spawned sessions (companion
-    /// background spawns, agent launches) are readable the same way
-    /// legacy `SessionStreamSession`s are via the replay ring.
-    ///
-    /// Returns trimmed-trailing-whitespace strings, one per row.
-    /// Trailing empty rows are dropped so the tail reflects actual
-    /// output rather than blank cells under the cursor.
-    pub fn read_lines(&self, count: usize) -> Vec<String> {
-        use alacritty_terminal::index::{Column, Line};
-
-        let term = self.term.lock();
-        let grid = term.grid();
-        let history = grid.history_size();
-        let screen_lines = grid.screen_lines();
-        let cols = grid.columns();
-        let total = history + screen_lines;
-
-        let mut lines: Vec<String> = Vec::with_capacity(total);
-        for i in 0..total {
-            let line_idx = i as i32 - history as i32;
-            let row = &grid[Line(line_idx)];
-            let mut text = String::with_capacity(cols);
-            for col in 0..cols {
-                text.push(row[Column(col)].c);
-            }
-            lines.push(text.trim_end().to_string());
-        }
-
-        // Drop trailing blanks — the visible region beneath the
-        // cursor is empty cells that should not count toward `count`.
-        while lines.last().map_or(false, |l| l.is_empty()) {
-            lines.pop();
-        }
-
-        let start = lines.len().saturating_sub(count);
-        lines.split_off(start)
-    }
 }
 
 // No explicit `Drop` impl: dropping `pty_notifier` closes the

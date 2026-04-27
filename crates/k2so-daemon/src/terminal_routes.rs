@@ -55,18 +55,6 @@ pub fn handle_read(params: &HashMap<String, String>) -> CliResponse {
         .and_then(|s| s.parse().ok())
         .unwrap_or(50);
 
-    // V2 sessions (DaemonPtySession — every spawn-background, agent
-    // launch, and Tauri tab post-A9) don't register in the legacy
-    // `registry`; their state lives on an alacritty `Term`. Snapshot
-    // its grid for the read response. Legacy sessions still flow
-    // through the replay-ring path below.
-    if let Some(crate::session_lookup::LiveSession::V2(v2)) =
-        crate::session_lookup::lookup_by_session_id(&session_id)
-    {
-        let lines = v2.read_lines(requested_lines);
-        return CliResponse::ok_json(serde_json::json!({ "lines": lines }).to_string());
-    }
-
     let entry = match registry::lookup(&session_id) {
         Some(e) => e,
         None => return CliResponse::bad_request("session not found"),
