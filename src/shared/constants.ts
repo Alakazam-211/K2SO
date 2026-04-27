@@ -30,15 +30,30 @@ export const UPDATE_CHECK_INTERVAL = 3 * 60 * 60 * 1000  // 3 hours
 export const CONTEXT_MENU_DISMISS_DELAY = 50  // ms
 
 // ── Resumable CLI tools ─────────────────────────────────────────────
-// Tools that support session resume via a --resume flag.
-// Used to detect active sessions before app close and restore on reopen.
-export const RESUMABLE_CLI_TOOLS: Record<string, { resumeFlag: string; provider: string }> = {
+// Tools that support session resume.
+//
+// Two shapes:
+//   - flag-style: `<command> <preset-args> <resumeFlag> <uuid>` — the
+//     resumed PTY launches with the same preset args as a fresh start
+//     (auth flags etc.). Used by Claude/Cursor/Gemini/Pi.
+//   - subcommand-style: `<command> <resumeSubcommand> <uuid>` — preset
+//     args are dropped because the saved session carries its own
+//     model/permissions, and the resume subcommand only accepts a
+//     subset of flags. Used by Codex (`codex resume <uuid>` since v0.125).
+export interface ResumableCliTool {
+  resumeFlag?: string
+  resumeSubcommand?: string
+  provider: string
+}
+export const RESUMABLE_CLI_TOOLS: Record<string, ResumableCliTool> = {
   'claude': { resumeFlag: '--resume', provider: 'claude' },
   'cursor-agent': { resumeFlag: '--resume', provider: 'cursor' },
   'gemini': { resumeFlag: '--resume', provider: 'gemini' },
   // Pi uses `--session <uuid>` for deterministic resume — `--resume`
   // is its interactive picker (no id arg), so don't confuse them.
   'pi': { resumeFlag: '--session', provider: 'pi' },
+  // Codex resume is a subcommand: `codex resume <uuid>`.
+  'codex': { resumeSubcommand: 'resume', provider: 'codex' },
 }
 
 // ── Agent activity ────────────────────────────────────────────────

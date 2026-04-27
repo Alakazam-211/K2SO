@@ -871,6 +871,200 @@ fn parse_pi_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSession>, S
     Ok(results)
 }
 
+// ── Codex chat parsing ──────────────────────────────────────────────────
+//
+// Layout (Codex 0.125+, dated partitioning):
+//   ~/.codex/sessions/YYYY/MM/DD/rollout-<ISO>-<uuidv7>.jsonl
+//     line 1: {"type":"session_meta","payload":{"id":"<uuid>","timestamp":"<ISO>",
+//                                               "cwd":"/abs/path","originator":"codex-tui",…}}
+//     subsequent: turn_context, response_item, event_msg
+//   ~/.codex/history.jsonl  — flat global index, one line per user prompt:
+//     {"session_id":"<uuid>","ts":<unix-secs>,"text":"<prompt>"}
+//
+// Title source: read `~/.codex/history.jsonl`, group by session_id, take
+// the EARLIEST entry per session. The rollout file's first user message
+// is polluted by an injected AGENTS.md blob, so the flat history is the
+// clean source.
+//
+// Resume: `codex resume <uuid>` (since v0.125 — earlier versions had
+// only `experimental_resume="<path>"`). Subcommand position matters,
+// so the click handler builds args as [resume, uuid] without preset
+// args.
+
+/// Read all entries from `~/.codex/history.jsonl`. Returns a map of
+/// `session_id → (earliest_ts_secs, prompt_text)`. Returns empty map
+/// if the file is missing — codex may not have written it yet.
+fn codex_history_index() -> HashMap<String, (i64, String)> {
+    let mut map: HashMap<String, (i64, String)> = HashMap::new();
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return map,
+    };
+    let path = home.join(".codex").join("history.jsonl");
+    let file = match File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return map,
+    };
+    for line in BufReader::new(file).lines().flatten() {
+        let parsed: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let sid = match parsed.get("session_id").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let ts = parsed.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
+        let text = parsed
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        map.entry(sid)
+            .and_modify(|(existing_ts, existing_text)| {
+                if ts < *existing_ts || existing_text.is_empty() {
+                    *existing_ts = ts;
+                    *existing_text = text.clone();
+                }
+            })
+            .or_insert((ts, text));
+    }
+    map
+}
+
+fn parse_codex_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSession>, String> {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return Ok(vec![]),
+    };
+    let sessions_root = home.join(".codex").join("sessions");
+    if !sessions_root.exists() {
+        return Ok(vec![]);
+    }
+
+    let filter_root = project_filter.map(resolve_root_project_path);
+    let title_index = codex_history_index();
+    let mut results = Vec::new();
+
+    // Walk YYYY/MM/DD/*.jsonl. Codex's older flat layout is no longer
+    // produced by 0.125+, so we don't need to handle it here.
+    let years = match fs::read_dir(&sessions_root) {
+        Ok(e) => e,
+        Err(_) => return Ok(vec![]),
+    };
+    for year_entry in years.flatten() {
+        if !year_entry.path().is_dir() {
+            continue;
+        }
+        let months = match fs::read_dir(year_entry.path()) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for month_entry in months.flatten() {
+            if !month_entry.path().is_dir() {
+                continue;
+            }
+            let days = match fs::read_dir(month_entry.path()) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for day_entry in days.flatten() {
+                if !day_entry.path().is_dir() {
+                    continue;
+                }
+                let files = match fs::read_dir(day_entry.path()) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                for f_entry in files.flatten() {
+                    let path = f_entry.path();
+                    if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                        continue;
+                    }
+
+                    let file = match File::open(&path) {
+                        Ok(f) => f,
+                        Err(_) => continue,
+                    };
+                    let mut reader = BufReader::new(file);
+                    let mut first_line = String::new();
+                    if reader.read_line(&mut first_line).is_err() {
+                        continue;
+                    }
+                    let header: serde_json::Value = match serde_json::from_str(first_line.trim()) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    if header.get("type").and_then(|v| v.as_str()) != Some("session_meta") {
+                        continue;
+                    }
+                    let payload = match header.get("payload") {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let session_id = match payload.get("id").and_then(|v| v.as_str()) {
+                        Some(s) => s.to_string(),
+                        None => continue,
+                    };
+                    let cwd = payload
+                        .get("cwd")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if let Some(ref root) = filter_root {
+                        if !matches_project_family(&cwd, root) {
+                            continue;
+                        }
+                    }
+
+                    // Timestamp: prefer file mtime since codex updates it
+                    // on every turn; fall back to header's timestamp.
+                    let mtime_ms = fs::metadata(&path)
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    let header_ms = parse_rfc3339_to_ms(
+                        payload.get("timestamp").and_then(|v| v.as_str()).unwrap_or(""),
+                    )
+                    .unwrap_or(0);
+                    let timestamp = if mtime_ms > 0 { mtime_ms } else { header_ms };
+
+                    // Title: prefer history.jsonl (clean); fall back to
+                    // a generic placeholder if the user hasn't typed
+                    // anything yet (still creates an entry so resume
+                    // works).
+                    let raw_title = title_index
+                        .get(&session_id)
+                        .map(|(_, t)| t.as_str())
+                        .unwrap_or("");
+                    let truncated_title = if raw_title.is_empty() {
+                        format!("Codex session {}", &session_id[..8.min(session_id.len())])
+                    } else if raw_title.chars().count() > 80 {
+                        let truncated: String = raw_title.chars().take(77).collect();
+                        format!("{}...", truncated)
+                    } else {
+                        raw_title.to_string()
+                    };
+
+                    results.push(ChatSession {
+                        session_id,
+                        project: cwd.clone(),
+                        origin_branch: extract_worktree_branch(&cwd),
+                        title: truncated_title,
+                        timestamp,
+                        provider: "codex".to_string(),
+                        message_count: 0,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(results)
+}
+
 // ── Session detection for resume ──────────────────────────────────────── moved to k2so_core::chat_history (re-exported).
 
 /// Check whether a claude session file exists on disk for the given
@@ -891,6 +1085,7 @@ pub fn chat_history_list(project_path: Option<String>) -> Result<Vec<ChatSession
     all.extend(parse_cursor_sessions(project_path.as_deref())?);
     all.extend(parse_gemini_sessions(project_path.as_deref())?);
     all.extend(parse_pi_sessions(project_path.as_deref())?);
+    all.extend(parse_codex_sessions(project_path.as_deref())?);
     all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     all.truncate(100);
     Ok(all)
@@ -903,6 +1098,7 @@ pub async fn chat_history_list_for_project(project_path: String) -> Result<Vec<C
         all.extend(parse_cursor_sessions(Some(&project_path))?);
         all.extend(parse_gemini_sessions(Some(&project_path))?);
         all.extend(parse_pi_sessions(Some(&project_path))?);
+        all.extend(parse_codex_sessions(Some(&project_path))?);
         all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         all.truncate(100);
         Ok(all)
@@ -921,6 +1117,8 @@ pub struct ChatStoragePaths {
     pub cursor_chats_dirs: Vec<String>,
     pub gemini_chats_dirs: Vec<String>,
     pub pi_chats_dirs: Vec<String>,
+    pub codex_sessions_dirs: Vec<String>,
+    pub codex_history_file: Option<String>,
 }
 
 // Convert a project path to Claude's project hash format. moved to k2so_core::chat_history (re-exported).
@@ -1029,12 +1227,67 @@ pub fn chat_history_get_storage_paths(project_path: String) -> Result<ChatStorag
         out
     };
 
+    // Codex storage paths. Sessions live under YYYY/MM/DD/ partitions;
+    // we surface every dated dir whose direct *.jsonl files include at
+    // least one session whose cwd matches our project family.
+    let codex_history_file = {
+        let p = home.join(".codex").join("history.jsonl");
+        if p.exists() { Some(p.to_string_lossy().to_string()) } else { None }
+    };
+    let codex_sessions_dirs = {
+        let mut out = Vec::new();
+        let sessions_root = home.join(".codex").join("sessions");
+        if let Ok(years) = fs::read_dir(&sessions_root) {
+            for year_entry in years.filter_map(|e| e.ok()) {
+                if !year_entry.path().is_dir() { continue; }
+                if let Ok(months) = fs::read_dir(year_entry.path()) {
+                    for month_entry in months.filter_map(|e| e.ok()) {
+                        if !month_entry.path().is_dir() { continue; }
+                        if let Ok(days) = fs::read_dir(month_entry.path()) {
+                            for day_entry in days.filter_map(|e| e.ok()) {
+                                let day_path = day_entry.path();
+                                if !day_path.is_dir() { continue; }
+                                let mut matched = false;
+                                if let Ok(files) = fs::read_dir(&day_path) {
+                                    for f in files.filter_map(|e| e.ok()) {
+                                        let p = f.path();
+                                        if p.extension().and_then(|s| s.to_str()) != Some("jsonl") { continue; }
+                                        if let Ok(file) = File::open(&p) {
+                                            let mut reader = BufReader::new(file);
+                                            let mut first = String::new();
+                                            if reader.read_line(&mut first).is_ok() {
+                                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(first.trim()) {
+                                                    if let Some(cwd) = v.get("payload").and_then(|p| p.get("cwd")).and_then(|v| v.as_str()) {
+                                                        if matches_project_family(cwd, root) {
+                                                            matched = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if matched {
+                                    out.push(day_path.to_string_lossy().to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    };
+
     Ok(ChatStoragePaths {
         claude_history_file,
         claude_sessions_dirs,
         cursor_chats_dirs,
         gemini_chats_dirs,
         pi_chats_dirs,
+        codex_sessions_dirs,
+        codex_history_file,
     })
 }
 

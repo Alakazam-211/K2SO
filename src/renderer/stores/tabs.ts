@@ -1993,9 +1993,16 @@ export const useTabsStore = create<TabsState>((set, get) => ({
             if (sessionId && command) {
               const toolConfig = RESUMABLE_CLI_TOOLS[command]
               if (toolConfig) {
-                // Preserve original args (e.g. --dangerously-skip-permissions) and append --resume
-                const origArgs = (si.args ?? []).filter((a: string) => a !== toolConfig.resumeFlag && a !== sessionId)
-                args = [...origArgs, toolConfig.resumeFlag, sessionId]
+                if (toolConfig.resumeSubcommand) {
+                  // Subcommand-style (Codex): drop preset args; resumed
+                  // session carries its own model/permissions.
+                  args = [toolConfig.resumeSubcommand, sessionId]
+                } else if (toolConfig.resumeFlag) {
+                  // Flag-style: preserve original args (e.g. --dangerously-skip-permissions) and append the resume flag.
+                  const flag = toolConfig.resumeFlag
+                  const origArgs = (si.args ?? []).filter((a: string) => a !== flag && a !== sessionId)
+                  args = [...origArgs, flag, sessionId]
+                }
               }
             }
 
@@ -2096,8 +2103,13 @@ export const useTabsStore = create<TabsState>((set, get) => ({
                   if (sessionId && command) {
                     const toolConfig = RESUMABLE_CLI_TOOLS[command]
                     if (toolConfig) {
-                      const origArgs = (si.args ?? []).filter((a: string) => a !== toolConfig.resumeFlag && a !== sessionId)
-                      args = [...origArgs, toolConfig.resumeFlag, sessionId]
+                      if (toolConfig.resumeSubcommand) {
+                        args = [toolConfig.resumeSubcommand, sessionId]
+                      } else if (toolConfig.resumeFlag) {
+                        const flag = toolConfig.resumeFlag
+                        const origArgs = (si.args ?? []).filter((a: string) => a !== flag && a !== sessionId)
+                        args = [...origArgs, flag, sessionId]
+                      }
                     }
                   }
                   return {
@@ -2395,8 +2407,13 @@ export const useTabsStore = create<TabsState>((set, get) => ({
                 projectPath: cwd,
               })
               if (sessionId) {
-                const baseArgs = agentOpts.args ?? []
-                agentOpts.args = [...baseArgs, toolConfig.resumeFlag, sessionId]
+                if (toolConfig.resumeSubcommand) {
+                  // Subcommand-style (Codex): drop preset args.
+                  agentOpts.args = [toolConfig.resumeSubcommand, sessionId]
+                } else if (toolConfig.resumeFlag) {
+                  const baseArgs = agentOpts.args ?? []
+                  agentOpts.args = [...baseArgs, toolConfig.resumeFlag, sessionId]
+                }
               }
             } catch { /* session detection failed — launch fresh */ }
           }

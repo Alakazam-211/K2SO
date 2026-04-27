@@ -23,11 +23,24 @@ type DateGroup = 'Pinned' | 'Today' | 'Yesterday' | 'This Week' | 'This Month' |
 
 // ── CLI tool config ─────────────────────────────────────────────────
 
-const PROVIDER_CONFIG: Record<string, { command: string; label: string; resumeFlag: string }> = {
+// Per-provider resume contract. Either `resumeFlag` ("flag-style":
+// `<command> <preset-args> <flag> <uuid>`) OR `resumeSubcommand`
+// ("subcommand-style": `<command> <subcommand> <uuid>` — no preset
+// args, since the saved session carries its own model/permissions).
+// Codex is the only subcommand-style provider currently.
+interface ProviderConfig {
+  command: string
+  label: string
+  resumeFlag?: string
+  resumeSubcommand?: string
+}
+
+const PROVIDER_CONFIG: Record<string, ProviderConfig> = {
   claude: { command: 'claude', label: 'Claude', resumeFlag: '--resume' },
   cursor: { command: 'cursor-agent', label: 'Cursor', resumeFlag: '--resume' },
   gemini: { command: 'gemini', label: 'Gemini', resumeFlag: '--resume' },
   pi: { command: 'pi', label: 'Pi', resumeFlag: '--session' },
+  codex: { command: 'codex', label: 'Codex', resumeSubcommand: 'resume' },
 }
 
 /// Get the preset args (e.g. --dangerously-skip-permissions) for a provider command.
@@ -109,6 +122,7 @@ const PROVIDER_AGENT_NAME: Record<string, string> = {
   cursor: 'Cursor Agent',
   gemini: 'Gemini',
   pi: 'Pi',
+  codex: 'Codex',
 }
 
 function ProviderIcon({ provider }: { provider: string }): React.JSX.Element {
@@ -122,6 +136,8 @@ interface ChatStoragePaths {
   cursorChatsDirs: string[]
   geminiChatsDirs: string[]
   piChatsDirs: string[]
+  codexSessionsDirs: string[]
+  codexHistoryFile: string | null
 }
 
 function SearchIcon(): React.JSX.Element {
@@ -302,6 +318,8 @@ export default function ChatHistory(): React.JSX.Element {
     for (const dir of paths.cursorChatsDirs) locationLines.push(`- Cursor chats: ${dir}`)
     for (const dir of paths.geminiChatsDirs) locationLines.push(`- Gemini chats: ${dir}`)
     for (const dir of paths.piChatsDirs) locationLines.push(`- Pi chats: ${dir}`)
+    if (paths.codexHistoryFile) locationLines.push(`- Codex prompt index: ${paths.codexHistoryFile}`)
+    for (const dir of paths.codexSessionsDirs) locationLines.push(`- Codex sessions: ${dir}`)
 
     const prompt = [
       `Search through my conversation history for: "${searchQuery.trim()}"`,
@@ -460,16 +478,23 @@ export default function ChatHistory(): React.JSX.Element {
         // One is a worktree, the other is main repo
         || (sessionFromWorktree !== isCurrentlyInWorktree)
 
-      // Build resume args: include preset flags (e.g. --dangerously-skip-permissions)
-      // so the resumed session has the same permissions as a fresh launch.
-      //
-      // Per-provider resume flag (config.resumeFlag) — Claude/Cursor/Gemini all
-      // use `--resume <uuid>`, but Pi uses `--session <uuid>` (its `--resume` is
-      // an interactive picker that takes no arg). Hardcoding `--resume` here
-      // sent the uuid through to Pi as a positional message, which then got
-      // typed into the chat after the picker closed.
-      const presetArgs = getPresetArgsForProvider(session.provider)
-      const args = [...presetArgs, config.resumeFlag, session.sessionId]
+      // Build resume args. Two shapes depending on provider:
+      //   - Flag-style (Claude/Cursor/Gemini/Pi): `<preset-args> <flag> <uuid>`.
+      //     Preset flags carry through (e.g. --dangerously-skip-permissions)
+      //     so the resumed session has the same auth as a fresh launch.
+      //   - Subcommand-style (Codex): `<subcommand> <uuid>`. Preset flags
+      //     are dropped because Codex's resume subcommand only accepts a
+      //     small subset of options (the saved session already carries
+      //     model/permissions/cwd from when it was first started).
+      let args: string[]
+      if (config.resumeSubcommand) {
+        args = [config.resumeSubcommand, session.sessionId]
+      } else if (config.resumeFlag) {
+        const presetArgs = getPresetArgsForProvider(session.provider)
+        args = [...presetArgs, config.resumeFlag, session.sessionId]
+      } else {
+        args = [session.sessionId]
+      }
       if (isCrossWorktree && config.command === 'claude') {
         args.push('--fork-session')
       }

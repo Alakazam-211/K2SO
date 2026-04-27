@@ -504,6 +504,112 @@ pub fn detect_pi_session(project_path: &str) -> Option<String> {
     header.get("id").and_then(|v| v.as_str()).map(String::from)
 }
 
+/// Return the most recent Codex session uuid for a project path.
+///
+/// Codex layout (0.125+):
+///   ~/.codex/sessions/YYYY/MM/DD/rollout-<ISO>-<uuidv7>.jsonl
+///   line 1: {"type":"session_meta","payload":{"id","timestamp","cwd",…}}
+///
+/// Walks the dated partitions, reads each rollout's line 1 to filter by
+/// cwd (project family), picks the file with newest mtime, returns its
+/// `payload.id` for `codex resume <uuid>`.
+pub fn detect_codex_session(project_path: &str) -> Option<String> {
+    let home = dirs::home_dir()?;
+    let sessions_root = home.join(".codex").join("sessions");
+    if !sessions_root.exists() {
+        return None;
+    }
+
+    let root = resolve_root_project_path(project_path);
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+
+    let years = fs::read_dir(&sessions_root).ok()?;
+    for year_entry in years.flatten() {
+        if !year_entry.path().is_dir() {
+            continue;
+        }
+        let months = match fs::read_dir(year_entry.path()) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for month_entry in months.flatten() {
+            if !month_entry.path().is_dir() {
+                continue;
+            }
+            let days = match fs::read_dir(month_entry.path()) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for day_entry in days.flatten() {
+                if !day_entry.path().is_dir() {
+                    continue;
+                }
+                let files = match fs::read_dir(day_entry.path()) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                for f_entry in files.flatten() {
+                    let path = f_entry.path();
+                    if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                        continue;
+                    }
+                    let file = match std::fs::File::open(&path) {
+                        Ok(f) => f,
+                        Err(_) => continue,
+                    };
+                    let mut reader = std::io::BufReader::new(file);
+                    let mut first_line = String::new();
+                    use std::io::BufRead;
+                    if reader.read_line(&mut first_line).is_err() {
+                        continue;
+                    }
+                    let header: serde_json::Value = match serde_json::from_str(first_line.trim()) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    let cwd = match header
+                        .get("payload")
+                        .and_then(|p| p.get("cwd"))
+                        .and_then(|v| v.as_str())
+                    {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    if !matches_project_family(cwd, root) {
+                        continue;
+                    }
+                    let modified = match fs::metadata(&path).and_then(|m| m.modified()) {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+                    match &best {
+                        Some((best_time, _)) if modified > *best_time => {
+                            best = Some((modified, path));
+                        }
+                        None => {
+                            best = Some((modified, path));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    let path = best.map(|(_, p)| p)?;
+    let file = std::fs::File::open(&path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut first_line = String::new();
+    use std::io::BufRead;
+    reader.read_line(&mut first_line).ok()?;
+    let header: serde_json::Value = serde_json::from_str(first_line.trim()).ok()?;
+    header
+        .get("payload")
+        .and_then(|p| p.get("id"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
 /// Provider dispatcher used by the daemon's post-spawn session-save
 /// task (and the Tauri UI's session-rediscovery). Returns `Ok(None)`
 /// when no session is detected — distinct from `Err` so callers can
@@ -517,6 +623,7 @@ pub fn detect_active_session(
         "cursor" => detect_cursor_session(project_path),
         "gemini" => detect_gemini_session(project_path),
         "pi" => detect_pi_session(project_path),
+        "codex" => detect_codex_session(project_path),
         _ => None,
     };
     Ok(session)
