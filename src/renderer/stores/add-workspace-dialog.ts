@@ -20,7 +20,7 @@ interface AddWorkspaceDialogState {
   open: (args: { path: string; preview: WorkspacePreviewEntry[]; onConfirm: () => Promise<void> }) => void
   close: () => void
   setIsPending: (pending: boolean) => void
-  setError: (error: string) => void
+  setError: (error: string | null) => void
 }
 
 export const useAddWorkspaceDialogStore = create<AddWorkspaceDialogState>((set) => ({
@@ -39,5 +39,5 @@ export const useAddWorkspaceDialogStore = create<AddWorkspaceDialogState>((set) 
 
   setIsPending: (isPending: boolean) => set({ isPending }),
 
-  setError: (error: string) => set({ error, isPending: false })
+  setError: (error: string | null) => set({ error, isPending: false })
 }))

@@ -31,6 +31,7 @@ pub mod events;
 pub mod heartbeat;
 pub mod heartbeat_install;
 pub mod launch_profile;
+pub mod onboarding;
 pub mod reviews;
 pub mod scheduler;
 pub mod session;

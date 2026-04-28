@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.36.0"
+K2SO_CLI_VERSION="0.36.9"
 
 set -euo pipefail
 
@@ -2997,7 +2997,7 @@ cmd_update() {
 
     # Extract the version from the remote script
     local remote_version
-    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.36.0"//')
+    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.36.9"//')
     if [ -z "$remote_version" ]; then
         echo "Error: Could not parse remote version." >&2
         exit 1
@@ -3046,6 +3046,66 @@ cmd_update() {
     fi
 
     echo "Updated k2so: $K2SO_CLI_VERSION → $remote_version"
+}
+
+# ── Onboarding (workspace-add three-option flow) ─────────────────────
+#
+# Thin shell wrappers around `/cli/onboarding/*` daemon routes. Logic
+# lives in k2so-core::agents::onboarding so the Tauri modal and the
+# CLI share a single implementation. Project path defaults to $PWD.
+
+# k2so onboarding scan [project-path]
+#   List workspace harness files (CLAUDE.md, GEMINI.md, .cursor/rules,
+#   etc.) that have substantive user content. Empty result == no
+#   prompt needed; a non-empty result is what the GUI modal shows in
+#   the "Adopt" picker.
+cmd_onboarding_scan() {
+    local target="${1:-$PWD}"
+    target="$(cd "$target" && pwd)"
+    cli_request "/cli/onboarding/scan" "project=$(urlencode "$target")"
+}
+
+# k2so onboarding adopt <relative-or-absolute-path> [project-path]
+#   Adopt the named harness file as the seed for .k2so/PROJECT.md and
+#   trigger a workspace SKILL regen. The source file is archived to
+#   .k2so/migration/ and removed (so the regen's existing migration
+#   helpers don't double-import the same body).
+cmd_onboarding_adopt() {
+    local source="${1:-}"
+    local target="${2:-$PWD}"
+    if [ -z "$source" ]; then
+        echo "Usage: k2so onboarding adopt <file> [project-path]" >&2
+        echo "Run 'k2so onboarding scan' to see candidate files." >&2
+        exit 1
+    fi
+    target="$(cd "$target" && pwd)"
+    # Resolve to absolute path if user passed a relative one
+    if [[ "$source" != /* ]]; then
+        source="$target/$source"
+    fi
+    cli_request "/cli/onboarding/adopt" \
+        "project=$(urlencode "$target")&source=$(urlencode "$source")"
+}
+
+# k2so onboarding later [project-path]
+#   "Do it later" — drops .k2so/.skip-harness-management so K2SO won't
+#   touch CLAUDE.md / GEMINI.md / .cursor/rules / etc. on subsequent
+#   regens. K2SO's internal SKILL still gets written so heartbeats and
+#   agent launches keep working. Reversible by removing the flag.
+cmd_onboarding_later() {
+    local target="${1:-$PWD}"
+    target="$(cd "$target" && pwd)"
+    cli_request "/cli/onboarding/skip" "project=$(urlencode "$target")"
+}
+
+# k2so onboarding fresh [project-path]
+#   Run the workspace regen normally, archiving any pre-existing
+#   harness files to .k2so/migration/ and replacing them with K2SO
+#   symlinks. Equivalent to the renderer's "Start Fresh" button.
+cmd_onboarding_fresh() {
+    local target="${1:-$PWD}"
+    target="$(cd "$target" && pwd)"
+    cli_request "/cli/onboarding/start-fresh" "project=$(urlencode "$target")"
 }
 
 # ── Router ───────────────────────────────────────────────────────────
@@ -3130,6 +3190,15 @@ case "${1:-help}" in
             preview) shift 2; cmd_workspace_preview "$@" ;;
             cleanup) cmd_workspace_cleanup ;;
             *)       echo "Usage: k2so workspace <create|open|remove|preview|cleanup> [path]" >&2; exit 1 ;;
+        esac
+        ;;
+    onboarding)
+        case "${2:-}" in
+            scan)   shift 2; cmd_onboarding_scan "$@" ;;
+            adopt)  shift 2; cmd_onboarding_adopt "$@" ;;
+            later)  shift 2; cmd_onboarding_later "$@" ;;
+            fresh)  shift 2; cmd_onboarding_fresh "$@" ;;
+            *)      echo "Usage: k2so onboarding <scan|adopt|later|fresh> [args]" >&2; exit 1 ;;
         esac
         ;;
     mode)

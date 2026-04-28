@@ -139,6 +139,16 @@ pub fn force_symlink(source: &Path, target: &Path) {
 /// (AGENTS.md + copilot-instructions.md). Only the workspace-level
 /// skill should set this true — per-agent skills would otherwise
 /// clobber each other in the single K2SO marker block.
+///
+/// **Skip-harness-management opt-out:** when the user has chosen
+/// "Skip" in the workspace onboarding flow, a flag file lives at
+/// `.k2so/.skip-harness-management`. We always write the canonical
+/// `.k2so/skills/<name>/SKILL.md` (K2SO's own internal context that
+/// heartbeats and agent launches need), but skip every harness
+/// fanout step — no symlinks into `.claude/`, `.opencode/`, `.pi/`,
+/// no marker injection into `AGENTS.md` or
+/// `.github/copilot-instructions.md`. The user keeps full control
+/// of those files. See [`crate::agents::onboarding`] for the flag.
 pub fn write_skill_to_all_harnesses(
     project_path: &str,
     skill_name: &str,
@@ -166,6 +176,14 @@ pub fn write_skill_to_all_harnesses(
         content,
         Some(&extras),
     );
+
+    // Skip-harness-management gate — the user opted out of K2SO
+    // touching CLAUDE.md / GEMINI.md / .cursor/rules / etc. Canonical
+    // SKILL above is still authoritative for K2SO's own use; we just
+    // don't fan out to the user-visible harness paths.
+    if crate::agents::onboarding::is_harness_management_skipped(project_path) {
+        return;
+    }
 
     // Claude Code: .claude/skills/{name}/SKILL.md → symlink
     let claude_dir = root.join(".claude/skills").join(skill_name);

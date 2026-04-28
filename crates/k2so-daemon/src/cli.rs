@@ -931,6 +931,56 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         // ring?"). Query param: session=<uuid>.
         "/cli/sessions/diagnose" => diagnose_session(params),
 
+        // ── Onboarding (workspace-add three-option flow) ────────
+        //
+        // Logic lives in `k2so_core::agents::onboarding`. Daemon
+        // exposes the four ops over HTTP so the `k2so onboarding`
+        // CLI subcommand and any other headless caller can drive
+        // the same flow as the Tauri `WorkspaceOnboardingModal`.
+        // Adopt + Start Fresh fire the workspace-regen bridge —
+        // a no-op when the host hasn't registered a regen impl
+        // (next Tauri launch picks up the staged PROJECT.md).
+        "/cli/onboarding/scan" => match need_project(params) {
+            Ok(p) => respond(Ok::<_, String>(
+                k2so_core::agents::onboarding::scan_harness_files(&p),
+            )),
+            Err(r) => r,
+        },
+        "/cli/onboarding/adopt" => match need_project(params) {
+            Ok(p) => {
+                let source = str_param(params, "source");
+                if source.is_empty() {
+                    CliResponse::bad_request("Missing source parameter")
+                } else {
+                    match k2so_core::agents::onboarding::adopt_harness_as_project_md(
+                        &p,
+                        std::path::Path::new(&source),
+                    ) {
+                        Ok(outcome) => {
+                            let _ = k2so_core::agents::workspace_regen::regen_workspace_skill(&p);
+                            respond(Ok::<_, String>(outcome))
+                        }
+                        Err(e) => CliResponse::bad_request(e),
+                    }
+                }
+            }
+            Err(r) => r,
+        },
+        "/cli/onboarding/skip" => match need_project(params) {
+            Ok(p) => respond_unit(k2so_core::agents::onboarding::skip_harness_management(&p)),
+            Err(r) => r,
+        },
+        "/cli/onboarding/start-fresh" => match need_project(params) {
+            Ok(p) => {
+                if let Err(e) = k2so_core::agents::onboarding::unskip_harness_management(&p) {
+                    return CliResponse::bad_request(e);
+                }
+                let _ = k2so_core::agents::workspace_regen::regen_workspace_skill(&p);
+                CliResponse::ok_json(r#"{"success":true}"#.to_string())
+            }
+            Err(r) => r,
+        },
+
         _ => CliResponse::not_found(),
     }
 }

@@ -146,6 +146,7 @@ export default function RemoveWorkspaceDialog(): React.JSX.Element | null {
                     onChange={() => setMode(opt.id)}
                     disabled={isPending}
                     className="mt-0.5"
+                    style={{ accentColor: 'var(--color-accent)' }}
                   />
                   <div className="flex-1 min-w-0">
                     <div className="text-[11px] font-medium text-[var(--color-text-primary)]">

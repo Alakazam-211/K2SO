@@ -243,6 +243,11 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
       }
 
       useToastStore.getState().addToast('Workspace added', 'success')
+
+      // Onboarding (Adopt / Start Fresh / Do it later) is now handled
+      // inline by AddWorkspaceDialog before this fn runs — the user
+      // has already picked one of the three options by the time
+      // addProject is called. No follow-up modal needed.
     } catch (err) {
       console.error('[projects] addProject failed:', err)
       useToastStore.getState().addToast('Failed to add workspace', 'error')

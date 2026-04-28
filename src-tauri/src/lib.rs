@@ -1226,6 +1226,10 @@ pub fn run() {
             commands::k2so_agents::k2so_agents_regenerate_agent_context,
             commands::k2so_agents::k2so_agents_preview_agent_context,
             commands::k2so_agents::k2so_agents_regenerate_workspace_skill,
+            commands::k2so_agents::k2so_onboarding_scan,
+            commands::k2so_agents::k2so_onboarding_adopt,
+            commands::k2so_agents::k2so_onboarding_skip,
+            commands::k2so_agents::k2so_onboarding_start_fresh,
             // Back-compat aliases — retained during the 0.33.0 rename window so
             // stale React `invoke()` names keep working until every call site
             // has migrated to the canonical new names above.

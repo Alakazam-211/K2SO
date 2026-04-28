@@ -1831,6 +1831,74 @@ pub fn k2so_agents_generate_workspace_claude_md(
     k2so_agents_regenerate_workspace_skill(project_path)
 }
 
+// ── Onboarding (workspace-add three-option flow) ───────────────────
+//
+// Thin wrappers around `k2so_core::agents::onboarding`. Logic lives in
+// core so the CLI (`k2so onboarding ...`) and Tauri share the same
+// implementation; the renderer's WorkspaceOnboardingModal only displays
+// scan results and forwards button-clicks to these commands.
+
+/// Scan the workspace for harness files (CLAUDE.md, GEMINI.md,
+/// .cursor/rules, .goosehints, etc.) with substantive user content.
+/// Used by the onboarding modal to decide whether to prompt the user
+/// at all (empty result → silently take the "Start Fresh" path) and
+/// what to show in the adopt-picker.
+#[tauri::command]
+pub fn k2so_onboarding_scan(
+    project_path: String,
+) -> Vec<k2so_core::agents::onboarding::DetectedHarnessFile> {
+    k2so_core::agents::onboarding::scan_harness_files(&project_path)
+}
+
+/// Adopt one of the detected harness files as the seed for
+/// `.k2so/PROJECT.md`, then run the workspace regen pipeline so the
+/// new PROJECT.md content fans out to every harness symlink in one
+/// pass. Source file is archived to `.k2so/migration/` and removed
+/// from its original location (so the regen's existing migration
+/// helpers don't re-import the same body a second time).
+#[tauri::command]
+pub fn k2so_onboarding_adopt(
+    project_path: String,
+    source_path: String,
+) -> Result<k2so_core::agents::onboarding::AdoptionOutcome, String> {
+    let outcome = k2so_core::agents::onboarding::adopt_harness_as_project_md(
+        &project_path,
+        std::path::Path::new(&source_path),
+    )?;
+    // Run regen so PROJECT.md content propagates to every harness
+    // file. Errors are reported but don't fail the adopt itself —
+    // the seed is already on disk.
+    if let Err(e) = k2so_agents_regenerate_workspace_skill(project_path) {
+        eprintln!("[onboarding] regen after adopt failed: {}", e);
+    }
+    Ok(outcome)
+}
+
+/// User-facing label: "Do it later." Drops a flag file at
+/// `.k2so/.skip-harness-management` so subsequent regens skip the
+/// harness-fanout step (CLAUDE.md / GEMINI.md / .cursor/rules / etc.
+/// stay untouched). K2SO still writes its internal SKILL.md so
+/// heartbeats and agent launches keep working. Reversible — a
+/// future settings surface can call the unskip path.
+#[tauri::command]
+pub fn k2so_onboarding_skip(project_path: String) -> Result<(), String> {
+    k2so_core::agents::onboarding::skip_harness_management(&project_path)
+}
+
+/// User-facing "Start Fresh" option. No special logic — just runs
+/// the regen pipeline, which already archives any pre-existing
+/// harness files to `.k2so/migration/` and replaces them with
+/// symlinks. Exposed as its own command so the renderer doesn't
+/// have to know that "Start Fresh" is just-the-default — the three
+/// options each have a symmetric Tauri entry point.
+#[tauri::command]
+pub fn k2so_onboarding_start_fresh(project_path: String) -> Result<(), String> {
+    // Make sure any prior "skip" flag from a re-onboarding flow is
+    // cleared so the regen actually performs the harness fanout.
+    k2so_core::agents::onboarding::unskip_harness_management(&project_path)?;
+    k2so_agents_regenerate_workspace_skill(project_path).map(|_| ())
+}
+
 /// Remove or disable the workspace SKILL.md + CLAUDE.md symlink
 /// (when the Agent toggle is turned off).
 #[tauri::command]
@@ -3159,26 +3227,35 @@ pub fn write_workspace_skill_file_with_body(project_path: &str, base_body: Optio
     // Propagates to all harness symlinks automatically.
     append_workspace_source_regions(project_path, preserved_freeform.as_deref());
 
-    // Step 6: Inject the full canonical body (now including SOURCE regions)
-    // into the marker-injected shared files.
+    // Steps 6 + 7 fan out the canonical SKILL into user-visible harness
+    // paths (CLAUDE.md, GEMINI.md, .cursor/rules, AGENTS.md marker block,
+    // etc.). Skip the entire fanout when the user opted out via the
+    // workspace onboarding flow — the canonical .k2so/skills/k2so/SKILL.md
+    // we already wrote in steps 4-5 stays authoritative for K2SO's own
+    // use; user keeps full control of harness files.
     let canonical = PathBuf::from(project_path).join(".k2so/skills/k2so/SKILL.md");
-    if let Ok(full) = fs::read_to_string(&canonical) {
-        let injection_body = strip_frontmatter(&full).trim().to_string();
-        let root = PathBuf::from(project_path);
-        upsert_k2so_section(&root.join("AGENTS.md"), &injection_body);
-        let github_dir = root.join(".github");
-        let _ = fs::create_dir_all(&github_dir);
-        upsert_k2so_section(&github_dir.join("copilot-instructions.md"), &injection_body);
-    }
+    if !k2so_core::agents::onboarding::is_harness_management_skipped(project_path) {
+        // Step 6: Inject the full canonical body (now including SOURCE
+        // regions) into the marker-injected shared files.
+        if let Ok(full) = fs::read_to_string(&canonical) {
+            let injection_body = strip_frontmatter(&full).trim().to_string();
+            let root = PathBuf::from(project_path);
+            upsert_k2so_section(&root.join("AGENTS.md"), &injection_body);
+            let github_dir = root.join(".github");
+            let _ = fs::create_dir_all(&github_dir);
+            upsert_k2so_section(&github_dir.join("copilot-instructions.md"), &injection_body);
+        }
 
-    // Step 7: Symlink project root SKILL.md + CLAUDE.md → canonical, plus
-    // the Phase 7b harness discovery targets (GEMINI.md, AGENT.md singular,
-    // .goosehints, .cursor/rules/k2so.mdc, .aider.conf.yml scaffold).
-    let root_skill = PathBuf::from(project_path).join("SKILL.md");
-    force_symlink(&canonical, &root_skill);
-    let root_claude = PathBuf::from(project_path).join("CLAUDE.md");
-    migrate_and_symlink_root_claude_md(&canonical, &root_claude, project_path);
-    write_workspace_harness_discovery_targets(project_path, &canonical);
+        // Step 7: Symlink project root SKILL.md + CLAUDE.md → canonical,
+        // plus the Phase 7b harness discovery targets (GEMINI.md, AGENT.md
+        // singular, .goosehints, .cursor/rules/k2so.mdc, .aider.conf.yml
+        // scaffold).
+        let root_skill = PathBuf::from(project_path).join("SKILL.md");
+        force_symlink(&canonical, &root_skill);
+        let root_claude = PathBuf::from(project_path).join("CLAUDE.md");
+        migrate_and_symlink_root_claude_md(&canonical, &root_claude, project_path);
+        write_workspace_harness_discovery_targets(project_path, &canonical);
+    }
 
     // Step 8: Stamp last-regen with the current source-content hashes.
     // Used by the next regen's adopt_workspace_skill_drift to distinguish
