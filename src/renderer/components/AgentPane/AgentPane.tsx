@@ -7,7 +7,7 @@ import { TerminalPane } from '@/terminal-v2/TerminalPane'
 import { agentChatId } from '@/lib/terminal-id'
 import { AgentInboxPane } from './AgentInboxPane'
 import { AgentChatPane } from './AgentChatPane'
-import ReactMarkdown from 'react-markdown'
+import Markdown from '@/components/Markdown/Markdown'
 import remarkGfm from 'remark-gfm'
 
 interface AgentPaneProps {
@@ -223,7 +223,7 @@ function WorktreeDetailPane({ worktreeId, projectPath }: { worktreeId: string; p
           <div className="h-full overflow-y-auto p-4">
             {taskContent ? (
               <div className="prose prose-sm prose-invert max-w-none">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{taskContent}</ReactMarkdown>
+                <Markdown remarkPlugins={[remarkGfm]}>{taskContent}</Markdown>
               </div>
             ) : (
               <div className="flex items-center justify-center h-full">
@@ -255,7 +255,7 @@ function WorktreeDetailPane({ worktreeId, projectPath }: { worktreeId: string; p
             {reviewAvailable ? (
               <div className="space-y-4">
                 <div className="prose prose-sm prose-invert max-w-none">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{reviewContent}</ReactMarkdown>
+                  <Markdown remarkPlugins={[remarkGfm]}>{reviewContent}</Markdown>
                 </div>
 
                 <div className="border-t border-[var(--color-border)] pt-4 space-y-3">

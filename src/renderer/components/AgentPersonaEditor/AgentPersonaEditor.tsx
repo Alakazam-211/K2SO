@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { AIFileEditor } from '../AIFileEditor/AIFileEditor'
 import { useSettingsStore } from '@/stores/settings'
 import { usePresetsStore, parseCommand } from '@/stores/presets'
-import ReactMarkdown from 'react-markdown'
+import Markdown from '@/components/Markdown/Markdown'
 import remarkGfm from 'remark-gfm'
 import { CodeEditor } from '../FileViewerPane/CodeEditor'
 
@@ -320,9 +320,9 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
           {previewMode === 'preview' ? (
             <div className="flex-1 overflow-auto p-4">
               <div className="markdown-content" style={{ fontSize: `${cssScale}%` }}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                <Markdown remarkPlugins={[remarkGfm]}>
                   {stripFrontmatter(agentContent) || '*No content yet*'}
-                </ReactMarkdown>
+                </Markdown>
               </div>
             </div>
           ) : (

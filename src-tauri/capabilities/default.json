@@ -39,7 +39,26 @@
       "allow": [
         { "url": "https://**" },
         { "url": "http://**" },
-        { "url": "mailto:**" }
+        { "url": "mailto:*" },
+        { "url": "message://**" },
+        { "url": "tel:*" },
+        { "url": "facetime:*" },
+        { "url": "facetime-audio:*" },
+        { "url": "sms:*" },
+        { "url": "slack://**" },
+        { "url": "discord://**" },
+        { "url": "zoommtg://**" },
+        { "url": "zoomus://**" },
+        { "url": "vscode://**" },
+        { "url": "cursor://**" },
+        { "url": "obsidian://**" },
+        { "url": "notion://**" },
+        { "url": "things:*" },
+        { "url": "bear://**" },
+        { "url": "addressbook://**" },
+        { "url": "x-apple-reminderkit://**" },
+        { "url": "calshow:*" },
+        { "url": "file://**" }
       ]
     },
     "opener:allow-open-path",

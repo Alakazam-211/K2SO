@@ -1,7 +1,7 @@
 import React from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import ReactMarkdown from 'react-markdown'
+import Markdown from '@/components/Markdown/Markdown'
 import remarkGfm from 'remark-gfm'
 import type { SettingEntry } from '../searchManifest'
 import { AgentContextDiagram } from './AgentContextDiagram'
@@ -274,7 +274,7 @@ export function AgentSkillsSection(): React.JSX.Element {
               {isOpen && (
                 <div className="px-3 pb-3 pt-1 border-t border-[var(--color-border)]/50 bg-black/[0.15]">
                   <div className="prose prose-invert prose-xs max-w-none text-xs text-[var(--color-text-secondary)] leading-relaxed">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{description}</ReactMarkdown>
+                    <Markdown remarkPlugins={[remarkGfm]}>{description}</Markdown>
                   </div>
                 </div>
               )}
@@ -352,9 +352,9 @@ export function AgentSkillsSection(): React.JSX.Element {
               {isOpen && (
                 <div className="px-3 pb-3 pt-1 border-t border-[var(--color-border)]/50 bg-black/[0.15]">
                   <div className="prose prose-invert prose-xs max-w-none text-xs text-[var(--color-text-secondary)] leading-relaxed">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    <Markdown remarkPlugins={[remarkGfm]}>
                       {body ?? '*Loading...*'}
-                    </ReactMarkdown>
+                    </Markdown>
                   </div>
                 </div>
               )}

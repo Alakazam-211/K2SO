@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useLayoutEffect, useImperativeHandle, useMemo } from 'react'
-import ReactMarkdown from 'react-markdown'
+import Markdown from '@/components/Markdown/Markdown'
 import remarkGfm from 'remark-gfm'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import { PDFViewer } from './PDFViewer'
@@ -112,12 +112,12 @@ const MemoizedMarkdown = React.memo(function MemoizedMarkdown({
   content: string
 }): React.JSX.Element {
   return (
-    <ReactMarkdown
+    <Markdown
       remarkPlugins={MARKDOWN_REMARK_PLUGINS}
       components={MARKDOWN_COMPONENTS}
     >
       {content}
-    </ReactMarkdown>
+    </Markdown>
   )
 })
 

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import ReactMarkdown from 'react-markdown'
+import Markdown from '@/components/Markdown/Markdown'
 import remarkGfm from 'remark-gfm'
 
 type SkillTier = 'manager' | 'agent_template' | 'custom_agent'
@@ -273,7 +273,7 @@ export function ContextLayersPreview({ projectPath, agentMode, onOpenSettings, o
               {isOpen && (
                 <div className="px-3 py-2 border-b border-[var(--color-border)] bg-black/20">
                   <div className="prose prose-invert prose-xs max-w-none text-[11px] text-[var(--color-text-secondary)] leading-relaxed">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{expandedBody}</ReactMarkdown>
+                    <Markdown remarkPlugins={[remarkGfm]}>{expandedBody}</Markdown>
                   </div>
                   {entry.editAction && (
                     <button

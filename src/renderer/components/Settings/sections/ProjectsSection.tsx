@@ -12,7 +12,7 @@ import ProjectAvatar from '@/components/Sidebar/ProjectAvatar'
 import AgentIcon from '@/components/AgentIcon/AgentIcon'
 import { AgentPersonaEditor } from '@/components/AgentPersonaEditor/AgentPersonaEditor'
 import { AIFileEditor } from '@/components/AIFileEditor/AIFileEditor'
-import ReactMarkdown from 'react-markdown'
+import Markdown from '@/components/Markdown/Markdown'
 import remarkGfm from 'remark-gfm'
 import { CodeEditor } from '@/components/FileViewerPane/CodeEditor'
 import { CustomThemeCreator } from '../CustomThemeCreator'
@@ -2018,9 +2018,9 @@ function ProjectContextEditor({ projectPath, projectName, onClose }: { projectPa
           {previewMode === 'preview' ? (
             <div className="flex-1 overflow-auto p-4">
               <div className="markdown-content" style={{ fontSize: `${cssScale}%` }}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                <Markdown remarkPlugins={[remarkGfm]}>
                   {content || '*No content yet. Use the AI assistant to set up your project context.*'}
-                </ReactMarkdown>
+                </Markdown>
               </div>
             </div>
           ) : (
@@ -2190,9 +2190,9 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
           {previewMode === 'preview' ? (
             <div className="flex-1 overflow-auto p-4">
               <div className="markdown-content" style={{ fontSize: `${cssScale}%` }}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                <Markdown remarkPlugins={[remarkGfm]}>
                   {content || '*No SKILL.md yet. Use the AI assistant to set up your workspace knowledge, or click Edit to write it manually.*'}
-                </ReactMarkdown>
+                </Markdown>
               </div>
             </div>
           ) : (
