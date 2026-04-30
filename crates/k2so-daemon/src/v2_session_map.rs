@@ -61,6 +61,15 @@ pub fn unregister(agent_name: &str) -> Option<Arc<DaemonPtySession>> {
             &conn,
             &terminal_id,
         );
+        // Mirror of the heartbeat cleanup above (migration 0037): the
+        // chat tab's pinned `agent_sessions` row stamps its own
+        // `active_terminal_id` on v2 spawn under the workspace agent's
+        // canonical name. PTY exit nulls it here so the next mount's
+        // `/cli/sessions/lookup-by-agent` lookup sees the truth.
+        let _ = k2so_core::db::schema::AgentSession::clear_active_terminal_id_by_terminal(
+            &conn,
+            &terminal_id,
+        );
         // Best-effort flip the agent_sessions row for this agent. We
         // don't know the project_id here so we rely on the row's
         // (project_id, agent_name) UNIQUE constraint — at most one

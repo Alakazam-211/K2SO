@@ -54,6 +54,19 @@ pub trait InjectProvider: Send + Sync {
     /// the caller. If the agent has no live session, return `Err` —
     /// egress degrades to audit-only for that signal.
     fn inject(&self, agent: &str, bytes: &[u8]) -> std::io::Result<()>;
+
+    /// Liveness probe used by [`is_agent_live`]. Default returns
+    /// false so existing test impls and pre-A9 hosts compile
+    /// unchanged — those callers fall back to the legacy
+    /// `session::registry` walk which catches every legacy session.
+    /// Hosts whose sessions don't all live in `session::registry`
+    /// (the daemon's v2 path) override this to consult their own
+    /// session maps; without it, Live signals to v2-only agents
+    /// short-circuit through the wake path and the inject
+    /// never runs.
+    fn is_live(&self, _agent: &str) -> bool {
+        false
+    }
 }
 
 /// Implemented by the host to trigger a scheduler wake for an
@@ -353,10 +366,26 @@ pub fn execute(
 // ─────────────────────────────────────────────────────────────────────
 
 fn is_agent_live(agent: &str) -> bool {
-    registry::list_ids()
+    // 1. Legacy session::registry — Kessel-T0 / SessionStreamSession.
+    let in_registry = registry::list_ids()
         .into_iter()
         .filter_map(|id| registry::lookup(&id).and_then(|e| e.agent_name()))
-        .any(|n| n == agent)
+        .any(|n| n == agent);
+    if in_registry {
+        return true;
+    }
+    // 2. Host inject provider's own liveness probe — daemons whose
+    // sessions don't all live in `session::registry` (the v2 path)
+    // override `InjectProvider::is_live` to consult their additional
+    // session maps. Default impl returns false, so this is a strict
+    // additive check: false here means no v2 host has claimed it.
+    let slot = inject_slot().lock();
+    if let Some(p) = slot.as_ref() {
+        if p.is_live(agent) {
+            return true;
+        }
+    }
+    false
 }
 
 fn try_inject(agent: &str, signal: &AgentSignal) -> std::io::Result<()> {
@@ -382,11 +411,14 @@ fn try_wake(agent: &str, signal: &AgentSignal) -> std::io::Result<()> {
     provider.wake(agent, signal)
 }
 
-/// Format a signal as the bytes to inject into the target's PTY.
-/// Phase 3 MVP: just render the message text with a newline so the
-/// harness reads it as a typed line. Future refinements (prefix with
-/// `[from foo]`, ANSI formatting, agent-speak control codes) live in
-/// per-harness integrations (Phase 6).
+/// Format a signal as the body bytes to inject into the target's
+/// PTY. Returns just `[from] body` — without a trailing newline or
+/// carriage return. The caller (`InjectProvider::inject` impl) must
+/// write the submit trigger (`\r`) separately after a brief settle
+/// delay, otherwise TUI input widgets treat a body+\r single write
+/// as a multi-line paste and the message lands typed-but-not-sent.
+/// Future refinements (ANSI formatting, agent-speak control codes)
+/// live in per-harness integrations.
 fn render_signal_for_inject(signal: &AgentSignal) -> String {
     use crate::awareness::SignalKind;
     let body = match &signal.kind {
@@ -411,7 +443,7 @@ fn render_signal_for_inject(signal: &AgentSignal) -> String {
         AgentAddress::Workspace { .. } => "workspace".into(),
         AgentAddress::Broadcast => "broadcast".into(),
     };
-    format!("[{from}] {body}\n")
+    format!("[{from}] {body}")
 }
 
 fn write_audit(signal: &AgentSignal, target_agent: Option<&str>) -> i64 {

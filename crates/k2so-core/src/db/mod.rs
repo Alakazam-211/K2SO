@@ -248,6 +248,7 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
         ("0034_heartbeat_session_archive_show", include_str!("../../drizzle_sql/0034_heartbeat_session_archive_show.sql")),
         ("0035_heartbeat_concurrency_policy", include_str!("../../drizzle_sql/0035_heartbeat_concurrency_policy.sql")),
         ("0036_heartbeat_active_session", include_str!("../../drizzle_sql/0036_heartbeat_active_session.sql")),
+        ("0037_agent_session_active_terminal", include_str!("../../drizzle_sql/0037_agent_session_active_terminal.sql")),
     ];
 
     for (name, sql) in migrations {

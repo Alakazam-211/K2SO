@@ -908,6 +908,15 @@ pub struct AgentSession {
     pub status_message: Option<String>,
     pub last_activity_at: Option<i64>,
     pub created_at: i64,
+    /// Daemon-side session_id of the live PTY currently attached to
+    /// this agent_session, or NULL when no PTY is alive. Mirrors
+    /// `agent_heartbeats.active_terminal_id` (migration 0037). Stamped
+    /// by `v2_spawn::handle_v2_spawn` after registering, cleared by
+    /// `v2_session_map::unregister`'s child-exit hook. Distinct from
+    /// `terminal_id` (renderer-scoped UUID like
+    /// `agent-chat:<projId>:<agent>`) and `session_id` (Claude's
+    /// conversation UUID for `--resume`). See migration 0037.
+    pub active_terminal_id: Option<String>,
 }
 
 impl AgentSession {
@@ -939,7 +948,7 @@ impl AgentSession {
     /// belongs to without the caller needing to know project/agent.
     pub fn get_by_terminal_id(conn: &Connection, terminal_id: &str) -> Result<Option<AgentSession>> {
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, agent_name, terminal_id, session_id, harness, owner, status, status_message, last_activity_at, created_at \
+            "SELECT id, project_id, agent_name, terminal_id, session_id, harness, owner, status, status_message, last_activity_at, created_at, active_terminal_id \
              FROM agent_sessions WHERE terminal_id = ?1 LIMIT 1"
         )?;
         let mut rows = stmt.query_map(params![terminal_id], |row| {
@@ -955,6 +964,7 @@ impl AgentSession {
                 status_message: row.get(8)?,
                 last_activity_at: row.get(9)?,
                 created_at: row.get(10)?,
+                active_terminal_id: row.get(11)?,
             })
         })?;
         match rows.next() {
@@ -966,7 +976,7 @@ impl AgentSession {
 
     pub fn get_by_agent(conn: &Connection, project_id: &str, agent_name: &str) -> Result<Option<AgentSession>> {
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, agent_name, terminal_id, session_id, harness, owner, status, status_message, last_activity_at, created_at \
+            "SELECT id, project_id, agent_name, terminal_id, session_id, harness, owner, status, status_message, last_activity_at, created_at, active_terminal_id \
              FROM agent_sessions WHERE project_id = ?1 AND agent_name = ?2"
         )?;
         let mut rows = stmt.query_map(params![project_id, agent_name], |row| {
@@ -982,6 +992,7 @@ impl AgentSession {
                 status_message: row.get(8)?,
                 last_activity_at: row.get(9)?,
                 created_at: row.get(10)?,
+                active_terminal_id: row.get(11)?,
             })
         })?;
         match rows.next() {
@@ -993,7 +1004,7 @@ impl AgentSession {
 
     pub fn list_by_project(conn: &Connection, project_id: &str) -> Result<Vec<AgentSession>> {
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, agent_name, terminal_id, session_id, harness, owner, status, status_message, last_activity_at, created_at \
+            "SELECT id, project_id, agent_name, terminal_id, session_id, harness, owner, status, status_message, last_activity_at, created_at, active_terminal_id \
              FROM agent_sessions WHERE project_id = ?1 ORDER BY agent_name"
         )?;
         let rows = stmt.query_map(params![project_id], |row| {
@@ -1009,6 +1020,7 @@ impl AgentSession {
                 status_message: row.get(8)?,
                 last_activity_at: row.get(9)?,
                 created_at: row.get(10)?,
+                active_terminal_id: row.get(11)?,
             })
         })?;
         rows.collect()
@@ -1184,6 +1196,56 @@ impl AgentSession {
         conn.execute(
             "UPDATE agent_sessions SET wakes_since_compact = 0 WHERE project_id = ?1 AND agent_name = ?2",
             params![project_id, agent_name],
+        )
+    }
+
+    /// Stamp the daemon session_id of the live PTY currently attached
+    /// to this agent. Mirror of `AgentHeartbeat::save_active_terminal_id`.
+    /// Called by `v2_spawn::handle_v2_spawn` after registering a fresh
+    /// (or reusing an existing) v2 session under this agent_name.
+    pub fn save_active_terminal_id(
+        conn: &Connection,
+        project_id: &str,
+        agent_name: &str,
+        terminal_id: &str,
+    ) -> Result<usize> {
+        conn.execute(
+            "UPDATE agent_sessions SET active_terminal_id = ?1 \
+             WHERE project_id = ?2 AND agent_name = ?3",
+            params![terminal_id, project_id, agent_name],
+        )
+    }
+
+    /// Null out `active_terminal_id`. Called when the chat tab's lazy
+    /// re-attach observes a stale id (`/cli/sessions/lookup-by-agent`
+    /// finds the recorded session no longer registered in either
+    /// session map).
+    #[allow(dead_code)]
+    pub fn clear_active_terminal_id(
+        conn: &Connection,
+        project_id: &str,
+        agent_name: &str,
+    ) -> Result<usize> {
+        conn.execute(
+            "UPDATE agent_sessions SET active_terminal_id = NULL \
+             WHERE project_id = ?1 AND agent_name = ?2",
+            params![project_id, agent_name],
+        )
+    }
+
+    /// Null out `active_terminal_id` for every row whose recorded id
+    /// matches the given value. Daemon's PTY-exit observer knows the
+    /// terminal_id that died but not which agent_sessions row pointed
+    /// at it — one UPDATE handles the lookup. Mirrors
+    /// `AgentHeartbeat::clear_active_terminal_id_by_terminal`.
+    pub fn clear_active_terminal_id_by_terminal(
+        conn: &Connection,
+        terminal_id: &str,
+    ) -> Result<usize> {
+        conn.execute(
+            "UPDATE agent_sessions SET active_terminal_id = NULL \
+             WHERE active_terminal_id = ?1",
+            params![terminal_id],
         )
     }
 }

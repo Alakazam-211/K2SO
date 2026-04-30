@@ -13,11 +13,17 @@
 
 use k2so_core::awareness::{AgentAddress, AgentSignal, SignalKind};
 
-/// Render an AgentSignal to the bytes that get written to the
-/// target's PTY. Phase 3.1 MVP — just formats each SignalKind
-/// variant as a short `[from] body\n` line. Phase 4+ per-harness
-/// integrations can replace this with ANSI-formatted,
-/// agent-speak, or structured output.
+/// Render an AgentSignal to the body bytes that get written to the
+/// target's PTY. Formats each SignalKind variant as a short
+/// `[from] body` line — **without** a trailing newline or carriage
+/// return. The submit trigger (Enter, i.e. `\r`) must be written by
+/// the caller as a separate syscall after a brief settle delay; a
+/// combined "body + \r" single write is interpreted by TUI input
+/// widgets (claude code, codex, gemini) as a multi-line paste and
+/// inserted as-is rather than as "type then submit." See
+/// `heartbeat_launch::run_inject` for the two-phase reference
+/// pattern. Phase 4+ per-harness integrations can replace this with
+/// ANSI-formatted, agent-speak, or structured output.
 pub fn inject_bytes(signal: &AgentSignal) -> String {
     let body = match &signal.kind {
         SignalKind::Msg { text } => text.clone(),
@@ -44,5 +50,5 @@ pub fn inject_bytes(signal: &AgentSignal) -> String {
         AgentAddress::Broadcast => "broadcast".into(),
         _ => "unknown".into(),
     };
-    format!("[{from}] {body}\n")
+    format!("[{from}] {body}")
 }

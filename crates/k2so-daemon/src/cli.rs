@@ -931,6 +931,37 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         // ring?"). Query param: session=<uuid>.
         "/cli/sessions/diagnose" => diagnose_session(params),
 
+        // Look up a live session by agent_name across both legacy
+        // session_map and v2_session_map. Used by the workspace
+        // chat tab on mount to detect "is this agent already
+        // running headless?" and pass attachAgentName to TerminalPane
+        // so /cli/sessions/v2/spawn returns reused=true instead of
+        // spawning a duplicate. Mirrors the role of
+        // /cli/heartbeat/active-session, but keyed by agent_name
+        // (heartbeats key by their own name).
+        "/cli/sessions/lookup-by-agent" => {
+            let agent = str_param(params, "agent");
+            if agent.is_empty() {
+                CliResponse::bad_request("Missing agent parameter")
+            } else {
+                let body = match crate::session_lookup::lookup_any(&agent) {
+                    Some(live) => serde_json::json!({
+                        "agentName": agent,
+                        "sessionId": live.session_id().to_string(),
+                        "sessionAlive": true,
+                        "isV2": live.is_v2(),
+                    }),
+                    None => serde_json::json!({
+                        "agentName": agent,
+                        "sessionId": null,
+                        "sessionAlive": false,
+                        "isV2": false,
+                    }),
+                };
+                CliResponse::ok_json(body.to_string())
+            }
+        }
+
         // ── Onboarding (workspace-add three-option flow) ────────
         //
         // Logic lives in `k2so_core::agents::onboarding`. Daemon

@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useProjectsStore } from '@/stores/projects'
 import { TerminalPane } from '@/terminal-v2/TerminalPane'
 import { agentChatId } from '@/lib/terminal-id'
+import { getDaemonWs } from '@/kessel/daemon-ws'
 
 interface AgentChatPaneProps {
   agentName: string
@@ -59,13 +60,45 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
     cwd: string
   } | null>(null)
   const [ready, setReady] = useState(false)
+  // Bumped on every refresh-button click to force a clean remount of
+  // TerminalPane (key={refreshNonce}) and a re-run of the resolve
+  // effect. Used when the user typed `exit` and the Claude process
+  // ended — without a remount the dead PTY stays on screen.
+  const [refreshNonce, setRefreshNonce] = useState(0)
+  const [refreshing, setRefreshing] = useState(false)
+
+  const handleRefresh = useCallback(async (): Promise<void> => {
+    if (refreshing) return
+    setRefreshing(true)
+    // Kill the daemon-owned PTY (best-effort). The unregister hook in
+    // v2_session_map clears agent_sessions.active_terminal_id and the
+    // child-exit observer fires for any still-alive process. If the
+    // session was already dead (user typed `exit`), the daemon's
+    // find-or-spawn on the next mount just spawns fresh.
+    try {
+      const { port, token } = await getDaemonWs()
+      await fetch(
+        `http://127.0.0.1:${port}/cli/sessions/v2/close?token=${token}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agent_name: agentName }),
+        },
+      ).catch(() => {})
+    } catch { /* ignore — refresh proceeds either way */ }
+
+    setLaunchConfig(null)
+    setReady(false)
+    setRefreshNonce((n) => n + 1)
+    setRefreshing(false)
+  }, [agentName, refreshing])
 
   useEffect(() => {
     let cancelled = false
     const resolve = async (): Promise<void> => {
       const myTerminalId = terminalIdRef.current
 
-      // Step 1: Reattach if PTY already alive
+      // Step 1: Reattach if PTY already alive in this Tauri session
       try {
         const exists = await invoke<boolean>('terminal_exists', { id: myTerminalId })
         if (!cancelled && exists) {
@@ -74,6 +107,37 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
           return
         }
       } catch { /* fall through */ }
+
+      // Step 1b: Check the daemon for an existing session under this
+      // agent_name. When the user has closed Tauri, the daemon can keep
+      // the workspace agent's PTY alive (heartbeat fires, k2so msg
+      // injections, etc.). On Tauri reopen we want to attach to that
+      // existing PTY rather than spawn a fresh `claude --resume`.
+      // TerminalPane will use the attachAgentName prop (always set
+      // below) to reach the daemon's canonical key in v2_session_map;
+      // this lookup is informational — purely for log-trail/diagnostic
+      // visibility — but proves the daemon-side bookkeeping is sane
+      // before we hand off to the spawn path.
+      try {
+        const json = await invoke<string>('k2so_session_lookup_by_agent', {
+          agent: agentName,
+        })
+        const data = JSON.parse(json) as {
+          sessionAlive?: boolean
+          sessionId?: string | null
+          isV2?: boolean
+        }
+        if (!cancelled && data.sessionAlive) {
+          console.info(
+            '[AgentChatPane] daemon has live session for',
+            agentName,
+            'session:',
+            data.sessionId,
+            'isV2:',
+            data.isV2,
+          )
+        }
+      } catch { /* informational only — fall through */ }
 
       // Step 2: Build a *bare resume* command for the chat tab.
       //
@@ -138,7 +202,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
     }
     resolve()
     return () => { cancelled = true }
-  }, [agentName, projectPath])
+  }, [agentName, projectPath, refreshNonce])
 
   // Detect Claude session id from the running PTY and persist it for resume.
   useEffect(() => {
@@ -176,13 +240,57 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
         <span className="text-xs font-semibold text-[var(--color-text-primary)] truncate">
           {agentName}
         </span>
+        <button
+          type="button"
+          onClick={handleRefresh}
+          disabled={refreshing}
+          title="Restart chat session — kills the current Claude process and spawns a fresh resume. Use after typing `exit` or when the session is unresponsive."
+          aria-label="Refresh chat session"
+          className="ml-auto inline-flex items-center justify-center h-5 w-5 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {/* Inline SVG keeps this self-contained (no icon-lib dep). */}
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={refreshing ? 'animate-spin' : ''}
+            aria-hidden="true"
+          >
+            <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+            <path d="M3 3v5h5" />
+            <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+            <path d="M16 16h5v5" />
+          </svg>
+        </button>
       </div>
       <div className="flex-1 min-h-0">
         <TerminalPane
+          key={refreshNonce}
           terminalId={terminalIdRef.current}
           cwd={launchConfig?.cwd ?? projectPath}
           command={launchConfig?.command}
           args={launchConfig?.args}
+          // Register this v2 session under the workspace agent's
+          // canonical name so:
+          //   1. `k2so msg <workspace>` finds it via session_lookup
+          //      and injects into THIS PTY (not a duplicate).
+          //   2. Closing Tauri leaves the daemon-owned PTY alive
+          //      under `<agentName>`; reopening Tauri re-attaches to
+          //      it instead of spawning fresh.
+          //   3. The daemon's auto-launch (heartbeat headless wake,
+          //      awareness inject) registers under the same key,
+          //      converging both paths on one PTY per workspace
+          //      agent.
+          // Without this override, TerminalPane defaults to
+          // `tab-${terminalId}` — a renderer-only key the daemon
+          // never sees on system-driven spawns.
+          attachAgentName={agentName}
         />
       </div>
     </div>

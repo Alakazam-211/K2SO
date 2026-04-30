@@ -1273,6 +1273,7 @@ pub fn run() {
             agent_hooks::k2so_heartbeat_force_fire,
             agent_hooks::k2so_heartbeat_smart_launch,
             agent_hooks::k2so_heartbeat_active_session,
+            agent_hooks::k2so_session_lookup_by_agent,
             // Agent Sessions (DB-tracked)
             commands::k2so_agents::agent_sessions_list,
             commands::k2so_agents::agent_sessions_get,

@@ -35,7 +35,27 @@ impl InjectProvider for DaemonInjectProvider {
                 format!("no live session for agent {agent}"),
             )
         })?;
-        session.write(bytes)
+        // Two-phase write — same pattern as
+        // `heartbeat_launch::run_inject`. Write the body, settle for
+        // 150ms so the TUI input widget commits each character, then
+        // write `\r` as a separate syscall so it's interpreted as
+        // Enter rather than the tail of a multi-line paste. A
+        // combined `body+\r` single write lands typed-but-not-sent
+        // because raw-mode input widgets treat fast-arriving bytes
+        // as paste content (claude code, codex, gemini all do this).
+        session.write(bytes)?;
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        session.write(b"\r")
+    }
+
+    /// Daemon-side liveness probe. Walks both legacy `session_map`
+    /// and `v2_session_map` via `session_lookup`. Without this
+    /// override, `egress::is_agent_live` would only see legacy
+    /// sessions and route every Live signal targeting a v2-only
+    /// agent through the wake provider — bypassing the inject
+    /// path entirely.
+    fn is_live(&self, agent: &str) -> bool {
+        session_lookup::lookup_any(agent).is_some()
     }
 }
 

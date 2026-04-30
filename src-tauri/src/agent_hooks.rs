@@ -352,6 +352,18 @@ pub fn k2so_heartbeat_active_session(
     )
 }
 
+/// Resolve a live PTY by agent_name across both legacy session_map
+/// and v2_session_map. Used by AgentChatPane on mount to decide
+/// whether to attach to an existing daemon-owned session vs spawn
+/// fresh. Returns JSON:
+///   `{ agentName, sessionId, sessionAlive, isV2 }`.
+/// `sessionId` is non-null only when a live session exists.
+#[tauri::command]
+pub fn k2so_session_lookup_by_agent(agent: String) -> Result<String, String> {
+    let client = crate::daemon_client::DaemonClient::try_connect()?;
+    client.cli_get("/cli/sessions/lookup-by-agent", &[("agent", &agent)])
+}
+
 // `push_agent_event` moved to k2so_core::agents::events.
 
 // `drain_agent_events` moved to k2so_core::agents::events.

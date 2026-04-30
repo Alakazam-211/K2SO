@@ -166,6 +166,30 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
 
     v2_session_map::register(req.agent_name.clone(), session.clone());
 
+    // Stamp the agent_sessions row's `active_terminal_id` (migration
+    // 0037). Best-effort: tab-keyed spawns (`tab-<id>`) won't have
+    // a matching agent_sessions row and the UPDATE no-ops; workspace
+    // agent spawns under the canonical name (e.g. `manager`,
+    // `pod-leader`) do, and the column lets the next chat tab mount
+    // re-attach without walking the in-memory v2_session_map. Mirror
+    // of the heartbeat smart-launch stamp (`heartbeat_launch.rs`)
+    // and the `agent_heartbeats.active_terminal_id` cleanup hook in
+    // `v2_session_map::unregister`.
+    {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        if let Some(project_id) =
+            k2so_core::agents::resolve_project_id(&conn, &req.cwd)
+        {
+            let _ = k2so_core::db::schema::AgentSession::save_active_terminal_id(
+                &conn,
+                &project_id,
+                &req.agent_name,
+                &session.session_id.to_string(),
+            );
+        }
+    }
+
     // Child-exit observer: subscribe to the session's alacritty event
     // broadcast and call v2_session_map::unregister when ChildExit
     // arrives. The unregister hook (in v2_session_map) is what nulls
@@ -182,11 +206,19 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
     // agent was offline so they become input to the fresh session.
     // Mirrors `crate::spawn::spawn_agent_session`'s legacy drain so
     // wake-queued signals to v2 agents aren't silently lost on boot.
+    //
+    // Two-phase write per signal — body, settle, `\r` — same pattern
+    // `DaemonInjectProvider::inject` and `heartbeat_launch::run_inject`
+    // use. A single combined write would be treated as a multi-line
+    // paste by the TUI input widget and the queued message would land
+    // typed-but-not-sent.
     let pending = pending_live::drain_for_agent(&req.agent_name);
     let pending_drained = pending.len();
     for signal in pending {
         let bytes = signal_format::inject_bytes(&signal);
         session.write(bytes.into_bytes());
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        session.write(b"\r".to_vec());
     }
 
     let total_ms = __t_total.elapsed().as_secs_f64() * 1000.0;
