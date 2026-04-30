@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useProjectsStore } from '@/stores/projects'
-import { useTabsStore } from '@/stores/tabs'
+import { useTabsStore, type TerminalItemData } from '@/stores/tabs'
 import { useSettingsStore } from '@/stores/settings'
 import { usePresetsStore } from '@/stores/presets'
 import AgentIcon from '@/components/AgentIcon/AgentIcon'
@@ -502,6 +502,37 @@ export default function ChatHistory(): React.JSX.Element {
       const title = isCrossWorktree && session.originBranch
         ? `${displayTitle} (from ${session.originBranch})`
         : displayTitle
+
+      // Re-surface dedup: if a tab is already running this exact
+      // session (same command + sessionId in args), focus it instead
+      // of opening a duplicate. Cross-worktree forks are exempt —
+      // --fork-session creates a *new* conversation branch, so the
+      // user genuinely wants a fresh tab even if the origin session
+      // is open elsewhere.
+      if (!isCrossWorktree) {
+        const groups: Array<{ tabs: typeof tabsStore.tabs, idx: number }> = [
+          { tabs: tabsStore.tabs, idx: 0 },
+          ...tabsStore.extraGroups.map((g, i) => ({ tabs: g.tabs, idx: i + 1 })),
+        ]
+        for (const { tabs, idx } of groups) {
+          for (const tab of tabs) {
+            for (const [, pg] of tab.paneGroups) {
+              for (const item of pg.items) {
+                if (item.type !== 'terminal') continue
+                const td = item.data as TerminalItemData
+                if (td.command !== config.command) continue
+                if (!td.args?.includes(session.sessionId)) continue
+                if (idx === 0) {
+                  tabsStore.setActiveTab(tab.id)
+                } else {
+                  tabsStore.setActiveTabInGroup(idx, tab.id)
+                }
+                return
+              }
+            }
+          }
+        }
+      }
 
       // If split into columns, open in the rightmost group
       const targetGroup = tabsStore.splitCount > 1 ? tabsStore.splitCount - 1 : 0
