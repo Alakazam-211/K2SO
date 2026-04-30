@@ -767,6 +767,121 @@ export function startAgentPolling(): void {
       }
     )
 
+    // SessionSurfaced — fired by k2so_session_set_surfaced when the
+    // user (or the openHeartbeatTab path) flips an existing PTY's
+    // surfaced flag from 0 → 1. Differs from cli:terminal-spawn-background
+    // semantically: Spawn means "I just spawned a new PTY, here's its
+    // info"; Surfaced means "this PTY is already running, mount a tab
+    // on it." The tab-creation path is the same — createCompanionTab
+    // attaches by terminal_id rather than spawning fresh.
+    // See `.k2so/prds/heartbeat-active-session-tracking.md`.
+    listen<{
+      terminalId: string | null
+      command: string | null
+      args: string[] | null
+      projectPath: string
+      agentName: string
+      heartbeatName: string | null
+      attachAgentName?: string | null
+    }>(
+      'session:surfaced', async (event) => {
+        const { terminalId, command, projectPath, heartbeatName } = event.payload
+        const attachAgentName = event.payload.attachAgentName ?? null
+        const args = event.payload.args ?? []
+        if (!terminalId || !command) return
+
+        // Bail if the user already has a tab for this surfaced
+        // session (cross-window race or duplicate event); just focus
+        // it instead of creating a duplicate.
+        const tabsStore = useTabsStore.getState()
+        const existing = tabsStore.tabs.find((t) =>
+          [...t.paneGroups.values()].some((pg) =>
+            pg.items.some(
+              (item) =>
+                item.type === 'terminal' &&
+                (item.data as any).terminalId === terminalId,
+            ),
+          ),
+        )
+        if (existing) {
+          useTabsStore.setState({ activeTabId: existing.id })
+          return
+        }
+
+        const projects = useProjectsStore.getState().projects
+        const project = projects.find((p) => p.path === projectPath)
+        const activeProjectId = useProjectsStore.getState().activeProjectId
+        const cwd = project?.path ?? projectPath
+        if (!project || project.id !== activeProjectId) {
+          pendingCompanionTerminals.push({ terminalId, command, cwd, projectPath })
+          return
+        }
+
+        // Build the tab synchronously with all fields stamped from
+        // the start. Using addTab + post-mutation here causes a race:
+        // TerminalPane mounts and calls /cli/sessions/v2/spawn with
+        // its default `tab-${terminalId}` agent_name BEFORE the
+        // post-stamp can override it with `attachAgentName`. The
+        // wrong agent_name gives the daemon no existing session to
+        // reuse → fresh blank PTY. By placing all the fields onto
+        // the new tab in a single setState before TerminalPane
+        // mounts, attachAgentName is on the data when /cli/sessions/v2/spawn
+        // is called and the daemon returns the existing session
+        // (`reused: true`).
+        // See `.k2so/prds/heartbeat-active-session-tracking.md`.
+        const cmd = command.split(' ')[0] || 'shell'
+        const tabId = crypto.randomUUID()
+        const paneGroupId = terminalId
+        const itemId = crypto.randomUUID()
+        const title = heartbeatName
+          ? `${heartbeatName} (heartbeat)`
+          : `Companion: ${cmd}`
+        const newTab = {
+          id: tabId,
+          title,
+          isSystemAgent: false,
+          paneGroups: new Map([
+            [
+              paneGroupId,
+              {
+                id: paneGroupId,
+                items: [
+                  {
+                    id: itemId,
+                    type: 'terminal' as const,
+                    data: {
+                      terminalId,
+                      cwd,
+                      command: cmd,
+                      args,
+                      renderer: 'alacritty-v2' as const,
+                      spawnedAt: performance.now(),
+                      heartbeatName: heartbeatName ?? undefined,
+                      projectPath,
+                      surfacedAgentName: event.payload.agentName,
+                      attachAgentName: attachAgentName ?? undefined,
+                    },
+                  },
+                ],
+                activeItemIndex: 0,
+              },
+            ],
+          ]),
+          mosaicTree: paneGroupId,
+        } as any
+        useTabsStore.setState((s) => ({
+          tabs: [...s.tabs, newTab],
+          // Auto-focus the surfaced tab. SessionSurfaced fires only
+          // on explicit user action (heartbeat-row click → set_surfaced),
+          // so the user clearly wants to look at the heartbeat now.
+          // Diverges from createCompanionTab's convention of preserving
+          // the previous active tab — that path is for autonomous
+          // background surfacing, this one is user-summoned.
+          activeTabId: tabId,
+        }))
+      },
+    )
+
     // Watch for workspace switches — flush any pending companion terminals
     useProjectsStore.subscribe((state, prevState) => {
       if (state.activeProjectId && state.activeProjectId !== prevState.activeProjectId) {

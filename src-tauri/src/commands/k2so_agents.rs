@@ -2377,6 +2377,64 @@ pub fn k2so_agents_clear_session_id(
     k2so_core::agents::session::k2so_agents_clear_session_id(project_path, agent_name)
 }
 
+/// Toggle the per-session `surfaced` flag. When transitioning 0 → 1,
+/// emits `HookEvent::SessionSurfaced` so the renderer creates a tab
+/// that ATTACHES to the existing PTY (no fresh spawn). When
+/// transitioning 1 → 0, the renderer is expected to remove the tab
+/// without killing the PTY (the heartbeat session keeps running in
+/// the background). See `.k2so/prds/heartbeat-active-session-tracking.md`.
+///
+/// `terminal_id`, `command`, `args`, `heartbeat_name` are forwarded
+/// in the surfaced-event payload so the renderer can construct a tab
+/// without re-querying — kept minimal because the event listener is
+/// a hot path. Pass empty strings / empty Vec / None when not
+/// applicable.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn k2so_session_set_surfaced(
+    project_path: String,
+    agent_name: String,
+    surfaced: bool,
+    terminal_id: Option<String>,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    heartbeat_name: Option<String>,
+    attach_agent_name: Option<String>,
+) -> Result<(), String> {
+    let db = k2so_core::db::shared();
+    let conn = db.lock();
+    let project_id = k2so_core::agents::resolve_project_id(&conn, &project_path)
+        .ok_or_else(|| format!("Project not found: {}", project_path))?;
+    k2so_core::db::schema::AgentSession::set_surfaced(
+        &conn, &project_id, &agent_name, surfaced,
+    )
+    .map_err(|e| format!("set surfaced flag: {}", e))?;
+    drop(conn);
+
+    if surfaced {
+        // Emit on every `surfaced=true` call (not just 0→1
+        // transitions) so the user can re-summon a tab even when the
+        // DB flag was left as `1` by a prior surface that the
+        // renderer subsequently dropped (e.g. close-minimize that
+        // skipped the surfaced=false flip). The renderer's listener
+        // already checks whether a tab exists before creating one,
+        // so re-emit is idempotent.
+        k2so_core::agent_hooks::emit(
+            k2so_core::agent_hooks::HookEvent::SessionSurfaced,
+            serde_json::json!({
+                "projectPath": project_path,
+                "agentName": agent_name,
+                "terminalId": terminal_id,
+                "command": command,
+                "args": args,
+                "heartbeatName": heartbeat_name,
+                "attachAgentName": attach_agent_name,
+            }),
+        );
+    }
+    Ok(())
+}
+
 // `k2so_agents_heartbeat_noop` moved to k2so_core::agents::commands (re-exported).
 
 // `k2so_agents_heartbeat_action` moved to k2so_core::agents::commands (re-exported).

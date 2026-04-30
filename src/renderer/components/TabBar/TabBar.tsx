@@ -1,7 +1,8 @@
-import { useCallback, useState, useRef, useEffect } from 'react'
+import { useCallback, useState, useRef, useEffect, useMemo } from 'react'
 import { useTabsStore, type TerminalItemData } from '@/stores/tabs'
 import { useSettingsStore } from '@/stores/settings'
 import { useActiveAgentsStore } from '@/stores/active-agents'
+import { useHeartbeatSessionsStore } from '@/stores/heartbeat-sessions'
 import { invoke } from '@tauri-apps/api/core'
 import { startTabDrag } from '@/components/Terminal/TerminalArea'
 import { showContextMenu } from '@/lib/context-menu'
@@ -25,6 +26,38 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
   const reorderTabs = useTabsStore((s) => s.reorderTabs)
   const agentMap = useActiveAgentsStore((s) => s.agents)
   const paneStatusMap = useActiveAgentsStore((s) => s.paneStatuses)
+
+  // Heartbeat-tab detection key: a Set of every heartbeat's
+  // `lastSessionId` (the Claude `--resume` target stamped in the DB
+  // by smart_launch). A tab is considered a heartbeat tab when any
+  // of its terminal items has one of these ids in its args — i.e.,
+  // the tab is currently running `claude --resume <heartbeat-id>`.
+  // This catches:
+  //   - tabs opened via the SessionSurfaced flow (which spawn with
+  //     these args by construction)
+  //   - normal chat tabs that smart_launch's inject path happened to
+  //     write the wakeup into (because they were already running
+  //     --resume against the same session id)
+  // The `activeTerminalId` column is the daemon's session_id, NOT the
+  // renderer's terminalId, so cross-referencing on that key never
+  // matches. lastSessionId IS the args value the renderer set when
+  // it spawned, so it does match. See migration 0036 +
+  // `.k2so/prds/heartbeat-active-session-tracking.md`.
+  //
+  // Selector returns the underlying entries array (Zustand can do
+  // reference equality on it) and we useMemo the derived Set so the
+  // identity is stable when nothing has changed — otherwise every
+  // render allocates a new Set and the selector triggers an
+  // infinite re-render loop.
+  const heartbeatActiveEntries = useHeartbeatSessionsStore((s) => s.active)
+  const heartbeatLastSessionIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const entry of heartbeatActiveEntries) {
+      const sid = entry.row.lastSessionId
+      if (sid) ids.add(sid)
+    }
+    return ids
+  }, [heartbeatActiveEntries])
 
   const handleAddTab = useCallback(() => {
     addTabToGroup(groupIndex, cwd)
@@ -474,24 +507,79 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
               <span className={`truncate flex-1 ${isDirty ? 'italic' : ''}`}>
                 {tab.title}
               </span>
-              <button
-                className="ml-2 flex h-4 w-4 flex-shrink-0 items-center justify-center hover:bg-white/10 group/close"
-                onClick={(e) => handleCloseTab(e, tab.id)}
-                title={isAgentActive ? 'Agent is active — close anyway' : 'Close tab'}
-              >
-                {isAgentActive ? (
-                  <>
-                    <span className="braille-spinner text-[10px] text-[var(--color-text-muted)] group-hover/close:hidden" />
-                    <svg className="hidden group-hover/close:block" width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5">
-                      <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
-                    </svg>
-                  </>
+              {/* Heartbeat tabs are "minimize, don't kill" — the
+                  daemon-owned PTY keeps running so the heartbeat
+                  keeps firing on schedule. Visually distinguish with
+                  a `–` glyph instead of `×`. Detection: any terminal
+                  item whose data carries `heartbeatName` (stamped at
+                  surface time by the session:surfaced listener).
+                  Close behavior is gated separately in
+                  closeTerminalForRenderer; this is purely the
+                  visual cue.
+                  See `.k2so/prds/heartbeat-active-session-tracking.md`. */}
+              {(() => {
+                // Detect a heartbeat tab two ways:
+                //   1. `heartbeatName` stamped on the terminal data
+                //      (set by the SessionSurfaced flow at attach time).
+                //   2. The terminal's id is currently the
+                //      `active_terminal_id` of some live heartbeat row.
+                // The second covers tabs opened via the legacy
+                // fresh-resume path or before the surfaced flow shipped
+                // — the heartbeat row is the source of truth so we
+                // pick up the relationship without needing the data to
+                // be stamped.
+                const isHeartbeatTab = Array.from(tab.paneGroups.values()).some((pg) =>
+                  pg.items.some((item) => {
+                    if (item.type !== 'terminal') return false
+                    const td = item.data as TerminalItemData
+                    if ((td as any).heartbeatName) return true
+                    if (!td.args) return false
+                    for (const a of td.args) {
+                      if (heartbeatLastSessionIds.has(a)) return true
+                    }
+                    return false
+                  }),
+                )
+                // Close glyph picks up the heartbeat-vs-regular split.
+                // The active-agent layer is independent: if the agent
+                // is working we show the braille spinner by default
+                // and reveal the close glyph on hover. Heartbeat tabs
+                // get `–` (minimize), regular tabs get `×` — same hover
+                // pattern, different glyph.
+                const closeGlyph = isHeartbeatTab ? (
+                  <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                    <line x1="1.5" y1="4" x2="6.5" y2="4" />
+                  </svg>
                 ) : (
                   <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5">
                     <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
                   </svg>
-                )}
-              </button>
+                )
+                return (
+                  <button
+                    className="ml-2 flex h-4 w-4 flex-shrink-0 items-center justify-center hover:bg-white/10 group/close"
+                    onClick={(e) => handleCloseTab(e, tab.id)}
+                    title={
+                      isHeartbeatTab
+                        ? isAgentActive
+                          ? 'Heartbeat agent is working — hide anyway (PTY keeps running)'
+                          : 'Hide tab — heartbeat keeps running in the background'
+                        : isAgentActive
+                          ? 'Agent is active — close anyway'
+                          : 'Close tab'
+                    }
+                  >
+                    {isAgentActive ? (
+                      <>
+                        <span className="braille-spinner text-[10px] text-[var(--color-text-muted)] group-hover/close:hidden" />
+                        <span className="hidden group-hover/close:block">{closeGlyph}</span>
+                      </>
+                    ) : (
+                      closeGlyph
+                    )}
+                  </button>
+                )
+              })()}
             </div>
           )
         })}

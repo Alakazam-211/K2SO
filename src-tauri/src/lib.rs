@@ -1210,6 +1210,7 @@ pub fn run() {
             commands::k2so_agents::k2so_agents_heartbeat_noop,
             commands::k2so_agents::k2so_agents_heartbeat_action,
             commands::k2so_agents::k2so_agents_save_session_id,
+            commands::k2so_agents::k2so_session_set_surfaced,
             commands::k2so_agents::k2so_agents_clear_session_id,
             // Workspace States
             commands::states::states_list,
@@ -1271,6 +1272,7 @@ pub fn run() {
             commands::k2so_agents::k2so_heartbeat_fires_list,
             agent_hooks::k2so_heartbeat_force_fire,
             agent_hooks::k2so_heartbeat_smart_launch,
+            agent_hooks::k2so_heartbeat_active_session,
             // Agent Sessions (DB-tracked)
             commands::k2so_agents::agent_sessions_list,
             commands::k2so_agents::agent_sessions_get,

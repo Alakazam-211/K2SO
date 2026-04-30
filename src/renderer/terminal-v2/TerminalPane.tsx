@@ -265,6 +265,15 @@ export interface TerminalPaneProps {
   args?: string[]
   fontSize?: number
   spawnedAt?: number
+  /** Override the auto-derived `tab-${terminalId}` agent_name used by
+   *  /cli/sessions/v2/spawn. Set when this tab is meant to attach to
+   *  an *existing* daemon-side session whose key in `v2_session_map`
+   *  is something other than `tab-...` — e.g. heartbeat-spawned
+   *  sessions live under the workspace's primary agent name. Without
+   *  this, /cli/sessions/v2/spawn never finds the existing session
+   *  and silently spawns a fresh resume. See
+   *  `.k2so/prds/heartbeat-active-session-tracking.md`. */
+  attachAgentName?: string
 }
 
 type Phase =
@@ -285,6 +294,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     command,
     args,
     spawnedAt,
+    attachAgentName,
   } = props
 
   // Live-subscribe to the terminal settings store so Cmd+Shift+=
@@ -483,7 +493,12 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   // only — daemon-side session survives.
   useEffect(() => {
     let cancelled = false
-    const agentName = `tab-${terminalId}`
+    // For heartbeat-surfaced tabs, attachAgentName carries the daemon's
+    // existing v2_session_map key (e.g. the workspace's primary agent
+    // name). Without the override the auto-derived `tab-${terminalId}`
+    // never matches a daemon-spawned session → /cli/sessions/v2/spawn
+    // creates a duplicate PTY instead of attaching. See PRD.
+    const agentName = attachAgentName ?? `tab-${terminalId}`
 
     async function boot() {
       perfLog('mount', spawnedAt

@@ -268,6 +268,19 @@ fn run_inject(
 
     stamp_fired_and_release(project_id, &hb.name);
     let target_id = live.session_id().to_string();
+
+    // Stamp `active_terminal_id` on the heartbeat row — the live PTY
+    // we just injected into is now the canonical "live" PTY for this
+    // heartbeat. Future openHeartbeatTab calls will surface this PTY
+    // directly instead of spawning a fresh resume. See migration 0036.
+    {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        let _ = AgentHeartbeat::save_active_terminal_id(
+            &conn, project_id, &hb.name, &target_id,
+        );
+    }
+
     write_audit(project_id, agent_name, hb, "fired",
         &format!("smart_launch: injected into live session {target_id}"));
     serde_json::json!({
@@ -330,6 +343,17 @@ fn run_resume_and_fire(
                 Some(out.session_id.to_string()),
                 Some("system".to_string()),
             );
+            // Stamp `active_terminal_id` so openHeartbeatTab can attach
+            // a tab to this newly-spawned PTY without spawning a second
+            // resume. See migration 0036 + the heartbeat-active-session
+            // PRD.
+            {
+                let db = k2so_core::db::shared();
+                let conn = db.lock();
+                let _ = AgentHeartbeat::save_active_terminal_id(
+                    &conn, project_id, &hb.name, &out.session_id.to_string(),
+                );
+            }
             // Surface the new PTY to any attached UI so a tab gets
             // created (gated by show_heartbeat_sessions on the
             // renderer side per P2.6).

@@ -29,6 +29,15 @@ export interface HeartbeatRow {
   lastSessionId: string | null
   archivedAt: string | null
   createdAt: number
+  /** Daemon-side terminal id of the live PTY currently attached to
+   *  this heartbeat, or null when no PTY is alive. Stamped at spawn
+   *  time inside smart_launch; cleared on PTY exit (child-exit
+   *  observer) or on lazy cleanup when openHeartbeatTab observes the
+   *  PTY no longer exists. The TabBar uses this to detect "this open
+   *  tab is the live heartbeat session" without depending on
+   *  per-tab stamped metadata. See migration 0036 +
+   *  `.k2so/prds/heartbeat-active-session-tracking.md`. */
+  activeTerminalId?: string | null
 }
 
 export interface HeartbeatEntry {

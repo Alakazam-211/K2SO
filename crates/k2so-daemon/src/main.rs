@@ -144,6 +144,37 @@ async fn main() {
         }
     }
 
+    // 0036: clear `active_terminal_id` for any heartbeat whose pointed-at
+    // PTY died with the daemon. After a daemon restart, `v2_session_map`
+    // is empty until rehydrated, so any non-NULL `active_terminal_id` is
+    // by definition pointing at a corpse. Lazy cleanup on read also
+    // catches stragglers, but doing the sweep on boot keeps the column
+    // honest from the start. Companion of `heartbeat-active-session`
+    // PRD's PtyExited observer.
+    {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        match k2so_core::db::schema::AgentHeartbeat::list_with_active_terminal(&conn) {
+            Ok(rows) => {
+                let mut cleared = 0usize;
+                for (_pid, _name, term_id) in &rows {
+                    // No PTYs exist yet at this point in boot, so every
+                    // row is stale — null it.
+                    if let Ok(n) = k2so_core::db::schema::AgentHeartbeat::clear_active_terminal_id_by_terminal(&conn, term_id) {
+                        cleared += n;
+                    }
+                }
+                if cleared > 0 {
+                    log_debug!(
+                        "[daemon] swept {} stale active_terminal_id(s) from prior daemon",
+                        cleared
+                    );
+                }
+            }
+            Err(e) => log_debug!("[daemon] WARN: list_with_active_terminal: {e}"),
+        }
+    }
+
     // P5.6: legacy heartbeat-projects.txt has been retired in favor
     // of `/cli/heartbeat/active-projects`. If it's still on disk from
     // a pre-P5 install (or if the user only ever runs the daemon
@@ -923,6 +954,65 @@ fn handle_cli_heartbeat(
                 .and_then(|s| s.parse::<i64>().ok());
             hb::k2so_heartbeat_fires_list(project_path.to_string(), limit)
                 .map(|rows| serde_json::to_string(&rows).unwrap_or_default())
+        }
+        "/cli/heartbeat/active-session" => {
+            // 0036 — heartbeat-active-session lookup. Reads the row's
+            // `active_terminal_id` and verifies via session_lookup
+            // (covers both legacy session_map and v2_session_map).
+            // Returns the agent_name as well so the renderer can pass
+            // it to TerminalPane's `attachAgentName` override and
+            // /cli/sessions/v2/spawn returns the existing session
+            // (reused=true) instead of spawning a duplicate. See
+            // `.k2so/prds/heartbeat-active-session-tracking.md`.
+            let name = params.get("name").cloned().unwrap_or_default();
+            if name.is_empty() {
+                return Err("Missing 'name' parameter".to_string());
+            }
+            let db = k2so_core::db::shared();
+            let conn = db.lock();
+            let project_id = k2so_core::agents::resolve_project_id(&conn, project_path)
+                .ok_or_else(|| format!("Project not found: {project_path}"))?;
+            let hb_row =
+                k2so_core::db::schema::AgentHeartbeat::get_by_name(&conn, &project_id, &name)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("no heartbeat '{name}'"))?;
+            let active_id = hb_row.active_terminal_id.clone();
+            // Walk both legacy + v2 session maps so we accept any
+            // running PTY (heartbeat fresh-fires today land in v2;
+            // legacy chat tabs may still be in session_map).
+            let (active_agent_name, session_alive, is_v2) = match active_id.as_deref() {
+                Some(tid) => match k2so_core::session::SessionId::parse(tid) {
+                    Some(sid) => {
+                        let snap = crate::session_lookup::snapshot_all();
+                        let found = snap
+                            .iter()
+                            .find(|(_n, live)| live.session_id() == sid);
+                        match found {
+                            Some((nm, live)) => {
+                                (Some(nm.clone()), true, live.is_v2())
+                            }
+                            None => (None, false, false),
+                        }
+                    }
+                    None => (None, false, false),
+                },
+                None => (None, false, false),
+            };
+            // Lazy cleanup so the next call reflects reality.
+            if active_id.is_some() && !session_alive {
+                let _ = k2so_core::db::schema::AgentHeartbeat::clear_active_terminal_id(
+                    &conn, &project_id, &name,
+                );
+            }
+            Ok(serde_json::json!({
+                "name": hb_row.name,
+                "claudeSessionId": hb_row.last_session_id,
+                "activeTerminalId": if session_alive { active_id.clone() } else { None },
+                "activeAgentName": active_agent_name,
+                "sessionAlive": session_alive,
+                "isV2": is_v2,
+            })
+            .to_string())
         }
         _ => Err(format!("Unknown heartbeat route: {path}")),
     }

@@ -166,6 +166,18 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
 
     v2_session_map::register(req.agent_name.clone(), session.clone());
 
+    // Child-exit observer: subscribe to the session's alacritty event
+    // broadcast and call v2_session_map::unregister when ChildExit
+    // arrives. The unregister hook (in v2_session_map) is what nulls
+    // any matching agent_heartbeats.active_terminal_id and flips
+    // surfaced=0 on the agent_sessions row. Without this, claude
+    // --print sessions exit cleanly and leave the column pointing at
+    // a corpse — which the lazy cleanup on read would catch
+    // eventually, but eventually-consistent stale data is the kind
+    // of "feels haunted" UX we'd rather avoid. See
+    // `heartbeat-active-session-tracking` PRD.
+    spawn_child_exit_observer(req.agent_name.clone(), session.clone());
+
     // Drain any pending-live signals that were queued while this
     // agent was offline so they become input to the fresh session.
     // Mirrors `crate::spawn::spawn_agent_session`'s legacy drain so
@@ -252,6 +264,50 @@ fn current_dims(session: &DaemonPtySession) -> (u16, u16) {
     let cols = term.columns() as u16;
     let rows = term.screen_lines() as u16;
     (cols, rows)
+}
+
+/// Subscribe to a freshly-spawned session's alacritty events on a
+/// detached tokio task and call `v2_session_map::unregister(agent)`
+/// when ChildExit arrives. The unregister hook is what handles the
+/// DB cleanup — see `v2_session_map::unregister`. Detached because
+/// we don't have a JoinHandle to track and the task is short-lived
+/// (only runs until the child dies, which terminates the underlying
+/// broadcast channel and ends our `recv()` loop).
+///
+/// Holds a Weak reference to the session so the observer task
+/// doesn't keep the Arc alive past the last legitimate holder. If
+/// every other holder drops first, `Weak::upgrade()` returns None
+/// and we exit silently.
+fn spawn_child_exit_observer(agent_name: String, session: std::sync::Arc<DaemonPtySession>) {
+    use k2so_core::terminal::AlacEvent;
+    let weak = std::sync::Arc::downgrade(&session);
+    drop(session);
+    tokio::spawn(async move {
+        // Re-acquire briefly to grab a receiver. If the session was
+        // already dropped, exit — nothing to observe.
+        let mut rx = match weak.upgrade() {
+            Some(s) => s.subscribe_events(),
+            None => return,
+        };
+        // Drop the temporary strong reference so we don't keep the
+        // Arc alive ourselves; the receiver alone is enough.
+        loop {
+            match rx.recv().await {
+                Ok(AlacEvent::ChildExit(status)) => {
+                    log_debug!(
+                        "[daemon/v2-exit] ChildExit observed for agent={} code={:?} — unregistering",
+                        agent_name,
+                        status.code(),
+                    );
+                    v2_session_map::unregister(&agent_name);
+                    return;
+                }
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
 }
 
 #[cfg(test)]

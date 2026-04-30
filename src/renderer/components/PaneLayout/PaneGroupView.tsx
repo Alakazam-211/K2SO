@@ -217,6 +217,7 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
                     command={td.command}
                     args={td.args}
                     spawnedAt={td.spawnedAt}
+                    attachAgentName={(td as any).attachAgentName}
                   />
                 )
               } else {

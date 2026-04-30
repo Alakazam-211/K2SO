@@ -331,6 +331,12 @@ pub fn spawn_wake_headless(
     // use, so we can write it to agent_heartbeats.last_session_id
     // immediately — no need to wait for the deferred-save thread to
     // poll claude history, no race between concurrent fires.
+    //
+    // Stamp `active_terminal_id` in the same critical section: this
+    // is the FK-style pointer the renderer's openHeartbeatTab reads
+    // to attach a new tab to the existing PTY (no fresh resume → no
+    // duplicate session). See migration 0036 + the
+    // `heartbeat-active-session-tracking` PRD.
     if let Some(hb_name) = heartbeat_name {
         let db = crate::db::shared();
         let conn = db.lock();
@@ -338,10 +344,13 @@ pub fn spawn_wake_headless(
             let _ = crate::db::schema::AgentHeartbeat::save_session_id(
                 &conn, &project_id, hb_name, &pinned_session_id,
             );
+            let _ = crate::db::schema::AgentHeartbeat::save_active_terminal_id(
+                &conn, &project_id, hb_name, &terminal_id,
+            );
         }
         crate::log_debug!(
-            "[daemon/wake] pinned heartbeat '{}' session id: {}",
-            hb_name, pinned_session_id
+            "[daemon/wake] pinned heartbeat '{}' session id: {} terminal: {}",
+            hb_name, pinned_session_id, terminal_id
         );
     }
 

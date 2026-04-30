@@ -1116,6 +1116,43 @@ impl AgentSession {
         )
     }
 
+    /// Toggle the per-session "surfaced" boolean. `true` = the session
+    /// has a live tab in the renderer; `false` = the session is running
+    /// headless (heartbeat default). See migration 0036.
+    pub fn set_surfaced(
+        conn: &Connection,
+        project_id: &str,
+        agent_name: &str,
+        surfaced: bool,
+    ) -> Result<usize> {
+        conn.execute(
+            "UPDATE agent_sessions SET surfaced = ?1, last_activity_at = unixepoch() \
+             WHERE project_id = ?2 AND agent_name = ?3",
+            params![surfaced as i64, project_id, agent_name],
+        )
+    }
+
+    /// Read the current surfaced flag for a session. `false` if the row
+    /// doesn't exist (no session yet → can't be surfaced).
+    pub fn is_surfaced(
+        conn: &Connection,
+        project_id: &str,
+        agent_name: &str,
+    ) -> Result<bool> {
+        conn.query_row(
+            "SELECT surfaced FROM agent_sessions WHERE project_id = ?1 AND agent_name = ?2",
+            params![project_id, agent_name],
+            |row| {
+                let v: i64 = row.get(0)?;
+                Ok(v != 0)
+            },
+        )
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(false),
+            other => Err(other),
+        })
+    }
+
     pub fn delete(conn: &Connection, project_id: &str, agent_name: &str) -> Result<usize> {
         conn.execute(
             "DELETE FROM agent_sessions WHERE project_id = ?1 AND agent_name = ?2",
@@ -1197,6 +1234,11 @@ pub struct AgentHeartbeat {
     /// entry, cleared by `stamp_heartbeat_fired` on completion.
     /// Boot-time sweep clears stale leases (>5min old). NULL = idle.
     pub in_flight_started_at: Option<String>,
+    /// Daemon-side terminal id of the live PTY currently running this
+    /// heartbeat's claude session, or NULL when no PTY is alive.
+    /// Replaces args-matching with explicit FK-style data — see
+    /// migration 0036 + the heartbeat-active-session PRD.
+    pub active_terminal_id: Option<String>,
 }
 
 impl AgentHeartbeat {
@@ -1249,7 +1291,7 @@ impl AgentHeartbeat {
 
     /// Column list for SELECTs. Centralised so adding a new column means
     /// updating one constant + `from_row`, not five query strings.
-    const COLS: &'static str = "id, project_id, name, frequency, spec_json, wakeup_path, enabled, last_fired, last_session_id, archived_at, created_at, concurrency_policy, starting_deadline_secs, active_deadline_secs, in_flight_started_at";
+    const COLS: &'static str = "id, project_id, name, frequency, spec_json, wakeup_path, enabled, last_fired, last_session_id, archived_at, created_at, concurrency_policy, starting_deadline_secs, active_deadline_secs, in_flight_started_at, active_terminal_id";
 
     pub fn get_by_name(conn: &Connection, project_id: &str, name: &str) -> Result<Option<AgentHeartbeat>> {
         let sql = format!(
@@ -1375,6 +1417,75 @@ impl AgentHeartbeat {
              WHERE project_id = ?2 AND name = ?3",
             params![session_id, project_id, name],
         )
+    }
+
+    /// Record the daemon-side terminal id of the live PTY currently
+    /// attached to this heartbeat. NULL when no PTY is alive (cold
+    /// heartbeat, post-exit, post-daemon-restart). Replaces the
+    /// args-matching `find_live_for_resume` heuristic with explicit
+    /// data — see migration 0036 + the heartbeat-active-session PRD.
+    pub fn save_active_terminal_id(
+        conn: &Connection,
+        project_id: &str,
+        name: &str,
+        terminal_id: &str,
+    ) -> Result<usize> {
+        conn.execute(
+            "UPDATE agent_heartbeats SET active_terminal_id = ?1 \
+             WHERE project_id = ?2 AND name = ?3",
+            params![terminal_id, project_id, name],
+        )
+    }
+
+    /// Null out `active_terminal_id`. Called when the PTY exits
+    /// (child-exit observer), the watchdog kills the session, or when
+    /// `openHeartbeatTab`'s lazy cleanup observes the terminal_id no
+    /// longer exists in the daemon's session map.
+    pub fn clear_active_terminal_id(
+        conn: &Connection,
+        project_id: &str,
+        name: &str,
+    ) -> Result<usize> {
+        conn.execute(
+            "UPDATE agent_heartbeats SET active_terminal_id = NULL \
+             WHERE project_id = ?1 AND name = ?2",
+            params![project_id, name],
+        )
+    }
+
+    /// Null out `active_terminal_id` for every row whose terminal id
+    /// matches the given value. Used by the daemon-side `PtyExited`
+    /// listener — we know the terminal_id that died but not which
+    /// heartbeat row pointed at it. One UPDATE handles the lookup.
+    pub fn clear_active_terminal_id_by_terminal(
+        conn: &Connection,
+        terminal_id: &str,
+    ) -> Result<usize> {
+        conn.execute(
+            "UPDATE agent_heartbeats SET active_terminal_id = NULL \
+             WHERE active_terminal_id = ?1",
+            params![terminal_id],
+        )
+    }
+
+    /// List heartbeats with non-NULL `active_terminal_id`. Used by the
+    /// boot-time sweep to reconcile column state with `v2_session_map`
+    /// after a daemon restart wipes the in-memory map.
+    pub fn list_with_active_terminal(conn: &Connection) -> Result<Vec<(String, String, String)>> {
+        let mut stmt = conn.prepare(
+            "SELECT project_id, name, active_terminal_id FROM agent_heartbeats \
+             WHERE active_terminal_id IS NOT NULL",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// Soft-archive: set archived_at to now. Idempotent — re-archiving an
@@ -1549,6 +1660,7 @@ impl AgentHeartbeat {
             starting_deadline_secs: row.get(12)?,
             active_deadline_secs: row.get(13)?,
             in_flight_started_at: row.get(14)?,
+            active_terminal_id: row.get(15)?,
         })
     }
 }
@@ -2335,6 +2447,96 @@ mod unit_tests {
 
         let h = AgentHeartbeat::get_by_name(&conn, &pid, "triage").unwrap().unwrap();
         assert_eq!(h.last_session_id.as_deref(), Some("claude-xyz"));
+    }
+
+    // ── 0036: active_terminal_id + surfaced flag (heartbeat-active-session PRD) ──
+
+    #[test]
+    fn heartbeat_active_terminal_round_trip() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/hb-active");
+        AgentHeartbeat::insert(&conn, "hb1", &pid, "daily", "60m", "{}", "p", true).unwrap();
+
+        // Fresh row has no live PTY.
+        let pre = AgentHeartbeat::get_by_name(&conn, &pid, "daily").unwrap().unwrap();
+        assert!(pre.active_terminal_id.is_none());
+
+        // Stamp a terminal id.
+        let n = AgentHeartbeat::save_active_terminal_id(&conn, &pid, "daily", "wake-cortana-abc").unwrap();
+        assert_eq!(n, 1);
+        let mid = AgentHeartbeat::get_by_name(&conn, &pid, "daily").unwrap().unwrap();
+        assert_eq!(mid.active_terminal_id.as_deref(), Some("wake-cortana-abc"));
+
+        // Clear it (e.g., child-exit observer).
+        let n = AgentHeartbeat::clear_active_terminal_id(&conn, &pid, "daily").unwrap();
+        assert_eq!(n, 1);
+        let cleared = AgentHeartbeat::get_by_name(&conn, &pid, "daily").unwrap().unwrap();
+        assert!(cleared.active_terminal_id.is_none());
+    }
+
+    #[test]
+    fn heartbeat_clear_active_by_terminal_id_targets_matching_rows() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/hb-clear-by-tid");
+        // Two heartbeats, two distinct terminal ids.
+        AgentHeartbeat::insert(&conn, "hb1", &pid, "morning", "60m", "{}", "p", true).unwrap();
+        AgentHeartbeat::insert(&conn, "hb2", &pid, "evening", "60m", "{}", "p2", true).unwrap();
+        AgentHeartbeat::save_active_terminal_id(&conn, &pid, "morning", "term-1").unwrap();
+        AgentHeartbeat::save_active_terminal_id(&conn, &pid, "evening", "term-2").unwrap();
+
+        // Simulate term-1 exiting — should null morning's column only.
+        let n = AgentHeartbeat::clear_active_terminal_id_by_terminal(&conn, "term-1").unwrap();
+        assert_eq!(n, 1);
+        assert!(AgentHeartbeat::get_by_name(&conn, &pid, "morning").unwrap().unwrap().active_terminal_id.is_none());
+        assert_eq!(
+            AgentHeartbeat::get_by_name(&conn, &pid, "evening").unwrap().unwrap().active_terminal_id.as_deref(),
+            Some("term-2"),
+        );
+    }
+
+    #[test]
+    fn heartbeat_list_with_active_terminal_returns_only_non_null() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/hb-list-active");
+        AgentHeartbeat::insert(&conn, "hb1", &pid, "with-term", "60m", "{}", "p", true).unwrap();
+        AgentHeartbeat::insert(&conn, "hb2", &pid, "no-term", "60m", "{}", "p2", true).unwrap();
+        AgentHeartbeat::save_active_terminal_id(&conn, &pid, "with-term", "term-x").unwrap();
+
+        let rows = AgentHeartbeat::list_with_active_terminal(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1, "with-term");
+        assert_eq!(rows[0].2, "term-x");
+    }
+
+    #[test]
+    fn agent_session_surfaced_round_trip() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/sess-surfaced");
+
+        // Fresh upsert — surfaced defaults to 0.
+        AgentSession::upsert(
+            &conn, "s1", &pid, "frank",
+            Some("term-1"), None, "claude", "system", "running",
+        )
+        .unwrap();
+        assert!(!AgentSession::is_surfaced(&conn, &pid, "frank").unwrap());
+
+        // Flip on.
+        let n = AgentSession::set_surfaced(&conn, &pid, "frank", true).unwrap();
+        assert_eq!(n, 1);
+        assert!(AgentSession::is_surfaced(&conn, &pid, "frank").unwrap());
+
+        // Flip off.
+        AgentSession::set_surfaced(&conn, &pid, "frank", false).unwrap();
+        assert!(!AgentSession::is_surfaced(&conn, &pid, "frank").unwrap());
+    }
+
+    #[test]
+    fn agent_session_surfaced_default_false_for_missing_row() {
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/sess-missing");
+        // No row inserted — query should return false, not error.
+        assert!(!AgentSession::is_surfaced(&conn, &pid, "ghost").unwrap());
     }
 
     #[test]

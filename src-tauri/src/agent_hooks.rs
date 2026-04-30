@@ -332,6 +332,26 @@ pub fn k2so_heartbeat_smart_launch(
     )
 }
 
+/// Resolve a heartbeat's currently-live PTY (if any) so the renderer
+/// can decide whether to attach a tab to an existing daemon-owned
+/// session vs spawn a fresh resume. Returns JSON:
+///   `{ name, claudeSessionId, activeTerminalId, sessionAlive }`.
+/// `activeTerminalId` is non-null only when the daemon's
+/// `v2_session_map` has the corresponding session — the daemon
+/// performs lazy-cleanup of stale columns inside the same call.
+/// See `.k2so/prds/heartbeat-active-session-tracking.md`.
+#[tauri::command]
+pub fn k2so_heartbeat_active_session(
+    project_path: String,
+    name: String,
+) -> Result<String, String> {
+    let client = crate::daemon_client::DaemonClient::try_connect()?;
+    client.cli_get(
+        "/cli/heartbeat/active-session",
+        &[("project", &project_path), ("name", &name)],
+    )
+}
+
 // `push_agent_event` moved to k2so_core::agents::events.
 
 // `drain_agent_events` moved to k2so_core::agents::events.

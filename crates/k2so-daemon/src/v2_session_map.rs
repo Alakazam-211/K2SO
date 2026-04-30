@@ -42,8 +42,36 @@ pub fn register(agent_name: impl Into<String>, session: Arc<DaemonPtySession>) {
 
 /// Remove the map entry. Returns the Arc if one was present;
 /// subsequent drops of all holders tear the session down.
+///
+/// Also runs the heartbeat-active-session cleanup path: any
+/// `agent_heartbeats` row whose `active_terminal_id` matches the
+/// removed session's id is nulled, and the matching `agent_sessions`
+/// row gets `surfaced=0` + `status='sleeping'`. This is the single
+/// chokepoint for "v2 session goes away" — child-exit observer in
+/// v2_spawn invokes us, the explicit /v2/close route invokes us, the
+/// watchdog escalation path invokes us. See the
+/// `heartbeat-active-session-tracking` PRD.
 pub fn unregister(agent_name: &str) -> Option<Arc<DaemonPtySession>> {
-    shared().lock().unwrap().remove(agent_name)
+    let removed = shared().lock().unwrap().remove(agent_name);
+    if let Some(ref session) = removed {
+        let terminal_id = session.session_id.to_string();
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        let _ = k2so_core::db::schema::AgentHeartbeat::clear_active_terminal_id_by_terminal(
+            &conn,
+            &terminal_id,
+        );
+        // Best-effort flip the agent_sessions row for this agent. We
+        // don't know the project_id here so we rely on the row's
+        // (project_id, agent_name) UNIQUE constraint — at most one
+        // row matches and it's the one we want.
+        let _ = conn.execute(
+            "UPDATE agent_sessions SET surfaced = 0, status = 'sleeping' \
+             WHERE agent_name = ?1",
+            rusqlite::params![agent_name],
+        );
+    }
+    removed
 }
 
 /// Lookup by agent name. Called on find-or-spawn to decide

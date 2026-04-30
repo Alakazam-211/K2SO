@@ -44,6 +44,13 @@ pub enum HookEvent {
     CliTerminalSpawnBackground,
     CliAiCommit,
     HookInjectionFailed,
+    /// Fires when an existing PTY is being surfaced into a tab — i.e.,
+    /// the renderer should attach to the given `terminalId` rather
+    /// than spawn a new PTY. Differs from `CliTerminalSpawnBackground`
+    /// in semantic: Spawn means "I just spawned a new PTY"; Surfaced
+    /// means "this PTY is already running, mount a tab on it." See
+    /// `.k2so/prds/heartbeat-active-session-tracking.md`.
+    SessionSurfaced,
 }
 
 impl HookEvent {
@@ -58,6 +65,7 @@ impl HookEvent {
             Self::CliTerminalSpawnBackground => "cli:terminal-spawn-background",
             Self::CliAiCommit => "cli:ai-commit",
             Self::HookInjectionFailed => "hook-injection-failed",
+            Self::SessionSurfaced => "session:surfaced",
         }
     }
 }

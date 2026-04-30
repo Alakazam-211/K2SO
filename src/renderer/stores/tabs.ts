@@ -5,6 +5,7 @@ import { RESUMABLE_CLI_TOOLS } from '@shared/constants'
 import { useSettingsStore } from '@/stores/settings'
 import { useTerminalSettingsStore, type TerminalRenderer } from '@/stores/terminal-settings'
 import { getDaemonWs } from '@/kessel/daemon-ws'
+import { useHeartbeatSessionsStore } from '@/stores/heartbeat-sessions'
 
 // Lazy reference to presets store — avoids circular dependency (presets → tabs → presets).
 // Set by presets.ts on init via registerPresetsStore().
@@ -51,6 +52,60 @@ function broadcastTabChange(payload: TabSyncPayload): void {
  * UI, matching the pattern already used for terminal_kill.
  */
 function closeTerminalForRenderer(data: TerminalItemData): void {
+  // Heartbeat tabs are "minimize, don't kill" — the daemon-owned PTY
+  // keeps running in the background after the tab closes so the
+  // heartbeat continues to fire on schedule. We still flip the
+  // surfaced flag so the UI knows the tab is gone, but we don't
+  // call cli_sessions_v2_close (which would unregister + SIGHUP).
+  // See `.k2so/prds/heartbeat-active-session-tracking.md`.
+  //
+  // Detection has two paths:
+  //   (a) stamped metadata — SessionSurfaced flow set heartbeatName +
+  //       projectPath + surfacedAgentName when the tab was created.
+  //   (b) cross-reference — if the tab's args contain any heartbeat
+  //       row's lastSessionId, this tab is currently running that
+  //       heartbeat's session even though metadata wasn't stamped at
+  //       creation time (e.g. a normal chat tab that smart_launch
+  //       happened to inject into). Same close-as-minimize semantics
+  //       apply: PTY survives, the row click can re-surface later.
+  if (data.heartbeatName && data.projectPath && data.surfacedAgentName) {
+    invoke('k2so_session_set_surfaced', {
+      projectPath: data.projectPath,
+      agentName: data.surfacedAgentName,
+      surfaced: false,
+      terminalId: null,
+      command: null,
+      args: null,
+      heartbeatName: null,
+      attachAgentName: null,
+    }).catch((e) => console.warn('[tabs] heartbeat surfaced=false failed:', e))
+    return
+  }
+  // Path (b): cross-reference args against the heartbeats store.
+  // Static import at module top — no circular dep with
+  // heartbeat-sessions.
+  if (data.args && data.args.length > 0) {
+    const entries = useHeartbeatSessionsStore.getState().active
+    for (const entry of entries) {
+      const sid = entry.row.lastSessionId
+      if (sid && data.args.includes(sid)) {
+        // Tab is the heartbeat's running session — minimize, not kill.
+        // We don't have a stamped surfacedAgentName, so we can't flip
+        // the agent_sessions surfaced flag. That's OK — the goal is
+        // PTY-survives. Skip the v2_close that would SIGHUP the child;
+        // the daemon-side row's active_terminal_id stays valid; the
+        // next row click finds the live session. Logs a hint so the
+        // path is debuggable when it matters.
+        console.info(
+          '[tabs] cross-ref heartbeat tab close — leaving PTY alive (heartbeat=%s, terminalId=%s)',
+          entry.row.name,
+          data.terminalId,
+        )
+        return
+      }
+    }
+  }
+
   const renderer = data.renderer ?? 'alacritty'
   switch (renderer) {
     case 'alacritty':
@@ -94,6 +149,28 @@ async function closeV2Session(agentName: string): Promise<void> {
   }
 }
 
+/**
+ * Resolve the user's enabled claude preset args (e.g.
+ * --dangerously-skip-permissions). Lazy-imports the presets store so
+ * module-load doesn't cascade through settings.ts (which calls invoke
+ * and breaks vitest environments without a window). Strips any
+ * pre-existing `--resume` so callers can append their own deterministically.
+ * Returns `[]` when no enabled claude preset is configured.
+ */
+async function resolveClaudePresetArgs(): Promise<string[]> {
+  try {
+    const { usePresetsStore } = await import('@/stores/presets')
+    const presets = usePresetsStore.getState().presets
+    const preset = presets.find((p) => p.command.split(/\s+/)[0] === 'claude' && p.enabled)
+    if (!preset) return []
+    const parts = preset.command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || []
+    const cleaned = parts.map((p: string) => p.replace(/^["']|["']$/g, ''))
+    return cleaned.slice(1).filter((a: string) => a !== '--resume')
+  } catch {
+    return []
+  }
+}
+
 // ── Item Types ────────────────────────────────────────────────────────────
 
 export interface TerminalItemData {
@@ -130,6 +207,26 @@ export interface TerminalItemData {
    * carries the alacritty-manager id instead.
    */
   kesselSessionId?: string
+  /** Set on tabs that are attached to a heartbeat's live PTY.
+   *  Closing the tab flips `surfaced=false` instead of killing the
+   *  PTY (the heartbeat keeps firing in the background).
+   *  See `.k2so/prds/heartbeat-active-session-tracking.md`. */
+  heartbeatName?: string
+  /** Override the v2_session_map agent_name TerminalPane uses on
+   *  /cli/sessions/v2/spawn. Necessary for surfaced heartbeat tabs:
+   *  the daemon registered the existing PTY under the workspace's
+   *  primary agent name, not the renderer's default
+   *  `tab-${terminalId}`. Without this we'd spawn a duplicate PTY
+   *  instead of attaching. */
+  attachAgentName?: string
+  /** Workspace path for the heartbeat — needed at tab-close time
+   *  to call k2so_session_set_surfaced. Mirror of TerminalItemData.cwd
+   *  in most cases, but explicit so tabs that change cwd can't
+   *  desync. */
+  projectPath?: string
+  /** Agent name on the agent_sessions row whose `surfaced` flag is
+   *  toggled when this tab opens / closes. */
+  surfacedAgentName?: string
 }
 
 export interface FileViewerItemData {
@@ -1125,14 +1222,108 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     heartbeatName: string,
     _options?: { existingTerminalId?: string },
   ): Promise<string | null> => {
-    // Mirror the Chat History tab's resume flow — that's the proven
-    // pattern for opening a tab with `claude --resume <session_id>`.
-    // Pre-0.36.0 this used build_launch + a deterministic
-    // heartbeat-namespaced terminal id, but build_launch's three
-    // wake branches (active worktree, inbox delegate, fresh launch)
-    // are tuned for FIRING a heartbeat, not VIEWING one. Resuming a
-    // saved session needs neither — just claude --resume against
-    // the project root with the user's preset args.
+    // Phase 4 of the heartbeat-active-session-tracking PRD: ask the
+    // daemon for the heartbeat's current live PTY. If one exists,
+    // flip the `surfaced` flag → daemon emits `session:surfaced`
+    // → renderer's listener attaches a tab to the existing PTY (no
+    // duplicate `claude --resume`, single canonical session). If no
+    // live PTY (column was null OR pointed at a corpse), fall through
+    // to the legacy fresh-resume path.
+    let active: {
+      name: string
+      claudeSessionId: string | null
+      activeTerminalId: string | null
+      activeAgentName: string | null
+      sessionAlive: boolean
+      isV2: boolean
+    } | null = null
+    try {
+      const raw = await invoke<string>('k2so_heartbeat_active_session', {
+        projectPath,
+        name: heartbeatName,
+      })
+      active = JSON.parse(raw)
+    } catch (err) {
+      console.warn('[openHeartbeatTab] active-session lookup failed:', err)
+    }
+
+    if (active?.sessionAlive && active.activeTerminalId) {
+      // Live PTY exists — surface it. The daemon's listener for the
+      // surfaced flag emits `session:surfaced` which triggers
+      // `createCompanionTab` in active-agents.ts to attach a tab
+      // (with the heartbeat-named title) to the existing terminal.
+      // First check whether the renderer already has a tab for this
+      // session — if so, just focus it instead of round-tripping
+      // through SessionSurfaced and creating a duplicate.
+      //
+      // Match key reasoning: the daemon's `active_terminal_id` is the
+      // session.session_id (e.g. `009bcb4c…`), NOT the renderer's
+      // terminalId. The bridge is the agent_name (`tab-<rendererId>`
+      // for tabs the renderer spawned). Strip the `tab-` prefix to
+      // get the renderer-side id and match against that. For
+      // daemon-spawned sessions registered under a non-`tab-` name
+      // (e.g. just the workspace agent name), there's no renderer
+      // tab yet — fall through to the surface path.
+      const state = get()
+      const rendererId = active.activeAgentName?.startsWith('tab-')
+        ? active.activeAgentName.slice('tab-'.length)
+        : null
+      if (rendererId) {
+        for (const tab of state.tabs) {
+          for (const [, pg] of tab.paneGroups) {
+            for (const item of pg.items) {
+              if (item.type !== 'terminal') continue
+              const td = item.data as TerminalItemData
+              if (td.terminalId === rendererId) {
+                set({ activeTabId: tab.id })
+                return tab.id
+              }
+            }
+          }
+        }
+      }
+      // Not yet a tab — flip surfaced. Resolve the agent name first;
+      // for daemon-spawned heartbeat sessions the agent name on the
+      // agent_sessions row is the workspace's primary agent (the one
+      // with type custom / manager / k2so). Fall back to listing if
+      // needed.
+      let agentName: string | null = null
+      try {
+        const agents = await invoke<Array<{
+          name: string
+          agentType: string
+        }>>('k2so_agents_list', { projectPath }).catch(() => [])
+        agentName = agents.find((a) =>
+          a.agentType === 'custom' || a.agentType === 'manager' || a.agentType === 'k2so'
+        )?.name ?? agents[0]?.name ?? null
+      } catch { /* fall back to spawn-fresh path */ }
+      if (agentName) {
+        try {
+          const presetArgs = await resolveClaudePresetArgs()
+          const args = [...presetArgs, '--resume', active.claudeSessionId ?? '']
+          await invoke('k2so_session_set_surfaced', {
+            projectPath,
+            agentName,
+            surfaced: true,
+            terminalId: active.activeTerminalId,
+            command: 'claude',
+            args,
+            heartbeatName,
+            // The daemon's v2_session_map key for the existing PTY.
+            // TerminalPane uses this to attach via /cli/sessions/v2/spawn
+            // instead of spawning a fresh resume — see the PRD.
+            attachAgentName: active.activeAgentName,
+          })
+          // The session:surfaced listener will create the tab
+          // asynchronously; don't return a tab id yet.
+          return null
+        } catch (err) {
+          console.warn('[openHeartbeatTab] surfaced flag flip failed; spawning fresh:', err)
+        }
+      }
+    }
+
+    // No live PTY (or the surface path bailed) — legacy fresh-resume.
     const list = await invoke<Array<{
       name: string
       lastSessionId: string | null
@@ -1153,24 +1344,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
     // Read the user's claude preset args (e.g. --dangerously-skip-permissions)
     // so the resumed session has the same permissions as a fresh launch.
-    // Same shape ChatHistory uses — kept inline (small) instead of
-    // importing the whole component module.
-    let presetArgs: string[] = []
-    try {
-      // Lazy import — pulling presets at module top would cascade
-      // through settings.ts's `invoke` call at load time, which
-      // breaks the vitest environment (no `window`). Same pattern
-      // as the resolvePrimaryAgent import above.
-      const { usePresetsStore } = await import('@/stores/presets')
-      const presets = usePresetsStore.getState().presets
-      const preset = presets.find((p) => p.command.split(/\s+/)[0] === 'claude' && p.enabled)
-      if (preset) {
-        const parts = preset.command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || []
-        const cleaned = parts.map((p: string) => p.replace(/^["']|["']$/g, ''))
-        presetArgs = cleaned.slice(1).filter((a: string) => a !== '--resume')
-      }
-    } catch { /* presets unavailable; fall back to empty */ }
-
+    const presetArgs = await resolveClaudePresetArgs()
     const args = [...presetArgs, '--resume', hb.lastSessionId]
     const title = `${heartbeatName} (heartbeat)`
 
@@ -1198,7 +1372,32 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     // a terminal id, registers in the active group, broadcasts the
     // tab-add event, etc.
     const targetGroup = get().splitCount > 1 ? get().splitCount - 1 : 0
-    return get().addTabToGroup(targetGroup, projectPath, { title, command: 'claude', args })
+    const tabId = get().addTabToGroup(targetGroup, projectPath, { title, command: 'claude', args })
+
+    // Force v2 renderer for heartbeat tabs regardless of the user's
+    // workspace renderer choice — heartbeat-spawned PTYs already only
+    // live in v2_session_map, so a tab attached to that session must
+    // use the v2 path. See `.k2so/prds/heartbeat-active-session-tracking.md`.
+    if (tabId) {
+      set((s) => ({
+        tabs: s.tabs.map((t) => {
+          if (t.id !== tabId) return t
+          const updatedGroups = new Map(t.paneGroups)
+          for (const [pgId, pg] of updatedGroups) {
+            const updatedItems = pg.items.map((item) => {
+              if (item.type !== 'terminal') return item
+              return {
+                ...item,
+                data: { ...item.data, renderer: 'alacritty-v2' as const },
+              }
+            })
+            updatedGroups.set(pgId, { ...pg, items: updatedItems })
+          }
+          return { ...t, paneGroups: updatedGroups }
+        }),
+      }))
+    }
+    return tabId
   },
 
   ensureSystemAgentTabs: (agentName: string, projectPath: string, _title: string) => {

@@ -981,6 +981,11 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
 
+        // Note: `/cli/heartbeat/active-session` lives in main.rs's
+        // `handle_cli_heartbeat` dispatcher (alongside the rest of the
+        // heartbeat CRUD), not here — main.rs intercepts /cli/heartbeat/*
+        // before this fallthrough dispatcher runs.
+
         _ => CliResponse::not_found(),
     }
 }
