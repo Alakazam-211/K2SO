@@ -58,14 +58,63 @@ pub fn resolve_project_id(conn: &rusqlite::Connection, path: &str) -> Option<Str
     .ok()
 }
 
-/// Root of the agent tree for a given workspace:
-/// `<project>/.k2so/agents/`.
+/// Root of the legacy multi-agent tree for a given workspace:
+/// `<project>/.k2so/agents/`. Post-0.37.0 unification this directory
+/// is removed by the migration sweep and only sticks around for
+/// fresh workspaces that haven't been onboarded yet (it gets created
+/// briefly by older code paths that still scaffold it). Prefer
+/// [`workspace_agent_path`] / [`agent_template_dir`] for new code.
 pub fn agents_dir(project_path: &str) -> PathBuf {
     PathBuf::from(project_path).join(".k2so").join("agents")
 }
 
-/// `<project>/.k2so/agents/<agent_name>/`.
+/// Post-0.37.0: `<project>/.k2so/agent/` — the single workspace
+/// agent's directory. Created by the unification migration; every
+/// call site that historically did `agent_dir(project, primary_name)`
+/// converges on this path after the migration runs.
+pub fn workspace_agent_path(project_path: &str) -> PathBuf {
+    PathBuf::from(project_path).join(".k2so").join("agent")
+}
+
+/// `<project>/.k2so/agent/AGENT.md` — the workspace agent's persona
+/// file post-0.37.0. Convenience over `workspace_agent_path().join("AGENT.md")`.
+#[allow(dead_code)]
+pub fn workspace_agent_md_path(project_path: &str) -> PathBuf {
+    workspace_agent_path(project_path).join("AGENT.md")
+}
+
+/// Post-0.37.0: `<project>/.k2so/agent-templates/<template_name>/` —
+/// role personas for delegation/worktrees.
+pub fn agent_template_dir(project_path: &str, template_name: &str) -> PathBuf {
+    PathBuf::from(project_path)
+        .join(".k2so")
+        .join("agent-templates")
+        .join(template_name)
+}
+
+/// Resolve the on-disk directory for an agent name within a workspace.
+///
+/// **Layout-aware.** Probes in this order:
+/// 1. `<project>/.k2so/agent/` if it exists — post-0.37.0 primary.
+///    `agent_name` is ignored here; the primary is keyed on
+///    workspace, not name. Callers that pass a name (e.g.
+///    `agent_dir(project, "pod-leader")`) get the unified path
+///    transparently — historic call sites keep working without
+///    changes during the deprecation window.
+/// 2. `<project>/.k2so/agent-templates/<agent_name>/` if it exists —
+///    a template (for delegate/worktree spawn).
+/// 3. Legacy `<project>/.k2so/agents/<agent_name>/` — pre-0.37.0
+///    workspaces that haven't been migrated yet (rare; the daemon's
+///    boot sweep migrates every registered workspace).
 pub fn agent_dir(project_path: &str, agent_name: &str) -> PathBuf {
+    let primary = workspace_agent_path(project_path);
+    if primary.exists() {
+        return primary;
+    }
+    let template = agent_template_dir(project_path, agent_name);
+    if template.exists() {
+        return template;
+    }
     agents_dir(project_path).join(agent_name)
 }
 
