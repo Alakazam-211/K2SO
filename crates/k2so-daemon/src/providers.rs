@@ -142,28 +142,36 @@ impl WakeProvider for DaemonWakeProvider {
 ///   - workspace id doesn't map to a known project path
 ///   - spawn itself failed (bad command, PTY exhaustion, etc.)
 fn try_auto_launch(agent: &str, signal: &AgentSignal) -> Result<(), String> {
-    // Single-flight: if a concurrent path already registered the
-    // session in EITHER map, skip. The pending-live drain on that
-    // session will pick up our enqueued signal. Pre-A9 this only
-    // checked the legacy map and would re-spawn against live v2
-    // sessions, producing a duplicate child for the same agent.
-    if session_lookup::lookup_any(agent).is_some() {
-        return Err("session already live".into());
+    // Resolve the target workspace id from `signal.to` first
+    // (preferred — it's the workspace this signal is FOR), falling
+    // back to `signal.from` for legacy callers that don't set
+    // `to.workspace` correctly. The pre-0.36.15 code only used
+    // `signal.from`, which works for same-workspace messaging
+    // (k2so msg from inside a workspace) but is wrong for
+    // cross-workspace addressing.
+    let workspace_id = match &signal.to {
+        AgentAddress::Agent { workspace, .. } => Some(workspace.0.as_str()),
+        AgentAddress::Workspace { workspace } => Some(workspace.0.as_str()),
+        _ => None,
+    }
+    .or_else(|| match &signal.from {
+        AgentAddress::Agent { workspace, .. }
+        | AgentAddress::Workspace { workspace } => Some(workspace.0.as_str()),
+        _ => None,
+    })
+    .ok_or_else(|| "broadcast signal has no attributable workspace".to_string())?;
+
+    // Single-flight: if a concurrent path already registered THIS
+    // workspace's session, skip. The pending-live drain on that
+    // session will pick up our enqueued signal. Pre-0.36.15 this
+    // checked the BARE name only — a stale issue when multiple
+    // workspaces share an agent name (lookup returned someone
+    // else's session and we incorrectly skipped spawning ours).
+    let prefixed_key = format!("{workspace_id}:{agent}");
+    if session_lookup::lookup_any(&prefixed_key).is_some() {
+        return Err("session already live for this workspace".into());
     }
 
-    // Resolve the signal's workspace id → projects.id → projects.path.
-    // Without a real path we can't locate AGENT.md.
-    let workspace_id = match &signal.from {
-        AgentAddress::Agent { workspace, .. }
-        | AgentAddress::Workspace { workspace } => workspace.0.as_str(),
-        AgentAddress::Broadcast => {
-            return Err("broadcast signal has no attributable workspace".into());
-        }
-        // `AgentAddress` is `#[non_exhaustive]`; any future variant
-        // falls through to queue-only — the safe default when we
-        // don't know how to derive a project id.
-        _ => return Err("unhandled AgentAddress variant for from".into()),
-    };
     let project_path = lookup_project_path(workspace_id)
         .ok_or_else(|| format!("no project registered for workspace id {workspace_id:?}"))?;
 
@@ -176,11 +184,12 @@ fn try_auto_launch(agent: &str, signal: &AgentSignal) -> Result<(), String> {
         Err(e) => return Err(format!("launch profile parse failed: {e}")),
     };
 
-    // Spawn. Shared helper tags agent_name on the SessionEntry,
-    // registers in session_map, and drains the pending-live queue.
-    // The signal we just enqueued is part of that drain and becomes
-    // the target's first byte of input.
-    let req = launch_request_for(agent, &project_path, &profile);
+    // Spawn under the project-namespaced key so the next
+    // workspace-scoped inject (egress::try_inject's prefixed lookup)
+    // finds it. v2_session_map::register also mirrors to the bare
+    // name for legacy bare-keyed callers (heartbeat-surfaced
+    // sessions, k2so msg without a workspace context).
+    let req = launch_request_for(&prefixed_key, &project_path, &profile);
     // Heartbeat-driven headless wake produces v2 sessions per A9.
     // The Tauri-open path goes through `BackgroundTerminalSpawner`
     // → v2_spawn (also v2 since A8). Both wake paths now converge.

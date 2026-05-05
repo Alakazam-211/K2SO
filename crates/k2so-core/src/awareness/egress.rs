@@ -289,7 +289,7 @@ pub fn deliver_to_agent(
     target_agent: &str,
     inbox_root: &std::path::Path,
 ) -> DeliveryReport {
-    let state = if is_agent_live(target_agent) {
+    let state = if is_agent_live(target_agent, signal) {
         TargetState::Live
     } else {
         TargetState::Offline
@@ -315,8 +315,9 @@ pub fn execute(
             Ok(()) => report.injected_to_pty = true,
             Err(e) => {
                 log_debug!(
-                    "[awareness/egress] inject to {} failed: {} — audit-only",
+                    "[awareness/egress] inject to {} (workspace={:?}) failed: {} — audit-only",
                     target_agent,
+                    workspace_id_from_signal_to(signal),
                     e
                 );
             }
@@ -365,7 +366,19 @@ pub fn execute(
 // Internals
 // ─────────────────────────────────────────────────────────────────────
 
-fn is_agent_live(agent: &str) -> bool {
+/// Extract the project_id from `signal.to` when it identifies a
+/// per-agent target (used to disambiguate multi-workspace name
+/// collisions like two workspaces both running an agent named
+/// `manager`). Returns `None` for `Workspace` / `Broadcast`
+/// addresses.
+fn workspace_id_from_signal_to(signal: &AgentSignal) -> Option<&str> {
+    match &signal.to {
+        AgentAddress::Agent { workspace, .. } => Some(workspace.0.as_str()),
+        _ => None,
+    }
+}
+
+fn is_agent_live(agent: &str, signal: &AgentSignal) -> bool {
     // 1. Legacy session::registry — Kessel-T0 / SessionStreamSession.
     let in_registry = registry::list_ids()
         .into_iter()
@@ -379,8 +392,24 @@ fn is_agent_live(agent: &str) -> bool {
     // override `InjectProvider::is_live` to consult their additional
     // session maps. Default impl returns false, so this is a strict
     // additive check: false here means no v2 host has claimed it.
+    //
+    // 0.36.15+: when the signal targets a specific workspace
+    // (`signal.to.workspace` set), check ONLY the project-namespaced
+    // key (`<project_id>:<agent>`). If the target workspace's session
+    // isn't live, return false so the wake provider can spawn it
+    // — never fall back to a bare-name lookup, because the bare slot
+    // points to whichever workspace happened to register last and
+    // would re-introduce the cross-workspace cross-wiring bug.
+    //
+    // Bare-name lookup is only used when there's no workspace
+    // disambiguator in the signal (Workspace/Broadcast addresses, or
+    // CLI callers that don't set K2SO_PROJECT_PATH).
     let slot = inject_slot().lock();
     if let Some(p) = slot.as_ref() {
+        if let Some(workspace_id) = workspace_id_from_signal_to(signal) {
+            let prefixed = format!("{workspace_id}:{agent}");
+            return p.is_live(&prefixed);
+        }
         if p.is_live(agent) {
             return true;
         }
@@ -397,6 +426,24 @@ fn try_inject(agent: &str, signal: &AgentSignal) -> std::io::Result<()> {
         )
     })?;
     let bytes = render_signal_for_inject(signal);
+
+    // 0.36.15+: when the signal targets a specific workspace,
+    // inject ONLY into the project-namespaced session. Do NOT fall
+    // back to bare-name lookup — the bare slot points to whichever
+    // workspace registered last (last-write-wins for back-compat
+    // with legacy bare-keyed callers), so falling back would
+    // re-introduce the cross-workspace cross-wiring this fix
+    // eliminates. NotFound on the prefixed key correctly bubbles up
+    // as "session offline" → egress's wake path runs and the
+    // signal is queued under the bare name (current behavior) for
+    // delivery on next spawn.
+    //
+    // Bare-name inject is reserved for callers that didn't supply a
+    // workspace context (Workspace/Broadcast addresses).
+    if let Some(workspace_id) = workspace_id_from_signal_to(signal) {
+        let prefixed = format!("{workspace_id}:{agent}");
+        return provider.inject(&prefixed, bytes.as_bytes());
+    }
     provider.inject(agent, bytes.as_bytes())
 }
 
