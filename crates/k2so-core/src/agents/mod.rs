@@ -41,6 +41,7 @@ pub mod skill_content;
 pub mod skill_writer;
 pub mod terminal_id;
 pub mod triage_summary;
+pub mod unification;
 pub mod wake;
 pub mod work_item;
 pub mod workspace_regen;
