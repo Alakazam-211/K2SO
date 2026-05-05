@@ -189,6 +189,13 @@ async fn main() {
         }
     }
 
+    // 0.37.0 workspace–agent unification migration. Per-workspace,
+    // sentinel-gated, idempotent. Runs synchronously before the
+    // listener accepts traffic so route handlers always see the
+    // unified layout. See `.k2so/prds/workspace-agent-unification.md`
+    // and `k2so_core::agents::unification`.
+    run_workspace_unification_sweep();
+
     let listener = match TcpListener::bind("127.0.0.1:0").await {
         Ok(l) => l,
         Err(e) => {
@@ -1163,6 +1170,76 @@ async fn read_post_body(stream: &mut TcpStream, buf: &mut [u8]) -> Vec<u8> {
         }
     }
     Vec::new()
+}
+
+/// Boot-time sweep that runs the 0.37.0 workspace–agent unification
+/// migration once per registered workspace. Idempotent — workspaces
+/// that already carry the sentinel `.k2so/.unification-0.37.0-done`
+/// no-op in milliseconds. The migration archives originals to
+/// `.k2so/migration/legacy/` before mutating anything, so worst-case
+/// recovery is a manual restore from there.
+///
+/// Failures are logged and skipped — a single bad workspace must not
+/// keep the daemon from booting and serving healthy ones.
+fn run_workspace_unification_sweep() {
+    use k2so_core::agents::unification;
+
+    let projects = {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        match k2so_core::db::schema::Project::list(&conn) {
+            Ok(rows) => rows,
+            Err(e) => {
+                log_debug!("[daemon/unification] WARN: list projects: {e}");
+                return;
+            }
+        }
+    };
+
+    if projects.is_empty() {
+        return;
+    }
+
+    let total = projects.len();
+    let mut migrated = 0usize;
+    let mut already_done = 0usize;
+    let mut errors = 0usize;
+    for project in &projects {
+        if !std::path::Path::new(&project.path).exists() {
+            // Workspace path no longer on disk (deleted folder, ejected
+            // drive). Don't fail the sweep on this.
+            continue;
+        }
+        match unification::run_unification(&project.path, &project.agent_mode) {
+            Ok(outcome) if outcome.already_done => {
+                already_done += 1;
+            }
+            Ok(outcome) => {
+                migrated += 1;
+                log_debug!(
+                    "[daemon/unification] migrated {} ({}): primary={:?} templates={} archived={} merged={} conflicts={}",
+                    project.name,
+                    project.path,
+                    outcome.primary_migrated,
+                    outcome.templates_migrated.len(),
+                    outcome.legacy_archived.len(),
+                    outcome.work_items_merged,
+                    outcome.conflicts.len(),
+                );
+            }
+            Err(e) => {
+                errors += 1;
+                log_debug!(
+                    "[daemon/unification] FAILED for {} ({}): {e}",
+                    project.name,
+                    project.path,
+                );
+            }
+        }
+    }
+    log_debug!(
+        "[daemon/unification] swept {total} workspace(s): migrated={migrated} already_done={already_done} errors={errors}",
+    );
 }
 
 /// Write `contents` to `path` with permissions 0600 so other users on the
