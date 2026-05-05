@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::db::schema::{AgentHeartbeat, AgentSession, HeartbeatFire, WorkspaceRelation};
+use crate::db::schema::{AgentHeartbeat, WorkspaceSession, HeartbeatFire, WorkspaceRelation};
 use crate::fs_atomic::{self, atomic_symlink, atomic_write_str, log_if_err, unique_archive_path};
 
 // Core-hosted helpers + heartbeat fns. Re-imported at crate-local paths
@@ -519,7 +519,7 @@ pub fn archive_orphan_top_tier_agents(project_path: &str) -> Vec<String> {
             {
         let db = crate::db::shared();
         let conn = db.lock();
-                let _ = AgentSession::delete(&conn, pid, &orphan);
+                let _ = WorkspaceSession::delete(&conn, pid);
                 let prefix = format!(".k2so/agents/{}/", orphan);
                 let _ = conn.execute(
                     "DELETE FROM agent_heartbeats WHERE project_id = ?1 AND wakeup_path LIKE ?2 || '%'",
@@ -1253,7 +1253,7 @@ pub fn k2so_agents_resume_chat_args(
                 |row| row.get(0),
             )
             .ok()?;
-        let row = k2so_core::db::schema::AgentSession::get_by_agent(&conn, &project_id, &agent_name).ok().flatten()?;
+        let row = k2so_core::db::schema::WorkspaceSession::get(&conn, &project_id).ok().flatten()?;
         row.session_id.filter(|s| !s.is_empty())
     })();
 
@@ -2405,8 +2405,8 @@ pub fn k2so_session_set_surfaced(
     let conn = db.lock();
     let project_id = k2so_core::agents::resolve_project_id(&conn, &project_path)
         .ok_or_else(|| format!("Project not found: {}", project_path))?;
-    k2so_core::db::schema::AgentSession::set_surfaced(
-        &conn, &project_id, &agent_name, surfaced,
+    k2so_core::db::schema::WorkspaceSession::set_surfaced(
+        &conn, &project_id, surfaced,
     )
     .map_err(|e| format!("set surfaced flag: {}", e))?;
     drop(conn);
@@ -3068,25 +3068,15 @@ pub fn k2so_agents_save_agent_md(
 
 // `cleanup_agent_backups` moved to k2so_core::agents::commands (re-exported).
 
-// ── Agent Sessions (DB-tracked) ──────────────────────────────────────────
+// ── Workspace Session (DB-tracked) ───────────────────────────────────────
 
 #[tauri::command]
-pub fn agent_sessions_list(
+pub fn workspace_session_get(
     state: tauri::State<'_, crate::state::AppState>,
     project_id: String,
-) -> Result<Vec<AgentSession>, String> {
+) -> Result<Option<WorkspaceSession>, String> {
     let conn = state.db.lock();
-    AgentSession::list_by_project(&conn, &project_id).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn agent_sessions_get(
-    state: tauri::State<'_, crate::state::AppState>,
-    project_id: String,
-    agent_name: String,
-) -> Result<Option<AgentSession>, String> {
-    let conn = state.db.lock();
-    AgentSession::get_by_agent(&conn, &project_id, &agent_name).map_err(|e| e.to_string())
+    WorkspaceSession::get(&conn, &project_id).map_err(|e| e.to_string())
 }
 
 // ── Workspace Relations ─────────────────────────────────────────────────
@@ -5672,24 +5662,24 @@ mod migration_safety_tests {
         ).expect("seed project");
 
         let sid1 = uuid::Uuid::new_v4().to_string();
-        let first = crate::db::schema::AgentSession::try_acquire_running(
-            &conn, &sid1, &pid, "agent-a", Some("term-1"), "claude", "system",
+        let first = crate::db::schema::WorkspaceSession::try_acquire_running(
+            &conn, &sid1, &pid, Some("term-1"), "claude", "system",
         ).expect("first acquire");
         assert!(first, "first caller must acquire the lock");
 
         let sid2 = uuid::Uuid::new_v4().to_string();
-        let second = crate::db::schema::AgentSession::try_acquire_running(
-            &conn, &sid2, &pid, "agent-a", Some("term-2"), "claude", "system",
+        let second = crate::db::schema::WorkspaceSession::try_acquire_running(
+            &conn, &sid2, &pid, Some("term-2"), "claude", "system",
         ).expect("second acquire");
         assert!(!second, "second caller must be rejected while first holds the lock");
 
         // Release the lock by updating status, then the next acquire
         // must succeed — confirms the gate isn't permanently sticky.
-        crate::db::schema::AgentSession::update_status(&conn, &pid, "agent-a", "sleeping")
+        crate::db::schema::WorkspaceSession::update_status(&conn, &pid, "sleeping")
             .expect("release lock");
         let sid3 = uuid::Uuid::new_v4().to_string();
-        let third = crate::db::schema::AgentSession::try_acquire_running(
-            &conn, &sid3, &pid, "agent-a", Some("term-3"), "claude", "system",
+        let third = crate::db::schema::WorkspaceSession::try_acquire_running(
+            &conn, &sid3, &pid, Some("term-3"), "claude", "system",
         ).expect("third acquire");
         assert!(third, "acquire after release must succeed");
     }

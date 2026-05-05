@@ -53,7 +53,7 @@ use k2so_core::log_debug;
 /// spawn endpoint, session_map always stays empty in a real
 /// daemon deployment.
 pub async fn handle_sessions_spawn(body: &[u8]) -> HandlerResult {
-    use crate::spawn::{spawn_agent_session, SpawnAgentSessionRequest};
+    use crate::spawn::{spawn_agent_session, SpawnWorkspaceSessionRequest};
 
     #[derive(serde::Deserialize)]
     struct SpawnRequest {
@@ -96,7 +96,7 @@ pub async fn handle_sessions_spawn(body: &[u8]) -> HandlerResult {
         };
     }
 
-    let outcome = match spawn_agent_session(SpawnAgentSessionRequest {
+    let outcome = match spawn_agent_session(SpawnWorkspaceSessionRequest {
         agent_name: req.agent_name,
         cwd: req.cwd,
         command: req.command,

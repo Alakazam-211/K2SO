@@ -250,6 +250,7 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
         ("0036_heartbeat_active_session", include_str!("../../drizzle_sql/0036_heartbeat_active_session.sql")),
         ("0037_agent_session_active_terminal", include_str!("../../drizzle_sql/0037_agent_session_active_terminal.sql")),
         ("0038_rename_workspace_sessions_to_layouts", include_str!("../../drizzle_sql/0038_rename_workspace_sessions_to_layouts.sql")),
+        ("0039_agent_sessions_to_workspace_sessions", include_str!("../../drizzle_sql/0039_agent_sessions_to_workspace_sessions.sql")),
     ];
 
     for (name, sql) in migrations {
@@ -468,7 +469,7 @@ mod tests {
         // exist after migrations. Using sqlite_master to confirm.
         for table in [
             "projects",
-            "agent_sessions",
+            "workspace_sessions",
             "agent_heartbeats",
             "agent_presets",
             "heartbeat_fires",
@@ -706,7 +707,7 @@ mod tests {
         let conn = isolated_test_connection();
         for table in [
             "projects",
-            "agent_sessions",
+            "workspace_sessions",
             "agent_heartbeats",
             "agent_presets",
             "heartbeat_fires",
@@ -725,175 +726,18 @@ mod tests {
         }
     }
 
-    // ── Migration 0033 — agent_session terminal_id namespace ──────
+    // ── Migration 0033 tests deleted in 0.37.0 ────────────────────
     //
-    // Pre-0.36.0 the chat-tab terminal_id was `agent-chat-<agent>`,
-    // which collided across workspaces sharing an agent name. The
-    // migration rewrites legacy rows to `agent-chat:<project_id>:<agent>`
-    // (and `agent-chat-wt-<wsid>` → `agent-chat:wt:<wsid>`).
-
-    /// Apply migration 0033's SQL directly. Used by tests to exercise
-    /// the migration after seeding legacy rows.
-    fn apply_migration_0033(conn: &Connection) {
-        let sql = include_str!("../../drizzle_sql/0033_agent_session_terminal_id_namespace.sql");
-        conn.execute_batch(sql).expect("migration 0033 SQL applies");
-    }
-
-    fn seed_project(conn: &Connection, id: &str, path: &str) {
-        conn.execute(
-            "INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)",
-            params![id, format!("p-{id}"), path],
-        )
-        .unwrap();
-    }
-
-    fn seed_agent_session(
-        conn: &Connection,
-        row_id: &str,
-        project_id: &str,
-        agent: &str,
-        terminal_id: Option<&str>,
-        session_id: Option<&str>,
-    ) {
-        conn.execute(
-            "INSERT INTO agent_sessions (id, project_id, agent_name, terminal_id, session_id, harness, owner, status) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 'claude', 'system', 'sleeping')",
-            params![row_id, project_id, agent, terminal_id, session_id],
-        )
-        .unwrap();
-    }
-
-    fn read_terminal_id(conn: &Connection, row_id: &str) -> Option<String> {
-        conn.query_row(
-            "SELECT terminal_id FROM agent_sessions WHERE id = ?1",
-            params![row_id],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn migration_0033_rewrites_legacy_unscoped_to_namespaced() {
-        // Six rows all sharing the legacy `agent-chat-manager` terminal_id
-        // (the user's actual production state) — each (project_id, agent)
-        // is unique, but they collide on terminal_id. After migration each
-        // row's terminal_id should include its own project_id.
-        let conn = fresh_memory();
-        run_migrations(&conn).unwrap();
-        for n in 0..6 {
-            let pid = format!("p_{n}");
-            let path = format!("/tmp/proj-{n}");
-            seed_project(&conn, &pid, &path);
-            seed_agent_session(
-                &conn,
-                &format!("row_{n}"),
-                &pid,
-                "manager",
-                Some("agent-chat-manager"),
-                Some(&format!("session_{n}")),
-            );
-        }
-
-        apply_migration_0033(&conn);
-
-        for n in 0..6 {
-            let id = read_terminal_id(&conn, &format!("row_{n}"));
-            assert_eq!(
-                id.as_deref(),
-                Some(format!("agent-chat:p_{n}:manager").as_str()),
-                "row {n} should have project-namespaced terminal_id"
-            );
-        }
-
-        // session_id must be preserved for every row — the migration
-        // doesn't clear it. Each project keeps its own resume target.
-        for n in 0..6 {
-            let sid: Option<String> = conn
-                .query_row(
-                    "SELECT session_id FROM agent_sessions WHERE id = ?1",
-                    params![format!("row_{n}")],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert_eq!(
-                sid.as_deref(),
-                Some(format!("session_{n}").as_str()),
-                "session_id must survive migration"
-            );
-        }
-    }
-
-    #[test]
-    fn migration_0033_renames_legacy_worktree_form() {
-        let conn = fresh_memory();
-        run_migrations(&conn).unwrap();
-        seed_project(&conn, "p_a", "/tmp/a");
-        seed_agent_session(
-            &conn,
-            "row_wt",
-            "p_a",
-            "manager",
-            Some("agent-chat-wt-ws_xyz"),
-            None,
-        );
-
-        apply_migration_0033(&conn);
-
-        assert_eq!(
-            read_terminal_id(&conn, "row_wt").as_deref(),
-            Some("agent-chat:wt:ws_xyz"),
-            "worktree form should keep its workspace-id suffix, just rename separators"
-        );
-    }
-
-    #[test]
-    fn migration_0033_is_idempotent() {
-        // Already-namespaced rows are untouched; running the migration
-        // again is a no-op.
-        let conn = fresh_memory();
-        run_migrations(&conn).unwrap();
-        seed_project(&conn, "p_z", "/tmp/z");
-        seed_agent_session(
-            &conn,
-            "row_new",
-            "p_z",
-            "manager",
-            Some("agent-chat:p_z:manager"),
-            None,
-        );
-
-        apply_migration_0033(&conn);
-        apply_migration_0033(&conn);
-        apply_migration_0033(&conn);
-
-        assert_eq!(
-            read_terminal_id(&conn, "row_new").as_deref(),
-            Some("agent-chat:p_z:manager"),
-            "already-namespaced row must not be rewritten"
-        );
-    }
-
-    #[test]
-    fn migration_0033_leaves_unrelated_terminal_ids_alone() {
-        // Other terminal-id forms (e.g. ad-hoc Cmd+T tabs) start with
-        // `term-` or random uuids — the migration must not touch them.
-        let conn = fresh_memory();
-        run_migrations(&conn).unwrap();
-        seed_project(&conn, "p_m", "/tmp/m");
-        seed_agent_session(&conn, "row_other", "p_m", "manager", Some("term-abc-123"), None);
-        seed_agent_session(&conn, "row_null", "p_m", "alice", None, None);
-
-        apply_migration_0033(&conn);
-
-        assert_eq!(
-            read_terminal_id(&conn, "row_other").as_deref(),
-            Some("term-abc-123"),
-            "non-agent-chat terminal_id must be untouched"
-        );
-        assert_eq!(
-            read_terminal_id(&conn, "row_null"),
-            None,
-            "NULL terminal_id must remain NULL"
-        );
-    }
+    // Migration 0033 (agent_session terminal_id namespace, 0.36.0)
+    // rewrote legacy `agent-chat-<agent>` terminal_ids to the
+    // workspace-scoped `agent-chat:<project_id>:<agent>` form. The
+    // migration ran exactly once on every existing user's DB and is
+    // historical now. Migration 0039 (0.37.0) renames the underlying
+    // table from `agent_sessions` to `workspace_sessions` and drops
+    // `agent_name`, so the test substrate (seed/read against the old
+    // table) no longer exists. The 0033 SQL still runs on each fresh
+    // DB during the migration sequence — it just operates on rows
+    // that 0039 immediately collapses + table-renames a few steps
+    // later. Equivalent regression coverage for the current shape
+    // lives in `schema::tests::workspace_session_*`.
 }

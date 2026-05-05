@@ -21,7 +21,7 @@ use std::fs;
 
 use crate::agents::{agent_dir, resolve_project_id};
 use crate::agents::scheduler::agent_work_dir;
-use crate::db::schema::AgentSession;
+use crate::db::schema::WorkspaceSession;
 
 /// Best-effort upsert of an `agent_sessions` row + create the legacy
 /// `.lock` file. The row is the source of truth; the file is for
@@ -38,11 +38,10 @@ pub fn k2so_agents_lock(
         if let Some(project_id) = resolve_project_id(&conn, &project_path) {
             let session_uuid = uuid::Uuid::new_v4().to_string();
             let owner_val = owner.as_deref().unwrap_or("system");
-            let _ = AgentSession::upsert(
+            let _ = WorkspaceSession::upsert(
                 &conn,
                 &session_uuid,
                 &project_id,
-                &agent_name,
                 terminal_id.as_deref(),
                 None,
                 "claude",
@@ -67,7 +66,7 @@ pub fn k2so_agents_unlock(project_path: String, agent_name: String) -> Result<()
         let db = crate::db::shared();
         let conn = db.lock();
         if let Some(project_id) = resolve_project_id(&conn, &project_path) {
-            let _ = AgentSession::update_status(&conn, &project_id, &agent_name, "sleeping");
+            let _ = WorkspaceSession::update_status(&conn, &project_id, "sleeping");
         }
     }
 
@@ -95,7 +94,7 @@ pub fn k2so_agents_save_session_id(
     let conn = db.lock();
     let project_id = resolve_project_id(&conn, &project_path)
         .ok_or_else(|| format!("Project not found: {}", project_path))?;
-    AgentSession::update_session_id(&conn, &project_id, &agent_name, &session_id)
+    WorkspaceSession::update_session_id(&conn, &project_id, &session_id)
         .map(|_| ())
         .map_err(|e| format!("Failed to save session ID: {}", e))
 }
@@ -110,7 +109,7 @@ pub fn k2so_agents_clear_session_id(
     let db = crate::db::shared();
     let conn = db.lock();
     if let Some(project_id) = resolve_project_id(&conn, &project_path) {
-        let _ = AgentSession::clear_session_id(&conn, &project_id, &agent_name);
+        let _ = WorkspaceSession::clear_session_id(&conn, &project_id);
     }
     Ok(())
 }

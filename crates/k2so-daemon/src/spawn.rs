@@ -53,7 +53,7 @@ use crate::v2_session_map;
 /// portable-pty layer expects, with defaults for fields callers
 /// might not care about.
 #[derive(Debug, Clone)]
-pub struct SpawnAgentSessionRequest {
+pub struct SpawnWorkspaceSessionRequest {
     pub agent_name: String,
     pub cwd: String,
     pub command: Option<String>,
@@ -70,7 +70,7 @@ pub struct SpawnAgentSessionRequest {
 /// (`session_map` for legacy, `v2_session_map` for v2) registered
 /// the session.
 #[derive(Clone, Debug)]
-pub struct SpawnAgentSessionOutcome {
+pub struct SpawnWorkspaceSessionOutcome {
     pub session_id: SessionId,
     pub agent_name: String,
     pub pending_drained: usize,
@@ -87,8 +87,8 @@ pub struct SpawnAgentSessionOutcome {
 /// session's replay ring is seeded with the full initial paint and
 /// the PTY has been SIGWINCHed down to the user's real rows.
 pub async fn spawn_agent_session(
-    req: SpawnAgentSessionRequest,
-) -> Result<SpawnAgentSessionOutcome, String> {
+    req: SpawnWorkspaceSessionRequest,
+) -> Result<SpawnWorkspaceSessionOutcome, String> {
     if req.agent_name.is_empty() {
         return Err("agent_name required".into());
     }
@@ -139,7 +139,7 @@ pub async fn spawn_agent_session(
         }
     }
 
-    Ok(SpawnAgentSessionOutcome {
+    Ok(SpawnWorkspaceSessionOutcome {
         session_id,
         agent_name: req.agent_name,
         pending_drained: pending_count,
@@ -147,8 +147,8 @@ pub async fn spawn_agent_session(
 }
 
 /// Alacritty_v2 spawn helper. The architectural counterpart to
-/// `spawn_agent_session`: takes the same `SpawnAgentSessionRequest`
-/// and returns the same `SpawnAgentSessionOutcome`, but the session
+/// `spawn_agent_session`: takes the same `SpawnWorkspaceSessionRequest`
+/// and returns the same `SpawnWorkspaceSessionOutcome`, but the session
 /// it produces is a `DaemonPtySession` (registered in
 /// `v2_session_map`) instead of a `SessionStreamSession` (legacy
 /// `session_map`). End-state target after A9: every system-driven
@@ -162,8 +162,8 @@ pub async fn spawn_agent_session(
 /// dance is needed (v2 doesn't have the replay-ring seeding the
 /// legacy path requires).
 pub fn spawn_agent_session_v2_blocking(
-    req: SpawnAgentSessionRequest,
-) -> Result<SpawnAgentSessionOutcome, String> {
+    req: SpawnWorkspaceSessionRequest,
+) -> Result<SpawnWorkspaceSessionOutcome, String> {
     if req.agent_name.is_empty() {
         return Err("agent_name required".into());
     }
@@ -207,7 +207,7 @@ pub fn spawn_agent_session_v2_blocking(
         pending_drained,
     );
 
-    Ok(SpawnAgentSessionOutcome {
+    Ok(SpawnWorkspaceSessionOutcome {
         session_id,
         agent_name: req.agent_name,
         pending_drained,
@@ -232,8 +232,8 @@ pub fn spawn_agent_session_v2_blocking(
 /// calls the async `spawn_agent_session` directly.
 #[allow(dead_code)]
 pub fn spawn_agent_session_blocking(
-    req: SpawnAgentSessionRequest,
-) -> Result<SpawnAgentSessionOutcome, String> {
+    req: SpawnWorkspaceSessionRequest,
+) -> Result<SpawnWorkspaceSessionOutcome, String> {
     tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(spawn_agent_session(req))
     })

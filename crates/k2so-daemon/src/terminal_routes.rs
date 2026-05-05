@@ -263,7 +263,7 @@ fn spawn_terminal_impl(
     event: k2so_core::agent_hooks::HookEvent,
     require_agent: bool,
 ) -> CliResponse {
-    use crate::spawn::{spawn_agent_session_v2_blocking, SpawnAgentSessionRequest};
+    use crate::spawn::{spawn_agent_session_v2_blocking, SpawnWorkspaceSessionRequest};
 
     let agent_param = params.get("agent").cloned().unwrap_or_default();
     if require_agent && agent_param.is_empty() {
@@ -309,7 +309,7 @@ fn spawn_terminal_impl(
         agent_param
     };
 
-    let outcome = match spawn_agent_session_v2_blocking(SpawnAgentSessionRequest {
+    let outcome = match spawn_agent_session_v2_blocking(SpawnWorkspaceSessionRequest {
         agent_name: agent_name.clone(),
         cwd: cwd.clone(),
         command: command.clone(),

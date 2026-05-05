@@ -258,7 +258,7 @@ pub fn handle_hook_complete(params: &HashMap<String, String>) -> &'static str {
             serde_json::to_value(&event).unwrap_or(serde_json::Value::Null),
         );
 
-        // Sync AgentSession.status so the scheduler's is_agent_locked
+        // Sync WorkspaceSession.status so the scheduler's is_agent_locked
         // check reflects reality. Without this, a single wake leaves
         // status='running' forever and every subsequent heartbeat
         // silently skips the agent. Pane_id is the K2SO_PANE_ID env
@@ -273,13 +273,12 @@ pub fn handle_hook_complete(params: &HashMap<String, String>) -> &'static str {
             let db = crate::db::shared();
             let conn = db.lock();
             if let Ok(Some(s)) =
-                crate::db::schema::AgentSession::get_by_terminal_id(&conn, &pane_id)
+                crate::db::schema::WorkspaceSession::get_by_terminal_id(&conn, &pane_id)
             {
                 if s.status != new_status {
-                    let _ = crate::db::schema::AgentSession::update_status(
+                    let _ = crate::db::schema::WorkspaceSession::update_status(
                         &conn,
                         &s.project_id,
-                        &s.agent_name,
                         new_status,
                     );
                 }

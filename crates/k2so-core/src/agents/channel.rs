@@ -23,7 +23,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::agents::resolve_project_id;
-use crate::db::schema::{log_activity, AgentSession};
+use crate::db::schema::{log_activity, WorkspaceSession};
 
 fn open_project(project_path: &str) -> Result<String, String> {
     let db = crate::db::shared();
@@ -46,7 +46,7 @@ pub fn status(
     let db = crate::db::shared();
     let conn = db.lock();
 
-    AgentSession::update_status_message(&conn, &project_id, &agent, &message)
+    WorkspaceSession::update_status_message(&conn, &project_id, &message)
         .map_err(|e| format!("Failed to update status: {}", e))?;
 
     log_activity(
@@ -102,7 +102,7 @@ pub fn done(
 
     let db = crate::db::shared();
     let conn = db.lock();
-    let _ = AgentSession::update_status(&conn, &project_id, &agent, "sleeping");
+    let _ = WorkspaceSession::update_status(&conn, &project_id, "sleeping");
 
     let event_type = if blocked.is_some() {
         "task.blocked"

@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use crate::agents::resolve_project_id;
 use crate::agents::wake::{compose_wake_prompt_for_agent, compose_wake_prompt_for_lead};
 use crate::db::schema::{
-    get_unread_messages, log_activity, mark_messages_read, ActivityFeedEntry, AgentSession,
+    get_unread_messages, log_activity, mark_messages_read, ActivityFeedEntry, WorkspaceSession,
     WorkspaceRelation,
 };
 
@@ -201,22 +201,21 @@ pub fn checkin(project_path: &str, agent: &str) -> Result<String, String> {
 
     let mut peers = Vec::new();
     for pid in &peer_project_ids {
-        if let Ok(sessions) = AgentSession::list_by_project(&conn, pid) {
+        if pid == &project_id {
+            // The caller's own workspace — skip; not a peer.
+            continue;
+        }
+        if let Ok(Some(s)) = WorkspaceSession::get(&conn, pid) {
             let pname = project_names.get(pid).cloned().unwrap_or_default();
-            for s in sessions {
-                if s.agent_name == agent && s.project_id == project_id {
-                    continue;
-                }
-                peers.push(serde_json::json!({
-                    "agent": s.agent_name,
-                    "status": s.status,
-                    "statusMessage": s.status_message,
-                    "terminalId": s.terminal_id,
-                    "project": pname,
-                    "projectId": s.project_id,
-                    "harness": s.harness,
-                }));
-            }
+            peers.push(serde_json::json!({
+                "agent": pname.clone(),
+                "status": s.status,
+                "statusMessage": s.status_message,
+                "terminalId": s.terminal_id,
+                "project": pname,
+                "projectId": s.project_id,
+                "harness": s.harness,
+            }));
         }
     }
 

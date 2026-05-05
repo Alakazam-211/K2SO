@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::agents::{
     agent_dir, agents_dir, parse_frontmatter, resolve_project_id,
 };
-use crate::db::schema::{AgentSession, HeartbeatFire, WorkspaceState};
+use crate::db::schema::{WorkspaceSession, HeartbeatFire, WorkspaceState};
 use crate::fs_atomic::atomic_write_str;
 use crate::scheduler::should_project_fire;
 
@@ -67,15 +67,17 @@ pub fn count_md_files(dir: &Path) -> usize {
 
 // ── Lock check ─────────────────────────────────────────────────────────
 
-/// Check whether an agent currently has an active session. Tries the
-/// `agent_sessions` DB row first (authoritative); falls back to the
-/// legacy `.lock` file so pre-migration workspaces keep working.
+/// Check whether the workspace currently has an active session. Tries
+/// the `workspace_sessions` DB row first (authoritative); falls back to
+/// the legacy `.lock` file so pre-migration workspaces keep working.
+/// `agent_name` is retained for back-compat with the legacy `.lock`
+/// path; post-0.37.0 it's only consulted as a fallback.
 pub fn is_agent_locked(project_path: &str, agent_name: &str) -> bool {
     {
         let db = crate::db::shared();
         let conn = db.lock();
         if let Some(project_id) = resolve_project_id(&conn, project_path) {
-            if let Ok(Some(session)) = AgentSession::get_by_agent(&conn, &project_id, agent_name) {
+            if let Ok(Some(session)) = WorkspaceSession::get(&conn, &project_id) {
                 if session.status == "running" {
                     return true;
                 }
@@ -508,7 +510,7 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
             if let Some(ref pid) = resolved_project_id {
                 let db = crate::db::shared();
                 let conn = db.lock();
-                if let Ok(Some(session)) = AgentSession::get_by_agent(&conn, pid, &name) {
+                if let Ok(Some(session)) = WorkspaceSession::get(&conn, pid) {
                     if session.owner == "user" && session.status == "running" {
                         audit(
                             Some(&name),

@@ -168,48 +168,34 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
 
     // Stamp the agent_sessions row's `active_terminal_id` (migration
     // 0037). Best-effort: tab-keyed spawns (`tab-<id>`) won't have
-    // a matching agent_sessions row and the UPDATE no-ops; workspace
-    // agent spawns under the canonical name (e.g. `manager`,
-    // `pod-leader`) do, and the column lets the next chat tab mount
-    // re-attach without walking the in-memory v2_session_map. Mirror
-    // of the heartbeat smart-launch stamp (`heartbeat_launch.rs`)
-    // and the `agent_heartbeats.active_terminal_id` cleanup hook in
+    // a matching workspace_sessions row and the UPDATE no-ops;
+    // workspace agent spawns do, and the column lets the next chat
+    // tab mount re-attach without walking the in-memory
+    // v2_session_map. Mirror of the heartbeat smart-launch stamp
+    // (`heartbeat_launch.rs`) and the
+    // `agent_heartbeats.active_terminal_id` cleanup hook in
     // `v2_session_map::unregister`.
     //
-    // 0.36.14+: the chat tab's `attachAgentName` is the prefixed
-    // `<project_id>:<bare_name>` form (workspace-namespaced to fix
-    // cross-workspace pinned-chat collisions). The DB row's
-    // `agent_name` column still stores the bare name (set by
-    // `k2so_agents_lock`), so strip the prefix before the UPDATE so
-    // the stamp lands on the right row.
+    // 0.37.0: the prefix split from 0.36.14 is gone — the
+    // `workspace_sessions` row is keyed purely on `project_id`. We
+    // accept either the prefixed `<pid>:<bare>` form (preferred —
+    // cheaper, unambiguous) or fall back to resolving from cwd.
     {
         let db = k2so_core::db::shared();
         let conn = db.lock();
-        // Prefer the project_id encoded in the prefixed agent_name
-        // (cheaper + unambiguous); fall back to resolving from cwd
-        // for legacy bare-form callers.
-        let (project_id_opt, bare_agent) = if let Some((pid, bare)) =
-            req.agent_name.split_once(':')
-        {
-            if !pid.is_empty() && !bare.is_empty() {
-                (Some(pid.to_string()), bare.to_string())
+        let project_id_opt = if let Some((pid, _bare)) = req.agent_name.split_once(':') {
+            if pid.is_empty() {
+                k2so_core::agents::resolve_project_id(&conn, &req.cwd)
             } else {
-                (
-                    k2so_core::agents::resolve_project_id(&conn, &req.cwd),
-                    req.agent_name.clone(),
-                )
+                Some(pid.to_string())
             }
         } else {
-            (
-                k2so_core::agents::resolve_project_id(&conn, &req.cwd),
-                req.agent_name.clone(),
-            )
+            k2so_core::agents::resolve_project_id(&conn, &req.cwd)
         };
         if let Some(project_id) = project_id_opt {
-            let _ = k2so_core::db::schema::AgentSession::save_active_terminal_id(
+            let _ = k2so_core::db::schema::WorkspaceSession::save_active_terminal_id(
                 &conn,
                 &project_id,
-                &bare_agent,
                 &session.session_id.to_string(),
             );
         }
@@ -238,20 +224,11 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
     // paste by the TUI input widget and the queued message would land
     // typed-but-not-sent.
     //
-    // 0.36.14+: drain under the prefixed key first, then fall back to
-    // the bare name. Awareness bus callers (`k2so msg --wake manager`)
-    // still enqueue under bare names today; chat-tab spawns now
-    // register under `<project_id>:<bare_name>`. Trying both keys
-    // catches signals from either flow without forcing every awareness
-    // caller through a workspace-aware enqueue path (that's 0.37.0
-    // territory).
-    let mut pending = pending_live::drain_for_agent(&req.agent_name);
-    if let Some((_pid, bare)) = req.agent_name.split_once(':') {
-        if !bare.is_empty() {
-            let mut bare_drain = pending_live::drain_for_agent(bare);
-            pending.append(&mut bare_drain);
-        }
-    }
+    // 0.37.0: drain under the spawn's key only. The 0.36.14 dual-key
+    // (prefixed + bare-name fallback) drain is retired now that every
+    // awareness-bus enqueue carries workspace context via signal.to;
+    // both ends of the queue use the same `<project_id>:<bare>` key.
+    let pending = pending_live::drain_for_agent(&req.agent_name);
     let pending_drained = pending.len();
     for signal in pending {
         let bytes = signal_format::inject_bytes(&signal);

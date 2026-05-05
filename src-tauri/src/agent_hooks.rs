@@ -487,7 +487,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                 }
 
                 // Delegate the actual lifecycle bookkeeping (ring buffer,
-                // AgentLifecycleEvent emit, AgentSession.status sync) to
+                // AgentLifecycleEvent emit, WorkspaceSession.status sync) to
                 // k2so_core so the daemon can call the identical path.
                 let body = k2so_core::agent_hooks::handle_hook_complete(&params);
                 let response = format!(
@@ -1649,7 +1649,7 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                                             // Step 2: Check DB for session to resume.
                                             // wake_project_id was resolved alongside wake_project_path above.
                                             if let Some(ref wpid) = wake_project_id {
-                                                let session = crate::db::schema::AgentSession::get_by_agent(&conn, wpid, &wake_agent).ok().flatten();
+                                                let session = crate::db::schema::WorkspaceSession::get(&conn, wpid).ok().flatten();
                                                 let has_prior = session.as_ref().map(|s| s.session_id.is_some()).unwrap_or(false);
                                                 if let Ok(info) = crate::commands::k2so_agents::k2so_agents_build_launch(
                                                     wp.clone(), wake_agent.clone(), None, None, None, None,

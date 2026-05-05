@@ -37,7 +37,7 @@ use crate::agents::skill_writer::{generate_default_agent_body, write_agent_skill
 use crate::agents::wake::{agent_wakeup_path, wakeup_template_for};
 use crate::agents::work_item::{atomic_write, read_work_item, WorkItem};
 use crate::agents::{agent_dir, agents_dir, parse_frontmatter, resolve_project_id};
-use crate::db::schema::AgentSession;
+use crate::db::schema::WorkspaceSession;
 use crate::fs_atomic::{atomic_write_str, log_if_err};
 
 /// Summary row the UI agent-list + `k2so agents list` CLI render.
@@ -824,7 +824,7 @@ pub fn heartbeat_noop(
         let db = crate::db::shared();
         let conn = db.lock();
         if let Some(project_id) = resolve_project_id(&conn, &project_path) {
-            let _ = AgentSession::clear_session_id(&conn, &project_id, &agent_name);
+            let _ = WorkspaceSession::clear_session_id(&conn, &project_id);
         }
     }
 

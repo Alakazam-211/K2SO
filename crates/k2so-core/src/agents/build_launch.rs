@@ -35,7 +35,7 @@ use crate::agents::wake::{compose_wake_prompt_for_agent, compose_wake_prompt_fro
 use crate::agents::work_item::{read_work_item, WorkItem};
 use crate::agents::{agent_dir, parse_frontmatter, resolve_project_id};
 use crate::chat_history;
-use crate::db::schema::AgentSession;
+use crate::db::schema::WorkspaceSession;
 
 /// See module docs. Returns the launch JSON for the chosen wake
 /// branch. Errors only for filesystem / DB failures during the
@@ -191,20 +191,14 @@ pub fn k2so_agents_build_launch(
             }
         }
 
-        // Layer 2: agent-global resume target.
-        if let Ok(Some(session)) =
-            AgentSession::get_by_agent(&conn, &project_id, &agent_name)
-        {
+        // Layer 2: workspace-global resume target.
+        if let Ok(Some(session)) = WorkspaceSession::get(&conn, &project_id) {
             if let Some(sid) = session.session_id {
                 if !sid.is_empty() {
                     if chat_history::claude_session_file_exists(&sid, &project_path) {
                         return Some(sid);
                     }
-                    let _ = AgentSession::clear_session_id(
-                        &conn,
-                        &project_id,
-                        &agent_name,
-                    );
+                    let _ = WorkspaceSession::clear_session_id(&conn, &project_id);
                 }
             }
         }
@@ -261,9 +255,9 @@ pub fn k2so_agents_build_launch(
         let db = crate::db::shared();
         let conn = db.lock();
         let pid = resolve_project_id(&conn, &project_path)?;
-        let n = AgentSession::bump_wake_counter(&conn, &pid, &agent_name).ok()?;
+        let n = WorkspaceSession::bump_wake_counter(&conn, &pid).ok()?;
         if n >= WAKES_PER_COMPACT {
-            let _ = AgentSession::reset_wake_counter(&conn, &pid, &agent_name);
+            let _ = WorkspaceSession::reset_wake_counter(&conn, &pid);
             Some(true)
         } else {
             Some(false)

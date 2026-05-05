@@ -34,73 +34,41 @@ fn shared() -> AgentMap {
 
 /// Register a live v2 session under `agent_name`.
 ///
-/// **Project-namespaced keys (0.36.14+).** When `agent_name` is in the
-/// form `<project_id>:<bare_name>` (chat tab spawn from a workspace),
-/// we register under the prefixed key AND mirror to the bare name for
-/// back-compat with bare-keyed lookups (awareness bus inject by agent
-/// name, e.g. `k2so msg --wake manager`). The bare slot is
-/// last-write-wins — the most recently registered "manager" is what
-/// `lookup_by_agent_name("manager")` returns. Workspace-specific
-/// lookups via the prefixed key always resolve to the right session,
-/// preventing the cross-workspace pinned-chat collision where two
-/// workspaces both running `manager` mode would share one PTY.
-///
-/// Bare-form `agent_name` (no `:`) registers normally — used by
-/// heartbeat-surfaced sessions, worktree chats, and other code paths
-/// that don't carry a workspace context.
+/// 0.37.0 retired the 0.36.14 bare-name mirror: workspace-agent
+/// sessions are keyed on `<project_id>:<bare>` exclusively, so the
+/// awareness bus and CLI lookups always carry workspace context.
+/// Worktree chats and ad-hoc Cmd+T tabs register under their own
+/// terminal-id-shaped keys; nothing depends on a bare-name slot.
 pub fn register(agent_name: impl Into<String>, session: Arc<DaemonPtySession>) {
     let key = agent_name.into();
     let map_arc = shared();
     let mut map = map_arc.lock().unwrap();
-    map.insert(key.clone(), Arc::clone(&session));
-    // Mirror to bare key when prefixed, so legacy lookups keep working.
-    if let Some((_pid, bare)) = key.split_once(':') {
-        if !bare.is_empty() {
-            map.insert(bare.to_string(), session);
-        }
-    }
+    map.insert(key, session);
 }
 
 /// Remove the map entry. Returns the Arc if one was present;
 /// subsequent drops of all holders tear the session down.
 ///
-/// Also runs the heartbeat-active-session cleanup path: any
-/// `agent_heartbeats` row whose `active_terminal_id` matches the
-/// removed session's id is nulled, and the matching `agent_sessions`
-/// row gets `surfaced=0` + `status='sleeping'`. This is the single
+/// Runs the active-session cleanup path: any `agent_heartbeats` or
+/// `workspace_sessions` row whose `active_terminal_id` matches the
+/// removed session's id is nulled, and the matching workspace's row
+/// gets `surfaced=0` + `status='sleeping'`. This is the single
 /// chokepoint for "v2 session goes away" — child-exit observer in
 /// v2_spawn invokes us, the explicit /v2/close route invokes us, the
 /// watchdog escalation path invokes us. See the
 /// `heartbeat-active-session-tracking` PRD.
 ///
-/// **Project-namespaced cleanup (0.36.14+).** When the key is the
-/// prefixed form `<project_id>:<bare_name>`, we (a) remove the prefixed
-/// entry, (b) remove the bare-name mirror only if it still points at
-/// the same session (otherwise another workspace's session has taken
-/// the bare slot — leave it alone), and (c) scope the
-/// `agent_sessions` UPDATE by `project_id` so closing one workspace's
-/// chat doesn't sleep another workspace's row.
+/// 0.37.0: with `workspace_sessions` keyed on `project_id` and the
+/// `agent_name` column gone, the cleanup is keyed entirely on the
+/// terminal_id we just stopped. The pre-0.37.0 dual-cleanup logic
+/// (prefix split → scoped UPDATE by `(project_id, agent_name)`) is
+/// retired.
 pub fn unregister(agent_name: &str) -> Option<Arc<DaemonPtySession>> {
     let map_arc = shared();
-    let mut map = map_arc.lock().unwrap();
-    let removed = map.remove(agent_name);
-    // If this was a prefixed key and the bare-name mirror still points
-    // at this exact session, remove it too. If it points at a different
-    // session (a newer workspace took the bare slot), leave it alone.
-    if let Some(ref session) = removed {
-        if let Some((_pid, bare)) = agent_name.split_once(':') {
-            if !bare.is_empty() {
-                let same = map
-                    .get(bare)
-                    .map(|s| Arc::ptr_eq(s, session))
-                    .unwrap_or(false);
-                if same {
-                    map.remove(bare);
-                }
-            }
-        }
-    }
-    drop(map);
+    let removed = {
+        let mut map = map_arc.lock().unwrap();
+        map.remove(agent_name)
+    };
 
     if let Some(ref session) = removed {
         let terminal_id = session.session_id.to_string();
@@ -111,39 +79,24 @@ pub fn unregister(agent_name: &str) -> Option<Arc<DaemonPtySession>> {
             &terminal_id,
         );
         // Mirror of the heartbeat cleanup above (migration 0037): the
-        // chat tab's pinned `agent_sessions` row stamps its own
-        // `active_terminal_id` on v2 spawn under the workspace agent's
-        // canonical name. PTY exit nulls it here so the next mount's
-        // `/cli/sessions/lookup-by-agent` lookup sees the truth.
-        let _ = k2so_core::db::schema::AgentSession::clear_active_terminal_id_by_terminal(
+        // chat tab's pinned workspace_sessions row stamps its own
+        // active_terminal_id on v2 spawn. PTY exit nulls it here so
+        // the next mount's `/cli/sessions/lookup-by-agent` sees the
+        // truth.
+        let _ = k2so_core::db::schema::WorkspaceSession::clear_active_terminal_id_by_terminal(
             &conn,
             &terminal_id,
         );
-        // Flip the `agent_sessions` row for this agent. When the key is
-        // the prefixed `<project_id>:<bare>` form, scope by project_id
-        // so we don't sleep rows belonging to other workspaces that
-        // share the same agent name (e.g., multiple workspaces in
-        // Workspace Manager mode all using `agent_name='manager'`).
-        if let Some((pid, bare)) = agent_name.split_once(':') {
-            if !pid.is_empty() && !bare.is_empty() {
-                let _ = conn.execute(
-                    "UPDATE agent_sessions SET surfaced = 0, status = 'sleeping' \
-                     WHERE project_id = ?1 AND agent_name = ?2",
-                    rusqlite::params![pid, bare],
-                );
-                return removed;
-            }
-        }
-        // Legacy bare-form (heartbeat-surfaced, worktree chat, etc.) —
-        // keep prior behavior. The (project_id, agent_name) UNIQUE
-        // constraint ensures at most one row per (workspace, agent),
-        // but with multiple workspaces this UPDATE can hit several
-        // rows; that's the legacy contract for non-chat-tab callers
-        // and is preserved for back-compat.
+        // Flip surfaced=0 + status=sleeping for the workspace whose
+        // active_terminal_id matched. Targeting by terminal_id (rather
+        // than (project_id, agent_name)) means this single UPDATE
+        // covers every code path — chat tab, heartbeat headless wake,
+        // worktree chat — without needing to know which kind of
+        // session this was.
         let _ = conn.execute(
-            "UPDATE agent_sessions SET surfaced = 0, status = 'sleeping' \
-             WHERE agent_name = ?1",
-            rusqlite::params![agent_name],
+            "UPDATE workspace_sessions SET surfaced = 0, status = 'sleeping' \
+             WHERE terminal_id = ?1 OR active_terminal_id = ?1",
+            rusqlite::params![terminal_id],
         );
     }
     removed

@@ -888,18 +888,22 @@ impl WorkspaceState {
     }
 }
 
-// ── Agent Sessions ──────────────────────────────────────────────────────
+// ── Workspace Sessions ─────────────────────────────────────────────────
+//
+// One row per `project_id`. The product invariant ("a workspace IS its
+// agent") is the schema constraint via `UNIQUE(project_id)` enforced
+// in migration 0039. The legacy `agent_name` column is gone — every
+// method that used to take it now keys purely by `project_id`.
 
-/// DB-tracked agent session. Single source of truth — the legacy
-/// `.lock` and `.last_session` filesystem tracking was retired.
-/// `owner` distinguishes system-managed sessions (safe to inject) from user
-/// interactive sessions (never inject).
+/// DB-tracked workspace agent session. Single source of truth — the
+/// legacy `.lock` and `.last_session` filesystem tracking was retired.
+/// `owner` distinguishes system-managed sessions (safe to inject) from
+/// user interactive sessions (never inject).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AgentSession {
+pub struct WorkspaceSession {
     pub id: String,
     pub project_id: String,
-    pub agent_name: String,
     pub terminal_id: Option<String>,
     pub session_id: Option<String>,
     pub harness: String,
@@ -909,7 +913,7 @@ pub struct AgentSession {
     pub last_activity_at: Option<i64>,
     pub created_at: i64,
     /// Daemon-side session_id of the live PTY currently attached to
-    /// this agent_session, or NULL when no PTY is alive. Mirrors
+    /// this workspace's session, or NULL when no PTY is alive. Mirrors
     /// `agent_heartbeats.active_terminal_id` (migration 0037). Stamped
     /// by `v2_spawn::handle_v2_spawn` after registering, cleared by
     /// `v2_session_map::unregister`'s child-exit hook. Distinct from
@@ -919,13 +923,13 @@ pub struct AgentSession {
     pub active_terminal_id: Option<String>,
 }
 
-impl AgentSession {
-    /// Insert or replace session keyed on (project_id, agent_name).
+impl WorkspaceSession {
+    /// Insert or replace the session for a workspace. Schema-level
+    /// `UNIQUE(project_id)` guarantees at most one row per workspace.
     pub fn upsert(
         conn: &Connection,
         id: &str,
         project_id: &str,
-        agent_name: &str,
         terminal_id: Option<&str>,
         session_id: Option<&str>,
         harness: &str,
@@ -933,38 +937,37 @@ impl AgentSession {
         status: &str,
     ) -> Result<()> {
         conn.execute(
-            "INSERT INTO agent_sessions (id, project_id, agent_name, terminal_id, session_id, harness, owner, status, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch()) \
-             ON CONFLICT(project_id, agent_name) DO UPDATE SET \
-               terminal_id = ?4, session_id = COALESCE(?5, agent_sessions.session_id), \
-               harness = ?6, owner = ?7, status = ?8, last_activity_at = unixepoch()",
-            params![id, project_id, agent_name, terminal_id, session_id, harness, owner, status],
+            "INSERT INTO workspace_sessions (id, project_id, terminal_id, session_id, harness, owner, status, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, unixepoch()) \
+             ON CONFLICT(project_id) DO UPDATE SET \
+               terminal_id = ?3, session_id = COALESCE(?4, workspace_sessions.session_id), \
+               harness = ?5, owner = ?6, status = ?7, last_activity_at = unixepoch()",
+            params![id, project_id, terminal_id, session_id, harness, owner, status],
         )?;
         Ok(())
     }
 
     /// Find the session row whose `terminal_id` matches — used by the
-    /// hook handler to resolve which AgentSession row a fired event
-    /// belongs to without the caller needing to know project/agent.
-    pub fn get_by_terminal_id(conn: &Connection, terminal_id: &str) -> Result<Option<AgentSession>> {
+    /// hook handler to resolve which workspace_sessions row a fired
+    /// event belongs to without the caller needing to know the project.
+    pub fn get_by_terminal_id(conn: &Connection, terminal_id: &str) -> Result<Option<WorkspaceSession>> {
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, agent_name, terminal_id, session_id, harness, owner, status, status_message, last_activity_at, created_at, active_terminal_id \
-             FROM agent_sessions WHERE terminal_id = ?1 LIMIT 1"
+            "SELECT id, project_id, terminal_id, session_id, harness, owner, status, status_message, last_activity_at, created_at, active_terminal_id \
+             FROM workspace_sessions WHERE terminal_id = ?1 LIMIT 1"
         )?;
         let mut rows = stmt.query_map(params![terminal_id], |row| {
-            Ok(AgentSession {
+            Ok(WorkspaceSession {
                 id: row.get(0)?,
                 project_id: row.get(1)?,
-                agent_name: row.get(2)?,
-                terminal_id: row.get(3)?,
-                session_id: row.get(4)?,
-                harness: row.get(5)?,
-                owner: row.get(6)?,
-                status: row.get(7)?,
-                status_message: row.get(8)?,
-                last_activity_at: row.get(9)?,
-                created_at: row.get(10)?,
-                active_terminal_id: row.get(11)?,
+                terminal_id: row.get(2)?,
+                session_id: row.get(3)?,
+                harness: row.get(4)?,
+                owner: row.get(5)?,
+                status: row.get(6)?,
+                status_message: row.get(7)?,
+                last_activity_at: row.get(8)?,
+                created_at: row.get(9)?,
+                active_terminal_id: row.get(10)?,
             })
         })?;
         match rows.next() {
@@ -974,25 +977,26 @@ impl AgentSession {
         }
     }
 
-    pub fn get_by_agent(conn: &Connection, project_id: &str, agent_name: &str) -> Result<Option<AgentSession>> {
+    /// Read the workspace's session row by project_id. Returns `None`
+    /// when the workspace has never spawned a session.
+    pub fn get(conn: &Connection, project_id: &str) -> Result<Option<WorkspaceSession>> {
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, agent_name, terminal_id, session_id, harness, owner, status, status_message, last_activity_at, created_at, active_terminal_id \
-             FROM agent_sessions WHERE project_id = ?1 AND agent_name = ?2"
+            "SELECT id, project_id, terminal_id, session_id, harness, owner, status, status_message, last_activity_at, created_at, active_terminal_id \
+             FROM workspace_sessions WHERE project_id = ?1"
         )?;
-        let mut rows = stmt.query_map(params![project_id, agent_name], |row| {
-            Ok(AgentSession {
+        let mut rows = stmt.query_map(params![project_id], |row| {
+            Ok(WorkspaceSession {
                 id: row.get(0)?,
                 project_id: row.get(1)?,
-                agent_name: row.get(2)?,
-                terminal_id: row.get(3)?,
-                session_id: row.get(4)?,
-                harness: row.get(5)?,
-                owner: row.get(6)?,
-                status: row.get(7)?,
-                status_message: row.get(8)?,
-                last_activity_at: row.get(9)?,
-                created_at: row.get(10)?,
-                active_terminal_id: row.get(11)?,
+                terminal_id: row.get(2)?,
+                session_id: row.get(3)?,
+                harness: row.get(4)?,
+                owner: row.get(5)?,
+                status: row.get(6)?,
+                status_message: row.get(7)?,
+                last_activity_at: row.get(8)?,
+                created_at: row.get(9)?,
+                active_terminal_id: row.get(10)?,
             })
         })?;
         match rows.next() {
@@ -1002,77 +1006,41 @@ impl AgentSession {
         }
     }
 
-    pub fn list_by_project(conn: &Connection, project_id: &str) -> Result<Vec<AgentSession>> {
-        let mut stmt = conn.prepare(
-            "SELECT id, project_id, agent_name, terminal_id, session_id, harness, owner, status, status_message, last_activity_at, created_at, active_terminal_id \
-             FROM agent_sessions WHERE project_id = ?1 ORDER BY agent_name"
-        )?;
-        let rows = stmt.query_map(params![project_id], |row| {
-            Ok(AgentSession {
-                id: row.get(0)?,
-                project_id: row.get(1)?,
-                agent_name: row.get(2)?,
-                terminal_id: row.get(3)?,
-                session_id: row.get(4)?,
-                harness: row.get(5)?,
-                owner: row.get(6)?,
-                status: row.get(7)?,
-                status_message: row.get(8)?,
-                last_activity_at: row.get(9)?,
-                created_at: row.get(10)?,
-                active_terminal_id: row.get(11)?,
-            })
-        })?;
-        rows.collect()
-    }
-
-    pub fn update_status(conn: &Connection, project_id: &str, agent_name: &str, status: &str) -> Result<usize> {
+    pub fn update_status(conn: &Connection, project_id: &str, status: &str) -> Result<usize> {
         // Fires on every agent state transition — cached.
         let mut stmt = conn.prepare_cached(
-            "UPDATE agent_sessions SET status = ?1, last_activity_at = unixepoch() WHERE project_id = ?2 AND agent_name = ?3",
+            "UPDATE workspace_sessions SET status = ?1, last_activity_at = unixepoch() WHERE project_id = ?2",
         )?;
-        stmt.execute(params![status, project_id, agent_name])
+        stmt.execute(params![status, project_id])
     }
 
-    /// Try to atomically acquire the "running" lock for an agent. Returns
-    /// `Ok(true)` if this call was the one that took the lock (and thus
-    /// the caller should proceed to spawn the PTY). Returns `Ok(false)`
-    /// if the agent was already running (caller must NOT spawn — the
-    /// existing session owns the terminal).
+    /// Try to atomically acquire the "running" lock for the workspace's
+    /// session. Returns `Ok(true)` if this call took the lock (caller
+    /// proceeds to spawn the PTY); `Ok(false)` if the workspace was
+    /// already running (caller must NOT spawn).
     ///
-    /// This replaces the pre-0.32.9 `is_agent_locked() → spawn → upsert`
-    /// sequence, which had a TOCTOU race: two heartbeats firing at
-    /// roughly the same time could both observe `is_locked=false` and
-    /// both spawn, producing duplicate PTYs and a stale row.
-    ///
-    /// Implementation: BEGIN IMMEDIATE takes the database write lock
-    /// before any reads, so concurrent callers serialize. Inside the
-    /// transaction we check for an existing running session; if present
-    /// we rollback (no change) and return false. If not, we INSERT/
-    /// UPDATE the session row with status='running' and COMMIT.
+    /// Replaces the pre-0.32.9 `is_locked → spawn → upsert` sequence,
+    /// which had a TOCTOU race: two heartbeats firing simultaneously
+    /// could both observe `is_locked=false` and both spawn, producing
+    /// duplicate PTYs and a stale row. `BEGIN IMMEDIATE` takes the DB
+    /// write lock before any reads so concurrent callers serialize.
     // TODO(resilience-followup): 0.32.9 introduced this CAS helper
     // but the production spawn path in `commands/k2so_agents.rs` still
-    // uses the pre-CAS `is_agent_locked → spawn → upsert` sequence.
-    // Wire this in before advertising the TOCTOU fix as live.
+    // uses the pre-CAS `is_locked → spawn → upsert` sequence.
     #[allow(dead_code)]
     pub fn try_acquire_running(
         conn: &Connection,
         session_id: &str,
         project_id: &str,
-        agent_name: &str,
         terminal_id: Option<&str>,
         harness: &str,
         owner: &str,
     ) -> Result<bool> {
-        // IMMEDIATE upgrades the connection to a write lock at BEGIN
-        // time rather than deferring to the first write — this prevents
-        // two concurrent readers from both thinking they can proceed.
         conn.execute_batch("BEGIN IMMEDIATE;")?;
 
-        // Check existing status.
         let existing: Option<String> = conn.query_row(
-            "SELECT status FROM agent_sessions WHERE project_id = ?1 AND agent_name = ?2",
-            params![project_id, agent_name],
+            "SELECT status FROM workspace_sessions WHERE project_id = ?1",
+            params![project_id],
             |row| row.get::<_, String>(0),
         ).ok();
 
@@ -1081,18 +1049,16 @@ impl AgentSession {
             return Ok(false);
         }
 
-        // Acquire: upsert with status='running'. Mirrors Self::upsert's
-        // schema so downstream reads see the same shape.
         let result = conn.execute(
-            "INSERT INTO agent_sessions (id, project_id, agent_name, terminal_id, session_id, harness, owner, status, created_at) \
-             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, 'running', unixepoch()) \
-             ON CONFLICT(project_id, agent_name) DO UPDATE SET \
+            "INSERT INTO workspace_sessions (id, project_id, terminal_id, session_id, harness, owner, status, created_at) \
+             VALUES (?1, ?2, ?3, NULL, ?4, ?5, 'running', unixepoch()) \
+             ON CONFLICT(project_id) DO UPDATE SET \
                terminal_id = excluded.terminal_id, \
                harness = excluded.harness, \
                owner = excluded.owner, \
                status = 'running', \
                last_activity_at = unixepoch()",
-            params![session_id, project_id, agent_name, terminal_id, harness, owner],
+            params![session_id, project_id, terminal_id, harness, owner],
         );
 
         match result {
@@ -1107,53 +1073,48 @@ impl AgentSession {
         }
     }
 
-    pub fn update_status_message(conn: &Connection, project_id: &str, agent_name: &str, message: &str) -> Result<usize> {
+    pub fn update_status_message(conn: &Connection, project_id: &str, message: &str) -> Result<usize> {
         conn.execute(
-            "UPDATE agent_sessions SET status_message = ?1, last_activity_at = unixepoch() WHERE project_id = ?2 AND agent_name = ?3",
-            params![message, project_id, agent_name],
+            "UPDATE workspace_sessions SET status_message = ?1, last_activity_at = unixepoch() WHERE project_id = ?2",
+            params![message, project_id],
         )
     }
 
-    pub fn update_session_id(conn: &Connection, project_id: &str, agent_name: &str, session_id: &str) -> Result<usize> {
+    pub fn update_session_id(conn: &Connection, project_id: &str, session_id: &str) -> Result<usize> {
         conn.execute(
-            "UPDATE agent_sessions SET session_id = ?1, last_activity_at = unixepoch() WHERE project_id = ?2 AND agent_name = ?3",
-            params![session_id, project_id, agent_name],
+            "UPDATE workspace_sessions SET session_id = ?1, last_activity_at = unixepoch() WHERE project_id = ?2",
+            params![session_id, project_id],
         )
     }
 
-    pub fn clear_session_id(conn: &Connection, project_id: &str, agent_name: &str) -> Result<usize> {
+    pub fn clear_session_id(conn: &Connection, project_id: &str) -> Result<usize> {
         conn.execute(
-            "UPDATE agent_sessions SET session_id = NULL WHERE project_id = ?1 AND agent_name = ?2",
-            params![project_id, agent_name],
+            "UPDATE workspace_sessions SET session_id = NULL WHERE project_id = ?1",
+            params![project_id],
         )
     }
 
-    /// Toggle the per-session "surfaced" boolean. `true` = the session
+    /// Toggle the per-workspace "surfaced" boolean. `true` = the session
     /// has a live tab in the renderer; `false` = the session is running
     /// headless (heartbeat default). See migration 0036.
     pub fn set_surfaced(
         conn: &Connection,
         project_id: &str,
-        agent_name: &str,
         surfaced: bool,
     ) -> Result<usize> {
         conn.execute(
-            "UPDATE agent_sessions SET surfaced = ?1, last_activity_at = unixepoch() \
-             WHERE project_id = ?2 AND agent_name = ?3",
-            params![surfaced as i64, project_id, agent_name],
+            "UPDATE workspace_sessions SET surfaced = ?1, last_activity_at = unixepoch() \
+             WHERE project_id = ?2",
+            params![surfaced as i64, project_id],
         )
     }
 
-    /// Read the current surfaced flag for a session. `false` if the row
-    /// doesn't exist (no session yet → can't be surfaced).
-    pub fn is_surfaced(
-        conn: &Connection,
-        project_id: &str,
-        agent_name: &str,
-    ) -> Result<bool> {
+    /// Read the current surfaced flag. `false` if the row doesn't
+    /// exist (no session yet → can't be surfaced).
+    pub fn is_surfaced(conn: &Connection, project_id: &str) -> Result<bool> {
         conn.query_row(
-            "SELECT surfaced FROM agent_sessions WHERE project_id = ?1 AND agent_name = ?2",
-            params![project_id, agent_name],
+            "SELECT surfaced FROM workspace_sessions WHERE project_id = ?1",
+            params![project_id],
             |row| {
                 let v: i64 = row.get(0)?;
                 Ok(v != 0)
@@ -1165,54 +1126,50 @@ impl AgentSession {
         })
     }
 
-    pub fn delete(conn: &Connection, project_id: &str, agent_name: &str) -> Result<usize> {
+    pub fn delete(conn: &Connection, project_id: &str) -> Result<usize> {
         conn.execute(
-            "DELETE FROM agent_sessions WHERE project_id = ?1 AND agent_name = ?2",
-            params![project_id, agent_name],
+            "DELETE FROM workspace_sessions WHERE project_id = ?1",
+            params![project_id],
         )
     }
 
     /// Atomically increment the "wakes since last /compact" counter and
     /// return the new value. Used by the heartbeat wake path to decide
     /// whether to prepend `/compact` to the wake message every N wakes.
-    ///
-    /// Returns 1 on first wake after upsert, increments from there. Row
-    /// is auto-created with count=0 → increment → returns 1 if missing.
-    pub fn bump_wake_counter(conn: &Connection, project_id: &str, agent_name: &str) -> Result<i64> {
+    pub fn bump_wake_counter(conn: &Connection, project_id: &str) -> Result<i64> {
         conn.execute(
-            "UPDATE agent_sessions SET wakes_since_compact = wakes_since_compact + 1 \
-             WHERE project_id = ?1 AND agent_name = ?2",
-            params![project_id, agent_name],
+            "UPDATE workspace_sessions SET wakes_since_compact = wakes_since_compact + 1 \
+             WHERE project_id = ?1",
+            params![project_id],
         )?;
         let val: i64 = conn.query_row(
-            "SELECT wakes_since_compact FROM agent_sessions WHERE project_id = ?1 AND agent_name = ?2",
-            params![project_id, agent_name],
+            "SELECT wakes_since_compact FROM workspace_sessions WHERE project_id = ?1",
+            params![project_id],
             |row| row.get(0),
         ).unwrap_or(0);
         Ok(val)
     }
 
-    pub fn reset_wake_counter(conn: &Connection, project_id: &str, agent_name: &str) -> Result<usize> {
+    pub fn reset_wake_counter(conn: &Connection, project_id: &str) -> Result<usize> {
         conn.execute(
-            "UPDATE agent_sessions SET wakes_since_compact = 0 WHERE project_id = ?1 AND agent_name = ?2",
-            params![project_id, agent_name],
+            "UPDATE workspace_sessions SET wakes_since_compact = 0 WHERE project_id = ?1",
+            params![project_id],
         )
     }
 
     /// Stamp the daemon session_id of the live PTY currently attached
-    /// to this agent. Mirror of `AgentHeartbeat::save_active_terminal_id`.
+    /// to this workspace. Mirror of `AgentHeartbeat::save_active_terminal_id`.
     /// Called by `v2_spawn::handle_v2_spawn` after registering a fresh
-    /// (or reusing an existing) v2 session under this agent_name.
+    /// (or reusing an existing) v2 session.
     pub fn save_active_terminal_id(
         conn: &Connection,
         project_id: &str,
-        agent_name: &str,
         terminal_id: &str,
     ) -> Result<usize> {
         conn.execute(
-            "UPDATE agent_sessions SET active_terminal_id = ?1 \
-             WHERE project_id = ?2 AND agent_name = ?3",
-            params![terminal_id, project_id, agent_name],
+            "UPDATE workspace_sessions SET active_terminal_id = ?1 \
+             WHERE project_id = ?2",
+            params![terminal_id, project_id],
         )
     }
 
@@ -1221,29 +1178,24 @@ impl AgentSession {
     /// finds the recorded session no longer registered in either
     /// session map).
     #[allow(dead_code)]
-    pub fn clear_active_terminal_id(
-        conn: &Connection,
-        project_id: &str,
-        agent_name: &str,
-    ) -> Result<usize> {
+    pub fn clear_active_terminal_id(conn: &Connection, project_id: &str) -> Result<usize> {
         conn.execute(
-            "UPDATE agent_sessions SET active_terminal_id = NULL \
-             WHERE project_id = ?1 AND agent_name = ?2",
-            params![project_id, agent_name],
+            "UPDATE workspace_sessions SET active_terminal_id = NULL WHERE project_id = ?1",
+            params![project_id],
         )
     }
 
     /// Null out `active_terminal_id` for every row whose recorded id
     /// matches the given value. Daemon's PTY-exit observer knows the
-    /// terminal_id that died but not which agent_sessions row pointed
-    /// at it — one UPDATE handles the lookup. Mirrors
+    /// terminal_id that died but not which row pointed at it — one
+    /// UPDATE handles the lookup. Mirrors
     /// `AgentHeartbeat::clear_active_terminal_id_by_terminal`.
     pub fn clear_active_terminal_id_by_terminal(
         conn: &Connection,
         terminal_id: &str,
     ) -> Result<usize> {
         conn.execute(
-            "UPDATE agent_sessions SET active_terminal_id = NULL \
+            "UPDATE workspace_sessions SET active_terminal_id = NULL \
              WHERE active_terminal_id = ?1",
             params![terminal_id],
         )
@@ -1467,7 +1419,7 @@ impl AgentHeartbeat {
 
     /// Record the Claude session id from a successful heartbeat spawn.
     /// The next fire's `--resume` target. Called by `spawn_wake_headless`
-    /// alongside the existing `agent_sessions::save_session_id` write.
+    /// alongside the existing `workspace_sessions::save_session_id` write.
     pub fn save_session_id(
         conn: &Connection,
         project_id: &str,
@@ -1585,7 +1537,7 @@ impl AgentHeartbeat {
     /// spawn; `false` if the row is already in-flight (under `forbid`)
     /// and this fire should be skipped.
     ///
-    /// Mirrors `AgentSession::try_acquire_running` — `BEGIN IMMEDIATE`
+    /// Mirrors `WorkspaceSession::try_acquire_running` — `BEGIN IMMEDIATE`
     /// upgrades the connection to a write lock at BEGIN time so two
     /// concurrent readers can't both think they can proceed. This is
     /// the load-bearing fix for the pre-existing TOCTOU between the
@@ -2221,25 +2173,22 @@ mod unit_tests {
         assert!(p.last_opened_at.is_some());
     }
 
-    // ── AgentSession ──────────────────────────────────────────────
+    // ── WorkspaceSession ─────────────────────────────────────────
+    //
+    // Post-0.37.0: one row per project_id, enforced by schema-level
+    // UNIQUE(project_id) (migration 0039). Tests assert the post-state
+    // invariant directly — no `unwrap_or` fallbacks that would mask a
+    // regression to the old multi-row shape.
     #[test]
-    fn agent_session_upsert_then_get_by_agent() {
+    fn workspace_session_upsert_then_get() {
         let conn = fresh();
         let pid = make_project_row(&conn, "/tmp/as1");
-        AgentSession::upsert(
-            &conn,
-            "sess-1",
-            &pid,
-            "alice",
-            Some("term-7"),
-            None,
-            "claude",
-            "manager",
-            "sleeping",
+        WorkspaceSession::upsert(
+            &conn, "sess-1", &pid, Some("term-7"), None, "claude", "manager", "sleeping",
         )
         .unwrap();
 
-        let s = AgentSession::get_by_agent(&conn, &pid, "alice")
+        let s = WorkspaceSession::get(&conn, &pid)
             .unwrap()
             .expect("session exists");
         assert_eq!(s.id, "sess-1");
@@ -2248,21 +2197,20 @@ mod unit_tests {
     }
 
     #[test]
-    fn agent_session_upsert_updates_existing_row() {
+    fn workspace_session_upsert_updates_existing_row() {
         let conn = fresh();
         let pid = make_project_row(&conn, "/tmp/as2");
-        AgentSession::upsert(
-            &conn, "s1", &pid, "bob", Some("t1"), None, "claude", "manager", "sleeping",
+        WorkspaceSession::upsert(
+            &conn, "s1", &pid, Some("t1"), None, "claude", "manager", "sleeping",
         )
         .unwrap();
-        AgentSession::upsert(
-            &conn, "s2", &pid, "bob", Some("t2"), Some("scid"), "codex", "user", "running",
+        WorkspaceSession::upsert(
+            &conn, "s2", &pid, Some("t2"), Some("scid"), "codex", "user", "running",
         )
         .unwrap();
 
-        // Same (project, agent) — second upsert replaces the row's
-        // payload but the conflict resolution uses the original id.
-        let s = AgentSession::get_by_agent(&conn, &pid, "bob").unwrap().unwrap();
+        // Same project_id — second upsert replaces the row's payload.
+        let s = WorkspaceSession::get(&conn, &pid).unwrap().unwrap();
         assert_eq!(s.terminal_id.as_deref(), Some("t2"));
         assert_eq!(s.harness, "codex");
         assert_eq!(s.status, "running");
@@ -2270,115 +2218,102 @@ mod unit_tests {
     }
 
     #[test]
-    fn agent_session_unique_constraint_on_project_agent() {
+    fn workspace_session_unique_constraint_on_project_id() {
+        // The product invariant ("a workspace IS its agent") is the
+        // schema constraint. Two raw inserts with the same project_id
+        // must be rejected by SQLite — no application code can violate
+        // the one-row-per-workspace rule.
         let conn = fresh();
         let pid = make_project_row(&conn, "/tmp/as3");
-        AgentSession::upsert(
-            &conn, "s1", &pid, "carol", None, None, "claude", "manager", "sleeping",
+        WorkspaceSession::upsert(
+            &conn, "s1", &pid, None, None, "claude", "manager", "sleeping",
         )
         .unwrap();
-        // Raw insert with different id but same (project, agent) must
-        // violate the UNIQUE constraint.
         let err = conn.execute(
-            "INSERT INTO agent_sessions (id, project_id, agent_name, harness, owner, status) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params!["sX", &pid, "carol", "claude", "manager", "sleeping"],
+            "INSERT INTO workspace_sessions (id, project_id, harness, owner, status) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params!["sX", &pid, "claude", "manager", "sleeping"],
         );
-        assert!(err.is_err(), "UNIQUE(project_id, agent_name) must reject");
+        assert!(err.is_err(), "UNIQUE(project_id) must reject");
     }
 
     #[test]
-    fn agent_session_list_by_project_ordered() {
-        let conn = fresh();
-        let pid = make_project_row(&conn, "/tmp/as-list");
-        for name in ["charlie", "alice", "bob"] {
-            AgentSession::upsert(
-                &conn, &format!("s-{}", name), &pid, name, None, None, "claude", "manager", "sleeping",
-            )
-            .unwrap();
-        }
-        let rows = AgentSession::list_by_project(&conn, &pid).unwrap();
-        let names: Vec<&str> = rows.iter().map(|r| r.agent_name.as_str()).collect();
-        assert_eq!(names, ["alice", "bob", "charlie"]);
-    }
-
-    #[test]
-    fn agent_session_get_by_terminal_id() {
+    fn workspace_session_get_by_terminal_id() {
         let conn = fresh();
         let pid = make_project_row(&conn, "/tmp/as-term");
-        AgentSession::upsert(
-            &conn, "sa", &pid, "dana", Some("terminal-99"), None, "claude", "manager", "running",
+        WorkspaceSession::upsert(
+            &conn, "sa", &pid, Some("terminal-99"), None, "claude", "manager", "running",
         )
         .unwrap();
-        let s = AgentSession::get_by_terminal_id(&conn, "terminal-99")
+        let s = WorkspaceSession::get_by_terminal_id(&conn, "terminal-99")
             .unwrap()
             .unwrap();
-        assert_eq!(s.agent_name, "dana");
-        let none = AgentSession::get_by_terminal_id(&conn, "no-such").unwrap();
+        assert_eq!(s.project_id, pid);
+        let none = WorkspaceSession::get_by_terminal_id(&conn, "no-such").unwrap();
         assert!(none.is_none());
     }
 
     #[test]
-    fn agent_session_update_status_and_message() {
+    fn workspace_session_update_status_and_message() {
         let conn = fresh();
         let pid = make_project_row(&conn, "/tmp/as-sm");
-        AgentSession::upsert(
-            &conn, "s", &pid, "eve", None, None, "claude", "manager", "sleeping",
+        WorkspaceSession::upsert(
+            &conn, "s", &pid, None, None, "claude", "manager", "sleeping",
         )
         .unwrap();
 
-        let n = AgentSession::update_status(&conn, &pid, "eve", "running").unwrap();
+        let n = WorkspaceSession::update_status(&conn, &pid, "running").unwrap();
         assert_eq!(n, 1);
-        AgentSession::update_status_message(&conn, &pid, "eve", "spawning PTY").unwrap();
-        let s = AgentSession::get_by_agent(&conn, &pid, "eve").unwrap().unwrap();
+        WorkspaceSession::update_status_message(&conn, &pid, "spawning PTY").unwrap();
+        let s = WorkspaceSession::get(&conn, &pid).unwrap().unwrap();
         assert_eq!(s.status, "running");
         assert_eq!(s.status_message.as_deref(), Some("spawning PTY"));
     }
 
     #[test]
-    fn agent_session_session_id_set_and_clear() {
+    fn workspace_session_session_id_set_and_clear() {
         let conn = fresh();
         let pid = make_project_row(&conn, "/tmp/as-sid");
-        AgentSession::upsert(
-            &conn, "s", &pid, "frank", None, None, "claude", "manager", "sleeping",
+        WorkspaceSession::upsert(
+            &conn, "s", &pid, None, None, "claude", "manager", "sleeping",
         )
         .unwrap();
-        AgentSession::update_session_id(&conn, &pid, "frank", "claude-abcd").unwrap();
+        WorkspaceSession::update_session_id(&conn, &pid, "claude-abcd").unwrap();
         assert_eq!(
-            AgentSession::get_by_agent(&conn, &pid, "frank").unwrap().unwrap().session_id.as_deref(),
+            WorkspaceSession::get(&conn, &pid).unwrap().unwrap().session_id.as_deref(),
             Some("claude-abcd")
         );
-        AgentSession::clear_session_id(&conn, &pid, "frank").unwrap();
-        assert!(AgentSession::get_by_agent(&conn, &pid, "frank").unwrap().unwrap().session_id.is_none());
+        WorkspaceSession::clear_session_id(&conn, &pid).unwrap();
+        assert!(WorkspaceSession::get(&conn, &pid).unwrap().unwrap().session_id.is_none());
     }
 
     #[test]
-    fn agent_session_wake_counter_increments_and_resets() {
+    fn workspace_session_wake_counter_increments_and_resets() {
         let conn = fresh();
         let pid = make_project_row(&conn, "/tmp/as-wc");
-        AgentSession::upsert(
-            &conn, "s", &pid, "grace", None, None, "claude", "manager", "sleeping",
+        WorkspaceSession::upsert(
+            &conn, "s", &pid, None, None, "claude", "manager", "sleeping",
         )
         .unwrap();
-        assert_eq!(AgentSession::bump_wake_counter(&conn, &pid, "grace").unwrap(), 1);
-        assert_eq!(AgentSession::bump_wake_counter(&conn, &pid, "grace").unwrap(), 2);
-        assert_eq!(AgentSession::bump_wake_counter(&conn, &pid, "grace").unwrap(), 3);
-        AgentSession::reset_wake_counter(&conn, &pid, "grace").unwrap();
-        assert_eq!(AgentSession::bump_wake_counter(&conn, &pid, "grace").unwrap(), 1);
+        assert_eq!(WorkspaceSession::bump_wake_counter(&conn, &pid).unwrap(), 1);
+        assert_eq!(WorkspaceSession::bump_wake_counter(&conn, &pid).unwrap(), 2);
+        assert_eq!(WorkspaceSession::bump_wake_counter(&conn, &pid).unwrap(), 3);
+        WorkspaceSession::reset_wake_counter(&conn, &pid).unwrap();
+        assert_eq!(WorkspaceSession::bump_wake_counter(&conn, &pid).unwrap(), 1);
     }
 
     #[test]
-    fn agent_session_delete_removes_row() {
+    fn workspace_session_delete_removes_row() {
         let conn = fresh();
         let pid = make_project_row(&conn, "/tmp/as-del");
-        AgentSession::upsert(
-            &conn, "s", &pid, "henry", None, None, "claude", "manager", "sleeping",
+        WorkspaceSession::upsert(
+            &conn, "s", &pid, None, None, "claude", "manager", "sleeping",
         )
         .unwrap();
-        assert!(AgentSession::get_by_agent(&conn, &pid, "henry").unwrap().is_some());
-        let n = AgentSession::delete(&conn, &pid, "henry").unwrap();
+        assert!(WorkspaceSession::get(&conn, &pid).unwrap().is_some());
+        let n = WorkspaceSession::delete(&conn, &pid).unwrap();
         assert_eq!(n, 1);
-        assert!(AgentSession::get_by_agent(&conn, &pid, "henry").unwrap().is_none());
+        assert!(WorkspaceSession::get(&conn, &pid).unwrap().is_none());
     }
 
     // ── AgentHeartbeat ────────────────────────────────────────────
@@ -2576,29 +2511,29 @@ mod unit_tests {
         let pid = make_project_row(&conn, "/tmp/sess-surfaced");
 
         // Fresh upsert — surfaced defaults to 0.
-        AgentSession::upsert(
-            &conn, "s1", &pid, "frank",
+        WorkspaceSession::upsert(
+            &conn, "s1", &pid,
             Some("term-1"), None, "claude", "system", "running",
         )
         .unwrap();
-        assert!(!AgentSession::is_surfaced(&conn, &pid, "frank").unwrap());
+        assert!(!WorkspaceSession::is_surfaced(&conn, &pid).unwrap());
 
         // Flip on.
-        let n = AgentSession::set_surfaced(&conn, &pid, "frank", true).unwrap();
+        let n = WorkspaceSession::set_surfaced(&conn, &pid, true).unwrap();
         assert_eq!(n, 1);
-        assert!(AgentSession::is_surfaced(&conn, &pid, "frank").unwrap());
+        assert!(WorkspaceSession::is_surfaced(&conn, &pid).unwrap());
 
         // Flip off.
-        AgentSession::set_surfaced(&conn, &pid, "frank", false).unwrap();
-        assert!(!AgentSession::is_surfaced(&conn, &pid, "frank").unwrap());
+        WorkspaceSession::set_surfaced(&conn, &pid, false).unwrap();
+        assert!(!WorkspaceSession::is_surfaced(&conn, &pid).unwrap());
     }
 
     #[test]
-    fn agent_session_surfaced_default_false_for_missing_row() {
+    fn workspace_session_surfaced_default_false_for_missing_row() {
         let conn = fresh();
         let pid = make_project_row(&conn, "/tmp/sess-missing");
         // No row inserted — query should return false, not error.
-        assert!(!AgentSession::is_surfaced(&conn, &pid, "ghost").unwrap());
+        assert!(!WorkspaceSession::is_surfaced(&conn, &pid).unwrap());
     }
 
     #[test]
@@ -2925,10 +2860,10 @@ mod concurrency_tests {
     }
 
     fn make_project(conn: &Connection, project_path: &str) -> String {
-        // Schema requires a projects row: agent_sessions.project_id is
-        // a FK to projects.id, and PRAGMA foreign_keys is ON. Returns
-        // the generated UUID — callers pass that as the project_id
-        // arg to try_acquire_running.
+        // Schema requires a projects row: workspace_sessions.project_id
+        // is a FK to projects.id, and PRAGMA foreign_keys is ON.
+        // Returns the generated UUID — callers pass that as the
+        // project_id arg to try_acquire_running.
         let id = uuid::Uuid::new_v4().to_string();
         conn.execute(
             "INSERT OR IGNORE INTO projects (id, name, path) VALUES (?1, ?2, ?3)",
@@ -2940,19 +2875,19 @@ mod concurrency_tests {
 
     #[test]
     fn try_acquire_running_exactly_one_winner_under_parallel_contention() {
-        // 20 threads race to acquire the same (project, agent) lock.
-        // Exactly one must return Ok(true); all others Ok(false).
+        // 20 threads race to acquire the same workspace's session
+        // lock. Exactly one must return Ok(true); all others Ok(false).
         // The pre-0.32.9 is_locked() → spawn → upsert sequence had a
         // TOCTOU here; BEGIN IMMEDIATE closes it. This test is the
         // proof.
         let (dir, db_path) = scratch_db();
-        let project_path = {
+        let project_id = {
             let conn = open_conn(&db_path);
             make_project(&conn, "/tmp/proj-a")
         };
 
         let db_path = Arc::new(db_path);
-        let project = Arc::new(project_path);
+        let project = Arc::new(project_id);
         let n_threads = 20usize;
 
         let handles: Vec<_> = (0..n_threads)
@@ -2961,11 +2896,10 @@ mod concurrency_tests {
                 let project = project.clone();
                 std::thread::spawn(move || -> bool {
                     let conn = open_conn(&db_path);
-                    AgentSession::try_acquire_running(
+                    WorkspaceSession::try_acquire_running(
                         &conn,
                         &format!("session-{}", tid),
                         &project,
-                        "agent-x",
                         None,
                         "claude",
                         "manager",
@@ -2987,31 +2921,33 @@ mod concurrency_tests {
     }
 
     #[test]
-    fn try_acquire_running_different_agents_all_succeed() {
-        // Sanity check: the CAS is per-agent, not global. 8 different
-        // agents in the same project, each acquired by its own
-        // thread, all should win.
+    fn try_acquire_running_different_workspaces_all_succeed() {
+        // The CAS is per-workspace (project_id), not global. Eight
+        // different workspaces, each acquired by its own thread, all
+        // should win. Replaces the pre-0.37.0 "different agents same
+        // project" test, which is now unreachable — the schema-level
+        // UNIQUE(project_id) makes one-row-per-workspace the law.
         let (dir, db_path) = scratch_db();
-        let project_path = {
+        let n_workspaces = 8usize;
+        let project_ids: Vec<String> = {
             let conn = open_conn(&db_path);
-            make_project(&conn, "/tmp/proj-b")
+            (0..n_workspaces)
+                .map(|i| make_project(&conn, &format!("/tmp/proj-multi-{i}")))
+                .collect()
         };
 
         let db_path = Arc::new(db_path);
-        let project = Arc::new(project_path);
-        let n_agents = 8usize;
-
-        let handles: Vec<_> = (0..n_agents)
-            .map(|i| {
+        let handles: Vec<_> = project_ids
+            .into_iter()
+            .enumerate()
+            .map(|(i, project)| {
                 let db_path = db_path.clone();
-                let project = project.clone();
                 std::thread::spawn(move || -> bool {
                     let conn = open_conn(&db_path);
-                    AgentSession::try_acquire_running(
+                    WorkspaceSession::try_acquire_running(
                         &conn,
-                        &format!("session-a{}", i),
+                        &format!("session-w{}", i),
                         &project,
-                        &format!("agent-{}", i),
                         None,
                         "claude",
                         "manager",
@@ -3023,7 +2959,7 @@ mod concurrency_tests {
 
         let results: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         let winners = results.iter().filter(|&&r| r).count();
-        assert_eq!(winners, n_agents, "different agents should all win: {:?}", results);
+        assert_eq!(winners, n_workspaces, "different workspaces should all win: {:?}", results);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3037,14 +2973,14 @@ mod concurrency_tests {
         // instead callers block on the write queue until they get
         // their turn.
         let (dir, db_path) = scratch_db();
-        let project_path = {
+        let project_id = {
             let conn = open_conn(&db_path);
             make_project(&conn, "/tmp/proj-c")
         };
 
         for round in 0..5 {
             let db_path = Arc::new(db_path.clone());
-            let project = Arc::new(project_path.clone());
+            let project = Arc::new(project_id.clone());
 
             let handles: Vec<_> = (0..10)
                 .map(|tid| {
@@ -3052,11 +2988,10 @@ mod concurrency_tests {
                     let project = project.clone();
                     std::thread::spawn(move || -> bool {
                         let conn = open_conn(&db_path);
-                        AgentSession::try_acquire_running(
+                        WorkspaceSession::try_acquire_running(
                             &conn,
                             &format!("session-r{}-t{}", round, tid),
                             &project,
-                            "agent-y",
                             None,
                             "claude",
                             "manager",
@@ -3075,8 +3010,8 @@ mod concurrency_tests {
             // Release the lock so the next round has something to acquire.
             let conn = open_conn(&db_path);
             conn.execute(
-                "UPDATE agent_sessions SET status='stopped' WHERE project_id=?1 AND agent_name=?2",
-                params![project_path, "agent-y"],
+                "UPDATE workspace_sessions SET status='stopped' WHERE project_id=?1",
+                params![project_id],
             ).expect("release lock");
         }
 
@@ -3092,27 +3027,27 @@ mod concurrency_tests {
         let conn = open_conn(&db_path);
         let project = make_project(&conn, "/tmp/proj-d");
 
-        let first = AgentSession::try_acquire_running(
-            &conn, "s1", &project, "a1", None, "claude", "manager",
+        let first = WorkspaceSession::try_acquire_running(
+            &conn, "s1", &project, None, "claude", "manager",
         )
         .unwrap();
         assert!(first, "first acquire should win");
 
-        let second = AgentSession::try_acquire_running(
-            &conn, "s2", &project, "a1", None, "claude", "manager",
+        let second = WorkspaceSession::try_acquire_running(
+            &conn, "s2", &project, None, "claude", "manager",
         )
         .unwrap();
         assert!(!second, "second acquire (already held) should lose");
 
         // Release (status != 'running').
         conn.execute(
-            "UPDATE agent_sessions SET status='stopped' WHERE project_id=?1 AND agent_name=?2",
-            params![project, "a1"],
+            "UPDATE workspace_sessions SET status='stopped' WHERE project_id=?1",
+            params![project],
         )
         .unwrap();
 
-        let third = AgentSession::try_acquire_running(
-            &conn, "s3", &project, "a1", None, "claude", "manager",
+        let third = WorkspaceSession::try_acquire_running(
+            &conn, "s3", &project, None, "claude", "manager",
         )
         .unwrap();
         assert!(third, "re-acquire after release should win");
@@ -3122,7 +3057,7 @@ mod concurrency_tests {
 
     // ── Heartbeat lease (try_acquire_heartbeat) ──────────────────────
     //
-    // Mirrors the AgentSession CAS tests above. The pre-P5 production
+    // Mirrors the WorkspaceSession CAS tests above. The pre-P5 production
     // path had no concurrency control on heartbeat fires — two ticks
     // overlapping (which becomes a real risk once StartInterval drops
     // from 300 to 60 in P5.7) would spawn the same heartbeat twice.

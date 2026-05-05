@@ -482,7 +482,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         "/hook/complete" => {
             // Agent-lifecycle hook endpoint. URL-encoded query params
             // carry paneId / tabId / eventType / token. Business logic
-            // (ring buffer, emit, AgentSession.status sync) lives in
+            // (ring buffer, emit, WorkspaceSession.status sync) lives in
             // k2so_core so src-tauri's existing server hits the same
             // code path.
             let _ = stream.read(&mut buf).await;

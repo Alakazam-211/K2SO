@@ -15,7 +15,7 @@ use k2so_core::awareness::{AgentAddress, AgentSignal, InjectProvider, WakeProvid
 use k2so_core::log_debug;
 
 use crate::session_lookup;
-use crate::spawn::{spawn_agent_session_v2_blocking, SpawnAgentSessionRequest};
+use crate::spawn::{spawn_agent_session_v2_blocking, SpawnWorkspaceSessionRequest};
 
 /// Looks up the target agent's session handle across BOTH the
 /// legacy `session_map` (Kessel-T0) and `v2_session_map`
@@ -142,31 +142,18 @@ impl WakeProvider for DaemonWakeProvider {
 ///   - workspace id doesn't map to a known project path
 ///   - spawn itself failed (bad command, PTY exhaustion, etc.)
 fn try_auto_launch(agent: &str, signal: &AgentSignal) -> Result<(), String> {
-    // Resolve the target workspace id from `signal.to` first
-    // (preferred — it's the workspace this signal is FOR), falling
-    // back to `signal.from` for legacy callers that don't set
-    // `to.workspace` correctly. The pre-0.36.15 code only used
-    // `signal.from`, which works for same-workspace messaging
-    // (k2so msg from inside a workspace) but is wrong for
-    // cross-workspace addressing.
+    // 0.37.0: signal.to.workspace is required and authoritative. The
+    // 0.36.15 signal.from fallback is retired — every wake target has
+    // a workspace by construction now (CLI, awareness bus, heartbeat).
     let workspace_id = match &signal.to {
-        AgentAddress::Agent { workspace, .. } => Some(workspace.0.as_str()),
-        AgentAddress::Workspace { workspace } => Some(workspace.0.as_str()),
-        _ => None,
-    }
-    .or_else(|| match &signal.from {
-        AgentAddress::Agent { workspace, .. }
-        | AgentAddress::Workspace { workspace } => Some(workspace.0.as_str()),
-        _ => None,
-    })
-    .ok_or_else(|| "broadcast signal has no attributable workspace".to_string())?;
+        AgentAddress::Agent { workspace, .. } => workspace.0.as_str(),
+        AgentAddress::Workspace { workspace } => workspace.0.as_str(),
+        _ => return Err("broadcast signal has no target workspace".into()),
+    };
 
     // Single-flight: if a concurrent path already registered THIS
     // workspace's session, skip. The pending-live drain on that
-    // session will pick up our enqueued signal. Pre-0.36.15 this
-    // checked the BARE name only — a stale issue when multiple
-    // workspaces share an agent name (lookup returned someone
-    // else's session and we incorrectly skipped spawning ours).
+    // session will pick up our enqueued signal.
     let prefixed_key = format!("{workspace_id}:{agent}");
     if session_lookup::lookup_any(&prefixed_key).is_some() {
         return Err("session already live for this workspace".into());
@@ -219,7 +206,7 @@ fn lookup_project_path(workspace_id: &str) -> Option<String> {
     .ok()
 }
 
-/// Turn a `LaunchProfile` + project root into a `SpawnAgentSessionRequest`.
+/// Turn a `LaunchProfile` + project root into a `SpawnWorkspaceSessionRequest`.
 /// Applies defaults for every field the profile leaves unset
 /// (matching `POST /cli/sessions/spawn`'s defaults for consistency
 /// with the explicit-spawn path).
@@ -227,13 +214,13 @@ fn launch_request_for(
     agent: &str,
     project_path: &str,
     profile: &LaunchProfile,
-) -> SpawnAgentSessionRequest {
+) -> SpawnWorkspaceSessionRequest {
     let project_root = std::path::Path::new(project_path);
     let cwd = resolve_cwd(project_root, profile.cwd.as_deref())
         .to_string_lossy()
         .into_owned();
 
-    SpawnAgentSessionRequest {
+    SpawnWorkspaceSessionRequest {
         agent_name: agent.to_string(),
         cwd,
         command: profile.command.clone(),
