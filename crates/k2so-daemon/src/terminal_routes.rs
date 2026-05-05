@@ -309,8 +309,20 @@ fn spawn_terminal_impl(
         agent_param
     };
 
+    // Resolve project_id so the canonical-key idempotency applies
+    // when the caller is a workspace-agent spawn (agent_name matches
+    // the workspace's primary agent). For ad-hoc terminals (Cmd+T,
+    // tab-* synthetic names), the lookup still works — there's just
+    // never a conflicting prior session under the synthesized key.
+    let project_id = {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        k2so_core::agents::resolve_project_id(&conn, &cwd)
+            .or_else(|| k2so_core::agents::resolve_project_id(&conn, project_path))
+    };
     let outcome = match spawn_agent_session_v2_blocking(SpawnWorkspaceSessionRequest {
         agent_name: agent_name.clone(),
+        project_id,
         cwd: cwd.clone(),
         command: command.clone(),
         args: None,

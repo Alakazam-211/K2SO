@@ -79,8 +79,14 @@ pub fn spawn_wake_via_session_stream(
         pinned_session_id.clone(),
         wake_prompt.to_string(),
     ];
+    let project_id = {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        k2so_core::agents::resolve_project_id(&conn, project_path)
+    };
     let outcome = spawn_agent_session_v2_blocking(SpawnWorkspaceSessionRequest {
         agent_name: agent_name.to_string(),
+        project_id: project_id.clone(),
         cwd: project_path.to_string(),
         command: Some("claude".to_string()),
         args: Some(args),
@@ -177,8 +183,14 @@ pub fn handle_agents_launch(
     let cwd = str_field(&launch_info, "cwd", project_path).to_string();
     let args = str_array(&launch_info, "args");
 
+    let project_id = {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        k2so_core::agents::resolve_project_id(&conn, project_path)
+    };
     let outcome = match spawn_agent_session_v2_blocking(SpawnWorkspaceSessionRequest {
         agent_name: agent.clone(),
+        project_id,
         cwd: cwd.clone(),
         command: Some(command.clone()),
         args: if args.is_empty() { None } else { Some(args) },
@@ -261,8 +273,14 @@ pub fn handle_agents_delegate(
     let agent_name = str_field(&launch_info, "agentName", &target).to_string();
     let args = str_array(&launch_info, "args");
 
+    // Delegated agents run in worktree subdirs, not the parent
+    // workspace. The delegated PTY isn't bound to the parent's
+    // canonical-agent slot — it has its own identity. project_id
+    // intentionally None so the registration uses the worktree-
+    // unique agent_name as the slot key.
     let outcome = match spawn_agent_session_v2_blocking(SpawnWorkspaceSessionRequest {
         agent_name: agent_name.clone(),
+        project_id: None,
         cwd: cwd.clone(),
         command: Some(command.clone()),
         args: if args.is_empty() { None } else { Some(args) },

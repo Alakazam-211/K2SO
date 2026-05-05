@@ -326,7 +326,7 @@ fn current_dims(session: &DaemonPtySession) -> (u16, u16) {
 /// doesn't keep the Arc alive past the last legitimate holder. If
 /// every other holder drops first, `Weak::upgrade()` returns None
 /// and we exit silently.
-fn spawn_child_exit_observer(agent_name: String, session: std::sync::Arc<DaemonPtySession>) {
+pub fn spawn_child_exit_observer(agent_name: String, session: std::sync::Arc<DaemonPtySession>) {
     use k2so_core::terminal::AlacEvent;
     let weak = std::sync::Arc::downgrade(&session);
     drop(session);

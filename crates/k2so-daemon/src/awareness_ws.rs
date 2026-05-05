@@ -96,8 +96,12 @@ pub async fn handle_sessions_spawn(body: &[u8]) -> HandlerResult {
         };
     }
 
+    // Legacy Kessel-T0 path — explicit user opt-in via /cli/sessions/spawn.
+    // No project_id (the legacy session_map keys on bare agent_name and
+    // doesn't participate in workspace canonicalization).
     let outcome = match spawn_agent_session(SpawnWorkspaceSessionRequest {
         agent_name: req.agent_name,
+        project_id: None,
         cwd: req.cwd,
         command: req.command,
         args: req.args,

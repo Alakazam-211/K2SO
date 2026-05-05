@@ -49,12 +49,26 @@ use crate::v2_session_map;
 
 /// Input shape for a spawn. Shared by the HTTP handler
 /// (`handle_sessions_spawn`) and the scheduler-wake path
-/// (`DaemonWakeProvider`). Every field mirrors the `SpawnConfig`
-/// portable-pty layer expects, with defaults for fields callers
-/// might not care about.
+/// (`DaemonWakeProvider`).
+///
+/// 0.37.0 canonicalization: every spawn carries `project_id` so the
+/// v2 spawn helper can register under the unique `<project_id>:<agent>`
+/// key. Pre-0.37.0, callers passed bare `agent_name` and registered
+/// under the bare key — `agents launch` and `--wake`'s auto-launch
+/// path then ended up writing to different slots in the same map
+/// (bare vs prefixed) and accumulating duplicate sessions per
+/// workspace. With `project_id` mandatory, both paths converge on
+/// the same key and the canonical-session invariant holds.
+///
+/// `project_id` is `Option<String>` only for the legacy
+/// Kessel-T0 spawn path (`POST /cli/sessions/spawn`), which doesn't
+/// have workspace context by design — that path stays on bare-name
+/// keying in the legacy `session_map`. v2 callers MUST set
+/// `project_id` or the function returns an error.
 #[derive(Debug, Clone)]
 pub struct SpawnWorkspaceSessionRequest {
     pub agent_name: String,
+    pub project_id: Option<String>,
     pub cwd: String,
     pub command: Option<String>,
     pub args: Option<Vec<String>>,
@@ -69,11 +83,19 @@ pub struct SpawnWorkspaceSessionRequest {
 /// were drained on boot. The owning `Arc` lives in whichever map
 /// (`session_map` for legacy, `v2_session_map` for v2) registered
 /// the session.
+///
+/// `reused = true` when the v2 spawn helper found an existing
+/// session under the canonical `<project_id>:<agent>` key and
+/// returned it instead of spawning a duplicate (idempotent
+/// `agents launch`). When `reused` is true, `pending_drained` is
+/// 0 (the session was already alive; any pending-live signals
+/// were drained on its original spawn).
 #[derive(Clone, Debug)]
 pub struct SpawnWorkspaceSessionOutcome {
     pub session_id: SessionId,
     pub agent_name: String,
     pub pending_drained: usize,
+    pub reused: bool,
 }
 
 /// Execute the shared spawn flow. Returns the new session's id +
@@ -143,6 +165,7 @@ pub async fn spawn_agent_session(
         session_id,
         agent_name: req.agent_name,
         pending_drained: pending_count,
+        reused: false,
     })
 }
 
@@ -151,10 +174,24 @@ pub async fn spawn_agent_session(
 /// and returns the same `SpawnWorkspaceSessionOutcome`, but the session
 /// it produces is a `DaemonPtySession` (registered in
 /// `v2_session_map`) instead of a `SessionStreamSession` (legacy
-/// `session_map`). End-state target after A9: every system-driven
-/// spawn flows through this. Only the explicit Kessel-T0 endpoint
+/// `session_map`). After A9, every system-driven spawn flows through
+/// this. Only the explicit Kessel-T0 endpoint
 /// (`POST /cli/sessions/spawn` → `awareness_ws::handle_sessions_spawn`)
 /// stays on the legacy variant.
+///
+/// 0.37.0 canonicalization: when `req.project_id` is set, the session
+/// registers under the prefixed key `<project_id>:<agent_name>` and
+/// the function performs an **idempotency check** first — if a session
+/// is already registered under that key and its child PID is still
+/// alive, return the existing session_id with `reused=true` instead
+/// of spawning a duplicate. This is what makes `agents launch`
+/// idempotent end-to-end and closes Baden's "session A vs B
+/// accumulating" bug class.
+///
+/// When `req.project_id` is None (legacy bare-name callers, vanishingly
+/// rare post-0.37.0), registration falls back to the bare agent_name
+/// — the function works but the canonicalization invariant doesn't
+/// apply. Production daemon callers always set project_id.
 ///
 /// Synchronous: alacritty's IO thread is started in the background
 /// by `DaemonPtySession::spawn`; this fn returns as soon as the PTY
@@ -166,6 +203,35 @@ pub fn spawn_agent_session_v2_blocking(
 ) -> Result<SpawnWorkspaceSessionOutcome, String> {
     if req.agent_name.is_empty() {
         return Err("agent_name required".into());
+    }
+
+    // Canonical key construction — every workspace+agent has exactly
+    // one slot in v2_session_map. project_id-less callers register
+    // under the bare name (legacy fallback).
+    let canonical_key = match req.project_id.as_deref() {
+        Some(pid) if !pid.is_empty() => format!("{pid}:{}", req.agent_name),
+        _ => req.agent_name.clone(),
+    };
+
+    // Idempotency: if a session is already registered under the
+    // canonical key, return it. The map is kept authoritative by the
+    // child-exit observer (`v2_spawn::spawn_child_exit_observer`),
+    // which fires `v2_session_map::unregister` on AlacEvent::ChildExit.
+    // Modulo a tiny race window between exit and observer firing,
+    // map presence == liveness. The race-window stale case is
+    // handled by `agents reap` (operator escape hatch).
+    if let Some(existing) = v2_session_map::lookup_by_agent_name(&canonical_key) {
+        log_debug!(
+            "[daemon/spawn] v2 reuse session={} canonical_key={}",
+            existing.session_id,
+            canonical_key,
+        );
+        return Ok(SpawnWorkspaceSessionOutcome {
+            session_id: existing.session_id,
+            agent_name: req.agent_name,
+            pending_drained: 0,
+            reused: true,
+        });
     }
 
     // Convert the request shape into DaemonPtyConfig. v2 takes its
@@ -186,14 +252,20 @@ pub fn spawn_agent_session_v2_blocking(
 
     let session = DaemonPtySession::spawn(cfg)
         .map_err(|e| format!("v2 spawn failed: {e}"))?;
-    v2_session_map::register(req.agent_name.clone(), session.clone());
+    v2_session_map::register(canonical_key.clone(), session.clone());
 
-    // Drain any pending-live signals queued for this agent so they
-    // become input to the fresh session — same contract as the
-    // legacy spawn drain. Without this, signals enqueued by
+    // Wire the child-exit observer so the v2_session_map slot
+    // releases when the child PID dies — keeps the idempotency
+    // check above accurate without a separate liveness probe.
+    crate::v2_spawn::spawn_child_exit_observer(canonical_key.clone(), session.clone());
+
+    // Drain any pending-live signals queued for this canonical key
+    // so they become input to the fresh session. Awareness bus
+    // enqueues under the prefixed key (post-0.36.15); this drain
+    // matches that. Without this, signals enqueued by
     // `DaemonWakeProvider::wake` while the agent was offline get
     // silently dropped on v2 boot.
-    let pending = pending_live::drain_for_agent(&req.agent_name);
+    let pending = pending_live::drain_for_agent(&canonical_key);
     let pending_drained = pending.len();
     for signal in pending {
         let bytes = signal_format::inject_bytes(&signal);
@@ -201,9 +273,9 @@ pub fn spawn_agent_session_v2_blocking(
     }
 
     log_debug!(
-        "[daemon/spawn] v2 session={} agent={} pending_drained={}",
+        "[daemon/spawn] v2 session={} canonical_key={} pending_drained={}",
         session_id,
-        req.agent_name,
+        canonical_key,
         pending_drained,
     );
 
@@ -211,6 +283,7 @@ pub fn spawn_agent_session_v2_blocking(
         session_id,
         agent_name: req.agent_name,
         pending_drained,
+        reused: false,
     })
 }
 

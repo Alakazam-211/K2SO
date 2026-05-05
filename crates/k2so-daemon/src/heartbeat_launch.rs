@@ -322,9 +322,11 @@ fn run_resume_and_fire(
         prompt,
     ];
 
+    // project_id is already a function parameter; no need to look it up.
     let outcome = crate::spawn::spawn_agent_session_v2_blocking(
         crate::spawn::SpawnWorkspaceSessionRequest {
             agent_name: agent_name.to_string(),
+            project_id: Some(project_id.to_string()),
             cwd: project_path.to_string(),
             command: Some("claude".to_string()),
             args: Some(args),

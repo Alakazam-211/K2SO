@@ -154,6 +154,13 @@ fn try_auto_launch(agent: &str, signal: &AgentSignal) -> Result<(), String> {
     // Single-flight: if a concurrent path already registered THIS
     // workspace's session, skip. The pending-live drain on that
     // session will pick up our enqueued signal.
+    //
+    // 0.37.0: the spawn helper itself now performs the
+    // canonical-key idempotency check internally — passing the bare
+    // `agent` + `project_id: workspace_id` is sufficient. The early
+    // lookup here stays as a logged-skip optimization (avoids the
+    // launch profile parse + spawn-helper call when the answer is
+    // obviously "already live").
     let prefixed_key = format!("{workspace_id}:{agent}");
     if session_lookup::lookup_any(&prefixed_key).is_some() {
         return Err("session already live for this workspace".into());
@@ -171,15 +178,11 @@ fn try_auto_launch(agent: &str, signal: &AgentSignal) -> Result<(), String> {
         Err(e) => return Err(format!("launch profile parse failed: {e}")),
     };
 
-    // Spawn under the project-namespaced key so the next
-    // workspace-scoped inject (egress::try_inject's prefixed lookup)
-    // finds it. v2_session_map::register also mirrors to the bare
-    // name for legacy bare-keyed callers (heartbeat-surfaced
-    // sessions, k2so msg without a workspace context).
-    let req = launch_request_for(&prefixed_key, &project_path, &profile);
-    // Heartbeat-driven headless wake produces v2 sessions per A9.
-    // The Tauri-open path goes through `BackgroundTerminalSpawner`
-    // → v2_spawn (also v2 since A8). Both wake paths now converge.
+    // Pass the BARE agent_name + workspace_id; the spawn helper
+    // builds the canonical key. Both this auto-launch path and the
+    // /cli/agents/launch path now feed the helper the same shape,
+    // so they converge on a single slot per (workspace, agent).
+    let req = launch_request_for(agent, workspace_id, &project_path, &profile);
     let outcome = spawn_agent_session_v2_blocking(req)
         .map_err(|e| format!("spawn failed: {e}"))?;
 
@@ -212,6 +215,7 @@ fn lookup_project_path(workspace_id: &str) -> Option<String> {
 /// with the explicit-spawn path).
 fn launch_request_for(
     agent: &str,
+    workspace_id: &str,
     project_path: &str,
     profile: &LaunchProfile,
 ) -> SpawnWorkspaceSessionRequest {
@@ -222,6 +226,7 @@ fn launch_request_for(
 
     SpawnWorkspaceSessionRequest {
         agent_name: agent.to_string(),
+        project_id: Some(workspace_id.to_string()),
         cwd,
         command: profile.command.clone(),
         args: profile.args.clone(),
