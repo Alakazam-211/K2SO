@@ -1382,16 +1382,38 @@ pub fn k2so_agents_regenerate_workspace_skill(
 
     // Scaffold .k2so/ structure if it doesn't exist
     let k2so_dir = PathBuf::from(&project_path).join(".k2so");
-    let _ = fs::create_dir_all(k2so_dir.join("agents"));
     let _ = fs::create_dir_all(k2so_dir.join("work").join("inbox"));
     let _ = fs::create_dir_all(k2so_dir.join("prds"));
 
-    // Auto-create manager agent if it doesn't exist
-    // Check for old "pod-leader" and "coordinator" directory names as fallback
+    // 0.37.0 unification check: if the workspace has been migrated to
+    // the single-agent layout (`.k2so/agent/AGENT.md` exists OR the
+    // unification sentinel is stamped), the legacy auto-scaffold of
+    // `.k2so/agents/manager/` and `.k2so/agents/k2so-agent/` is a
+    // regression — it'd repopulate the directory tree the migration
+    // just retired and re-create files at paths the runtime no longer
+    // reads. Skip the legacy scaffold entirely when migrated.
+    let unification_sentinel = k2so_dir.join(".unification-0.37.0-done");
+    let unified_agent_dir = k2so_dir.join("agent");
+    let post_unification = unification_sentinel.exists() || unified_agent_dir.exists();
+    if post_unification {
+        // Don't recreate `.k2so/agents/` either — the post-migration
+        // layout uses `.k2so/agent/` (singular) and
+        // `.k2so/agent-templates/<n>/`. Skip straight to PROJECT.md +
+        // workspace SKILL writes below.
+    } else {
+        let _ = fs::create_dir_all(k2so_dir.join("agents"));
+    }
+
+    // Auto-create manager agent if it doesn't exist (pre-unification only).
+    // Check for old "pod-leader" and "coordinator" directory names as fallback.
     let manager_dir = k2so_dir.join("agents").join("manager");
     let legacy_coordinator_dir = k2so_dir.join("agents").join("coordinator");
     let legacy_pod_leader_dir = k2so_dir.join("agents").join("pod-leader");
-    if !manager_dir.exists() && !legacy_coordinator_dir.exists() && !legacy_pod_leader_dir.exists() {
+    if !post_unification
+        && !manager_dir.exists()
+        && !legacy_coordinator_dir.exists()
+        && !legacy_pod_leader_dir.exists()
+    {
         let _ = fs::create_dir_all(manager_dir.join("work").join("inbox"));
         let _ = fs::create_dir_all(manager_dir.join("work").join("active"));
         let _ = fs::create_dir_all(manager_dir.join("work").join("done"));
@@ -1410,9 +1432,11 @@ pub fn k2so_agents_regenerate_workspace_skill(
         write_agent_skill_file(&project_path, "manager", "manager");
     }
 
-    // Auto-create K2SO agent if it doesn't exist (for agent mode)
+    // Auto-create K2SO agent if it doesn't exist (pre-unification only).
+    // Post-0.37.0 the workspace agent lives at .k2so/agent/, not
+    // .k2so/agents/k2so-agent/.
     let k2so_agent_dir = k2so_dir.join("agents").join("k2so-agent");
-    if !k2so_agent_dir.exists() {
+    if !post_unification && !k2so_agent_dir.exists() {
         let _ = fs::create_dir_all(k2so_agent_dir.join("work").join("inbox"));
         let _ = fs::create_dir_all(k2so_agent_dir.join("work").join("active"));
         let _ = fs::create_dir_all(k2so_agent_dir.join("work").join("done"));

@@ -36,7 +36,7 @@ use crate::agents::session::simple_date;
 use crate::agents::skill_writer::{generate_default_agent_body, write_agent_skill_file};
 use crate::agents::wake::{agent_wakeup_path, wakeup_template_for};
 use crate::agents::work_item::{atomic_write, read_work_item, WorkItem};
-use crate::agents::{agent_dir, agents_dir, parse_frontmatter, resolve_project_id};
+use crate::agents::{agent_dir, agent_type_for, agents_dir, parse_frontmatter, resolve_project_id};
 use crate::db::schema::WorkspaceSession;
 use crate::fs_atomic::{atomic_write_str, log_if_err};
 
@@ -199,6 +199,32 @@ pub fn create(
 ) -> Result<K2soAgentInfo, String> {
     if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
         return Err("Agent name must be alphanumeric (hyphens and underscores allowed)".to_string());
+    }
+
+    // 0.37.0 unification awareness: if the workspace has been migrated
+    // and the unified primary at .k2so/agent/ already exists, "creating"
+    // the workspace's named primary is a no-op success — the persona
+    // is already there. The pre-0.37.0 contract was "create the agent's
+    // dir + scaffold AGENT.md if missing"; post-migration the dir is
+    // always present (the migration created it). Frontend "Manage
+    // Persona" buttons that reflexively call `create` to ensure the
+    // agent exists used to error here ("Agent already exists"); now
+    // they get back the existing K2soAgentInfo and proceed to the
+    // edit flow.
+    let unified_primary = std::path::PathBuf::from(&project_path)
+        .join(".k2so")
+        .join("agent");
+    if unified_primary.join("AGENT.md").exists() {
+        let existing_type = agent_type_for(&project_path, &name);
+        return Ok(K2soAgentInfo {
+            name,
+            role,
+            inbox_count: 0,
+            active_count: 0,
+            done_count: 0,
+            is_manager: existing_type == "manager" || existing_type == "coordinator",
+            agent_type: existing_type,
+        });
     }
 
     let dir = agent_dir(&project_path, &name);

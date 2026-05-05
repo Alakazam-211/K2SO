@@ -1240,6 +1240,78 @@ fn run_workspace_unification_sweep() {
     log_debug!(
         "[daemon/unification] swept {total} workspace(s): migrated={migrated} already_done={already_done} errors={errors}",
     );
+
+    // Rewrite stale `wakeup_path` rows in workspace_heartbeats. Pre-
+    // 0.37.0 every heartbeat row pointed at
+    // `.k2so/agents/<primary>/heartbeats/<sched>/WAKEUP.md`; the
+    // unification migration moved those files to
+    // `.k2so/heartbeats/<sched>/WAKEUP.md` but doesn't touch the DB
+    // (the migration code is filesystem-only, kept testable without
+    // a DB). Run a single-pass rewrite here so heartbeat fires after
+    // first 0.37.0 boot find their wakeup files at the new location.
+    rewrite_legacy_heartbeat_wakeup_paths();
+}
+
+/// Rewrite any `workspace_heartbeats.wakeup_path` rows whose paths
+/// reference the legacy `.k2so/agents/<primary>/heartbeats/` layout.
+/// After the unification migration, those files live under
+/// `.k2so/heartbeats/<sched>/`. This sweep walks every row, detects
+/// the legacy pattern, and rewrites in place. Idempotent — rows
+/// already pointing at `.k2so/heartbeats/...` are untouched.
+fn rewrite_legacy_heartbeat_wakeup_paths() {
+    let db = k2so_core::db::shared();
+    let conn = db.lock();
+    let rows: Vec<(String, String, String)> = match conn.prepare(
+        "SELECT id, name, wakeup_path FROM workspace_heartbeats \
+         WHERE wakeup_path LIKE '%/.k2so/agents/%/heartbeats/%' \
+            OR wakeup_path LIKE '.k2so/agents/%/heartbeats/%'",
+    ) {
+        Ok(mut stmt) => stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            })
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default(),
+        Err(e) => {
+            log_debug!("[daemon/unification] WARN: scan stale wakeup_path: {e}");
+            return;
+        }
+    };
+
+    if rows.is_empty() {
+        return;
+    }
+
+    let mut rewritten = 0usize;
+    for (id, name, old) in &rows {
+        // Pattern: `[<root>/].k2so/agents/<primary>/heartbeats/<sched>/...`
+        // becomes `[<root>/].k2so/heartbeats/<sched>/...`.
+        let needle = ".k2so/agents/";
+        let Some(start) = old.find(needle) else { continue };
+        let after_agents = &old[start + needle.len()..];
+        let Some(slash) = after_agents.find('/') else { continue };
+        let rest = &after_agents[slash..]; // /heartbeats/<sched>/...
+        if !rest.starts_with("/heartbeats/") {
+            continue;
+        }
+        let prefix = &old[..start]; // everything before .k2so/agents/
+        let new_path = format!("{prefix}.k2so{rest}");
+        match conn.execute(
+            "UPDATE workspace_heartbeats SET wakeup_path = ?1 WHERE id = ?2",
+            rusqlite::params![new_path, id],
+        ) {
+            Ok(_) => {
+                log_debug!(
+                    "[daemon/unification] rewrote wakeup_path for hb={name}: {old} → {new_path}"
+                );
+                rewritten += 1;
+            }
+            Err(e) => log_debug!("[daemon/unification] WARN: rewrite wakeup_path for hb={name}: {e}"),
+        }
+    }
+    log_debug!(
+        "[daemon/unification] rewrote {rewritten} heartbeat wakeup_path row(s) to post-migration layout"
+    );
 }
 
 /// Write `contents` to `path` with permissions 0600 so other users on the
