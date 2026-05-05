@@ -120,8 +120,14 @@ async fn wake_auto_launches_agent_with_launch_profile() {
         "---\nname: auto-target\nlaunch:\n  command: cat\n  cwd: /tmp\n---\n",
     );
 
+    // 0.37.0 canonicalization: auto-launched sessions register under
+    // `<workspace_id>:<agent_name>`. Lookups, queue keys, and
+    // teardown all use the canonical form. Bare-name lookup
+    // ("auto-target") is intentionally unreachable now.
+    let canonical_key = format!("{workspace}:auto-target");
+
     // Sanity: neither map has the agent yet.
-    assert!(session_lookup::lookup_any("auto-target").is_none());
+    assert!(session_lookup::lookup_any(&canonical_key).is_none());
 
     // Send a Live signal. egress sees target=offline → calls wake.
     // Our G4 wake enqueues + auto-launches via AGENT.md.
@@ -135,15 +141,16 @@ async fn wake_auto_launches_agent_with_launch_profile() {
     );
 
     // G4 outcome: post-A9 wake auto-launches into v2_session_map
-    // (the unified lookup_any handles both legacy + v2).
+    // under the canonical key.
     assert!(
-        session_lookup::lookup_any("auto-target").is_some(),
-        "auto-target should have been auto-launched by wake"
+        session_lookup::lookup_any(&canonical_key).is_some(),
+        "{canonical_key} should have been auto-launched by wake"
     );
 
     // The pending queue was drained as part of the spawn flow —
-    // the signal file should not linger on disk.
-    let agent_queue = queue_root.join("auto-target");
+    // the signal file should not linger on disk. Queue keys on the
+    // canonical name, matching the spawn helper's drain target.
+    let agent_queue = queue_root.join(&canonical_key);
     let remaining: Vec<_> = if agent_queue.exists() {
         std::fs::read_dir(&agent_queue)
             .unwrap()
@@ -162,11 +169,11 @@ async fn wake_auto_launches_agent_with_launch_profile() {
     // sessions teardown via unregister; legacy needs an explicit
     // kill.
     tokio::time::sleep(Duration::from_millis(50)).await;
-    if let Some(legacy) = session_map::lookup("auto-target") {
+    if let Some(legacy) = session_map::lookup(&canonical_key) {
         let _ = legacy.kill();
-        session_map::unregister("auto-target");
+        session_map::unregister(&canonical_key);
     } else {
-        v2_session_map::unregister("auto-target");
+        v2_session_map::unregister(&canonical_key);
     }
 }
 

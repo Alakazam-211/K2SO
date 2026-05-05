@@ -195,7 +195,7 @@ async fn launch_fresh_agent_registers_in_session_map() {
     // Launch doesn't need a git repo — it only resolves
     // project_id + reads AGENT.md. Skipping git_init keeps this
     // test fast.
-    seed_project(&proj_str);
+    let project_id = seed_project(&proj_str);
     write_agent_md(&proj, "alpha");
 
     // Override command to `true` so the child exits immediately
@@ -213,11 +213,20 @@ async fn launch_fresh_agent_registers_in_session_map() {
     let tid = v["terminalId"].as_str().expect("terminalId present");
     assert!(!tid.is_empty());
 
-    // Check that the session is findable by agent name across
-    // both maps. Post-A9, /cli/agents/launch produces v2 sessions.
+    // Check that the session is findable under the canonical
+    // workspace-namespaced key. 0.37.0 canonicalization registers
+    // every workspace-agent spawn under `<project_id>:<agent_name>`
+    // so `agents launch` and `--wake`'s auto-launch path converge
+    // on the same slot. Bare-name lookup ("alpha") deliberately
+    // returns None — there is no bare-keyed session anymore.
+    let canonical_key = format!("{project_id}:alpha");
     assert!(
-        session_lookup::lookup_any("alpha").is_some(),
-        "alpha missing from session maps"
+        session_lookup::lookup_any(&canonical_key).is_some(),
+        "{canonical_key} missing from session maps"
+    );
+    assert!(
+        session_lookup::lookup_any("alpha").is_none(),
+        "post-canonicalization the bare key must NOT be registered"
     );
 
     drain_session_map();

@@ -204,7 +204,7 @@ async fn triage_with_flag_on_spawns_via_session_stream() {
 
     let proj = tmp_project_dir("on");
     let proj_str = proj.to_string_lossy().into_owned();
-    seed_project(&proj_str, "on");
+    let project_id = seed_project(&proj_str, "on");
     // Agent type `k2so` has a shipped wakeup template so
     // `compose_wake_prompt_for_agent` returns Some without a
     // separate WAKEUP.md. We still scaffold one above.
@@ -213,13 +213,14 @@ async fn triage_with_flag_on_spawns_via_session_stream() {
 
     let _body = triage::handle_scheduler_fire(&proj_str);
 
-    // Prove H6's target behavior: regardless of whether the
-    // scheduler picked the agent, IF it did spawn, the session is
-    // daemon-owned. Post-A9 the spawn helper produces v2 sessions
-    // so the agent lands in v2_session_map; lookup_any handles both.
+    // 0.37.0 canonicalization: scheduler-driven spawns (post-A9 →
+    // v2 path → spawn_agent_session_v2_blocking) register under
+    // `<project_id>:<agent_name>`. lookup_any walks both maps
+    // without touching the bare-key slot.
+    let canonical_key = format!("{project_id}:runner");
     assert!(
-        session_lookup::lookup_any("runner").is_some(),
-        "expected 'runner' in a daemon session map under flag-on scheduler fire"
+        session_lookup::lookup_any(&canonical_key).is_some(),
+        "expected '{canonical_key}' in a daemon session map under flag-on scheduler fire"
     );
 
     drain_session_map();

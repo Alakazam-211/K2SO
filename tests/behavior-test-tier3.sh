@@ -1150,12 +1150,13 @@ for cmd in k2so_heartbeat_add k2so_heartbeat_list k2so_heartbeat_archive k2so_he
     fi
 done
 
-# Hook handler must sync AgentSession.status on every canonical event so the
-# scheduler's is_agent_locked check reflects reality. Without this the row
-# stays status='running' forever after the first wake and every subsequent
-# heartbeat skips the agent.
-if grep -q 'AgentSession::get_by_terminal_id' "$HOOKS_SRC"; then
-    pass "wake reliability: hook handler resolves pane_id → AgentSession row"
+# Hook handler must sync workspace session status on every canonical event
+# so the scheduler's is_agent_locked check reflects reality. Without this
+# the row stays status='running' forever after the first wake and every
+# subsequent heartbeat skips the agent. (0.37.0 renamed AgentSession to
+# WorkspaceSession; the lookup function name is unchanged.)
+if grep -q 'WorkspaceSession::get_by_terminal_id' "$HOOKS_SRC"; then
+    pass "wake reliability: hook handler resolves pane_id → WorkspaceSession row"
 else
     fail "wake reliability: terminal_id lookup missing" "Expected get_by_terminal_id in hook handler"
 fi
@@ -2014,11 +2015,13 @@ else
     fail "phase-7f: RemoveWorkspaceDialog missing" "Expected $REMOVE_DIALOG"
 fi
 
-# AddWorkspace: "Why?" expander explaining multi-LLM context sharing
-if grep -q 'Why does K2SO do this' "$ADD_DIALOG" && grep -q 'different file' "$ADD_DIALOG"; then
-    pass "phase-7f: AddWorkspace dialog explains multi-LLM context sharing"
+# AddWorkspace: file-plan expander shows what K2SO creates / archives.
+# Replaced the 0.35.x "Why does K2SO do this" copy when 0.36.10's
+# three-option onboarding flow shipped.
+if grep -q 'Show file plan' "$ADD_DIALOG" && grep -q 'showWhy' "$ADD_DIALOG"; then
+    pass "phase-7f: AddWorkspace dialog exposes file-plan toggle"
 else
-    fail "phase-7f: Why expander missing" "Expected 'Why does K2SO do this' + multi-LLM explanation"
+    fail "phase-7f: file-plan expander missing" "Expected 'Show file plan' toggle + showWhy state"
 fi
 
 # RemoveWorkspace: three mode options visible

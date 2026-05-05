@@ -43,10 +43,15 @@ async fn spawn_via_http_then_signal_reaches_target_pty() {
     ensure_project("k2so-ws");
     providers::register_all();
 
-    // Call the daemon's spawn handler directly (same code path
-    // that HTTP would exercise, minus the TCP transport).
+    // 0.37.0: post-canonicalization, awareness bus lookups for
+    // workspace-addressed signals key on `<workspace>:<agent>`. The
+    // legacy `/cli/sessions/spawn` (Kessel-T0) path doesn't auto-
+    // canonicalize — it registers verbatim under whatever
+    // `agent_name` is passed. So the test passes the canonical key
+    // form directly to keep the e2e signal-to-PTY path coherent.
+    let canonical_key = "k2so-ws:bar";
     let spawn_body = serde_json::json!({
-        "agent_name": "bar",
+        "agent_name": canonical_key,
         "cwd": "/tmp",
         "command": "cat",
         "args": null,
@@ -63,12 +68,12 @@ async fn spawn_via_http_then_signal_reaches_target_pty() {
         .get("agentName")
         .and_then(|v| v.as_str())
         .expect("agentName in response");
-    assert_eq!(agent_name, "bar");
+    assert_eq!(agent_name, canonical_key);
 
-    // session_map now has "bar".
+    // session_map now has the canonical key.
     assert!(
-        session_map::lookup("bar").is_some(),
-        "spawn should have registered bar in session_map"
+        session_map::lookup(canonical_key).is_some(),
+        "spawn should have registered {canonical_key} in session_map"
     );
 
     // Reader thread needs a moment to attach.
@@ -117,7 +122,7 @@ async fn spawn_via_http_then_signal_reaches_target_pty() {
     assert_eq!(decoded.id, signal.id);
 
     // Cleanup.
-    let _ = session_map::unregister("bar");
+    let _ = session_map::unregister(canonical_key);
 }
 
 #[tokio::test(flavor = "current_thread")]

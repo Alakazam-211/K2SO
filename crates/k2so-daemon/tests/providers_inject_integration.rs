@@ -78,9 +78,15 @@ async fn daemon_inject_provider_writes_bytes_to_live_session() {
     })
     .expect("spawn bar session");
 
-    // Register bar in the daemon's agent map.
+    // 0.37.0 canonicalization: every workspace-agent session is
+    // keyed under `<workspace_id>:<agent_name>`. Egress's prefixed
+    // lookup (post-0.36.15 bridge retirement) requires this — the
+    // bare-name fallback is gone. Register + tag under the
+    // canonical key so the resolution path actually finds the
+    // session.
+    let canonical_key = "k2so-ws:bar";
     let bar_arc = Arc::new(bar_session);
-    session_map::register("bar", Arc::clone(&bar_arc));
+    session_map::register(canonical_key, Arc::clone(&bar_arc));
 
     // Small delay so the reader thread is attached before we write.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -112,10 +118,11 @@ async fn daemon_inject_provider_writes_bytes_to_live_session() {
     let _ = std::fs::create_dir_all(&inbox_root);
 
     // Crucial: the k2so-core liveness check walks the core's
-    // session::registry for sessions with matching agent_name. Tag
-    // bar's entry so the check finds it.
+    // session::registry for sessions with matching agent_name.
+    // Post-0.37.0 the registry expects the canonical key form so
+    // the cross-map lookup matches.
     if let Some(entry) = k2so_core::session::registry::lookup(&bar_id) {
-        entry.set_agent_name("bar");
+        entry.set_agent_name(canonical_key);
     }
 
     let report = egress::deliver(&signal, &inbox_root);
@@ -132,7 +139,7 @@ async fn daemon_inject_provider_writes_bytes_to_live_session() {
     assert!(report.activity_feed_row_id > 0);
 
     // Cleanup — unregister + kill session.
-    session_map::unregister("bar");
+    session_map::unregister(canonical_key);
     bar_arc.kill().ok();
 }
 
