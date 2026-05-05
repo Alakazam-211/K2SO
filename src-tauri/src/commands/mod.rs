@@ -13,7 +13,7 @@ pub mod assistant;
 pub mod chat_history;
 pub mod timer;
 pub mod updater;
-pub mod workspace_sessions;
+pub mod workspace_layouts;
 pub mod claude_auth;
 pub mod k2so_agents;
 pub mod review_checklist;

@@ -123,7 +123,7 @@ pub struct AppSettings {
     pub left_panel_tabs: Vec<String>,
     #[serde(default = "default_right_panel_tabs")]
     pub right_panel_tabs: Vec<String>,
-    /// Deprecated: workspace layouts now stored in SQLite workspace_sessions table.
+    /// Deprecated: workspace layouts now stored in SQLite workspace_layouts table.
     /// Kept for deserialization compat with old settings.json files; skipped on write.
     #[serde(default, skip_serializing)]
     #[allow(dead_code)] // deserialize-only: consumed by old settings.json, never read.

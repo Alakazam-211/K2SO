@@ -264,8 +264,8 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
           tabsStore.clearBackgroundWorkspace(key)
         }
       }
-      // Delete saved sessions from DB
-      invoke('workspace_session_delete', { projectId: id, workspaceId: null }).catch((e) => console.warn('[projects] workspace_session_delete failed:', e))
+      // Delete saved layouts from DB
+      invoke('workspace_layout_delete', { projectId: id, workspaceId: null }).catch((e) => console.warn('[projects] workspace_layout_delete failed:', e))
 
       await invoke('projects_delete', { id })
 

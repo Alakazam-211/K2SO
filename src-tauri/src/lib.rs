@@ -1188,11 +1188,11 @@ pub fn run() {
             commands::updater::check_for_update,
             commands::updater::get_current_version,
             commands::updater::broadcast_sync,
-            // Workspace Sessions
-            commands::workspace_sessions::workspace_session_save,
-            commands::workspace_sessions::workspace_session_load,
-            commands::workspace_sessions::workspace_session_load_all,
-            commands::workspace_sessions::workspace_session_delete,
+            // Workspace Layouts (per-(project, workspace) pane/tab JSON; renamed from workspace_sessions in 0.37.0)
+            commands::workspace_layouts::workspace_layout_save,
+            commands::workspace_layouts::workspace_layout_load,
+            commands::workspace_layouts::workspace_layout_load_all,
+            commands::workspace_layouts::workspace_layout_delete,
             // Claude Auth
             commands::claude_auth::claude_auth_status,
             commands::claude_auth::claude_auth_refresh,
@@ -1422,7 +1422,7 @@ fn any_heartbeat_enabled() -> bool {
     count > 0
 }
 
-/// One-time migration: move workspace_layouts from settings.json → workspace_sessions SQLite table.
+/// One-time migration: move workspace_layouts from settings.json → workspace_layouts SQLite table.
 fn migrate_workspace_layouts_to_db(app: &tauri::AppHandle) {
     let settings_path = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -1471,7 +1471,7 @@ fn migrate_workspace_layouts_to_db(app: &tauri::AppHandle) {
 
         let id = key.clone();
         if conn.execute(
-            "INSERT OR IGNORE INTO workspace_sessions (id, project_id, workspace_id, layout_json, updated_at)
+            "INSERT OR IGNORE INTO workspace_layouts (id, project_id, workspace_id, layout_json, updated_at)
              VALUES (?1, ?2, ?3, ?4, unixepoch())",
             rusqlite::params![id, project_id, workspace_id, layout_json],
         ).is_ok() {

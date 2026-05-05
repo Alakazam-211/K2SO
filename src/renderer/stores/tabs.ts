@@ -2401,7 +2401,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       // instead of restoring a stale session
       const { [key]: _, ...remaining } = state.workspaceLayouts
       set({ workspaceLayouts: remaining })
-      invoke('workspace_session_delete', { projectId, workspaceId }).catch(() => {})
+      invoke('workspace_layout_delete', { projectId, workspaceId }).catch(() => {})
       return
     }
 
@@ -2409,7 +2409,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     set({ workspaceLayouts: { ...state.workspaceLayouts, [key]: layout } })
 
     // Persist to SQLite
-    invoke('workspace_session_save', {
+    invoke('workspace_layout_save', {
       projectId,
       workspaceId,
       layoutJson: JSON.stringify(layout),
@@ -2432,7 +2432,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       set({ activeWorkspaceKey: key })
 
       // Try loading from DB
-      invoke<string | null>('workspace_session_load', { projectId, workspaceId })
+      invoke<string | null>('workspace_layout_load', { projectId, workspaceId })
         .then((json) => {
           // Guard: bail if user already switched to a different workspace
           if (get().activeWorkspaceKey !== key) return
@@ -2461,7 +2461,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
   loadWorkspaceSessionsFromDb: async () => {
     try {
-      const sessions = await invoke<Array<{ projectId: string, workspaceId: string, layoutJson: string }>>('workspace_session_load_all')
+      const sessions = await invoke<Array<{ projectId: string, workspaceId: string, layoutJson: string }>>('workspace_layout_load_all')
       const layouts: Record<string, SerializedLayout> = {}
       for (const session of sessions) {
         try {
@@ -2645,7 +2645,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       // Delete saved session from DB so loadLayoutForWorkspace falls through to launchDefaultAgent
       const [projectId, workspaceId] = key.split(':')
       if (projectId && workspaceId) {
-        invoke('workspace_session_delete', { projectId, workspaceId }).catch(() => {})
+        invoke('workspace_layout_delete', { projectId, workspaceId }).catch(() => {})
       }
       return
     }
@@ -2715,7 +2715,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       const layout = state.serializeCurrentLayout()
       const [projectId, workspaceId] = activeKey.split(':')
       if (projectId && workspaceId) {
-        await invoke('workspace_session_save', {
+        await invoke('workspace_layout_save', {
           projectId,
           workspaceId,
           layoutJson: JSON.stringify(layout),
@@ -2728,7 +2728,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       const layout = serializeSnapshot(snapshot)
       const [projectId, workspaceId] = key.split(':')
       if (projectId && workspaceId) {
-        await invoke('workspace_session_save', {
+        await invoke('workspace_layout_save', {
           projectId,
           workspaceId,
           layoutJson: JSON.stringify(layout),
@@ -2781,7 +2781,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       const layout = state.serializeCurrentLayout()
       const [projectId, workspaceId] = state.activeWorkspaceKey.split(':')
       if (projectId && workspaceId) {
-        invoke('workspace_session_save', {
+        invoke('workspace_layout_save', {
           projectId,
           workspaceId,
           layoutJson: JSON.stringify(layout),
@@ -2831,7 +2831,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
     const [projectId, workspaceId] = workspaceKey.split(':')
     if (projectId && workspaceId) {
-      invoke('workspace_session_save', {
+      invoke('workspace_layout_save', {
         projectId,
         workspaceId,
         layoutJson: JSON.stringify(layout),
