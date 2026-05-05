@@ -251,6 +251,8 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
         ("0037_agent_session_active_terminal", include_str!("../../drizzle_sql/0037_agent_session_active_terminal.sql")),
         ("0038_rename_workspace_sessions_to_layouts", include_str!("../../drizzle_sql/0038_rename_workspace_sessions_to_layouts.sql")),
         ("0039_agent_sessions_to_workspace_sessions", include_str!("../../drizzle_sql/0039_agent_sessions_to_workspace_sessions.sql")),
+        ("0040_rename_agent_heartbeats", include_str!("../../drizzle_sql/0040_rename_agent_heartbeats.sql")),
+        ("0041_activity_feed_workspace_keyed", include_str!("../../drizzle_sql/0041_activity_feed_workspace_keyed.sql")),
     ];
 
     for (name, sql) in migrations {
@@ -470,7 +472,7 @@ mod tests {
         for table in [
             "projects",
             "workspace_sessions",
-            "agent_heartbeats",
+            "workspace_heartbeats",
             "agent_presets",
             "heartbeat_fires",
             "activity_feed",
@@ -708,7 +710,7 @@ mod tests {
         for table in [
             "projects",
             "workspace_sessions",
-            "agent_heartbeats",
+            "workspace_heartbeats",
             "agent_presets",
             "heartbeat_fires",
             "activity_feed",

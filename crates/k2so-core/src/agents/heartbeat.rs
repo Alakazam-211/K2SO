@@ -245,7 +245,7 @@ pub struct HeartbeatFireCandidate {
     pub wakeup_path_rel: String,
 }
 
-/// Iterate enabled `agent_heartbeats` rows for a project and return the
+/// Iterate enabled `workspace_heartbeats` rows for a project and return the
 /// subset whose schedules are due to fire now.
 ///
 /// Does NOT lock, spawn, or stamp — those are the caller's
@@ -484,7 +484,7 @@ pub fn k2so_heartbeat_rename(
         .unwrap_or_else(|_| new_wakeup.to_string_lossy().to_string());
 
     conn.execute(
-        "UPDATE agent_heartbeats SET name = ?1, wakeup_path = ?2 \
+        "UPDATE workspace_heartbeats SET name = ?1, wakeup_path = ?2 \
          WHERE project_id = ?3 AND name = ?4",
         rusqlite::params![new_name, workspace_relative, project_id, old_name],
     )

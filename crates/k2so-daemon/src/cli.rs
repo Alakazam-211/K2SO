@@ -663,7 +663,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                 };
 
                 let entries = match agent {
-                    Some(agent_name) => k2so_core::db::schema::ActivityFeedEntry::list_by_agent(
+                    Some(agent_name) => k2so_core::db::schema::ActivityFeedEntry::list_by_actor(
                         &conn, &project_id, &agent_name, limit,
                     ),
                     None => k2so_core::db::schema::ActivityFeedEntry::list_by_project(
@@ -678,10 +678,10 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                             .map(|e| {
                                 serde_json::json!({
                                     "id": e.id,
-                                    "agent": e.agent_name,
+                                    "actor": e.actor,
                                     "type": e.event_type,
-                                    "from": e.from_agent,
-                                    "to": e.to_agent,
+                                    "from": e.from_workspace,
+                                    "to": e.to_workspace,
                                     "summary": e.summary,
                                     "at": e.created_at,
                                 })

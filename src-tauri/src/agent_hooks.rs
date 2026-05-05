@@ -1746,18 +1746,18 @@ pub fn start_server(app_handle: AppHandle) -> Result<u16, String> {
                             ).map_err(|e| format!("Project not found: {}", e))?;
 
                             let entries = if let Some(agent_name) = agent {
-                                crate::db::schema::ActivityFeedEntry::list_by_agent(&conn, &project_id, &agent_name, limit)
+                                crate::db::schema::ActivityFeedEntry::list_by_actor(&conn, &project_id, &agent_name, limit)
                             } else {
                                 crate::db::schema::ActivityFeedEntry::list_by_project(&conn, &project_id, limit, 0)
                             }.map_err(|e| e.to_string())?;
 
                             let items: Vec<serde_json::Value> = entries.iter().map(|e| {
                                 serde_json::json!({
+                                    "actor": e.actor,
                                     "id": e.id,
-                                    "agent": e.agent_name,
                                     "type": e.event_type,
-                                    "from": e.from_agent,
-                                    "to": e.to_agent,
+                                    "from": e.from_workspace,
+                                    "to": e.to_workspace,
                                     "summary": e.summary,
                                     "at": e.created_at,
                                 })

@@ -160,7 +160,7 @@ pub fn checkin(project_path: &str, agent: &str) -> Result<String, String> {
                 .unwrap_or_else(|| m.summary.clone().unwrap_or_default());
             serde_json::json!({
                 "type": "message",
-                "from": m.from_agent,
+                "from": m.from_workspace,
                 "text": text,
                 "at": m.created_at,
                 "id": m.id,
@@ -238,9 +238,9 @@ pub fn checkin(project_path: &str, agent: &str) -> Result<String, String> {
             .map(|e| {
                 serde_json::json!({
                     "eventType": e.event_type,
-                    "agent": e.agent_name,
-                    "from": e.from_agent,
-                    "to": e.to_agent,
+                    "agent": e.actor,
+                    "from": e.from_workspace,
+                    "to": e.to_workspace,
                     "summary": e.summary,
                     "createdAt": e.created_at,
                 })

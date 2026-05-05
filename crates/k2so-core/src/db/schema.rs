@@ -914,7 +914,7 @@ pub struct WorkspaceSession {
     pub created_at: i64,
     /// Daemon-side session_id of the live PTY currently attached to
     /// this workspace's session, or NULL when no PTY is alive. Mirrors
-    /// `agent_heartbeats.active_terminal_id` (migration 0037). Stamped
+    /// `workspace_heartbeats.active_terminal_id` (migration 0037). Stamped
     /// by `v2_spawn::handle_v2_spawn` after registering, cleared by
     /// `v2_session_map::unregister`'s child-exit hook. Distinct from
     /// `terminal_id` (renderer-scoped UUID like
@@ -1295,7 +1295,7 @@ impl AgentHeartbeat {
         enabled: bool,
     ) -> Result<()> {
         conn.execute(
-            "INSERT INTO agent_heartbeats \
+            "INSERT INTO workspace_heartbeats \
              (id, project_id, name, frequency, spec_json, wakeup_path, enabled, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, unixepoch())",
             params![id, project_id, name, frequency, spec_json, wakeup_path, enabled as i64],
@@ -1309,7 +1309,7 @@ impl AgentHeartbeat {
 
     pub fn get_by_name(conn: &Connection, project_id: &str, name: &str) -> Result<Option<AgentHeartbeat>> {
         let sql = format!(
-            "SELECT {} FROM agent_heartbeats WHERE project_id = ?1 AND name = ?2",
+            "SELECT {} FROM workspace_heartbeats WHERE project_id = ?1 AND name = ?2",
             Self::COLS,
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -1323,7 +1323,7 @@ impl AgentHeartbeat {
 
     pub fn list_by_project(conn: &Connection, project_id: &str) -> Result<Vec<AgentHeartbeat>> {
         let sql = format!(
-            "SELECT {} FROM agent_heartbeats WHERE project_id = ?1 ORDER BY name",
+            "SELECT {} FROM workspace_heartbeats WHERE project_id = ?1 ORDER BY name",
             Self::COLS,
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -1335,7 +1335,7 @@ impl AgentHeartbeat {
     /// sidebar's Live/Resumable/Scheduled sections both use this.
     pub fn list_active(conn: &Connection, project_id: &str) -> Result<Vec<AgentHeartbeat>> {
         let sql = format!(
-            "SELECT {} FROM agent_heartbeats \
+            "SELECT {} FROM workspace_heartbeats \
              WHERE project_id = ?1 AND archived_at IS NULL ORDER BY name",
             Self::COLS,
         );
@@ -1348,7 +1348,7 @@ impl AgentHeartbeat {
     /// section uses this; ordered by archive recency (newest first).
     pub fn list_archived(conn: &Connection, project_id: &str) -> Result<Vec<AgentHeartbeat>> {
         let sql = format!(
-            "SELECT {} FROM agent_heartbeats \
+            "SELECT {} FROM workspace_heartbeats \
              WHERE project_id = ?1 AND archived_at IS NOT NULL \
              ORDER BY archived_at DESC",
             Self::COLS,
@@ -1363,7 +1363,7 @@ impl AgentHeartbeat {
         // fire on schedule even if `enabled` was never flipped before
         // archiving.
         let sql = format!(
-            "SELECT {} FROM agent_heartbeats \
+            "SELECT {} FROM workspace_heartbeats \
              WHERE project_id = ?1 AND enabled = 1 AND archived_at IS NULL \
              ORDER BY name",
             Self::COLS,
@@ -1375,7 +1375,7 @@ impl AgentHeartbeat {
 
     pub fn set_enabled(conn: &Connection, project_id: &str, name: &str, enabled: bool) -> Result<usize> {
         conn.execute(
-            "UPDATE agent_heartbeats SET enabled = ?1 WHERE project_id = ?2 AND name = ?3",
+            "UPDATE workspace_heartbeats SET enabled = ?1 WHERE project_id = ?2 AND name = ?3",
             params![enabled as i64, project_id, name],
         )
     }
@@ -1388,7 +1388,7 @@ impl AgentHeartbeat {
         spec_json: &str,
     ) -> Result<usize> {
         conn.execute(
-            "UPDATE agent_heartbeats SET frequency = ?1, spec_json = ?2 \
+            "UPDATE workspace_heartbeats SET frequency = ?1, spec_json = ?2 \
              WHERE project_id = ?3 AND name = ?4",
             params![frequency, spec_json, project_id, name],
         )
@@ -1401,7 +1401,7 @@ impl AgentHeartbeat {
         wakeup_path: &str,
     ) -> Result<usize> {
         conn.execute(
-            "UPDATE agent_heartbeats SET wakeup_path = ?1 WHERE project_id = ?2 AND name = ?3",
+            "UPDATE workspace_heartbeats SET wakeup_path = ?1 WHERE project_id = ?2 AND name = ?3",
             params![wakeup_path, project_id, name],
         )
     }
@@ -1412,7 +1412,7 @@ impl AgentHeartbeat {
     pub fn stamp_last_fired(conn: &Connection, project_id: &str, name: &str) -> Result<usize> {
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "UPDATE agent_heartbeats SET last_fired = ?1 WHERE project_id = ?2 AND name = ?3",
+            "UPDATE workspace_heartbeats SET last_fired = ?1 WHERE project_id = ?2 AND name = ?3",
             params![now, project_id, name],
         )
     }
@@ -1427,7 +1427,7 @@ impl AgentHeartbeat {
         session_id: &str,
     ) -> Result<usize> {
         conn.execute(
-            "UPDATE agent_heartbeats SET last_session_id = ?1 \
+            "UPDATE workspace_heartbeats SET last_session_id = ?1 \
              WHERE project_id = ?2 AND name = ?3",
             params![session_id, project_id, name],
         )
@@ -1445,7 +1445,7 @@ impl AgentHeartbeat {
         terminal_id: &str,
     ) -> Result<usize> {
         conn.execute(
-            "UPDATE agent_heartbeats SET active_terminal_id = ?1 \
+            "UPDATE workspace_heartbeats SET active_terminal_id = ?1 \
              WHERE project_id = ?2 AND name = ?3",
             params![terminal_id, project_id, name],
         )
@@ -1461,7 +1461,7 @@ impl AgentHeartbeat {
         name: &str,
     ) -> Result<usize> {
         conn.execute(
-            "UPDATE agent_heartbeats SET active_terminal_id = NULL \
+            "UPDATE workspace_heartbeats SET active_terminal_id = NULL \
              WHERE project_id = ?1 AND name = ?2",
             params![project_id, name],
         )
@@ -1476,7 +1476,7 @@ impl AgentHeartbeat {
         terminal_id: &str,
     ) -> Result<usize> {
         conn.execute(
-            "UPDATE agent_heartbeats SET active_terminal_id = NULL \
+            "UPDATE workspace_heartbeats SET active_terminal_id = NULL \
              WHERE active_terminal_id = ?1",
             params![terminal_id],
         )
@@ -1487,7 +1487,7 @@ impl AgentHeartbeat {
     /// after a daemon restart wipes the in-memory map.
     pub fn list_with_active_terminal(conn: &Connection) -> Result<Vec<(String, String, String)>> {
         let mut stmt = conn.prepare(
-            "SELECT project_id, name, active_terminal_id FROM agent_heartbeats \
+            "SELECT project_id, name, active_terminal_id FROM workspace_heartbeats \
              WHERE active_terminal_id IS NOT NULL",
         )?;
         let rows = stmt
@@ -1508,7 +1508,7 @@ impl AgentHeartbeat {
     /// "Remove" behaviour in 0.36.0).
     pub fn archive(conn: &Connection, project_id: &str, name: &str) -> Result<usize> {
         conn.execute(
-            "UPDATE agent_heartbeats SET archived_at = ?1 \
+            "UPDATE workspace_heartbeats SET archived_at = ?1 \
              WHERE project_id = ?2 AND name = ?3 AND archived_at IS NULL",
             params![chrono::Utc::now().to_rfc3339(), project_id, name],
         )
@@ -1518,7 +1518,7 @@ impl AgentHeartbeat {
     /// from Archive" UI affordance — no caller in 0.36.0.
     pub fn unarchive(conn: &Connection, project_id: &str, name: &str) -> Result<usize> {
         conn.execute(
-            "UPDATE agent_heartbeats SET archived_at = NULL \
+            "UPDATE workspace_heartbeats SET archived_at = NULL \
              WHERE project_id = ?1 AND name = ?2",
             params![project_id, name],
         )
@@ -1526,7 +1526,7 @@ impl AgentHeartbeat {
 
     pub fn delete(conn: &Connection, project_id: &str, name: &str) -> Result<usize> {
         conn.execute(
-            "DELETE FROM agent_heartbeats WHERE project_id = ?1 AND name = ?2",
+            "DELETE FROM workspace_heartbeats WHERE project_id = ?1 AND name = ?2",
             params![project_id, name],
         )
     }
@@ -1563,7 +1563,7 @@ impl AgentHeartbeat {
         let row: Option<(String, Option<String>)> = conn
             .query_row(
                 "SELECT concurrency_policy, in_flight_started_at \
-                 FROM agent_heartbeats \
+                 FROM workspace_heartbeats \
                  WHERE project_id = ?1 AND name = ?2",
                 params![project_id, name],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
@@ -1585,7 +1585,7 @@ impl AgentHeartbeat {
 
         let now = chrono::Utc::now().to_rfc3339();
         let result = conn.execute(
-            "UPDATE agent_heartbeats SET in_flight_started_at = ?1 \
+            "UPDATE workspace_heartbeats SET in_flight_started_at = ?1 \
              WHERE project_id = ?2 AND name = ?3",
             params![now, project_id, name],
         );
@@ -1613,7 +1613,7 @@ impl AgentHeartbeat {
         name: &str,
     ) -> Result<usize> {
         conn.execute(
-            "UPDATE agent_heartbeats SET in_flight_started_at = NULL \
+            "UPDATE workspace_heartbeats SET in_flight_started_at = NULL \
              WHERE project_id = ?1 AND name = ?2",
             params![project_id, name],
         )
@@ -1629,7 +1629,7 @@ impl AgentHeartbeat {
     ) -> Result<usize> {
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "UPDATE agent_heartbeats \
+            "UPDATE workspace_heartbeats \
              SET last_fired = ?1, in_flight_started_at = NULL \
              WHERE project_id = ?2 AND name = ?3",
             params![now, project_id, name],
@@ -1650,7 +1650,7 @@ impl AgentHeartbeat {
             - chrono::Duration::seconds(older_than_secs))
         .to_rfc3339();
         conn.execute(
-            "UPDATE agent_heartbeats SET in_flight_started_at = NULL \
+            "UPDATE workspace_heartbeats SET in_flight_started_at = NULL \
              WHERE in_flight_started_at IS NOT NULL \
                AND in_flight_started_at < ?1",
             params![cutoff],
@@ -1752,16 +1752,21 @@ impl WorkspaceRelation {
 
 // ── Activity Feed ───────────────────────────────────────────────────────
 
-/// Audit trail entry for agent communications and lifecycle events.
+/// Audit trail entry for workspace agent communications and lifecycle
+/// events. Post-0.37.0: `actor` is a free-form string (`agent`, `user`,
+/// `heartbeat`, `cli`, `sms-bridge`, an external workspace path) so
+/// cross-workspace events from external systems can land here without
+/// a fake "agent name" placeholder. `from_workspace` / `to_workspace`
+/// are workspace path/id strings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActivityFeedEntry {
     pub id: i64,
     pub project_id: String,
-    pub agent_name: Option<String>,
+    pub actor: Option<String>,
     pub event_type: String,
-    pub from_agent: Option<String>,
-    pub to_agent: Option<String>,
+    pub from_workspace: Option<String>,
+    pub to_workspace: Option<String>,
     pub to_project_id: Option<String>,
     pub summary: Option<String>,
     pub metadata: Option<String>,
@@ -1772,10 +1777,10 @@ impl ActivityFeedEntry {
     pub fn insert(
         conn: &Connection,
         project_id: &str,
-        agent_name: Option<&str>,
+        actor: Option<&str>,
         event_type: &str,
-        from_agent: Option<&str>,
-        to_agent: Option<&str>,
+        from_workspace: Option<&str>,
+        to_workspace: Option<&str>,
         to_project_id: Option<&str>,
         summary: Option<&str>,
         metadata: Option<&str>,
@@ -1785,26 +1790,26 @@ impl ActivityFeedEntry {
         // fire on every agent event; criterion bench at P1.3 showed ~25%
         // speedup vs rebuilding the statement each call.
         let mut stmt = conn.prepare_cached(
-            "INSERT INTO activity_feed (project_id, agent_name, event_type, from_agent, to_agent, to_project_id, summary, metadata, created_at) \
+            "INSERT INTO activity_feed (project_id, actor, event_type, from_workspace, to_workspace, to_project_id, summary, metadata, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch())",
         )?;
-        stmt.execute(params![project_id, agent_name, event_type, from_agent, to_agent, to_project_id, summary, metadata])?;
+        stmt.execute(params![project_id, actor, event_type, from_workspace, to_workspace, to_project_id, summary, metadata])?;
         Ok(conn.last_insert_rowid())
     }
 
     pub fn list_by_project(conn: &Connection, project_id: &str, limit: i64, offset: i64) -> Result<Vec<ActivityFeedEntry>> {
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, agent_name, event_type, from_agent, to_agent, to_project_id, summary, metadata, created_at \
+            "SELECT id, project_id, actor, event_type, from_workspace, to_workspace, to_project_id, summary, metadata, created_at \
              FROM activity_feed WHERE project_id = ?1 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3"
         )?;
         let rows = stmt.query_map(params![project_id, limit, offset], |row| {
             Ok(ActivityFeedEntry {
                 id: row.get(0)?,
                 project_id: row.get(1)?,
-                agent_name: row.get(2)?,
+                actor: row.get(2)?,
                 event_type: row.get(3)?,
-                from_agent: row.get(4)?,
-                to_agent: row.get(5)?,
+                from_workspace: row.get(4)?,
+                to_workspace: row.get(5)?,
                 to_project_id: row.get(6)?,
                 summary: row.get(7)?,
                 metadata: row.get(8)?,
@@ -1814,20 +1819,20 @@ impl ActivityFeedEntry {
         rows.collect()
     }
 
-    pub fn list_by_agent(conn: &Connection, project_id: &str, agent_name: &str, limit: i64) -> Result<Vec<ActivityFeedEntry>> {
+    pub fn list_by_actor(conn: &Connection, project_id: &str, actor: &str, limit: i64) -> Result<Vec<ActivityFeedEntry>> {
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, agent_name, event_type, from_agent, to_agent, to_project_id, summary, metadata, created_at \
-             FROM activity_feed WHERE project_id = ?1 AND (agent_name = ?2 OR from_agent = ?2 OR to_agent = ?2) \
+            "SELECT id, project_id, actor, event_type, from_workspace, to_workspace, to_project_id, summary, metadata, created_at \
+             FROM activity_feed WHERE project_id = ?1 AND (actor = ?2 OR from_workspace = ?2 OR to_workspace = ?2) \
              ORDER BY created_at DESC LIMIT ?3"
         )?;
-        let rows = stmt.query_map(params![project_id, agent_name, limit], |row| {
+        let rows = stmt.query_map(params![project_id, actor, limit], |row| {
             Ok(ActivityFeedEntry {
                 id: row.get(0)?,
                 project_id: row.get(1)?,
-                agent_name: row.get(2)?,
+                actor: row.get(2)?,
                 event_type: row.get(3)?,
-                from_agent: row.get(4)?,
-                to_agent: row.get(5)?,
+                from_workspace: row.get(4)?,
+                to_workspace: row.get(5)?,
                 to_project_id: row.get(6)?,
                 summary: row.get(7)?,
                 metadata: row.get(8)?,
@@ -1843,39 +1848,39 @@ impl ActivityFeedEntry {
 pub fn log_activity(
     conn: &Connection,
     project_id: &str,
-    agent_name: Option<&str>,
+    actor: Option<&str>,
     event_type: &str,
-    from_agent: Option<&str>,
-    to_agent: Option<&str>,
+    from_workspace: Option<&str>,
+    to_workspace: Option<&str>,
     to_project_id: Option<&str>,
     summary: Option<&str>,
 ) {
-    let _ = ActivityFeedEntry::insert(conn, project_id, agent_name, event_type, from_agent, to_agent, to_project_id, summary, None);
+    let _ = ActivityFeedEntry::insert(conn, project_id, actor, event_type, from_workspace, to_workspace, to_project_id, summary, None);
 }
 
-/// Get unread messages for a specific agent in a project.
+/// Get unread messages addressed to a workspace identifier.
 pub fn get_unread_messages(
     conn: &Connection,
     project_id: &str,
-    agent_name: &str,
+    workspace_target: &str,
 ) -> Result<Vec<ActivityFeedEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT id, project_id, agent_name, event_type, from_agent, to_agent, to_project_id, summary, metadata, created_at \
+        "SELECT id, project_id, actor, event_type, from_workspace, to_workspace, to_project_id, summary, metadata, created_at \
          FROM activity_feed \
-         WHERE (to_agent = ?1 OR (to_agent IS NULL AND ?1 = '__lead__')) \
+         WHERE (to_workspace = ?1 OR (to_workspace IS NULL AND ?1 = '__lead__')) \
          AND (project_id = ?2 OR to_project_id = ?2) \
          AND event_type IN ('message.sent', 'message.delivered') \
          AND read = 0 \
          ORDER BY created_at ASC"
     )?;
-    let rows = stmt.query_map(params![agent_name, project_id], |row| {
+    let rows = stmt.query_map(params![workspace_target, project_id], |row| {
         Ok(ActivityFeedEntry {
             id: row.get(0)?,
             project_id: row.get(1)?,
-            agent_name: row.get(2)?,
+            actor: row.get(2)?,
             event_type: row.get(3)?,
-            from_agent: row.get(4)?,
-            to_agent: row.get(5)?,
+            from_workspace: row.get(4)?,
+            to_workspace: row.get(5)?,
             to_project_id: row.get(6)?,
             summary: row.get(7)?,
             metadata: row.get(8)?,
@@ -1885,19 +1890,19 @@ pub fn get_unread_messages(
     rows.collect()
 }
 
-/// Mark messages as read for an agent.
+/// Mark messages addressed to a workspace target as read.
 pub fn mark_messages_read(
     conn: &Connection,
     project_id: &str,
-    agent_name: &str,
+    workspace_target: &str,
 ) -> Result<usize> {
     conn.execute(
         "UPDATE activity_feed SET read = 1 \
-         WHERE (to_agent = ?1 OR (to_agent IS NULL AND ?1 = '__lead__')) \
+         WHERE (to_workspace = ?1 OR (to_workspace IS NULL AND ?1 = '__lead__')) \
          AND (project_id = ?2 OR to_project_id = ?2) \
          AND event_type IN ('message.sent', 'message.delivered') \
          AND read = 0",
-        params![agent_name, project_id],
+        params![workspace_target, project_id],
     )
 }
 
@@ -1924,7 +1929,7 @@ pub struct HeartbeatFire {
 
 impl HeartbeatFire {
     /// Insert an audit row. `schedule_name` is the multi-heartbeat name
-    /// (the `agent_heartbeats.name`); None for legacy fires that predate
+    /// (the `workspace_heartbeats.name`); None for legacy fires that predate
     /// the multi-heartbeat system or aren't tied to a specific heartbeat.
     pub fn insert(
         conn: &Connection,
@@ -1946,7 +1951,7 @@ impl HeartbeatFire {
     /// Insert an audit row with an explicit schedule_name — used by the
     /// multi-heartbeat tick so `k2so heartbeat status <name>` can filter
     /// cleanly. schedule_name is denormalized TEXT (NOT a FK to
-    /// agent_heartbeats.name) so audit rows survive heartbeat deletion.
+    /// workspace_heartbeats.name) so audit rows survive heartbeat deletion.
     pub fn insert_with_schedule(
         conn: &Connection,
         project_id: &str,
@@ -2675,7 +2680,7 @@ mod unit_tests {
     }
 
     #[test]
-    fn activity_feed_list_by_agent_matches_agent_from_or_to() {
+    fn activity_feed_list_by_actor_matches_actor_from_or_to() {
         let conn = fresh();
         let pid = make_project_row(&conn, "/tmp/af-b");
         ActivityFeedEntry::insert(&conn, &pid, Some("alice"), "x", None, None, None, None, None).unwrap();
@@ -2683,8 +2688,8 @@ mod unit_tests {
         ActivityFeedEntry::insert(&conn, &pid, None, "z", Some("carol"), Some("alice"), None, None, None).unwrap();
         ActivityFeedEntry::insert(&conn, &pid, None, "w", Some("bob"), Some("carol"), None, None, None).unwrap();
 
-        let alice_rows = ActivityFeedEntry::list_by_agent(&conn, &pid, "alice", 10).unwrap();
-        // 3 rows: agent_name=alice, from=alice, to=alice.
+        let alice_rows = ActivityFeedEntry::list_by_actor(&conn, &pid, "alice", 10).unwrap();
+        // 3 rows: actor=alice, from_workspace=alice, to_workspace=alice.
         assert_eq!(alice_rows.len(), 3);
     }
 
@@ -3174,7 +3179,7 @@ mod concurrency_tests {
         // Stale lease: 1 hour old.
         let stale_ts = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
         conn.execute(
-            "UPDATE agent_heartbeats SET in_flight_started_at = ?1 WHERE name = 'stale-hb'",
+            "UPDATE workspace_heartbeats SET in_flight_started_at = ?1 WHERE name = 'stale-hb'",
             params![stale_ts],
         )
         .unwrap();
@@ -3208,7 +3213,7 @@ mod concurrency_tests {
 
         // Flip policy to 'allow'.
         conn.execute(
-            "UPDATE agent_heartbeats SET concurrency_policy = 'allow' WHERE name = 'allow-hb'",
+            "UPDATE workspace_heartbeats SET concurrency_policy = 'allow' WHERE name = 'allow-hb'",
             [],
         )
         .unwrap();

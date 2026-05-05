@@ -522,7 +522,7 @@ pub fn archive_orphan_top_tier_agents(project_path: &str) -> Vec<String> {
                 let _ = WorkspaceSession::delete(&conn, pid);
                 let prefix = format!(".k2so/agents/{}/", orphan);
                 let _ = conn.execute(
-                    "DELETE FROM agent_heartbeats WHERE project_id = ?1 AND wakeup_path LIKE ?2 || '%'",
+                    "DELETE FROM workspace_heartbeats WHERE project_id = ?1 AND wakeup_path LIKE ?2 || '%'",
                     rusqlite::params![pid, prefix],
                 );
             }

@@ -49,7 +49,7 @@ const MAX_PARALLEL_HEARTBEAT_SPAWNS: usize = 6;
 /// Default per-spawn deadline in seconds. Today's PTY allocate +
 /// Claude Code boot measures 1-3s; 30s catches truly hung forks
 /// while leaving generous headroom. Per-row override comes in P5.5
-/// (the `agent_heartbeats.active_deadline_secs` column already
+/// (the `workspace_heartbeats.active_deadline_secs` column already
 /// exists from P5.1; this constant is the fallback).
 const DEFAULT_SPAWN_DEADLINE_SECS: u64 = 30;
 
@@ -63,7 +63,7 @@ pub fn handle_triage(project_path: &str) -> String {
 
 /// Handler for `/cli/heartbeat/active-projects` — newline-delimited
 /// list of project paths with at least one enabled, non-archived
-/// `agent_heartbeats` row. Replaces the static
+/// `workspace_heartbeats` row. Replaces the static
 /// `~/.k2so/heartbeat-projects.txt` file (which went stale because
 /// nothing kept it in sync with workspace creation/deletion).
 ///
@@ -76,7 +76,7 @@ pub fn handle_active_projects() -> String {
     let db = shared_db();
     let conn = db.lock();
     let mut stmt = match conn.prepare(
-        "SELECT DISTINCT p.path FROM agent_heartbeats h \
+        "SELECT DISTINCT p.path FROM workspace_heartbeats h \
          JOIN projects p ON h.project_id = p.id \
          WHERE h.enabled = 1 AND h.archived_at IS NULL \
          ORDER BY p.path",

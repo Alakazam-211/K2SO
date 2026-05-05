@@ -77,7 +77,7 @@ fn clear_projects() {
         [],
     );
     let _ = conn.execute("DELETE FROM agent_sessions", []);
-    let _ = conn.execute("DELETE FROM agent_heartbeats", []);
+    let _ = conn.execute("DELETE FROM workspace_heartbeats", []);
 }
 
 fn drain_session_map() {
