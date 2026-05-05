@@ -175,16 +175,41 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
     // of the heartbeat smart-launch stamp (`heartbeat_launch.rs`)
     // and the `agent_heartbeats.active_terminal_id` cleanup hook in
     // `v2_session_map::unregister`.
+    //
+    // 0.36.14+: the chat tab's `attachAgentName` is the prefixed
+    // `<project_id>:<bare_name>` form (workspace-namespaced to fix
+    // cross-workspace pinned-chat collisions). The DB row's
+    // `agent_name` column still stores the bare name (set by
+    // `k2so_agents_lock`), so strip the prefix before the UPDATE so
+    // the stamp lands on the right row.
     {
         let db = k2so_core::db::shared();
         let conn = db.lock();
-        if let Some(project_id) =
-            k2so_core::agents::resolve_project_id(&conn, &req.cwd)
+        // Prefer the project_id encoded in the prefixed agent_name
+        // (cheaper + unambiguous); fall back to resolving from cwd
+        // for legacy bare-form callers.
+        let (project_id_opt, bare_agent) = if let Some((pid, bare)) =
+            req.agent_name.split_once(':')
         {
+            if !pid.is_empty() && !bare.is_empty() {
+                (Some(pid.to_string()), bare.to_string())
+            } else {
+                (
+                    k2so_core::agents::resolve_project_id(&conn, &req.cwd),
+                    req.agent_name.clone(),
+                )
+            }
+        } else {
+            (
+                k2so_core::agents::resolve_project_id(&conn, &req.cwd),
+                req.agent_name.clone(),
+            )
+        };
+        if let Some(project_id) = project_id_opt {
             let _ = k2so_core::db::schema::AgentSession::save_active_terminal_id(
                 &conn,
                 &project_id,
-                &req.agent_name,
+                &bare_agent,
                 &session.session_id.to_string(),
             );
         }
@@ -212,7 +237,21 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
     // use. A single combined write would be treated as a multi-line
     // paste by the TUI input widget and the queued message would land
     // typed-but-not-sent.
-    let pending = pending_live::drain_for_agent(&req.agent_name);
+    //
+    // 0.36.14+: drain under the prefixed key first, then fall back to
+    // the bare name. Awareness bus callers (`k2so msg --wake manager`)
+    // still enqueue under bare names today; chat-tab spawns now
+    // register under `<project_id>:<bare_name>`. Trying both keys
+    // catches signals from either flow without forcing every awareness
+    // caller through a workspace-aware enqueue path (that's 0.37.0
+    // territory).
+    let mut pending = pending_live::drain_for_agent(&req.agent_name);
+    if let Some((_pid, bare)) = req.agent_name.split_once(':') {
+        if !bare.is_empty() {
+            let mut bare_drain = pending_live::drain_for_agent(bare);
+            pending.append(&mut bare_drain);
+        }
+    }
     let pending_drained = pending.len();
     for signal in pending {
         let bytes = signal_format::inject_bytes(&signal);

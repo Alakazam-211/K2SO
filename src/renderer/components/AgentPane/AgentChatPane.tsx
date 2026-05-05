@@ -36,8 +36,15 @@ export function AgentChatPane({ agentName, projectPath }: AgentChatPaneProps): R
     )
   }
 
+  // `key={projectId}:${agentName}` forces a clean remount when the
+  // workspace switches. Without it, React reuses the same
+  // AgentChatTerminal instance and `terminalIdRef` (initialized from
+  // `useRef(agentChatId(projectId, agentName))`) keeps the stale
+  // workspace's terminal id — defense-in-depth against the
+  // cross-workspace pinned-chat collision fixed in 0.36.14.
   return (
     <AgentChatTerminal
+      key={`${projectId}:${agentName}`}
       agentName={agentName}
       projectId={projectId}
       projectPath={projectPath}
@@ -75,6 +82,10 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
     // child-exit observer fires for any still-alive process. If the
     // session was already dead (user typed `exit`), the daemon's
     // find-or-spawn on the next mount just spawns fresh.
+    //
+    // Pass the project-namespaced key (0.36.14+) so we close THIS
+    // workspace's session, not whichever bare-name session happens to
+    // be registered globally.
     try {
       const { port, token } = await getDaemonWs()
       await fetch(
@@ -82,7 +93,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ agent_name: agentName }),
+          body: JSON.stringify({ agent_name: `${projectId}:${agentName}` }),
         },
       ).catch(() => {})
     } catch { /* ignore — refresh proceeds either way */ }
@@ -91,7 +102,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
     setReady(false)
     setRefreshNonce((n) => n + 1)
     setRefreshing(false)
-  }, [agentName, refreshing])
+  }, [projectId, agentName, refreshing])
 
   useEffect(() => {
     let cancelled = false
@@ -109,18 +120,23 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
       } catch { /* fall through */ }
 
       // Step 1b: Check the daemon for an existing session under this
-      // agent_name. When the user has closed Tauri, the daemon can keep
-      // the workspace agent's PTY alive (heartbeat fires, k2so msg
-      // injections, etc.). On Tauri reopen we want to attach to that
-      // existing PTY rather than spawn a fresh `claude --resume`.
-      // TerminalPane will use the attachAgentName prop (always set
-      // below) to reach the daemon's canonical key in v2_session_map;
-      // this lookup is informational — purely for log-trail/diagnostic
-      // visibility — but proves the daemon-side bookkeeping is sane
-      // before we hand off to the spawn path.
+      // workspace-namespaced agent key. When the user has closed Tauri,
+      // the daemon can keep the workspace agent's PTY alive (heartbeat
+      // fires, k2so msg injections, etc.). On Tauri reopen we want to
+      // attach to that existing PTY rather than spawn a fresh
+      // `claude --resume`. TerminalPane will use the attachAgentName
+      // prop (always set below) to reach the daemon's canonical key in
+      // v2_session_map; this lookup is informational — purely for
+      // log-trail/diagnostic visibility — but proves the daemon-side
+      // bookkeeping is sane before we hand off to the spawn path.
+      //
+      // Lookup is on the prefixed `<projectId>:<agentName>` key so
+      // workspaces sharing an agent name (e.g., two Workspace Manager
+      // workspaces both running `manager`) don't resolve to each
+      // other's session.
       try {
         const json = await invoke<string>('k2so_session_lookup_by_agent', {
-          agent: agentName,
+          agent: `${projectId}:${agentName}`,
         })
         const data = JSON.parse(json) as {
           sessionAlive?: boolean
@@ -130,7 +146,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
         if (!cancelled && data.sessionAlive) {
           console.info(
             '[AgentChatPane] daemon has live session for',
-            agentName,
+            `${projectId}:${agentName}`,
             'session:',
             data.sessionId,
             'isV2:',
@@ -276,21 +292,29 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
           cwd={launchConfig?.cwd ?? projectPath}
           command={launchConfig?.command}
           args={launchConfig?.args}
-          // Register this v2 session under the workspace agent's
-          // canonical name so:
-          //   1. `k2so msg <workspace>` finds it via session_lookup
-          //      and injects into THIS PTY (not a duplicate).
-          //   2. Closing Tauri leaves the daemon-owned PTY alive
-          //      under `<agentName>`; reopening Tauri re-attaches to
-          //      it instead of spawning fresh.
-          //   3. The daemon's auto-launch (heartbeat headless wake,
+          // Register this v2 session under a project-namespaced agent
+          // key (`<projectId>:<agentName>`, 0.36.14+) so:
+          //   1. Two workspaces with the same agent name (e.g., both
+          //      in Workspace Manager mode → both `manager`) don't
+          //      collide on a single daemon-side slot. Pre-0.36.14,
+          //      opening a second workspace replaced the first
+          //      workspace's entry in v2_session_map and both chat
+          //      tabs ended up cross-wired to the same PTY.
+          //   2. `k2so msg <workspace>` finds the right session via
+          //      session_lookup's bare-name mirror (registered
+          //      alongside the prefixed key by v2_session_map::register
+          //      for back-compat with bare-keyed callers).
+          //   3. Closing Tauri leaves the daemon-owned PTY alive
+          //      under both keys; reopening Tauri re-attaches via the
+          //      prefixed key for unambiguous workspace identification.
+          //   4. The daemon's auto-launch (heartbeat headless wake,
           //      awareness inject) registers under the same key,
           //      converging both paths on one PTY per workspace
           //      agent.
           // Without this override, TerminalPane defaults to
           // `tab-${terminalId}` — a renderer-only key the daemon
           // never sees on system-driven spawns.
-          attachAgentName={agentName}
+          attachAgentName={`${projectId}:${agentName}`}
         />
       </div>
     </div>
