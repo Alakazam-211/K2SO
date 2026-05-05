@@ -100,17 +100,33 @@ impl WakeProvider for DaemonWakeProvider {
     fn wake(&self, agent: &str, signal: &AgentSignal) -> std::io::Result<()> {
         // Stage 1: always enqueue so durability is preserved
         // regardless of what the auto-launch path does next.
-        match crate::pending_live::enqueue(signal, agent) {
+        //
+        // 0.37.0 keying: enqueue under the canonical
+        // `<workspace_id>:<agent_name>` key when the signal carries a
+        // target workspace. The spawn helper drains under the same
+        // canonical key, so signals queued while a workspace's agent
+        // is offline land in the right session when it boots.
+        // Pre-0.37.0 the queue was keyed bare and signals targeting
+        // a specific workspace's offline agent could be drained by
+        // a different workspace's spawn (cross-wiring) — or never
+        // drained at all if the spawn now uses the prefixed key.
+        let queue_key = match &signal.to {
+            AgentAddress::Agent { workspace, .. } if !workspace.0.is_empty() => {
+                format!("{}:{}", workspace.0, agent)
+            }
+            _ => agent.to_string(),
+        };
+        match crate::pending_live::enqueue(signal, &queue_key) {
             Ok(path) => {
                 log_debug!(
-                    "[daemon/wake] queued signal id={} for {agent} at {:?}",
+                    "[daemon/wake] queued signal id={} for {queue_key} at {:?}",
                     signal.id,
                     path
                 );
             }
             Err(e) => {
                 log_debug!(
-                    "[daemon/wake] failed to queue signal for {agent}: {e}"
+                    "[daemon/wake] failed to queue signal for {queue_key}: {e}"
                 );
                 return Err(e);
             }
@@ -169,12 +185,22 @@ fn try_auto_launch(agent: &str, signal: &AgentSignal) -> Result<(), String> {
     let project_path = lookup_project_path(workspace_id)
         .ok_or_else(|| format!("no project registered for workspace id {workspace_id:?}"))?;
 
-    // G3 launch profile lookup. Absent profile = stay in queue-only
-    // mode. Malformed profile = log + skip (bad YAML shouldn't kill
-    // the wake path).
+    // G3 launch profile lookup. Malformed profile = log + skip (bad
+    // YAML shouldn't kill the wake path).
+    //
+    // 0.37.0 ergonomic fallback: AGENT.md without an explicit
+    // `launch:` block synthesizes a default `claude
+    // --dangerously-skip-permissions` running at the workspace
+    // root. This closes the "no launch profile" gap for the common
+    // case — workspaces shipped without webhook automation just
+    // want their pinned chat agent woken when a wake signal
+    // arrives. Custom workflows (Baden's SMS bridge, --print
+    // single-shot patterns, custom resume logic) still author an
+    // explicit `launch:` block in AGENT.md and override these
+    // defaults field-by-field.
     let profile = match load_launch_profile(&project_path, agent) {
         Ok(Some(p)) => p,
-        Ok(None) => return Err("no AGENT.md launch profile".into()),
+        Ok(None) => default_launch_profile(),
         Err(e) => return Err(format!("launch profile parse failed: {e}")),
     };
 
@@ -186,6 +212,28 @@ fn try_auto_launch(agent: &str, signal: &AgentSignal) -> Result<(), String> {
     let outcome = spawn_agent_session_v2_blocking(req)
         .map_err(|e| format!("spawn failed: {e}"))?;
 
+    // Write a workspace_sessions DB row so the canonical session is
+    // visible across daemon restart and to the Tauri app's
+    // re-attach path. Without this, the in-memory v2_session_map
+    // is the only source of truth — and Tauri opening AFTER a wake
+    // auto-spawn would query workspace_sessions, find nothing, and
+    // spawn ITS OWN session under the same canonical key. The
+    // canonicalization check in the spawn helper would catch the
+    // dup at the in-memory layer, but only after a wasted DaemonPty
+    // spawn cycle. Writing the DB row up front lets the Tauri
+    // attach path observe the live session before deciding to
+    // spawn.
+    //
+    // Mirrors `agents_routes::handle_agents_launch`'s post-spawn
+    // k2so_agents_lock call. Best-effort: failure logs but doesn't
+    // unwind the spawn (the PTY is alive regardless).
+    let _ = k2so_core::agents::session::k2so_agents_lock(
+        project_path.to_string(),
+        agent.to_string(),
+        Some(outcome.session_id.to_string()),
+        Some("system".to_string()),
+    );
+
     log_debug!(
         "[daemon/wake] auto-launched session={} agent={agent} pending_drained={} \
          via AGENT.md launch profile",
@@ -193,6 +241,25 @@ fn try_auto_launch(agent: &str, signal: &AgentSignal) -> Result<(), String> {
         outcome.pending_drained,
     );
     Ok(())
+}
+
+/// Default launch profile for workspaces whose AGENT.md doesn't
+/// declare a `launch:` block. Mirrors the everyday "open the chat
+/// tab in Tauri" command — claude in interactive mode with K2SO's
+/// permission flag, running at the project root. Custom workflows
+/// (heartbeats with --print, automation with --resume, alternate
+/// harnesses like codex/gemini, custom cwd) still author an
+/// explicit `launch:` block in AGENT.md and override these
+/// defaults field-by-field.
+fn default_launch_profile() -> LaunchProfile {
+    LaunchProfile {
+        command: Some("claude".to_string()),
+        args: Some(vec!["--dangerously-skip-permissions".to_string()]),
+        cwd: None, // None = project root via resolve_cwd
+        cols: None,
+        rows: None,
+        env: Default::default(),
+    }
 }
 
 /// Lookup `projects.path` by `projects.id`. Returns `None` if the
