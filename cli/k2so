@@ -1309,6 +1309,20 @@ for a in data:
 " 2>/dev/null || cli_request "/cli/agents/running"
 }
 
+cmd_agents_reap() {
+    cli_request "/cli/agents/reap" | python3 -c "
+import json, sys
+data = json.loads(sys.stdin.read())
+n = data.get('reapedCount', 0)
+if n == 0:
+    print('No stale sessions to reap.')
+    sys.exit(0)
+print(f'Reaped {n} stale session(s):')
+for name in data.get('reaped', []):
+    print(f'  {name}')
+" 2>/dev/null || cli_request "/cli/agents/reap"
+}
+
 cmd_terminal_write() {
     local terminal_id="${1:-}"
     shift || true
@@ -3136,6 +3150,7 @@ case "${1:-help}" in
             unlock) shift 2; cmd_agents_unlock "$@" ;;
             triage) shift 2; cmd_agents_triage "$@" ;;
             running) cmd_agents_running ;;
+            reap) cmd_agents_reap ;;
             *)      echo "Unknown agents subcommand: $2" >&2; cmd_help; exit 1 ;;
         esac
         ;;

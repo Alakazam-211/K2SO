@@ -23,6 +23,8 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use k2so_core::log_debug;
+
 use k2so_core::session::{registry, Frame, SessionId};
 
 use crate::cli_response::CliResponse;
@@ -393,7 +395,19 @@ pub fn handle_agents_running(_params: &HashMap<String, String>) -> CliResponse {
     let now = Instant::now();
     let sessions = session_lookup::snapshot_all();
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(sessions.len());
+    let mut reaped: Vec<String> = Vec::new();
     for (agent_name, session) in sessions {
+        // 0.37.0: defensive PID reaping. The child-exit observer
+        // normally keeps v2_session_map authoritative, but if it
+        // panicked or the broadcast channel closed before a
+        // ChildExit landed, a dead session can linger. Detect it
+        // here (cheap atomic load) and unregister + skip — the
+        // operator's `agents running` query never reports zombies.
+        if !session.is_child_alive() {
+            reaped.push(agent_name.clone());
+            crate::v2_session_map::unregister(&agent_name);
+            continue;
+        }
         // v2 sessions don't register in `k2so_core::session::registry`
         // (only legacy session_stream_pty.rs does). For those, idle
         // and subscriber counts surface as 0 — accurate enough for
@@ -415,5 +429,43 @@ pub fn handle_agents_running(_params: &HashMap<String, String>) -> CliResponse {
             "subscriberCount": subscriber_count,
         }));
     }
+    if !reaped.is_empty() {
+        log_debug!(
+            "[daemon/agents-running] reaped {} stale session(s): {:?}",
+            reaped.len(),
+            reaped,
+        );
+    }
     CliResponse::ok_json(serde_json::to_string(&out).unwrap_or_else(|_| "[]".into()))
+}
+
+/// Handler for `GET /cli/agents/reap`.
+///
+/// Force-reaps every v2 session whose child PID has exited, regardless
+/// of whether the child-exit observer has fired yet. Returns the count
+/// of reaped sessions plus their names. Operator escape hatch — the
+/// canonical-session work in 0.37.0 makes accumulated zombies very
+/// rare, but having an explicit verb to clear them out is cheap
+/// insurance against the infrequent observer-task crash.
+pub fn handle_agents_reap(_params: &HashMap<String, String>) -> CliResponse {
+    let sessions = session_lookup::snapshot_all();
+    let mut reaped: Vec<String> = Vec::new();
+    for (agent_name, session) in sessions {
+        if !session.is_child_alive() {
+            crate::v2_session_map::unregister(&agent_name);
+            reaped.push(agent_name);
+        }
+    }
+    log_debug!(
+        "[daemon/agents-reap] manual reap pass cleared {} session(s): {:?}",
+        reaped.len(),
+        reaped,
+    );
+    CliResponse::ok_json(
+        serde_json::json!({
+            "reapedCount": reaped.len(),
+            "reaped": reaped,
+        })
+        .to_string(),
+    )
 }

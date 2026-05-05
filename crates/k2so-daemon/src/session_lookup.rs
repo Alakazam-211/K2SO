@@ -124,6 +124,22 @@ impl LiveSession {
     pub fn is_v2(&self) -> bool {
         matches!(self, LiveSession::V2(_))
     }
+
+    /// Whether the session's child PID is still alive.
+    ///
+    /// Legacy `SessionStreamSession` doesn't yet expose an analogous
+    /// flag, so it always returns `true` for now — Kessel-T0 sessions
+    /// are explicit user opt-in and the canonical-session reaping
+    /// pass for 0.37.0 only needs to handle v2. If reaping logic
+    /// later wants to extend to legacy, add the equivalent
+    /// `child_exited` AtomicBool to `SessionStreamSession` and route
+    /// through here.
+    pub fn is_child_alive(&self) -> bool {
+        match self {
+            LiveSession::Legacy(_) => true,
+            LiveSession::V2(s) => s.is_child_alive(),
+        }
+    }
 }
 
 /// Look up an agent across both maps. Legacy first because it's

@@ -879,6 +879,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         // Replaces the Tauri endpoint that walked AppState's
         // terminal_manager. Now a walk of session_map + registry.
         "/cli/agents/running" => crate::terminal_routes::handle_agents_running(params),
+        "/cli/agents/reap" => crate::terminal_routes::handle_agents_reap(params),
 
         // ── Phase 4.5 I7: resize a live session ─────────────────────
         // Resizes both the PTY and the alacritty Term so the child

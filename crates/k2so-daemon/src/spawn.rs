@@ -214,24 +214,35 @@ pub fn spawn_agent_session_v2_blocking(
     };
 
     // Idempotency: if a session is already registered under the
-    // canonical key, return it. The map is kept authoritative by the
-    // child-exit observer (`v2_spawn::spawn_child_exit_observer`),
-    // which fires `v2_session_map::unregister` on AlacEvent::ChildExit.
-    // Modulo a tiny race window between exit and observer firing,
-    // map presence == liveness. The race-window stale case is
-    // handled by `agents reap` (operator escape hatch).
+    // canonical key AND its child PID is alive, return it. The map
+    // is normally kept authoritative by the child-exit observer
+    // (`v2_spawn::spawn_child_exit_observer`), but the `is_child_alive`
+    // double-check closes the small race window between ChildExit
+    // and unregister — and gracefully handles the rare case where
+    // the observer task panicked or the broadcast channel closed
+    // before ChildExit landed.
     if let Some(existing) = v2_session_map::lookup_by_agent_name(&canonical_key) {
+        if existing.is_child_alive() {
+            log_debug!(
+                "[daemon/spawn] v2 reuse session={} canonical_key={}",
+                existing.session_id,
+                canonical_key,
+            );
+            return Ok(SpawnWorkspaceSessionOutcome {
+                session_id: existing.session_id,
+                agent_name: req.agent_name,
+                pending_drained: 0,
+                reused: true,
+            });
+        }
+        // Stale entry — child has exited but the unregister hadn't
+        // fired yet (or the observer dropped its Arc). Clean up and
+        // continue to spawn fresh.
         log_debug!(
-            "[daemon/spawn] v2 reuse session={} canonical_key={}",
-            existing.session_id,
+            "[daemon/spawn] reaping stale v2 entry under canonical_key={} (child exited)",
             canonical_key,
         );
-        return Ok(SpawnWorkspaceSessionOutcome {
-            session_id: existing.session_id,
-            agent_name: req.agent_name,
-            pending_drained: 0,
-            reused: true,
-        });
+        v2_session_map::unregister(&canonical_key);
     }
 
     // Convert the request shape into DaemonPtyConfig. v2 takes its

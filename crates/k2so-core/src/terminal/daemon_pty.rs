@@ -183,6 +183,16 @@ pub struct DaemonPtySession {
     /// of subscribers can exist, and reconnects just subscribe
     /// again (no ownership handoff).
     events_tx: broadcast::Sender<AlacEvent>,
+
+    /// Flipped to `true` when the alacritty `ChildExit` event has
+    /// been observed. Read by `is_child_alive()` for
+    /// idempotency-check liveness probes (the daemon's
+    /// `agents running` reaping pass and the spawn helper's
+    /// existing-session check both consult it). Set inside the
+    /// event listener — fires synchronously when alacritty's IO
+    /// thread sees the child exit, so the bool flips before the
+    /// broadcast subscribers are woken.
+    child_exited: std::sync::atomic::AtomicBool,
 }
 
 impl DaemonPtySession {
@@ -333,7 +343,27 @@ impl DaemonPtySession {
             term,
             pty_notifier: Mutex::new(Notifier(pty_sender)),
             events_tx,
+            child_exited: std::sync::atomic::AtomicBool::new(false),
         }))
+    }
+
+    /// Whether the child PID is still alive. Returns `false` once
+    /// the alacritty `ChildExit` event has been observed and
+    /// `mark_child_exited` was called (typically from the daemon's
+    /// child-exit observer task). Used by the spawn helper's
+    /// idempotency check and the `agents running` reaping pass to
+    /// recognize stale entries before reporting them as live.
+    pub fn is_child_alive(&self) -> bool {
+        !self.child_exited.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Flip the `child_exited` flag. Called by the child-exit
+    /// observer in the daemon (`v2_spawn::spawn_child_exit_observer`)
+    /// when an `AlacEvent::ChildExit` is received. Idempotent —
+    /// repeated calls are no-ops.
+    pub fn mark_child_exited(&self) {
+        self.child_exited
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Write input bytes to the child's stdin. Used for user

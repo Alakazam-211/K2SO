@@ -347,6 +347,18 @@ pub fn spawn_child_exit_observer(agent_name: String, session: std::sync::Arc<Dae
                         agent_name,
                         status.code(),
                     );
+                    // Flip the session's child_exited flag so any
+                    // subsequent lookup_by_agent_name caller (the
+                    // spawn-helper idempotency check, the agents
+                    // running reaping pass) sees the dead state
+                    // immediately. Without this, the small window
+                    // between ChildExit and unregister could surface
+                    // a stale Arc as "live" to a fast-following
+                    // lookup. Fix is cheap; race is rare; bug class
+                    // is high-impact.
+                    if let Some(s) = weak.upgrade() {
+                        s.mark_child_exited();
+                    }
                     v2_session_map::unregister(&agent_name);
                     return;
                 }
