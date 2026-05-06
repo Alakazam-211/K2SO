@@ -152,6 +152,20 @@ pub fn init_database() -> Result<Arc<ReentrantMutex<Connection>>> {
     let db_path = db_dir.join("k2so.db");
     let conn = open_with_resilience(&db_path)?;
 
+    // Self-heal: clean orphan rows whose parent `projects` row was
+    // deleted under earlier versions where FK enforcement was off
+    // or a delete path bypassed CASCADE. Runs BEFORE migrations so
+    // 0.37.0's `INSERT INTO workspace_sessions … SELECT … FROM
+    // agent_sessions` (which adds a NOT NULL REFERENCES projects(id)
+    // FK) doesn't trip on stranded rows. One client's DB had 615
+    // such rows across `activity_feed` / `heartbeat_fires` /
+    // `agent_sessions`, causing 0.37.0 to crash on launch with
+    // "FATAL: Failed to initialize database: FOREIGN KEY constraint
+    // failed". The CASCADE rule on every FK declaration says these
+    // rows should already be gone — this just finishes the deletion
+    // that didn't happen.
+    purge_orphan_project_children(&conn)?;
+
     run_migrations(&conn)?;
     seed_agent_presets(&conn)?;
     seed_audit_sentinels(&conn)?;
@@ -198,6 +212,116 @@ pub(crate) fn isolated_test_connection() -> Connection {
     seed_agent_presets(&conn).expect("seed");
     seed_audit_sentinels(&conn).expect("audit sentinels");
     conn
+}
+
+/// Self-heal sweep: remove rows in FK-bearing project-child tables
+/// whose `project_id` no longer exists in `projects`. Runs before
+/// migrations so 0.37.0's table-rebuild migrations (which add
+/// `REFERENCES projects(id)` constraints) don't fail with
+/// "FOREIGN KEY constraint failed" on databases that accumulated
+/// orphans under earlier versions.
+///
+/// FK constraints are toggled OFF for the duration of the DELETE
+/// to avoid triggering cascading checks while we're cleaning up;
+/// re-enabled afterwards. The deletes themselves are intentionally
+/// idempotent — every CASCADE rule on these tables says these rows
+/// should already be gone, so this just finishes the deletion that
+/// didn't happen in earlier versions where FK enforcement was off
+/// per-connection or a delete path bypassed CASCADE.
+///
+/// Tables we check (every FK to projects.id we ship):
+/// - `agent_sessions`           (pre-0.39 → renamed to workspace_sessions in 0039)
+/// - `agent_heartbeats`         (pre-0.40 → renamed to workspace_heartbeats in 0040)
+/// - `workspace_sessions`       (post-0.39, but the table name was
+///                               also used pre-0.38 for tab layouts;
+///                               we check it conditionally)
+/// - `heartbeat_fires`
+/// - `activity_feed`
+/// - `workspace_layouts`        (renamed from old workspace_sessions in 0038)
+///
+/// Conditional `IF EXISTS`-style guards via sqlite_master so the
+/// sweep is safe whether it runs pre-0.37.0 (legacy tables exist)
+/// or post-0.37.0 (renamed tables exist) or in any partially-migrated
+/// state. Returns `Ok(())` if the projects table doesn't exist yet
+/// (fresh DB, nothing to heal).
+pub(crate) fn purge_orphan_project_children(conn: &Connection) -> Result<()> {
+    // Fresh DB — no `projects` table yet, no orphans possible.
+    let projects_exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects'",
+        [],
+        |r| r.get(0),
+    )?;
+    if projects_exists == 0 {
+        return Ok(());
+    }
+
+    // Tables we know carry a `project_id` FK to projects(id) at
+    // some point in the schema's history. Each entry is checked
+    // for existence before the DELETE so we don't fail on
+    // partial-migration state.
+    let candidate_tables = [
+        "agent_sessions",
+        "agent_heartbeats",
+        "workspace_sessions",
+        "workspace_heartbeats",
+        "heartbeat_fires",
+        "activity_feed",
+        "workspace_layouts",
+    ];
+
+    // FK enforcement off for the cleanup so we don't trip
+    // intermediate constraints on tables that still reference each
+    // other through the orphan chain. Re-enabled before we exit.
+    let _ = conn.execute_batch("PRAGMA foreign_keys = OFF;");
+
+    let mut total_purged = 0i64;
+    for table in &candidate_tables {
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            [table],
+            |r| r.get(0),
+        )?;
+        if exists == 0 {
+            continue;
+        }
+        // Only delete from tables that actually have a `project_id`
+        // column. Older variants (e.g., the original 0009-vintage
+        // workspace_sessions before the 0038 rename) had different
+        // shapes; we shouldn't touch those.
+        let has_col: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name='project_id'",
+                table
+            ),
+            [],
+            |r| r.get(0),
+        )?;
+        if has_col == 0 {
+            continue;
+        }
+        let stmt = format!(
+            "DELETE FROM {} WHERE project_id NOT IN (SELECT id FROM projects)",
+            table
+        );
+        let n = conn.execute(&stmt, [])?;
+        if n > 0 {
+            total_purged += n as i64;
+            crate::log_debug!(
+                "[db/self-heal] purged {n} orphan rows from {table} \
+                 (project_id no longer exists in projects)"
+            );
+        }
+    }
+
+    let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
+
+    if total_purged > 0 {
+        crate::log_debug!(
+            "[db/self-heal] total orphan rows purged across all FK-bearing tables: {}",
+            total_purged
+        );
+    }
+    Ok(())
 }
 
 /// Simple migration runner using a _migrations table to track applied migrations.
@@ -569,6 +693,134 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 11, "reseeding must not duplicate rows");
+    }
+
+    // ── purge_orphan_project_children self-heal ───────────────────
+    #[test]
+    fn purge_orphan_project_children_removes_stranded_rows() {
+        // Reproduces the 0.37.0-launch crash: a DB with rows in
+        // FK-bearing tables whose parent `projects` row was deleted
+        // under earlier versions where FK enforcement was off.
+        // Without the self-heal, migration 0039's
+        // `INSERT INTO workspace_sessions … SELECT … FROM agent_sessions`
+        // would trip the new `REFERENCES projects(id)` constraint.
+        let conn = fresh_memory();
+        run_migrations(&conn).unwrap();
+
+        // Seed two projects + child rows for both, then delete
+        // ONE project bypassing CASCADE (FK off, simulating the
+        // pre-0.37.0 code path that left the orphans).
+        conn.execute(
+            "INSERT INTO projects (id, path, name) VALUES \
+             ('keep-me', '/tmp/keep', 'keep'), \
+             ('orphan-me', '/tmp/orphan', 'orphan')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO heartbeat_fires (id, project_id, agent_name, fired_at, mode, decision) \
+             VALUES (1, 'keep-me',   'a', '2026-05-06', 'manual', 'fired'), \
+                    (2, 'orphan-me', 'a', '2026-05-06', 'manual', 'fired'), \
+                    (3, 'orphan-me', 'a', '2026-05-06', 'manual', 'fired')",
+            [],
+        )
+        .unwrap();
+        // activity_feed schema: id INTEGER, project_id, event_type, summary, metadata...
+        // Use AUTOINCREMENT for id; just insert event_type + summary.
+        conn.execute(
+            "INSERT INTO activity_feed (project_id, event_type, summary) \
+             VALUES ('keep-me',   'message.sent', 'kept'), \
+                    ('orphan-me', 'message.sent', 'orphan-1'), \
+                    ('orphan-me', 'message.sent', 'orphan-2')",
+            [],
+        )
+        .unwrap();
+
+        // Delete the orphan project with FK off — what older
+        // versions effectively did.
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        conn.execute(
+            "DELETE FROM projects WHERE id = 'orphan-me'",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+
+        // Confirm the orphans are present (the bug we're fixing).
+        let orphan_fires: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM heartbeat_fires WHERE project_id = 'orphan-me'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphan_fires, 2, "test setup should produce 2 orphan fires");
+
+        // Run the self-heal.
+        purge_orphan_project_children(&conn).unwrap();
+
+        // Orphans gone, kept-project rows preserved.
+        let remaining_orphan_fires: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM heartbeat_fires WHERE project_id = 'orphan-me'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let kept_fires: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM heartbeat_fires WHERE project_id = 'keep-me'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_orphan_fires, 0, "orphan heartbeat_fires must be purged");
+        assert_eq!(kept_fires, 1, "non-orphan rows must be preserved");
+
+        let remaining_orphan_af: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM activity_feed WHERE project_id = 'orphan-me'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_orphan_af, 0, "orphan activity_feed rows must be purged");
+
+        // PRAGMA foreign_key_check should report clean.
+        let fk_violations: Vec<String> = conn
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            fk_violations.is_empty(),
+            "foreign_key_check should be clean after self-heal, got: {fk_violations:?}"
+        );
+    }
+
+    #[test]
+    fn purge_orphan_project_children_idempotent_on_clean_db() {
+        // Running the sweep against a freshly-migrated DB with no
+        // orphans must be a no-op — it'll fire on every K2SO launch
+        // post-0.37.1, so it has to stay cheap and harmless.
+        let conn = fresh_memory();
+        run_migrations(&conn).unwrap();
+        purge_orphan_project_children(&conn).unwrap();
+        purge_orphan_project_children(&conn).unwrap();
+        // Re-running shouldn't fail or re-introduce any rows.
+    }
+
+    #[test]
+    fn purge_orphan_project_children_handles_pre_migration_db() {
+        // Bare-minimum DB without any FK-bearing tables — sweep must
+        // return Ok cleanly so it can run BEFORE migrations on a
+        // brand-new install.
+        let conn = Connection::open(":memory:").unwrap();
+        // No projects table, no child tables — projects_exists check
+        // should short-circuit.
+        purge_orphan_project_children(&conn).unwrap();
     }
 
     // ── open_with_resilience PRAGMAs ──────────────────────────────
