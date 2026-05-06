@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useState, useEffect } from 'react'
+import { useMemo, useCallback, useState, useEffect, useRef } from 'react'
 import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
 import { useActiveAgentsStore } from '@/stores/active-agents'
@@ -41,6 +41,38 @@ function pruneExpiredActiveBarMemory(now: number): void {
   }
 }
 
+/**
+ * Set of project IDs the user has explicitly dismissed in this
+ * session. Used to override the auto-include rules (currently-active
+ * workspace, has-background-workspaces, in-memory) so an explicit
+ * Dismiss action always takes effect immediately — even when the
+ * dismissed project happens to be the workspace the user is
+ * currently viewing.
+ *
+ * Without this, dismissing the active workspace was a no-op
+ * visually: DB cleared, _activeBarMemory cleared, but rule 3
+ * (`p.id === activeProjectId`) re-added the project on the next
+ * render. The user only saw the dismiss after reloading the
+ * Tauri page (which reset the in-memory active project id).
+ *
+ * Cleared by:
+ *   - User navigates to a different workspace (the dismiss is
+ *     "complete" once they've moved on; coming back re-engages
+ *     normal rules).
+ *   - Manual re-add ("Keep in Active Bar" sets manuallyActive=1).
+ *   - The TTL matches `_activeBarMemory` (24h) for safety, even
+ *     though navigation usually clears it well before then.
+ */
+const _dismissedProjects = new Map<string, number>()
+
+function pruneExpiredDismissedProjects(now: number): void {
+  for (const [id, dismissedAt] of _dismissedProjects) {
+    if (now - dismissedAt >= TWENTY_FOUR_HOURS) {
+      _dismissedProjects.delete(id)
+    }
+  }
+}
+
 /** Compute which projects appear in the Active Bar */
 function useActiveBarItems(): ProjectWithWorkspaces[] {
   const projects = useProjectsStore((s) => s.projects)
@@ -56,14 +88,35 @@ function useActiveBarItems(): ProjectWithWorkspaces[] {
     return () => clearInterval(interval)
   }, [])
 
+  // Track the previous activeProjectId so we can detect "navigated
+  // away from a dismissed project" → clear that project's dismissed
+  // bit so a future return re-engages normal rules. Without this
+  // ref, simply checking `if (activeProjectId)` on each render would
+  // clear the dismissed entry on the very next render after dismiss
+  // (the dismissed project IS still active right then), defeating
+  // the dismiss visually.
+  const prevActiveProjectIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    const prev = prevActiveProjectIdRef.current
+    if (prev && prev !== activeProjectId && _dismissedProjects.has(prev)) {
+      _dismissedProjects.delete(prev)
+    }
+    prevActiveProjectIdRef.current = activeProjectId
+  }, [activeProjectId])
+
   return useMemo(() => {
     const now = Math.floor(Date.now() / 1000)
 
-    // Prune expired memory before reading it — guarantees rule 5
-    // never returns true for an entry older than 24h, so the
-    // explicit-dismiss + 24h-auto-dismiss invariants hold without
-    // needing a separate background sweep.
+    // Prune both TTL maps before reading. Guarantees explicit-dismiss
+    // and 24h-auto-dismiss invariants hold without a separate
+    // background sweep.
     pruneExpiredActiveBarMemory(now)
+    pruneExpiredDismissedProjects(now)
+
+    // (Dismissed-bit cleanup on activeProjectId change is handled in
+    // the prevActiveProjectIdRef effect above. Doing it inline here
+    // would clear the dismiss on the very next render after the
+    // user dismissed the currently-active project.)
 
     // Check if any pane has a non-idle hook status (agent was recently active)
     const hasHookActivity = paneStatuses.size > 0 && Array.from(paneStatuses.values()).some(
@@ -78,11 +131,21 @@ function useActiveBarItems(): ProjectWithWorkspaces[] {
       // Coordinator workspaces with worktrees should still appear in the active bar
       if (p.agentMode === 'agent' || p.agentMode === 'custom') return false
 
-      // 1. Manually active — always included
+      // 1. Manually active — always included (explicit user signal,
+      // wins over a stale dismiss).
       if (p.manuallyActive) return true
 
-      // 2. Recently interacted (within 24h, set when agent message sent)
+      // 2. Recently interacted (within 24h, set when agent message sent).
+      // Also an explicit user signal — wins over dismiss.
       if (p.lastInteractionAt && (now - p.lastInteractionAt) < TWENTY_FOUR_HOURS) return true
+
+      // Explicit dismiss in this session overrides the auto-include
+      // rules below. Without this gate, dismissing the workspace the
+      // user is currently viewing was a no-op visually — rule 3
+      // re-added the project before the next render painted. The
+      // dismissed-bit clears when the user navigates away (above)
+      // or after 24h.
+      if (_dismissedProjects.has(p.id)) return false
 
       // 3. Is the currently-active workspace. The user is looking at
       // it right now; surfacing it in Active gives them an obvious
@@ -227,12 +290,22 @@ export default function ActiveBar(): React.JSX.Element | null {
     const clickedId = await showContextMenu(menuItems)
     if (clickedId === 'remove-permanent') {
       _activeBarMemory.delete(project.id)
+      _dismissedProjects.delete(project.id)
       await setManuallyActive(project.id, false)
     } else if (clickedId === 'add-active') {
+      // "Keep in Active Bar" is an explicit re-add — clears any
+      // stale dismiss state so the manual flag wins immediately.
+      _dismissedProjects.delete(project.id)
       await setManuallyActive(project.id, true)
     } else if (clickedId === 'dismiss' && !hasRunningAgent) {
-      // Clear from memory, DB, background workspaces, and local state
+      // Clear from memory, DB, background workspaces, and local state.
+      // Also stamp the dismissed-bit so rules 3/4/5 don't re-add the
+      // project on the next render — this is the visible-immediately
+      // fix for "I dismissed the workspace I'm currently viewing
+      // and nothing changed until reload."
+      const now = Math.floor(Date.now() / 1000)
       _activeBarMemory.delete(project.id)
+      _dismissedProjects.set(project.id, now)
       await invoke('projects_update', { id: project.id, manuallyActive: 0 })
       await invoke('projects_touch_interaction_clear', { id: project.id }).catch((e) => console.warn('[active-bar]', e))
       // Clear background workspaces for this project (stashed terminals keep it visible)
@@ -305,9 +378,10 @@ export function getActiveBarItems(): ProjectWithWorkspaces[] {
   const backgroundWorkspaces = useTabsStore.getState().backgroundWorkspaces
   const now = Math.floor(Date.now() / 1000)
 
-  // Honor the same 24h TTL as the hook version. Without this prune,
-  // a stale memory entry would override the dismiss path here too.
+  // Honor the same 24h TTLs as the hook version. Without these
+  // prunes, stale entries would override the dismiss path here too.
   pruneExpiredActiveBarMemory(now)
+  pruneExpiredDismissedProjects(now)
 
   return projects.filter((p) => {
     if (p.pinned) return false
@@ -315,6 +389,7 @@ export function getActiveBarItems(): ProjectWithWorkspaces[] {
     if (p.agentMode === 'agent' || p.agentMode === 'custom') return false
     if (p.manuallyActive) return true
     if (p.lastInteractionAt && (now - p.lastInteractionAt) < TWENTY_FOUR_HOURS) return true
+    if (_dismissedProjects.has(p.id)) return false
     if (p.id === activeProjectId) return true
     if (Object.keys(backgroundWorkspaces).some((k) => k.startsWith(`${p.id}:`))) return true
     if (_activeBarMemory.has(p.id)) return true
