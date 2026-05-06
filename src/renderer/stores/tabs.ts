@@ -1342,6 +1342,27 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       return null
     }
 
+    // Verify the JSONL exists on disk before passing `--resume`.
+    // wake_headless saves last_session_id synchronously at spawn time,
+    // but claude doesn't write the JSONL until it's processed input.
+    // A daemon restart during that window leaves a "ghost" session id
+    // pointing at a missing file — `claude --resume <ghost>` would
+    // fail with "No conversation found" and lock the user into a
+    // broken tab on every retry. The next heartbeat fire will
+    // self-heal via smart_launch's matching JSONL check, so we just
+    // surface the wait state to the user here.
+    const jsonlExists = await invoke<boolean>('chat_history_session_exists', {
+      projectPath,
+      sessionId: hb.lastSessionId,
+    }).catch(() => true)
+    if (!jsonlExists) {
+      console.info(
+        '[openHeartbeatTab] saved session %s has no JSONL on disk yet; click Launch to refire',
+        hb.lastSessionId,
+      )
+      return null
+    }
+
     // Read the user's claude preset args (e.g. --dangerously-skip-permissions)
     // so the resumed session has the same permissions as a fresh launch.
     const presetArgs = await resolveClaudePresetArgs()

@@ -1079,6 +1079,20 @@ fn parse_codex_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSession>
 
 // ── Tauri commands ──────────────────────────────────────────────────────
 
+/// Check whether a Claude session JSONL exists on disk for the given
+/// workspace. Used by `openHeartbeatTab` (and any other resume-path
+/// caller) to validate `last_session_id` before passing it to
+/// `claude --resume <id>` — claude bails with "No conversation found"
+/// against a missing JSONL, which is uglier than just falling back to
+/// fresh-spawn or showing an empty state.
+#[tauri::command]
+pub fn chat_history_session_exists(project_path: String, session_id: String) -> bool {
+    if session_id.is_empty() {
+        return false;
+    }
+    k2so_core::chat_history::claude_session_file_exists(&session_id, &project_path)
+}
+
 #[tauri::command]
 pub fn chat_history_list(project_path: Option<String>) -> Result<Vec<ChatSession>, String> {
     let mut all = parse_claude_sessions(project_path.as_deref())?;

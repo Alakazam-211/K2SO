@@ -1433,6 +1433,23 @@ impl AgentHeartbeat {
         )
     }
 
+    /// Null out `last_session_id`. Called by the smart_launch self-heal
+    /// path when the saved session_id points at a JSONL that no longer
+    /// exists on disk (daemon-restart-during-spawn race) — clearing
+    /// here lets the next fire fall through to fresh_fire and pick a
+    /// new pinned UUID instead of looping on `claude --resume <ghost>`.
+    pub fn clear_session_id(
+        conn: &Connection,
+        project_id: &str,
+        name: &str,
+    ) -> Result<usize> {
+        conn.execute(
+            "UPDATE workspace_heartbeats SET last_session_id = NULL \
+             WHERE project_id = ?1 AND name = ?2",
+            params![project_id, name],
+        )
+    }
+
     /// Record the daemon-side terminal id of the live PTY currently
     /// attached to this heartbeat. NULL when no PTY is alive (cold
     /// heartbeat, post-exit, post-daemon-restart). Replaces the

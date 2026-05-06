@@ -139,6 +139,20 @@ pub fn smart_launch(project_path: &str, name: &str) -> serde_json::Value {
             &session_id, live_agent, live);
     }
 
+    // Self-heal: before resuming, verify the saved session's JSONL
+    // exists on disk. Daemon restarts during the spawn → wakeup-write
+    // window can leave `last_session_id` pointing at a session whose
+    // JSONL was never written. `claude --resume <ghost>` would fail
+    // with "No conversation found" — clear the ghost and fall through
+    // to fresh_fire so the next fire spawns cleanly.
+    if !k2so_core::chat_history::claude_session_file_exists(&session_id, project_path) {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        let _ = AgentHeartbeat::clear_session_id(&conn, &project_id, &hb.name);
+        drop(conn);
+        return run_fresh_fire(project_path, &project_id, &agent_name, &hb, &wakeup_abs);
+    }
+
     // Branch 3: saved session, no live PTY — resume + fire.
     run_resume_and_fire(project_path, &project_id, &agent_name, &hb, &wakeup_abs, &session_id)
 }

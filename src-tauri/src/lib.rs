@@ -1172,6 +1172,7 @@ pub fn run() {
             commands::chat_history::chat_history_list,
             commands::chat_history::chat_history_list_for_project,
             commands::chat_history::chat_history_detect_active_session,
+            commands::chat_history::chat_history_session_exists,
             commands::chat_history::chat_history_get_storage_paths,
             commands::chat_history::chat_history_get_custom_names,
             commands::chat_history::chat_history_rename_session,
