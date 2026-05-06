@@ -74,10 +74,22 @@ pub fn get_git_info(path: &str) -> GitInfo {
         .unwrap_or("")
         .to_string();
 
-    // Count changed and untracked files
+    // Count changed and untracked files. We deliberately do NOT
+    // `recurse_untracked_dirs(true)` here even though it would
+    // give a more precise per-file untracked count. The recurse
+    // makes libgit2 walk into every untracked directory — most
+    // notably `node_modules/`, `target/`, `dist/`, `.next/`, etc.
+    // — which on a JS/TS workspace with 100k+ files inside
+    // node_modules turns each poll into a multi-hundred-thousand
+    // stat-and-attribute-load loop. With this hook polled every
+    // 5 seconds (`useGit::useGitInfo`), that pegs the Tauri main
+    // process at ~200% CPU. Without recurse, libgit2 reports the
+    // untracked directory as a single entry — which is exactly
+    // what the sidebar's "is this workspace dirty?" indicator
+    // needs anyway. Per-file detail is available on demand via
+    // `get_changed_files` when the user opens the commit panel.
     let mut opts = StatusOptions::new();
     opts.include_untracked(true);
-    opts.recurse_untracked_dirs(true);
 
     let (changed_files, untracked_files) = match repo.statuses(Some(&mut opts)) {
         Ok(statuses) => {
@@ -474,9 +486,14 @@ pub fn get_changed_files(path: &str) -> Vec<ChangedFile> {
         Err(_) => return Vec::new(),
     };
 
+    // Don't recurse into untracked directories — same rationale as
+    // `get_git_info` above. Walking inside node_modules/, target/,
+    // etc. produces hundreds of thousands of irrelevant entries and
+    // burns CPU. Without recurse, libgit2 reports the untracked dir
+    // as a single entry (e.g. `node_modules/`) which is what every
+    // git GUI / `git status` CLI does by default.
     let mut opts = StatusOptions::new();
     opts.include_untracked(true);
-    opts.recurse_untracked_dirs(true);
 
     let statuses = match repo.statuses(Some(&mut opts)) {
         Ok(s) => s,

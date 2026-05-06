@@ -132,12 +132,27 @@ pub fn detect_claude_session(project_path: &str) -> Option<String> {
         let project_hash = claude_project_hash(resolve_root_project_path(project_path));
         let projects_dir = home.join(".claude").join("projects");
 
+        // Fast path: most workspaces store their session under exactly
+        // `<projects>/<hash>/<id>.jsonl`. Hit that first with a single
+        // stat. Avoids walking the entire `.claude/projects/` directory
+        // on every call — that walk costs O(N) stats per project the
+        // user has ever opened, and `AgentChatPane`'s 5s detection
+        // poll multiplies it across every chat tab. Worktree-suffixed
+        // dirs (`<hash>-<branch>`) still need the read_dir fallback.
+        let direct = projects_dir
+            .join(&project_hash)
+            .join(format!("{}.jsonl", id));
+        if direct.exists() {
+            return Some(id);
+        }
+
+        // Fallback: scan for `<hash>-<branch>` worktree variants. Same
+        // O(N) cost as before, but only paid when the direct path
+        // misses — which is the worktree case, not the common case.
         if let Ok(entries) = fs::read_dir(&projects_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name == project_hash
-                    || name.starts_with(&format!("{}-", project_hash))
-                {
+                if name.starts_with(&format!("{}-", project_hash)) {
                     let session_file = entry.path().join(format!("{}.jsonl", id));
                     if session_file.exists() {
                         return Some(id);

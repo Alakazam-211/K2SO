@@ -17,7 +17,20 @@ export const MAX_FILE_SIZE = 10 * 1024 * 1024  // 10MB
 export const MAX_ICON_SIZE = 256 * 1024  // 256KB
 
 // ── Polling intervals ────────────────────────────────────────────────
-export const GIT_POLL_INTERVAL = 5000  // 5 seconds
+// Five sidebar components call `useGitInfo` for the same workspace
+// path (App, IconRail, SectionItem, Sidebar ×4). At a 5s interval
+// that's a `repo.statuses()` per workspace every second across the
+// renderer — and each call walks the worktree's tracked-file tree
+// loading `.gitattributes` per directory. On a JS workspace with
+// thousands of tracked files that pegs the Tauri main at 200% CPU.
+// Bumping to 30s drops the rate 6× while a "is the workspace dirty?"
+// indicator that lags by tens of seconds is fine for the UX (the
+// dot just turns red a little later than it could). Real dirty-state
+// visibility happens in the commit panel which fetches on demand.
+// Future: deduplicate multi-component polling via a shared timer +
+// watch worktree mtime so we only re-fire when the filesystem
+// actually changed.
+export const GIT_POLL_INTERVAL = 30000  // 30 seconds
 export const FILE_POLL_INTERVAL = 2000  // 2 seconds
 
 // ── Terminal ─────────────────────────────────────────────────────────
