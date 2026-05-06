@@ -183,7 +183,28 @@ pub fn agent_type_for(project_path: &str, agent_name: &str) -> String {
 /// `projects.agent_mode` as the source of truth and only returns an
 /// agent dir whose type matches the workspace's declared mode.
 /// Agent-templates are never scheduleable.
+///
+/// **0.37.0 unification.** Post-migration the workspace's single
+/// agent lives at `.k2so/agent/AGENT.md` and the legacy
+/// `.k2so/agents/<name>/` tree is gone. We probe the unified path
+/// first — if it has an AGENT.md, parse the frontmatter `name:`
+/// and return it. Pre-0.37.0 workspaces (or freshly-created ones
+/// that haven't been migrated yet) fall through to the legacy
+/// scan. Without this probe, every heartbeat fire on a migrated
+/// workspace silently failed at "no scheduleable agent in this
+/// workspace" because `agents_root.exists()` returned false.
 pub fn find_primary_agent(project_path: &str) -> Option<String> {
+    // Post-0.37.0 unified primary.
+    let unified_md = workspace_agent_path(project_path).join("AGENT.md");
+    if let Ok(content) = fs::read_to_string(&unified_md) {
+        let fm = parse_frontmatter(&content);
+        if let Some(name) = fm.get("name") {
+            if !name.is_empty() {
+                return Some(name.clone());
+            }
+        }
+    }
+
     let agents_root = agents_dir(project_path);
     if !agents_root.exists() {
         return None;
