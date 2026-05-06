@@ -494,3 +494,128 @@ async fn agents_running_returns_empty_array_when_no_sessions() {
         "empty session_map should yield empty JSON array"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// 0.37.3: v2 session read — primary path for canonical workspace+agent
+// PTYs. The pre-0.37.3 read path only saw session_stream/sub-terminal
+// sessions; v2 sessions (the canonical workspace+agent PTYs spawned
+// by `agents launch`, `msg --wake`, or `ensure_canonical_session`)
+// returned empty. Filed by nsi-checkin Scout deployment as the
+// "no read-side surface for v2 PTYs" issue.
+// ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_returns_grid_lines_for_v2_session_by_session_id() {
+    let _g = lock();
+    v2_session_map::clear_for_tests();
+
+    // Spawn a v2 session running `printf "alpha\nbeta\ngamma\n"` —
+    // the printf writes to PTY stdout, alacritty's Term applies the
+    // bytes to its grid, and our read path projects the grid back
+    // to text. printf exits cleanly so the test doesn't depend on
+    // long-running PTY behavior.
+    let agent = "v2-read-test-uuid";
+    let outcome = k2so_daemon::spawn::spawn_agent_session_v2_blocking(
+        k2so_daemon::spawn::SpawnWorkspaceSessionRequest {
+            agent_name: agent.to_string(),
+            project_id: None,
+            cwd: "/tmp".to_string(),
+            command: Some("/bin/sh".to_string()),
+            args: Some(vec![
+                "-c".to_string(),
+                "printf 'alpha\\nbeta\\ngamma\\n'; sleep 1".to_string(),
+            ]),
+            cols: 80,
+            rows: 24,
+        },
+    )
+    .expect("v2 spawn should succeed");
+
+    // Wait briefly for the PTY's event loop to apply the printf
+    // output to the Term grid. 200ms is generous; the IO thread +
+    // alacritty parser usually finishes in single-digit ms.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let p = params(&[
+        ("id", &outcome.session_id.to_string()),
+        ("lines", "10"),
+    ]);
+    let resp = terminal_routes::handle_read(&p);
+    assert_eq!(resp.status, "200 OK", "v2 read should succeed: {}", resp.body);
+    let lines = extract_lines(&resp.body);
+
+    // Each printf line should appear as its own row in the grid.
+    // Match by `contains` rather than exact equality — alacritty
+    // pads short lines to column width with spaces, and trim_end
+    // in the read helper handles the trailing whitespace.
+    let joined = lines.join("\n");
+    assert!(
+        joined.contains("alpha") && joined.contains("beta") && joined.contains("gamma"),
+        "v2 grid read should surface printf output, got: {joined:?}"
+    );
+
+    let _ = v2_session_map::unregister(agent);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_resolves_canonical_workspace_agent_key() {
+    let _g = lock();
+    v2_session_map::clear_for_tests();
+
+    // Mirrors the nsi-checkin caller pattern: address by canonical
+    // key `<project_id>:<agent>` instead of the v2 session UUID.
+    // Same v2 session, different lookup form.
+    let project_id = "ws-read-test-canonical";
+    let agent = "scout";
+    let canonical_key = format!("{project_id}:{agent}");
+
+    let _outcome = k2so_daemon::spawn::spawn_agent_session_v2_blocking(
+        k2so_daemon::spawn::SpawnWorkspaceSessionRequest {
+            agent_name: canonical_key.clone(),
+            project_id: None,
+            cwd: "/tmp".to_string(),
+            command: Some("/bin/sh".to_string()),
+            args: Some(vec![
+                "-c".to_string(),
+                "printf 'CANONICAL_OK\\n'; sleep 1".to_string(),
+            ]),
+            cols: 80,
+            rows: 24,
+        },
+    )
+    .expect("v2 spawn under canonical key should succeed");
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let p = params(&[
+        ("id", canonical_key.as_str()),
+        ("lines", "10"),
+    ]);
+    let resp = terminal_routes::handle_read(&p);
+    assert_eq!(resp.status, "200 OK", "read by canonical key must succeed: {}", resp.body);
+    let lines = extract_lines(&resp.body);
+    assert!(
+        lines.iter().any(|l| l.contains("CANONICAL_OK")),
+        "canonical-key read must surface grid output, got: {lines:?}"
+    );
+
+    let _ = v2_session_map::unregister(&canonical_key);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_unknown_canonical_key_returns_clear_error() {
+    let _g = lock();
+    v2_session_map::clear_for_tests();
+
+    let p = params(&[
+        ("id", "nonexistent-ws:nonexistent-agent"),
+        ("lines", "10"),
+    ]);
+    let resp = terminal_routes::handle_read(&p);
+    assert_eq!(resp.status, "400 Bad Request");
+    assert!(
+        resp.body.contains("no live v2 session"),
+        "missing canonical key must return a clear error, got: {}",
+        resp.body
+    );
+}

@@ -32,34 +32,69 @@ use crate::session_lookup;
 
 /// Handler for `GET /cli/terminal/read?id=<session>&lines=<n>[&scrollback=true]`.
 ///
-/// Walks the session's replay ring, decodes every `Frame::Text`
-/// chunk back to UTF-8, joins them into a single byte stream,
-/// and splits on `\n` to produce logical lines. Returns the last
-/// N lines (or every line if `lines=` is missing / zero).
+/// `<id>` accepts three forms:
 ///
-/// `scrollback=true` is accepted for back-compat with the legacy
-/// Tauri endpoint but currently has no distinct behavior — the
-/// replay ring IS the scrollback. A future commit can wire a
-/// separate "archive replay" path that reads from the on-disk
-/// NDJSON segments when the caller wants history beyond
-/// `REPLAY_CAP` frames.
+///   1. **v2 session UUID** (`<v2 SessionId>`) — the canonical
+///      workspace+agent PTY. Resolved via `v2_session_map`. Reads
+///      the live alacritty `Term`'s grid (rendered TUI surface)
+///      and returns the last N rows as plain text.
+///   2. **Canonical workspace+agent key** (`<project_id>:<agent>`) —
+///      same path as (1), looked up by `lookup_by_agent_name`.
+///      Lets callers tail by name without first resolving the
+///      session UUID.
+///   3. **Sub-terminal SessionId** — the older `terminal spawn`
+///      facility's session-stream registry. Reads the replay ring
+///      (LineMux-emitted Frame::Text). Used by tooling that
+///      spawned a one-off command via `terminal spawn --command`.
+///
+/// All three forms produce the same response shape:
+/// `{"lines":["row1","row2",...]}`.
 pub fn handle_read(params: &HashMap<String, String>) -> CliResponse {
     let id_str = match params.get("id") {
         Some(s) if !s.is_empty() => s.as_str(),
         _ => return CliResponse::bad_request("missing id param"),
-    };
-    let session_id = match SessionId::parse(id_str) {
-        Some(id) => id,
-        None => return CliResponse::bad_request("invalid session id (expected UUID)"),
     };
     let requested_lines: usize = params
         .get("lines")
         .and_then(|s| s.parse().ok())
         .unwrap_or(50);
 
+    // Form 2: canonical key `<project_id>:<agent>` — lookup_by_agent_name
+    // accepts arbitrary string keys, so a colon-bearing id that
+    // doesn't parse as a UUID is the canonical-key form.
+    if id_str.contains(':')
+        && k2so_core::session::SessionId::parse(id_str).is_none()
+    {
+        if let Some(session) = crate::v2_session_map::lookup_by_agent_name(id_str) {
+            return read_v2_grid_lines(&session, requested_lines);
+        }
+        return CliResponse::bad_request(format!(
+            "no live v2 session under canonical key '{id_str}'"
+        ));
+    }
+
+    // Form 1 + 3: try parsing as a UUID, then dispatch on which
+    // map owns it. v2 first — that's the workspace+agent PTY's
+    // primary read surface.
+    let session_id = match SessionId::parse(id_str) {
+        Some(id) => id,
+        None => return CliResponse::bad_request("invalid session id (expected UUID or canonical key)"),
+    };
+
+    if let Some(session) = crate::v2_session_map::lookup_by_session_id(&session_id) {
+        return read_v2_grid_lines(&session, requested_lines);
+    }
+
+    // Form 3 fallback: sub-terminal session-stream registry. This
+    // is the older Frame::Text replay-ring path used by tooling
+    // that called `terminal spawn --command "..."`. Distinct from
+    // v2: those sub-terminals don't have an alacritty Term backing
+    // them, just a session_stream pipeline.
     let entry = match registry::lookup(&session_id) {
         Some(e) => e,
-        None => return CliResponse::bad_request("session not found"),
+        None => return CliResponse::bad_request(
+            "session not found (checked v2_session_map + session_stream registry)",
+        ),
     };
 
     // Decode every Frame::Text's bytes. LineMux emits a Frame::Text
@@ -112,6 +147,60 @@ pub fn handle_read(params: &HashMap<String, String>) -> CliResponse {
     let start = lines.len().saturating_sub(requested_lines);
     let tail: Vec<String> = lines[start..].to_vec();
 
+    CliResponse::ok_json(serde_json::json!({ "lines": tail }).to_string())
+}
+
+/// Render a v2 session's live grid + scrollback as plain-text lines
+/// and return the last N. Used by `handle_read` for the primary
+/// "show me what's on the screen for this canonical workspace+agent
+/// PTY" surface — every workspace's pinned chat tab is a v2 session,
+/// so this is the read path that closes the operational-visibility
+/// gap (peek before inject, diagnose stuck agents, etc.).
+///
+/// Reads the alacritty `Term`'s grid (the rendered TUI surface, not
+/// raw byte history). One line per Term row; trailing-empty rows
+/// are trimmed. Cursor / SGR styling is dropped — this is plain
+/// text for human eyes / shell pipelines.
+fn read_v2_grid_lines(
+    session: &std::sync::Arc<k2so_core::terminal::daemon_pty::DaemonPtySession>,
+    requested_lines: usize,
+) -> CliResponse {
+    use k2so_core::terminal::grid_snapshot::snapshot_term;
+
+    // Lock the Term briefly, take a snapshot, drop the lock fast.
+    // The snapshot returns owned data so we can hold it across the
+    // unlock without keeping the Term blocked.
+    let term_arc = session.term();
+    let snapshot = {
+        let term = term_arc.lock();
+        snapshot_term(&session.session_id.to_string(), &*term, 0)
+    };
+
+    // Concatenate scrollback + live grid in order (scrollback
+    // first = oldest at top), render each row by joining its
+    // CellRun.text values.
+    let mut lines: Vec<String> = Vec::with_capacity(
+        snapshot.scrollback.len() + snapshot.grid.len(),
+    );
+    for row in &snapshot.scrollback {
+        let text: String = row.iter().map(|run| run.text.as_str()).collect();
+        lines.push(text.trim_end().to_string());
+    }
+    for row in &snapshot.grid {
+        let text: String = row.iter().map(|run| run.text.as_str()).collect();
+        lines.push(text.trim_end().to_string());
+    }
+
+    // Trim trailing empty rows — alacritty pads the live grid to
+    // its full row count, so an idle terminal returns dozens of
+    // empty rows that are noise to the caller. The first non-empty
+    // row from the end is the last meaningful line.
+    while lines.last().map(String::is_empty).unwrap_or(false) {
+        lines.pop();
+    }
+
+    let start = lines.len().saturating_sub(requested_lines);
+    let tail: Vec<String> = lines[start..].to_vec();
     CliResponse::ok_json(serde_json::json!({ "lines": tail }).to_string())
 }
 
