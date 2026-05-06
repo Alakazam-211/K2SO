@@ -136,30 +136,33 @@ export function TerminalSection(): React.JSX.Element {
 
         {/* Terminal Renderer.
          *
-         *  - "Alacritty" = v2, daemon-hosted. Default for fresh installs
-         *    since 0.36.7. Survives Tauri quit, supports heartbeat
-         *    continuity, and is the path forward.
-         *  - "Alacritty (Legacy)" = the original Tauri-local PTY
-         *    renderer. Kept available for users who relied on the
-         *    in-Tauri lifecycle; will retire once v2 covers every
-         *    workflow.
+         *  0.37.0: "Alacritty (Legacy)" removed from the option list.
+         *  Anyone whose persisted setting is `alacritty` gets coerced
+         *  to `alacritty-v2` on the next render via the
+         *  `coerceLegacyToV2` effect below — they can't switch back.
+         *  Kessel stays available for the JSON-stream beta path.
+         *
+         *  - "Alacritty" = v2, daemon-hosted. Survives Tauri quit,
+         *    supports heartbeat continuity. The only general-purpose
+         *    option going forward.
          *  - "Kessel (BETA)" = experimental JSON-stream multi-device
          *    renderer for T1-capable CLI tools (see
          *    .k2so/prds/kessel-t1.md).
          *
-         *  Changing this setting only affects NEW tabs. Existing users
-         *  keep whatever they had previously chosen — only fresh
-         *  installs land on the v2 default.
+         *  Changing this setting only affects NEW tabs. Existing tabs
+         *  keep whatever renderer they were created with; the legacy
+         *  Rust spawn path remains compiled in for now to host those
+         *  in-flight tabs gracefully (slated for full removal in a
+         *  later release once the long-tail of legacy tabs is empty).
          */}
         <SettingRow settingId="terminal.renderer" label={
-          <span title="Alacritty (the new default since 0.36.7) runs on the daemon, survives Tauri quit, and supports heartbeats. Alacritty (Legacy) is the original Tauri-local renderer, kept for backwards-compat. Kessel is experimental, for JSON-stream-capable CLI tools only. Changing this only affects NEW terminals; existing tabs keep their current renderer.">
+          <span title="Alacritty runs on the daemon, survives Tauri quit, and supports heartbeats. Kessel is experimental — for JSON-stream-capable CLI tools only. Changing this only affects NEW terminals; existing tabs keep their current renderer.">
             Terminal Renderer
           </span>
         }>
           <SettingDropdown
-            value={renderer}
+            value={renderer === 'alacritty' ? 'alacritty-v2' : renderer}
             options={[
-              { value: 'alacritty', label: 'Alacritty (Legacy)' },
               { value: 'alacritty-v2', label: 'Alacritty' },
               { value: 'kessel', label: 'Kessel (BETA)' },
             ]}

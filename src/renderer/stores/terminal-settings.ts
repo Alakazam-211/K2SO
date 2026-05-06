@@ -97,7 +97,13 @@ export const useTerminalSettingsStore = create<TerminalSettingsState>()(
       },
 
       setRenderer: (renderer: TerminalRenderer) => {
-        set({ renderer })
+        // 0.37.0: 'alacritty' (legacy) is no longer a user-selectable
+        // option. The Settings UI hides it from the dropdown; this
+        // setter coerces any programmatic attempt to set it (e.g.,
+        // someone editing localStorage by hand or invoking via
+        // DevTools) so the chosen renderer stays on a supported path.
+        const normalized = renderer === 'alacritty' ? 'alacritty-v2' : renderer
+        set({ renderer: normalized })
       }
     }),
     {
@@ -112,7 +118,22 @@ export const useTerminalSettingsStore = create<TerminalSettingsState>()(
         shortcutLayout: state.shortcutLayout,
         renderer: state.renderer,
       }),
-      version: 1,
+      version: 2,
+      // 0.37.0 (v1 → v2): force-migrate users who had the persisted
+      // renderer set to 'alacritty' (Legacy) onto 'alacritty-v2'.
+      // The legacy option is removed from the Settings UI and the
+      // Rust spawn path is slated for deletion in a later release;
+      // this migration ensures no user is left on a renderer that
+      // will eventually stop working.
+      migrate: (persisted: unknown, version: number) => {
+        if (version < 2 && persisted && typeof persisted === 'object') {
+          const ps = persisted as { renderer?: string }
+          if (ps.renderer === 'alacritty') {
+            return { ...ps, renderer: 'alacritty-v2' }
+          }
+        }
+        return persisted as Partial<TerminalSettingsState>
+      },
     },
   ),
 )
