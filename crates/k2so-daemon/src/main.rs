@@ -36,6 +36,7 @@
 
 mod agents_routes;
 mod awareness_ws;
+mod canonical_session;
 mod cli;
 mod cli_response;
 mod companion_routes;
@@ -1321,6 +1322,14 @@ fn run_workspace_unification_sweep() {
     // `.k2so/`. Idempotent + reversible (moves to .archive/, doesn't
     // delete) — see `archive_legacy_unification_dirs`.
     archive_legacy_unification_dirs();
+
+    // 0.37.2: proactively ensure each bot-mode workspace has a
+    // canonical session registered. Closes the SMS-bridge race
+    // window where a webhook's `--wake` arrives before any caller
+    // has spawned the canonical PTY. Best-effort per workspace; a
+    // failure on one workspace doesn't stop the sweep. See
+    // `canonical_session::boot_sweep_ensure_canonical_sessions`.
+    crate::canonical_session::boot_sweep_ensure_canonical_sessions();
 }
 
 /// Move heartbeat WAKEUP.md files from `.k2so/agent/heartbeats/<sched>/`

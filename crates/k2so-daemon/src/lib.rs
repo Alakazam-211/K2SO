@@ -8,6 +8,7 @@
 
 pub mod agents_routes;
 pub mod awareness_ws;
+pub mod canonical_session;
 pub mod cli_response;
 pub mod companion_routes;
 pub mod events;

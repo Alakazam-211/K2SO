@@ -294,8 +294,50 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                                 k2so_core::agent_hooks::HookEvent::SyncProjects,
                                 serde_json::Value::Null,
                             );
+                            // 0.37.2: when mode flips to a bot mode AND
+                            // AGENT.md exists, proactively spawn the
+                            // canonical PTY + register workspace_sessions.
+                            // Without this, the SMS-bridge race window
+                            // (mode → AGENT.md write → first webhook
+                            // inbound, all sub-second) lets `--wake`
+                            // race ahead and spawn a session that the
+                            // sidebar's window pane never sees. Filed by
+                            // nsi-checkin Scout deployment as the
+                            // "canonical PTY initialization" issue.
+                            // Best-effort — not having an agent yet
+                            // (operator is between `mode` and AGENT.md
+                            // write) is the common case and isn't an
+                            // error; just log and let the next caller
+                            // (or boot sweep) handle it.
+                            let bot_mode = matches!(mode.as_str(),
+                                "custom" | "manager" | "k2so");
+                            let agent_md = std::path::PathBuf::from(&p)
+                                .join(".k2so/agent/AGENT.md");
+                            let mut ensure_summary = serde_json::Value::Null;
+                            if bot_mode && agent_md.exists() {
+                                match crate::canonical_session::ensure_canonical_session(&p) {
+                                    Ok(out) => {
+                                        ensure_summary = serde_json::json!({
+                                            "session_id": out.session_id,
+                                            "agent": out.agent_name,
+                                            "reused": out.reused,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        k2so_core::log_debug!(
+                                            "[daemon/canonical] mode={mode} \
+                                             ensure_canonical_session skipped \
+                                             for {p}: {e}"
+                                        );
+                                    }
+                                }
+                            }
                             CliResponse::ok_json(
-                                serde_json::json!({"success": true, "mode": mode}).to_string(),
+                                serde_json::json!({
+                                    "success": true,
+                                    "mode": mode,
+                                    "canonical": ensure_summary,
+                                }).to_string(),
                             )
                         }
                         Err(e) => CliResponse::bad_request(e),
@@ -475,6 +517,31 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                 Err(e) => CliResponse::bad_request(e),
             }
         }
+
+        // 0.37.2: explicit caller-driven canonical-session ensurance.
+        // Replaces the SMS-bridge `agents launch <name>` workaround
+        // — semantically correct, returns the canonical IDs the
+        // caller can use for follow-up inject/wake. Idempotent: if
+        // canonical session is already alive, returns reused=true
+        // with the existing IDs. See `canonical_session.rs` module
+        // doc for the full flow + the race it solves.
+        "/cli/workspace/ensure-canonical-session" => match need_project(params) {
+            Ok(p) => match crate::canonical_session::ensure_canonical_session(&p) {
+                Ok(out) => CliResponse::ok_json(
+                    serde_json::json!({
+                        "success": true,
+                        "session_id": out.session_id,
+                        "agent": out.agent_name,
+                        "project_id": out.project_id,
+                        "reused": out.reused,
+                        "pending_drained": out.pending_drained,
+                    })
+                    .to_string(),
+                ),
+                Err(e) => CliResponse::bad_request(e),
+            },
+            Err(r) => r,
+        },
 
         // 0.37.0 simplified messaging — `k2so msg <workspace> "text"`.
         // Resolves a workspace token (name | absolute path | UUID) to
