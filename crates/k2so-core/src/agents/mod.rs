@@ -92,6 +92,16 @@ pub fn agent_template_dir(project_path: &str, template_name: &str) -> PathBuf {
         .join(template_name)
 }
 
+/// Post-0.37.0: `<project>/.k2so/heartbeats/` — workspace-level
+/// heartbeat directory. Each schedule lives at
+/// `<this>/<schedule_name>/WAKEUP.md`. Pre-0.37.0 heartbeats lived
+/// under each agent's directory (`agent_dir/heartbeats/<sched>/`).
+/// The unification migration moves them to this workspace-level
+/// path; new heartbeats scaffold here directly.
+pub fn workspace_heartbeats_dir(project_path: &str) -> PathBuf {
+    PathBuf::from(project_path).join(".k2so").join("heartbeats")
+}
+
 /// Resolve the on-disk directory for an agent name within a workspace.
 ///
 /// **Layout-aware.** Probes in this order:

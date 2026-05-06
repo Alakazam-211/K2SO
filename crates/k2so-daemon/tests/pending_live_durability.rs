@@ -19,6 +19,8 @@ use k2so_daemon::awareness_ws;
 use k2so_daemon::pending_live;
 use k2so_daemon::providers;
 use k2so_daemon::session_map;
+use k2so_daemon::spawn::{spawn_agent_session_v2_blocking, SpawnWorkspaceSessionRequest};
+use k2so_daemon::v2_session_map;
 
 static TEST_LOCK: StdMutex<()> = StdMutex::new(());
 
@@ -56,17 +58,23 @@ fn isolate_pending_root(tag: &str) -> std::path::PathBuf {
 async fn live_signal_to_offline_target_lands_in_pending_queue() {
     let _g = lock();
     init_for_tests();
-    ensure_project("k2so-ws");
+    // Deliberately NOT registering "unregistered-ws" in projects.
+    // Post-0.37.0 the wake provider has a default launch profile
+    // fallback that would otherwise auto-launch and drain the
+    // queue immediately. By targeting a workspace not in the
+    // projects table, `try_auto_launch` errors at
+    // `lookup_project_path` and the signal stays queued — which
+    // is exactly the F3 invariant we want to pin.
     providers::register_all();
     let queue_root = isolate_pending_root("offline-queue");
 
     let signal = AgentSignal::new(
         AgentAddress::Agent {
-            workspace: WorkspaceId("k2so-ws".into()),
+            workspace: WorkspaceId("unregistered-ws".into()),
             name: "foo".into(),
         },
         AgentAddress::Agent {
-            workspace: WorkspaceId("k2so-ws".into()),
+            workspace: WorkspaceId("unregistered-ws".into()),
             name: "offline-target".into(),
         },
         SignalKind::Msg {
@@ -85,8 +93,10 @@ async fn live_signal_to_offline_target_lands_in_pending_queue() {
         "wake should have fired and queued the signal"
     );
 
-    // Queue file exists.
-    let agent_dir = queue_root.join("offline-target");
+    // Queue file exists under the canonical key (post-0.37.0:
+    // wake provider enqueues under `<workspace_id>:<agent>`,
+    // sanitized to `_` for filesystem safety).
+    let agent_dir = queue_root.join("unregistered-ws_offline-target");
     assert!(agent_dir.exists(), "agent dir should exist: {agent_dir:?}");
     let queued: Vec<_> = std::fs::read_dir(&agent_dir)
         .unwrap()
@@ -99,7 +109,9 @@ async fn live_signal_to_offline_target_lands_in_pending_queue() {
 async fn spawn_drains_pending_queue_and_injects_on_boot() {
     let _g = lock();
     init_for_tests();
-    ensure_project("k2so-ws");
+    // Use an UNREGISTERED workspace so the post-0.37.0 default
+    // launch profile fallback can't auto-launch — keeps the F3
+    // queue-then-drain-on-explicit-spawn semantics intact.
     providers::register_all();
     let _queue = isolate_pending_root("spawn-drain");
 
@@ -107,11 +119,11 @@ async fn spawn_drains_pending_queue_and_injects_on_boot() {
     // This queues the signal via DaemonWakeProvider.
     let signal = AgentSignal::new(
         AgentAddress::Agent {
-            workspace: WorkspaceId("k2so-ws".into()),
+            workspace: WorkspaceId("unregistered-drain-ws".into()),
             name: "foo".into(),
         },
         AgentAddress::Agent {
-            workspace: WorkspaceId("k2so-ws".into()),
+            workspace: WorkspaceId("unregistered-drain-ws".into()),
             name: "drain-target".into(),
         },
         SignalKind::Msg {
@@ -125,11 +137,15 @@ async fn spawn_drains_pending_queue_and_injects_on_boot() {
     let report = egress::deliver(&signal, &inbox_root);
     assert!(report.woke_offline_target);
 
-    // Step 2: now spawn a session for drain-target via the HTTP
-    // handler. The spawn path should drain the queue and inject
-    // the queued signal into the fresh PTY.
+    // Step 2: spawn a session via the legacy Kessel-T0 endpoint
+    // (`/cli/sessions/spawn` → `awareness_ws::handle_sessions_spawn`).
+    // Post-0.37.0 the wake provider enqueues under the canonical
+    // `<workspace_id>:<agent>` key. The legacy spawn endpoint
+    // doesn't auto-canonicalize agent_name, so the test passes the
+    // canonical key form directly so the drain side matches.
+    let canonical_key = "unregistered-drain-ws:drain-target";
     let spawn_body = serde_json::json!({
-        "agent_name": "drain-target",
+        "agent_name": canonical_key,
         "cwd": "/tmp",
         "command": "cat",
         "args": null,
@@ -148,9 +164,9 @@ async fn spawn_drains_pending_queue_and_injects_on_boot() {
         .unwrap_or(0);
     assert_eq!(drained, 1, "spawn should have drained 1 queued signal");
 
-    // Queue dir is now empty.
+    // Queue dir is now empty (sanitized canonical-key path).
     let queue_root = pending_live::queue_root();
-    let agent_dir = queue_root.join("drain-target");
+    let agent_dir = queue_root.join("unregistered-drain-ws_drain-target");
     if agent_dir.exists() {
         let remaining: Vec<_> = std::fs::read_dir(&agent_dir)
             .unwrap()
@@ -161,15 +177,16 @@ async fn spawn_drains_pending_queue_and_injects_on_boot() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Cleanup.
-    session_map::unregister("drain-target");
+    // Cleanup — session was registered under canonical key.
+    session_map::unregister(canonical_key);
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn replay_all_finds_queued_entries() {
     let _g = lock();
     init_for_tests();
-    ensure_project("k2so-ws");
+    // Unregistered workspace → wake auto-launch fallback can't
+    // fire → signals stay queued for replay.
     providers::register_all();
     let _queue = isolate_pending_root("replay-all");
 
@@ -177,11 +194,11 @@ async fn replay_all_finds_queued_entries() {
     for (agent, text) in [("a", "msg-to-a"), ("b", "msg-to-b")] {
         let sig = AgentSignal::new(
             AgentAddress::Agent {
-                workspace: WorkspaceId("k2so-ws".into()),
+                workspace: WorkspaceId("unregistered-replay-ws".into()),
                 name: "sender".into(),
             },
             AgentAddress::Agent {
-                workspace: WorkspaceId("k2so-ws".into()),
+                workspace: WorkspaceId("unregistered-replay-ws".into()),
                 name: agent.to_string(),
             },
             SignalKind::Msg {
@@ -197,9 +214,120 @@ async fn replay_all_finds_queued_entries() {
     let replayed = pending_live::replay_all();
     let mut agents: Vec<_> = replayed.iter().map(|(n, _)| n.clone()).collect();
     agents.sort();
-    assert_eq!(agents, vec!["a".to_string(), "b".to_string()]);
+    // Post-0.37.0: wake provider enqueues under canonical
+    // `<workspace_id>:<agent>` keys. replay_all reads dir names off
+    // disk; dir names are pending_live::sanitize()'d so `:` becomes
+    // `_`. So replay surfaces the SANITIZED form. Pre-0.37.0 these
+    // were bare ['a', 'b'].
+    assert_eq!(
+        agents,
+        vec!["unregistered-replay-ws_a".to_string(), "unregistered-replay-ws_b".to_string()]
+    );
     // Each has 1 signal.
     for (_, sigs) in &replayed {
         assert_eq!(sigs.len(), 1);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 0.37.0 canonical-key keying — wake provider enqueues under
+// `<workspace_id>:<agent>` and v2 spawn drains the same key. This
+// is the alignment fix that closes the cross-restart durability
+// gap: signals queued while a workspace's agent is offline land in
+// the right session when it comes back, even if the daemon
+// restarted in between.
+// ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "current_thread")]
+async fn canonical_key_wake_enqueue_drains_on_v2_spawn() {
+    let _g = lock();
+    init_for_tests();
+    // Deliberately UNregistered so the auto-launch fallback errors
+    // out (no project path → can't load any launch profile). The
+    // signal stays queued, ready for the manual drain below to
+    // exercise the canonical-key alignment.
+    providers::register_all();
+    v2_session_map::clear_for_tests();
+    let _queue = isolate_pending_root("canonical-key-drain");
+
+    // Step 1: send a Live signal to an offline target. The wake
+    // provider should enqueue under the canonical key
+    // `<workspace_id>:<agent>` (post-0.37.0 alignment with the
+    // v2 spawn helper's drain key). Pre-0.37.0 the provider used
+    // bare `agent` and the v2 drain used the prefixed form — they
+    // never met. This test pins the alignment.
+    let signal = AgentSignal::new(
+        AgentAddress::Agent {
+            workspace: WorkspaceId("canonical-ws".into()),
+            name: "sender".into(),
+        },
+        AgentAddress::Agent {
+            workspace: WorkspaceId("canonical-ws".into()),
+            name: "canonical-target".into(),
+        },
+        SignalKind::Msg {
+            text: "canonical-key-probe".into(),
+        },
+    )
+    .with_delivery(Delivery::Live);
+
+    let inbox_root = std::env::temp_dir().join("k2so-canonical-drain-inbox");
+    let _ = std::fs::create_dir_all(&inbox_root);
+    egress::deliver(&signal, &inbox_root);
+
+    // Verify enqueue happened under the CANONICAL key, not bare.
+    // pending_live::enqueue sanitizes `:` → `_` for filesystem
+    // safety, so the on-disk dir for canonical key
+    // "canonical-ws:canonical-target" is "canonical-ws_canonical-target".
+    let canonical_key = "canonical-ws:canonical-target";
+    let canonical_dir_name = "canonical-ws_canonical-target";
+    let queue_root = pending_live::queue_root();
+    let canonical_dir = queue_root.join(canonical_dir_name);
+    let bare_dir = queue_root.join("canonical-target");
+    assert!(
+        canonical_dir.exists(),
+        "queue dir for canonical key {canonical_key:?} (sanitized: {canonical_dir_name:?}) should exist"
+    );
+    assert!(
+        !bare_dir.exists() || std::fs::read_dir(&bare_dir).map(|d| d.count()).unwrap_or(0) == 0,
+        "queue dir for bare 'canonical-target' should be empty/absent — pre-0.37.0 keying regression"
+    );
+
+    // Step 2: simulate "daemon restarted, in-memory map is empty,
+    // queue is intact on disk" by NOT spawning yet. Then spawn via
+    // `spawn_agent_session_v2_blocking` with the workspace_id
+    // attached. The helper should construct the same canonical key
+    // and drain the queue.
+    let outcome = spawn_agent_session_v2_blocking(SpawnWorkspaceSessionRequest {
+        agent_name: "canonical-target".to_string(),
+        project_id: Some("canonical-ws".to_string()),
+        cwd: "/tmp".to_string(),
+        command: Some("cat".to_string()),
+        args: None,
+        cols: 80,
+        rows: 24,
+    })
+    .expect("v2 spawn should succeed");
+
+    assert_eq!(
+        outcome.pending_drained, 1,
+        "spawn under canonical key should drain the queued signal"
+    );
+    assert!(!outcome.reused, "fresh spawn (map cleared above), not reused");
+
+    // Queue dir under the canonical key is now drained.
+    if canonical_dir.exists() {
+        let remaining: Vec<_> = std::fs::read_dir(&canonical_dir)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            remaining.is_empty(),
+            "canonical-key queue dir should be empty post-drain; remaining: {remaining:?}"
+        );
+    }
+
+    // Cleanup.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    v2_session_map::clear_for_tests();
 }

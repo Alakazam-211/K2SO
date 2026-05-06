@@ -178,11 +178,19 @@ async fn wake_auto_launches_agent_with_launch_profile() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Agent WITHOUT launch profile → stays queued, no auto-launch
+// Agent WITHOUT explicit launch profile → 0.37.0 default fallback fires
 // ─────────────────────────────────────────────────────────────────────
+//
+// Pre-0.37.0 this test asserted "no auto-launch when AGENT.md lacks a
+// launch: block." 0.37.0 added an ergonomic default-launch fallback
+// (claude --dangerously-skip-permissions, cwd = project root) so
+// workspace-agent spawns work without users hand-authoring YAML. The
+// test now pins the new contract: a registered workspace + AGENT.md
+// without a launch: block still auto-launches, just via the default
+// instead of an explicit profile.
 
 #[tokio::test(flavor = "current_thread")]
-async fn wake_falls_back_to_queue_only_without_launch_profile() {
+async fn wake_falls_back_to_default_launch_profile_when_block_absent() {
     let _g = lock();
     init_for_tests();
     providers::register_all();
@@ -203,24 +211,35 @@ async fn wake_falls_back_to_queue_only_without_launch_profile() {
     let report = egress::deliver(&signal, &inbox_root);
     assert!(report.woke_offline_target);
 
-    // Expected: no auto-launch — neither map has the agent, and
-    // the queue retains the signal file for a future user-triggered
-    // spawn to drain.
+    // 0.37.0: auto-launch fires via the default profile fallback.
+    let canonical_key = format!("{workspace}:profileless-target");
     assert!(
-        session_lookup::lookup_any("profileless-target").is_none(),
-        "agent without launch profile must not be auto-launched"
+        session_lookup::lookup_any(&canonical_key).is_some(),
+        "default-launch fallback should auto-spawn under canonical key {canonical_key}"
     );
 
-    let agent_queue = queue_root.join("profileless-target");
-    let queued: Vec<_> = std::fs::read_dir(&agent_queue)
-        .unwrap()
-        .filter_map(|r| r.ok())
-        .collect();
-    assert_eq!(
-        queued.len(),
-        1,
-        "signal should still be queued for a future spawn"
+    // Queue is drained as part of the spawn flow — sanitized
+    // canonical-key directory is empty (or absent).
+    let sanitized = format!("{}_{}", workspace, "profileless-target");
+    let agent_queue = queue_root.join(&sanitized);
+    let remaining: Vec<_> = if agent_queue.exists() {
+        std::fs::read_dir(&agent_queue).unwrap().filter_map(|r| r.ok()).collect()
+    } else {
+        Vec::new()
+    };
+    assert!(
+        remaining.is_empty(),
+        "queue should be empty after default-fallback drain; remaining: {remaining:?}"
     );
+
+    // Cleanup.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    if let Some(legacy) = session_map::lookup(&canonical_key) {
+        let _ = legacy.kill();
+        session_map::unregister(&canonical_key);
+    } else {
+        v2_session_map::unregister(&canonical_key);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -241,12 +260,14 @@ async fn wake_falls_back_when_workspace_id_is_unknown() {
     let _ = std::fs::create_dir_all(&inbox_root);
     let _ = egress::deliver(&signal, &inbox_root);
 
+    let canonical_key = "_not_a_real_workspace_id_:ghost-agent";
     assert!(
-        session_lookup::lookup_any("ghost-agent").is_none(),
+        session_lookup::lookup_any(canonical_key).is_none(),
         "unknown workspace must not trigger auto-launch"
     );
 
-    let agent_queue = queue_root.join("ghost-agent");
+    // Queue keys on the canonical form (sanitized: `:` → `_`).
+    let agent_queue = queue_root.join("_not_a_real_workspace_id__ghost-agent");
     let queued: Vec<_> = std::fs::read_dir(&agent_queue)
         .unwrap()
         .filter_map(|r| r.ok())

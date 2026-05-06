@@ -96,6 +96,18 @@ pub fn spawn_wake_headless(
         wake_prompt.to_string(),
     ];
 
+    // Test-only override. Integration tests in
+    // `crates/k2so-daemon/tests/heartbeat_fire_v2_integration.rs`
+    // set this env var to a benign command (e.g. `cat`) so the
+    // test can exercise the v2 spawn + post-spawn DB writes
+    // without requiring `claude` on PATH or burning API calls.
+    // Production never sets this — defaults to `claude` + the
+    // args above.
+    let (command, args) = match std::env::var("K2SO_WAKE_HEADLESS_TEST_COMMAND") {
+        Ok(c) if !c.is_empty() => (c, Vec::<String>::new()),
+        _ => ("claude".to_string(), args),
+    };
+
     let project_id = {
         let db = k2so_core::db::shared();
         let conn = db.lock();

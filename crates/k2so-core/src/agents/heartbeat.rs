@@ -43,13 +43,17 @@ pub fn k2so_heartbeat_add(
     let project_id = resolve_project_id(&conn, &project_path)
         .ok_or_else(|| format!("Project not found: {}", project_path))?;
 
-    let agent_name = find_primary_agent(&project_path).ok_or(
+    // 0.37.0: heartbeats are workspace-level (.k2so/heartbeats/<sched>/),
+    // independent of which agent owns them. find_primary_agent is
+    // still required for validation (a workspace must have an agent
+    // to schedule against) but the path no longer routes through it.
+    let _agent_name = find_primary_agent(&project_path).ok_or(
         "No scheduleable agent found in this workspace. Enable heartbeat on a Custom, Workspace Manager, or K2SO Agent workspace first.",
     )?;
 
-    // Create heartbeat folder and scaffold wakeup.md
-    let hb_dir = agent_dir(&project_path, &agent_name)
-        .join("heartbeats")
+    // Create heartbeat folder and scaffold wakeup.md at the
+    // workspace-level path the runtime reads from.
+    let hb_dir = crate::agents::workspace_heartbeats_dir(&project_path)
         .join(&name);
     fs::create_dir_all(&hb_dir)
         .map_err(|e| format!("Failed to create heartbeat folder: {}", e))?;
@@ -187,12 +191,12 @@ pub fn k2so_heartbeat_remove(project_path: String, name: String) -> Result<(), S
     let conn = db.lock();
     let project_id = resolve_project_id(&conn, &project_path)
         .ok_or_else(|| format!("Project not found: {}", project_path))?;
-    let agent_name = find_primary_agent(&project_path)
+    let _agent_name = find_primary_agent(&project_path)
         .ok_or("No scheduleable agent in this workspace")?;
 
     AgentHeartbeat::delete(&conn, &project_id, &name).map_err(|e| e.to_string())?;
-    let hb_dir = agent_dir(&project_path, &agent_name)
-        .join("heartbeats")
+    // 0.37.0: heartbeats live at .k2so/heartbeats/<sched>/ now.
+    let hb_dir = crate::agents::workspace_heartbeats_dir(&project_path)
         .join(&name);
     if hb_dir.exists() {
         let _ = fs::remove_dir_all(&hb_dir);
@@ -465,9 +469,10 @@ pub fn k2so_heartbeat_rename(
         return Err(format!("Heartbeat '{}' already exists", new_name));
     }
 
-    let agent_name = find_primary_agent(&project_path)
+    let _agent_name = find_primary_agent(&project_path)
         .ok_or("No scheduleable agent in this workspace")?;
-    let hb_parent = agent_dir(&project_path, &agent_name).join("heartbeats");
+    // 0.37.0: rename within the workspace-level heartbeats dir.
+    let hb_parent = crate::agents::workspace_heartbeats_dir(&project_path);
     let old_dir = hb_parent.join(&old_name);
     let new_dir = hb_parent.join(&new_name);
 

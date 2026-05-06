@@ -1251,6 +1251,95 @@ fn run_workspace_unification_sweep() {
     // a DB). Run a single-pass rewrite here so heartbeat fires after
     // first 0.37.0 boot find their wakeup files at the new location.
     rewrite_legacy_heartbeat_wakeup_paths();
+
+    // Migrate heartbeat WAKEUP.md files written to the wrong
+    // location. Between the unification migration shipping (which
+    // moves heartbeats to .k2so/heartbeats/) and the heartbeat
+    // write-path fix landing, K2SO's heartbeat scaffolding code
+    // wrote new WAKEUP.md files to .k2so/agent/heartbeats/<sched>/
+    // (because agent_dir's layout-aware probe correctly resolved
+    // to .k2so/agent/ post-migration, but the heartbeat code was
+    // still constructing path = agent_dir + "heartbeats" instead
+    // of the workspace-level .k2so/heartbeats/). DB rows correctly
+    // point at .k2so/heartbeats/, so any file at the agent-relative
+    // path is "orphaned" — the runtime can't find it on a fire.
+    // Sweep moves them into place once at boot.
+    migrate_orphaned_agent_heartbeats();
+}
+
+/// Move heartbeat WAKEUP.md files from `.k2so/agent/heartbeats/<sched>/`
+/// (the agent-relative path that 0.37.0's incomplete heartbeat
+/// write-path fix used) to the workspace-level
+/// `.k2so/heartbeats/<sched>/`. DB rows are already pointed at the
+/// workspace-level path, so this aligns disk with DB.
+///
+/// Idempotent — workspaces with no orphaned files are no-ops. A
+/// workspace where the destination already exists keeps the
+/// existing file and leaves the orphan in place (user resolves).
+fn migrate_orphaned_agent_heartbeats() {
+    let projects = {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        match k2so_core::db::schema::Project::list(&conn) {
+            Ok(rows) => rows,
+            Err(_) => return,
+        }
+    };
+
+    let mut moved = 0usize;
+    for project in &projects {
+        if !std::path::Path::new(&project.path).exists() {
+            continue;
+        }
+        let project_root = std::path::Path::new(&project.path);
+        let orphan_root = project_root.join(".k2so/agent/heartbeats");
+        if !orphan_root.exists() {
+            continue;
+        }
+        let workspace_hb_root = project_root.join(".k2so/heartbeats");
+        if let Err(e) = fs::create_dir_all(&workspace_hb_root) {
+            log_debug!(
+                "[daemon/unification] WARN: create {workspace_hb_root:?}: {e}"
+            );
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&orphan_root) else { continue };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else { continue };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let sched_name = entry.file_name();
+            let from = orphan_root.join(&sched_name);
+            let to = workspace_hb_root.join(&sched_name);
+            if to.exists() {
+                log_debug!(
+                    "[daemon/unification] orphaned heartbeat dir at {from:?} \
+                     left in place (workspace-level dir already exists at {to:?})"
+                );
+                continue;
+            }
+            match fs::rename(&from, &to) {
+                Ok(_) => {
+                    log_debug!(
+                        "[daemon/unification] moved orphan heartbeat: {from:?} → {to:?}"
+                    );
+                    moved += 1;
+                }
+                Err(e) => log_debug!(
+                    "[daemon/unification] WARN: move orphan heartbeat {from:?} → {to:?}: {e}"
+                ),
+            }
+        }
+        // Best-effort cleanup of the now-empty .k2so/agent/heartbeats/.
+        let _ = fs::remove_dir(&orphan_root);
+    }
+    if moved > 0 {
+        log_debug!(
+            "[daemon/unification] moved {moved} orphaned heartbeat dir(s) from \
+             .k2so/agent/heartbeats/ to workspace-level .k2so/heartbeats/"
+        );
+    }
 }
 
 /// Rewrite any `workspace_heartbeats.wakeup_path` rows whose paths

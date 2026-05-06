@@ -68,13 +68,13 @@ pub fn ensure_agent_wakeup(project_path: &str, agent_name: &str, agent_type: &st
     if path.exists() {
         return;
     }
-    // Multi-heartbeat lives at heartbeats/<name>/wakeup.md — if any
-    // heartbeat folder already exists for this agent, we're past the
-    // legacy single-slot world and the agent-root wakeup.md is no
-    // longer the source of truth. Skip scaffolding to avoid tricking
-    // the repair pass into clobbering real content.
-    let hb_default = agent_dir(project_path, agent_name)
-        .join("heartbeats")
+    // Multi-heartbeat lives at .k2so/heartbeats/<name>/WAKEUP.md
+    // (post-0.37.0 workspace-level layout). If any heartbeat folder
+    // already exists, we're past the legacy single-slot world and
+    // the agent-root wakeup.md is no longer the source of truth.
+    // Skip scaffolding to avoid tricking the repair pass into
+    // clobbering real content.
+    let hb_default = crate::agents::workspace_heartbeats_dir(project_path)
         .join("default")
         .join("WAKEUP.md");
     if hb_default.exists() {
@@ -729,6 +729,120 @@ mod tests {
     #[test]
     fn update_agent_md_field_rejects_missing_frontmatter() {
         assert!(update_agent_md_field("no fm", "role", "x").is_err());
+    }
+
+    // ── 0.37.0 post-unification idempotency ──────────────────────
+    //
+    // The AIFileEditor "Manage Persona" button calls `create()` to
+    // ensure the agent exists before opening the edit flow. Pre-fix,
+    // post-unification workspaces (where `.k2so/agent/AGENT.md`
+    // exists) errored "Agent already exists" because agent_dir's
+    // layout-aware probe correctly resolved to the unified path —
+    // which always exists post-migration. Tests below pin the
+    // short-circuit: when the unified primary's AGENT.md is on
+    // disk, create() returns Ok with the existing K2soAgentInfo
+    // instead of erroring.
+
+    fn temp_workspace_with_unified_agent(persona_type: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "k2so-commands-create-test-{}-{}-{}",
+            persona_type,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join(".k2so/agent")).unwrap();
+        let body = format!("---\nname: cortana\ntype: {}\n---\n# persona body\n", persona_type);
+        std::fs::write(dir.join(".k2so/agent/AGENT.md"), body).unwrap();
+        dir
+    }
+
+    #[test]
+    fn create_short_circuits_when_unified_primary_exists() {
+        let dir = temp_workspace_with_unified_agent("custom");
+        let path = dir.to_string_lossy().into_owned();
+
+        // Pre-fix this would error "Agent 'cortana' already exists"
+        // because agent_dir resolved to .k2so/agent/ which has
+        // AGENT.md. Post-fix it should return Ok with the existing
+        // info (read from the on-disk frontmatter).
+        let result = create(
+            path.clone(),
+            "cortana".to_string(),
+            "test role".to_string(),
+            None,
+            Some("custom".to_string()),
+        );
+        assert!(result.is_ok(), "create should short-circuit, got: {result:?}");
+        let info = result.unwrap();
+        assert_eq!(info.name, "cortana");
+        assert_eq!(info.agent_type, "custom",
+            "agent_type must come from the on-disk AGENT.md frontmatter");
+        assert!(!info.is_manager, "custom-type primary is not a manager");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_short_circuit_recognizes_manager_type() {
+        let dir = temp_workspace_with_unified_agent("manager");
+        let path = dir.to_string_lossy().into_owned();
+
+        let result = create(
+            path,
+            "anything".to_string(), // name doesn't matter; workspace primary wins
+            "test role".to_string(),
+            None,
+            None,
+        );
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert_eq!(info.agent_type, "manager",
+            "frontmatter type='manager' must propagate");
+        assert!(info.is_manager, "manager type should set is_manager=true");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_does_not_short_circuit_pre_unification() {
+        // No .k2so/agent/AGENT.md on disk → workspace hasn't been
+        // migrated yet. create() should fall through to its
+        // legacy path (which writes to .k2so/agents/<name>/).
+        // Verify create() succeeds (writes AGENT.md to the legacy
+        // path) for a fresh workspace.
+        let dir = std::env::temp_dir().join(format!(
+            "k2so-commands-create-pre-unif-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.to_string_lossy().into_owned();
+
+        // Sanity: no unified path exists pre-call.
+        assert!(!dir.join(".k2so/agent/AGENT.md").exists());
+
+        let result = create(
+            path.clone(),
+            "fresh-agent".to_string(),
+            "test role".to_string(),
+            None,
+            Some("custom".to_string()),
+        );
+        assert!(result.is_ok(), "fresh create should succeed: {result:?}");
+
+        // Post-call the legacy path got written.
+        assert!(
+            dir.join(".k2so/agents/fresh-agent/AGENT.md").exists(),
+            "legacy path .k2so/agents/<name>/AGENT.md should be written when no unified primary"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

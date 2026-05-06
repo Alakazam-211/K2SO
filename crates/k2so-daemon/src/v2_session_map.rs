@@ -141,7 +141,9 @@ pub fn list_agents() -> Vec<String> {
 
 /// Test helper — drop every registered entry. Keeps tests that
 /// share the global map from contaminating each other.
-#[cfg(test)]
+/// Drop every registered entry. Available to both unit tests
+/// (in this module) and integration tests (in `tests/*.rs`) so
+/// shared global state doesn't leak between cases.
 pub fn clear_for_tests() {
     shared().lock().unwrap().clear();
 }
