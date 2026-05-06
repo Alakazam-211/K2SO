@@ -95,24 +95,33 @@ pub fn agent_template_dir(project_path: &str, template_name: &str) -> PathBuf {
 /// Resolve the on-disk directory for an agent name within a workspace.
 ///
 /// **Layout-aware.** Probes in this order:
-/// 1. `<project>/.k2so/agent/` if it exists — post-0.37.0 primary.
+/// 1. `<project>/.k2so/agent/AGENT.md` exists — post-0.37.0 primary.
 ///    `agent_name` is ignored here; the primary is keyed on
 ///    workspace, not name. Callers that pass a name (e.g.
 ///    `agent_dir(project, "pod-leader")`) get the unified path
 ///    transparently — historic call sites keep working without
 ///    changes during the deprecation window.
-/// 2. `<project>/.k2so/agent-templates/<agent_name>/` if it exists —
-///    a template (for delegate/worktree spawn).
+///
+///    Probing for AGENT.md (not just the dir) matters because the
+///    unification migration `mkdir -p`s `.k2so/agent/` BEFORE it
+///    moves any files. During that window the dir exists but has
+///    no AGENT.md yet, and the migration's own primary-detection
+///    walk needs `agent_type_for` to read from the LEGACY
+///    `.k2so/agents/<name>/AGENT.md` to determine the primary.
+///    Gating the probe on the populated state avoids a
+///    chicken-and-egg failure during migration.
+/// 2. `<project>/.k2so/agent-templates/<agent_name>/AGENT.md`
+///    exists — a template (for delegate/worktree spawn).
 /// 3. Legacy `<project>/.k2so/agents/<agent_name>/` — pre-0.37.0
 ///    workspaces that haven't been migrated yet (rare; the daemon's
 ///    boot sweep migrates every registered workspace).
 pub fn agent_dir(project_path: &str, agent_name: &str) -> PathBuf {
     let primary = workspace_agent_path(project_path);
-    if primary.exists() {
+    if primary.join("AGENT.md").exists() {
         return primary;
     }
     let template = agent_template_dir(project_path, agent_name);
-    if template.exists() {
+    if template.join("AGENT.md").exists() {
         return template;
     }
     agents_dir(project_path).join(agent_name)
