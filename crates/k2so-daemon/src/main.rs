@@ -1393,18 +1393,26 @@ fn migrate_orphaned_agent_heartbeats() {
 }
 
 /// Rewrite any `workspace_heartbeats.wakeup_path` rows whose paths
-/// reference the legacy `.k2so/agents/<primary>/heartbeats/` layout.
-/// After the unification migration, those files live under
-/// `.k2so/heartbeats/<sched>/`. This sweep walks every row, detects
-/// the legacy pattern, and rewrites in place. Idempotent — rows
-/// already pointing at `.k2so/heartbeats/...` are untouched.
+/// reference a legacy nested-under-agent layout. Two patterns:
+///
+///   1. Pre-0.37.0: `.k2so/agents/<primary>/heartbeats/<sched>/...`
+///      (plural `agents/`, named per-agent subdir).
+///   2. 0.36.x→0.37.0 half-state: `.k2so/agent/heartbeats/<sched>/...`
+///      (singular `agent/`, post-unification but still nested).
+///
+/// Post-0.37.0 the canonical layout is `.k2so/heartbeats/<sched>/`.
+/// This sweep walks every row, detects either legacy pattern, and
+/// rewrites in place. Idempotent — rows already pointing at the
+/// canonical layout are untouched.
 fn rewrite_legacy_heartbeat_wakeup_paths() {
     let db = k2so_core::db::shared();
     let conn = db.lock();
     let rows: Vec<(String, String, String)> = match conn.prepare(
         "SELECT id, name, wakeup_path FROM workspace_heartbeats \
          WHERE wakeup_path LIKE '%/.k2so/agents/%/heartbeats/%' \
-            OR wakeup_path LIKE '.k2so/agents/%/heartbeats/%'",
+            OR wakeup_path LIKE '.k2so/agents/%/heartbeats/%' \
+            OR wakeup_path LIKE '%/.k2so/agent/heartbeats/%' \
+            OR wakeup_path LIKE '.k2so/agent/heartbeats/%'",
     ) {
         Ok(mut stmt) => stmt
             .query_map([], |r| {
@@ -1424,18 +1432,34 @@ fn rewrite_legacy_heartbeat_wakeup_paths() {
 
     let mut rewritten = 0usize;
     for (id, name, old) in &rows {
-        // Pattern: `[<root>/].k2so/agents/<primary>/heartbeats/<sched>/...`
-        // becomes `[<root>/].k2so/heartbeats/<sched>/...`.
-        let needle = ".k2so/agents/";
-        let Some(start) = old.find(needle) else { continue };
-        let after_agents = &old[start + needle.len()..];
-        let Some(slash) = after_agents.find('/') else { continue };
-        let rest = &after_agents[slash..]; // /heartbeats/<sched>/...
-        if !rest.starts_with("/heartbeats/") {
+        // Two legacy patterns to normalize to `.k2so/heartbeats/<sched>/...`:
+        //
+        //   1. `.k2so/agents/<primary>/heartbeats/<sched>/...`
+        //      (pre-0.37.0; named per-agent subdir before plural→singular)
+        //   2. `.k2so/agent/heartbeats/<sched>/...`
+        //      (0.36.x→0.37.0 half-state; singular `agent` but still nested)
+        //
+        // Try the plural pattern first (longer match), then fall back to
+        // the singular form. Either way the result strips the agent dir
+        // and leaves `.k2so/heartbeats/<sched>/...`.
+        let new_path = if let Some(start) = old.find(".k2so/agents/") {
+            let after = &old[start + ".k2so/agents/".len()..];
+            let Some(slash) = after.find('/') else { continue };
+            let rest = &after[slash..];
+            if !rest.starts_with("/heartbeats/") {
+                continue;
+            }
+            let prefix = &old[..start];
+            format!("{prefix}.k2so{rest}")
+        } else if let Some(start) = old.find(".k2so/agent/heartbeats/") {
+            // Singular `agent` doesn't have a per-name subdir — the path
+            // segment to drop is just `agent`.
+            let prefix = &old[..start];
+            let rest = &old[start + ".k2so/agent".len()..]; // /heartbeats/<sched>/...
+            format!("{prefix}.k2so{rest}")
+        } else {
             continue;
-        }
-        let prefix = &old[..start]; // everything before .k2so/agents/
-        let new_path = format!("{prefix}.k2so{rest}");
+        };
         match conn.execute(
             "UPDATE workspace_heartbeats SET wakeup_path = ?1 WHERE id = ?2",
             rusqlite::params![new_path, id],

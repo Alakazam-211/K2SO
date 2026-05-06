@@ -255,18 +255,20 @@ pub fn matches_ordinal_day(date: NaiveDate, ordinal: &str, day_type: &str) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{TimeZone, Utc};
+    use chrono::TimeZone;
 
     fn mk_now(year: i32, month: u32, day: u32, h: u32, m: u32) -> DateTime<Local> {
-        // Build UTC then coerce to Local — good enough for tests that
-        // don't probe timezone-edge behaviour. For inputs near midnight
-        // this will shift by the local offset; tests choose daylight
-        // hours to stay safe.
-        Local.from_utc_datetime(
-            &Utc.with_ymd_and_hms(year, month, day, h, m, 0)
-                .unwrap()
-                .naive_utc(),
-        )
+        // Build directly in Local so `now.hour()` returns the
+        // intended hour regardless of the test runner's timezone.
+        // Earlier versions built UTC then "coerced" via
+        // `from_utc_datetime`, which actually time-shifts (e.g. in
+        // MDT 18:00 UTC becomes 12:00 Local) and made the
+        // `hourly_outside_window_does_not_fire` test silently pass
+        // only in UTC-aligned runners.
+        Local
+            .with_ymd_and_hms(year, month, day, h, m, 0)
+            .single()
+            .expect("test datetime must be unambiguous")
     }
 
     #[test]

@@ -2592,6 +2592,51 @@ mod unit_tests {
     }
 
     #[test]
+    fn heartbeat_clear_session_id_nulls_only_target_row() {
+        // Self-heal (smart_launch) calls clear_session_id when the
+        // saved session_id points at a JSONL that no longer exists
+        // on disk — daemon-restart-during-spawn race. The clear must
+        // be scoped to (project_id, name) and leave other heartbeats
+        // and other workspaces untouched.
+        let conn = fresh();
+        let pid = make_project_row(&conn, "/tmp/hb-clear-sid");
+        AgentHeartbeat::insert(
+            &conn, "hb-target", &pid, "fast-test", "hourly", "{}", "p1", true,
+        )
+        .unwrap();
+        AgentHeartbeat::insert(
+            &conn, "hb-other", &pid, "other-hb", "hourly", "{}", "p2", true,
+        )
+        .unwrap();
+        // Seed both heartbeats with a session_id; clearing the target
+        // must leave the sibling intact.
+        AgentHeartbeat::save_session_id(&conn, &pid, "fast-test", "ghost-uuid")
+            .unwrap();
+        AgentHeartbeat::save_session_id(&conn, &pid, "other-hb", "alive-uuid")
+            .unwrap();
+
+        let n = AgentHeartbeat::clear_session_id(&conn, &pid, "fast-test").unwrap();
+        assert_eq!(n, 1, "exactly one row should be cleared");
+
+        let cleared = AgentHeartbeat::get_by_name(&conn, &pid, "fast-test")
+            .unwrap()
+            .unwrap();
+        assert!(
+            cleared.last_session_id.is_none(),
+            "fast-test last_session_id must be NULL after clear"
+        );
+
+        let untouched = AgentHeartbeat::get_by_name(&conn, &pid, "other-hb")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            untouched.last_session_id.as_deref(),
+            Some("alive-uuid"),
+            "sibling heartbeat's session_id must be preserved"
+        );
+    }
+
+    #[test]
     fn heartbeat_unarchive_clears_timestamp() {
         let conn = fresh();
         let pid = make_project_row(&conn, "/tmp/hb-un");
