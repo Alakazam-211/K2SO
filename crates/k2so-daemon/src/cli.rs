@@ -475,6 +475,63 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                 Err(e) => CliResponse::bad_request(e),
             }
         }
+
+        // 0.37.0 simplified messaging — `k2so msg <workspace> "text"`.
+        // Resolves a workspace token (name | absolute path | UUID) to
+        // the canonical project path. Used by the CLI to detect whether
+        // a `msg` first-arg is a workspace (new flow) or an agent name
+        // (legacy flow + deprecation warning).
+        "/cli/workspace/resolve" => {
+            // Param name: `q` (query). Avoids collision with the auth
+            // token URL param (`token=<auth>`) the cli_request helper
+            // injects on every call.
+            let q = str_param(params, "q");
+            if q.is_empty() {
+                return CliResponse::bad_request("Missing q (workspace name | path | UUID)");
+            }
+            match crate::workspace_msg::resolve_workspace(&q) {
+                Some(path) => CliResponse::ok_json(
+                    serde_json::json!({ "path": path }).to_string(),
+                ),
+                None => CliResponse::bad_request(format!("workspace not found: {q}")),
+            }
+        }
+        // Smart-cascade message delivery to a workspace's pinned tab.
+        // `delivery=live` runs the heartbeat-style cascade (inject →
+        // resume_and_fire → fresh_fire); `delivery=inbox` (default)
+        // writes a regular work item to the workspace inbox. Mirrors
+        // `k2so msg <workspace> "text" [--wake]` semantics.
+        "/cli/workspace/msg" => {
+            let workspace = str_param(params, "workspace");
+            let text = str_param(params, "text");
+            let delivery = opt_param(params, "delivery").unwrap_or_else(|| "inbox".to_string());
+            let sender = opt_param(params, "from").unwrap_or_else(|| "cli".to_string());
+            if workspace.is_empty() {
+                return CliResponse::bad_request("Missing workspace");
+            }
+            if text.is_empty() {
+                return CliResponse::bad_request("Missing text");
+            }
+            // Accept name | path | UUID — resolve before dispatching.
+            let project_path = match crate::workspace_msg::resolve_workspace(&workspace) {
+                Some(p) => p,
+                None => {
+                    return CliResponse::bad_request(format!(
+                        "workspace not found: {workspace}"
+                    ));
+                }
+            };
+            let result = match delivery.as_str() {
+                "live" => crate::workspace_msg::deliver_live(&project_path, &text),
+                "inbox" => crate::workspace_msg::deliver_to_inbox(&project_path, &text, &sender),
+                other => {
+                    return CliResponse::bad_request(format!(
+                        "unknown delivery mode '{other}' (expected 'live' or 'inbox')"
+                    ));
+                }
+            };
+            CliResponse::ok_json(result.to_string())
+        }
         "/cli/workspace/remove" => {
             // Teardown modes (keep_current / restore_original) still
             // live in src-tauri because they depend on

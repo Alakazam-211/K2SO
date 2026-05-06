@@ -1690,25 +1690,24 @@ cmd_done() {
 }
 
 cmd_msg() {
-    # `k2so msg` is a convenience wrapper over the awareness primitive.
-    # Pre-Phase-4 it hit Tauri's `/cli/msg` which wrote two
-    # activity_feed rows (message.sent on sender side,
-    # message.received on recipient side) and optionally PTY-
-    # injected a wake-style notice.
+    # `k2so msg` — workspace-targeted messaging.
     #
-    # Post-Phase-4, the daemon is the sole HTTP server and the
-    # awareness bus handles the whole flow. An `AgentSignal` with
-    # `SignalKind::Msg` + `Delivery::Live` injects into the target's
-    # live session (matching --wake's old intent); `Delivery::Inbox`
-    # writes to the filesystem inbox for async pickup. Every signal
-    # audits as `event_type='signal:msg'` in activity_feed.
+    # 0.37.0+ shape (preferred):
+    #   k2so msg <workspace> "text"            # → workspace inbox
+    #   k2so msg <workspace> "text" --wake     # → smart-launch cascade
+    #                                          #   (inject live → resume saved
+    #                                          #    session → fresh fire,
+    #                                          #    stamping session_id +
+    #                                          #    active_terminal_id)
     #
-    # `--wake` historically meant "inject if live, else inbox." That
-    # is *exactly* Delivery::Live — the target's liveness (and the
-    # inject provider's fallback behavior) already handles the
-    # if-live/else-inbox branching inside the daemon. So --wake ⇒
-    # Live, default ⇒ Inbox (old behavior of dropping a message
-    # file without disturbing anyone).
+    # `<workspace>` accepts a name (TestingK2SO), absolute path, or UUID.
+    # The daemon's `/cli/workspace/resolve` endpoint disambiguates;
+    # if the token doesn't match a workspace we fall back to the
+    # legacy agent-keyed flow (pre-0.37.0) with a deprecation warning.
+    #
+    # Pre-0.37.0 shape (deprecated, still works):
+    #   k2so msg <agent> "text" [--wake] --agent <sender>
+    #   K2SO_AGENT_NAME=foo k2so msg <agent> "text"
     local agent="${K2SO_AGENT_NAME:-}"
     local target=""
     local text=""
@@ -1724,14 +1723,37 @@ cmd_msg() {
                 shift ;;
         esac
     done
-    [[ -z "$agent" ]] && { echo "Error: --agent required (or set K2SO_AGENT_NAME)" >&2; exit 1; }
-    [[ -z "$target" ]] && { echo "Error: target required" >&2; exit 1; }
+    [[ -z "$target" ]] && { echo "Error: target required (workspace name | path | UUID, or agent name)" >&2; exit 1; }
     [[ -z "$text" ]] && { echo "Error: message text required" >&2; exit 1; }
 
-    # Delegate to the signal primitive. Pass --from explicitly so
-    # the sender name is the agent flag (not the default "cli").
-    # Delivery is Inbox unless --wake was set (matching the
-    # pre-Phase-4 /cli/msg semantic).
+    # Try resolving target as a workspace token. If the daemon recognizes
+    # it (matched a `projects` row), route through the new
+    # /cli/workspace/msg endpoint with smart-launch cascade.
+    local resolved_path
+    resolved_path=$(cli_request "/cli/workspace/resolve" "q=$(urlencode "$target")" 2>/dev/null \
+        | python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("path",""))
+except Exception:
+    pass' 2>/dev/null)
+
+    if [ -n "$resolved_path" ]; then
+        # New flow — workspace-targeted msg.
+        local delivery="inbox"
+        [[ "$wake" == "true" ]] && delivery="live"
+        local sender="${agent:-cli}"
+        local params="workspace=$(urlencode "$resolved_path")"
+        params="${params}&text=$(urlencode "$text")"
+        params="${params}&delivery=${delivery}"
+        params="${params}&from=$(urlencode "$sender")"
+        cli_request "/cli/workspace/msg" "$params"
+        return
+    fi
+
+    # Legacy agent-keyed path (deprecated). Print a warning to stderr
+    # and route through the old awareness-bus signal primitive.
+    [[ -z "$agent" ]] && { echo "Error: --agent required (or set K2SO_AGENT_NAME) for agent-keyed msg, or pass a workspace name/path/UUID" >&2; exit 1; }
+    echo "warning: 'k2so msg <agent>' is deprecated; use 'k2so msg <workspace>' instead. See \`k2so help\`." >&2
     local delivery_flag=""
     [[ "$wake" != "true" ]] && delivery_flag="--inbox"
     local payload
@@ -2707,7 +2729,8 @@ cmd_help_general() {
 K2SO CLI — Agent interface to K2SO workspace orchestration
 
 COMMUNICATION
-  msg <target> "text" [--wake]       Send a message (--wake: interrupt live session)
+  msg <workspace> "text" [--wake]    Send to a workspace's inbox (or pinned tab with --wake)
+                                     <workspace> = name | absolute path | UUID
   signal <target> <kind> <payload>   Low-level signal emission [--inbox --from <sender>]
   roster                             Who's online (live sessions + inbox-reachable agents)
   feed [--agent <n>] [--limit N]     View activity feed

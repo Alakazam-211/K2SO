@@ -56,6 +56,7 @@ mod v2_session_map;
 mod v2_spawn;
 mod wake_headless;
 mod watchdog;
+mod workspace_msg;
 
 use std::fs;
 use std::io::Write;
