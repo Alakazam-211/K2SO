@@ -194,14 +194,20 @@ fn run_fresh_fire(
         return error_value("error", "failed to compose wake prompt", &hb.name);
     };
 
-    let use_stream = k2so_core::agents::settings::get_use_session_stream(project_path);
-    let result = if use_stream {
-        crate::agents_routes::spawn_wake_via_session_stream(
-            agent_name, project_path, &prompt, Some(&hb.name),
-        )
-    } else {
-        wake::spawn_wake_headless(agent_name, project_path, &prompt, Some(&hb.name))
-    };
+    // 0.37.0: every daemon-driven heartbeat fresh-fire goes through
+    // v2 via `wake_headless::spawn_wake_headless`. The
+    // `use_session_stream` column-driven branching (legacy
+    // SessionStreamSession or in-process Alacritty Legacy) is
+    // retired — both legacy backends are mothballed for headless
+    // wakes. The `--print` semantics, `--session-id` pinning, DB
+    // writes (workspace_sessions lock, heartbeat last_session_id +
+    // active_terminal_id), and HookEvent emission are unchanged.
+    let result = crate::wake_headless::spawn_wake_headless(
+        agent_name,
+        project_path,
+        &prompt,
+        Some(&hb.name),
+    );
 
     match result {
         Ok(terminal_id) => {

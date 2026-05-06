@@ -120,8 +120,13 @@ pub fn handle_scheduler_fire(project_path: &str) -> String {
         }
     };
 
-    let use_stream = settings::get_use_session_stream(project_path);
-
+    // 0.37.0: every daemon-driven heartbeat fire goes through v2.
+    // The `use_session_stream` branching (legacy → Kessel-T0 if 'on'
+    // else in-process Alacritty Legacy if 'off') is retired —
+    // `wake_headless::spawn_wake_headless` always spawns a
+    // DaemonPtySession via spawn_agent_session_v2_blocking. The
+    // `projects.use_session_stream` column becomes vestigial; safe
+    // to drop in a follow-up SQL cleanup.
     let mut launched: Vec<String> = Vec::new();
     for agent_name in &launchable {
         let prompt = if agent_name == "__lead__" {
@@ -133,7 +138,12 @@ pub fn handle_scheduler_fire(project_path: &str) -> String {
             }
         };
         // Workspace-manager / non-multi-heartbeat path — no specific heartbeat row.
-        let result = dispatch_wake(use_stream, agent_name, project_path, &prompt, None);
+        let result = crate::wake_headless::spawn_wake_headless(
+            agent_name,
+            project_path,
+            &prompt,
+            None,
+        );
         match result {
             Ok(_tid) => launched.push(agent_name.clone()),
             Err(e) => {
@@ -255,22 +265,7 @@ fn run_candidates_bounded(
     })
 }
 
-/// Choose the spawn path based on the project's
-/// `use_session_stream` flag. Exposed for callers (like tests)
-/// that want to exercise one branch explicitly without a DB
-/// round-trip.
-fn dispatch_wake(
-    use_stream: bool,
-    agent_name: &str,
-    project_path: &str,
-    prompt: &str,
-    heartbeat_name: Option<&str>,
-) -> Result<String, String> {
-    if use_stream {
-        crate::agents_routes::spawn_wake_via_session_stream(
-            agent_name, project_path, prompt, heartbeat_name,
-        )
-    } else {
-        wake::spawn_wake_headless(agent_name, project_path, prompt, heartbeat_name)
-    }
-}
+// `dispatch_wake` retired in 0.37.0 — every fire goes through
+// `wake_headless::spawn_wake_headless` (v2). The legacy two-branch
+// dispatch (Kessel-T0 if use_stream='on' else in-process Alacritty
+// Legacy) has been removed.

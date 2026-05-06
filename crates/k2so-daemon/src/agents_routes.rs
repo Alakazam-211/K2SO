@@ -55,6 +55,12 @@ use crate::spawn::{spawn_agent_session_v2_blocking, SpawnWorkspaceSessionRequest
 // the v2 session UUID, not Claude's resume id), so this parameter
 // is reserved for symmetry with `spawn_wake_headless` and a future
 // hook that mirrors the per-heartbeat resume contract for v2 wakes.
+// 0.37.0: retired from the heartbeat fire path. Every daemon-
+// driven wake spawn now flows through `wake_headless::spawn_wake_headless`
+// (v2). This function survives only as dead code reachable via the
+// explicit `/cli/sessions/spawn` Kessel-T0 endpoint, which is opt-in
+// for users who select Kessel as their renderer in settings.
+#[allow(dead_code)]
 pub fn spawn_wake_via_session_stream(
     agent_name: &str,
     project_path: &str,

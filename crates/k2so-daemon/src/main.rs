@@ -54,6 +54,7 @@ mod terminal_routes;
 mod triage;
 mod v2_session_map;
 mod v2_spawn;
+mod wake_headless;
 mod watchdog;
 
 use std::fs;

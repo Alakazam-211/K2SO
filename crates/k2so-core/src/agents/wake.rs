@@ -240,6 +240,19 @@ impl TerminalEventSink for NoOpTerminalEventSink {
 // writes to `agent_heartbeats.last_session_id` so the heartbeat keeps
 // its own dedicated chat thread separate from the agent's global
 // session. None = manual / awareness-bus / non-heartbeat wake.
+// 0.37.0 RETIRED. The daemon-side wake fire moved to
+// `k2so_daemon::wake_headless::spawn_wake_headless` which routes
+// through `spawn_agent_session_v2_blocking` (DaemonPtySession +
+// v2_session_map). This function spawned through the in-process
+// `terminal::shared()` `TerminalManager` (Alacritty Legacy
+// backend) and is now dead code — kept for one release as a
+// compile-time tombstone so any unexpected caller surfaces in
+// CI before deletion. Slated for removal in 0.38.0.
+#[allow(dead_code)]
+#[deprecated(
+    since = "0.37.0",
+    note = "use k2so_daemon::wake_headless::spawn_wake_headless (v2 backend)"
+)]
 pub fn spawn_wake_headless(
     agent_name: &str,
     project_path: &str,
