@@ -1,8 +1,17 @@
 # K2SO Test Map
 
-Everything that tests K2SO lives in one of four places. This doc maps
-them so any future agent can answer "where do the tests live" and "how
-do I run them" without grepping.
+Everything that tests K2SO lives in one of **six** places. This doc
+maps them so any future agent can answer "where do the tests live" and
+"how do I run them" without grepping.
+
+## Quick index
+
+1. **Shell behavior** — this folder (`tests/`)
+2. **Rust integration** — `crates/k2so-core/tests/` (16 files)
+3. **Rust integration** — `crates/k2so-daemon/tests/` (15 files)
+4. **Rust inline unit** — `#[cfg(test)] mod tests` in `crates/*/src/`
+5. **Tauri inline unit** — `#[cfg(test)] mod tests` in `src-tauri/src/`
+6. **TypeScript / Vitest** — `src/renderer/**/*.test.ts(x)`
 
 ---
 
@@ -111,6 +120,8 @@ Each file corresponds to one feature area.
 | `providers_inject_integration.rs` | 2 | `DaemonInjectProvider` → real PTY |
 | `awareness_ws_integration.rs` | 2 | `/cli/awareness/subscribe` WS loopback |
 | `heartbeat_port_claim_integration.rs` | 1 | Daemon eagerly owns heartbeat.port (H7) |
+| `heartbeat_fire_v2_integration.rs` | (varies) | 0.37.0 v2-retirement: wake_headless registers in v2_session_map + writes workspace_sessions row |
+| `workspace_msg_integration.rs` | 7 | 0.37.0 simplified-msg: `workspace_msg::resolve_workspace` (name/path/UUID) + `deliver_to_inbox` |
 
 ### Running
 
@@ -157,23 +168,86 @@ cargo test -p k2so-daemon --lib
 
 ---
 
+## 5. Tauri inline unit tests — `src-tauri/src/**/*.rs`
+
+The host-side Tauri binary ships its own `#[cfg(test)] mod tests`
+blocks for command logic that doesn't live in `k2so-core`. These run
+under the `k2so` crate (NOT `k2so-daemon` or `k2so-core`).
+
+Notable suites:
+- `commands::k2so_agents::migration_safety_tests` — 0.37.0 unification
+  migration: idempotency on second launch, teardown safety, drift
+  adoption.
+- `commands::*::tests` — per-command unit assertions for whatever the
+  command's pure helpers handle (path resolution, frontmatter parsing,
+  etc.).
+
+```bash
+# All Tauri lib tests.
+cargo test --release -p k2so --lib
+```
+
+Current count (0.37.0): **76 passing**.
+
+---
+
+## 6. TypeScript / Vitest — `src/renderer/**/*.test.ts(x)`
+
+Renderer-side tests for Zustand stores, pure helpers, and React
+components. Configured via `vitest.config.ts`; runs under jsdom.
+
+Files:
+- `src/renderer/stores/tabs.test.ts` — tab store invariants
+- `src/renderer/lib/smoke.test.ts` — smoke
+- `src/renderer/lib/terminal-id.test.ts` — terminal id parsing
+- `src/renderer/kessel/{client,grid,selection,style,config}.test.ts` — Kessel renderer pieces
+- `src/renderer/kessel/SessionStreamView.test.tsx` — component test
+
+```bash
+# Run all vitest.
+bun run test
+
+# Type-check separately (catches drift even without running tests).
+bunx tsc --noEmit
+```
+
+Current counts (0.37.0): 133 passing, 2 known-pre-existing failing
+(`config.test.ts` uses `bun:test` import vitest can't resolve;
+`SessionStreamView.test.tsx` has DOM-layout assertions that depend on
+jsdom behavior the runtime doesn't replicate).
+
+---
+
 ## Full battery, one-liner
 
 From a clean, registered workspace with the daemon running:
 
 ```bash
-cargo test -p k2so-core --features session_stream,test-util \
- && cargo test -p k2so-daemon \
- && bash tests/behavior-test-tier3.sh \
- && bash tests/behavior-test-tier1.sh \
- && bash tests/behavior-test-tier2.sh \
- && bash tests/cli-integration-test.sh
+# Rust everything (core + daemon + Tauri lib).
+cargo test --release --workspace
+
+# TS type-check + vitest.
+bunx tsc --noEmit && bun run test
+
+# Shell suites that work without manual setup.
+bash tests/behavior-test-tier3.sh
+bash tests/behavior-test-tier1.sh
+bash tests/cli-integration-test.sh
+
+# Tier 2 needs the test workspace registered in K2SO UI first
+# (see "Running" under section 1).
+bash tests/behavior-test-tier2.sh
 ```
 
-Current totals (Phase 4 H7.3):
-- Rust: 514 passing (435 core + 79 daemon)
-- Shell: 531 passing (385 + 19 + 16 + 111)
-- **Total: 1045 passing, 0 failing**
+Current totals (0.37.0):
+- Rust core lib: 302 passing
+- Rust core integration (session_stream_*): all green
+- Rust daemon integration: ~80 passing across 15 files (incl. new `workspace_msg_integration.rs`)
+- Tauri lib: 76 passing
+- Vitest: 133 passing (2 known pre-existing failures, see section 6)
+- Shell tier 1: 19 passing
+- Shell tier 3: 385 passing
+- Shell CLI integration: 110 passing
 
 ---
 
