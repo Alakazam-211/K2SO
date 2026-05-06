@@ -83,17 +83,25 @@ pub fn spawn_wake_headless(
     // deferred-save thread guessing wrong.
     let pinned_session_id = uuid::Uuid::new_v4().to_string();
 
-    // `--print` makes claude one-shot: read prompt, respond, persist
-    // JSONL, exit. The v2 child-exit observer cleans up
-    // `v2_session_map` on exit. Long-lived heartbeat PTYs are
-    // anti-pattern (they pollute `find_live_for_resume`'s pick of
-    // "which PTY does the user want to attach to").
+    // Interactive mode (no `--print`). The wakeup body is delivered
+    // after spawn via a two-phase PTY write (body + 150ms settle +
+    // `\r`), matching how `run_inject` writes wakeups to live PTYs
+    // and how `pending_live::drain_for_agent` writes queued signals.
+    // Why interactive instead of `--print`:
+    //
+    //   1. The PTY stays alive after the first fire, so subsequent
+    //      fires hit `smart_launch`'s inject branch naturally — no
+    //      `--print` ephemeral spawn that's invisible to the user.
+    //   2. Opening the heartbeat tab from the sidebar reuses the
+    //      same v2_session_map slot (idempotent attach via the
+    //      canonical `<project_id>:<agent>` key), no duplicate
+    //      `claude --resume` process.
+    //   3. Audit-ability is preserved either way — claude writes the
+    //      same JSONL whether run interactively or under `--print`.
     let args = vec![
         "--dangerously-skip-permissions".to_string(),
-        "--print".to_string(),
         "--session-id".to_string(),
         pinned_session_id.clone(),
-        wake_prompt.to_string(),
     ];
 
     // Test-only override. Integration tests in
@@ -132,6 +140,42 @@ pub fn spawn_wake_headless(
         project_path,
         terminal_id
     );
+
+    // Deliver the wakeup body to the freshly-spawned interactive
+    // claude. Two-phase write — body, settle, `\r` — same pattern
+    // run_inject uses on a live PTY. A single combined write lands
+    // the body as a multi-line paste in the TUI input widget,
+    // typed-but-not-sent. Claude's TUI needs ~1s to start up before
+    // it accepts input cleanly, so wait a beat first.
+    //
+    // Skip when running under the test override (the test command
+    // is e.g. `cat`, which doesn't need a wakeup payload).
+    let is_test_override = std::env::var("K2SO_WAKE_HEADLESS_TEST_COMMAND")
+        .ok()
+        .filter(|c| !c.is_empty())
+        .is_some();
+    if !is_test_override {
+        // Look up the freshly-spawned session by its v2 session id.
+        // It was just registered by `spawn_agent_session_v2_blocking`
+        // a few microseconds ago.
+        if let Some(session) =
+            crate::v2_session_map::lookup_by_session_id(&outcome.session_id)
+        {
+            let prompt = wake_prompt.to_string();
+            std::thread::spawn(move || {
+                // Wait for claude TUI to draw its initial prompt.
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                session.write(prompt.into_bytes());
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                session.write(b"\r".to_vec());
+            });
+        } else {
+            log_debug!(
+                "[daemon/wake] post-spawn lookup miss for session={} — wakeup body not delivered",
+                terminal_id
+            );
+        }
+    }
 
     // Mark the workspace_sessions row 'running' so the next scheduler
     // tick skips this agent. Best-effort — the PTY is alive and will

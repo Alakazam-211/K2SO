@@ -984,33 +984,82 @@ fn handle_cli_heartbeat(
                 k2so_core::db::schema::AgentHeartbeat::get_by_name(&conn, &project_id, &name)
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| format!("no heartbeat '{name}'"))?;
-            let active_id = hb_row.active_terminal_id.clone();
+            let mut active_id = hb_row.active_terminal_id.clone();
             // Walk both legacy + v2 session maps so we accept any
             // running PTY (heartbeat fresh-fires today land in v2;
             // legacy chat tabs may still be in session_map).
-            let (active_agent_name, session_alive, is_v2) = match active_id.as_deref() {
-                Some(tid) => match k2so_core::session::SessionId::parse(tid) {
-                    Some(sid) => {
-                        let snap = crate::session_lookup::snapshot_all();
-                        let found = snap
-                            .iter()
-                            .find(|(_n, live)| live.session_id() == sid);
-                        match found {
-                            Some((nm, live)) => {
-                                (Some(nm.clone()), true, live.is_v2())
+            let (mut active_agent_name, mut session_alive, mut is_v2) =
+                match active_id.as_deref() {
+                    Some(tid) => match k2so_core::session::SessionId::parse(tid) {
+                        Some(sid) => {
+                            let snap = crate::session_lookup::snapshot_all();
+                            let found = snap
+                                .iter()
+                                .find(|(_n, live)| live.session_id() == sid);
+                            match found {
+                                Some((nm, live)) => {
+                                    (Some(nm.clone()), true, live.is_v2())
+                                }
+                                None => (None, false, false),
                             }
-                            None => (None, false, false),
                         }
-                    }
+                        None => (None, false, false),
+                    },
                     None => (None, false, false),
-                },
-                None => (None, false, false),
-            };
+                };
             // Lazy cleanup so the next call reflects reality.
             if active_id.is_some() && !session_alive {
                 let _ = k2so_core::db::schema::AgentHeartbeat::clear_active_terminal_id(
                     &conn, &project_id, &name,
                 );
+                active_id = None;
+            }
+            // Fallback: stamp was null or pointed at a corpse. Scan
+            // argv for any live PTY running `--resume <last_session_id>`
+            // and surface it. Avoids the duplicate-claude-process
+            // problem where clicking a heartbeat row spawns yet
+            // another `claude --resume` against an already-running
+            // session. When found, stamp the row so subsequent calls
+            // go straight through the fast path above.
+            if !session_alive {
+                if let Some(saved) = hb_row
+                    .last_session_id
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                {
+                    let snap = crate::session_lookup::snapshot_all();
+                    // Prefer `tab-*` agent names (visible UI tabs) over
+                    // daemon-internal agent names. Same ranking
+                    // `find_live_for_resume` uses.
+                    let mut matches: Vec<&(String, crate::session_lookup::LiveSession)> =
+                        snap.iter()
+                            .filter(|(_n, live)| {
+                                let args = live.args();
+                                let mut i = 0;
+                                while i + 1 < args.len() {
+                                    if (args[i] == "--session-id"
+                                        || args[i] == "--resume")
+                                        && args[i + 1] == saved
+                                    {
+                                        return true;
+                                    }
+                                    i += 1;
+                                }
+                                false
+                            })
+                            .collect();
+                    matches.sort_by_key(|(n, _)| if n.starts_with("tab-") { 0 } else { 1 });
+                    if let Some((nm, live)) = matches.first() {
+                        let new_tid = live.session_id().to_string();
+                        let _ = k2so_core::db::schema::AgentHeartbeat::save_active_terminal_id(
+                            &conn, &project_id, &name, &new_tid,
+                        );
+                        active_id = Some(new_tid);
+                        active_agent_name = Some(nm.clone());
+                        session_alive = true;
+                        is_v2 = live.is_v2();
+                    }
+                }
             }
             Ok(serde_json::json!({
                 "name": hb_row.name,

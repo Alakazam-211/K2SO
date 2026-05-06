@@ -193,11 +193,51 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
             k2so_core::agents::resolve_project_id(&conn, &req.cwd)
         };
         if let Some(project_id) = project_id_opt {
-            let _ = k2so_core::db::schema::WorkspaceSession::save_active_terminal_id(
-                &conn,
-                &project_id,
-                &session.session_id.to_string(),
-            );
+            // Symmetric session-id-keyed stamping — mirrors the
+            // heartbeat update below. The pinned tab and any
+            // heartbeats may share the same `<workspace>:<agent>`
+            // claude session; whoever resumes that session gets
+            // their `active_terminal_id` updated to the new PTY.
+            // Walking `req.args` catches both `--resume <id>` and
+            // `--session-id <id>`. Without keying on the actual
+            // resume target, ad-hoc tab spawns (Cmd+T, AI editor)
+            // would clobber the pinned tab's stamp on every spawn.
+            let args = &session.args;
+            let mut resumed_session: Option<&str> = None;
+            let mut i = 0;
+            while i + 1 < args.len() {
+                if (args[i] == "--resume" || args[i] == "--session-id")
+                    && !args[i + 1].is_empty()
+                {
+                    resumed_session = Some(args[i + 1].as_str());
+                    break;
+                }
+                i += 1;
+            }
+            if let Some(claude_sid) = resumed_session {
+                let new_tid = session.session_id.to_string();
+
+                // Pinned-tab pointer: workspace_sessions row whose
+                // saved claude session_id matches what this PTY is
+                // resuming. Tab spawns that aren't resuming the
+                // pinned tab's session no-op.
+                let _ = conn.execute(
+                    "UPDATE workspace_sessions SET active_terminal_id = ?1 \
+                     WHERE project_id = ?2 AND session_id = ?3",
+                    rusqlite::params![&new_tid, &project_id, claude_sid],
+                );
+
+                // Heartbeat pointer: any heartbeat in this workspace
+                // whose `last_session_id` matches what this PTY is
+                // resuming. Multiple heartbeats can target the same
+                // claude session (and the workspace's pinned chat),
+                // so they all get stamped together.
+                let _ = conn.execute(
+                    "UPDATE workspace_heartbeats SET active_terminal_id = ?1 \
+                     WHERE project_id = ?2 AND last_session_id = ?3",
+                    rusqlite::params![&new_tid, &project_id, claude_sid],
+                );
+            }
         }
     }
 

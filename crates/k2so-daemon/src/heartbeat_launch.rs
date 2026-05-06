@@ -32,6 +32,7 @@ use std::path::Path;
 
 use k2so_core::agents::{find_primary_agent, resolve_project_id, wake};
 use k2so_core::db::schema::{AgentHeartbeat, HeartbeatFire};
+use k2so_core::session::SessionId;
 
 use crate::session_lookup;
 
@@ -106,7 +107,33 @@ pub fn smart_launch(project_path: &str, name: &str) -> serde_json::Value {
     }
     let session_id = saved_session.unwrap();
 
-    // Branch 2: live PTY for this session id — inject.
+    // Branch 2a: SQL-stamped active_terminal_id is the source of truth
+    // for which PTY this heartbeat is bonded to. Honor it first so
+    // every fire lands in the same PTY (the one a previous fire chose),
+    // even when multiple live PTYs share the same `--resume <id>` argv.
+    // Without this, `find_live_for_resume`'s argv-scan can pick a
+    // different match each time and inject lands in a PTY the user
+    // isn't watching.
+    if let Some(active_id_str) = hb.active_terminal_id.as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        if let Some(sid) = SessionId::parse(active_id_str) {
+            if let Some(live) = session_lookup::lookup_by_session_id(&sid) {
+                return run_inject(project_path, &project_id, &agent_name, &hb,
+                    &wakeup_abs, &session_id, String::new(), live);
+            }
+        }
+        // Stamp pointed at a corpse — clear it so we don't keep
+        // stumbling on the same dead pointer next fire.
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        let _ = AgentHeartbeat::clear_active_terminal_id(
+            &conn, &project_id, &hb.name,
+        );
+    }
+
+    // Branch 2b: argv-scan fallback for the cold-start case (first
+    // fire after restart, or active_terminal_id was just cleared).
     if let Some((live_agent, live)) = find_live_for_resume(&session_id) {
         return run_inject(project_path, &project_id, &agent_name, &hb, &wakeup_abs,
             &session_id, live_agent, live);
