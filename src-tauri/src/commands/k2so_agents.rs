@@ -1238,41 +1238,85 @@ pub fn k2so_agents_resume_chat_args(
     project_path: String,
     agent_name: String,
 ) -> Result<serde_json::Value, String> {
+    let _ = agent_name;
     let mut args: Vec<String> = vec!["--dangerously-skip-permissions".to_string()];
 
     // Look up saved session_id for this agent. Missing project / missing
-    // agent_session row → fall through to a fresh `claude`; that's not
-    // an error — it's a first-run for that agent.
-    let session_id: Option<String> = (|| {
+    // agent_session row → fall through to fresh-session pre-allocation
+    // below; not an error — it's a first-run for this workspace.
+    let project_id: Option<String> = {
         let db = k2so_core::db::shared();
         let conn = db.lock();
-        let project_id: String = conn
-            .query_row(
-                "SELECT id FROM projects WHERE path = ?1",
-                rusqlite::params![&project_path],
-                |row| row.get(0),
-            )
-            .ok()?;
-        let row = k2so_core::db::schema::WorkspaceSession::get(&conn, &project_id).ok().flatten()?;
-        row.session_id.filter(|s| !s.is_empty())
-    })();
+        conn.query_row(
+            "SELECT id FROM projects WHERE path = ?1",
+            rusqlite::params![&project_path],
+            |row| row.get(0),
+        )
+        .ok()
+    };
+    let session_id: Option<String> = project_id
+        .as_ref()
+        .and_then(|pid| {
+            let db = k2so_core::db::shared();
+            let conn = db.lock();
+            let row = k2so_core::db::schema::WorkspaceSession::get(&conn, pid)
+                .ok()
+                .flatten()?;
+            row.session_id.filter(|s| !s.is_empty())
+        });
 
     // Verify the session file actually exists on disk before we pass
     // `--resume`. Stale rows happen (workspace remove+readd, claude
-    // pruning) — `--resume` against a missing id makes claude bail with
-    // "No conversation found", which is uglier than just opening fresh.
+    // pruning, manual SQL clears) — `--resume` against a missing id
+    // makes claude bail with "No conversation found".
     if let Some(ref id) = session_id {
         if k2so_core::chat_history::claude_session_file_exists(id, &project_path) {
             args.push("--resume".to_string());
             args.push(id.clone());
+            return Ok(serde_json::json!({
+                "command": "claude",
+                "args": args,
+                "cwd": project_path,
+                "resumeSession": session_id,
+            }));
         }
     }
+
+    // No saved session (or its JSONL is gone) — pre-allocate the
+    // session UUID and pin it via `--session-id <X>`. Persist to
+    // workspace_sessions.session_id BEFORE claude spawns so:
+    //
+    //   1. v2_spawn's auto-stamp hook sees `--session-id <X>` in argv,
+    //      matches it against workspace_sessions.session_id, and
+    //      stamps `active_terminal_id` on PTY register.
+    //   2. We never need to chat-history-poll the workspace's JSONL
+    //      directory to "discover" the active session — which was
+    //      the source of the pinned-tab/heartbeat coupling bug
+    //      (the polling picked the most-recently-modified JSONL
+    //      globally, conflating heartbeat fires with the pinned tab).
+    //
+    // Mirrors the heartbeat fresh-fire pattern in `wake_headless` and
+    // the workspace_msg::fresh_fire path used by `k2so msg --wake`.
+    let new_sid = uuid::Uuid::new_v4().to_string();
+    if let Some(pid) = project_id.as_deref() {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        let row_id = uuid::Uuid::new_v4().to_string();
+        let _ = conn.execute(
+            "INSERT INTO workspace_sessions (id, project_id, session_id, harness, owner, status, created_at) \
+             VALUES (?1, ?2, ?3, 'claude', 'user', 'running', unixepoch()) \
+             ON CONFLICT(project_id) DO UPDATE SET session_id = ?3, last_activity_at = unixepoch()",
+            rusqlite::params![row_id, pid, new_sid],
+        );
+    }
+    args.push("--session-id".to_string());
+    args.push(new_sid.clone());
 
     Ok(serde_json::json!({
         "command": "claude",
         "args": args,
         "cwd": project_path,
-        "resumeSession": session_id,
+        "resumeSession": new_sid,
     }))
 }
 

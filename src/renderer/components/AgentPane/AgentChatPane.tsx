@@ -220,46 +220,22 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
     return () => { cancelled = true }
   }, [agentName, projectPath, refreshNonce])
 
-  // Detect Claude session id from the running PTY and persist it for
-  // resume. Capped at MAX_POLLS attempts to avoid burning CPU forever
-  // when Claude hasn't yet written its session file (which only
-  // happens after the user submits their first prompt). Each
-  // detection scans ~/.claude/projects/ — a hot path on machines
-  // with hundreds of historical projects. After the cap, the user
-  // can click the refresh button (bumps refreshNonce → effect re-runs
-  // → counter resets) to retry detection on demand.
-  useEffect(() => {
-    if (!ready) return
-    const MAX_POLLS = 12 // 12 × 5s = 60s of polling
-    let polls = 0
-    const interval = setInterval(async () => {
-      polls += 1
-      try {
-        const sessionId = await invoke<string | null>('chat_history_detect_active_session', {
-          provider: 'claude',
-          projectPath,
-        })
-        if (sessionId) {
-          invoke('k2so_agents_save_session_id', {
-            projectPath,
-            agentName,
-            sessionId,
-          }).catch(() => {})
-          clearInterval(interval)
-          return
-        }
-      } catch { /* ignore */ }
-      if (polls >= MAX_POLLS) {
-        clearInterval(interval)
-        console.info(
-          '[AgentChatPane] gave up detecting Claude session for %s after %d polls — refresh to retry',
-          agentName,
-          MAX_POLLS,
-        )
-      }
-    }, 5000)
-    return () => clearInterval(interval)
-  }, [ready, projectPath, agentName, refreshNonce])
+  // Session id detection used to live here — a 12×5s polling loop that
+  // called `chat_history_detect_active_session` to find the
+  // most-recently-modified .jsonl in the workspace's chat history dir
+  // and persist it as workspace_sessions.session_id.
+  //
+  // Removed in 0.37.0 because it conflated *every* JSONL in the
+  // workspace's history dir (including heartbeat fires) and would
+  // overwrite the pinned tab's session_id with whatever fired last.
+  // Symptom: clicking Launch on fast-test would couple the pinned
+  // tab to the heartbeat's session within ~5s of the next poll.
+  //
+  // Replacement: `k2so_agents_resume_chat_args` pre-allocates a UUID
+  // and persists it via `workspace_sessions.session_id` BEFORE claude
+  // starts, then passes `--session-id <UUID>` so claude uses it.
+  // v2_spawn's auto-stamp hook then writes `active_terminal_id` when
+  // the PTY registers. Daemon owns the truth; renderer doesn't poll.
 
   if (!ready) {
     return (
