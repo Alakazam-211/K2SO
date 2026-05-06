@@ -1315,6 +1315,12 @@ fn run_workspace_unification_sweep() {
     // path is "orphaned" — the runtime can't find it on a fire.
     // Sweep moves them into place once at boot.
     migrate_orphaned_agent_heartbeats();
+
+    // After all the migration sweeps run, move whatever's left in the
+    // pre-0.37.0 directories out of the way so they stop polluting
+    // `.k2so/`. Idempotent + reversible (moves to .archive/, doesn't
+    // delete) — see `archive_legacy_unification_dirs`.
+    archive_legacy_unification_dirs();
 }
 
 /// Move heartbeat WAKEUP.md files from `.k2so/agent/heartbeats/<sched>/`
@@ -1388,6 +1394,129 @@ fn migrate_orphaned_agent_heartbeats() {
         log_debug!(
             "[daemon/unification] moved {moved} orphaned heartbeat dir(s) from \
              .k2so/agent/heartbeats/ to workspace-level .k2so/heartbeats/"
+        );
+    }
+}
+
+/// Move pre-0.37.0 layout directories out of `.k2so/` and into
+/// `.k2so/.archive/0.37.0-unification/` so they stop polluting the
+/// active workspace folder. Reversible — files are moved, not deleted.
+///
+/// Sweeps two legacy locations per workspace:
+///
+///   1. `.k2so/agents/` (plural) — pre-0.37.0 multi-agent root.
+///      Migration has already copied AGENT.md / SKILL.md / WAKEUP.md
+///      content forward; whatever remains here is residue.
+///   2. `.k2so/agent/heartbeats/` (singular `agent`, with nested
+///      heartbeats subdir) — 0.36.x→0.37.0 half-state. Heartbeats now
+///      live at workspace-level `.k2so/heartbeats/`. The orphan
+///      handler above already moved any active wakeup files; this
+///      sweep handles whatever's still sitting under the agent dir.
+///
+/// Idempotent: if the destination archive path already exists for a
+/// workspace, the legacy dir is left alone (already archived, don't
+/// double-move). The `.k2so/.archive/0.37.0-unification/MIGRATED.md`
+/// marker explains what's there and that it's safe to delete once
+/// the user has confirmed nothing important got swept up.
+fn archive_legacy_unification_dirs() {
+    let projects = {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        match k2so_core::db::schema::Project::list(&conn) {
+            Ok(rows) => rows,
+            Err(_) => return,
+        }
+    };
+
+    const ARCHIVE_TAG: &str = "0.37.0-unification";
+    let mut archived = 0usize;
+
+    for project in &projects {
+        let project_root = std::path::Path::new(&project.path);
+        if !project_root.exists() {
+            continue;
+        }
+        let archive_root = project_root.join(".k2so/.archive").join(ARCHIVE_TAG);
+
+        // Pattern 1: `.k2so/agents/` (plural).
+        let plural = project_root.join(".k2so/agents");
+        if plural.is_dir() {
+            let dest = archive_root.join("agents");
+            if dest.exists() {
+                // Already archived for this workspace — don't double-move.
+            } else if let Err(e) = fs::create_dir_all(&archive_root) {
+                log_debug!(
+                    "[daemon/unification-archive] WARN: create {archive_root:?}: {e}"
+                );
+            } else if let Err(e) = fs::rename(&plural, &dest) {
+                log_debug!(
+                    "[daemon/unification-archive] WARN: archive {plural:?} → {dest:?}: {e}"
+                );
+            } else {
+                log_debug!(
+                    "[daemon/unification-archive] archived {plural:?} → {dest:?}"
+                );
+                archived += 1;
+            }
+        }
+
+        // Pattern 2: `.k2so/agent/heartbeats/` (singular `agent`,
+        // with heartbeats nested under). Don't touch `.k2so/agent/`
+        // itself — that's the post-0.37.0 canonical location for the
+        // workspace's primary agent.
+        let nested_hb = project_root.join(".k2so/agent/heartbeats");
+        if nested_hb.is_dir() {
+            let dest = archive_root.join("agent-heartbeats");
+            if dest.exists() {
+                // Already archived.
+            } else if let Err(e) = fs::create_dir_all(&archive_root) {
+                log_debug!(
+                    "[daemon/unification-archive] WARN: create {archive_root:?}: {e}"
+                );
+            } else if let Err(e) = fs::rename(&nested_hb, &dest) {
+                log_debug!(
+                    "[daemon/unification-archive] WARN: archive {nested_hb:?} → {dest:?}: {e}"
+                );
+            } else {
+                log_debug!(
+                    "[daemon/unification-archive] archived {nested_hb:?} → {dest:?}"
+                );
+                archived += 1;
+            }
+        }
+
+        // Drop the marker once we've actually moved something.
+        if archive_root.exists() {
+            let marker = archive_root.join("MIGRATED.md");
+            if !marker.exists() {
+                let body = format!(
+                    "# 0.37.0 unification — archived legacy layout\n\
+                     \n\
+                     This folder contains directories that lived under `.k2so/`\n\
+                     in the pre-0.37.0 (or transitional 0.36.x→0.37.0) layout.\n\
+                     The unification migration already moved active content to\n\
+                     the canonical post-0.37.0 paths:\n\
+                     \n\
+                     - `.k2so/agent/AGENT.md`         — primary workspace agent\n\
+                     - `.k2so/agent-templates/<role>/`— role personas (delegate)\n\
+                     - `.k2so/heartbeats/<sched>/`    — workspace-level heartbeats\n\
+                     \n\
+                     What's archived here:\n\
+                     - `agents/` — pre-0.37.0 multi-agent root (plural)\n\
+                     - `agent-heartbeats/` — heartbeats nested under the singular\n\
+                       `.k2so/agent/` directory in the half-state\n\
+                     \n\
+                     Safe to delete once you've confirmed nothing important got\n\
+                     swept up. Created by k2so-daemon at boot.\n"
+                );
+                let _ = fs::write(&marker, body);
+            }
+        }
+    }
+
+    if archived > 0 {
+        log_debug!(
+            "[daemon/unification-archive] archived {archived} legacy dir(s) to .k2so/.archive/{ARCHIVE_TAG}/"
         );
     }
 }
