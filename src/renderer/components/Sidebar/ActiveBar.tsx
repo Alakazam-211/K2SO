@@ -13,12 +13,33 @@ import type { ProjectWithWorkspaces } from '@/stores/projects'
 const TWENTY_FOUR_HOURS = 24 * 60 * 60
 
 /**
- * In-memory set of project IDs that have been in the Active bar.
- * This prevents projects from flickering out during workspace switches
- * when background/DB state is temporarily inconsistent.
- * Only cleared by explicit dismiss or 24h expiry.
+ * In-memory map of project IDs → unix-second timestamp at which they
+ * were first observed in the Active bar. Prevents flicker during
+ * workspace switches when background/DB state is temporarily
+ * inconsistent (rule 5 in `useActiveBarItems`).
+ *
+ * Each entry has a 24h TTL — older entries are pruned by the same
+ * filter pass that reads them, plus a periodic pass on the 60s
+ * `tick`. Without the TTL, rule 5 would override every other
+ * dismiss path (explicit dismiss, 24h interaction expiry on rule 2)
+ * because once a project enters memory it never leaves.
+ *
+ * Cleared by:
+ *   - Explicit dismiss (`Dismiss` context-menu item) → immediate `delete`.
+ *   - 24h elapsed since the entry was added → pruned on next read /
+ *     periodic tick.
+ *   - "Remove from Active Bar" (manual-active toggle off) →
+ *     immediate `delete`.
  */
-const _activeBarMemory = new Set<string>()
+const _activeBarMemory = new Map<string, number>()
+
+function pruneExpiredActiveBarMemory(now: number): void {
+  for (const [id, addedAt] of _activeBarMemory) {
+    if (now - addedAt >= TWENTY_FOUR_HOURS) {
+      _activeBarMemory.delete(id)
+    }
+  }
+}
 
 /** Compute which projects appear in the Active Bar */
 function useActiveBarItems(): ProjectWithWorkspaces[] {
@@ -37,6 +58,12 @@ function useActiveBarItems(): ProjectWithWorkspaces[] {
 
   return useMemo(() => {
     const now = Math.floor(Date.now() / 1000)
+
+    // Prune expired memory before reading it — guarantees rule 5
+    // never returns true for an entry older than 24h, so the
+    // explicit-dismiss + 24h-auto-dismiss invariants hold without
+    // needing a separate background sweep.
+    pruneExpiredActiveBarMemory(now)
 
     // Check if any pane has a non-idle hook status (agent was recently active)
     const hasHookActivity = paneStatuses.size > 0 && Array.from(paneStatuses.values()).some(
@@ -74,14 +101,25 @@ function useActiveBarItems(): ProjectWithWorkspaces[] {
       )
       if (hasBackground) return true
 
-      // 5. Was previously in the active bar (memory — prevents flicker during switches)
+      // 5. Was previously in the active bar within the last 24h
+      // (memory — prevents flicker during workspace switches). The
+      // map's TTL is honored by the prune above; entries older than
+      // 24h are gone before this read fires.
       if (_activeBarMemory.has(p.id)) return true
 
       return false
     })
 
-    // Remember items that entered the active bar
-    for (const p of result) _activeBarMemory.add(p.id)
+    // Remember items that just entered the active bar. Stamp `now`
+    // only on first add — re-adding an existing entry doesn't reset
+    // its 24h timer (otherwise an always-on workspace could never
+    // fall out of memory by being constantly re-observed). The 24h
+    // is from FIRST appearance, not most-recent-render.
+    for (const p of result) {
+      if (!_activeBarMemory.has(p.id)) {
+        _activeBarMemory.set(p.id, now)
+      }
+    }
 
     return result
   }, [projects, activeProjectId, backgroundWorkspaces, hasActiveAgents, paneStatuses, tick])
@@ -266,6 +304,10 @@ export function getActiveBarItems(): ProjectWithWorkspaces[] {
   const activeProjectId = useProjectsStore.getState().activeProjectId
   const backgroundWorkspaces = useTabsStore.getState().backgroundWorkspaces
   const now = Math.floor(Date.now() / 1000)
+
+  // Honor the same 24h TTL as the hook version. Without this prune,
+  // a stale memory entry would override the dismiss path here too.
+  pruneExpiredActiveBarMemory(now)
 
   return projects.filter((p) => {
     if (p.pinned) return false
