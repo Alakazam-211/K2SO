@@ -69,7 +69,26 @@ enum Outbound<'a> {
     /// from `terminal:title:<id>` Tauri events: Claude Code's
     /// braille-spinner prefix while working, the ✱-family glyphs
     /// the moment it goes idle, etc.
+    ///
+    /// **0.37.4 (Phase B):** the renderer keeps using this for
+    /// activity-marker detection only — tab labels come from
+    /// `LabelInitial` / `LabelChanged` instead. Title is kept on
+    /// the wire so legacy idle/working hints don't regress.
     Title { title: String },
+    /// Authoritative label for the session at WS-connect time
+    /// (Phase B). Sent once, immediately after the initial
+    /// snapshot. Renderer should display this as the tab label
+    /// (or whatever surface it owns) until a `LabelChanged`
+    /// supersedes it. Daemon-owned — survives renderer reload via
+    /// re-fetch on the next connect.
+    LabelInitial { label: String },
+    /// Authoritative label updated mid-session (Phase B). Fired
+    /// when the daemon's PTY-title interceptor accepts a change
+    /// (label_source ∈ {Pty, Seed}) or when an explicit caller hits
+    /// `set_label` via the new `/cli/sessions/<id>/label` route.
+    /// Renderer just replaces its mirror — no decision-making in
+    /// the client.
+    LabelChanged { label: String },
     /// Bell character (`\a`, OSC 7). Mirrors how iTerm decides
     /// "agent is now waiting for input": Claude rings the bell
     /// when it's done and ready for a reply. Renderer can use
@@ -139,6 +158,10 @@ pub async fn serve_session_grid_connection(
     // to fail with "busy" now subscribe fresh each time and
     // render from a new initial snapshot.
     let mut events_rx = session.subscribe_events();
+    // Phase B: subscribe to out-of-band label updates. When the
+    // CLI route or another process sets the session's label, we
+    // need to push `LabelChanged` to this client.
+    let mut labels_rx = session.subscribe_labels();
 
     let pane_id = format!("alacritty-v2-{}", session.session_id);
 
@@ -172,6 +195,21 @@ pub async fn serve_session_grid_connection(
         // need to be restored.
         return;
     }
+    // Phase B: emit the authoritative session label immediately
+    // after the snapshot. Subscribers display this as the tab
+    // label. If the daemon was given an empty seed (most spawn
+    // paths still are during the rollout window), the renderer
+    // falls back to its own display-name lookup.
+    let initial_label = session.label();
+    if send_outbound(
+        &mut write,
+        &Outbound::LabelInitial { label: initial_label },
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
     let first_snap_ms = __t_first_snap.elapsed().as_secs_f64() * 1000.0;
     log_debug!(
         "[v2-perf] side=daemon CONNECT-SUMMARY session={} ws_accept_ms={:.3} first_snap_ms={:.3} rows={} cols={} scrollback={}",
@@ -196,6 +234,40 @@ pub async fn serve_session_grid_connection(
     // keeps the volume sane.
     loop {
         tokio::select! {
+            // Phase B: out-of-band label changes (from /cli/sessions/<id>/label
+            // or a multi-window peer's set). Push to this client so
+            // its tab updates without a renderer round-trip.
+            label = labels_rx.recv() => {
+                match label {
+                    Ok(new_label) => {
+                        if send_outbound(
+                            &mut write,
+                            &Outbound::LabelChanged { label: new_label },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // Subscriber fell behind on label events.
+                        // Re-emit the current authoritative label so
+                        // the client converges.
+                        let current = session.label();
+                        let _ = send_outbound(
+                            &mut write,
+                            &Outbound::LabelChanged { label: current },
+                        )
+                        .await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // Session dropped — main loop will see the
+                        // events_rx Closed too. Don't break here;
+                        // let the event loop terminate cleanly.
+                    }
+                }
+            }
             ev = events_rx.recv() => {
                 match ev {
                     Ok(AlacEvent::Wakeup) => {
@@ -234,14 +306,23 @@ pub async fn serve_session_grid_connection(
                         // Forward as Outbound::Title so the renderer
                         // can use the same idle/working hints legacy
                         // pulls from `terminal:title:<id>` Tauri
-                        // events. Claude Code's title cycles between
-                        // braille-spinner glyphs (working) and the
-                        // ✱-family idle marker (done).
+                        // events (activity-marker detection only —
+                        // post-Phase B, tab labels come from
+                        // LabelInitial/LabelChanged instead).
                         let _ = send_outbound(
                             &mut write,
-                            &Outbound::Title { title },
+                            &Outbound::Title { title: title.clone() },
                         )
                         .await;
+                        // Phase B: feed the title into the daemon's
+                        // label state machine. Honors LabelSource;
+                        // when not Locked, updates the label and
+                        // broadcasts on `label_tx` so EVERY
+                        // subscriber's labels_rx arm wakes and emits
+                        // `LabelChanged` (multi-window convergence).
+                        // Don't emit here — let the broadcast path
+                        // handle it uniformly.
+                        let _ = session.try_set_label_from_pty(title);
                     }
                     Ok(AlacEvent::ResetTitle) => {
                         // OSC 0 reset → empty title. Treated by the
@@ -252,6 +333,10 @@ pub async fn serve_session_grid_connection(
                             &Outbound::Title { title: String::new() },
                         )
                         .await;
+                        // Phase B: empty label → renderer falls
+                        // back to its workspace-derived helper.
+                        // Same broadcast path as Title.
+                        let _ = session.try_set_label_from_pty(String::new());
                     }
                     Ok(AlacEvent::Bell) => {
                         // Bell — used by Claude / Codex to signal

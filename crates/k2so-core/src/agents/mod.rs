@@ -27,6 +27,7 @@ pub mod checkin;
 pub mod commands;
 pub mod connections;
 pub mod delegate;
+pub mod display;
 pub mod events;
 pub mod heartbeat;
 pub mod heartbeat_install;

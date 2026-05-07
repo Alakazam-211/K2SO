@@ -33,6 +33,27 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
     return tab.paneGroups.get(paneGroupId)
   })
 
+  // 0.37.4 Phase B: read the parent tab's title once at render
+  // time. When the title is non-default (i.e. set by ChatHistory
+  // / openHeartbeatTab / restored layout), pass it down to
+  // TerminalPane as `seedLabel` so the daemon stamps it as the
+  // authoritative session label and locks the source — PTY title
+  // events from `claude --resume` etc. can no longer overwrite.
+  // Default `Terminal N` titles are filtered out so we don't
+  // lock the label on a vanilla Cmd+T tab.
+  const tabTitle = useTabsStore((s) => {
+    let tab = s.tabs.find((t) => t.id === tabId)
+    if (!tab) {
+      for (const g of s.extraGroups) {
+        tab = g.tabs.find((t) => t.id === tabId)
+        if (tab) break
+      }
+    }
+    return tab?.title
+  })
+  const isMeaningfulTitle =
+    !!tabTitle && !/^Terminal \d+$/.test(tabTitle) && tabTitle !== 'Untitled'
+
   const activateItem = useTabsStore((s) => s.activateItemInPaneGroup)
   const closeItem = useTabsStore((s) => s.closeItemInPaneGroup)
   const removePaneFromTab = useTabsStore((s) => s.removePaneFromTab)
@@ -218,6 +239,12 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
                     args={td.args}
                     spawnedAt={td.spawnedAt}
                     attachAgentName={(td as any).attachAgentName}
+                    // 0.37.4 Phase B: seed + lock the daemon label
+                    // when the tab has a meaningful title. Stops
+                    // claude --resume's "Claude Code" title from
+                    // smudging chat-history-restored tabs.
+                    seedLabel={isMeaningfulTitle ? tabTitle : undefined}
+                    lockLabel={isMeaningfulTitle ? true : undefined}
                   />
                 )
               } else {

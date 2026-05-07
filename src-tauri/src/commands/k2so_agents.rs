@@ -166,6 +166,52 @@ pub fn k2so_agents_delete(project_path: String, name: String) -> Result<(), Stri
     k2so_core::agents::commands::delete(project_path, name)
 }
 
+/// 0.37.4: resolve the workspace's primary agent display name.
+///
+/// Routed through the daemon HTTP API (daemon-first) so the daemon's
+/// mtime-cache is the single source of truth — Tauri reads the same
+/// answer the CLI verb / sub-agents see. Falls back to the
+/// in-process helper only if the daemon is unreachable; reads remain
+/// total (always return a string).
+#[tauri::command]
+pub fn k2so_workspace_agent_display_name(project_path: String) -> Result<String, String> {
+    if let Ok(client) = crate::daemon_client::DaemonClient::try_connect() {
+        if let Ok(body) = client.cli_get(
+            "/cli/workspace/agent-display-name",
+            &[("project", &project_path)],
+        ) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                if let Some(s) = v.get("display_name").and_then(|d| d.as_str()) {
+                    return Ok(s.to_string());
+                }
+            }
+        }
+    }
+    Ok(k2so_core::agents::display::agent_display_name(&project_path))
+}
+
+/// 0.37.4: set the workspace's primary agent display name.
+///
+/// Routed through the daemon HTTP API. The daemon writes AGENT.md
+/// (atomic temp-file rename), invalidates its display-name cache, and
+/// emits `SyncProjects`. Tauri's local cache lives in the same shared
+/// `k2so-core` lib, but the daemon-side mtime check picks up the
+/// fresh write on the next read regardless of which process did the
+/// write — so single-source-of-truth holds even if the daemon is
+/// hot-restarted between Tauri invocations.
+#[tauri::command]
+pub fn k2so_workspace_set_agent_display_name(
+    project_path: String,
+    name: String,
+) -> Result<(), String> {
+    let client = crate::daemon_client::DaemonClient::try_connect()?;
+    client.cli_get(
+        "/cli/workspace/set-agent-display-name",
+        &[("project", &project_path), ("name", &name)],
+    )?;
+    Ok(())
+}
+
 pub fn k2so_agents_delete_inner(
     project_path: &str,
     name: &str,

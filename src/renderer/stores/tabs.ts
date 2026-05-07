@@ -1766,6 +1766,23 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   },
 
   setTabTitle: (tabId: string, title: string) => {
+    // 0.37.4 Phase B: pinned system agent tabs (Chat / Inbox) own
+    // their bar titles — they're picked deliberately by
+    // `ensureSystemAgentTabs` ("Chat", "Inbox", "Work Board") and
+    // refer to the UI surface, not the underlying session.
+    // Daemon-pushed `LabelChanged` events for the canonical
+    // session still update the in-pane header (AgentChatPane reads
+    // from `useSessionLabel` / `display_name` directly), but the
+    // tab BAR keeps its functional label so the pinned tabs read
+    // consistently across workspaces.
+    const allTabs = (() => {
+      const s = get()
+      return [...s.tabs, ...s.extraGroups.flatMap((g) => g.tabs)]
+    })()
+    const target = allTabs.find((t) => t.id === tabId)
+    if (target?.isSystemAgent) {
+      return
+    }
     set((state) => {
       const result = mapTabAcrossGroups(state, tabId, (tab) => ({ ...tab, title }))
       return { tabs: result.tabs, extraGroups: result.extraGroups }

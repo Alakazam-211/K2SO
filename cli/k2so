@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.36.9"
+K2SO_CLI_VERSION="0.37.3"
 
 set -euo pipefail
 
@@ -1534,6 +1534,100 @@ cmd_workspace_cleanup() {
     cli_request "/cli/workspace/cleanup"
 }
 
+# 0.37.4 Phase B: set a v2 session's authoritative label.
+# Daemon-side; broadcasts LabelChanged to every WS subscriber so
+# every Tauri window + the mobile companion converge.
+#
+# Optional --no-lock leaves label_source as Pty/Seed (PTY title
+# events can still update). Default locks the label.
+#
+#   k2so sessions set-label <session-uuid> <new label>
+#   k2so sessions set-label <session-uuid> <new label> --no-lock
+cmd_sessions_set_label() {
+    local session_id="${1:-}"
+    [[ -z "$session_id" ]] && { echo "Usage: k2so sessions set-label <session-id> <label> [--no-lock]" >&2; exit 1; }
+    shift
+    local lock="true"
+    local label_parts=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-lock) lock="false"; shift ;;
+            *) label_parts+=("$1"); shift ;;
+        esac
+    done
+    local label="${label_parts[*]}"
+    [[ -z "$label" ]] && { echo "Usage: k2so sessions set-label <session-id> <label> [--no-lock]" >&2; exit 1; }
+    local params="id=$(urlencode "$session_id")&label=$(urlencode "$label")&lock=$lock"
+    cli_request "/cli/sessions/label" "$params" \
+        | python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+    if "error" in d:
+        print("Error: %s" % d["error"], file=sys.stderr); sys.exit(1)
+    print("Set label to: %s (locked=%s)" % (d.get("label",""), d.get("locked","?")))
+except Exception as e:
+    print("Error: %s" % e, file=sys.stderr); sys.exit(1)'
+}
+
+# 0.37.4: read the friendly display name for a workspace's primary
+# agent. Reads .k2so/agent/AGENT.md frontmatter (display_name → name)
+# then falls back to projects.name. Total — always returns a string.
+cmd_workspace_get_agent_display_name() {
+    local target="${1:-}"
+    [[ -z "$target" ]] && { echo "Usage: k2so workspace agent-name <workspace>" >&2; exit 1; }
+    local resolved_path
+    resolved_path=$(cli_request "/cli/workspace/resolve" "q=$(urlencode "$target")" 2>/dev/null \
+        | python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("path",""))
+except Exception:
+    pass' 2>/dev/null)
+    if [ -z "$resolved_path" ]; then
+        # Treat as raw path if resolver didn't match a registered workspace.
+        resolved_path="$target"
+    fi
+    cli_request "/cli/workspace/agent-display-name" "project=$(urlencode "$resolved_path")" \
+        | python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+    if "error" in d:
+        print("Error: %s" % d["error"], file=sys.stderr); sys.exit(1)
+    print(d.get("display_name", ""))
+except Exception as e:
+    print("Error: %s" % e, file=sys.stderr); sys.exit(1)'
+}
+
+# 0.37.4: write the friendly display name for a workspace's primary
+# agent. Atomic AGENT.md frontmatter rewrite, scaffolds the file if
+# missing. Does NOT touch the technical agent name (`name:`) or
+# infrastructure layers (v2_session_map, terminal_id, pending_live).
+cmd_workspace_set_agent_display_name() {
+    local target="${1:-}"
+    local new_name="${2:-}"
+    [[ -z "$target" ]] && { echo "Usage: k2so workspace set-agent-name <workspace> <new-name>" >&2; exit 1; }
+    [[ -z "$new_name" ]] && { echo "Usage: k2so workspace set-agent-name <workspace> <new-name>" >&2; exit 1; }
+    local resolved_path
+    resolved_path=$(cli_request "/cli/workspace/resolve" "q=$(urlencode "$target")" 2>/dev/null \
+        | python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("path",""))
+except Exception:
+    pass' 2>/dev/null)
+    if [ -z "$resolved_path" ]; then
+        resolved_path="$target"
+    fi
+    local params="project=$(urlencode "$resolved_path")&name=$(urlencode "$new_name")"
+    cli_request "/cli/workspace/set-agent-display-name" "$params" \
+        | python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+    if "error" in d:
+        print("Error: %s" % d["error"], file=sys.stderr); sys.exit(1)
+    print("Set agent display name to: %s" % d.get("display_name", ""))
+except Exception as e:
+    print("Error: %s" % e, file=sys.stderr); sys.exit(1)'
+}
+
 # ── Agent Skill Surface ─────────────────────────────────────────────
 
 cmd_checkin() {
@@ -2055,14 +2149,16 @@ cmd_sessions() {
     local sub="${1:-}"
     shift 2>/dev/null || true
     case "$sub" in
-        spawn)   cmd_sessions_spawn "$@" ;;
-        list)    cmd_sessions_list "$@" ;;
-        compact) cmd_sessions_compact "$@" ;;
+        spawn)     cmd_sessions_spawn "$@" ;;
+        list)      cmd_sessions_list "$@" ;;
+        compact)   cmd_sessions_compact "$@" ;;
+        set-label) cmd_sessions_set_label "$@" ;;
         *)
             echo "Usage:" >&2
             echo "  k2so sessions spawn --agent <name> [...]" >&2
             echo "  k2so sessions list [--json]" >&2
             echo "  k2so sessions compact <session-id>" >&2
+            echo "  k2so sessions set-label <session-id> <label> [--no-lock]" >&2
             exit 1
             ;;
     esac
@@ -2846,6 +2942,8 @@ for completeness. See `k2so help` for the curated general list.
   workspace remove <path>                Deregister (files stay).
   workspace preview <path>                Preview before register.
   workspace cleanup                      Remove stale worktree records.
+  workspace agent-name <ws>              Show the workspace agent's display name.
+  workspace set-agent-name <ws> <name>   Rename the workspace agent's display label (no infra change).
 
   mode                                   Show current workspace mode.
   mode <off|agent|manager>               Set mode.
@@ -3034,7 +3132,7 @@ cmd_update() {
 
     # Extract the version from the remote script
     local remote_version
-    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.36.9"//')
+    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.37.3"//')
     if [ -z "$remote_version" ]; then
         echo "Error: Could not parse remote version." >&2
         exit 1
@@ -3222,12 +3320,14 @@ case "${1:-help}" in
         ;;
     workspace)
         case "${2:-}" in
-            create)  shift 2; cmd_workspace_create "$@" ;;
-            open)    shift 2; cmd_workspace_open "$@" ;;
-            remove)  shift 2; cmd_workspace_remove "$@" ;;
-            preview) shift 2; cmd_workspace_preview "$@" ;;
-            cleanup) cmd_workspace_cleanup ;;
-            *)       echo "Usage: k2so workspace <create|open|remove|preview|cleanup> [path]" >&2; exit 1 ;;
+            create)          shift 2; cmd_workspace_create "$@" ;;
+            open)            shift 2; cmd_workspace_open "$@" ;;
+            remove)          shift 2; cmd_workspace_remove "$@" ;;
+            preview)         shift 2; cmd_workspace_preview "$@" ;;
+            cleanup)         cmd_workspace_cleanup ;;
+            agent-name)      shift 2; cmd_workspace_get_agent_display_name "$@" ;;
+            set-agent-name)  shift 2; cmd_workspace_set_agent_display_name "$@" ;;
+            *)               echo "Usage: k2so workspace <create|open|remove|preview|cleanup|agent-name|set-agent-name> [args]" >&2; exit 1 ;;
         esac
         ;;
     onboarding)

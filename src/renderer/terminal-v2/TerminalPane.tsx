@@ -35,6 +35,7 @@ import {
 import { getDaemonWs, invalidateDaemonWs } from '../kessel/daemon-ws'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import { useTabsStore } from '@/stores/tabs'
+import { useSessionLabelsStore } from '@/stores/session-labels'
 import { useActiveAgentsStore } from '@/stores/active-agents'
 import { detectWorkingSignal } from '@/lib/agent-signals'
 import {
@@ -101,6 +102,9 @@ type OutboundMsg =
   | { event: 'title'; payload: { title: string } }
   | { event: 'bell'; payload: null }
   | { event: 'error'; payload: { message: string } }
+  // 0.37.4 Phase B — daemon-owned label events.
+  | { event: 'label_initial'; payload: { label: string } }
+  | { event: 'label_changed'; payload: { label: string } }
 
 // ── Helpers ───────────────────────────────────────────────────────
 
@@ -274,6 +278,20 @@ export interface TerminalPaneProps {
    *  and silently spawns a fresh resume. See
    *  `.k2so/prds/heartbeat-active-session-tracking.md`. */
   attachAgentName?: string
+  /** 0.37.4 Phase B — initial label seed sent to the daemon at
+   *  spawn time. Used by callers that already know what this
+   *  session should be called (e.g. a chat-history-restored tab
+   *  knows the session name; a heartbeat fire knows the schedule
+   *  name). The daemon stores this as the authoritative label and
+   *  emits `LabelInitial` to all subscribers. Empty / unset ⇒ no
+   *  seed; PTY title events fill the label. */
+  seedLabel?: string
+  /** 0.37.4 Phase B — when true, lock the daemon-owned label so
+   *  PTY title events can't overwrite it (e.g. claude --resume
+   *  emitting "Claude Code"). Pairs with `seedLabel` for the
+   *  common case "I know the right label, don't let the PTY
+   *  smudge it." */
+  lockLabel?: boolean
 }
 
 type Phase =
@@ -295,6 +313,8 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     args,
     spawnedAt,
     attachAgentName,
+    seedLabel,
+    lockLabel,
   } = props
 
   // Live-subscribe to the terminal settings store so Cmd+Shift+=
@@ -516,6 +536,11 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
         // resize message once we measure the container.
         cols: 120,
         rows: 40,
+        // 0.37.4 Phase B — pass label seed + lock policy through
+        // to the daemon. Daemon stores these on the session and
+        // emits LabelInitial/LabelChanged accordingly.
+        label: seedLabel ?? null,
+        label_locked: lockLabel ?? null,
       }
 
       // Boot with retry. `Tauri auto-update → relaunch` produces a
@@ -705,7 +730,32 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
               .replace(/^[\u2800-\u28FF*✱✲✳✴✵✶✷✸✹⚹⁎∗※·•●◦‣⏺]\s*/g, '')
               .trim()
             if (cleanTitle && tabId) {
-              useTabsStore.getState().setTabTitle(tabId, cleanTitle)
+              // 0.37.4 Phase B: do NOT push the cleaned PTY title
+              // back to the tab — daemon owns labels now. The
+              // cleanTitle calc stays so other code that reads it
+              // (none currently) keeps working; we just stop
+              // mutating tab.title from this side. The daemon's
+              // `label_changed` event is the only thing that
+              // updates the visible label.
+              void cleanTitle
+            }
+            break
+          }
+          case 'label_initial':
+          case 'label_changed': {
+            // 0.37.4 Phase B — daemon-authoritative label.
+            // Mirror into the session-labels store keyed by
+            // sessionId so any UI surface (tab bar, agent panes,
+            // mobile companion) can read via
+            // `useSessionLabel(sessionId)`. Also write through to
+            // `Tab.title` for backwards-compat with components
+            // that read tab.title directly.
+            const newLabel = parsed.payload.label ?? ''
+            useSessionLabelsStore
+              .getState()
+              .setSessionLabel(spawn.sessionId, newLabel)
+            if (newLabel && tabId) {
+              useTabsStore.getState().setTabTitle(tabId, newLabel)
             }
             break
           }

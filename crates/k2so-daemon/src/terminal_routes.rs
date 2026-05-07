@@ -214,6 +214,55 @@ fn read_v2_grid_lines(
 /// Phase 4.5 I7: Kessel's ResizeObserver fires on pane dimension
 /// changes and calls this endpoint to keep the PTY in sync with
 /// the DOM cells the user sees.
+/// Handler for `GET /cli/sessions/label?id=<uuid>&label=<text>[&lock=true|false]`.
+///
+/// 0.37.4 Phase B — explicit caller-driven label set. Updates the
+/// session's authoritative label and (by default) flips
+/// `LabelSource` to `Locked` so future PTY title events can't
+/// overwrite. Broadcasts on the session's label channel so every
+/// WS subscriber emits `LabelChanged` to its client.
+///
+/// Only v2 sessions have labels. Legacy `SessionStreamSession`
+/// (Kessel-T0) returns 400 — opt-in users on Kessel can rely on
+/// PTY title flow as before.
+pub fn handle_sessions_label(params: &HashMap<String, String>) -> CliResponse {
+    let id_str = match params.get("id").or_else(|| params.get("session")) {
+        Some(s) if !s.is_empty() => s.as_str(),
+        _ => return CliResponse::bad_request("missing id param"),
+    };
+    let session_id = match SessionId::parse(id_str) {
+        Some(id) => id,
+        None => return CliResponse::bad_request("invalid session id (expected UUID)"),
+    };
+    let label = match params.get("label") {
+        Some(s) => s.to_string(),
+        _ => return CliResponse::bad_request("missing label param"),
+    };
+    let lock = params
+        .get("lock")
+        .map(|v| !matches!(v.as_str(), "false" | "0"))
+        .unwrap_or(true);
+
+    let v2_session = match crate::v2_session_map::lookup_by_session_id(&session_id) {
+        Some(s) => s,
+        None => {
+            return CliResponse::bad_request(
+                "session not found in v2_session_map (labels are v2-only)",
+            );
+        }
+    };
+
+    let new_label = v2_session.set_label(label, lock);
+    CliResponse::ok_json(
+        serde_json::json!({
+            "success": true,
+            "label": new_label,
+            "locked": lock,
+        })
+        .to_string(),
+    )
+}
+
 pub fn handle_sessions_resize(params: &HashMap<String, String>) -> CliResponse {
     let id_str = match params.get("session").or_else(|| params.get("id")) {
         Some(s) if !s.is_empty() => s.as_str(),

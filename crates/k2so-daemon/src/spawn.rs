@@ -47,6 +47,20 @@ use crate::session_map;
 use crate::signal_format;
 use crate::v2_session_map;
 
+/// Resolve a workspace's filesystem path from its project_id.
+/// Used by the v2 spawn helper to seed the session label from the
+/// agent display name (Phase B). `None` if the row is gone.
+fn project_path_for_id(project_id: &str) -> Option<String> {
+    let db = k2so_core::db::shared();
+    let conn = db.lock();
+    conn.query_row(
+        "SELECT path FROM projects WHERE id = ?1",
+        rusqlite::params![project_id],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
 /// Input shape for a spawn. Shared by the HTTP handler
 /// (`handle_sessions_spawn`) and the scheduler-wake path
 /// (`DaemonWakeProvider`).
@@ -245,6 +259,31 @@ pub fn spawn_agent_session_v2_blocking(
         v2_session_map::unregister(&canonical_key);
     }
 
+    // Phase B: seed the session's label with the workspace's
+    // primary-agent display name and LOCK it. This is the
+    // canonical workspace+agent session — its tab label should be
+    // the friendly agent name (per the agent-display-name PRD),
+    // never `claude --resume`'s "Claude Code" PTY title. Locked
+    // means PTY title events still drive activity-marker
+    // detection but cannot mutate the visible label.
+    //
+    // Resolving the label needs a project_path; we have project_id.
+    // Look the path up via the agents-display helper's caching
+    // resolver — falls back to the agent name when no project
+    // row exists (legacy bare-name path) so the label still has
+    // SOMETHING readable.
+    let label_seed = if let Some(pid) = req.project_id.as_deref() {
+        if !pid.is_empty() {
+            project_path_for_id(pid)
+                .map(|p| k2so_core::agents::display::agent_display_name(&p))
+                .unwrap_or_else(|| req.agent_name.clone())
+        } else {
+            req.agent_name.clone()
+        }
+    } else {
+        req.agent_name.clone()
+    };
+
     // Convert the request shape into DaemonPtyConfig. v2 takes its
     // working directory as `Option<PathBuf>` rather than a String,
     // and stores `program: Option<String>` (vs legacy `command`),
@@ -258,6 +297,8 @@ pub fn spawn_agent_session_v2_blocking(
         args: req.args.clone().unwrap_or_default(),
         env: HashMap::new(),
         drain_on_exit: true,
+        label: label_seed,
+        label_source: k2so_core::terminal::LabelSource::Locked,
     };
     let session_id = cfg.session_id;
 

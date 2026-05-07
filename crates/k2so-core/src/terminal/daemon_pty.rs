@@ -108,6 +108,34 @@ impl EventListener for DaemonEventListener {
     }
 }
 
+/// Source-of-truth marker for `DaemonPtySession::label`. Drives
+/// the title-event-vs-locked-label state machine that lives on the
+/// daemon side (Phase B / `session-label-daemon-owned.md` PRD).
+///
+/// - `Pty` — default. PTY `WindowTitleChanged` events freely
+///   overwrite the label. Right answer for ad-hoc Cmd+T tabs where
+///   vim's filename or Claude's progress glyph is informative.
+/// - `Seed` — caller (renderer/CLI/heartbeat fire) supplied a
+///   meaningful label at spawn time but didn't lock it. PTY can
+///   still update the label as the session evolves; the seed is
+///   just the initial value subscribers see on connect.
+/// - `Locked` — caller wants the label PINNED. PTY title events
+///   are observed (still drive activity-marker detection) but
+///   never mutate the label. Used by the canonical workspace+agent
+///   session, heartbeat-fire sessions, and explicit user renames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabelSource {
+    Pty,
+    Seed,
+    Locked,
+}
+
+impl Default for LabelSource {
+    fn default() -> Self {
+        LabelSource::Pty
+    }
+}
+
 /// Configuration for `DaemonPtySession::spawn`. Construct via
 /// `DaemonPtyConfig::default()` and mutate fields, or use the
 /// struct literal with explicit values.
@@ -126,6 +154,16 @@ pub struct DaemonPtyConfig {
     /// If true, drain the child's pending output before tearing
     /// down the PTY on child exit. Matches Zed's default.
     pub drain_on_exit: bool,
+    /// Initial label for the session (Phase B). Empty string ⇒
+    /// caller had no preference; PTY title events will fill it in.
+    /// Populated values are visible via `LabelInitial` to the first
+    /// WS subscriber.
+    pub label: String,
+    /// Initial label source (Phase B). Defaults to `Pty` when the
+    /// caller doesn't care; set to `Seed` when supplying an initial
+    /// `label` but allowing PTY updates; set to `Locked` to pin the
+    /// label so PTY events never overwrite it.
+    pub label_source: LabelSource,
 }
 
 impl Default for DaemonPtyConfig {
@@ -139,6 +177,8 @@ impl Default for DaemonPtyConfig {
             args: Vec::new(),
             env: HashMap::new(),
             drain_on_exit: true,
+            label: String::new(),
+            label_source: LabelSource::Pty,
         }
     }
 }
@@ -193,6 +233,29 @@ pub struct DaemonPtySession {
     /// thread sees the child exit, so the bool flips before the
     /// broadcast subscribers are woken.
     child_exited: std::sync::atomic::AtomicBool,
+
+    /// Authoritative human-friendly label (Phase B / PRD
+    /// `session-label-daemon-owned.md`). The daemon owns this
+    /// string; every consumer (Tauri tabs, mobile companion, CLI
+    /// `agents running`, future MCP) reads it from here. PTY title
+    /// events are absorbed here according to `label_source` — they
+    /// don't round-trip through the renderer back to the tab.
+    label: std::sync::RwLock<String>,
+    /// Drives the PTY-title-vs-locked-label state machine. See
+    /// [`LabelSource`]. Held under its own `RwLock` so callers can
+    /// flip `Pty → Locked` (user explicit rename) and have new PTY
+    /// events instantly start ignoring the title surface.
+    label_source: std::sync::RwLock<LabelSource>,
+    /// Broadcast channel for label changes (Phase B). Out-of-band
+    /// label sets — from `/cli/sessions/<id>/label` or from the
+    /// agent-display-name change hook — push the new label here so
+    /// every WS subscriber's select loop wakes and emits a
+    /// `LabelChanged` to its client. PTY-driven label updates
+    /// don't need this channel since the WS subscriber that's
+    /// already processing the `Title` AlacEvent emits
+    /// `LabelChanged` directly; the broadcast still fires there
+    /// too so OTHER subscribers (multi-window) converge.
+    label_tx: broadcast::Sender<String>,
 }
 
 impl DaemonPtySession {
@@ -335,6 +398,12 @@ impl DaemonPtySession {
             cfg.session_id
         );
 
+        // Phase B: small broadcast for out-of-band label updates.
+        // Cap of 16 is plenty — we only push on actual changes and
+        // multi-window subscribers consume immediately.
+        let (label_tx, _label_rx_drop) = broadcast::channel::<String>(16);
+        drop(_label_rx_drop);
+
         Ok(Arc::new(Self {
             session_id: cfg.session_id,
             cwd: cfg.cwd,
@@ -344,7 +413,79 @@ impl DaemonPtySession {
             pty_notifier: Mutex::new(Notifier(pty_sender)),
             events_tx,
             child_exited: std::sync::atomic::AtomicBool::new(false),
+            label: std::sync::RwLock::new(cfg.label),
+            label_source: std::sync::RwLock::new(cfg.label_source),
+            label_tx,
         }))
+    }
+
+    /// Subscribe to out-of-band label change events. Receivers see
+    /// every label set that happened after they subscribed.
+    /// Subscribed by the WS handler so multi-window sync works:
+    /// when one window sets the label, other windows' subscribers
+    /// wake and emit `LabelChanged` to their clients.
+    pub fn subscribe_labels(&self) -> broadcast::Receiver<String> {
+        self.label_tx.subscribe()
+    }
+
+    /// Read the authoritative label. Cheap (RwLock read + clone of
+    /// the inner String). Caller gets an owned String — the lock is
+    /// released before return.
+    pub fn label(&self) -> String {
+        self.label.read().expect("label rwlock poisoned").clone()
+    }
+
+    /// Read the current label source. Cheap.
+    pub fn label_source(&self) -> LabelSource {
+        *self.label_source.read().expect("label_source rwlock poisoned")
+    }
+
+    /// Update the label from a PTY title event. Honors `label_source`:
+    /// `Pty` and `Seed` allow the update; `Locked` ignores it.
+    /// Broadcasts on `label_tx` (so every WS subscriber, not just
+    /// the one whose AlacEvent loop received the Title, emits
+    /// `LabelChanged` to its client). Returns the new label if it
+    /// actually changed; returns `None` if locked or a no-op.
+    pub fn try_set_label_from_pty(&self, title: String) -> Option<String> {
+        let source = self.label_source();
+        if matches!(source, LabelSource::Locked) {
+            return None;
+        }
+        let mut guard = self.label.write().expect("label rwlock poisoned");
+        if *guard == title {
+            return None;
+        }
+        *guard = title.clone();
+        drop(guard);
+        // Broadcast so multi-window peers converge. Best-effort —
+        // `send` returns `Err` only when there are zero subscribers.
+        let _ = self.label_tx.send(title.clone());
+        Some(title)
+    }
+
+    /// Explicit caller-driven label set. Used by the new
+    /// `/cli/sessions/<id>/label` endpoint and any other path where
+    /// a human or another process has decided what the label should
+    /// be. `lock=true` flips `label_source` to `Locked` so future
+    /// PTY title events can't undo this. Always succeeds, returns
+    /// the new label. Broadcasts on `label_tx` so every WS
+    /// subscriber emits `LabelChanged` to its client (multi-window
+    /// convergence).
+    pub fn set_label(&self, label: String, lock: bool) -> String {
+        {
+            let mut guard = self.label.write().expect("label rwlock poisoned");
+            *guard = label.clone();
+        }
+        if lock {
+            *self
+                .label_source
+                .write()
+                .expect("label_source rwlock poisoned") = LabelSource::Locked;
+        }
+        // Best-effort broadcast — `send` returns `Err` only when
+        // there are zero subscribers, which is fine.
+        let _ = self.label_tx.send(label.clone());
+        label
     }
 
     /// Whether the child PID is still alive. Returns `false` once
@@ -441,6 +582,15 @@ mod tests {
     }
 
     #[test]
+    fn daemon_pty_config_default_label_state() {
+        // Phase B: defaults are empty label + Pty source. PTY title
+        // events fill the label.
+        let cfg = DaemonPtyConfig::default();
+        assert_eq!(cfg.label, "");
+        assert_eq!(cfg.label_source, LabelSource::Pty);
+    }
+
+    #[test]
     fn term_size_dimensions_include_scrollback() {
         let size = TermSize {
             cols: 120,
@@ -451,8 +601,133 @@ mod tests {
         assert_eq!(size.total_lines(), 40 + SCROLLBACK_CAP);
     }
 
-    // Note: a real end-to-end spawn test requires a tokio runtime
-    // (for the mpsc receiver) plus a forked shell. Deferred to the
-    // A3 integration tests where the WS handler exercises the full
-    // pipeline.
+    // Phase B label-state-machine tests. These exercise the
+    // `try_set_label_from_pty` / `set_label` / accessor surface
+    // without spawning a real PTY — we hand-construct a session
+    // and verify the state-machine logic in isolation. Requires a
+    // tokio runtime because `broadcast::channel` lives inside a
+    // tokio module, and we need a Term + EventLoop to satisfy the
+    // struct layout. We use the simplest valid spawn (a `cat`
+    // subprocess on Unix) under #[cfg(unix)] — the test exits
+    // when the Arc drops at scope end.
+
+    #[cfg(unix)]
+    #[test]
+    fn label_starts_with_seed_and_source() {
+        use std::path::PathBuf;
+        let cfg = DaemonPtyConfig {
+            session_id: SessionId::new(),
+            cols: 80,
+            rows: 24,
+            cwd: Some(PathBuf::from("/tmp")),
+            program: Some("cat".to_string()),
+            args: vec![],
+            env: Default::default(),
+            drain_on_exit: true,
+            label: "scout".to_string(),
+            label_source: LabelSource::Locked,
+        };
+        let s = DaemonPtySession::spawn(cfg).expect("spawn cat");
+        assert_eq!(s.label(), "scout");
+        assert_eq!(s.label_source(), LabelSource::Locked);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn try_set_label_from_pty_drops_locked() {
+        use std::path::PathBuf;
+        let cfg = DaemonPtyConfig {
+            session_id: SessionId::new(),
+            cols: 80,
+            rows: 24,
+            cwd: Some(PathBuf::from("/tmp")),
+            program: Some("cat".to_string()),
+            args: vec![],
+            env: Default::default(),
+            drain_on_exit: true,
+            label: "scout".to_string(),
+            label_source: LabelSource::Locked,
+        };
+        let s = DaemonPtySession::spawn(cfg).expect("spawn cat");
+        // PTY would emit "Claude Code" — must be silently dropped.
+        let result = s.try_set_label_from_pty("Claude Code".to_string());
+        assert!(result.is_none(), "Locked label must reject PTY update");
+        assert_eq!(s.label(), "scout", "label must not have changed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn try_set_label_from_pty_accepts_pty_source() {
+        use std::path::PathBuf;
+        let cfg = DaemonPtyConfig {
+            session_id: SessionId::new(),
+            cols: 80,
+            rows: 24,
+            cwd: Some(PathBuf::from("/tmp")),
+            program: Some("cat".to_string()),
+            args: vec![],
+            env: Default::default(),
+            drain_on_exit: true,
+            label: String::new(),
+            label_source: LabelSource::Pty,
+        };
+        let s = DaemonPtySession::spawn(cfg).expect("spawn cat");
+        let r1 = s.try_set_label_from_pty("vim README.md".to_string());
+        assert_eq!(r1.as_deref(), Some("vim README.md"));
+        assert_eq!(s.label(), "vim README.md");
+        // Same value again is a no-op (returns None).
+        let r2 = s.try_set_label_from_pty("vim README.md".to_string());
+        assert!(r2.is_none(), "no-op rewrite must return None");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_label_with_lock_locks_source() {
+        use std::path::PathBuf;
+        let cfg = DaemonPtyConfig {
+            session_id: SessionId::new(),
+            cols: 80,
+            rows: 24,
+            cwd: Some(PathBuf::from("/tmp")),
+            program: Some("cat".to_string()),
+            args: vec![],
+            env: Default::default(),
+            drain_on_exit: true,
+            ..Default::default()
+        };
+        let s = DaemonPtySession::spawn(cfg).expect("spawn cat");
+        assert_eq!(s.label_source(), LabelSource::Pty);
+        s.set_label("user-named".to_string(), true);
+        assert_eq!(s.label(), "user-named");
+        assert_eq!(s.label_source(), LabelSource::Locked);
+        // Subsequent PTY update must be ignored.
+        let r = s.try_set_label_from_pty("Claude Code".to_string());
+        assert!(r.is_none());
+        assert_eq!(s.label(), "user-named");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_label_without_lock_keeps_source() {
+        use std::path::PathBuf;
+        let cfg = DaemonPtyConfig {
+            session_id: SessionId::new(),
+            cols: 80,
+            rows: 24,
+            cwd: Some(PathBuf::from("/tmp")),
+            program: Some("cat".to_string()),
+            args: vec![],
+            env: Default::default(),
+            drain_on_exit: true,
+            label: "seed".to_string(),
+            label_source: LabelSource::Seed,
+        };
+        let s = DaemonPtySession::spawn(cfg).expect("spawn cat");
+        s.set_label("new-seed".to_string(), false);
+        assert_eq!(s.label(), "new-seed");
+        // Source preserved — PTY still allowed to update.
+        assert_eq!(s.label_source(), LabelSource::Seed);
+        let r = s.try_set_label_from_pty("vim".to_string());
+        assert_eq!(r.as_deref(), Some("vim"));
+    }
 }

@@ -1203,6 +1203,8 @@ pub fn run() {
             // K2SO Agents
             commands::k2so_agents::k2so_agents_list,
             commands::k2so_agents::k2so_agents_create,
+            commands::k2so_agents::k2so_workspace_agent_display_name,
+            commands::k2so_agents::k2so_workspace_set_agent_display_name,
             commands::k2so_agents::k2so_agents_delete,
             commands::k2so_agents::k2so_agents_update_field,
             commands::k2so_agents::k2so_agents_get_heartbeat,

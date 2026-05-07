@@ -273,10 +273,15 @@ fn apc_msg_with_live_delivery_triggers_inject_through_ingress() {
         Some(&ws),
     );
 
-    // Inject fired for bar with "inject me" in the bytes.
+    // Inject fired with "inject me" in the bytes. Provider is
+    // called with the canonical (workspace-prefixed) key —
+    // post-0.36.15 egress routes workspace-addressed signals to
+    // `<workspace>:<agent>` instead of bare-name. Liveness check
+    // still uses bare-name registry walk; only the inject side
+    // is prefixed.
     let calls = inject.calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 1, "exactly one inject expected");
-    assert_eq!(calls[0].0, "bar");
+    assert_eq!(calls[0].0, "k2so-ws:bar");
     let text = String::from_utf8_lossy(&calls[0].1);
     assert!(text.contains("inject me"), "bytes were: {text}");
 

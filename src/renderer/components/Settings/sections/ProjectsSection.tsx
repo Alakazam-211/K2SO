@@ -1,6 +1,7 @@
 import React from 'react'
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { useSettingsStore } from '@/stores/settings'
 import { useProjectsStore, type ProjectWithWorkspaces } from '@/stores/projects'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
@@ -2213,77 +2214,80 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
   )
 }
 
-// ── Custom Agent Persona Button ──────────────────────────────────────
+// ── Agent Display Name Input (0.37.4) ────────────────────────────────
+//
+// A small inline editor that reads the workspace's primary agent's
+// display name (AGENT.md `display_name:` → `name:` → projects.name)
+// and writes new values via `k2so_workspace_set_agent_display_name`.
+//
+// Why a separate field from the technical agent name? Because in
+// 0.37.4 the technical name (`__lead__`, `k2so-agent`, custom-agent
+// directory name) still keys infrastructure layers — v2_session_map,
+// `workspace_sessions.terminal_id`, pending_live queue dirs. Editing
+// the technical name would cascade through all of them and risk
+// dropping the live PTY. The display name decouples the
+// human-facing label from those keys; the user gets a friendly
+// "what to call this agent" without the rename gymnastics.
+//
+// A future 0.38.0 ships the full `agent-display-name.md` PRD: drop
+// the technical name from infrastructure, collapse `display_name:`
+// and `name:` back into one field. Until then, this is the cheap
+// stepping stone that fixes the user-visible "I renamed my agent
+// and the inbox tab still says __lead__" complaint.
 
-function CustomAgentPersonaButton({ projectPath, projectName, onOpenEditor }: { projectPath: string; projectName: string; onOpenEditor: (agentName: string) => void }): React.JSX.Element {
-  const derived = projectName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
+function AgentDisplayNameField({
+  projectPath,
+  helpText,
+  trailing,
+}: {
+  projectPath: string
+  helpText?: string
+  /** Optional element rendered to the right of the Save button —
+   *  meant for siblings like a Manage Persona button so the row
+   *  reads input | save | persona on one line. */
+  trailing?: React.ReactNode
+}): React.JSX.Element {
   const [ready, setReady] = useState(false)
-  const [agentExists, setAgentExists] = useState(false)
-  const [agentName, setAgentName] = useState(derived)
-  const [nameDraft, setNameDraft] = useState(derived)
-  const [nameError, setNameError] = useState<string | null>(null)
+  const [draft, setDraft] = useState('')
+  const [saved, setSaved] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [flash, setFlash] = useState(false)
 
-  // Load existing Custom agent name if one is already set up for this
-  // workspace. First-time render (no agent yet) leaves the draft at the
-  // workspace-derived default, ready for the user to edit before creation.
   useEffect(() => {
-    const init = async () => {
-      try {
-        const agents = await invoke<(K2soAgentInfo & { agentType?: string })[]>('k2so_agents_list', { projectPath })
-        const existing = agents.find((a: any) => a.agentType === 'custom')
-        if (existing) {
-          setAgentName(existing.name)
-          setNameDraft(existing.name)
-          setAgentExists(true)
-        }
-        setReady(true)
-      } catch (e) {
-        console.error('[custom-agent] Init failed:', e)
-        setReady(true)
-      }
-    }
-    init()
-  }, [projectPath, projectName])
+    let cancelled = false
+    invoke<string>('k2so_workspace_agent_display_name', { projectPath })
+      .then((n) => { if (!cancelled) { setDraft(n); setSaved(n); setReady(true) } })
+      .catch((e) => { if (!cancelled) { console.error('[display-name] read failed:', e); setReady(true) } })
+    return () => { cancelled = true }
+  }, [projectPath])
 
-  const RESERVED = ['__lead__', 'k2so-agent', 'pod-leader', 'default', 'legacy']
-  const validateName = (n: string): string | null => {
-    if (!/^[a-z][a-z0-9-]*[a-z0-9]$/.test(n) || n.length < 2) {
-      return 'Lowercase letters, digits, hyphens only (min 2 chars, no leading/trailing hyphen)'
+  const dirty = ready && draft !== saved
+
+  const validate = (n: string): string | null => {
+    if (n.length < 2) return 'Display name must be at least 2 characters.'
+    if (n.length > 64) return 'Display name must be at most 64 characters.'
+    if (!/^[a-z][a-z0-9-]*[a-z0-9]$/.test(n)) {
+      return 'Lowercase letters, digits, hyphens only. Start with a letter, no trailing hyphen.'
     }
-    if (RESERVED.includes(n)) return `"${n}" is reserved`
     return null
   }
 
-  const handleOpen = async (): Promise<void> => {
-    const err = validateName(nameDraft)
-    if (err) { setNameError(err); return }
-    setNameError(null)
-
-    if (!agentExists) {
-      // First-time setup — create the agent with the user's chosen name.
-      try {
-        await invoke('k2so_agents_create', {
-          projectPath,
-          name: nameDraft,
-          role: 'Custom agent — customize via the persona editor',
-          agentType: 'custom',
-        })
-        setAgentName(nameDraft)
-        setAgentExists(true)
-        onOpenEditor(nameDraft)
-      } catch (e) {
-        setNameError(String(e))
-      }
-      return
+  const handleSave = async (): Promise<void> => {
+    const err = validate(draft)
+    if (err) { setError(err); return }
+    setError(null)
+    setBusy(true)
+    try {
+      await invoke('k2so_workspace_set_agent_display_name', { projectPath, name: draft })
+      setSaved(draft)
+      setFlash(true)
+      setTimeout(() => setFlash(false), 1200)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
     }
-    // Already exists. If the user changed the name, note that rename
-    // isn't wired yet — direct them to open the current persona for now.
-    if (nameDraft !== agentName) {
-      setNameError('Rename support for existing agents is coming in a later release — open the current persona for now, or use the CLI to rename.')
-      setNameDraft(agentName)
-      return
-    }
-    onOpenEditor(agentName)
   }
 
   return (
@@ -2291,34 +2295,117 @@ function CustomAgentPersonaButton({ projectPath, projectName, onOpenEditor }: { 
       <div className="flex items-center gap-2">
         <div className="flex-1 min-w-0">
           <label className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)] mb-1">
-            Agent name
+            Agent display name
           </label>
           <input
             type="text"
-            value={nameDraft}
-            onChange={(e) => { setNameDraft(e.target.value.toLowerCase()); setNameError(null) }}
-            disabled={!ready || agentExists}
-            placeholder={derived}
+            value={draft}
+            onChange={(e) => { setDraft(e.target.value.toLowerCase()); setError(null) }}
+            disabled={!ready || busy}
+            placeholder="agent"
+            onKeyDown={(e) => { if (e.key === 'Enter' && dirty && !busy) handleSave() }}
             className="w-full px-2 py-1 text-xs bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)] disabled:opacity-60"
           />
         </div>
         <button
-          onClick={handleOpen}
+          onClick={handleSave}
+          disabled={!ready || busy || !dirty}
+          className="px-3 py-1.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer disabled:opacity-50 flex-shrink-0 self-end"
+        >
+          {busy ? 'Saving…' : flash ? 'Saved' : 'Save'}
+        </button>
+        {trailing}
+      </div>
+      {error && (
+        <p className="text-[10px] text-red-400 mt-1">{error}</p>
+      )}
+      {!error && helpText && (
+        <p className="text-[9px] text-[var(--color-text-muted)] mt-1">{helpText}</p>
+      )}
+    </div>
+  )
+}
+
+// ── Custom Agent Persona Button ──────────────────────────────────────
+
+function CustomAgentPersonaButton({ projectPath, projectName, onOpenEditor }: { projectPath: string; projectName: string; onOpenEditor: (agentName: string) => void }): React.JSX.Element {
+  const derived = projectName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
+  const [ready, setReady] = useState(false)
+  // Technical agent name from AGENT.md `name:` (the directory-side
+  // identifier). Post-0.37.0 unification, every workspace's primary
+  // agent lives at `.k2so/agent/AGENT.md`; we just need its `name:`
+  // for the Manage Persona open-editor call. Friendly label editing
+  // goes through AgentDisplayNameField (`display_name:` frontmatter).
+  const [techName, setTechName] = useState<string>(derived)
+
+  useEffect(() => {
+    let cancelled = false
+    invoke<(K2soAgentInfo & { agentType?: string })[]>('k2so_agents_list', { projectPath })
+      .then((agents) => {
+        if (cancelled) return
+        // Post-0.37.0 there's at most one agent per workspace. Pick
+        // whichever one comes back; if the workspace mode is custom
+        // we expect exactly one with `type: custom` (or whatever
+        // AGENT.md was scaffolded with), but the picker is mode-blind
+        // because the technical name is what we need either way.
+        const primary = agents[0]
+        setTechName(primary?.name ?? derived)
+        setReady(true)
+      })
+      .catch((e) => {
+        if (cancelled) return
+        console.error('[custom-agent] list failed:', e)
+        setReady(true)
+      })
+    return () => { cancelled = true }
+  }, [projectPath, derived])
+
+  // Refresh the technical name on cross-window sync (e.g. someone
+  // edited AGENT.md `name:` via the persona editor in another tab).
+  useEffect(() => {
+    let unlisten: (() => void) | null = null
+    let cancelled = false
+    listen('sync:projects', () => {
+      invoke<(K2soAgentInfo & { agentType?: string })[]>('k2so_agents_list', { projectPath })
+        .then((agents) => { if (agents[0]?.name) setTechName(agents[0].name) })
+        .catch(() => {})
+    }).then((u) => { if (cancelled) u(); else unlisten = u })
+    return () => { cancelled = true; unlisten?.() }
+  }, [projectPath])
+
+  const handleOpenPersona = async (): Promise<void> => {
+    if (!ready) return
+    // First-time setup: scaffold a custom agent with the
+    // workspace-derived technical name. Idempotent — if AGENT.md
+    // already exists, k2so_agents_create returns the existing agent's
+    // info without overwriting (post-0.37.0 unification behavior).
+    try {
+      await invoke('k2so_agents_create', {
+        projectPath,
+        name: techName,
+        role: 'Custom agent — customize via the persona editor',
+        agentType: 'custom',
+      })
+    } catch (e) {
+      console.warn('[custom-agent] create returned error (may be benign if already exists):', e)
+    }
+    onOpenEditor(techName)
+  }
+
+  return (
+    <AgentDisplayNameField
+      projectPath={projectPath}
+      helpText="The friendly label used in the inbox tab, chat tab, and persona prompts. Edit anytime — does not affect the agent's technical name or live session."
+      trailing={
+        <button
+          onClick={handleOpenPersona}
           disabled={!ready}
-          className="px-5 py-1.5 text-[11px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer disabled:opacity-50 flex-shrink-0 whitespace-nowrap self-end"
+          className="px-3 py-1.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer disabled:opacity-50 flex-shrink-0 self-end whitespace-nowrap"
         >
           Manage Persona
         </button>
-      </div>
-      {nameError && (
-        <p className="text-[10px] text-red-400 mt-1">{nameError}</p>
-      )}
-      <p className="text-[9px] text-[var(--color-text-muted)] mt-1">
-        {agentExists
-          ? `Define what ${agentName} does. Name is locked — rename support lands in a later release.`
-          : `Give your custom agent a short name (defaults to the workspace name). The Persona editor creates the agent on first open.`}
-      </p>
-    </div>
+      }
+    />
   )
 }
 
@@ -2352,20 +2439,19 @@ function K2SOAgentPersonaButton({ projectPath, projectName, onOpenEditor }: { pr
   }, [projectPath, projectName])
 
   return (
-    <div className="flex items-center justify-between gap-3">
-      <div className="flex-1 min-w-0">
-        <p className="text-[10px] text-[var(--color-text-muted)]">
-          Customize the K2SO agent&apos;s persona — add work sources, integrations, and project-specific context.
-        </p>
-      </div>
-      <button
-        onClick={() => onOpenEditor(agentName)}
-        disabled={!ready}
-        className="px-3 py-1.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer disabled:opacity-50 flex-shrink-0"
-      >
-        Manage Persona
-      </button>
-    </div>
+    <AgentDisplayNameField
+      projectPath={projectPath}
+      helpText="The friendly label used in the inbox tab. Edit anytime — does not affect routing or the live session."
+      trailing={
+        <button
+          onClick={() => onOpenEditor(agentName)}
+          disabled={!ready}
+          className="px-3 py-1.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer disabled:opacity-50 flex-shrink-0 self-end whitespace-nowrap"
+        >
+          Manage Persona
+        </button>
+      }
+    />
   )
 }
 
@@ -2754,38 +2840,43 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
             Workspace Manager
           </h3>
           <div className="border border-[var(--color-accent)]/30">
-            <div className="px-3 py-2">
-              <div className="flex items-center justify-between">
-                <div className="flex-1 min-w-0 mr-3">
-                  <div className="flex items-center">
-                    <span className="text-xs font-medium text-[var(--color-text-primary)] flex-shrink-0">{manager.name}</span>
-                    <span className="text-[9px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 px-1.5 py-0.5 ml-1.5 flex-shrink-0">
-                      MANAGER
-                    </span>
-                    <div className="flex items-center justify-end gap-1.5 text-[10px] flex-1 ml-2">
-                      {wsInboxCount > 0 && (
-                        <span className="text-[var(--color-accent)]" title="Undelegated work in workspace inbox">{wsInboxCount} undelegated</span>
-                      )}
-                      {totalDelegated > 0 && (
-                        <span className="text-yellow-400" title="Work assigned to agents">{totalDelegated} delegated</span>
-                      )}
-                      {totalDone > 0 && (
-                        <span className="text-green-400" title="Completed, awaiting review">{totalDone} done</span>
-                      )}
-                    </div>
-                  </div>
-                  <p className="text-[10px] text-[var(--color-text-muted)] truncate mt-0.5">{manager.role}</p>
+            <div className="px-3 py-2 space-y-2">
+              <div className="flex items-center">
+                <span className="text-xs font-medium text-[var(--color-text-primary)] flex-shrink-0">{manager.name}</span>
+                <span className="text-[9px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 px-1.5 py-0.5 ml-1.5 flex-shrink-0">
+                  MANAGER
+                </span>
+                <div className="flex items-center justify-end gap-1.5 text-[10px] flex-1 ml-2">
+                  {wsInboxCount > 0 && (
+                    <span className="text-[var(--color-accent)]" title="Undelegated work in workspace inbox">{wsInboxCount} undelegated</span>
+                  )}
+                  {totalDelegated > 0 && (
+                    <span className="text-yellow-400" title="Work assigned to agents">{totalDelegated} delegated</span>
+                  )}
+                  {totalDone > 0 && (
+                    <span className="text-green-400" title="Completed, awaiting review">{totalDone} done</span>
+                  )}
                 </div>
-                <div className="flex items-center gap-1 flex-shrink-0">
+              </div>
+              <p className="text-[10px] text-[var(--color-text-muted)] truncate">{manager.role}</p>
+              {/* 0.37.4: friendly display label, separate from the
+                  internal `__lead__` routing key so the inbox tab
+                  can show something more human. Manage Persona
+                  rides as the trailing slot so input | save | persona
+                  all sit on one row. */}
+              <AgentDisplayNameField
+                projectPath={projectPath}
+                helpText="Shown on the inbox tab — what you call this manager. Internal routing key (__lead__) is unchanged."
+                trailing={
                   <button
                     onClick={() => onOpenEditor(manager.name)}
-                    className="px-2 py-0.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer"
+                    className="px-3 py-1.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer flex-shrink-0 self-end whitespace-nowrap"
                     title="Manage workspace manager persona"
                   >
                     Manage Persona
                   </button>
-                </div>
-              </div>
+                }
+              />
             </div>
           </div>
         </div>

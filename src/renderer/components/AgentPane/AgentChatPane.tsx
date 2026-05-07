@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { useProjectsStore } from '@/stores/projects'
 import { TerminalPane } from '@/terminal-v2/TerminalPane'
 import { agentChatId } from '@/lib/terminal-id'
@@ -67,6 +68,28 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
     cwd: string
   } | null>(null)
   const [ready, setReady] = useState(false)
+  // 0.37.4: friendly label from AGENT.md `display_name:` (falls back
+  // to the technical agent name on first paint, then upgrades).
+  const [displayName, setDisplayName] = useState<string>(agentName)
+
+  useEffect(() => {
+    let cancelled = false
+    invoke<string>('k2so_workspace_agent_display_name', { projectPath })
+      .then((n) => { if (!cancelled && n) setDisplayName(n) })
+      .catch(() => { /* keep agentName as fallback */ })
+    return () => { cancelled = true }
+  }, [projectPath, agentName])
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null
+    let cancelled = false
+    listen('sync:projects', () => {
+      invoke<string>('k2so_workspace_agent_display_name', { projectPath })
+        .then((n) => { if (n) setDisplayName(n) })
+        .catch(() => {})
+    }).then((u) => { if (cancelled) u(); else unlisten = u })
+    return () => { cancelled = true; unlisten?.() }
+  }, [projectPath])
   // Bumped on every refresh-button click to force a clean remount of
   // TerminalPane (key={refreshNonce}) and a re-run of the resolve
   // effect. Used when the user typed `exit` and the Claude process
@@ -249,7 +272,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
     <div ref={containerRef} className="h-full flex flex-col bg-[var(--color-bg)] overflow-hidden">
       <div className="px-3 py-2 border-b border-[var(--color-border)] flex-shrink-0 flex items-center gap-3">
         <span className="text-xs font-semibold text-[var(--color-text-primary)] truncate">
-          {agentName}
+          {displayName}
         </span>
         <button
           type="button"
@@ -310,6 +333,17 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
           // `tab-${terminalId}` — a renderer-only key the daemon
           // never sees on system-driven spawns.
           attachAgentName={`${projectId}:${agentName}`}
+          // 0.37.4 Phase B — seed the label with the agent's
+          // display name and LOCK it so PTY title events (e.g.
+          // claude --resume's "Claude Code" emission) cannot
+          // overwrite. The daemon spawn helper for the canonical
+          // workspace+agent session also seeds from the
+          // display-name helper; this prop is the renderer-side
+          // mirror of the same intent for the tab-driven spawn
+          // path (when the renderer beats the daemon to spawning
+          // the canonical session).
+          seedLabel={displayName}
+          lockLabel={true}
         />
       </div>
     </div>

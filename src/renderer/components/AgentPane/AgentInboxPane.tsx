@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { useTabsStore } from '@/stores/tabs'
 
 // ── Types ───────────────────────────────────────────────────────────────
@@ -131,6 +132,11 @@ export function AgentInboxPane({ agentName, projectPath }: AgentInboxPaneProps):
   const [workItems, setWorkItems] = useState<WorkItem[]>([])
   const [wsInboxItems, setWsInboxItems] = useState<WorkItem[]>([])
   const [allAgentWork, setAllAgentWork] = useState<WorkItem[]>([])
+  // 0.37.4: header label is the agent's display name (AGENT.md
+  // `display_name:` → `name:` → projects.name fallback). Daemon-side
+  // helper is mtime-cached so this fetch is cheap; we still hold a
+  // local copy so the header doesn't flicker every re-render.
+  const [displayName, setDisplayName] = useState<string>(agentName)
 
   const agentDir = `${projectPath}/.k2so/agents/${agentName}`
 
@@ -194,6 +200,31 @@ export function AgentInboxPane({ agentName, projectPath }: AgentInboxPaneProps):
     return () => clearInterval(interval)
   }, [fetchProfile, fetchWork])
 
+  useEffect(() => {
+    let cancelled = false
+    if (isWorkspaceBoard) { setDisplayName(agentName); return }
+    invoke<string>('k2so_workspace_agent_display_name', { projectPath })
+      .then((n) => { if (!cancelled && n) setDisplayName(n) })
+      .catch(() => { /* keep agentName as fallback */ })
+    return () => { cancelled = true }
+  }, [projectPath, agentName, isWorkspaceBoard])
+
+  // 0.37.4: when the user changes the agent display name in
+  // Settings, the daemon emits SyncProjects → renderer fires
+  // `sync:projects`. Re-fetch on that signal so this header
+  // updates without a page reload.
+  useEffect(() => {
+    if (isWorkspaceBoard) return
+    let unlisten: (() => void) | null = null
+    let cancelled = false
+    listen('sync:projects', () => {
+      invoke<string>('k2so_workspace_agent_display_name', { projectPath })
+        .then((n) => { if (n) setDisplayName(n) })
+        .catch(() => {})
+    }).then((u) => { if (cancelled) u(); else unlisten = u })
+    return () => { cancelled = true; unlisten?.() }
+  }, [projectPath, isWorkspaceBoard])
+
   const openFile = (filePath: string): void => useTabsStore.getState().openFileAsTab(filePath)
 
   // Single-agent columns
@@ -210,7 +241,7 @@ export function AgentInboxPane({ agentName, projectPath }: AgentInboxPaneProps):
     <div className="h-full flex flex-col bg-[var(--color-bg)] overflow-hidden">
       <div className="px-3 py-2 border-b border-[var(--color-border)] flex-shrink-0 flex items-center gap-3">
         <span className="text-xs font-semibold text-[var(--color-text-primary)] truncate">
-          {isWorkspaceBoard ? 'Work Board' : agentName}
+          {isWorkspaceBoard ? 'Work Board' : displayName}
         </span>
         {profile?.isCoordinator && (
           <span className="text-[9px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 px-1.5 py-0.5 flex-shrink-0">

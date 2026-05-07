@@ -216,6 +216,7 @@ async fn daemon_inject_provider_writes_bytes_to_v2_session() {
         args: vec![],
         env: Default::default(),
         drain_on_exit: true,
+        ..Default::default()
     };
     let v2_session = DaemonPtySession::spawn(v2_cfg).expect("v2 spawn");
     v2_session_map::register("v2-only-bar", v2_session.clone());
@@ -277,6 +278,7 @@ async fn daemon_inject_provider_finds_legacy_first_then_v2() {
         args: vec![],
         env: Default::default(),
         drain_on_exit: true,
+        ..Default::default()
     })
     .expect("v2 spawn");
     v2_session_map::register("dual-name", v2.clone());

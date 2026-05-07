@@ -49,7 +49,7 @@ pub use session_stream_pty::{
 #[cfg(feature = "session_stream")]
 pub use daemon_pty::{
     AlacEvent, DaemonEventListener, DaemonPtyConfig, DaemonPtySession,
-    SCROLLBACK_CAP,
+    LabelSource, SCROLLBACK_CAP,
 };
 
 /// Re-export alacritty's `Dimensions` trait so daemon + Tauri

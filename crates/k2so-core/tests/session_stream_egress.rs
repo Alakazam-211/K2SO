@@ -140,14 +140,20 @@ fn live_live_injects_and_audits_no_inbox_no_wake() {
     let (inject, wake) = install_mocks();
     let inbox_root = tmp_inbox_root("live-live");
 
+    // Liveness check uses the legacy registry walk (bare agent
+    // names) — `is_agent_live` matches `entry.agent_name() == agent`.
+    // Inject delivery, however, post-0.36.15 routes workspace-
+    // addressed signals to the canonical `<workspace>:<agent>`
+    // shape (`try_inject` in egress.rs). The test verifies BOTH
+    // sides: bare-name liveness, prefixed-key inject.
     let sid = register_live_agent("bar");
     let signal = signal_to("bar", Delivery::Live);
     let report = egress::deliver(&signal, &inbox_root);
 
-    // PTY-inject fired once.
+    // PTY-inject fired once. Provider sees the canonical (prefixed) key.
     let inject_calls = inject.calls.lock().unwrap().clone();
     assert_eq!(inject_calls.len(), 1);
-    assert_eq!(inject_calls[0].0, "bar");
+    assert_eq!(inject_calls[0].0, "test-ws:bar");
     assert!(
         String::from_utf8_lossy(&inject_calls[0].1)
             .contains("hello from egress test"),

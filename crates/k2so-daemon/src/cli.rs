@@ -518,6 +518,89 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             }
         }
 
+        // 0.37.4: read the workspace's primary-agent display name.
+        // Reads `.k2so/agent/AGENT.md` frontmatter — first
+        // `display_name:` (the user-editable label), then `name:`
+        // (the technical agent name), then `projects.name`. Total —
+        // always returns a string. Mtime-cached, so render-path
+        // callers can hit this freely.
+        "/cli/workspace/agent-display-name" => match need_project(params) {
+            Ok(p) => CliResponse::ok_json(
+                serde_json::json!({
+                    "display_name": k2so_core::agents::display::agent_display_name(&p),
+                })
+                .to_string(),
+            ),
+            Err(r) => r,
+        },
+
+        // 0.37.4: write the workspace's primary-agent display name.
+        // Atomically rewrites AGENT.md frontmatter `display_name:`,
+        // creating the file with a stub frontmatter if absent. Does
+        // NOT touch the technical agent name (`name:` field), the
+        // `v2_session_map` keys, or `workspace_sessions.terminal_id`
+        // — those stay stable so live PTYs aren't dropped. Emits
+        // `SyncProjects` so subscribed renderer surfaces re-fetch.
+        //
+        // Phase B: also updates the live canonical session's label
+        // (if one exists) so the change propagates to subscribed
+        // tabs in real time without a renderer round-trip — the
+        // canonical session was spawned with `LabelSource::Locked`,
+        // so PTY title events can't undo this.
+        "/cli/workspace/set-agent-display-name" => match need_project(params) {
+            Ok(p) => {
+                let new_name = str_param(params, "name");
+                if new_name.is_empty() {
+                    return CliResponse::bad_request("Missing name");
+                }
+                match k2so_core::agents::display::set_agent_display_name(&p, &new_name) {
+                    Ok(()) => {
+                        // Phase B: live-session label propagation.
+                        // The canonical workspace+agent session is
+                        // keyed `<project_id>:<agent_name>` in
+                        // v2_session_map. Look it up via the
+                        // primary-agent helper + the project_id
+                        // resolver and push the new label.
+                        let project_id_opt = {
+                            let db = k2so_core::db::shared();
+                            let conn = db.lock();
+                            conn.query_row(
+                                "SELECT id FROM projects WHERE path = ?1",
+                                rusqlite::params![p],
+                                |r| r.get::<_, String>(0),
+                            )
+                            .ok()
+                        };
+                        if let Some(project_id) = project_id_opt {
+                            if let Some(agent_name) =
+                                k2so_core::agents::find_primary_agent(&p)
+                            {
+                                let canonical_key = format!("{project_id}:{agent_name}");
+                                if let Some(session) =
+                                    crate::v2_session_map::lookup_by_agent_name(&canonical_key)
+                                {
+                                    session.set_label(new_name.clone(), true);
+                                }
+                            }
+                        }
+                        k2so_core::agent_hooks::emit(
+                            k2so_core::agent_hooks::HookEvent::SyncProjects,
+                            serde_json::Value::Null,
+                        );
+                        CliResponse::ok_json(
+                            serde_json::json!({
+                                "success": true,
+                                "display_name": new_name,
+                            })
+                            .to_string(),
+                        )
+                    }
+                    Err(e) => CliResponse::bad_request(e),
+                }
+            }
+            Err(r) => r,
+        },
+
         // 0.37.2: explicit caller-driven canonical-session ensurance.
         // Replaces the SMS-bridge `agents launch <name>` workaround
         // — semantically correct, returns the canonical IDs the
@@ -1010,6 +1093,16 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         // re-flows for the new dimensions. Called by Kessel's
         // ResizeObserver on DOM pane resize.
         "/cli/sessions/resize" => crate::terminal_routes::handle_sessions_resize(params),
+
+        // 0.37.4 (Phase B): set a session's authoritative label.
+        // Optional `lock` query param (default true) flips the
+        // label_source to `Locked` so future PTY title events
+        // can't override. Broadcasts `LabelChanged` to every WS
+        // subscriber of this session — both windows of the same
+        // workspace, the mobile companion, etc.
+        //
+        // Params: `id=<session-uuid>&label=<text>[&lock=true|false]`
+        "/cli/sessions/label" => crate::terminal_routes::handle_sessions_label(params),
 
         // ── Phase 4 H3: daemon-side terminal spawn ──────────────────
         // Thin wrappers over `spawn::spawn_agent_session` (the same

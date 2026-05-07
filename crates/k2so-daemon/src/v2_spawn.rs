@@ -76,6 +76,18 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
         rows: u16,
         #[serde(default)]
         env: Option<HashMap<String, String>>,
+        /// Phase B: caller-supplied initial label. Sent to the
+        /// first WS subscriber as `LabelInitial`. Empty/absent ⇒
+        /// no seed; `Pty` source means PTY title events fill it.
+        #[serde(default)]
+        label: Option<String>,
+        /// Phase B: lock the label so future PTY title events
+        /// (e.g. claude --resume emitting "Claude Code") cannot
+        /// overwrite it. Common cases: canonical workspace+agent
+        /// session, heartbeat fire sessions, restored chat-history
+        /// tabs whose label is the session-derived friendly name.
+        #[serde(default)]
+        label_locked: Option<bool>,
     }
     fn default_cwd() -> String {
         std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())
@@ -137,6 +149,20 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
     }
 
     // Spawn a fresh session.
+    // Phase B: pick the label seed + source. Caller-supplied label
+    // (with optional lock) takes priority; otherwise we leave the
+    // label empty and let PTY title events fill it (the legacy
+    // pre-Phase-B behavior). `label_locked: true` with no label
+    // still locks (caller is saying "don't accept ANY PTY title").
+    let seed_label = req.label.clone().unwrap_or_default();
+    let label_locked_flag = req.label_locked.unwrap_or(false);
+    let label_source = if label_locked_flag {
+        k2so_core::terminal::LabelSource::Locked
+    } else if !seed_label.is_empty() {
+        k2so_core::terminal::LabelSource::Seed
+    } else {
+        k2so_core::terminal::LabelSource::Pty
+    };
     let cfg = DaemonPtyConfig {
         session_id: SessionId::new(),
         cols: req.cols,
@@ -146,6 +172,8 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
         args: req.args.unwrap_or_default(),
         env: req.env.unwrap_or_default(),
         drain_on_exit: true,
+        label: seed_label,
+        label_source,
     };
     let session_id_for_response = cfg.session_id;
 
