@@ -124,7 +124,8 @@ async fn wake_auto_launches_agent_with_launch_profile() {
     // `<workspace_id>:<agent_name>`. Lookups, queue keys, and
     // teardown all use the canonical form. Bare-name lookup
     // ("auto-target") is intentionally unreachable now.
-    let canonical_key = format!("{workspace}:auto-target");
+    // **0.37.5:** canonical key is bare workspace_id (no agent suffix).
+    let canonical_key = workspace.to_string();
 
     // Sanity: neither map has the agent yet.
     assert!(session_lookup::lookup_any(&canonical_key).is_none());
@@ -211,17 +212,17 @@ async fn wake_falls_back_to_default_launch_profile_when_block_absent() {
     let report = egress::deliver(&signal, &inbox_root);
     assert!(report.woke_offline_target);
 
-    // 0.37.0: auto-launch fires via the default profile fallback.
-    let canonical_key = format!("{workspace}:profileless-target");
+    // **0.37.5:** auto-launch fires via the default profile fallback,
+    // registered under the bare workspace_id canonical key.
+    let canonical_key = workspace.to_string();
     assert!(
         session_lookup::lookup_any(&canonical_key).is_some(),
         "default-launch fallback should auto-spawn under canonical key {canonical_key}"
     );
 
-    // Queue is drained as part of the spawn flow — sanitized
-    // canonical-key directory is empty (or absent).
-    let sanitized = format!("{}_{}", workspace, "profileless-target");
-    let agent_queue = queue_root.join(&sanitized);
+    // Queue is drained as part of the spawn flow — bare canonical-key
+    // directory is empty (or absent).
+    let agent_queue = queue_root.join(workspace);
     let remaining: Vec<_> = if agent_queue.exists() {
         std::fs::read_dir(&agent_queue).unwrap().filter_map(|r| r.ok()).collect()
     } else {
@@ -260,14 +261,16 @@ async fn wake_falls_back_when_workspace_id_is_unknown() {
     let _ = std::fs::create_dir_all(&inbox_root);
     let _ = egress::deliver(&signal, &inbox_root);
 
-    let canonical_key = "_not_a_real_workspace_id_:ghost-agent";
+    // **0.37.5:** canonical key is bare workspace_id.
+    let canonical_key = "_not_a_real_workspace_id_";
     assert!(
         session_lookup::lookup_any(canonical_key).is_none(),
         "unknown workspace must not trigger auto-launch"
     );
 
-    // Queue keys on the canonical form (sanitized: `:` → `_`).
-    let agent_queue = queue_root.join("_not_a_real_workspace_id__ghost-agent");
+    // Queue keys on the canonical form (bare workspace_id, no agent
+    // suffix to sanitize).
+    let agent_queue = queue_root.join("_not_a_real_workspace_id_");
     let queued: Vec<_> = std::fs::read_dir(&agent_queue)
         .unwrap()
         .filter_map(|r| r.ok())

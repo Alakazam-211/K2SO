@@ -78,13 +78,14 @@ async fn daemon_inject_provider_writes_bytes_to_live_session() {
     })
     .expect("spawn bar session");
 
-    // 0.37.0 canonicalization: every workspace-agent session is
-    // keyed under `<workspace_id>:<agent_name>`. Egress's prefixed
-    // lookup (post-0.36.15 bridge retirement) requires this — the
-    // bare-name fallback is gone. Register + tag under the
-    // canonical key so the resolution path actually finds the
-    // session.
-    let canonical_key = "k2so-ws:bar";
+    // **0.37.5 canonicalization:** every workspace-agent session is
+    // keyed under bare `<workspace_id>` (no agent suffix). Egress's
+    // workspace-aware lookup (post-0.37.5) requires this — the
+    // bare-agent-name fallback is gone for workspace-addressed
+    // signals. Register + tag under the canonical key so the
+    // resolution path actually finds the session. Pre-0.37.5 this
+    // was `<workspace_id>:<agent_name>`.
+    let canonical_key = "k2so-ws";
     let bar_arc = Arc::new(bar_session);
     session_map::register(canonical_key, Arc::clone(&bar_arc));
 

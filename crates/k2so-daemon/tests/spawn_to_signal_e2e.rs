@@ -43,13 +43,14 @@ async fn spawn_via_http_then_signal_reaches_target_pty() {
     ensure_project("k2so-ws");
     providers::register_all();
 
-    // 0.37.0: post-canonicalization, awareness bus lookups for
-    // workspace-addressed signals key on `<workspace>:<agent>`. The
+    // **0.37.5:** awareness bus lookups for workspace-addressed
+    // signals key on bare `<workspace_id>` (no agent suffix). The
     // legacy `/cli/sessions/spawn` (Kessel-T0) path doesn't auto-
     // canonicalize — it registers verbatim under whatever
     // `agent_name` is passed. So the test passes the canonical key
-    // form directly to keep the e2e signal-to-PTY path coherent.
-    let canonical_key = "k2so-ws:bar";
+    // form (bare workspace_id) directly to keep the e2e signal-to-
+    // PTY path coherent. Pre-0.37.5 this was `<workspace>:<agent>`.
+    let canonical_key = "k2so-ws";
     let spawn_body = serde_json::json!({
         "agent_name": canonical_key,
         "cwd": "/tmp",

@@ -37,15 +37,20 @@ export function AgentChatPane({ agentName, projectPath }: AgentChatPaneProps): R
     )
   }
 
-  // `key={projectId}:${agentName}` forces a clean remount when the
-  // workspace switches. Without it, React reuses the same
-  // AgentChatTerminal instance and `terminalIdRef` (initialized from
+  // `key={projectId}` forces a clean remount when the workspace
+  // switches. Without it, React reuses the same AgentChatTerminal
+  // instance and `terminalIdRef` (initialized from
   // `useRef(agentChatId(projectId, agentName))`) keeps the stale
   // workspace's terminal id — defense-in-depth against the
   // cross-workspace pinned-chat collision fixed in 0.36.14.
+  //
+  // 0.37.5: project_id alone is the canonical workspace identity
+  // (post-unification, one agent per workspace, agent name is
+  // metadata not address). The agent name doesn't need to be in
+  // the React key.
   return (
     <AgentChatTerminal
-      key={`${projectId}:${agentName}`}
+      key={projectId}
       agentName={agentName}
       projectId={projectId}
       projectPath={projectPath}
@@ -106,9 +111,12 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
     // session was already dead (user typed `exit`), the daemon's
     // find-or-spawn on the next mount just spawns fresh.
     //
-    // Pass the project-namespaced key (0.36.14+) so we close THIS
-    // workspace's session, not whichever bare-name session happens to
-    // be registered globally.
+    // 0.37.5: pass the canonical workspace key — bare project_id —
+    // so we close THIS workspace's session. Pre-0.37.5 the key was
+    // `<projectId>:<agentName>`; the suffix was vestigial
+    // post-unification (one agent per workspace) and caused the
+    // renderer to compute the wrong key when its mode→name mapping
+    // disagreed with AGENT.md's `name:` field (C3PO 5c80bef1).
     try {
       const { port, token } = await getDaemonWs()
       await fetch(
@@ -116,7 +124,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ agent_name: `${projectId}:${agentName}` }),
+          body: JSON.stringify({ agent_name: projectId }),
         },
       ).catch(() => {})
     } catch { /* ignore — refresh proceeds either way */ }
@@ -143,23 +151,19 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
       } catch { /* fall through */ }
 
       // Step 1b: Check the daemon for an existing session under this
-      // workspace-namespaced agent key. When the user has closed Tauri,
-      // the daemon can keep the workspace agent's PTY alive (heartbeat
-      // fires, k2so msg injections, etc.). On Tauri reopen we want to
-      // attach to that existing PTY rather than spawn a fresh
-      // `claude --resume`. TerminalPane will use the attachAgentName
-      // prop (always set below) to reach the daemon's canonical key in
-      // v2_session_map; this lookup is informational — purely for
-      // log-trail/diagnostic visibility — but proves the daemon-side
-      // bookkeeping is sane before we hand off to the spawn path.
+      // workspace's canonical key. When the user has closed Tauri,
+      // the daemon can keep the workspace agent's PTY alive
+      // (heartbeat fires, k2so msg injections, etc.). On Tauri
+      // reopen we want to attach to that existing PTY rather than
+      // spawn a fresh `claude --resume`.
       //
-      // Lookup is on the prefixed `<projectId>:<agentName>` key so
-      // workspaces sharing an agent name (e.g., two Workspace Manager
-      // workspaces both running `manager`) don't resolve to each
-      // other's session.
+      // 0.37.5: lookup on the bare project_id canonical key.
+      // Pre-0.37.5 the key was `<projectId>:<agentName>`; that
+      // suffix was vestigial post-unification and caused renderer-
+      // side mismatches (C3PO 5c80bef1).
       try {
         const json = await invoke<string>('k2so_session_lookup_by_agent', {
-          agent: `${projectId}:${agentName}`,
+          agent: projectId,
         })
         const data = JSON.parse(json) as {
           sessionAlive?: boolean
@@ -169,7 +173,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
         if (!cancelled && data.sessionAlive) {
           console.info(
             '[AgentChatPane] daemon has live session for',
-            `${projectId}:${agentName}`,
+            projectId,
             'session:',
             data.sessionId,
             'isV2:',
@@ -310,29 +314,33 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
           cwd={launchConfig?.cwd ?? projectPath}
           command={launchConfig?.command}
           args={launchConfig?.args}
-          // Register this v2 session under a project-namespaced agent
-          // key (`<projectId>:<agentName>`, 0.36.14+) so:
-          //   1. Two workspaces with the same agent name (e.g., both
-          //      in Workspace Manager mode → both `manager`) don't
-          //      collide on a single daemon-side slot. Pre-0.36.14,
-          //      opening a second workspace replaced the first
-          //      workspace's entry in v2_session_map and both chat
-          //      tabs ended up cross-wired to the same PTY.
-          //   2. `k2so msg <workspace>` finds the right session via
-          //      session_lookup's bare-name mirror (registered
-          //      alongside the prefixed key by v2_session_map::register
-          //      for back-compat with bare-keyed callers).
-          //   3. Closing Tauri leaves the daemon-owned PTY alive
-          //      under both keys; reopening Tauri re-attaches via the
-          //      prefixed key for unambiguous workspace identification.
-          //   4. The daemon's auto-launch (heartbeat headless wake,
-          //      awareness inject) registers under the same key,
-          //      converging both paths on one PTY per workspace
-          //      agent.
+          // Register this v2 session under the workspace's canonical
+          // key — bare `projectId` (post-0.37.5).
+          //
+          // **0.37.5:** the canonical key dropped its `<agent_name>`
+          // suffix because post-unification there's at most one
+          // agent per workspace, and the suffix only created
+          // opportunities for the renderer to compute the wrong
+          // name (mode→__lead__ hardcoding when AGENT.md said
+          // scout — see C3PO 5c80bef1, the SMS Bridge bug). The
+          // daemon's `canonical_session::canonical_key_for(pid)`
+          // helper is the single source of truth for the shape.
+          //
+          // What this still gets us:
+          //   1. Two workspaces with the same agent name don't
+          //      collide — they have distinct project_ids.
+          //   2. `k2so msg <workspace>` finds the right session
+          //      via the same project_id resolution.
+          //   3. Closing Tauri leaves the daemon-owned PTY alive;
+          //      reopening Tauri re-attaches via project_id.
+          //   4. The daemon's auto-launch (heartbeat headless
+          //      wake, awareness inject, ensure_canonical_session)
+          //      registers under the SAME bare-pid key, converging
+          //      every path on one PTY per workspace.
           // Without this override, TerminalPane defaults to
           // `tab-${terminalId}` — a renderer-only key the daemon
           // never sees on system-driven spawns.
-          attachAgentName={`${projectId}:${agentName}`}
+          attachAgentName={projectId}
           // 0.37.4 Phase B — seed the label with the agent's
           // display name and LOCK it so PTY title events (e.g.
           // claude --resume's "Claude Code" emission) cannot

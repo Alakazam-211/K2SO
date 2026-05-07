@@ -48,8 +48,20 @@ pub fn claude_history_path() -> Option<PathBuf> {
 /// Claude Code turns `/Users/.../TestingK2SO/.k2so/agents/foo` into
 /// `-Users-...-TestingK2SO--k2so-agents-foo` — leading `/` → `-`,
 /// `/.` → `/-` (hidden dir prefix preserved), remaining `/` → `-`.
+///
+/// **0.37.5:** also replaces spaces in path components with hyphens.
+/// Claude Code does this for paths like `/Users/.../Alakazam Labs/...`
+/// — the on-disk dir is `-Users-...-Alakazam-Labs-...` (hyphenated),
+/// not `-Users-...-Alakazam Labs-...`. Pre-0.37.5 our hash kept the
+/// space so `claude_session_file_exists` always returned false for
+/// spaced-path workspaces, breaking `--resume` continuity (refresh
+/// button on the pinned chat tab kept producing fresh sessions
+/// instead of resuming the existing JSONL).
 pub fn claude_project_hash(project_path: &str) -> String {
-    project_path.replace("/.", "/-").replace('/', "-")
+    project_path
+        .replace("/.", "/-")
+        .replace('/', "-")
+        .replace(' ', "-")
 }
 
 /// Convert a project path to Cursor's chat-directory hash.
@@ -671,6 +683,23 @@ mod tests {
             "-Users-z-proj--k2so-agents-a"
         );
         assert_eq!(claude_project_hash("/r"), "-r");
+    }
+
+    #[test]
+    fn claude_project_hash_handles_spaces() {
+        // 0.37.5: claude turns spaces in path components to
+        // hyphens. Mirror that so `claude_session_file_exists`
+        // resolves the right on-disk dir for workspaces like
+        // `/Users/.../Alakazam Labs/...`. Reverting `replace(' ', "-")`
+        // MUST flip this assertion to "FAIL".
+        assert_eq!(
+            claude_project_hash("/Users/z/DevProjects/Alakazam Labs/K2SO"),
+            "-Users-z-DevProjects-Alakazam-Labs-K2SO"
+        );
+        assert_eq!(
+            claude_project_hash("/Users/z/Some Folder With Spaces/proj"),
+            "-Users-z-Some-Folder-With-Spaces-proj"
+        );
     }
 
     #[test]

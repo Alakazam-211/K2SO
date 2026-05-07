@@ -267,6 +267,12 @@ async fn main() {
     providers::register_all();
 
     // Phase 3.1 F3 — boot-time pending-live replay. Previous
+    // 0.37.5 migration: legacy `<sanitized_pid>_<agent>/` queue dirs
+    // (pre-0.37.5 keying) merged into bare `<sanitized_pid>/`. MUST
+    // run BEFORE replay_all so the in-memory `pending_state` counter
+    // is built from the post-migration shape. Idempotent.
+    pending_live::migrate_legacy_dirs_to_bare_pid();
+
     // daemon-run may have queued signals for offline agents that
     // never got injected (daemon crashed before the session came
     // online). Log them so operators can eyeball the queue; the
@@ -1322,6 +1328,15 @@ fn run_workspace_unification_sweep() {
     // `.k2so/`. Idempotent + reversible (moves to .archive/, doesn't
     // delete) — see `archive_legacy_unification_dirs`.
     archive_legacy_unification_dirs();
+
+    // 0.37.5: re-key any legacy `<pid>:<agent>` v2_session_map
+    // entries to bare `<pid>` so post-upgrade lookups under the new
+    // canonical shape land. Defensive — no-op on cold boot since
+    // the map starts empty; meaningful when the daemon binary is
+    // upgraded without a restart and old in-memory entries linger.
+    // MUST run before `boot_sweep_ensure_canonical_sessions` so the
+    // sweep's idempotency check sees the post-migration shape.
+    crate::v2_session_map::migrate_legacy_keys_to_bare_pid();
 
     // 0.37.2: proactively ensure each bot-mode workspace has a
     // canonical session registered. Closes the SMS-bridge race

@@ -93,10 +93,13 @@ async fn live_signal_to_offline_target_lands_in_pending_queue() {
         "wake should have fired and queued the signal"
     );
 
-    // Queue file exists under the canonical key (post-0.37.0:
-    // wake provider enqueues under `<workspace_id>:<agent>`,
-    // sanitized to `_` for filesystem safety).
-    let agent_dir = queue_root.join("unregistered-ws_offline-target");
+    // Queue file exists under the canonical key.
+    // **0.37.5:** wake provider enqueues under bare `<workspace_id>`
+    // (no `:<agent>` suffix). The sanitize() helper still maps
+    // colons to underscores but there's no colon to sanitize.
+    // Reverting `providers.rs:queue_key` to the pre-0.37.5
+    // `<workspace>:<agent>` shape MUST flip this assertion to "FAIL".
+    let agent_dir = queue_root.join("unregistered-ws");
     assert!(agent_dir.exists(), "agent dir should exist: {agent_dir:?}");
     let queued: Vec<_> = std::fs::read_dir(&agent_dir)
         .unwrap()
@@ -139,11 +142,10 @@ async fn spawn_drains_pending_queue_and_injects_on_boot() {
 
     // Step 2: spawn a session via the legacy Kessel-T0 endpoint
     // (`/cli/sessions/spawn` → `awareness_ws::handle_sessions_spawn`).
-    // Post-0.37.0 the wake provider enqueues under the canonical
-    // `<workspace_id>:<agent>` key. The legacy spawn endpoint
-    // doesn't auto-canonicalize agent_name, so the test passes the
-    // canonical key form directly so the drain side matches.
-    let canonical_key = "unregistered-drain-ws:drain-target";
+    // **0.37.5:** wake provider enqueues under bare `<workspace_id>`.
+    // The legacy spawn endpoint doesn't auto-canonicalize agent_name,
+    // so we pass the canonical key form directly to match the drain.
+    let canonical_key = "unregistered-drain-ws";
     let spawn_body = serde_json::json!({
         "agent_name": canonical_key,
         "cwd": "/tmp",
@@ -164,9 +166,9 @@ async fn spawn_drains_pending_queue_and_injects_on_boot() {
         .unwrap_or(0);
     assert_eq!(drained, 1, "spawn should have drained 1 queued signal");
 
-    // Queue dir is now empty (sanitized canonical-key path).
+    // Queue dir is now empty (canonical key path).
     let queue_root = pending_live::queue_root();
-    let agent_dir = queue_root.join("unregistered-drain-ws_drain-target");
+    let agent_dir = queue_root.join("unregistered-drain-ws");
     if agent_dir.exists() {
         let remaining: Vec<_> = std::fs::read_dir(&agent_dir)
             .unwrap()
@@ -214,19 +216,22 @@ async fn replay_all_finds_queued_entries() {
     let replayed = pending_live::replay_all();
     let mut agents: Vec<_> = replayed.iter().map(|(n, _)| n.clone()).collect();
     agents.sort();
-    // Post-0.37.0: wake provider enqueues under canonical
-    // `<workspace_id>:<agent>` keys. replay_all reads dir names off
-    // disk; dir names are pending_live::sanitize()'d so `:` becomes
-    // `_`. So replay surfaces the SANITIZED form. Pre-0.37.0 these
-    // were bare ['a', 'b'].
+    // **0.37.5:** wake provider enqueues under bare `<workspace_id>`.
+    // Both signals (one per `agent` from the loop above) collapse
+    // into the SAME canonical key — the workspace's project_id —
+    // because the agent name is no longer part of the queue key.
+    // So replay surfaces a single entry containing BOTH signals.
+    // Pre-0.37.5 the test expected two separate dirs, one per agent.
+    // Reverting `providers.rs:queue_key` to the pre-0.37.5 shape
+    // MUST flip these assertions to "FAIL".
     assert_eq!(
         agents,
-        vec!["unregistered-replay-ws_a".to_string(), "unregistered-replay-ws_b".to_string()]
+        vec!["unregistered-replay-ws".to_string()],
+        "0.37.5: signals to different agents in the same workspace collapse to one canonical queue dir"
     );
-    // Each has 1 signal.
-    for (_, sigs) in &replayed {
-        assert_eq!(sigs.len(), 1);
-    }
+    // Single entry with both signals.
+    let total_signals: usize = replayed.iter().map(|(_, s)| s.len()).sum();
+    assert_eq!(total_signals, 2, "both signals must survive replay");
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -251,11 +256,11 @@ async fn canonical_key_wake_enqueue_drains_on_v2_spawn() {
     let _queue = isolate_pending_root("canonical-key-drain");
 
     // Step 1: send a Live signal to an offline target. The wake
-    // provider should enqueue under the canonical key
-    // `<workspace_id>:<agent>` (post-0.37.0 alignment with the
-    // v2 spawn helper's drain key). Pre-0.37.0 the provider used
-    // bare `agent` and the v2 drain used the prefixed form — they
-    // never met. This test pins the alignment.
+    // provider should enqueue under the canonical bare-pid key
+    // (post-0.37.5 alignment with the v2 spawn helper's drain key).
+    // Pre-0.37.0 the provider used bare `agent`; 0.37.0 introduced
+    // `<workspace_id>:<agent>`; 0.37.5 dropped the agent suffix
+    // entirely. This test pins the current alignment.
     let signal = AgentSignal::new(
         AgentAddress::Agent {
             workspace: WorkspaceId("canonical-ws".into()),
@@ -275,22 +280,26 @@ async fn canonical_key_wake_enqueue_drains_on_v2_spawn() {
     let _ = std::fs::create_dir_all(&inbox_root);
     egress::deliver(&signal, &inbox_root);
 
-    // Verify enqueue happened under the CANONICAL key, not bare.
-    // pending_live::enqueue sanitizes `:` → `_` for filesystem
-    // safety, so the on-disk dir for canonical key
-    // "canonical-ws:canonical-target" is "canonical-ws_canonical-target".
-    let canonical_key = "canonical-ws:canonical-target";
-    let canonical_dir_name = "canonical-ws_canonical-target";
+    // **0.37.5:** verify enqueue happened under the CANONICAL key
+    // (bare `workspace_id`), not under bare `agent_name` and not
+    // under the legacy `<workspace>:<agent>` shape. There's no `:`
+    // to sanitize anymore; the dir name IS the workspace_id.
+    let canonical_dir_name = "canonical-ws";
     let queue_root = pending_live::queue_root();
     let canonical_dir = queue_root.join(canonical_dir_name);
-    let bare_dir = queue_root.join("canonical-target");
+    let bare_agent_dir = queue_root.join("canonical-target");
+    let legacy_dir = queue_root.join("canonical-ws_canonical-target");
     assert!(
         canonical_dir.exists(),
-        "queue dir for canonical key {canonical_key:?} (sanitized: {canonical_dir_name:?}) should exist"
+        "queue dir for canonical key {canonical_dir_name:?} should exist"
     );
     assert!(
-        !bare_dir.exists() || std::fs::read_dir(&bare_dir).map(|d| d.count()).unwrap_or(0) == 0,
-        "queue dir for bare 'canonical-target' should be empty/absent — pre-0.37.0 keying regression"
+        !bare_agent_dir.exists() || std::fs::read_dir(&bare_agent_dir).map(|d| d.count()).unwrap_or(0) == 0,
+        "0.37.5 regression: queue dir for bare 'canonical-target' must be empty/absent"
+    );
+    assert!(
+        !legacy_dir.exists() || std::fs::read_dir(&legacy_dir).map(|d| d.count()).unwrap_or(0) == 0,
+        "0.37.5 regression: legacy `<ws>_<agent>` queue dir must be empty/absent"
     );
 
     // Step 2: simulate "daemon restarted, in-memory map is empty,

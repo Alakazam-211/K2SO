@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use k2so_core::log_debug;
 use k2so_core::session::SessionId;
 use k2so_core::terminal::DaemonPtySession;
 
@@ -146,4 +147,79 @@ pub fn list_agents() -> Vec<String> {
 /// shared global state doesn't leak between cases.
 pub fn clear_for_tests() {
     shared().lock().unwrap().clear();
+}
+
+/// 0.37.5 boot-time migration — re-key any entry whose key shape is
+/// `<uuid>:<rest>` to the bare `<uuid>` form (the new canonical
+/// shape). Pre-0.37.5 the canonical key encoded the agent name as a
+/// suffix; post-0.37.5 it's bare project_id (see
+/// `canonical_session::canonical_key_for`).
+///
+/// **Defensive on a fresh daemon boot.** The map is empty at boot,
+/// so this helper is a no-op in the common case. It earns its
+/// keep when the daemon stays running across a binary upgrade
+/// (upgrade-without-restart): old entries linger under the legacy
+/// shape, the renderer post-upgrade asks under the new shape and
+/// misses, fresh PTY spawns. This sweep collapses the old entries
+/// into the new shape so lookups land. Idempotent.
+///
+/// **Atomicity.** Holds the map lock for the entire snapshot+rekey
+/// pass so a concurrent register/unregister can't see a half-migrated
+/// state. Per-entry collision (both old + new shapes registered at
+/// the same time) keeps the bare-keyed one and drops the legacy.
+pub fn migrate_legacy_keys_to_bare_pid() {
+    let map_arc = shared();
+    let mut map = map_arc.lock().unwrap();
+    let mut migrated = 0usize;
+    let mut collided = 0usize;
+    let legacy_keys: Vec<String> = map
+        .keys()
+        .filter(|k| is_legacy_canonical_key(k))
+        .cloned()
+        .collect();
+    for legacy in legacy_keys {
+        let prefix = match legacy.split_once(':') {
+            Some((p, _)) => p.to_string(),
+            None => continue,
+        };
+        let arc = match map.remove(&legacy) {
+            Some(a) => a,
+            None => continue,
+        };
+        if map.contains_key(&prefix) {
+            // Both shapes present — keep the bare-keyed (already
+            // canonical) entry, drop the legacy. The dropped Arc's
+            // ChildExit observer will fire on the orphaned PTY's
+            // child exit; v2_session_map::unregister no-ops if the
+            // key isn't present.
+            collided += 1;
+            log_debug!(
+                "[v2-map/migrate] both shapes present for {prefix}; dropping legacy {legacy}"
+            );
+            continue;
+        }
+        map.insert(prefix.clone(), arc);
+        migrated += 1;
+        log_debug!("[v2-map/migrate] re-keyed {legacy} → {prefix}");
+    }
+    if migrated > 0 || collided > 0 {
+        log_debug!(
+            "[v2-map/migrate] complete: migrated={migrated} collided={collided}"
+        );
+    }
+}
+
+fn is_legacy_canonical_key(k: &str) -> bool {
+    // UUID-shaped prefix (36 chars + colon-then-suffix) signals
+    // pre-0.37.5 canonical key. Tab keys (`tab-XXX`), worktree
+    // (no colon), and bare-pid keys (no colon) all fail this check.
+    if k.len() < 38 || !k.is_char_boundary(36) {
+        return false;
+    }
+    let bytes = k.as_bytes();
+    bytes[8] == b'-'
+        && bytes[13] == b'-'
+        && bytes[18] == b'-'
+        && bytes[23] == b'-'
+        && bytes[36] == b':'
 }

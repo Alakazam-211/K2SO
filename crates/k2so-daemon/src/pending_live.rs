@@ -175,6 +175,138 @@ pub fn drain_for_agent(agent: &str) -> Vec<AgentSignal> {
 /// begins. Returns a `Vec<(agent_name, Vec<AgentSignal>)>` so
 /// callers can decide what to do (daemon-at-boot: log + drain as
 /// sessions come online; tests: just inspect the contents).
+/// 0.37.5 migration — merge legacy `<sanitized_pid>_<agent>/` queue
+/// dirs into the new bare `<sanitized_pid>/` shape.
+///
+/// Pre-0.37.5 the queue was keyed `<workspace_id>:<agent>`, which
+/// `sanitize()` mapped to `<sanitized_pid>_<agent>` (colon → underscore).
+/// Post-0.37.5 the canonical key is bare `workspace_id`, so the dir
+/// is just `<sanitized_pid>`. Existing queued signals must move to
+/// the new dir or they'll never drain.
+///
+/// **Lossless.** Per-file move (`fs::rename`), atomic on the same
+/// filesystem. If a target file already exists (statistically
+/// impossible — every queued filename embeds a ns timestamp +
+/// signal UUID), the source file stays in place and a debug log
+/// fires.
+///
+/// **Idempotent.** Subsequent boots find no `_<agent>` dirs and no-op.
+///
+/// **Ordering.** This MUST run before any other `pending_live` access
+/// (`replay_all`, `enqueue`, `drain_for_agent`) so the in-memory
+/// `pending_state` counter is built from the post-migration shape.
+/// Caller is responsible for the order; in practice `main.rs`'s boot
+/// sequence calls this immediately after queue_root setup, before
+/// `replay_all`.
+///
+/// Worktree dirs (no underscore in name) and bare-pid dirs (no
+/// underscore prefix that decomposes into a UUID-shape) are left alone.
+pub fn migrate_legacy_dirs_to_bare_pid() {
+    let root = queue_root();
+    let entries = match fs::read_dir(&root) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let mut migrated = 0usize;
+    let mut skipped = 0usize;
+    for entry in entries.filter_map(|r| r.ok()) {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let dir_name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        // Look for `<sanitized_uuid>_<rest>` pattern. The sanitized
+        // UUID has hyphens preserved but colons replaced by `_`, so
+        // the pattern is: 36 chars of UUID-shape, then `_`, then a
+        // suffix.
+        if dir_name.len() <= 37 || !dir_name.is_char_boundary(36) {
+            skipped += 1;
+            continue;
+        }
+        let (prefix, sep_and_rest) = dir_name.split_at(36);
+        if !is_uuid_shape(prefix) {
+            skipped += 1;
+            continue;
+        }
+        if !sep_and_rest.starts_with('_') {
+            skipped += 1;
+            continue;
+        }
+        // Found a legacy dir. Target dir is just <prefix>.
+        let target = root.join(prefix);
+        if !target.exists() {
+            // Simple rename — atomic on same fs.
+            match fs::rename(&path, &target) {
+                Ok(()) => {
+                    migrated += 1;
+                    log_debug!(
+                        "[pending-live/migrate] renamed {dir_name} → {prefix}"
+                    );
+                }
+                Err(e) => {
+                    log_debug!(
+                        "[pending-live/migrate] rename {dir_name} → {prefix} failed: {e}"
+                    );
+                }
+            }
+            continue;
+        }
+        // Target dir exists — move queued files in, then remove old dir.
+        let files = match fs::read_dir(&path) {
+            Ok(e) => e,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let mut moved_files = 0usize;
+        for f in files.filter_map(|r| r.ok()) {
+            let src = f.path();
+            let fname = match src.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            let dst = target.join(&fname);
+            if dst.exists() {
+                log_debug!(
+                    "[pending-live/migrate] file {fname} already exists in target {prefix}; \
+                     leaving source"
+                );
+                continue;
+            }
+            if let Err(e) = fs::rename(&src, &dst) {
+                log_debug!(
+                    "[pending-live/migrate] move {fname} from {dir_name} → {prefix} failed: {e}"
+                );
+                continue;
+            }
+            moved_files += 1;
+        }
+        // Best-effort cleanup of the now-empty (or partially-empty) source dir.
+        let _ = fs::remove_dir(&path);
+        migrated += 1;
+        log_debug!(
+            "[pending-live/migrate] merged {dir_name} → {prefix} ({moved_files} files)"
+        );
+    }
+    if migrated > 0 || skipped > 0 {
+        log_debug!(
+            "[pending-live/migrate] complete: migrated={migrated} skipped={skipped}"
+        );
+    }
+}
+
+fn is_uuid_shape(s: &str) -> bool {
+    s.len() == 36
+        && s.as_bytes()[8] == b'-'
+        && s.as_bytes()[13] == b'-'
+        && s.as_bytes()[18] == b'-'
+        && s.as_bytes()[23] == b'-'
+}
+
 pub fn replay_all() -> Vec<(String, Vec<AgentSignal>)> {
     let root = queue_root();
     let entries = match fs::read_dir(&root) {

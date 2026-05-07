@@ -219,11 +219,25 @@ pub fn spawn_agent_session_v2_blocking(
         return Err("agent_name required".into());
     }
 
-    // Canonical key construction — every workspace+agent has exactly
-    // one slot in v2_session_map. project_id-less callers register
-    // under the bare name (legacy fallback).
+    // Canonical key construction.
+    //
+    // **0.37.5 contract:** every workspace has exactly one canonical
+    // slot in v2_session_map, keyed on `project_id` alone. The agent's
+    // name is metadata about the session (display label, persona file,
+    // launch profile owner) — not part of the address. Pre-0.37.5 the
+    // key was `<project_id>:<agent_name>`; the suffix was vestigial
+    // post-0.37.0 unification (one agent per workspace) and caused
+    // the renderer to compute the wrong key when its mode→name
+    // mapping disagreed with AGENT.md's `name:` field. See
+    // `canonical_session::canonical_key_for` for the full rationale.
+    //
+    // Project_id-less callers (delegated worktrees via
+    // `/cli/agents/delegate`, legacy bare-name spawns) still register
+    // under the bare agent_name — those don't represent canonical
+    // workspace sessions and don't go through this code's
+    // workspace-aware paths.
     let canonical_key = match req.project_id.as_deref() {
-        Some(pid) if !pid.is_empty() => format!("{pid}:{}", req.agent_name),
+        Some(pid) if !pid.is_empty() => crate::canonical_session::canonical_key_for(pid),
         _ => req.agent_name.clone(),
     };
 

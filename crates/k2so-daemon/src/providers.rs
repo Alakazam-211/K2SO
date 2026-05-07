@@ -101,18 +101,20 @@ impl WakeProvider for DaemonWakeProvider {
         // Stage 1: always enqueue so durability is preserved
         // regardless of what the auto-launch path does next.
         //
-        // 0.37.0 keying: enqueue under the canonical
-        // `<workspace_id>:<agent_name>` key when the signal carries a
-        // target workspace. The spawn helper drains under the same
-        // canonical key, so signals queued while a workspace's agent
-        // is offline land in the right session when it boots.
-        // Pre-0.37.0 the queue was keyed bare and signals targeting
-        // a specific workspace's offline agent could be drained by
-        // a different workspace's spawn (cross-wiring) — or never
-        // drained at all if the spawn now uses the prefixed key.
+        // **0.37.5 keying:** enqueue under the canonical bare
+        // `<workspace_id>` key when the signal carries a target
+        // workspace. The spawn helper drains under the same canonical
+        // key (post-0.37.5 = bare project_id, see
+        // `canonical_session::canonical_key_for`), so signals queued
+        // while a workspace's agent is offline land in the right
+        // session when it boots. Pre-0.37.5 the key was
+        // `<workspace_id>:<agent_name>` — that suffix was vestigial
+        // post-0.37.0 unification and caused signal drains to miss
+        // when the renderer or another caller computed the wrong
+        // agent name (C3PO `5c80bef1`).
         let queue_key = match &signal.to {
             AgentAddress::Agent { workspace, .. } if !workspace.0.is_empty() => {
-                format!("{}:{}", workspace.0, agent)
+                workspace.0.clone()
             }
             _ => agent.to_string(),
         };
@@ -171,14 +173,12 @@ fn try_auto_launch(agent: &str, signal: &AgentSignal) -> Result<(), String> {
     // workspace's session, skip. The pending-live drain on that
     // session will pick up our enqueued signal.
     //
-    // 0.37.0: the spawn helper itself now performs the
-    // canonical-key idempotency check internally — passing the bare
-    // `agent` + `project_id: workspace_id` is sufficient. The early
-    // lookup here stays as a logged-skip optimization (avoids the
-    // launch profile parse + spawn-helper call when the answer is
-    // obviously "already live").
-    let prefixed_key = format!("{workspace_id}:{agent}");
-    if session_lookup::lookup_any(&prefixed_key).is_some() {
+    // **0.37.5 keying:** look up under the bare `workspace_id`
+    // canonical key (see `canonical_session::canonical_key_for`).
+    // The spawn helper itself performs the same idempotency check
+    // internally; this early lookup is a logged-skip optimization.
+    let canonical_key = crate::canonical_session::canonical_key_for(workspace_id);
+    if session_lookup::lookup_any(&canonical_key).is_some() {
         return Err("session already live for this workspace".into());
     }
 

@@ -214,19 +214,27 @@ async fn launch_fresh_agent_registers_in_session_map() {
     assert!(!tid.is_empty());
 
     // Check that the session is findable under the canonical
-    // workspace-namespaced key. 0.37.0 canonicalization registers
-    // every workspace-agent spawn under `<project_id>:<agent_name>`
-    // so `agents launch` and `--wake`'s auto-launch path converge
-    // on the same slot. Bare-name lookup ("alpha") deliberately
-    // returns None — there is no bare-keyed session anymore.
-    let canonical_key = format!("{project_id}:alpha");
+    // workspace key — bare project_id (post-0.37.5).
+    //
+    // **0.37.5:** the canonical key for a workspace's primary
+    // agent is the workspace's project_id. Pre-0.37.5 it was
+    // `<project_id>:<agent_name>`; the suffix was vestigial
+    // post-unification and caused the renderer to compute the
+    // wrong key (C3PO 5c80bef1). Reverting `spawn.rs:228` to the
+    // pre-0.37.5 prefix shape MUST flip this assertion to "FAIL"
+    // (verifies the test pins the new contract).
+    let canonical_key = project_id.to_string();
     assert!(
         session_lookup::lookup_any(&canonical_key).is_some(),
         "{canonical_key} missing from session maps"
     );
+    // Regression guard: the legacy `<pid>:<agent>` shape MUST NOT
+    // resolve. If it does, something is double-registering or the
+    // production code reverted to the legacy shape.
+    let legacy_key = format!("{project_id}:alpha");
     assert!(
-        session_lookup::lookup_any("alpha").is_none(),
-        "post-canonicalization the bare key must NOT be registered"
+        session_lookup::lookup_any(&legacy_key).is_none(),
+        "0.37.5 regression: legacy {legacy_key} must NOT be registered"
     );
 
     drain_session_map();

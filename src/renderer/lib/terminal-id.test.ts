@@ -10,21 +10,35 @@ import {
 } from './terminal-id'
 
 describe('terminal-id builders', () => {
-  it('builds agent chat id', () => {
-    expect(agentChatId('p_abc', 'manager')).toBe('agent-chat:p_abc:manager')
+  it('builds agent chat id (0.37.5: bare project_id, agent ignored)', () => {
+    // Post-0.37.5: agent name is no longer part of the canonical
+    // shape. The agent argument is kept for back-compat at call
+    // sites but produces the bare-pid form. Reverting agentChatId
+    // to the pre-0.37.5 prefix shape MUST flip this assertion to
+    // "FAIL".
+    expect(agentChatId('p_abc', 'manager')).toBe('agent-chat:p_abc')
+    expect(agentChatId('p_abc', 'scout')).toBe('agent-chat:p_abc')
   })
 
   it('builds worktree id', () => {
     expect(worktreeChatId('ws_xyz')).toBe('agent-chat:wt:ws_xyz')
   })
 
-  it('builds heartbeat id', () => {
+  it('builds heartbeat id (heartbeat keying unchanged in 0.37.5)', () => {
     expect(heartbeatChatId('p_abc', 'manager', 'triage')).toBe('agent-chat:p_abc:manager:hb:triage')
   })
 })
 
 describe('parseTerminalId — namespaced forms', () => {
-  it('parses agent chat', () => {
+  it('parses bare-pid agent chat (0.37.5)', () => {
+    expect(parseTerminalId('agent-chat:p_abc')).toEqual({
+      kind: 'agent_chat',
+      projectId: 'p_abc',
+      agent: '',
+    })
+  })
+
+  it('parses legacy <pid>:<agent> agent chat (pre-0.37.5, still recognized for back-compat)', () => {
     expect(parseTerminalId('agent-chat:p_abc:manager')).toEqual({
       kind: 'agent_chat',
       projectId: 'p_abc',
@@ -74,6 +88,11 @@ describe('parseTerminalId — rejection', () => {
   it('rejects malformed ids', () => {
     expect(parseTerminalId('agent-chat:')).toBeNull()
     expect(parseTerminalId('agent-chat:wt:')).toBeNull()
+    // 0.37.5: `agent-chat:p_abc:` (trailing colon, empty agent
+    // tail) was previously rejected; now we treat the bare-pid
+    // form as canonical. The trailing-colon variant still rejects
+    // because the parser sees a non-empty head + empty tail and
+    // can't classify.
     expect(parseTerminalId('agent-chat:p_abc:')).toBeNull()
     expect(parseTerminalId('agent-chat:p_abc:manager:hb:')).toBeNull()
     expect(parseTerminalId('agent-chat:p_abc::hb:triage')).toBeNull()

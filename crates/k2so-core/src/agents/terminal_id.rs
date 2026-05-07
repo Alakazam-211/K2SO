@@ -45,8 +45,19 @@ pub enum TerminalIdKind {
 }
 
 /// Build the terminal id for an agent's Chat tab.
+///
+/// **0.37.5:** the agent name is no longer part of the canonical
+/// shape — post-unification the workspace's project_id alone is
+/// unique. The `agent` parameter is kept for back-compat at call
+/// sites but it's IGNORED in the produced id. Mirrors the renderer
+/// `terminal-id.ts agentChatId()` helper. Pre-0.37.5 the id was
+/// `agent-chat:<project_id>:<agent>`; rebuilding it that way
+/// caused the renderer-side `k2so_agents_lock` call to write the
+/// wrong shape to `workspace_sessions.terminal_id`, bypassing the
+/// SQL migration 0042 (C3PO 5c80bef1).
 pub fn agent_chat_id(project_id: &str, agent: &str) -> String {
-    format!("{PREFIX}{project_id}:{agent}")
+    let _ = agent;
+    format!("{PREFIX}{project_id}")
 }
 
 /// Build the terminal id for a worktree-scoped chat session.
@@ -82,7 +93,21 @@ fn parse_namespaced(rest: &str) -> Option<TerminalIdKind> {
     // First segment is either WORKTREE_TAG or project_id.
     let mut parts = rest.splitn(2, ':');
     let head = parts.next()?;
-    let tail = parts.next()?;
+    let tail = match parts.next() {
+        Some(t) => t,
+        None => {
+            // 0.37.5 bare-pid form: `agent-chat:<projectId>` (no
+            // agent suffix). Post-unification the project_id alone
+            // is canonical.
+            if head.is_empty() {
+                return None;
+            }
+            return Some(TerminalIdKind::AgentChat {
+                project_id: head.to_string(),
+                agent: String::new(),
+            });
+        }
+    };
 
     if head == WORKTREE_TAG {
         if tail.is_empty() {
@@ -144,7 +169,11 @@ mod tests {
 
     #[test]
     fn builds_agent_chat_id() {
-        assert_eq!(agent_chat_id("p_abc", "manager"), "agent-chat:p_abc:manager");
+        // **0.37.5:** agent name no longer in the canonical id.
+        // Reverting `agent_chat_id` to the pre-0.37.5 prefix shape
+        // MUST flip these assertions to "FAIL".
+        assert_eq!(agent_chat_id("p_abc", "manager"), "agent-chat:p_abc");
+        assert_eq!(agent_chat_id("p_abc", "scout"), "agent-chat:p_abc");
     }
 
     #[test]
@@ -247,12 +276,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_bare_pid_agent_chat() {
+        // 0.37.5: `agent-chat:<project_id>` (no agent suffix).
+        assert_eq!(
+            parse("agent-chat:p_abc"),
+            Some(TerminalIdKind::AgentChat {
+                project_id: "p_abc".to_string(),
+                agent: String::new(),
+            })
+        );
+    }
+
+    #[test]
     fn round_trip_agent_chat() {
+        // **0.37.5:** `agent_chat_id` ignores the agent argument
+        // and produces the bare-pid form. Round-trip parses back
+        // to AgentChat with empty agent.
         let id = agent_chat_id("p_1", "alice");
+        assert_eq!(id, "agent-chat:p_1");
         match parse(&id) {
             Some(TerminalIdKind::AgentChat { project_id, agent }) => {
                 assert_eq!(project_id, "p_1");
-                assert_eq!(agent, "alice");
+                assert_eq!(agent, "");
             }
             other => panic!("expected AgentChat, got {other:?}"),
         }

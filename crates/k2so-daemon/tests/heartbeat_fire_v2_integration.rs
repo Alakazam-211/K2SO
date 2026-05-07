@@ -124,7 +124,11 @@ async fn wake_headless_v2_registers_in_v2_session_map() {
 
     // The returned terminal_id IS the v2 SessionId stringified.
     // Look it up in v2_session_map under the canonical key.
-    let canonical_key = format!("{workspace_id}:{agent_name}");
+    // **0.37.5:** canonical key is bare workspace_id (no
+    // `:<agent_name>` suffix). Reverting `spawn.rs:228` to the
+    // pre-0.37.5 prefix shape MUST flip this assertion to "FAIL".
+    let _ = agent_name; // referenced via AGENT.md fixture only
+    let canonical_key = workspace_id.to_string();
     let session = v2_session_map::lookup_by_agent_name(&canonical_key);
     assert!(
         session.is_some(),

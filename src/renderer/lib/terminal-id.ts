@@ -34,9 +34,24 @@ export type TerminalIdKind =
   | { kind: 'legacy_agent_chat'; agent: string }
   | { kind: 'legacy_worktree'; workspaceId: string }
 
-/** Build the terminal id for an agent's Chat tab. */
+/**
+ * Build the terminal id for an agent's Chat tab.
+ *
+ * **0.37.5:** the agent name is no longer part of the canonical
+ * shape — post-unification (one agent per workspace), the
+ * workspace's project_id alone is unique. The `agent` parameter
+ * is kept for back-compat at the call site (every caller already
+ * has it on hand) but it's IGNORED in the produced id. Pre-0.37.5
+ * the id was `agent-chat:<projectId>:<agent>`; that suffix caused
+ * the renderer to write the wrong shape to
+ * `workspace_sessions.terminal_id` via `k2so_agents_lock`,
+ * bypassing the SQL migration 0042 (C3PO 5c80bef1). The bare-pid
+ * form keeps Tauri's terminal manager and the SQL canonical row
+ * in agreement.
+ */
 export function agentChatId(projectId: string, agent: string): string {
-  return `${PREFIX}${projectId}:${agent}`
+  void agent
+  return `${PREFIX}${projectId}`
 }
 
 /** Build the terminal id for a worktree-scoped chat session. */
@@ -72,7 +87,12 @@ export function parseTerminalId(id: string): TerminalIdKind | null {
 
 function parseNamespaced(rest: string): TerminalIdKind | null {
   const colon = rest.indexOf(':')
-  if (colon < 0) return null
+  if (colon < 0) {
+    // 0.37.5 bare-pid form: `agent-chat:<projectId>` (no agent suffix).
+    // Post-unification the workspace's project_id alone is canonical.
+    if (!rest) return null
+    return { kind: 'agent_chat', projectId: rest, agent: '' }
+  }
   const head = rest.slice(0, colon)
   const tail = rest.slice(colon + 1)
 
@@ -95,6 +115,10 @@ function parseNamespaced(rest: string): TerminalIdKind | null {
   }
 
   if (!tail) return null
+  // Pre-0.37.5 form: `agent-chat:<projectId>:<agent>`. Still
+  // recognized for back-compat with stale tab state and rows that
+  // weren't migrated. Post-0.37.5 callers produce the bare-pid
+  // form via `agentChatId` above.
   return { kind: 'agent_chat', projectId: head, agent: tail }
 }
 

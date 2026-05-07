@@ -31,6 +31,19 @@ use crate::pending_live;
 use crate::signal_format;
 use crate::v2_session_map;
 
+/// Cheap UUID-shape probe: 36 chars, hyphens at the canonical
+/// positions (8-4-4-4-12). Used to distinguish a bare `project_id`
+/// canonical key (post-0.37.5) from legacy `<pid>:<agent>` strings
+/// or ad-hoc tab keys (`tab-XXX`). Doesn't validate the hex digits
+/// — fast path for the spawn helper's stamping logic.
+fn is_uuid_shape(s: &str) -> bool {
+    s.len() == 36
+        && s.as_bytes()[8] == b'-'
+        && s.as_bytes()[13] == b'-'
+        && s.as_bytes()[18] == b'-'
+        && s.as_bytes()[23] == b'-'
+}
+
 /// Handler for `POST /cli/sessions/v2/spawn`.
 ///
 /// Request body (JSON):
@@ -204,14 +217,21 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
     // `agent_heartbeats.active_terminal_id` cleanup hook in
     // `v2_session_map::unregister`.
     //
-    // 0.37.0: the prefix split from 0.36.14 is gone — the
-    // `workspace_sessions` row is keyed purely on `project_id`. We
-    // accept either the prefixed `<pid>:<bare>` form (preferred —
-    // cheaper, unambiguous) or fall back to resolving from cwd.
+    // **0.37.5 keying:** the canonical `req.agent_name` is now bare
+    // `<project_id>` (UUID). We accept three shapes for back-compat
+    // during the cross-version transition window:
+    //   1. Bare UUID: the project_id directly. (post-0.37.5 native)
+    //   2. `<project_id>:<bare>`: legacy renderer form. Split, take
+    //      the prefix.
+    //   3. Anything else (tab-XXX, ad-hoc): resolve from cwd.
     {
         let db = k2so_core::db::shared();
         let conn = db.lock();
-        let project_id_opt = if let Some((pid, _bare)) = req.agent_name.split_once(':') {
+        let project_id_opt = if is_uuid_shape(&req.agent_name) {
+            // Native bare-pid canonical key.
+            Some(req.agent_name.clone())
+        } else if let Some((pid, _bare)) = req.agent_name.split_once(':') {
+            // Legacy `<pid>:<agent>` shape from a 0.37.4 renderer.
             if pid.is_empty() {
                 k2so_core::agents::resolve_project_id(&conn, &req.cwd)
             } else {

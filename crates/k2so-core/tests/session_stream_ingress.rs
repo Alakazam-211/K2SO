@@ -274,14 +274,20 @@ fn apc_msg_with_live_delivery_triggers_inject_through_ingress() {
     );
 
     // Inject fired with "inject me" in the bytes. Provider is
-    // called with the canonical (workspace-prefixed) key —
-    // post-0.36.15 egress routes workspace-addressed signals to
-    // `<workspace>:<agent>` instead of bare-name. Liveness check
-    // still uses bare-name registry walk; only the inject side
-    // is prefixed.
+    // called with the canonical bare workspace_id key.
+    //
+    // **0.37.5:** workspace-addressed signals route to bare
+    // `<workspace_id>` (post-unification, agent name is metadata
+    // not address). Pre-0.37.5 it was `<workspace>:<agent>`; the
+    // suffix was vestigial and caused renderer-side mismatches
+    // (C3PO 5c80bef1). Reverting `egress.rs:try_inject` to the
+    // pre-0.37.5 prefix shape MUST flip this assertion to "FAIL".
     let calls = inject.calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 1, "exactly one inject expected");
-    assert_eq!(calls[0].0, "k2so-ws:bar");
+    assert_eq!(
+        calls[0].0, "k2so-ws",
+        "0.37.5: inject delivers to bare workspace_id"
+    );
     let text = String::from_utf8_lossy(&calls[0].1);
     assert!(text.contains("inject me"), "bytes were: {text}");
 

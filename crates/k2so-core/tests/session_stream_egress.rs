@@ -142,18 +142,29 @@ fn live_live_injects_and_audits_no_inbox_no_wake() {
 
     // Liveness check uses the legacy registry walk (bare agent
     // names) — `is_agent_live` matches `entry.agent_name() == agent`.
-    // Inject delivery, however, post-0.36.15 routes workspace-
-    // addressed signals to the canonical `<workspace>:<agent>`
-    // shape (`try_inject` in egress.rs). The test verifies BOTH
-    // sides: bare-name liveness, prefixed-key inject.
+    //
+    // **0.37.5 inject path:** workspace-addressed signals route to
+    // the bare `<workspace_id>` canonical key (`try_inject` in
+    // egress.rs:443). Pre-0.37.5 it was `<workspace>:<agent>`; the
+    // suffix was vestigial post-unification and caused the renderer
+    // to compute the wrong key (C3PO 5c80bef1).
+    //
+    // The test verifies BOTH sides: bare-name liveness lookup
+    // (legacy registry walk), bare-pid inject delivery (post-0.37.5
+    // canonical key). Reverting `egress.rs:try_inject` to the
+    // pre-0.37.5 prefix shape MUST flip this assertion to "FAIL"
+    // (verifies the test pins the new contract, not a fallback).
     let sid = register_live_agent("bar");
     let signal = signal_to("bar", Delivery::Live);
     let report = egress::deliver(&signal, &inbox_root);
 
-    // PTY-inject fired once. Provider sees the canonical (prefixed) key.
+    // PTY-inject fired once. Provider sees the canonical bare-pid key.
     let inject_calls = inject.calls.lock().unwrap().clone();
     assert_eq!(inject_calls.len(), 1);
-    assert_eq!(inject_calls[0].0, "test-ws:bar");
+    assert_eq!(
+        inject_calls[0].0, "test-ws",
+        "0.37.5: inject delivers to bare workspace_id, NOT prefixed with agent name"
+    );
     assert!(
         String::from_utf8_lossy(&inject_calls[0].1)
             .contains("hello from egress test"),

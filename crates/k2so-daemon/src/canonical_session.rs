@@ -74,6 +74,30 @@ use k2so_core::log_debug;
 use crate::session_lookup;
 use crate::spawn::{spawn_agent_session_v2_blocking, SpawnWorkspaceSessionRequest};
 
+/// Build the canonical `v2_session_map` key for a workspace.
+///
+/// **0.37.5 contract:** the canonical session for a workspace is keyed
+/// purely on `project_id`. The agent's name is metadata about the
+/// session (display label, persona file, launch profile owner) — not
+/// part of its address.
+///
+/// Pre-0.37.5 the key was `<project_id>:<agent_name>`. That suffix
+/// was vestigial — pre-unification when multiple agents lived per
+/// workspace it was needed for disambiguation, but post-0.37.0
+/// unification there's at most one agent per workspace and the
+/// suffix only created opportunities for the renderer to compute
+/// the wrong name (see C3PO `5c80bef1`: pinned-tab open hardcoded
+/// `__lead__` for `mode custom`, missed the `<pid>:scout` slot,
+/// spawned a duplicate PTY, orphaned scout).
+///
+/// Every consumer (`v2_session_map::register`, `lookup_by_agent_name`,
+/// `pending_live` queue dirs, `workspace_sessions.terminal_id`) goes
+/// through this helper to get the canonical key. One chokepoint, one
+/// shape, no string assembly scattered across the codebase.
+pub fn canonical_key_for(project_id: &str) -> String {
+    project_id.to_string()
+}
+
 /// Result of `ensure_canonical_session`. Returned to callers (CLI,
 /// boot sweep, wake provider) so they can log + take follow-up
 /// action with the canonical IDs.
@@ -119,7 +143,10 @@ pub fn ensure_canonical_session(project_path: &str) -> Result<EnsureOutcome, Str
         .ok_or_else(|| "no primary agent in workspace".to_string())?;
 
     // 2. Single-flight: if canonical session is already live, return.
-    let canonical_key = format!("{project_id}:{agent_name}");
+    //    0.37.5: canonical key is bare project_id (see canonical_key_for
+    //    doc-block). Drops the `:<agent_name>` suffix that previously
+    //    encoded the agent's name into the address.
+    let canonical_key = canonical_key_for(&project_id);
     if let Some(live) = session_lookup::lookup_any(&canonical_key) {
         return Ok(EnsureOutcome {
             session_id: live.session_id().to_string(),

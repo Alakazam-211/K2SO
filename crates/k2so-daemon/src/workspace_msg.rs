@@ -241,7 +241,15 @@ fn resume_and_fire(
         "--resume".to_string(),
         claude_sid.to_string(),
     ];
-    spawn_and_inject(project_path, project_id, &agent_name, args, text, "resume_and_fire")
+    spawn_and_inject(
+        project_path,
+        project_id,
+        &agent_name,
+        args,
+        text,
+        "resume_and_fire",
+        Some(claude_sid),
+    )
 }
 
 fn fresh_fire(project_path: &str, project_id: &str, text: &str) -> serde_json::Value {
@@ -260,18 +268,15 @@ fn fresh_fire(project_path: &str, project_id: &str, text: &str) -> serde_json::V
         "--session-id".to_string(),
         new_sid.clone(),
     ];
-
-    // Stamp session_id synchronously — pinning means the deferred-save
-    // race that the legacy detect-session-id polling tries to win is
-    // already won. Without this, fresh_fire would leave session_id
-    // unset until the renderer's polling caught it ~5s later.
-    {
-        let db = k2so_core::db::shared();
-        let conn = db.lock();
-        let _ = WorkspaceSession::update_session_id(&conn, project_id, &new_sid);
-    }
-
-    spawn_and_inject(project_path, project_id, &agent_name, args, text, "fresh_fire")
+    spawn_and_inject(
+        project_path,
+        project_id,
+        &agent_name,
+        args,
+        text,
+        "fresh_fire",
+        Some(&new_sid),
+    )
 }
 
 fn spawn_and_inject(
@@ -281,6 +286,7 @@ fn spawn_and_inject(
     args: Vec<String>,
     text: &str,
     branch: &str,
+    claude_session_id: Option<&str>,
 ) -> serde_json::Value {
     let outcome = match spawn_agent_session_v2_blocking(SpawnWorkspaceSessionRequest {
         agent_name: agent_name.to_string(),
@@ -301,15 +307,48 @@ fn spawn_and_inject(
     };
     let target_id = outcome.session_id.to_string();
 
-    // Stamp `active_terminal_id` synchronously. The auto-stamp hook
-    // in `handle_v2_spawn` doesn't fire for spawns that go through
-    // `spawn_agent_session_v2_blocking` (the in-process helper), so
-    // stamp here directly. Mirror of the heartbeat synchronous stamp
-    // in `wake_headless`.
+    // **0.37.5:** UPSERT the workspace_sessions row.
+    //
+    // `spawn_and_inject` is the cold-start path for `k2so msg --wake`
+    // against a workspace whose `workspace_sessions` row doesn't
+    // exist yet (common for workspaces that became Workspace Manager
+    // before 0.37.2's `ensure_canonical_session` shipped). Pre-0.37.5
+    // we only called `save_active_terminal_id` (UPDATE-only — silent
+    // no-op when no row exists), so the row was never created and
+    // subsequent canonical-session lookups had no SQL to consult.
+    //
+    // `k2so_agents_lock` upserts the row with `terminal_id` set to
+    // the canonical `agent-chat:<pid>` form (per 0042 SQL migration).
+    // After this returns, the row exists; the
+    // `save_active_terminal_id` follow-up writes the live PTY's
+    // session UUID into `active_terminal_id`.
+    let canonical_terminal_id = format!("agent-chat:{project_id}");
+    let _ = k2so_core::agents::session::k2so_agents_lock(
+        project_path.to_string(),
+        agent_name.to_string(),
+        Some(canonical_terminal_id),
+        Some("system".to_string()),
+    );
     {
         let db = k2so_core::db::shared();
         let conn = db.lock();
         let _ = WorkspaceSession::save_active_terminal_id(&conn, project_id, &target_id);
+
+        // **0.37.5 fix:** stamp `session_id` AFTER the row exists.
+        // Pre-fix, fresh_fire pre-allocated `new_sid` and called
+        // `update_session_id` BEFORE spawn_and_inject — but the
+        // UPDATE was a silent no-op when no row existed yet, then
+        // k2so_agents_lock created the row with session_id=None.
+        // Net result: `claude --session-id <new_sid>` ran in the
+        // PTY but SQL had session_id=NULL, so refresh-button
+        // re-mounts hit `k2so_agents_resume_chat_args`'s "no saved
+        // session" branch, pre-allocated a DIFFERENT uuid, and
+        // the original "hi" conversation was orphaned. Stamping
+        // here, after the row is guaranteed to exist, fixes the
+        // refresh→resume continuity.
+        if let Some(sid) = claude_session_id {
+            let _ = WorkspaceSession::update_session_id(&conn, project_id, sid);
+        }
     }
 
     log_debug!(

@@ -213,11 +213,12 @@ async fn triage_with_flag_on_spawns_via_session_stream() {
 
     let _body = triage::handle_scheduler_fire(&proj_str);
 
-    // 0.37.0 canonicalization: scheduler-driven spawns (post-A9 →
-    // v2 path → spawn_agent_session_v2_blocking) register under
-    // `<project_id>:<agent_name>`. lookup_any walks both maps
-    // without touching the bare-key slot.
-    let canonical_key = format!("{project_id}:runner");
+    // **0.37.5 canonicalization:** scheduler-driven spawns
+    // (v2 path → spawn_agent_session_v2_blocking) register under
+    // bare `<project_id>` (no agent suffix). Pre-0.37.5 it was
+    // `<project_id>:<agent_name>`; the suffix was vestigial
+    // post-unification (one agent per workspace).
+    let canonical_key = project_id.to_string();
     assert!(
         session_lookup::lookup_any(&canonical_key).is_some(),
         "expected '{canonical_key}' in a daemon session map under flag-on scheduler fire"

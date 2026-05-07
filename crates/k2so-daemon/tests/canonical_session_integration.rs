@@ -103,11 +103,22 @@ async fn ensure_canonical_session_fresh_spawns_and_registers() {
     );
 
     // v2_session_map must contain the canonical key.
-    let canonical_key = format!("{workspace_id}:scout");
+    //
+    // **0.37.5:** canonical key is bare workspace_id (no
+    // `:<agent_name>` suffix; see canonical_session::canonical_key_for).
+    // Reverting that helper to the pre-0.37.5 prefix shape MUST
+    // flip this assertion to "FAIL".
+    let canonical_key = workspace_id.to_string();
     let live = v2_session_map::lookup_by_agent_name(&canonical_key);
     assert!(
         live.is_some(),
         "v2_session_map missing canonical_key={canonical_key} after ensure"
+    );
+    // Regression guard: legacy `<pid>:<agent>` MUST NOT resolve.
+    let legacy_key = format!("{workspace_id}:scout");
+    assert!(
+        v2_session_map::lookup_by_agent_name(&legacy_key).is_none(),
+        "0.37.5 regression: legacy {legacy_key} must NOT be registered"
     );
     let live = live.unwrap();
     assert_eq!(
@@ -233,13 +244,19 @@ async fn boot_sweep_ensures_bot_mode_workspaces_with_agent_md() {
     boot_sweep_ensure_canonical_sessions();
 
     // Only the bot+agent workspace should have a canonical session.
+    // **0.37.5:** canonical key is bare workspace_id.
     assert!(
-        v2_session_map::lookup_by_agent_name("sweep-bot-agent:scout").is_some(),
+        v2_session_map::lookup_by_agent_name("sweep-bot-agent").is_some(),
         "boot sweep must ensure a session for bot-mode + AGENT.md workspaces"
     );
     assert!(
-        v2_session_map::lookup_by_agent_name("sweep-bot-no-agent:scout").is_none(),
+        v2_session_map::lookup_by_agent_name("sweep-bot-no-agent").is_none(),
         "boot sweep must skip bot-mode workspaces without AGENT.md"
+    );
+    // Regression guard: legacy `<pid>:<agent>` shape MUST NOT exist.
+    assert!(
+        v2_session_map::lookup_by_agent_name("sweep-bot-agent:scout").is_none(),
+        "0.37.5 regression: legacy `sweep-bot-agent:scout` must NOT be registered"
     );
     assert!(
         v2_session_map::lookup_by_agent_name("sweep-off:scout").is_none(),
@@ -296,14 +313,21 @@ async fn ensure_then_wake_lands_in_same_session_no_duplicate_spawn() {
 
     // Step 3: only ONE entry should exist in v2_session_map for
     // this workspace's canonical key.
-    let canonical_key = format!("{workspace_id}:scout");
+    // **0.37.5:** canonical key is bare workspace_id.
+    let canonical_key = workspace_id.to_string();
     let count = v2_session_map::snapshot()
         .into_iter()
         .filter(|(name, _)| name == &canonical_key)
         .count();
     assert_eq!(
         count, 1,
-        "exactly one v2_session_map entry per (workspace, agent), got {count}"
+        "exactly one v2_session_map entry per workspace, got {count}"
+    );
+    // Regression guard: no legacy `<pid>:<agent>` entry crept in.
+    let legacy_key = format!("{workspace_id}:scout");
+    assert!(
+        v2_session_map::snapshot().iter().all(|(n, _)| n != &legacy_key),
+        "0.37.5 regression: legacy {legacy_key} must NOT exist"
     );
 
     v2_session_map::clear_for_tests();
