@@ -648,14 +648,86 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
 
       perfLog('ws_opening')
       const __t_ws = performance.now()
-      const ws = new WebSocket(
-        `ws://127.0.0.1:${creds.port}/cli/sessions/grid?session=${spawn.sessionId}&token=${creds.token}`,
-      )
-      wsRef.current = ws
 
-      ws.onopen = () => {
-        perfLog('ws_open', { elapsed_ms: (performance.now() - __t_ws).toFixed(1) })
+      // 0.37.7: WS connect-with-retry. Smooths the install-relaunch
+      // race where the renderer mounts before the daemon has finished
+      // binding its WS port (or before its credentials file has
+      // settled). Pre-fix the renderer surfaced "ws error" on the
+      // user's tab and they had to right-click → reload to recover.
+      // Now we retry up to a deadline with exponential backoff —
+      // most real install-relaunch races resolve in 1-2 retries
+      // (~250-750ms).
+      //
+      // We DON'T retry forever. If after the deadline the WS still
+      // can't connect, surface the error so the user knows
+      // something's actually wrong — but a transient races doesn't
+      // bubble up.
+      const WS_BOOT_DEADLINE_MS = 8_000
+      const __t_ws_boot = performance.now()
+      let ws: WebSocket | null = null
+      let wsAttempt = 0
+      while (true) {
+        if (cancelled) return
+        wsAttempt += 1
+        const candidate = new WebSocket(
+          `ws://127.0.0.1:${creds.port}/cli/sessions/grid?session=${spawn.sessionId}&token=${creds.token}`,
+        )
+        // Race: open vs. close-before-open. Browser fires both
+        // `onerror` then `onclose` when a connection is rejected
+        // immediately (port not bound, etc.). We bind temporary
+        // listeners; the real ones get attached after the open
+        // resolves successfully.
+        const opened = await new Promise<boolean>((resolve) => {
+          const cleanup = () => {
+            candidate.onopen = null
+            candidate.onerror = null
+            candidate.onclose = null
+          }
+          candidate.onopen = () => { cleanup(); resolve(true) }
+          candidate.onerror = () => { cleanup(); resolve(false) }
+          candidate.onclose = () => { cleanup(); resolve(false) }
+        })
+        if (cancelled) {
+          if (candidate.readyState !== WebSocket.CLOSED) candidate.close()
+          return
+        }
+        if (opened) {
+          ws = candidate
+          perfLog('ws_open', {
+            elapsed_ms: (performance.now() - __t_ws).toFixed(1),
+            attempts: String(wsAttempt),
+          })
+          break
+        }
+        // Connect failed — back off and retry within the boot
+        // deadline. Beyond the deadline, surface the error.
+        const elapsedMs = performance.now() - __t_ws_boot
+        if (elapsedMs > WS_BOOT_DEADLINE_MS) {
+          perfLog('ws_giveup', {
+            attempts: String(wsAttempt),
+            elapsed_ms: Math.round(elapsedMs).toString(),
+          })
+          setPhase({
+            kind: 'error',
+            message: 'ws error (daemon unreachable after retries)',
+          })
+          return
+        }
+        const delayMs = Math.min(250 * 2 ** Math.min(wsAttempt - 1, 3), 2000)
+        perfLog('ws_retry', {
+          attempt: String(wsAttempt),
+          delay_ms: String(delayMs),
+          elapsed_ms: Math.round(elapsedMs).toString(),
+        })
+        await new Promise((r) => setTimeout(r, delayMs))
       }
+
+      if (!ws) return // unreachable; satisfies TS
+      wsRef.current = ws
+      // Note: ws.onopen is intentionally NOT set here — the connect
+      // retry loop above handled the open path and logged perf.
+      // Setting onopen on an already-open socket would never fire
+      // anyway (browser dispatched the event during the retry race).
 
       ws.onmessage = (evt) => {
         if (typeof evt.data !== 'string') return
