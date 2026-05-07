@@ -917,6 +917,25 @@ fn handle_cli_heartbeat(
             hb::k2so_heartbeat_set_enabled(project_path.to_string(), name, enabled)
                 .map(|_| r#"{"success":true}"#.to_string())
         }
+        "/cli/heartbeat/set-use-workspace-session" => {
+            // 0.37.8 — flip the per-heartbeat opt-in to deliver
+            // WAKEUP.md into the workspace's pinned chat session
+            // instead of the heartbeat's own saved session.
+            let name = params.get("name").cloned().unwrap_or_default();
+            let enabled = params
+                .get("enabled")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false);
+            if name.is_empty() {
+                return Err("Missing 'name' parameter".to_string());
+            }
+            hb::k2so_heartbeat_set_use_workspace_session(
+                project_path.to_string(),
+                name,
+                enabled,
+            )
+            .map(|_| r#"{"success":true}"#.to_string())
+        }
         "/cli/heartbeat/edit" => {
             let name = params.get("name").cloned().unwrap_or_default();
             let frequency = params.get("frequency").cloned().unwrap_or_default();

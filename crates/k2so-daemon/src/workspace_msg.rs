@@ -296,6 +296,7 @@ fn spawn_and_inject(
         args: Some(args),
         cols: 120,
         rows: 38,
+        canonical_key: None,
     }) {
         Ok(o) => o,
         Err(e) => {

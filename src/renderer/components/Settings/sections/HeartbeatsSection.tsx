@@ -20,6 +20,12 @@ export interface HeartbeatRow {
   enabled: boolean
   lastFired: string | null
   createdAt: number
+  // 0.37.8 — when true, this heartbeat's WAKEUP.md prompt is delivered
+  // into the workspace's pinned chat session via
+  // `workspace_msg::deliver_live` instead of the heartbeat's own saved
+  // session. The heartbeat's own last_session_id stays in the DB
+  // untouched; un-checking restores legacy targeting.
+  useWorkspaceSession: boolean
 }
 
 // Mirrors src-tauri db::schema::HeartbeatFire (camelCase via serde rename).
@@ -794,6 +800,20 @@ export function HeartbeatsPanel({
     await refresh()
   }
 
+  // 0.37.8 — per-heartbeat opt-in to deliver WAKEUP.md into the
+  // workspace's pinned chat session via `workspace_msg::deliver_live`.
+  // When on, the heartbeat's own saved session stays in the DB but is
+  // no longer targeted on new fires.
+  const handleToggleUseWorkspaceSession = async (row: HeartbeatRow): Promise<void> => {
+    if (!project) return
+    await invoke('k2so_heartbeat_set_use_workspace_session', {
+      projectPath: project.path,
+      name: row.name,
+      enabled: !row.useWorkspaceSession,
+    })
+    await refresh()
+  }
+
   const startRename = (row: HeartbeatRow): void => {
     setRenamingId(row.id)
     setRenameDraft(row.name)
@@ -930,6 +950,37 @@ export function HeartbeatsPanel({
                       Last fired: {describeLastFired(r.lastFired)}
                     </span>
                   )}
+                  {/* 0.37.8 — per-heartbeat pinned-chat delivery opt-in.
+                      Toggling routes future fires through
+                      workspace_msg::deliver_live so the prompt lands in
+                      the workspace's pinned chat session instead of the
+                      heartbeat's own saved session. */}
+                  <button
+                    onClick={() => { void handleToggleUseWorkspaceSession(r) }}
+                    className="flex items-center gap-1 mt-0.5 text-[9px] text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors no-drag cursor-pointer"
+                    title={
+                      r.useWorkspaceSession
+                        ? 'Wakeup is delivered into the workspace’s pinned chat session.'
+                        : 'Wakeup goes to this heartbeat’s own saved session.'
+                    }
+                  >
+                    <span
+                      role="checkbox"
+                      aria-checked={r.useWorkspaceSession}
+                      className={`w-2.5 h-2.5 border flex items-center justify-center flex-shrink-0 ${
+                        r.useWorkspaceSession
+                          ? 'bg-[var(--color-accent)] border-[var(--color-accent)]'
+                          : 'border-[var(--color-border)]'
+                      }`}
+                    >
+                      {r.useWorkspaceSession && (
+                        <svg className="w-1.5 h-1.5 text-white" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M1.5 4l1.5 1.5L6.5 2" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      )}
+                    </span>
+                    Send into pinned chat
+                  </button>
                 </div>
 
                 {/* Col 2 — schedule (click to edit) */}

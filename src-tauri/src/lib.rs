@@ -1270,6 +1270,7 @@ pub fn run() {
             commands::k2so_agents::k2so_workspace_get_show_heartbeat_sessions,
             commands::k2so_agents::k2so_workspace_set_show_heartbeat_sessions,
             commands::k2so_agents::k2so_heartbeat_set_enabled,
+            commands::k2so_agents::k2so_heartbeat_set_use_workspace_session,
             commands::k2so_agents::k2so_heartbeat_edit,
             commands::k2so_agents::k2so_heartbeat_rename,
             commands::k2so_agents::k2so_heartbeat_fires_list,

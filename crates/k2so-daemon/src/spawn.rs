@@ -79,7 +79,7 @@ fn project_path_for_id(project_id: &str) -> Option<String> {
 /// have workspace context by design — that path stays on bare-name
 /// keying in the legacy `session_map`. v2 callers MUST set
 /// `project_id` or the function returns an error.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SpawnWorkspaceSessionRequest {
     pub agent_name: String,
     pub project_id: Option<String>,
@@ -88,6 +88,14 @@ pub struct SpawnWorkspaceSessionRequest {
     pub args: Option<Vec<String>>,
     pub cols: u16,
     pub rows: u16,
+    /// 0.37.8 — explicit canonical_key override. When `Some`, the v2
+    /// spawn registers under THIS key in `v2_session_map` instead of
+    /// the default `canonical_key_for(project_id)`. Used by heartbeat
+    /// fires (`<project_id>:hb:<heartbeat_name>`) so they don't
+    /// collide with the workspace's pinned chat session at the bare
+    /// `<project_id>` slot. Default `None` = use the project_id-derived
+    /// canonical key (the chat-tab lane).
+    pub canonical_key: Option<String>,
 }
 
 /// Output shape returned by both legacy and v2 spawn variants.
@@ -236,9 +244,17 @@ pub fn spawn_agent_session_v2_blocking(
     // under the bare agent_name — those don't represent canonical
     // workspace sessions and don't go through this code's
     // workspace-aware paths.
-    let canonical_key = match req.project_id.as_deref() {
-        Some(pid) if !pid.is_empty() => crate::canonical_session::canonical_key_for(pid),
-        _ => req.agent_name.clone(),
+    // 0.37.8 — explicit canonical_key override takes precedence so
+    // heartbeat fires can stay in their own per-heartbeat lane
+    // (`<project_id>:hb:<name>`) without colliding with the chat tab's
+    // bare-`<project_id>` slot. Default falls through to the
+    // project_id-derived canonical key.
+    let canonical_key = match req.canonical_key.as_deref() {
+        Some(k) if !k.is_empty() => k.to_string(),
+        _ => match req.project_id.as_deref() {
+            Some(pid) if !pid.is_empty() => crate::canonical_session::canonical_key_for(pid),
+            _ => req.agent_name.clone(),
+        },
     };
 
     // Idempotency: if a session is already registered under the

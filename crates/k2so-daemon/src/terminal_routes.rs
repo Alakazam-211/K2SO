@@ -468,6 +468,7 @@ fn spawn_terminal_impl(
         args: None,
         cols,
         rows,
+        canonical_key: None,
     }) {
         Ok(o) => o,
         Err(e) => return CliResponse::bad_request(format!("spawn failed: {e}")),

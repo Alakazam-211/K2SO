@@ -98,6 +98,7 @@ pub fn spawn_wake_via_session_stream(
         args: Some(args),
         cols: 120,
         rows: 38,
+        canonical_key: None,
     })?;
 
     let _ = k2so_core::agents::session::k2so_agents_lock(
@@ -202,6 +203,7 @@ pub fn handle_agents_launch(
         args: if args.is_empty() { None } else { Some(args) },
         cols: 120,
         rows: 38,
+        canonical_key: None,
     }) {
         Ok(o) => o,
         Err(e) => return CliResponse::bad_request(format!("spawn failed: {e}")),
@@ -292,6 +294,7 @@ pub fn handle_agents_delegate(
         args: if args.is_empty() { None } else { Some(args) },
         cols: 120,
         rows: 38,
+        canonical_key: None,
     }) {
         Ok(o) => o,
         Err(e) => return CliResponse::bad_request(format!("spawn failed: {e}")),

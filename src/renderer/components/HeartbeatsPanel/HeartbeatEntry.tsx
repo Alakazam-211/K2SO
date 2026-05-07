@@ -85,10 +85,14 @@ export function HeartbeatEntryRow({
       // Daemon returns a JSON string mirroring the heartbeat_fires
       // audit decision; surface a friendly toast based on the
       // branch it took.
+      // 0.37.8: when the heartbeat has `use_workspace_session = true`,
+      // the branch is tagged `workspace_session:<inner>` (e.g.
+      // `workspace_session:fresh_fire`) — the inner cascade is the
+      // chat-tab `deliver_live` cascade, not the heartbeat-keyed one.
       type LaunchResp = {
         success: boolean
         decision: string
-        branch?: 'fresh_fire' | 'injected' | 'resume_and_fire'
+        branch?: string
         reason?: string
       }
       const parsed: LaunchResp = JSON.parse(resp)
@@ -100,12 +104,19 @@ export function HeartbeatEntryRow({
         )
         return
       }
-      const branchLabel: Record<NonNullable<LaunchResp['branch']>, string> = {
+      const branchLabel: Record<string, string> = {
         fresh_fire: 'Fired',
         injected: 'Sent wakeup to running session for',
         resume_and_fire: 'Resumed + fired',
       }
-      const verb = parsed.branch ? branchLabel[parsed.branch] : 'Fired'
+      let verb: string
+      if (parsed.branch && parsed.branch.startsWith('workspace_session:')) {
+        verb = 'Sent wakeup to pinned chat for'
+      } else if (parsed.branch && parsed.branch in branchLabel) {
+        verb = branchLabel[parsed.branch]
+      } else {
+        verb = 'Fired'
+      }
       toast.addToast(`${verb} "${entry.row.name}"`, 'success', 2500)
       // Refetch heartbeat rows so the "Next run" line picks up the
       // freshly-stamped last_fired immediately. Without this, the

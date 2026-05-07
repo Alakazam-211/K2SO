@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.37.4"
+K2SO_CLI_VERSION="0.37.7"
 
 set -euo pipefail
 
@@ -796,6 +796,30 @@ cmd_heartbeat_enable_disable() {
     echo "Heartbeat '$name' ${enabled}d"
 }
 
+# 0.37.8 — flip the per-heartbeat opt-in to deliver WAKEUP.md into the
+# workspace's pinned chat session (instead of the heartbeat's own saved
+# session). When enabled, the heartbeat's last_session_id stays in the
+# DB but is no longer targeted on new fires; the prompt routes through
+# `workspace_msg::deliver_live` (same primitive as `k2so msg --wake`).
+cmd_heartbeat_use_pinned_session() {
+    local enabled="$1"; shift
+    local name="${1:-}"
+    [ -z "$name" ] && { echo "Usage: k2so heartbeat use-pinned-session [on|off] <name>" >&2; exit 1; }
+    cli_request "/cli/heartbeat/set-use-workspace-session" \
+        "name=$(urlencode "$name")&enabled=$enabled" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    if d.get('success'):
+        state = 'enabled' if '$enabled' == 'true' else 'disabled'
+        print(f'Pinned-session delivery {state} for heartbeat: $name')
+    else:
+        print(f\"Error: {d.get('error', 'unknown')}\", file=sys.stderr); sys.exit(1)
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr); sys.exit(1)
+"
+}
+
 cmd_heartbeat_rename() {
     local from="${1:-}"
     local to="${2:-}"
@@ -884,12 +908,14 @@ try:
     enabled = 'yes' if row.get('enabled') else 'no'
     last = row.get('lastFired') or 'never'
     created = row.get('createdAt') or '?'
-    print(f'Name:        {row.get(\"name\")}')
-    print(f'Frequency:   {row.get(\"frequency\")}')
-    print(f'Enabled:     {enabled}')
-    print(f'Last fired:  {last}')
-    print(f'Wakeup file: {row.get(\"wakeupPath\")}')
-    print(f'Created:     {created}')
+    pinned = 'yes' if row.get('useWorkspaceSession') else 'no'
+    print(f'Name:           {row.get(\"name\")}')
+    print(f'Frequency:      {row.get(\"frequency\")}')
+    print(f'Enabled:        {enabled}')
+    print(f'Pinned chat:    {pinned}')
+    print(f'Last fired:     {last}')
+    print(f'Wakeup file:    {row.get(\"wakeupPath\")}')
+    print(f'Created:        {created}')
     print(f'Spec:')
     for k, v in spec.items():
         print(f'  {k}: {v}')
@@ -3159,7 +3185,7 @@ cmd_update() {
 
     # Extract the version from the remote script
     local remote_version
-    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.37.4"//')
+    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.37.7"//')
     if [ -z "$remote_version" ]; then
         echo "Error: Could not parse remote version." >&2
         exit 1
@@ -3383,6 +3409,14 @@ case "${1:-help}" in
             fire)           shift 2; cmd_heartbeat_fire "$@" ;;
             enable)         shift 2; cmd_heartbeat_enable_disable true "$@" ;;
             disable)        shift 2; cmd_heartbeat_enable_disable false "$@" ;;
+            use-pinned-session)
+                shift 2
+                case "${1:-}" in
+                    on|true|1)   shift; cmd_heartbeat_use_pinned_session true "$@" ;;
+                    off|false|0) shift; cmd_heartbeat_use_pinned_session false "$@" ;;
+                    *) echo "Usage: k2so heartbeat use-pinned-session [on|off] <name>" >&2; exit 1 ;;
+                esac
+                ;;
             rename)         shift 2; cmd_heartbeat_rename "$@" ;;
             edit)           shift 2; cmd_heartbeat_edit "$@" ;;
             show)           shift 2; cmd_heartbeat_show "$@" ;;

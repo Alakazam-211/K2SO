@@ -315,6 +315,7 @@ async fn canonical_key_wake_enqueue_drains_on_v2_spawn() {
         args: None,
         cols: 80,
         rows: 24,
+        canonical_key: None,
     })
     .expect("v2 spawn should succeed");
 

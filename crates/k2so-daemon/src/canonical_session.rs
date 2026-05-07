@@ -233,6 +233,7 @@ pub fn launch_request_for(
         args: profile.args.clone(),
         cols: profile.cols.unwrap_or(80),
         rows: profile.rows.unwrap_or(24),
+        canonical_key: None,
     }
 }
 

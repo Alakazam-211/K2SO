@@ -527,6 +527,7 @@ async fn read_returns_grid_lines_for_v2_session_by_session_id() {
             ]),
             cols: 80,
             rows: 24,
+            canonical_key: None,
         },
     )
     .expect("v2 spawn should succeed");
@@ -581,6 +582,7 @@ async fn read_resolves_canonical_workspace_agent_key() {
             ]),
             cols: 80,
             rows: 24,
+            canonical_key: None,
         },
     )
     .expect("v2 spawn under canonical key should succeed");

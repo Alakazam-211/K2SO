@@ -463,6 +463,22 @@ pub fn k2so_heartbeat_set_enabled(
     k2so_core::agents::heartbeat::k2so_heartbeat_set_enabled(project_path, name, enabled)
 }
 
+/// 0.37.8 — flip the per-heartbeat opt-in to deliver WAKEUP.md into
+/// the workspace's pinned chat session via
+/// `workspace_msg::deliver_live`. See migration 0043.
+#[tauri::command]
+pub fn k2so_heartbeat_set_use_workspace_session(
+    project_path: String,
+    name: String,
+    enabled: bool,
+) -> Result<(), String> {
+    k2so_core::agents::heartbeat::k2so_heartbeat_set_use_workspace_session(
+        project_path,
+        name,
+        enabled,
+    )
+}
+
 #[tauri::command]
 pub fn k2so_heartbeat_edit(
     project_path: String,

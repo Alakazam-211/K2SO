@@ -96,6 +96,27 @@ pub fn smart_launch(project_path: &str, name: &str) -> serde_json::Value {
         });
     }
 
+    // 0.37.8 — opt-in: deliver into the workspace's pinned chat
+    // session via `workspace_msg::deliver_live`, the same smart
+    // cascade `k2so msg --wake` uses. Reuses the four-branch primitive
+    // (active_terminal_id alive → inject / argv-scan / saved
+    // session_id → resume_and_fire / nothing → fresh_fire) keyed on
+    // `workspace_sessions` columns so heartbeat-driven activity lands
+    // in the same JSONL the workspace's chat tab is reading from.
+    //
+    // The heartbeat's own `last_session_id` and `active_terminal_id`
+    // stay untouched on this path — un-checking the flag restores the
+    // legacy behavior with the historical session intact.
+    if hb.use_workspace_session {
+        return run_workspace_session_delivery(
+            project_path,
+            &project_id,
+            &agent_name,
+            &hb,
+            &wakeup_abs,
+        );
+    }
+
     let saved_session = hb.last_session_id
         .as_deref()
         .filter(|s| !s.is_empty())
@@ -273,6 +294,68 @@ fn run_fresh_fire(
     }
 }
 
+/// 0.37.8 — opt-in branch when `hb.use_workspace_session = true`.
+/// Delegates to `workspace_msg::deliver_live` so the WAKEUP.md prompt
+/// lands in the workspace's pinned chat session (same JSONL the chat
+/// tab attaches to) instead of the heartbeat's own saved session.
+///
+/// All four cascade branches (live PTY inject / argv-scan / resume +
+/// fire / fresh fire) are inherited from `deliver_live`, keyed on
+/// `workspace_sessions` columns rather than `workspace_heartbeats`.
+fn run_workspace_session_delivery(
+    project_path: &str,
+    project_id: &str,
+    agent_name: &str,
+    hb: &AgentHeartbeat,
+    wakeup_abs: &Path,
+) -> serde_json::Value {
+    let Some(prompt) = wake::compose_wake_prompt_from_path(wakeup_abs) else {
+        release_lease(project_id, &hb.name);
+        write_audit(project_id, agent_name, hb, "error",
+            "failed to compose wake prompt");
+        return error_value("error", "failed to compose wake prompt", &hb.name);
+    };
+
+    let result = crate::workspace_msg::deliver_live(project_path, &prompt);
+    let success = result
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if success {
+        let branch = result
+            .get("branch")
+            .and_then(|v| v.as_str())
+            .unwrap_or("workspace_session")
+            .to_string();
+        let target_id = result
+            .get("targetSessionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        stamp_fired_and_release(project_id, &hb.name);
+        write_audit(project_id, agent_name, hb, "fired",
+            &format!("smart_launch (use_workspace_session): {branch} → {target_id}"));
+        serde_json::json!({
+            "success": true,
+            "decision": "fired",
+            "branch": format!("workspace_session:{branch}"),
+            "name": hb.name,
+            "agent": agent_name,
+            "targetSessionId": target_id,
+        })
+    } else {
+        let reason = result
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("workspace_session delivery failed")
+            .to_string();
+        release_lease(project_id, &hb.name);
+        write_audit(project_id, agent_name, hb, "error", &reason);
+        error_value("error", &reason, &hb.name)
+    }
+}
+
 fn run_inject(
     project_path: &str,
     project_id: &str,
@@ -369,6 +452,15 @@ fn run_resume_and_fire(
         prompt,
     ];
 
+    // 0.37.8 — register the resumed PTY under the heartbeat's own
+    // canonical key (`<project_id>:hb:<name>`) so it doesn't collide
+    // with the chat tab's bare-`<project_id>` slot. See the matching
+    // override in `wake_headless::spawn_wake_headless`.
+    let canonical_key_override = if !hb.name.is_empty() {
+        Some(format!("{project_id}:hb:{}", hb.name))
+    } else {
+        None
+    };
     // project_id is already a function parameter; no need to look it up.
     let outcome = crate::spawn::spawn_agent_session_v2_blocking(
         crate::spawn::SpawnWorkspaceSessionRequest {
@@ -379,19 +471,20 @@ fn run_resume_and_fire(
             args: Some(args),
             cols: 120,
             rows: 38,
+            canonical_key: canonical_key_override,
         },
     );
 
     match outcome {
         Ok(out) => {
-            // Lock the agent_sessions row so later scheduler ticks don't
-            // double-spawn this session.
-            let _ = k2so_core::agents::session::k2so_agents_lock(
-                project_path.to_string(),
-                agent_name.to_string(),
-                Some(out.session_id.to_string()),
-                Some("system".to_string()),
-            );
+            // 0.37.8 — heartbeat fires don't touch workspace_sessions;
+            // that row is the chat tab's lane. The pre-fix
+            // `k2so_agents_lock` call stamped the chat tab's
+            // `active_terminal_id` to the heartbeat PTY id and
+            // contributed to the lane collapse. Heartbeat's
+            // `active_terminal_id` is stamped below on
+            // `workspace_heartbeats` only.
+
             // Stamp `active_terminal_id` so openHeartbeatTab can attach
             // a tab to this newly-spawned PTY without spawning a second
             // resume. See migration 0036 + the heartbeat-active-session

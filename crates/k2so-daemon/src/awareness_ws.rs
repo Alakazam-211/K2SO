@@ -107,6 +107,7 @@ pub async fn handle_sessions_spawn(body: &[u8]) -> HandlerResult {
         args: req.args,
         cols: req.cols,
         rows: req.rows,
+        canonical_key: None,
     })
     .await
     {

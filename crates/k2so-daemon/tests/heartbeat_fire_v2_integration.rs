@@ -150,7 +150,7 @@ async fn wake_headless_v2_registers_in_v2_session_map() {
 // ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wake_headless_v2_writes_workspace_sessions_row_and_heartbeat_fields() {
+async fn wake_headless_v2_writes_heartbeat_fields_and_does_not_touch_workspace_sessions() {
     let _g = lock();
     init_for_tests();
     v2_session_map::clear_for_tests();
@@ -188,31 +188,51 @@ async fn wake_headless_v2_writes_workspace_sessions_row_and_heartbeat_fields() {
     .expect("spawn_wake_headless with heartbeat name");
 
     // Allow the synchronous DB writes inside spawn_wake_headless to
-    // settle. The DB writes are synchronous in the fn body, but
-    // `k2so_agents_lock` writes via the shared connection that
-    // other code paths might hold — give a tick.
+    // settle.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // 1. workspace_sessions row exists for this project_id with
-    //    terminal_id matching the v2 session.
+    // 0.37.8: heartbeat fires register under their own per-heartbeat
+    // canonical key (`<workspace_id>:hb:<name>`), NOT bare
+    // `<workspace_id>` — the chat tab owns the bare slot. Reverting
+    // either the canonical_key override in `wake_headless` or the
+    // override field in `SpawnWorkspaceSessionRequest` MUST flip this
+    // assertion to "FAIL".
+    let heartbeat_key = format!("{workspace_id}:hb:test-hb");
+    let session = v2_session_map::lookup_by_agent_name(&heartbeat_key)
+        .expect("v2_session_map missing per-heartbeat canonical key after fire");
+    assert_eq!(
+        session.session_id.to_string(),
+        terminal_id,
+        "v2_session_map session_id under {heartbeat_key} must match returned terminal_id"
+    );
+    assert!(
+        v2_session_map::lookup_by_agent_name(workspace_id).is_none(),
+        "heartbeat fire must NOT register under bare workspace_id={workspace_id} \
+         (that slot is reserved for the chat tab)"
+    );
+
+    // 0.37.8: heartbeat fires don't touch workspace_sessions; that
+    // row is the chat tab's lane. Pre-fix, `k2so_agents_lock` ran
+    // unconditionally and clobbered the chat tab's terminal_id with
+    // the heartbeat's PTY id.
     let db = k2so_core::db::shared();
     let conn = db.lock();
     let ws_session = k2so_core::db::schema::WorkspaceSession::get(&conn, workspace_id)
-        .expect("query workspace_sessions")
-        .expect("workspace_sessions row should exist after fresh fire");
-    assert_eq!(
-        ws_session.terminal_id.as_deref(),
-        Some(terminal_id.as_str()),
-        "workspace_sessions.terminal_id must match the v2 session id"
+        .expect("query workspace_sessions");
+    assert!(
+        ws_session.is_none()
+            || ws_session
+                .as_ref()
+                .and_then(|r| r.terminal_id.as_deref())
+                .map(|t| t != terminal_id)
+                .unwrap_or(true),
+        "workspace_sessions.terminal_id must NOT be stamped to the heartbeat PTY id; \
+         got {ws_session:?} terminal_id matching {terminal_id}"
     );
-    assert_eq!(ws_session.status, "running",
-        "workspace_sessions.status must be 'running' post-spawn");
-    assert_eq!(ws_session.owner, "system",
-        "owner='system' so the renderer doesn't treat the session as user-driven");
 
-    // 2. The heartbeat row got its synchronous stamps:
-    //    - last_session_id = pinned uuid (we don't know it, but it should be non-empty)
-    //    - active_terminal_id = the v2 session id
+    // The heartbeat row got its synchronous stamps:
+    //  - last_session_id = pinned uuid
+    //  - active_terminal_id = the v2 session id
     let hb = AgentHeartbeat::get_by_name(&conn, workspace_id, "test-hb")
         .expect("query heartbeat row")
         .expect("heartbeat row should exist");
@@ -223,7 +243,7 @@ async fn wake_headless_v2_writes_workspace_sessions_row_and_heartbeat_fields() {
     assert_eq!(
         hb.active_terminal_id.as_deref(),
         Some(terminal_id.as_str()),
-        "heartbeat.active_terminal_id must point at the v2 session id"
+        "heartbeat.active_terminal_id must point at the heartbeat's own PTY"
     );
 
     drop(conn);

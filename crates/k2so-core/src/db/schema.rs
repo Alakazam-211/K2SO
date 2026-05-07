@@ -1253,6 +1253,17 @@ pub struct AgentHeartbeat {
     /// Replaces args-matching with explicit FK-style data — see
     /// migration 0036 + the heartbeat-active-session PRD.
     pub active_terminal_id: Option<String>,
+    /// 0.37.8 — when true, `heartbeat_launch::smart_launch` skips its
+    /// own three-branch cascade and calls
+    /// `workspace_msg::deliver_live(project_path, prompt)` instead, so
+    /// the WAKEUP.md prompt lands in the workspace's pinned chat
+    /// session (the same JSONL the chat tab is reading) rather than
+    /// the heartbeat's own saved session. The heartbeat's
+    /// `last_session_id` / `active_terminal_id` stay in the DB
+    /// untouched — they're just no longer targeted on new fires.
+    /// Un-checking the flag restores the original behavior with the
+    /// historical session intact. Default false. See migration 0043.
+    pub use_workspace_session: bool,
 }
 
 impl AgentHeartbeat {
@@ -1305,7 +1316,7 @@ impl AgentHeartbeat {
 
     /// Column list for SELECTs. Centralised so adding a new column means
     /// updating one constant + `from_row`, not five query strings.
-    const COLS: &'static str = "id, project_id, name, frequency, spec_json, wakeup_path, enabled, last_fired, last_session_id, archived_at, created_at, concurrency_policy, starting_deadline_secs, active_deadline_secs, in_flight_started_at, active_terminal_id";
+    const COLS: &'static str = "id, project_id, name, frequency, spec_json, wakeup_path, enabled, last_fired, last_session_id, archived_at, created_at, concurrency_policy, starting_deadline_secs, active_deadline_secs, in_flight_started_at, active_terminal_id, use_workspace_session";
 
     pub fn get_by_name(conn: &Connection, project_id: &str, name: &str) -> Result<Option<AgentHeartbeat>> {
         let sql = format!(
@@ -1692,7 +1703,25 @@ impl AgentHeartbeat {
             active_deadline_secs: row.get(13)?,
             in_flight_started_at: row.get(14)?,
             active_terminal_id: row.get(15)?,
+            use_workspace_session: row.get::<_, i64>(16)? == 1,
         })
+    }
+
+    /// 0.37.8 — flip the per-heartbeat opt-in to deliver WAKEUP.md
+    /// into the workspace's pinned chat session via
+    /// `workspace_msg::deliver_live`. See migration 0043 + the field
+    /// doc on `AgentHeartbeat::use_workspace_session`.
+    pub fn set_use_workspace_session(
+        conn: &Connection,
+        project_id: &str,
+        name: &str,
+        enabled: bool,
+    ) -> Result<usize> {
+        conn.execute(
+            "UPDATE workspace_heartbeats SET use_workspace_session = ?1 \
+             WHERE project_id = ?2 AND name = ?3",
+            params![enabled as i64, project_id, name],
+        )
     }
 }
 

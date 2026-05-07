@@ -122,6 +122,21 @@ pub fn spawn_wake_headless(
         k2so_core::agents::resolve_project_id(&conn, project_path)
     };
 
+    // 0.37.8 — heartbeat fires get their own per-heartbeat canonical
+    // key in `v2_session_map` so they don't collide with the chat tab's
+    // bare-`<project_id>` slot. Pre-fix, `spawn_agent_session_v2_blocking`'s
+    // idempotency check returned the chat tab's existing PTY for every
+    // heartbeat fire — every wakeup ended up dropped into the chat tab
+    // session and `workspace_heartbeats.active_terminal_id` was stamped
+    // to the chat tab's PTY id. Per-heartbeat keys keep the lanes
+    // separate; chat tab calls (heartbeat_name = None) keep the default.
+    let canonical_key_override = match (project_id.as_deref(), heartbeat_name) {
+        (Some(pid), Some(hb)) if !pid.is_empty() && !hb.is_empty() => {
+            Some(format!("{pid}:hb:{hb}"))
+        }
+        _ => None,
+    };
+
     let outcome = spawn_agent_session_v2_blocking(SpawnWorkspaceSessionRequest {
         agent_name: agent_name.to_string(),
         project_id: project_id.clone(),
@@ -130,6 +145,7 @@ pub fn spawn_wake_headless(
         args: Some(args),
         cols: 120,
         rows: 38,
+        canonical_key: canonical_key_override,
     })?;
 
     let terminal_id = outcome.session_id.to_string();
@@ -177,15 +193,20 @@ pub fn spawn_wake_headless(
         }
     }
 
-    // Mark the workspace_sessions row 'running' so the next scheduler
-    // tick skips this agent. Best-effort — the PTY is alive and will
-    // run regardless of the DB write.
-    let _ = k2so_core::agents::session::k2so_agents_lock(
-        project_path.to_string(),
-        agent_name.to_string(),
-        Some(terminal_id.clone()),
-        Some("system".to_string()),
-    );
+    // 0.37.8 — only chat-tab wakes (heartbeat_name = None) touch the
+    // workspace_sessions row. Heartbeat fires live in their own lane
+    // and must NOT clobber the chat tab's `active_terminal_id` /
+    // `terminal_id` / `session_id`. Pre-fix this lock call ran
+    // unconditionally and was the second contributor to the lane
+    // collapse (along with the canonical_key collision).
+    if heartbeat_name.is_none() {
+        let _ = k2so_core::agents::session::k2so_agents_lock(
+            project_path.to_string(),
+            agent_name.to_string(),
+            Some(terminal_id.clone()),
+            Some("system".to_string()),
+        );
+    }
 
     // Synchronous per-heartbeat session stamp. With --session-id
     // pinning, we know exactly what UUID claude will use — write to

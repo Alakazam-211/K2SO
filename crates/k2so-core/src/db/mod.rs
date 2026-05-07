@@ -378,6 +378,8 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
         ("0040_rename_agent_heartbeats", include_str!("../../drizzle_sql/0040_rename_agent_heartbeats.sql")),
         ("0041_activity_feed_workspace_keyed", include_str!("../../drizzle_sql/0041_activity_feed_workspace_keyed.sql")),
         ("0042_canonical_key_drop_agent_suffix", include_str!("../../drizzle_sql/0042_canonical_key_drop_agent_suffix.sql")),
+        ("0043_heartbeat_use_workspace_session", include_str!("../../drizzle_sql/0043_heartbeat_use_workspace_session.sql")),
+        ("0044_clear_ghost_heartbeat_active_terminals", include_str!("../../drizzle_sql/0044_clear_ghost_heartbeat_active_terminals.sql")),
     ];
 
     for (name, sql) in migrations {

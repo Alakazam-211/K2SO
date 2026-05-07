@@ -222,6 +222,25 @@ pub fn k2so_heartbeat_set_enabled(
         .map_err(|e| e.to_string())
 }
 
+/// 0.37.8 — flip the per-heartbeat opt-in to deliver WAKEUP.md into
+/// the workspace's pinned chat session. When enabled,
+/// `heartbeat_launch::smart_launch` skips the heartbeat's own
+/// cascade and routes through `workspace_msg::deliver_live` instead.
+/// See migration 0043.
+pub fn k2so_heartbeat_set_use_workspace_session(
+    project_path: String,
+    name: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let db = crate::db::shared();
+    let conn = db.lock();
+    let project_id = resolve_project_id(&conn, &project_path)
+        .ok_or_else(|| format!("Project not found: {}", project_path))?;
+    AgentHeartbeat::set_use_workspace_session(&conn, &project_id, &name, enabled)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// Replace a heartbeat row's `frequency` + `spec_json` in place. Used
 /// when the user edits the schedule via the Settings UI.
 pub fn k2so_heartbeat_edit(
