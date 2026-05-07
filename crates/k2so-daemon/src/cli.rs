@@ -518,6 +518,28 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             }
         }
 
+        // 0.37.5: resolve the resume-chat launch args for a thin
+        // client opening / refreshing a workspace's pinned chat tab.
+        // Returns the canonical `claude` command + args, either:
+        //   - `claude --resume <id>` when workspace_sessions.session_id
+        //     points at an on-disk JSONL (continues the existing
+        //     conversation), or
+        //   - `claude --session-id <new>` after pre-allocating a fresh
+        //     UUID and persisting it to SQL (next refresh resumes).
+        //
+        // Daemon-first: every thin client (Tauri pinned tab, mobile
+        // companion, future MCP, CLI) hits this route. No client
+        // duplicates the SQL lookup + JSONL existence check + fresh
+        // pre-allocate logic — it lives in `k2so_core::agents::resume_chat`
+        // and is callable purely.
+        "/cli/workspace/resume-chat-args" => match need_project(params) {
+            Ok(p) => match k2so_core::agents::resume_chat::resolve_resume_chat_args(&p) {
+                Ok(out) => CliResponse::ok_json(out.to_json().to_string()),
+                Err(e) => CliResponse::bad_request(e),
+            },
+            Err(r) => r,
+        },
+
         // 0.37.4: read the workspace's primary-agent display name.
         // Reads `.k2so/agent/AGENT.md` frontmatter — first
         // `display_name:` (the user-editable label), then `name:`

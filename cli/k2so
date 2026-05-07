@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.37.3"
+K2SO_CLI_VERSION="0.37.4"
 
 set -euo pipefail
 
@@ -1532,6 +1532,33 @@ cmd_agent_complete() {
 
 cmd_workspace_cleanup() {
     cli_request "/cli/workspace/cleanup"
+}
+
+# 0.37.5 — resolve resume-chat launch args for a workspace's pinned
+# chat tab. Daemon-first: every thin client (Tauri pinned tab,
+# companion, MCP, this CLI) hits the same daemon route. Returns JSON
+# `{command, args, cwd, resumeSession, resumedExisting}`.
+#
+# When `workspace_sessions.session_id` points at an on-disk JSONL,
+# returns `--resume <id>` (continues the conversation). Otherwise
+# pre-allocates a fresh UUID, persists it to SQL, and returns
+# `--session-id <new>`.
+#
+#   k2so workspace resume-chat-args <workspace>
+cmd_workspace_resume_chat_args() {
+    local target="${1:-}"
+    [[ -z "$target" ]] && { echo "Usage: k2so workspace resume-chat-args <workspace>" >&2; exit 1; }
+    local resolved_path
+    resolved_path=$(cli_request "/cli/workspace/resolve" "q=$(urlencode "$target")" 2>/dev/null \
+        | python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("path",""))
+except Exception:
+    pass' 2>/dev/null)
+    if [ -z "$resolved_path" ]; then
+        resolved_path="$target"
+    fi
+    cli_request "/cli/workspace/resume-chat-args" "project=$(urlencode "$resolved_path")"
 }
 
 # 0.37.4 Phase B: set a v2 session's authoritative label.
@@ -3132,7 +3159,7 @@ cmd_update() {
 
     # Extract the version from the remote script
     local remote_version
-    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.37.3"//')
+    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.37.4"//')
     if [ -z "$remote_version" ]; then
         echo "Error: Could not parse remote version." >&2
         exit 1
@@ -3320,14 +3347,15 @@ case "${1:-help}" in
         ;;
     workspace)
         case "${2:-}" in
-            create)          shift 2; cmd_workspace_create "$@" ;;
-            open)            shift 2; cmd_workspace_open "$@" ;;
-            remove)          shift 2; cmd_workspace_remove "$@" ;;
-            preview)         shift 2; cmd_workspace_preview "$@" ;;
-            cleanup)         cmd_workspace_cleanup ;;
-            agent-name)      shift 2; cmd_workspace_get_agent_display_name "$@" ;;
-            set-agent-name)  shift 2; cmd_workspace_set_agent_display_name "$@" ;;
-            *)               echo "Usage: k2so workspace <create|open|remove|preview|cleanup|agent-name|set-agent-name> [args]" >&2; exit 1 ;;
+            create)            shift 2; cmd_workspace_create "$@" ;;
+            open)              shift 2; cmd_workspace_open "$@" ;;
+            remove)            shift 2; cmd_workspace_remove "$@" ;;
+            preview)           shift 2; cmd_workspace_preview "$@" ;;
+            cleanup)           cmd_workspace_cleanup ;;
+            agent-name)        shift 2; cmd_workspace_get_agent_display_name "$@" ;;
+            set-agent-name)    shift 2; cmd_workspace_set_agent_display_name "$@" ;;
+            resume-chat-args)  shift 2; cmd_workspace_resume_chat_args "$@" ;;
+            *)                 echo "Usage: k2so workspace <create|open|remove|preview|cleanup|agent-name|set-agent-name|resume-chat-args> [args]" >&2; exit 1 ;;
         esac
         ;;
     onboarding)
