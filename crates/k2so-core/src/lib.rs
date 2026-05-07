@@ -42,6 +42,7 @@ pub mod llm;
 pub mod perf;
 pub mod project_config;
 pub mod push;
+pub mod safe_delete;
 pub mod scheduler;
 pub mod terminal;
 pub mod wake;

@@ -178,8 +178,9 @@ fn migrate_primary_agent(
     let work_dst = dst_root.join("work");
     if work_src.exists() {
         outcome.work_items_merged += merge_work_dirs(&work_src, &work_dst, outcome)?;
-        // Remove the now-empty (or post-merge) work dir.
-        let _ = fs::remove_dir_all(&work_src);
+        // 0.37.6: trash the now-empty (or post-merge) work dir
+        // so any unmerged residue is recoverable.
+        let _ = crate::safe_delete::trash(&work_src);
     }
 
     // 3c: heartbeats/<sched>/* → .k2so/heartbeats/<sched>/*
@@ -187,14 +188,20 @@ fn migrate_primary_agent(
     let hb_dst = dst_root.join("heartbeats");
     if hb_src.exists() {
         merge_heartbeats(&hb_src, &hb_dst)?;
-        let _ = fs::remove_dir_all(&hb_src);
+        // 0.37.6: trash post-merge — heartbeat content (WAKEUP.md
+        // edits) was just copied to dst, but sending the source to
+        // Trash gives recoverability if the merge missed something.
+        let _ = crate::safe_delete::trash(&hb_src);
     }
 
     // 3d: delete compiled outputs that regen.
+    // 0.37.6: trash, not permanent. CLAUDE.md and SKILL.md may
+    // contain user edits the regen pipeline might not perfectly
+    // preserve — keep them recoverable.
     for f in ["CLAUDE.md", "SKILL.md"] {
         let p = src.join(f);
         if p.exists() {
-            let _ = fs::remove_file(&p);
+            let _ = crate::safe_delete::trash(&p);
         }
     }
 
@@ -336,12 +343,14 @@ fn migrate_templates(
         }
 
         // Templates have no inbox — drop work/, CLAUDE.md, SKILL.md.
-        let _ = fs::remove_dir_all(src.join("work"));
-        let _ = fs::remove_file(src.join("CLAUDE.md"));
-        let _ = fs::remove_file(src.join("SKILL.md"));
+        // 0.37.6: trash, not permanent. Same reasoning as the
+        // primary-agent migration above.
+        let _ = crate::safe_delete::trash(src.join("work"));
+        let _ = crate::safe_delete::trash(src.join("CLAUDE.md"));
+        let _ = crate::safe_delete::trash(src.join("SKILL.md"));
 
         // Drop heartbeats/ on templates too — they don't run.
-        let _ = fs::remove_dir_all(src.join("heartbeats"));
+        let _ = crate::safe_delete::trash(src.join("heartbeats"));
 
         // Anything else under the template dir that we don't
         // recognize → archive to legacy under the template name.

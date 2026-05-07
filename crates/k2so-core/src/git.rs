@@ -441,39 +441,51 @@ pub fn remove_worktree(
                 .current_dir(project_path)
                 .output();
 
-            // Move to Trash in background thread (recoverable)
+            // Move to Trash in background thread (recoverable).
+            // 0.37.6: route through the centralized safe_delete
+            // helper so every trashing call site goes through one
+            // chokepoint we can audit + tweak.
             let trash_path = temp_path.to_path_buf();
             std::thread::spawn(move || {
-                let _ = trash::delete(&trash_path);
+                let _ = crate::safe_delete::trash(&trash_path);
             });
 
             return Ok(());
         }
     }
 
-    // Fallback: try git worktree remove directly
-    let mut args = vec!["worktree", "remove"];
-    if force {
-        args.push("--force");
-    }
-    args.push(worktree_path);
-
-    let output = Command::new("git")
-        .args(&args)
+    // **0.37.6:** the rename-to-trash fast path above failed (e.g.
+    // cross-volume, permission, lock held). Pre-0.37.6 we fell
+    // through to `git worktree remove` here — which **permanently
+    // deletes** the worktree directory with no recycle bin. That's
+    // the path that destroyed a user's bouncy-blobs game in 0.37.5
+    // and is exactly what the user directive forbids: "deletion
+    // systems should only be sending things to the recycle bin.
+    // Never full-on deletion."
+    //
+    // New flow: skip `git worktree remove` entirely. Send the
+    // worktree directory to the OS recycle bin via the safe-delete
+    // helper, then `git worktree prune` to clean up the dangling
+    // ref. Recoverable: user can drag the worktree back from Trash
+    // if the deletion was a mistake.
+    //
+    // If the trash itself fails (no trash service / permission),
+    // we surface the error and STOP — better to leave the worktree
+    // in place and let the user investigate than to permanently
+    // destroy their work.
+    let _ = Command::new("git")
+        .args(["worktree", "prune"])
         .current_dir(project_path)
-        .output()
-        .map_err(|e| format!("Failed to run git worktree remove: {}", e))?;
-
-    if !output.status.success() {
-        // Last resort: trash directly and prune
-        if Path::new(worktree_path).exists() {
-            let _ = trash::delete(worktree_path);
-        }
-        let _ = Command::new("git")
-            .args(["worktree", "prune"])
-            .current_dir(project_path)
-            .output();
+        .output();
+    if Path::new(worktree_path).exists() {
+        crate::safe_delete::trash(worktree_path).map_err(|e| {
+            format!(
+                "worktree trash failed: {} (worktree NOT removed; the dir is intact at {})",
+                e, worktree_path
+            )
+        })?;
     }
+    let _ = force; // explicitly unused in trash path; kept on signature for back-compat
 
     Ok(())
 }

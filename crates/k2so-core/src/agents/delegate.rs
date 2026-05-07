@@ -195,7 +195,13 @@ pub fn k2so_agents_delegate(
     let updated = add_worktree_to_frontmatter(&updated, &worktree.path, &worktree.branch);
     let active_file = active_dir.join(&item.filename);
     atomic_write(&active_file, &updated)?;
-    fs::remove_file(&source).map_err(|e| format!("Failed to remove source: {}", e))?;
+    // **0.37.6:** route to recycle bin. The work item content is
+    // already preserved in `active_file` via the atomic_write
+    // above, but the SOURCE was a user-authored task description —
+    // sending to Trash gives the user a recovery path if they want
+    // to undelegate.
+    crate::safe_delete::trash(&source)
+        .map_err(|e| format!("Failed to trash source: {}", e))?;
 
     // 3. Generate a task-specific CLAUDE.md and write it to the
     //    worktree root.

@@ -266,7 +266,14 @@ pub fn adopt_harness_as_project_md(
     // + re-import the same body via its existing migration
     // helpers. The archive we just wrote is the single source of
     // truth for the original content.
-    fs::remove_file(source_path).map_err(|e| format!("remove adopted source: {e}"))?;
+    //
+    // **0.37.6:** route to recycle bin — `source_path` is the
+    // user's original CLAUDE.md / GEMINI.md / etc. We've already
+    // written an archive copy to .k2so/migration/ but Trash gives
+    // the user a second recovery path if something went wrong with
+    // the archive write.
+    crate::safe_delete::trash(source_path)
+        .map_err(|e| format!("trash adopted source: {e}"))?;
 
     Ok(AdoptionOutcome {
         archive_path: archive_path.display().to_string(),

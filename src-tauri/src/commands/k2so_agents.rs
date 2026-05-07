@@ -3996,11 +3996,15 @@ pub fn harvest_per_agent_claude_md_files(project_path: &str) {
                     // the orphan would otherwise get skipped on every future
                     // boot, leaving a pre-0.32.7 CLAUDE.md duplicating the
                     // symlinked one.
-                    if let Err(e) = fs::remove_file(&claude_md) {
+                    //
+                    // **0.37.6:** route to Trash. The user's original
+                    // CLAUDE.md is already preserved at archive_path,
+                    // but Trash gives a second recovery path.
+                    if let Err(e) = k2so_core::safe_delete::trash(&claude_md) {
                         log_if_err::<(), _>(
-                            "harvest remove original",
+                            "harvest trash original",
                             &claude_md,
-                            Err::<(), _>(e),
+                            Err::<(), _>(format!("{e}")),
                         );
                         any_failure = true;
                     }
@@ -4500,11 +4504,23 @@ pub fn teardown_workspace_harness_files(
                         }),
                     },
                     None => {
-                        log_if_err("restore_original remove symlink", &path, fs::remove_file(&path));
+                        // **0.37.6:** trash-preferred with fallback.
+                        // K2SO scaffolded this file (no archive of
+                        // user content), so if trash fails (CI
+                        // without Finder, etc.) the fallback to
+                        // permanent delete is acceptable — the
+                        // worst case is K2SO re-scaffolds on next
+                        // setup. Use plain `trash()` would block
+                        // the teardown on Trash failures.
+                        log_if_err(
+                            "restore_original trash symlink",
+                            &path,
+                            k2so_core::safe_delete::trash_or_remove(&path),
+                        );
                         results.push(TeardownResult {
                             action: "removed".to_string(),
                             path: rel.to_string(),
-                            note: "No prior archive — K2SO created this file fresh; removed cleanly.".to_string(),
+                            note: "No prior archive — K2SO created this file fresh; sent to Trash.".to_string(),
                         });
                     }
                 }
@@ -4543,12 +4559,19 @@ pub fn teardown_workspace_harness_files(
             }
         } else if aider_path.exists() {
             // K2SO created it fresh with only the SKILL.md read entry.
-            // Remove it cleanly.
-            log_if_err("teardown remove aider.conf.yml", &aider_path, fs::remove_file(&aider_path));
+            // **0.37.6:** trash-preferred with fallback. Same
+            // reasoning as the symlink path above — K2SO-scaffolded
+            // file, fallback to permanent delete acceptable on
+            // trash failure (CI without Finder).
+            log_if_err(
+                "teardown trash aider.conf.yml",
+                &aider_path,
+                k2so_core::safe_delete::trash_or_remove(&aider_path),
+            );
             results.push(TeardownResult {
                 action: "removed".to_string(),
                 path: ".aider.conf.yml".to_string(),
-                note: "No prior archive — K2SO scaffolded this file fresh; removed cleanly.".to_string(),
+                note: "No prior archive — K2SO scaffolded this file fresh; sent to Trash.".to_string(),
             });
         }
     }

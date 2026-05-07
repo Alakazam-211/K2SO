@@ -107,7 +107,12 @@ pub fn skill_layers_delete(tier: String, filename: String) -> Result<(), String>
         return Err(format!("Layer '{}' not found", filename));
     }
 
-    fs::remove_file(&path).map_err(|e| format!("Failed to delete layer: {}", e))
+    // **0.37.6:** route to Trash. Skill layers are user-authored
+    // content (workspace-specific instructions the user added on
+    // top of K2SO's defaults) — recoverable from Trash on accidental
+    // delete or change-of-mind.
+    k2so_core::safe_delete::trash(&path)
+        .map_err(|e| format!("Failed to delete layer: {}", e))
 }
 
 /// Get the full content of a layer file.

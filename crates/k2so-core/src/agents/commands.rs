@@ -313,7 +313,13 @@ pub fn delete_inner(project_path: &str, name: &str, force: bool) -> Result<(), S
         }
     }
 
-    fs::remove_dir_all(&dir).map_err(|e| format!("Failed to delete agent: {}", e))?;
+    // **0.37.6:** route to recycle bin instead of permanent unlink.
+    // Agent dir contains AGENT.md (user-editable persona file) +
+    // potentially user-authored work items, heartbeat config,
+    // skill content. Recoverable from Trash if the user changes
+    // their mind.
+    crate::safe_delete::trash(&dir)
+        .map_err(|e| format!("Failed to delete agent: {}", e))?;
     Ok(())
 }
 
