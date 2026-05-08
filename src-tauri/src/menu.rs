@@ -44,6 +44,19 @@ pub fn create_menu(handle: &AppHandle) -> Result<Menu<tauri::Wry>, tauri::Error>
     )?;
 
     // Edit submenu
+    //
+    // 0.37.9 — submenu title MUST be literally "Edit" so macOS
+    // auto-injects the native `Start Dictation…` and `Emoji &
+    // Symbols` items at runtime. AppKit keys this auto-injection
+    // on the localized title string. We deliberately DO NOT add a
+    // custom `MenuItem::with_id("start-dictation", ...)` here —
+    // doing so suppresses the OS auto-inject and Fn-Fn falls back
+    // to firing `startDictation:` against a responder that has no
+    // such selector → silent failure. (The original 0.37.9 attempt
+    // shipped that custom item; agent research traced the
+    // suppression bug to it. See:
+    // https://github.com/tauri-apps/muda/issues/83
+    // https://github.com/electron/electron/issues/8283 )
     let edit_menu = Submenu::with_items(
         handle,
         "Edit",

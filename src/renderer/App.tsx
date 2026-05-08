@@ -453,6 +453,14 @@ export default function App(): React.JSX.Element {
           })
         }
       }).then((fn) => unlisteners.push(fn))
+      // 0.37.9 — there's no `menu:start-dictation` listener.
+      // The Edit submenu's title "Edit" makes macOS auto-inject the
+      // native `Start Dictation…` item itself (bound to the
+      // `startDictation:` selector); adding our own custom item
+      // would suppress that auto-inject. The system shortcut
+      // (Fn-Fn or Globe) fires `startDictation:` against the first
+      // responder, which is the focused shadow textarea inside the
+      // active terminal pane. See PRD: .k2so/prds/voice-dictation.md.
       // Zoom events from menu — use native WKWebView zoom via Tauri API
       listen('app:zoom-in', () => {
         import('@tauri-apps/api/webview').then(m => m.getCurrentWebview().setZoom(

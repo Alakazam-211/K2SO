@@ -2274,13 +2274,20 @@ function AgentDisplayNameField({
   }
 
   const handleSave = async (): Promise<void> => {
-    const err = validate(draft)
+    // 0.37.9 — lowercase at save time, not on every keystroke. The
+    // onChange handler used to lowercase eagerly, but that mutated
+    // the DOM input value mid-composition during Apple Dictation,
+    // hanging the dictation engagement. Lowercasing once on commit
+    // keeps the validation contract intact and dictation working.
+    const candidate = draft.toLowerCase()
+    const err = validate(candidate)
     if (err) { setError(err); return }
     setError(null)
     setBusy(true)
     try {
-      await invoke('k2so_workspace_set_agent_display_name', { projectPath, name: draft })
-      setSaved(draft)
+      await invoke('k2so_workspace_set_agent_display_name', { projectPath, name: candidate })
+      setDraft(candidate)
+      setSaved(candidate)
       setFlash(true)
       setTimeout(() => setFlash(false), 1200)
     } catch (e) {
@@ -2300,9 +2307,21 @@ function AgentDisplayNameField({
           <input
             type="text"
             value={draft}
-            onChange={(e) => { setDraft(e.target.value.toLowerCase()); setError(null) }}
+            // 0.37.9 — DON'T transform the value on every keystroke.
+            // Pre-fix this read `e.target.value.toLowerCase()`, which
+            // mutates the DOM input's value mid-composition during
+            // Apple Dictation. Dictation manages the input value
+            // internally during the composition phase; if we mutate
+            // it underneath, dictation's state desyncs and the
+            // engagement hangs/aborts. Lowercase enforcement now
+            // happens at save time via `validate()` instead.
+            onChange={(e) => { setDraft(e.target.value); setError(null) }}
             disabled={!ready || busy}
             placeholder="agent"
+            spellCheck={false}
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
             onKeyDown={(e) => { if (e.key === 'Enter' && dirty && !busy) handleSave() }}
             className="w-full px-2 py-1 text-xs bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)] disabled:opacity-60"
           />

@@ -25,3 +25,4 @@ pub mod daemon;
 pub mod kessel;
 pub mod kessel_term;
 pub mod skill_layers;
+pub mod permissions;

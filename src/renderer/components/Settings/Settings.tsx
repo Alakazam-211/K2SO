@@ -18,6 +18,8 @@ import { AgentSkillsSection, AGENT_SKILLS_MANIFEST } from './sections/AgentSkill
 // stays exported from HeartbeatsSection so searches still find it.
 import { HEARTBEATS_MANIFEST } from './sections/HeartbeatsSection'
 import { WakeSchedulerSection, WAKE_SCHEDULER_MANIFEST } from './sections/WakeSchedulerSection'
+import { PermissionsSection, PERMISSIONS_MANIFEST } from './sections/PermissionsSection'
+import { DictationLabSection, DICTATION_LAB_MANIFEST } from './sections/DictationLabSection'
 
 // ── Section nav items ────────────────────────────────────────────────
 const SECTIONS: { id: SettingsSection; label: string; agenticOnly?: boolean }[] = [
@@ -32,6 +34,14 @@ const SECTIONS: { id: SettingsSection; label: string; agenticOnly?: boolean }[] 
   { id: 'wake-scheduler', label: 'Heartbeats', agenticOnly: true },
   { id: 'keybindings', label: 'Keybindings' },
   { id: 'timer', label: 'Timer' },
+  { id: 'permissions', label: 'Permissions' },
+  // 0.37.9 — DEV-only Dictation Lab. Filtered out at render time
+  // when `import.meta.env.DEV` is false so production users never
+  // see it. Lets us isolate which input config makes Apple
+  // Dictation engage cleanly vs. hang.
+  ...(import.meta.env.DEV
+    ? ([{ id: 'dictation-lab', label: 'Dictation Lab (dev)' }] as const)
+    : []),
 ]
 
 // ── Main Settings component ──────────────────────────────────────────
@@ -63,6 +73,8 @@ export default function Settings(): React.JSX.Element {
       ...TIMER_MANIFEST,
       ...COMPANION_MANIFEST,
       ...WAKE_SCHEDULER_MANIFEST,
+      ...PERMISSIONS_MANIFEST,
+      ...DICTATION_LAB_MANIFEST,
     ]
     if (agenticEnabled) return combined
     return combined.filter(
@@ -160,7 +172,15 @@ export default function Settings(): React.JSX.Element {
       </div>
 
       {/* Content area */}
-      <div className={`flex-1 min-h-0 relative ${activeSection === 'projects' ? 'overflow-hidden p-0' : 'overflow-y-auto p-6'}`}>
+      <div
+        className={`flex-1 min-h-0 relative ${
+          activeSection === 'projects'
+            ? 'overflow-hidden p-0'
+            : activeSection === 'dictation-lab'
+              ? 'overflow-hidden p-6'
+              : 'overflow-y-auto p-6'
+        }`}
+      >
         {activeSection === 'general' && <GeneralSection />}
         {activeSection === 'terminal' && <TerminalSection />}
         {activeSection === 'code-editor' && <CodeEditorSettingsSection />}
@@ -194,6 +214,16 @@ export default function Settings(): React.JSX.Element {
         {activeSection === 'wake-scheduler' && (
           <SectionErrorBoundary>
             <WakeSchedulerSection />
+          </SectionErrorBoundary>
+        )}
+        {activeSection === 'permissions' && (
+          <SectionErrorBoundary>
+            <PermissionsSection />
+          </SectionErrorBoundary>
+        )}
+        {activeSection === 'dictation-lab' && import.meta.env.DEV && (
+          <SectionErrorBoundary>
+            <DictationLabSection />
           </SectionErrorBoundary>
         )}
       </div>

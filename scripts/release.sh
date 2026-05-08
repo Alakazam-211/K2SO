@@ -125,19 +125,31 @@ echo "  k2so-daemon copied into K2SO.app/Contents/MacOS/"
 # ── Step 3: Sign with hardened runtime ──
 echo ""
 echo "Step 3: Signing with hardened runtime..."
+# 0.37.9: pass --entitlements so codesign attaches our requested
+# capabilities (audio-input for Apple Dictation, JIT/library
+# validation relaxations for wry/WKWebView). Without this, the
+# hardened runtime denies audio access and Fn-Fn silently fails.
+ENTITLEMENTS="${PROJECT_DIR}/src-tauri/entitlements.plist"
+if [ ! -f "$ENTITLEMENTS" ]; then
+    echo "  FATAL: entitlements file not found at $ENTITLEMENTS" >&2
+    exit 1
+fi
 # Inner binaries first (Apple requires sub-binaries signed before the
 # outer bundle, otherwise codesign rejects with 'resource fork … not
 # allowed').
 codesign --force --options runtime --timestamp \
+    --entitlements "$ENTITLEMENTS" \
     --sign "$SIGNING_IDENTITY" \
     "target/release/bundle/macos/K2SO.app/Contents/MacOS/k2so"
 codesign --force --options runtime --timestamp \
+    --entitlements "$ENTITLEMENTS" \
     --sign "$SIGNING_IDENTITY" \
     "target/release/bundle/macos/K2SO.app/Contents/MacOS/k2so-daemon"
 codesign --force --options runtime --timestamp \
+    --entitlements "$ENTITLEMENTS" \
     --sign "$SIGNING_IDENTITY" \
     "target/release/bundle/macos/K2SO.app"
-echo "  Signed (main + daemon + bundle)."
+echo "  Signed (main + daemon + bundle) with entitlements."
 
 # ── Step 4: Notarize app via ZIP ──
 echo ""

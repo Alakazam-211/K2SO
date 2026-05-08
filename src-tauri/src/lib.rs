@@ -1093,6 +1093,13 @@ pub fn run() {
             commands::filesystem::fs_create_entry,
             commands::filesystem::fs_duplicate,
             commands::filesystem::open_external,
+            // 0.37.9 — macOS permissions surface for Settings UI
+            commands::permissions::permissions_get_status,
+            commands::permissions::permissions_request_full_disk_access,
+            commands::permissions::permissions_request_accessibility,
+            commands::permissions::permissions_request_microphone,
+            commands::permissions::permissions_request_apple_events,
+            commands::permissions::permissions_request_local_network,
             // Filesystem watcher
             watcher::fs_watch_dir,
             watcher::fs_unwatch_dir,

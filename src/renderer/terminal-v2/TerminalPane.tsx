@@ -302,6 +302,29 @@ type Phase =
   | { kind: 'exited'; sessionId: string; exitCode: number | null }
   | { kind: 'error'; message: string }
 
+// 0.37.9 — Fallback shadow textarea style for the brief window
+// before snapshot/cellMetrics are available. Off-screen-far-left
+// matches xterm.js's default helper-textarea CSS — focusable but
+// not visible, no flash on first render. Once snapshot lands, the
+// component computes a cursor-positioned style instead (via the
+// `shadowInputStyle` memo inside the component).
+const SHADOW_INPUT_FALLBACK_STYLE: React.CSSProperties = {
+  position: 'absolute',
+  left: '-9999em',
+  top: 0,
+  width: 0,
+  height: 0,
+  opacity: 0,
+  zIndex: -5,
+  border: 0,
+  outline: 'none',
+  padding: 0,
+  margin: 0,
+  resize: 'none',
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+}
+
 export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   const config = useKesselConfig()
   const {
@@ -334,6 +357,26 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   )
 
   const containerRef = useRef<HTMLDivElement>(null)
+  // 0.37.9 — invisible focusable <textarea> sibling to the visible
+  // grid. macOS Apple Dictation only fires when the focused element
+  // is one AppKit recognizes as a text input (NSTextField / NSTextView
+  // or a WebView <textarea>/<input>/contenteditable). The container
+  // <div tabIndex={0}> isn't one of those, so Fn-Fn silently does
+  // nothing. A real <textarea> overlaid invisibly on the pane gets
+  // dictation working with no visible UI change. See PRD:
+  // .k2so/prds/voice-dictation.md.
+  const shadowInputRef = useRef<HTMLTextAreaElement>(null)
+  // Tracks IME / dictation composition (Japanese/Chinese/Korean
+  // candidate window, accent picker, Apple Dictation). While
+  // composing, onKey + onShadowInput skip — compositionend
+  // commits the final string in one sendInput call.
+  const composingRef = useRef(false)
+  // Visible transcript shown at the cursor while dictation/IME is
+  // active. xterm.js calls this their `_compositionView`. Updates
+  // on compositionupdate so the user sees words flow in as they
+  // speak; cleared on compositionend (the final text is sent to
+  // the PTY in one shot and renders normally through the grid).
+  const [compositionText, setCompositionText] = useState('')
   const wsRef = useRef<WebSocket | null>(null)
   const isTabVisible = useIsTabVisible()
 
@@ -955,8 +998,11 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   }, [snapshot, perfLog])
 
   // ── Focus tracking ────────────────────────────────────────────
+  // 0.37.9 — focus tracking moved to the shadow input. Visible
+  // "this pane is focused" state (border highlights, etc.) keys on
+  // shadow input focus, since that's where keystrokes actually land.
   useEffect(() => {
-    const el = containerRef.current
+    const el = shadowInputRef.current
     if (!el) return
     const on = () => setIsFocused(true)
     const off = () => setIsFocused(false)
@@ -968,32 +1014,35 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     }
   }, [])
 
-  // Auto-focus when tab becomes visible.
+  // Auto-focus when tab becomes visible — focus the shadow input
+  // so dictation/typed input both work without an extra click.
   useEffect(() => {
     if (!isTabVisible) return
-    const el = containerRef.current
+    const el = shadowInputRef.current
     if (!el) return
     const raf = requestAnimationFrame(() => el.focus())
     return () => cancelAnimationFrame(raf)
   }, [isTabVisible])
 
   // Re-focus terminal when the OS window regains focus (e.g.,
-  // switching back from another app). Only re-focuses if THIS
-  // container held focus before the window blur — prevents
-  // stealing focus from an input/textarea that happens to be
-  // visible. Mirrors AlacrittyTerminalView.tsx's pattern.
+  // switching back from another app). Only re-focuses if the
+  // shadow input held focus before the window blur — prevents
+  // stealing focus from a sidebar input the user clicked into.
+  // Mirrors AlacrittyTerminalView.tsx's pattern.
   useEffect(() => {
+    const shadow = shadowInputRef.current
     const container = containerRef.current
-    if (!container) return
+    if (!shadow || !container) return
     let wasFocused = false
     const onBlur = () => {
       wasFocused =
+        document.activeElement === shadow ||
         document.activeElement === container ||
         container.contains(document.activeElement)
     }
     const onFocus = () => {
       if (!wasFocused) return
-      requestAnimationFrame(() => container.focus())
+      requestAnimationFrame(() => shadow.focus())
     }
     window.addEventListener('blur', onBlur)
     window.addEventListener('focus', onFocus)
@@ -1032,17 +1081,29 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   }, [])
 
   // ── Keyboard input ────────────────────────────────────────────
+  // 0.37.9 — handlers attach to the shadow <textarea> instead of the
+  // container <div>. Same key→escape sequence pipeline; the textarea
+  // is where AppKit looks for a text input target (so Fn-Fn
+  // Dictation engages here), while the visible grid stays
+  // pointer-events-driven below for selection + link hover. See PRD:
+  // .k2so/prds/voice-dictation.md.
   useEffect(() => {
     if (phase.kind !== 'ready') return
-    const el = containerRef.current
+    const el = shadowInputRef.current
     if (!el) return
 
     const onKey = (e: KeyboardEvent) => {
+      // Don't intercept keystrokes mid-IME composition. The textarea
+      // absorbs them; compositionend commits the final string in one
+      // sendInput call.
+      if (composingRef.current) return
       const natural = naturalTextEditingSequence(e)
       if (natural !== null) {
         e.preventDefault()
         setViewportOffset(0)
         sendInput(natural)
+        // Clear so the textarea never accumulates.
+        if (shadowInputRef.current) shadowInputRef.current.value = ''
         return
       }
       const seq = keyEventToSequence(e, 0)
@@ -1050,6 +1111,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       e.preventDefault()
       setViewportOffset(0)
       sendInput(seq)
+      if (shadowInputRef.current) shadowInputRef.current.value = ''
     }
     const onPaste = (e: ClipboardEvent) => {
       const text = e.clipboardData?.getData('text') ?? ''
@@ -1072,14 +1134,80 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
         .catch(() => {
           if (text) sendInput(text)
         })
+      // Always clear; preventDefault blocks the browser's own insert,
+      // but onInput fires after paste — clearing here keeps the
+      // textarea empty so the input handler's `text.length === 0`
+      // guard short-circuits cleanly.
+      if (shadowInputRef.current) shadowInputRef.current.value = ''
+    }
+
+    // Apple Dictation, IME final commits, and any non-keystroke text
+    // delivery (drag-drop into textarea, accessibility text input)
+    // all fire `input`. `keydown` already handled normal keystrokes
+    // above with preventDefault, so the textarea was never given the
+    // chance to insert their characters. What's left here is dictated
+    // / IME-committed text only.
+    const onInput = () => {
+      if (composingRef.current) return
+      const text = el.value
+      if (text.length === 0) return
+      setViewportOffset(0)
+      sendInput(text)
+      el.value = ''
+    }
+
+    // 0.37.9 — composition handling matches xterm.js's strategy:
+    // do NOT write to the PTY during compositionupdate. Apple
+    // Dictation, IME candidate windows, and accent pickers all
+    // deliver progressive best-guesses via compositionupdate that
+    // get autocorrected at compositionend. Streaming with
+    // backspace+retype during update events is what every
+    // WebView-based terminal avoids — it causes lag spikes on
+    // dictation engage (AppKit's rect query stalls if updates fire
+    // while it's polling), and it interacts badly with TUI apps
+    // that interpret \x7f differently.
+    //
+    // We commit only at compositionend. Future enhancement: render
+    // a visible preview overlay at the cursor (xterm.js's
+    // `_compositionView`) so the user sees recognized text as they
+    // speak. The text doesn't reach the PTY until they stop, but
+    // they get visual feedback in the meantime.
+    const onComposeStart = () => {
+      composingRef.current = true
+      setCompositionText('')
+    }
+    // Update the visible composition overlay as Apple Dictation /
+    // IME refines its best-guess transcript. The text doesn't go to
+    // the PTY here — the user just SEES it streaming at the cursor.
+    // xterm.js's `_compositionView` does the same thing.
+    const onComposeUpdate = (e: CompositionEvent) => {
+      setCompositionText(e.data ?? '')
+    }
+    const onComposeEnd = (e: CompositionEvent) => {
+      composingRef.current = false
+      setCompositionText('')
+      const committed = e.data ?? ''
+      if (committed) {
+        setViewportOffset(0)
+        sendInput(committed)
+      }
+      el.value = ''
     }
 
     el.addEventListener('keydown', onKey)
     el.addEventListener('paste', onPaste)
+    el.addEventListener('input', onInput)
+    el.addEventListener('compositionstart', onComposeStart)
+    el.addEventListener('compositionupdate', onComposeUpdate)
+    el.addEventListener('compositionend', onComposeEnd)
     el.focus()
     return () => {
       el.removeEventListener('keydown', onKey)
       el.removeEventListener('paste', onPaste)
+      el.removeEventListener('input', onInput)
+      el.removeEventListener('compositionstart', onComposeStart)
+      el.removeEventListener('compositionupdate', onComposeUpdate)
+      el.removeEventListener('compositionend', onComposeEnd)
     }
   }, [phase.kind, sendInput])
 
@@ -1466,6 +1594,56 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     [config.colors.background],
   )
 
+  // 0.37.9 — Cursor-following shadow textarea position with
+  // freeze-during-composition. Mirrors xterm.js's `_syncTextArea`:
+  // when not composing, position the textarea AT the visible
+  // cursor cell (1 cell wide, 1 row tall). AppKit's
+  // `firstRectForCharacterRange:` query then returns the cursor's
+  // on-screen rect, so the dictation indicator anchors there.
+  // While composing, hold the prior style so AppKit doesn't see
+  // the rect move mid-engagement (xterm.js uses the same guard).
+  const shadowInputStyleStableRef = useRef<React.CSSProperties | null>(null)
+  const shadowInputStyle = useMemo<React.CSSProperties>(() => {
+    if (composingRef.current && shadowInputStyleStableRef.current) {
+      return shadowInputStyleStableRef.current
+    }
+    if (snapshot && cellMetrics.width > 0 && cellMetrics.height > 0) {
+      const next: React.CSSProperties = {
+        position: 'absolute',
+        left: `${4 + cellMetrics.width * snapshot.cursor.col}px`,
+        top: `${
+          4 + cellMetrics.height * (snapshot.cursor.row + viewportOffset)
+        }px`,
+        width: `${cellMetrics.width}px`,
+        height: `${cellMetrics.height}px`,
+        lineHeight: `${cellMetrics.height}px`,
+        opacity: 0,
+        zIndex: -5,
+        border: 0,
+        outline: 'none',
+        padding: 0,
+        margin: 0,
+        resize: 'none',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        color: 'transparent',
+        background: 'transparent',
+        caretColor: 'transparent',
+      }
+      shadowInputStyleStableRef.current = next
+      return next
+    }
+    shadowInputStyleStableRef.current = SHADOW_INPUT_FALLBACK_STYLE
+    return SHADOW_INPUT_FALLBACK_STYLE
+  }, [
+    snapshot,
+    snapshot?.cursor.col,
+    snapshot?.cursor.row,
+    cellMetrics.width,
+    cellMetrics.height,
+    viewportOffset,
+  ])
+
   const cursorOverlay: {
     style: React.CSSProperties
     char?: string
@@ -1631,13 +1809,65 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       data-terminal-kind="v2"
       tabIndex={0}
       style={finalContainerStyle}
+      onFocus={() => {
+        // 0.37.9 — App.tsx's global click handler + 200ms refocus
+        // poll target [data-terminal-container][data-terminal-visible]
+        // and call .focus() on the matched container <div>. We
+        // immediately delegate to the shadow textarea so dictation
+        // stays addressable. App.tsx already short-circuits if the
+        // active element is a TEXTAREA (line 321), so once the
+        // shadow input has focus it stays put. See PRD:
+        // voice-dictation.md.
+        if (
+          shadowInputRef.current &&
+          document.activeElement !== shadowInputRef.current
+        ) {
+          shadowInputRef.current.focus({ preventScroll: true })
+        }
+      }}
       onMouseMove={handleMouseMove}
       onMouseLeave={handleMouseLeave}
       onMouseDown={handleMouseDown}
+      onMouseUp={() => {
+        // 0.37.9 — Re-focus the shadow textarea after a click or
+        // drag-select. The container has tabIndex={0} for App.tsx's
+        // [data-terminal-container] focus-poll contract, so clicks
+        // briefly land focus on it. Returning focus to the shadow
+        // input keeps Apple Dictation engaged for the next Fn-Fn
+        // press. Range selection on the visible grid persists —
+        // focusing a textarea (vs a contenteditable) doesn't clear
+        // window.getSelection(). See PRD: voice-dictation.md risk E.
+        if (
+          shadowInputRef.current &&
+          document.activeElement !== shadowInputRef.current
+        ) {
+          shadowInputRef.current.focus({ preventScroll: true })
+        }
+      }}
       onClick={handleClick}
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
+      {/* 0.37.9 — shadow input. Position pinned at the cursor cell
+          AND memoized + frozen-during-composition so the rect AppKit
+          queries for `firstRectForCharacterRange:` is stable. xterm.js
+          uses this same pattern (their `_syncTextArea` skips when
+          `isComposing`); without the guard, every shell-echo
+          repositions the textarea, AppKit's Dictation rect query
+          races the React re-render, and Dictation aborts with the
+          "ending dictation" chime. See PRD: .k2so/prds/voice-dictation.md. */}
+      <textarea
+        ref={shadowInputRef}
+        autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="off"
+        spellCheck={false}
+        data-1p-ignore="true"
+        data-k2so-shadow-input=""
+        aria-label="Terminal input"
+        aria-multiline="false"
+        style={shadowInputStyle}
+      />
       {visibleRows.map((row, rowIdx) => {
         const absRow = visibleRowAbsRows[rowIdx] ?? rowIdx
         return (
@@ -1651,6 +1881,42 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
           {cursorOverlay.char ?? ''}
         </div>
       )}
+      {/* 0.37.9 — visible composition overlay. Anchored at the
+          cursor cell, shows the running Apple Dictation / IME
+          transcript as the user speaks. Text doesn't go to the
+          PTY until compositionend (where it gets sent as a single
+          sendInput call); the overlay is purely visual feedback so
+          the user can see what's being recognized. xterm.js calls
+          this their `_compositionView`. */}
+      {compositionText &&
+        snapshot &&
+        cellMetrics.width > 0 &&
+        cellMetrics.height > 0 && (
+          <div
+            aria-hidden="true"
+            style={{
+              position: 'absolute',
+              left: `${4 + cellMetrics.width * snapshot.cursor.col}px`,
+              top: `${
+                4 + cellMetrics.height * (snapshot.cursor.row + viewportOffset)
+              }px`,
+              minHeight: `${cellMetrics.height}px`,
+              lineHeight: `${cellMetrics.height}px`,
+              padding: '0 4px',
+              background: 'rgba(80, 130, 200, 0.85)',
+              color: '#fff',
+              fontFamily: 'inherit',
+              fontSize: 'inherit',
+              whiteSpace: 'nowrap',
+              pointerEvents: 'none',
+              zIndex: 50,
+              borderRadius: 2,
+              boxShadow: '0 1px 3px rgba(0,0,0,0.4)',
+            }}
+          >
+            {compositionText}
+          </div>
+        )}
       {import.meta.env.DEV && (
         <div
           style={{
