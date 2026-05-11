@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { getCurrentWindow as getCurrentTauriWindow } from '@tauri-apps/api/window'
+import { useWindowFocusStore } from './stores/window-focus'
 import Layout from './components/Layout/Layout'
 import FocusLayout from './components/Layout/FocusLayout'
 import Sidebar from './components/Sidebar/Sidebar'
@@ -47,13 +49,30 @@ import { useCursorMigrationCheck } from './hooks/useCursorMigrationCheck'
 import { HarnessLab } from './kessel/HarnessLab'
 import { prewarmDaemonWs } from './kessel/daemon-ws'
 
-/** Parse focus mode project ID from URL hash (#focus=<projectId>) */
+/** Parse focus mode project ID. Two sources because URL fragments
+ *  are stripped by Tauri's `WebviewUrl::App` in production builds:
+ *
+ *  1. URL hash `#focus=<id>` — works in dev (external URL,
+ *     `http://localhost:5173#focus=...`).
+ *  2. Window label `focus-<id>` — survives in production where the
+ *     URL fragment doesn't.
+ *
+ *  Either path produces the same id; we just need to read whichever
+ *  one is populated for this window. */
 function parseFocusProjectId(): string | null {
   const hash = window.location.hash
-  if (!hash) return null
-  const match = hash.match(/^#focus=(.+)$/)
-  if (!match) return null
-  return decodeURIComponent(match[1])
+  if (hash) {
+    const match = hash.match(/^#focus=(.+)$/)
+    if (match) return decodeURIComponent(match[1])
+  }
+  try {
+    const label = getCurrentTauriWindow().label
+    const match = label.match(/^focus-(.+)$/)
+    if (match) return match[1]
+  } catch {
+    // ignore — we'll just have no focus id, regular window behavior
+  }
+  return null
 }
 
 function LeftPanelContent({ rootPath, header }: { rootPath?: string; header?: React.ReactNode }): React.JSX.Element {
@@ -621,6 +640,34 @@ export default function App(): React.JSX.Element {
   const activeProject = projects.find((p) => p.id === effectiveProjectId)
   const activeWorkspace = activeProject?.workspaces.find((w) => w.id === activeWorkspaceId)
   const cwd = activeWorkspace?.worktreePath ?? activeProject?.path ?? '~'
+
+  // 0.37.11 A9 Phase 4c — track this window's OS focus.
+  // `TerminalPane.sendResize` reads from `useWindowFocusStore` to
+  // refuse resize emits while the window is blurred so two
+  // windows viewing the same workspace don't fight over the PTY's
+  // grid size. On focus-gain, the pane re-emits its current size.
+  useEffect(() => {
+    const win = getCurrentTauriWindow()
+    let unlistenFocus: (() => void) | null = null
+    let unlistenBlur: (() => void) | null = null
+    win.isFocused()
+      .then((focused) => useWindowFocusStore.getState().setFocused(focused))
+      .catch(() => { /* default true is fine */ })
+    win.listen('tauri://focus', () => {
+      useWindowFocusStore.getState().setFocused(true)
+    })
+      .then((fn) => { unlistenFocus = fn })
+      .catch((err) => console.warn('[window-focus] focus listen failed:', err))
+    win.listen('tauri://blur', () => {
+      useWindowFocusStore.getState().setFocused(false)
+    })
+      .then((fn) => { unlistenBlur = fn })
+      .catch((err) => console.warn('[window-focus] blur listen failed:', err))
+    return () => {
+      if (unlistenFocus) unlistenFocus()
+      if (unlistenBlur) unlistenBlur()
+    }
+  }, [])
 
   // Wait for stores to initialize before rendering to prevent flicker
   if (!settingsLoaded) {

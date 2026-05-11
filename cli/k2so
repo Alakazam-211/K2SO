@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.37.9"
+K2SO_CLI_VERSION="0.37.11"
 
 set -euo pipefail
 
@@ -2213,6 +2213,123 @@ cmd_sessions_compact() {
 }
 
 # Sessions subcommand dispatcher — handles `k2so sessions spawn`,
+# 0.37.11 — List LIVE v2 sessions (daemon memory) for a workspace.
+# Wraps /cli/sessions/list-for-workspace.  Distinct from
+# `k2so sessions list` (which inspects on-disk archive segments) —
+# this verb answers "what's the daemon currently holding open for
+# this workspace?", which is what you need to verify focus-window
+# adoption (sessions count shouldn't change when a focus window
+# opens on top of an existing workspace).
+#
+# Usage:
+#   k2so sessions live <path>             # human table
+#   k2so sessions live <path> --json      # raw JSON from daemon
+#   k2so sessions live <path> --count     # just the integer count
+cmd_sessions_live() {
+    local path="${1:-}"
+    local mode="table"
+    shift 2>/dev/null || true
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --json)  mode="json"; shift ;;
+            --count) mode="count"; shift ;;
+            *) shift ;;
+        esac
+    done
+    if [ -z "$path" ]; then
+        echo "Usage: k2so sessions live <workspace-path> [--json|--count]" >&2
+        echo "  Lists live daemon-side v2 sessions whose cwd is under <workspace-path>." >&2
+        exit 1
+    fi
+    # Try the targeted endpoint first (post-0.37.11 daemons); fall back
+    # to `/cli/agents/running` with client-side filtering for older
+    # daemons that haven't picked up the new route yet.
+    local response
+    response=$(cli_request "/cli/sessions/list-for-workspace" "path=$(urlencode "$path")" 2>/dev/null)
+    local fallback=0
+    if echo "$response" | grep -q '"route not found"' 2>/dev/null; then
+        fallback=1
+        response=$(cli_request "/cli/agents/running")
+    fi
+    case "$mode" in
+        json)
+            if [ "$fallback" = "1" ]; then
+                echo "$response" | python3 -c "
+import json, sys
+def _workspace_match(cwd: str, path: str) -> bool:
+    if not cwd: return False
+    p = path.rstrip('/')
+    c = cwd.rstrip('/')
+    return c == p or cwd.startswith(p + '/')
+path = '$path'
+all_sessions = json.loads(sys.stdin.read())
+filtered = [
+    {
+        'sessionId': s.get('terminalId'),
+        'agentName': s.get('agentName'),
+        'command': s.get('command'),
+        'args': [],
+        'cwd': s.get('cwd', ''),
+        'isV2': True,  # agents running only ever returns alive sessions; v2 status unknown but assumed
+    }
+    for s in all_sessions if _workspace_match(s.get('cwd') or '', path)
+]
+print(json.dumps(filtered, indent=2))
+"
+            else
+                echo "$response"
+            fi
+            ;;
+        count)
+            if [ "$fallback" = "1" ]; then
+                echo "$response" | python3 -c "
+import json, sys
+def _workspace_match(cwd: str, path: str) -> bool:
+    if not cwd: return False
+    p = path.rstrip('/')
+    c = cwd.rstrip('/')
+    return c == p or cwd.startswith(p + '/')
+path = '$path'
+sessions = json.loads(sys.stdin.read())
+print(sum(1 for s in sessions if _workspace_match(s.get('cwd') or '', path)))
+"
+            else
+                echo "$response" | python3 -c "import json,sys; print(len(json.loads(sys.stdin.read())))"
+            fi
+            ;;
+        *)
+            echo "$response" | python3 -c "
+import json, sys
+def _workspace_match(cwd: str, path: str) -> bool:
+    if not cwd: return False
+    p = path.rstrip('/')
+    c = cwd.rstrip('/')
+    return c == p or cwd.startswith(p + '/')
+fallback = $fallback
+path = '$path'
+raw = json.loads(sys.stdin.read())
+if fallback:
+    sessions = [s for s in raw if _workspace_match(s.get('cwd') or '', path)]
+    note = '  (using /cli/agents/running fallback — daemon pre-0.37.11)'
+else:
+    sessions = raw
+    note = ''
+if not sessions:
+    print('No live sessions in this workspace.' + note)
+    sys.exit(0)
+print(f'{len(sessions)} live session(s):' + note)
+print(f'  {\"TERMINAL_ID\":<38}  {\"AGENT\":<30}  {\"CMD\":<14}  CWD')
+for s in sessions:
+    sid = s.get('sessionId') or s.get('terminalId') or '?'
+    name = s.get('agentName', '?')[:30]
+    cmd = (s.get('command') or 'shell')[:14]
+    cwd = s.get('cwd', '')
+    print(f'  {sid:<38}  {name:<30}  {cmd:<14}  {cwd}')
+"
+            ;;
+    esac
+}
+
 # `k2so sessions list`, `k2so sessions compact`, and any future
 # `sessions *` verbs.
 cmd_sessions() {
@@ -2221,12 +2338,14 @@ cmd_sessions() {
     case "$sub" in
         spawn)     cmd_sessions_spawn "$@" ;;
         list)      cmd_sessions_list "$@" ;;
+        live)      cmd_sessions_live "$@" ;;
         compact)   cmd_sessions_compact "$@" ;;
         set-label) cmd_sessions_set_label "$@" ;;
         *)
             echo "Usage:" >&2
             echo "  k2so sessions spawn --agent <name> [...]" >&2
-            echo "  k2so sessions list [--json]" >&2
+            echo "  k2so sessions list [--json]                     # on-disk archives" >&2
+            echo "  k2so sessions live <workspace> [--json|--count] # live daemon sessions" >&2
             echo "  k2so sessions compact <session-id>" >&2
             echo "  k2so sessions set-label <session-id> <label> [--no-lock]" >&2
             exit 1
@@ -3202,7 +3321,7 @@ cmd_update() {
 
     # Extract the version from the remote script
     local remote_version
-    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.37.9"//')
+    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.37.11"//')
     if [ -z "$remote_version" ]; then
         echo "Error: Could not parse remote version." >&2
         exit 1

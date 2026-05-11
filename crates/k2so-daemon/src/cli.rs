@@ -1202,6 +1202,57 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             }
         }
 
+        // 0.37.11 A9 phase 4a — every live session whose cwd is
+        // under `path`. The renderer's `tabsStore.loadLayoutForWorkspace`
+        // hits this BEFORE running `launchDefaultAgent` so a second
+        // window opening the same workspace adopts the daemon's
+        // existing PTYs instead of spawning duplicates.
+        //
+        // Returns JSON array; one object per live session:
+        //   { sessionId, agentName, command, args, cwd, isV2 }
+        //
+        // Filter rule: longest cwd-prefix match against `path`, mirroring
+        // the companion routes' grouping. Workspaces with `path` that
+        // doesn't match any session return an empty array.
+        "/cli/sessions/list-for-workspace" => {
+            let path = str_param(params, "path");
+            if path.is_empty() {
+                CliResponse::bad_request("Missing path parameter")
+            } else {
+                // Match rule: session.cwd is either EXACTLY `path` or a
+                // subdirectory of `path`. The previous loose `starts_with`
+                // matched siblings — e.g. `/x/K2SO` would match
+                // `/x/K2SO-website`. Require the next character to be
+                // either end-of-string or `/` so siblings can't sneak in.
+                let trimmed = path.trim_end_matches('/').to_string();
+                let prefix_with_slash = if trimmed.is_empty() {
+                    "/".to_string()
+                } else {
+                    format!("{}/", trimmed)
+                };
+                let live = crate::session_lookup::snapshot_all();
+                let mut out: Vec<serde_json::Value> = Vec::new();
+                for (agent_name, session) in live {
+                    let cwd = session.cwd();
+                    let cwd_trim = cwd.trim_end_matches('/');
+                    let matches = cwd_trim == trimmed.as_str()
+                        || cwd.starts_with(&prefix_with_slash);
+                    if !matches {
+                        continue;
+                    }
+                    out.push(serde_json::json!({
+                        "sessionId": session.session_id().to_string(),
+                        "agentName": agent_name,
+                        "command": session.command(),
+                        "args": session.args(),
+                        "cwd": cwd,
+                        "isV2": session.is_v2(),
+                    }));
+                }
+                CliResponse::ok_json(serde_json::to_string(&out).unwrap_or_else(|_| "[]".into()))
+            }
+        }
+
         // ── Onboarding (workspace-add three-option flow) ────────
         //
         // Logic lives in `k2so_core::agents::onboarding`. Daemon

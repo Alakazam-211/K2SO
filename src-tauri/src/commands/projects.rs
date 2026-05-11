@@ -995,7 +995,20 @@ pub async fn projects_open_focus_window(
         tauri::WebviewUrl::App(format!("index.html#focus={}", project_id).into())
     };
 
-    // Create a new focus window
+    // Create a new focus window. 0.37.11 — same pattern as the
+    // `new-window` menu handler (see menu.rs): just open another
+    // Tauri window pointed at the React app. The window label
+    // `focus-<project_id>` is what the renderer reads in App.tsx
+    // to know which workspace to display (URL fragments are
+    // stripped by `WebviewUrl::App` in production).
+    //
+    // Once mounted, the focus window is a regular K2SO viewer:
+    //   - cross-window sync (`useWindowSync`) keeps tabs aligned
+    //     with the main window
+    //   - the v2 WS protocol supports multiple subscribers per
+    //     session, so both windows attach to the same daemon PTYs
+    //   - the active viewer is the one that pushes its grid size
+    //     across the WS; daemon picks up the most recent claim
     let _window = WebviewWindowBuilder::new(
         &app,
         &label,

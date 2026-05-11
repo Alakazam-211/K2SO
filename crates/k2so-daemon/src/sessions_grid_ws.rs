@@ -109,7 +109,22 @@ enum Inbound {
     Input { text: String },
     /// Resize request from the client's ResizeObserver.
     Resize { cols: u16, rows: u16 },
+    /// 0.37.11 — viewer-claim: this subscriber is becoming the
+    /// active viewer (or releasing the claim). Active viewers are
+    /// the only subscribers whose `Resize` frames the daemon
+    /// honors. Renderer sends `true` on window focus, `false` on
+    /// blur. Once the daemon-side `active_subscriber` is set,
+    /// resize from non-active subscribers is ignored — eliminates
+    /// the "two windows fighting over the TUI size" problem.
+    SetActive { active: bool },
 }
+
+/// 0.37.11 — monotonically-increasing subscriber id generator.
+/// Each WS accept claims the next value; the id is passed to the
+/// session's `active_subscriber` atomic on viewer-claim. Starts at
+/// 1 because 0 is the "no claim" sentinel value.
+static NEXT_SUBSCRIBER_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
 
 pub async fn serve_session_grid_connection(
     stream: TcpStream,
@@ -135,6 +150,15 @@ pub async fn serve_session_grid_connection(
             return;
         }
     };
+
+    // 0.37.11 — claim a unique subscriber id for this connection.
+    // The id stays stable for the WS's lifetime; the renderer's
+    // `SetActive` frame stamps this value into the session's
+    // `active_subscriber`. `Resize` frames check against it.
+    let subscriber_id = NEXT_SUBSCRIBER_ID.fetch_add(
+        1,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     let __t_accept = std::time::Instant::now();
     let ws = match tokio_tungstenite::accept_async(stream).await {
@@ -392,7 +416,66 @@ pub async fn serve_session_grid_connection(
                                 session.write(text.into_bytes());
                             }
                             Ok(Inbound::Resize { cols, rows }) => {
-                                session.resize(cols, rows);
+                                // 0.37.11 — only the active subscriber
+                                // can resize. `active = 0` means "no
+                                // claim yet" — accept (first-resize-
+                                // wins, preserves single-viewer behavior
+                                // for sessions where no one ever sends
+                                // SetActive). Otherwise gate on match.
+                                let active = session
+                                    .active_subscriber
+                                    .load(std::sync::atomic::Ordering::Relaxed);
+                                if active == 0 || active == subscriber_id {
+                                    session.resize(cols, rows);
+                                } else {
+                                    log_debug!(
+                                        "[v2-perf] side=daemon stage=resize_ignored \
+                                         session={} from_sub={} active_sub={} \
+                                         (non-active viewer resize dropped)",
+                                        session.session_id,
+                                        subscriber_id,
+                                        active,
+                                    );
+                                }
+                            }
+                            Ok(Inbound::SetActive { active }) => {
+                                if active {
+                                    // Claim: stamp our id. Previous
+                                    // claimer (if any) is silently
+                                    // displaced; that's the intended
+                                    // semantics — most-recent claim
+                                    // wins.
+                                    session.active_subscriber.store(
+                                        subscriber_id,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    log_debug!(
+                                        "[v2-perf] side=daemon stage=active_claim \
+                                         session={} sub={}",
+                                        session.session_id,
+                                        subscriber_id,
+                                    );
+                                } else {
+                                    // Release: only clear if we still
+                                    // hold the claim. CAS prevents
+                                    // accidentally releasing someone
+                                    // else's claim if claims rapidly
+                                    // alternate between viewers.
+                                    let _ = session
+                                        .active_subscriber
+                                        .compare_exchange(
+                                            subscriber_id,
+                                            0,
+                                            std::sync::atomic::Ordering::Relaxed,
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
+                                    log_debug!(
+                                        "[v2-perf] side=daemon stage=active_release \
+                                         session={} sub={}",
+                                        session.session_id,
+                                        subscriber_id,
+                                    );
+                                }
                             }
                             Err(e) => {
                                 log_debug!(
@@ -434,14 +517,25 @@ pub async fn serve_session_grid_connection(
         }
     }
 
+    // 0.37.11 — release the active claim on disconnect IF we still
+    // hold it. CAS so a viewer that took over our claim before we
+    // disconnected isn't accidentally cleared.
+    let _ = session.active_subscriber.compare_exchange(
+        subscriber_id,
+        0,
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
     // Drop `events_rx` implicitly on return. Broadcast subscribers
     // don't need to be "restored" — the next connection just calls
     // `subscribe_events()` for a fresh receiver.
     drop(events_rx);
 
     log_debug!(
-        "[daemon/sessions_grid_ws] subscriber detached from session {}",
+        "[daemon/sessions_grid_ws] subscriber detached from session {} (sub_id={})",
         session.session_id,
+        subscriber_id,
     );
 }
 

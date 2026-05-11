@@ -284,22 +284,15 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
     } else if (clickedId === 'copy-file-path' && fileViewerPath) {
       invoke('fs_copy_path', { path: fileViewerPath }).catch((err) => console.warn('[tab-bar] copy-file-path', err))
     } else if (clickedId === 'copy-terminal-id' && tabTerminalId) {
-      // Copy workspace:agent qualified identifier
-      const { agentNameFromId } = await import('@/lib/terminal-id')
-      const agName = agentNameFromId(tabTerminalId) ?? tabTerminalId
-      // Resolve workspace name from tab title or CWD
-      const tabForCopy = allTabs.find((t) => t.id === tabId)
-      let wsName = tabForCopy?.title || ''
-      // Try to find workspace name from projects store
-      try {
-        const { useProjectsStore } = await import('@/stores/projects')
-        const activeProject = useProjectsStore.getState().projects.find(
-          (p) => useProjectsStore.getState().activeProjectId === p.id
-        )
-        if (activeProject) wsName = activeProject.name
-      } catch { /* use tab title */ }
-      const qualified = wsName ? `${wsName}:${agName}` : tabTerminalId
-      navigator.clipboard.writeText(qualified).catch(() => {})
+      // 0.37.11 — Copy the RAW terminal id (v2 session UUID or
+      // canonical key). Pre-fix this constructed a
+      // `<workspace>:<agent>` "qualified" string which was nice to
+      // read but did NOT work as input to any K2SO CLI verb. The
+      // daemon's `terminal read` / `terminal write` accept either
+      // the bare v2 session UUID (in `active_terminal_id` shape)
+      // or the v2 canonical key (`<project_id>` post-0.37.5).
+      // `tabTerminalId` is already one of those — copy verbatim.
+      navigator.clipboard.writeText(tabTerminalId).catch(() => {})
     } else if (clickedId === 'open-terminal') {
       // Find the cwd from the tab's first terminal pane
       const tabsState = useTabsStore.getState()

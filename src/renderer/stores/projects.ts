@@ -308,7 +308,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     // Stash current workspace (PTYs stay alive in background)
     if (state.activeProjectId && state.activeWorkspaceId) {
       tabsStore.stashWorkspace(`${state.activeProjectId}:${state.activeWorkspaceId}`)
-    } else if (tabsStore.getState().tabs.length > 0) {
+    } else if (tabsStore.tabs.length > 0) {
       // No tracked workspace but tabs exist — clear them so the next workspace starts clean
       tabsStore.clearAllTabs()
     }
@@ -349,7 +349,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     // Stash current workspace (PTYs stay alive in background)
     if (state.activeProjectId && state.activeWorkspaceId) {
       tabsStore.stashWorkspace(`${state.activeProjectId}:${state.activeWorkspaceId}`)
-    } else if (tabsStore.getState().tabs.length > 0) {
+    } else if (tabsStore.tabs.length > 0) {
       tabsStore.clearAllTabs()
     }
 

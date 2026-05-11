@@ -35,6 +35,7 @@ import {
 import { getDaemonWs, invalidateDaemonWs } from '../kessel/daemon-ws'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import { useTabsStore } from '@/stores/tabs'
+import { useWindowFocusStore } from '@/stores/window-focus'
 import { useSessionLabelsStore } from '@/stores/session-labels'
 import { useActiveAgentsStore } from '@/stores/active-agents'
 import { detectWorkingSignal } from '@/lib/agent-signals'
@@ -372,6 +373,14 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   // streams partials to the PTY using backspace+retype so words
   // flow into the prompt as the user speaks.
   const composingRef = useRef(false)
+  // 0.37.11 — true while a mouse button is held down anywhere
+  // inside this pane (the user might be in the middle of a
+  // drag-select). The container's onFocus handler skips its
+  // shadow-textarea delegation while this is true so we don't
+  // shift focus mid-drag and cancel the in-flight selection.
+  // Cleared on mouseup AND on any global mouseup (covers the
+  // case where the user releases outside the pane bounds).
+  const mouseDownInPaneRef = useRef(false)
   // Length (in graphemes) of the partial transcript we last
   // streamed to the PTY. Each compositionupdate replaces the prior
   // partial in the PTY with the new best-guess: we send `\x7f`
@@ -1076,11 +1085,77 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     ws.send(JSON.stringify({ action: 'input', text }))
   }, [])
 
+  // 0.37.11 — active-viewer resize protocol.
+  //
+  // Two layers cooperate here:
+  //
+  //   (1) Renderer-side: gate `sendResize` on this window's OS focus.
+  //       Only the focused window emits resize at all. Keeps the
+  //       wire quiet when multiple windows view the same session.
+  //
+  //   (2) Daemon-side: every WS connection gets a `subscriber_id`
+  //       on accept. The renderer sends `{action:"set_active",
+  //       active:true}` on window focus and `false` on blur. Daemon
+  //       stamps `session.active_subscriber` accordingly. Resize
+  //       frames are accepted only from the active subscriber —
+  //       even if a non-active viewer accidentally emits one, the
+  //       daemon drops it. Hard enforcement, no toe-stepping.
+  //
+  // Generalizes naturally to mobile companion: any subscriber that
+  // sends `set_active:true` becomes the resize authority for that
+  // session until another claims or it disconnects.
+  const lastResizeRef = useRef<{ cols: number; rows: number } | null>(null)
   const sendResize = useCallback((cols: number, rows: number) => {
+    lastResizeRef.current = { cols, rows }
+    if (!useWindowFocusStore.getState().isFocused) return
     const ws = wsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     ws.send(JSON.stringify({ action: 'resize', cols, rows }))
   }, [])
+
+  // Emit `set_active` on focus changes + re-emit latest dimensions
+  // when this window regains focus so the daemon snaps the PTY to
+  // our grid size. Also emits an initial claim/release at mount
+  // time based on current focus state — without it, a freshly-
+  // mounted pane in a non-focused window would never tell the
+  // daemon it exists, leaving `active_subscriber` stale until the
+  // next focus transition.
+  useEffect(() => {
+    const sendSetActive = (active: boolean): void => {
+      const ws = wsRef.current
+      if (!ws || ws.readyState !== WebSocket.OPEN) return
+      ws.send(JSON.stringify({ action: 'set_active', active }))
+    }
+
+    let wasFocused = useWindowFocusStore.getState().isFocused
+    // Initial claim — happens after WS is open. The boot effect
+    // wires `wsRef.current` once the v2 spawn completes; if the
+    // WS isn't open yet when this fires, the send is a no-op.
+    // It's fine — the focus-transition path below will claim
+    // when the user interacts.
+    sendSetActive(wasFocused)
+
+    const unsub = useWindowFocusStore.subscribe((state) => {
+      const nowFocused = state.isFocused
+      if (wasFocused !== nowFocused) {
+        sendSetActive(nowFocused)
+        // On focus-gain, re-emit the latest dimensions so the PTY
+        // snaps to this window's grid.
+        if (!wasFocused && nowFocused && lastResizeRef.current) {
+          const ws = wsRef.current
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              action: 'resize',
+              cols: lastResizeRef.current.cols,
+              rows: lastResizeRef.current.rows,
+            }))
+          }
+        }
+      }
+      wasFocused = nowFocused
+    })
+    return () => { unsub() }
+  }, [phase.kind])
 
   // ── Keyboard input ────────────────────────────────────────────
   // 0.37.9 — handlers attach to the shadow <textarea> instead of the
@@ -1356,7 +1431,20 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
 
   const handleMouseDown = useCallback(() => {
     mouseDownLinkRef.current = hoveredLink?.link ?? null
+    mouseDownInPaneRef.current = true
   }, [hoveredLink])
+
+  // 0.37.11 — global mouseup safety net. Catches the case where the
+  // user starts a drag inside the pane and releases outside its
+  // bounds; without this the pane-level onMouseUp would never fire
+  // and `mouseDownInPaneRef` would stay stuck at true.
+  useEffect(() => {
+    const onGlobalMouseUp = (): void => {
+      mouseDownInPaneRef.current = false
+    }
+    window.addEventListener('mouseup', onGlobalMouseUp)
+    return () => window.removeEventListener('mouseup', onGlobalMouseUp)
+  }, [])
 
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
@@ -1845,7 +1933,20 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
         // active element is a TEXTAREA (line 321), so once the
         // shadow input has focus it stays put. See PRD:
         // voice-dictation.md.
+        //
+        // 0.37.11 — also skip if a mouse drag is in progress. The
+        // browser focuses the container <div tabIndex={0}> on
+        // mousedown BEFORE the selection range starts being built.
+        // If we redirect focus to the shadow textarea at that
+        // moment, the in-flight drag's selection gets cancelled.
+        // The 0.37.9 onMouseUp guard catches the post-selection
+        // case; this catches the mid-drag case.
+        if (mouseDownInPaneRef.current) return
+        const sel = window.getSelection()
+        const hasSelection =
+          sel !== null && !sel.isCollapsed && sel.toString().length > 0
         if (
+          !hasSelection &&
           shadowInputRef.current &&
           document.activeElement !== shadowInputRef.current
         ) {
@@ -1856,15 +1957,20 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       onMouseLeave={handleMouseLeave}
       onMouseDown={handleMouseDown}
       onMouseUp={() => {
-        // 0.37.9 — Re-focus the shadow textarea after a click or
-        // drag-select. The container has tabIndex={0} for App.tsx's
-        // [data-terminal-container] focus-poll contract, so clicks
-        // briefly land focus on it. Returning focus to the shadow
-        // input keeps Apple Dictation engaged for the next Fn-Fn
-        // press. Range selection on the visible grid persists —
-        // focusing a textarea (vs a contenteditable) doesn't clear
-        // window.getSelection(). See PRD: voice-dictation.md risk E.
+        // 0.37.11 — drag ended. Clear the mousedown flag first so
+        // the next focus check (or any global handler) sees the
+        // user is no longer dragging. Then re-focus the shadow
+        // textarea ONLY if there's no live selection — leaving
+        // focus on the container preserves the highlighted range.
+        // (The container's onFocus handler also guards against
+        // mid-drag interruptions so dictation re-engagement
+        // doesn't race against selection.)
+        mouseDownInPaneRef.current = false
+        const sel = window.getSelection()
+        const hasSelection =
+          sel !== null && !sel.isCollapsed && sel.toString().length > 0
         if (
+          !hasSelection &&
           shadowInputRef.current &&
           document.activeElement !== shadowInputRef.current
         ) {

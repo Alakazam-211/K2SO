@@ -2607,9 +2607,69 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   // ── Background workspace management ─────────────────────────────────
 
   launchDefaultAgent: (key: string, cwd: string) => {
-    // Short delay (100ms) to let React finish the workspace switch render
-    setTimeout(async () => {
-      if (get().activeWorkspaceKey === key && get().tabs.length === 0) {
+    // 0.37.11 A9 Phase 4b — daemon-side session adoption.
+    //
+    // Before spawning a default, ask the daemon if it already has live
+    // v2 sessions for this workspace. A second window opening the same
+    // workspace (focus window, "new window", etc.) adopts the existing
+    // PTYs instead of spawning duplicates.
+    //
+    // Only adopt `tab-<terminalId>` sessions — those are user-spawned
+    // Cmd+T / launchDefaultAgent tabs. System-spawned sessions
+    // (workspace agent panel, heartbeats, delegate) live under their
+    // canonical agent names and are owned by other surfaces.
+    void (async () => {
+      if (get().activeWorkspaceKey !== key || get().tabs.length > 0) return
+
+      try {
+        const json = await invoke<string>('k2so_sessions_list_for_workspace', { path: cwd })
+        const sessions: Array<{
+          sessionId: string
+          agentName: string
+          command: string | null
+          args: string[]
+          cwd: string
+          isV2: boolean
+        }> = JSON.parse(json)
+
+        const adoptable = sessions.filter(
+          (s) => s.isV2 && typeof s.agentName === 'string' && s.agentName.startsWith('tab-'),
+        )
+
+        if (
+          adoptable.length > 0 &&
+          get().activeWorkspaceKey === key &&
+          get().tabs.length === 0
+        ) {
+          const adoptedTabs: Tab[] = adoptable.map((s) => {
+            const terminalId = s.agentName.slice(4)
+            const paneGroupId = terminalId
+            const tabId = crypto.randomUUID()
+            const pg = makeTerminalPaneGroup(
+              paneGroupId,
+              s.cwd || cwd,
+              s.command
+                ? { command: s.command, args: s.args.length > 0 ? s.args : undefined }
+                : undefined,
+            )
+            tabCounter++
+            return {
+              id: tabId,
+              title: s.command ?? `Terminal ${tabCounter}`,
+              mosaicTree: paneGroupId,
+              paneGroups: new Map([[paneGroupId, pg]]),
+            }
+          })
+          set({ tabs: adoptedTabs, activeTabId: adoptedTabs[0].id })
+          return
+        }
+      } catch (err) {
+        console.warn('[tabs] adoption query failed; falling through to default spawn:', err)
+      }
+
+      // ── No adoptable sessions — fresh default-agent spawn ──
+      setTimeout(async () => {
+        if (get().activeWorkspaceKey !== key || get().tabs.length !== 0) return
         tabCounter++
         const tabId = crypto.randomUUID()
         const paneGroupId = crypto.randomUUID()
@@ -2633,8 +2693,6 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         } catch { /* fall back to plain terminal */ }
 
         // Resume previous session if this is a resumable CLI tool (e.g. Claude)
-        // This makes returning to K2SO/Custom agent workspaces feel like picking
-        // up an ongoing conversation rather than starting fresh every time.
         if (agentOpts.command) {
           const toolConfig = RESUMABLE_CLI_TOOLS[agentOpts.command]
           if (toolConfig) {
@@ -2645,7 +2703,6 @@ export const useTabsStore = create<TabsState>((set, get) => ({
               })
               if (sessionId) {
                 if (toolConfig.resumeSubcommand) {
-                  // Subcommand-style (Codex): drop preset args.
                   agentOpts.args = [toolConfig.resumeSubcommand, sessionId]
                 } else if (toolConfig.resumeFlag) {
                   const baseArgs = agentOpts.args ?? []
@@ -2664,8 +2721,8 @@ export const useTabsStore = create<TabsState>((set, get) => ({
           paneGroups: new Map([[paneGroupId, pg]])
         }
         set({ tabs: [tab], activeTabId: tabId })
-      }
-    }, 100)
+      }, 100)
+    })()
   },
 
   stashWorkspace: (key: string) => {

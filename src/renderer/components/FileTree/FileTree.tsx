@@ -528,7 +528,12 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
     setExpandedDirs(new Set([rootPath]))
     setLoadingDirs(new Set())
     setErrorDirs(new Map())
-    useFileSelectionStore.getState().clearSelection()
+    // 0.37.11 — clearSelection writes to a SEPARATE zustand store,
+    // which triggers its subscribers' re-renders mid-render of
+    // FileTree. React (correctly) flags that as "setState in
+    // render of a different component." Defer to a microtask so
+    // it lands after the current render commits.
+    queueMicrotask(() => useFileSelectionStore.getState().clearSelection())
   }
 
   // ── Env files section ──────────────────────────────────────────────
@@ -681,6 +686,14 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
 
   // ── FS Watcher ──────────────────────────────────────────────────────
   useEffect(() => {
+    // 0.37.11 — skip the watcher entirely when rootPath isn't a real
+    // filesystem path. Focus windows briefly mount with rootPath="~"
+    // (placeholder) before the project loads, and `fs_watch_dir`
+    // rejects with "No path was found" for non-existent paths. The
+    // useEffect will re-run when rootPath becomes a real path.
+    if (!rootPath || rootPath === '~' || !rootPath.startsWith('/')) {
+      return
+    }
     // Start watching the root path
     invoke('fs_watch_dir', { path: rootPath }).catch((err) => {
       console.warn('[filetree] Failed to start watcher:', err)

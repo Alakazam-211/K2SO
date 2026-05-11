@@ -364,6 +364,20 @@ pub fn k2so_session_lookup_by_agent(agent: String) -> Result<String, String> {
     client.cli_get("/cli/sessions/lookup-by-agent", &[("agent", &agent)])
 }
 
+/// 0.37.11 A9 phase 4a — list live daemon sessions for a workspace.
+/// `path` is the workspace path (project path or worktree path);
+/// returns JSON array of `{ sessionId, agentName, command, args, cwd, isV2 }`
+/// for every session whose cwd is under `path`.
+///
+/// Renderer calls this in `tabsStore.loadLayoutForWorkspace` before
+/// falling back to `launchDefaultAgent`, so opening a workspace in a
+/// second window adopts existing PTYs rather than spawning duplicates.
+#[tauri::command]
+pub fn k2so_sessions_list_for_workspace(path: String) -> Result<String, String> {
+    let client = crate::daemon_client::DaemonClient::try_connect()?;
+    client.cli_get("/cli/sessions/list-for-workspace", &[("path", &path)])
+}
+
 // `push_agent_event` moved to k2so_core::agents::events.
 
 // `drain_agent_events` moved to k2so_core::agents::events.
