@@ -368,15 +368,17 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   const shadowInputRef = useRef<HTMLTextAreaElement>(null)
   // Tracks IME / dictation composition (Japanese/Chinese/Korean
   // candidate window, accent picker, Apple Dictation). While
-  // composing, onKey + onShadowInput skip — compositionend
-  // commits the final string in one sendInput call.
+  // composing, onKey + onShadowInput skip — onComposeUpdate
+  // streams partials to the PTY using backspace+retype so words
+  // flow into the prompt as the user speaks.
   const composingRef = useRef(false)
-  // Visible transcript shown at the cursor while dictation/IME is
-  // active. xterm.js calls this their `_compositionView`. Updates
-  // on compositionupdate so the user sees words flow in as they
-  // speak; cleared on compositionend (the final text is sent to
-  // the PTY in one shot and renders normally through the grid).
-  const [compositionText, setCompositionText] = useState('')
+  // Length (in graphemes) of the partial transcript we last
+  // streamed to the PTY. Each compositionupdate replaces the prior
+  // partial in the PTY with the new best-guess: we send `\x7f`
+  // (DEL) backspaces equal to this length, then the new text. On
+  // compositionend we reconcile to the final committed string in
+  // the same way (so Dictation's autocorrect-on-stop gets applied).
+  const compositionLastLengthRef = useRef(0)
   const wsRef = useRef<WebSocket | null>(null)
   const isTabVisible = useIsTabVisible()
 
@@ -1174,23 +1176,48 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     // they get visual feedback in the meantime.
     const onComposeStart = () => {
       composingRef.current = true
-      setCompositionText('')
+      compositionLastLengthRef.current = 0
     }
-    // Update the visible composition overlay as Apple Dictation /
-    // IME refines its best-guess transcript. The text doesn't go to
-    // the PTY here — the user just SEES it streaming at the cursor.
-    // xterm.js's `_compositionView` does the same thing.
+    // Stream the running transcript into the PTY on every update.
+    // Apple Dictation delivers a full best-guess string (not a
+    // delta) each time — "Hello" → "Hello world" → "Hello world,
+    // how" — so we backspace away the prior partial and retype the
+    // new one. Words appear at the prompt as the user speaks; the
+    // cursor advances naturally; brief flicker on autocorrect is
+    // the only side effect.
     const onComposeUpdate = (e: CompositionEvent) => {
-      setCompositionText(e.data ?? '')
+      const text = e.data ?? ''
+      const prevLen = compositionLastLengthRef.current
+      // \x7f (DEL) is what readline + claude TUI + most line
+      // editors accept as "delete previous character." \x08 (BS,
+      // Ctrl+H) is intercepted by some apps for help-back.
+      if (prevLen > 0) {
+        sendInput('\x7f'.repeat(prevLen))
+      }
+      if (text.length > 0) {
+        sendInput(text)
+      }
+      // Grapheme count, not utf-16 — Dictation can produce emoji /
+      // multi-codepoint clusters where the surrogate pair is one
+      // visible character (one DEL).
+      compositionLastLengthRef.current = [...text].length
     }
     const onComposeEnd = (e: CompositionEvent) => {
       composingRef.current = false
-      setCompositionText('')
       const committed = e.data ?? ''
+      const prevLen = compositionLastLengthRef.current
+      // Reconcile partial → final. If they're identical, this
+      // backspace-and-retype is wasteful but harmless. If
+      // Dictation autocorrected on stop ("their" → "there"), this
+      // is what makes the PTY content match what the user said.
+      if (prevLen > 0) {
+        sendInput('\x7f'.repeat(prevLen))
+      }
       if (committed) {
         setViewportOffset(0)
         sendInput(committed)
       }
+      compositionLastLengthRef.current = 0
       el.value = ''
     }
 
@@ -1881,42 +1908,10 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
           {cursorOverlay.char ?? ''}
         </div>
       )}
-      {/* 0.37.9 — visible composition overlay. Anchored at the
-          cursor cell, shows the running Apple Dictation / IME
-          transcript as the user speaks. Text doesn't go to the
-          PTY until compositionend (where it gets sent as a single
-          sendInput call); the overlay is purely visual feedback so
-          the user can see what's being recognized. xterm.js calls
-          this their `_compositionView`. */}
-      {compositionText &&
-        snapshot &&
-        cellMetrics.width > 0 &&
-        cellMetrics.height > 0 && (
-          <div
-            aria-hidden="true"
-            style={{
-              position: 'absolute',
-              left: `${4 + cellMetrics.width * snapshot.cursor.col}px`,
-              top: `${
-                4 + cellMetrics.height * (snapshot.cursor.row + viewportOffset)
-              }px`,
-              minHeight: `${cellMetrics.height}px`,
-              lineHeight: `${cellMetrics.height}px`,
-              padding: '0 4px',
-              background: 'rgba(80, 130, 200, 0.85)',
-              color: '#fff',
-              fontFamily: 'inherit',
-              fontSize: 'inherit',
-              whiteSpace: 'nowrap',
-              pointerEvents: 'none',
-              zIndex: 50,
-              borderRadius: 2,
-              boxShadow: '0 1px 3px rgba(0,0,0,0.4)',
-            }}
-          >
-            {compositionText}
-          </div>
-        )}
+      {/* 0.37.9 — composition overlay removed: text now streams
+          straight into the PTY on each compositionupdate via
+          backspace+retype, so the prompt itself shows the running
+          transcript and the cursor advances naturally. */}
       {import.meta.env.DEV && (
         <div
           style={{

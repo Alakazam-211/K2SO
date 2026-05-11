@@ -97,6 +97,15 @@ async fn main() {
     // at build-time until we actually use it for real work.
     k2so_core::__scaffolding_marker();
 
+    // 0.37.9 — raise RLIMIT_NOFILE so the daemon can hold enough fds
+    // for many concurrent PTYs / WS sockets / file watchers. launchd
+    // gives the daemon a 256/1024 soft limit by default, which gets
+    // saturated quickly with 10+ terminal sessions (each takes 2+
+    // fds for the PTY pair plus WS sockets per attached client).
+    // No-op when already at the kernel hard limit.
+    #[cfg(unix)]
+    k2so_core::raise_nofile_limit();
+
     // launchd hands us a sparse PATH; enrich from the user's login shell
     // BEFORE anything else, so child posix_spawn calls (alacritty's
     // tty::new for v2 sessions, plus any Command::new in handlers) can

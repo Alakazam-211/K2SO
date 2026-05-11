@@ -2,6 +2,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    // 0.37.9 — raise RLIMIT_NOFILE so the Tauri process can hold
+    // enough fds for many concurrent PTYs / WS sockets / watchers.
+    // launchd-launched apps inherit a 256/1024 soft limit by default,
+    // which saturates quickly when users open 10+ terminal panes.
+    // No-op if already at the hard limit. Must run before anything
+    // else opens fds.
+    #[cfg(unix)]
+    k2so_core::raise_nofile_limit();
+
     // Check if invoked as an LLM worker subprocess
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 3 && args[1] == "--llm-worker" {

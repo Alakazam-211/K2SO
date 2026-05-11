@@ -128,6 +128,62 @@ pub fn enrich_path_from_login_shell() {
     }
 }
 
+/// Raise `RLIMIT_NOFILE` (soft limit) up to the kernel's hard limit so
+/// the process can hold enough open file descriptors for many PTY
+/// sessions + file watchers + WebSocket sockets concurrently.
+///
+/// **Why this matters:** macOS apps launched via `open` or LaunchAgent
+/// inherit launchd's default soft limit, which is typically **256 or
+/// 1024** — much lower than the user's shell `ulimit -n`. Each v2
+/// terminal pane takes ~2 fds for the PTY (master + slave), plus WS
+/// sockets and file watchers, so 10–20 panes is enough to saturate at
+/// the default and start failing spawns with:
+///
+/// > `spawn failed: ... Too many open files (os error 24)`
+///
+/// The kernel hard limit on macOS is `OPEN_MAX` (10240) or higher.
+/// Raising the soft limit to match the hard limit is a no-op when
+/// they're already equal, and is safe + standard for daemon-style apps
+/// (Postgres, Redis, browsers all do this). The change persists for
+/// the lifetime of the process; children inherit the new soft limit.
+#[cfg(unix)]
+pub fn raise_nofile_limit() {
+    use std::mem::MaybeUninit;
+    unsafe {
+        let mut rlim: MaybeUninit<libc::rlimit> = MaybeUninit::uninit();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, rlim.as_mut_ptr()) != 0 {
+            log_debug!("[rlimit] getrlimit RLIMIT_NOFILE failed; leaving default");
+            return;
+        }
+        let rlim = rlim.assume_init();
+        let prior_soft = rlim.rlim_cur;
+        let hard = rlim.rlim_max;
+        if prior_soft >= hard {
+            // Already at hard limit (or higher — shouldn't happen).
+            log_debug!("[rlimit] RLIMIT_NOFILE soft={prior_soft} already at hard={hard}");
+            return;
+        }
+        let new_rlim = libc::rlimit { rlim_cur: hard, rlim_max: hard };
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &new_rlim) != 0 {
+            log_debug!(
+                "[rlimit] setrlimit RLIMIT_NOFILE failed (errno={}); leaving soft={prior_soft}",
+                std::io::Error::last_os_error()
+            );
+            return;
+        }
+        log_debug!(
+            "[rlimit] RLIMIT_NOFILE soft raised: {prior_soft} -> {hard}",
+        );
+    }
+}
+
+#[cfg(not(unix))]
+pub fn raise_nofile_limit() {
+    // Windows uses a different model (no equivalent to RLIMIT_NOFILE).
+    // Per-process handle limits are usually high enough that this isn't
+    // a concern in practice.
+}
+
 #[doc(hidden)]
 pub fn __scaffolding_marker() {}
 
