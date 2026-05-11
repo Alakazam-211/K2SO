@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.37.8"
+K2SO_CLI_VERSION="0.37.9"
 
 set -euo pipefail
 
@@ -436,12 +436,29 @@ cmd_work_send() {
         fi
         body=$(cat "$body_file")
     fi
+    # 0.37.10 — both --workspace and --title are required. Pre-fix
+    # the CLI only validated --title; if the user omitted --workspace
+    # the daemon silently fell back to the source workspace's
+    # project path, so the item landed in the SOURCE's local inbox
+    # with a success-shaped JSON response — the "k2so work send
+    # silently misroutes to local inbox" symptom. If the user
+    # actually meant to write to their own inbox, they should use
+    # `k2so work create` instead — that verb owns the local path.
+    if [ -z "$workspace" ]; then
+        echo "Error: --workspace is required for 'work send' (it targets another workspace)." >&2
+        echo "" >&2
+        echo "Usage: k2so work send --workspace <path-or-name> --title \"...\" [--body \"...\"|--body-file <path>]" >&2
+        echo "" >&2
+        echo "To add work to YOUR OWN workspace's inbox, use:" >&2
+        echo "  k2so work create --title \"...\" --body \"...\"" >&2
+        exit 1
+    fi
     if [ -z "$title" ]; then
-        echo "Usage: k2so work send --workspace <path> --title \"...\" [--body \"...\"|--body-file <path>]" >&2
+        echo "Usage: k2so work send --workspace <path-or-name> --title \"...\" [--body \"...\"|--body-file <path>]" >&2
         exit 1
     fi
     local params="title=$(urlencode "$title")&body=$(urlencode "$body")"
-    [ -n "$workspace" ] && params="${params}&workspace=$(urlencode "$workspace")"
+    params="${params}&workspace=$(urlencode "$workspace")"
     [ -n "$priority" ] && params="${params}&priority=$(urlencode "$priority")"
     [ -n "$item_type" ] && params="${params}&type=$(urlencode "$item_type")"
     cli_request "/cli/work/inbox/create" "$params"
@@ -3185,7 +3202,7 @@ cmd_update() {
 
     # Extract the version from the remote script
     local remote_version
-    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.37.8"//')
+    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.37.9"//')
     if [ -z "$remote_version" ]; then
         echo "Error: Could not parse remote version." >&2
         exit 1
