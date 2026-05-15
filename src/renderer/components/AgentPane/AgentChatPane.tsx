@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useProjectsStore } from '@/stores/projects'
+import { useTabsStore } from '@/stores/tabs'
 import { TerminalPane } from '@/terminal-v2/TerminalPane'
 import { agentChatId } from '@/lib/terminal-id'
 import { getDaemonWs } from '@/kessel/daemon-ws'
@@ -9,6 +10,14 @@ import { getDaemonWs } from '@/kessel/daemon-ws'
 interface AgentChatPaneProps {
   agentName: string
   projectPath: string
+  /** 0.37.12 — Claude session id restored from the serialized layout.
+   *  When present, AgentChatPane skips the
+   *  `k2so_agents_resume_chat_args` daemon roundtrip and builds the
+   *  launch config directly so the same session resumes immediately.
+   *  Renderer holds the canonical record; the daemon's auto-stamp
+   *  hook reconciles DB state on the next spawn. See
+   *  `.k2so/prds/canonical-lane-restore.md`. */
+  restoredSessionId?: string
 }
 
 /**
@@ -21,7 +30,7 @@ interface AgentChatPaneProps {
  * so two workspaces sharing an agent name don't collide on a single
  * PTY — see `.k2so/prds/heartbeats-sidebar-audit.md` Phase 1.
  */
-export function AgentChatPane({ agentName, projectPath }: AgentChatPaneProps): React.JSX.Element {
+export function AgentChatPane({ agentName, projectPath, restoredSessionId }: AgentChatPaneProps): React.JSX.Element {
   // Resolve project id synchronously from the projects store; the chat tab
   // will not render until a real id is available so the legacy collision
   // bug can never reappear via this surface.
@@ -54,6 +63,7 @@ export function AgentChatPane({ agentName, projectPath }: AgentChatPaneProps): R
       agentName={agentName}
       projectId={projectId}
       projectPath={projectPath}
+      restoredSessionId={restoredSessionId}
     />
   )
 }
@@ -62,9 +72,10 @@ interface AgentChatTerminalProps {
   agentName: string
   projectId: string
   projectPath: string
+  restoredSessionId?: string
 }
 
-function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTerminalProps): React.JSX.Element {
+function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionId }: AgentChatTerminalProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalIdRef = useRef(agentChatId(projectId, agentName))
   const [launchConfig, setLaunchConfig] = useState<{
@@ -76,6 +87,33 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
   // 0.37.4: friendly label from AGENT.md `display_name:` (falls back
   // to the technical agent name on first paint, then upgrades).
   const [displayName, setDisplayName] = useState<string>(agentName)
+
+  // 0.37.12 — chat-history dropdown state. Lets the user switch the
+  // pinned chat to a different past session (escape hatch when a
+  // chat was deleted, when restoration landed on the wrong session,
+  // or just to revisit an earlier conversation). See
+  // `.k2so/prds/canonical-lane-restore.md`.
+  const [historySessions, setHistorySessions] = useState<Array<{
+    sessionId: string
+    title: string
+    timestamp: number
+    messageCount: number
+  }>>([])
+  const [historyOpen, setHistoryOpen] = useState(false)
+  // The Claude session id currently driving the live PTY — derived
+  // from launchConfig.args (`--resume <X>` or `--session-id <X>`).
+  // Used to highlight the matching dropdown entry and look up the
+  // display title.
+  const currentSessionId = useMemo<string | null>(() => {
+    const args = launchConfig?.args
+    if (!args) return null
+    for (let i = 0; i + 1 < args.length; i++) {
+      if (args[i] === '--resume' || args[i] === '--session-id') {
+        return args[i + 1]
+      }
+    }
+    return null
+  }, [launchConfig])
 
   useEffect(() => {
     let cancelled = false
@@ -135,10 +173,120 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
     setRefreshing(false)
   }, [projectId, agentName, refreshing])
 
+  // 0.37.12 — fetch chat history for the dropdown title display
+  // and the popover list. Runs on mount, when the current session
+  // changes (title converges after the user sends the first
+  // message — claude assigns titles dynamically based on
+  // conversation content), and when the popover opens (cheap
+  // re-fetch to catch any new sessions created via heartbeat fires
+  // or other paths). Daemon owns chat_history_list_for_project;
+  // Tauri is just the IPC bridge.
   useEffect(() => {
     let cancelled = false
+    void invoke<Array<{
+      sessionId: string
+      title: string
+      timestamp: number
+      messageCount: number
+      provider: string
+    }>>('chat_history_list_for_project', { projectPath })
+      .then((rows) => {
+        if (cancelled) return
+        // Sort by recency desc; show claude sessions only — other
+        // providers (codex, gemini, pi) have their own tabs/lanes.
+        const claudeOnly = rows
+          .filter((r) => r.provider === 'claude' || !r.provider)
+          .sort((a, b) => b.timestamp - a.timestamp)
+        setHistorySessions(claudeOnly)
+      })
+      .catch((err) => {
+        console.warn('[AgentChatPane] chat_history_list_for_project failed:', err)
+      })
+    return () => { cancelled = true }
+  }, [projectPath, currentSessionId, historyOpen])
+
+  // Title display for the dropdown trigger: matched against historySessions.
+  // Falls back to a placeholder when the current session has no entry
+  // yet (brand-new chat — claude hasn't written its first turn).
+  const currentChatTitle = useMemo<string>(() => {
+    if (!currentSessionId) return 'New chat'
+    const found = historySessions.find((s) => s.sessionId === currentSessionId)
+    if (found?.title) return found.title
+    return 'New chat'
+  }, [historySessions, currentSessionId])
+
+  // Switch the pinned chat tab to a different past session. Updates
+  // `workspace_sessions.session_id` via the daemon, stamps the new
+  // id on the local AgentItemData (so the next serialize captures
+  // it), then triggers a refresh so the live PTY swaps too.
+  const switchToSession = useCallback(async (newSessionId: string): Promise<void> => {
+    if (!newSessionId || newSessionId === currentSessionId) {
+      setHistoryOpen(false)
+      return
+    }
+    setHistoryOpen(false)
+    try {
+      await invoke('workspace_session_set_session_id', {
+        projectPath,
+        sessionId: newSessionId,
+      })
+    } catch (err) {
+      console.error('[AgentChatPane] switchToSession DB update failed:', err)
+      return
+    }
+    try {
+      useTabsStore.getState().stampAgentSessionId(agentName, projectPath, newSessionId)
+    } catch (err) {
+      console.warn('[AgentChatPane] stampAgentSessionId failed:', err)
+    }
+    // Trigger the same kill-and-remount path the refresh button uses
+    // so the live PTY drops and AgentChatPane re-resolves with the
+    // new restoredSessionId (passed in as a prop from the layout
+    // store, which we just updated via stampAgentSessionId).
+    void handleRefresh()
+  }, [currentSessionId, projectPath, agentName, handleRefresh])
+
+  useEffect(() => {
+    let cancelled = false
+    const stampSessionId = (sid: string | null | undefined): void => {
+      if (!sid) return
+      try {
+        useTabsStore.getState().stampAgentSessionId(agentName, projectPath, sid)
+      } catch (err) {
+        console.warn('[AgentChatPane] stampAgentSessionId failed:', err)
+      }
+    }
     const resolve = async (): Promise<void> => {
       const myTerminalId = terminalIdRef.current
+
+      // 0.37.12 — Step 0: if the serialized layout restored a
+      // sessionId hint, use it directly. Skips the
+      // k2so_agents_resume_chat_args daemon roundtrip that can race
+      // or land on the wrong workspace_sessions row post-crash.
+      // The TerminalPane spawn that follows registers under the
+      // canonical project_id agent_name; the auto-stamp hook then
+      // updates workspace_sessions to match. Renderer is canonical.
+      if (restoredSessionId && !cancelled) {
+        // `claude --resume <X>` reloads an existing conversation;
+        // matches what k2so_agents_resume_chat_args would have
+        // returned for a workspace whose chat session has fired
+        // before. Skipping permissions matches workspace agent
+        // defaults across the rest of K2SO.
+        setLaunchConfig({
+          command: 'claude',
+          args: ['--dangerously-skip-permissions', '--resume', restoredSessionId],
+          cwd: projectPath,
+        })
+        invoke('k2so_agents_lock', {
+          projectPath,
+          agentName,
+          terminalId: myTerminalId,
+          owner: 'user',
+        }).catch(() => {})
+        stampSessionId(restoredSessionId)
+        setReady(true)
+        return
+      }
 
       // Step 1: Reattach if PTY already alive in this Tauri session
       try {
@@ -220,6 +368,10 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
             terminalId: myTerminalId,
             owner: 'user',
           }).catch(() => {})
+          // 0.37.12 — stamp the resolved session id back onto the
+          // agent item so the next serializeTab captures it. Next
+          // close/reopen takes the fast path above.
+          stampSessionId(result.resumeSession)
           setReady(true)
           return
         }
@@ -245,7 +397,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
     }
     resolve()
     return () => { cancelled = true }
-  }, [agentName, projectPath, refreshNonce])
+  }, [agentName, projectPath, refreshNonce, restoredSessionId])
 
   // Session id detection used to live here — a 12×5s polling loop that
   // called `chat_history_detect_active_session` to find the
@@ -274,17 +426,79 @@ function AgentChatTerminal({ agentName, projectId, projectPath }: AgentChatTermi
 
   return (
     <div ref={containerRef} className="h-full flex flex-col bg-[var(--color-bg)] overflow-hidden">
-      <div className="px-3 py-2 border-b border-[var(--color-border)] flex-shrink-0 flex items-center gap-3">
-        <span className="text-xs font-semibold text-[var(--color-text-primary)] truncate">
+      <div className="px-3 py-2 border-b border-[var(--color-border)] flex-shrink-0 flex items-center gap-3 relative">
+        <span className="text-xs font-semibold text-[var(--color-text-primary)] truncate flex-shrink-0">
           {displayName}
         </span>
+        {/* spacer pushes the dropdown + refresh to the right. */}
+        <div className="flex-1" />
+        {/* 0.37.12 — chat-history dropdown. Lets the user switch the
+            pinned chat to a different past session (escape hatch for
+            orphaned/deleted sessions or just to revisit). Title
+            display also serves as confirmation that the restored
+            session id is what's actually running. Sits to the LEFT
+            of the refresh button. */}
+        <button
+          type="button"
+          onClick={() => setHistoryOpen((v) => !v)}
+          title="Switch pinned chat to a different past Claude session"
+          aria-label="Switch pinned chat session"
+          aria-haspopup="listbox"
+          aria-expanded={historyOpen}
+          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors no-drag cursor-pointer min-w-0"
+        >
+          <span className="truncate max-w-[28ch]">{currentChatTitle}</span>
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="flex-shrink-0">
+            <path d={historyOpen ? 'M18 15l-6-6-6 6' : 'M6 9l6 6 6-6'} />
+          </svg>
+        </button>
+        {historyOpen && (
+          <div
+            role="listbox"
+            className="absolute right-12 top-full mt-1 z-20 w-[36ch] max-h-[60vh] overflow-y-auto bg-[var(--color-bg-elevated)] border border-[var(--color-border)] shadow-2xl py-1"
+          >
+            {historySessions.length === 0 ? (
+              <div className="px-3 py-2 text-[10px] text-[var(--color-text-muted)]">
+                No past sessions yet.
+              </div>
+            ) : (
+              historySessions.map((s) => {
+                const isCurrent = s.sessionId === currentSessionId
+                return (
+                  <button
+                    key={s.sessionId}
+                    type="button"
+                    role="option"
+                    aria-selected={isCurrent}
+                    onClick={() => void switchToSession(s.sessionId)}
+                    className={`w-full text-left px-3 py-1.5 text-[11px] flex items-center gap-2 transition-colors no-drag cursor-pointer ${
+                      isCurrent
+                        ? 'bg-[var(--color-accent)]/15 text-[var(--color-text-primary)]'
+                        : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
+                    }`}
+                  >
+                    <span className="flex-1 truncate">{s.title || 'Untitled chat'}</span>
+                    <span className="flex-shrink-0 text-[9px] text-[var(--color-text-muted)] opacity-70">
+                      {s.messageCount}
+                    </span>
+                    {isCurrent && (
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="flex-shrink-0 text-[var(--color-accent)]">
+                        <path d="M5 12l5 5 9-11" />
+                      </svg>
+                    )}
+                  </button>
+                )
+              })
+            )}
+          </div>
+        )}
         <button
           type="button"
           onClick={handleRefresh}
           disabled={refreshing}
           title="Restart chat session — kills the current Claude process and spawns a fresh resume. Use after typing `exit` or when the session is unresponsive."
           aria-label="Refresh chat session"
-          className="ml-auto inline-flex items-center justify-center h-5 w-5 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          className="inline-flex items-center justify-center h-5 w-5 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex-shrink-0"
         >
           {/* Inline SVG keeps this self-contained (no icon-lib dep). */}
           <svg

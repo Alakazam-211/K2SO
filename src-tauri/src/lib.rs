@@ -1288,6 +1288,7 @@ pub fn run() {
             agent_hooks::k2so_sessions_list_for_workspace,
             // Agent Sessions (DB-tracked)
             commands::k2so_agents::workspace_session_get,
+            commands::k2so_agents::workspace_session_set_session_id,
             // Workspace Relations
             commands::k2so_agents::workspace_relations_list,
             commands::k2so_agents::workspace_relations_list_incoming,

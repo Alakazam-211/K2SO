@@ -249,6 +249,18 @@ export interface AgentItemData {
    *  backwards-compat with pre-split serialized rows (defaults to
    *  'inbox' on restore so existing tabs land on the work board). */
   section?: 'inbox' | 'chat'
+  /** 0.37.12 — Claude session UUID for the pinned chat tab.
+   *  Persisted in the serialized layout so on close→reopen the
+   *  AgentChatPane immediately resumes the **same** session
+   *  without needing a daemon roundtrip that can race or miss.
+   *  Set on `chat` section only — `inbox` tabs don't carry a
+   *  Claude session of their own.
+   *
+   *  Stamped by `AgentChatPane` after it resolves its launch
+   *  config (either from a restored hint or from
+   *  `k2so_agents_resume_chat_args`). See
+   *  `.k2so/prds/canonical-lane-restore.md`. */
+  sessionId?: string
 }
 
 export interface Item {
@@ -312,6 +324,20 @@ export interface SerializedItem {
    *  See AgentItemData.section for semantics. Defaults to 'inbox'
    *  on deserialize when missing (legacy layouts). */
   section?: 'inbox' | 'chat'
+  /** 0.37.12 — heartbeat tab metadata. Without these, a restored
+   *  heartbeat-surfaced tab can't attach to the canonical daemon-side
+   *  heartbeat PTY (registered under `<project_id>:hb:<name>`); it
+   *  spawns a duplicate `claude --resume <X>` instead. `closeTerminalForRenderer`
+   *  also depends on `heartbeatName + surfacedAgentName` to recognize
+   *  the tab as a heartbeat (close-as-minimize semantics). See
+   *  `.k2so/prds/canonical-lane-restore.md`. */
+  heartbeatName?: string
+  surfacedAgentName?: string
+  /** v2_session_map agent_name override — when set, TerminalPane
+   *  spawns with this key instead of `tab-<terminalId>` so the
+   *  daemon's idempotency check finds the existing PTY and the
+   *  restored tab adopts it rather than duplicating. */
+  attachAgentName?: string
   /** Phase 4.5+ renderer choice stamped when the tab was first
    *  spawned. Preserved across app restarts so Kessel tabs come back
    *  as Kessel tabs and v2 tabs come back as v2 tabs. Missing on rows
@@ -386,6 +412,14 @@ interface TabsState {
   moveItemBetweenPanes: (fromTabId: string, fromPaneGroupId: string, itemId: string, toTabId: string, toPaneGroupId: string) => void
   getActiveTab: () => Tab | undefined
   openFileInPane: (tabId: string, filePath: string) => void
+  /** 0.37.12 — stamp the canonical Claude session id on an agent
+   *  item's data so the next `serializeTab` captures it. Called by
+   *  `AgentChatPane` after it resolves the session_id (either from
+   *  a restored hint or from `k2so_agents_resume_chat_args`). The
+   *  serialized layout becomes the renderer-side canonical record,
+   *  surviving daemon DB races + crash windows. See
+   *  `.k2so/prds/canonical-lane-restore.md`. */
+  stampAgentSessionId: (agentName: string, projectPath: string, sessionId: string) => void
   openAgentPane: (agentName: string, projectPath: string, title?: string) => void
   /** Open a tab bound to a specific heartbeat's chat session, or focus
    *  the existing tab if one is already open. Resolves the launch
@@ -558,6 +592,17 @@ function serializeTab(tab: Tab): SerializedTab {
           // as Kessel tabs. Older rows without this field fall back
           // to currentRenderer() during restoreLayout.
           renderer: d.renderer,
+          // 0.37.12 — heartbeat tab metadata. Without these, the
+          // restored TerminalPane spawns with `tab-<terminalId>`
+          // (idempotency miss) instead of attaching to the
+          // canonical heartbeat agent_name. Result: duplicate
+          // `claude --resume <X>` PTYs and the user's
+          // closeTerminalForRenderer can't recognize the tab as
+          // heartbeat-bonded. See `.k2so/prds/canonical-lane-restore.md`.
+          heartbeatName: d.heartbeatName,
+          projectPath: d.projectPath,
+          surfacedAgentName: d.surfacedAgentName,
+          attachAgentName: d.attachAgentName,
         }
       } else if (item.type === 'agent') {
         const d = item.data as AgentItemData
@@ -567,6 +612,11 @@ function serializeTab(tab: Tab): SerializedTab {
           agentName: d.agentName,
           projectPath: d.projectPath,
           section: d.section,
+          // 0.37.12 — pinned chat tab carries its canonical Claude
+          // session id so close → reopen resumes the same conversation
+          // without a daemon roundtrip race. See PRD
+          // .k2so/prds/canonical-lane-restore.md.
+          sessionId: d.sessionId,
         }
       } else {
         const d = item.data as FileViewerItemData
@@ -1160,6 +1210,48 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
       return { tabs }
     })
+  },
+
+  stampAgentSessionId: (agentName: string, projectPath: string, sessionId: string) => {
+    if (!sessionId) return
+    let mutated = false
+    set((state) => {
+      const next = state.tabs.map((tab) => {
+        let tabMutated = false
+        const nextPaneGroups = new Map(tab.paneGroups)
+        for (const [pgId, pg] of tab.paneGroups) {
+          let pgMutated = false
+          const nextItems = pg.items.map((item) => {
+            if (item.type !== 'agent') return item
+            const d = item.data as AgentItemData
+            if (d.agentName !== agentName || d.projectPath !== projectPath) return item
+            // 0.37.12 P1C — only stamp the CHAT pinned tab. Inbox
+            // tabs share agentName + projectPath but don't render
+            // Claude, so sessionId on those is unused garbage. Also
+            // future-proofs against worktree-chat agent items
+            // (which use a different agentName but still match
+            // projectPath in their parent workspace context).
+            if (d.section !== 'chat') return item
+            if (d.sessionId === sessionId) return item
+            pgMutated = true
+            return { ...item, data: { ...d, sessionId } }
+          })
+          if (pgMutated) {
+            tabMutated = true
+            nextPaneGroups.set(pgId, { ...pg, items: nextItems })
+          }
+        }
+        if (!tabMutated) return tab
+        mutated = true
+        return { ...tab, paneGroups: nextPaneGroups }
+      })
+      return mutated ? { tabs: next } : state
+    })
+    // Trigger a layout save so the new sessionId lands in DB on the
+    // next debounce. persistActiveWorkspace already runs on a tab
+    // mutation — calling explicitly here is belt-and-suspenders for
+    // the case where the renderer is mid-cleanup at app quit.
+    if (mutated) get().persistActiveWorkspace()
   },
 
   openAgentPane: (agentName: string, projectPath: string, title?: string) => {
@@ -2256,13 +2348,47 @@ export const useTabsStore = create<TabsState>((set, get) => ({
                 // serialized before renderer persistence shipped have
                 // no field — fall back to the current user setting.
                 renderer: si.renderer ?? currentRenderer(),
+                // 0.37.12 — restore heartbeat tab metadata so the
+                // TerminalPane spawn attaches to the canonical
+                // daemon-side heartbeat PTY (via attachAgentName)
+                // instead of registering under `tab-<terminalId>`
+                // and spawning a duplicate `claude --resume <X>`.
+                // closeTerminalForRenderer also depends on
+                // heartbeatName + surfacedAgentName to keep the
+                // PTY alive on tab close (close-as-minimize).
+                heartbeatName: si.heartbeatName,
+                projectPath: si.projectPath,
+                surfacedAgentName: si.surfacedAgentName,
+                attachAgentName: si.attachAgentName,
               },
             }
           } else if (si.type === 'agent') {
+            const restoredSection = si.section ?? 'inbox'
             return {
               id: crypto.randomUUID(),
               type: 'agent' as const,
-              data: { agentName: si.agentName ?? '', projectPath: si.projectPath ?? cwd, section: si.section ?? 'inbox' },
+              data: {
+                agentName: si.agentName ?? '',
+                projectPath: si.projectPath ?? cwd,
+                section: restoredSection,
+                // 0.37.12 — restore the pinned chat tab's Claude
+                // session id (when present). AgentChatPane reads
+                // this as a hint and resumes the same session
+                // immediately without round-tripping
+                // k2so_agents_resume_chat_args. Absent on rows
+                // serialized before 0.37.12 — AgentChatPane falls
+                // back to the daemon lookup in that case.
+                //
+                // 0.37.12 P1C scrub: only restore sessionId for
+                // the chat tab. Inbox tabs (and any other
+                // non-chat agent surface) don't render Claude, so
+                // a stamped sessionId there is unused garbage.
+                // Pre-fix layouts may carry a leaked value from
+                // the broader stampAgentSessionId match. Drop it
+                // on restore so the next serialize doesn't
+                // round-trip the stale data.
+                sessionId: restoredSection === 'chat' ? si.sessionId : undefined,
+              },
             }
           } else {
             return {

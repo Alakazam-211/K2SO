@@ -297,6 +297,7 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
                   agentName={ad.agentName}
                   projectPath={ad.projectPath}
                   section={ad.section}
+                  restoredSessionId={ad.sessionId}
                   onClose={() => handleClose(item.id)}
                 />
               )

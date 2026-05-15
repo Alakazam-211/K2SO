@@ -540,6 +540,47 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
 
+        // 0.37.12 — set the pinned chat tab's canonical Claude session
+        // id for a workspace. Powers AgentChatPane's chat-history
+        // dropdown (escape hatch for orphaned/deleted sessions).
+        // After this returns, the renderer is expected to refresh
+        // the pinned chat (close v2 session by canonical agent_name,
+        // re-mount AgentChatPane) so the live PTY swaps.
+        //
+        // Query params:
+        //   project=<workspace-path>
+        //   session_id=<claude-uuid-to-set>
+        "/cli/workspace/set-chat-session" => match need_project(params) {
+            Ok(p) => {
+                let session_id = str_param(params, "session_id");
+                if session_id.is_empty() {
+                    return CliResponse::bad_request("Missing session_id parameter");
+                }
+                let db = k2so_core::db::shared();
+                let conn = db.lock();
+                let project_id = match k2so_core::agents::resolve_project_id(&conn, &p) {
+                    Some(pid) => pid,
+                    None => return CliResponse::bad_request(
+                        format!("project not registered: {p}"),
+                    ),
+                };
+                match k2so_core::db::schema::WorkspaceSession::update_session_id(
+                    &conn, &project_id, &session_id,
+                ) {
+                    Ok(rows) => CliResponse::ok_json(
+                        serde_json::json!({
+                            "success": true,
+                            "projectId": project_id,
+                            "sessionId": session_id,
+                            "rowsUpdated": rows,
+                        }).to_string(),
+                    ),
+                    Err(e) => CliResponse::bad_request(format!("update failed: {e}")),
+                }
+            }
+            Err(r) => r,
+        },
+
         // 0.37.4: read the workspace's primary-agent display name.
         // Reads `.k2so/agent/AGENT.md` frontmatter — first
         // `display_name:` (the user-editable label), then `name:`

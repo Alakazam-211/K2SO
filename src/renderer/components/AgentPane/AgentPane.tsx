@@ -17,6 +17,10 @@ interface AgentPaneProps {
    *  explicitly. `undefined` falls back to 'inbox' for backwards compat
    *  with rows serialized before the split. */
   section?: 'inbox' | 'chat'
+  /** 0.37.12 — pinned chat tab's restored Claude session id from the
+   *  serialized layout. Forwarded to `AgentChatPane` so restore is
+   *  deterministic without a daemon roundtrip race. */
+  restoredSessionId?: string
   onClose?: () => void
 }
 
@@ -42,13 +46,13 @@ interface WorkItem {
  * Workspace Settings now (the existing "Edit AGENT.md" / "Edit CLAUDE.md"
  * buttons there cover what the deleted sub-tabs did).
  */
-export function AgentPane({ agentName, projectPath, section }: AgentPaneProps): React.JSX.Element {
+export function AgentPane({ agentName, projectPath, section, restoredSessionId }: AgentPaneProps): React.JSX.Element {
   if (agentName.startsWith('__wt:')) {
     return <WorktreeDetailPane worktreeId={agentName.slice(5)} projectPath={projectPath} />
   }
 
   if (section === 'chat') {
-    return <AgentChatPane agentName={agentName} projectPath={projectPath} />
+    return <AgentChatPane agentName={agentName} projectPath={projectPath} restoredSessionId={restoredSessionId} />
   }
 
   // Default to inbox for legacy serialized rows that have no section field.

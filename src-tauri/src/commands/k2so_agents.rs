@@ -3160,6 +3160,28 @@ pub fn workspace_session_get(
     WorkspaceSession::get(&conn, &project_id).map_err(|e| e.to_string())
 }
 
+/// 0.37.12 — explicitly set the pinned chat tab's Claude session id
+/// for a workspace. Thin facade over the daemon HTTP route
+/// `/cli/workspace/set-chat-session` — keeps Tauri as the thin
+/// client, daemon owns the write. Used by `AgentChatPane`'s
+/// chat-history dropdown when the user picks a different chat from
+/// the history list (escape hatch for orphaned or deleted sessions).
+///
+/// Caller is expected to follow up with a pinned-chat refresh
+/// (`closeV2Session(projectId)` + re-mount AgentChatPane) so the
+/// live PTY swaps to the new session.
+#[tauri::command]
+pub fn workspace_session_set_session_id(
+    project_path: String,
+    session_id: String,
+) -> Result<String, String> {
+    let client = crate::daemon_client::DaemonClient::try_connect()?;
+    client.cli_get(
+        "/cli/workspace/set-chat-session",
+        &[("project", &project_path), ("session_id", &session_id)],
+    )
+}
+
 // ── Workspace Relations ─────────────────────────────────────────────────
 
 #[tauri::command]
