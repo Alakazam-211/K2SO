@@ -1,8 +1,10 @@
+> **⚠️ Alpha note** — Voice dictation in the terminal, the Permissions settings page, and the Dictation Lab are all **shipping as alpha** in this release. They work end-to-end in our testing on macOS 14/15 Sequoia, but the API surfaces and UX are likely to shift as we get real-world feedback. The "Too many open files" fix is a straight bugfix and not alpha.
+
 ## Highlights
 
-**Apple Dictation now works in K2SO terminals.** Press Fn-Fn (or your configured Dictation shortcut) inside any v2 terminal pane; the indicator anchors at the cursor cell, and words stream into the prompt as you speak.
+**Apple Dictation now works in K2SO terminals** *(alpha)*. Press Fn-Fn (or your configured Dictation shortcut) inside any v2 terminal pane; the indicator anchors at the cursor cell, and words stream into the prompt as you speak.
 
-Plus a new **Permissions settings page**, a **fix for "Too many open files"** errors that surfaced when running many panes, and a developer-only **Dictation Lab** for diagnosing input/dictation interactions.
+Plus a new **Permissions settings page** *(alpha)*, a **fix for "Too many open files"** errors that surfaced when running many panes, and a developer-only **Dictation Lab** *(alpha, dev-only)* for diagnosing input/dictation interactions.
 
 ## Apple Dictation in the terminal
 
