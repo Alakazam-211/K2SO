@@ -776,6 +776,21 @@ export default function Sidebar(): React.JSX.Element {
 
   const agenticEnabled = useSettingsStore((s) => s.agenticSystemsEnabled)
 
+  // 0.37.13 — Agents & Pinned section collapse + scroll.
+  // Persists across launches via localStorage so users with many
+  // workspaces don't have to re-collapse on every reopen.
+  const [agentsPinnedCollapsed, setAgentsPinnedCollapsedRaw] = useState<boolean>(() => {
+    try { return localStorage.getItem('k2so:sidebar:agentsPinnedCollapsed') === '1' }
+    catch { return false }
+  })
+  const setAgentsPinnedCollapsed = useCallback((v: boolean | ((prev: boolean) => boolean)) => {
+    setAgentsPinnedCollapsedRaw((prev) => {
+      const next = typeof v === 'function' ? v(prev) : v
+      try { localStorage.setItem('k2so:sidebar:agentsPinnedCollapsed', next ? '1' : '0') } catch { /* ignore */ }
+      return next
+    })
+  }, [])
+
   // Agent-mode workspaces float to top (K2SO Agents + Custom Agents, not pods)
   const agentProjects = useMemo(() =>
     agenticEnabled ? projects.filter((p) => p.agentMode === 'agent' || p.agentMode === 'custom') : [],
@@ -1035,17 +1050,50 @@ export default function Sidebar(): React.JSX.Element {
     <div className="relative flex flex-col h-full">
       <ResizeHandle />
 
-      {/* Agents & Pinned workspaces — always visible above focus groups */}
-      {(agentProjects.length > 0 || pinnedProjects.length > 0) && (
+      {/* Agents & Pinned workspaces — always visible above focus groups.
+          0.37.13: collapsible header + inner scroll when > 10 items so the
+          section doesn't push focus groups + active dock off-screen. */}
+      {(agentProjects.length > 0 || pinnedProjects.length > 0) && (() => {
+        const totalCount = agentProjects.length + pinnedProjects.length
+        const SCROLL_THRESHOLD = 10
+        const SCROLL_MAX_HEIGHT = 360 // ~7-8 items visible before scrolling
+        const useScroll = totalCount > SCROLL_THRESHOLD
+        return (
         <div className="border-b border-[var(--color-border)]">
-          <div className="px-4 pt-3 pb-1 no-drag flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setAgentsPinnedCollapsed((v) => !v)}
+            className="no-drag w-full flex items-center gap-1.5 px-4 pt-3 pb-1 text-left cursor-pointer hover:bg-white/[0.02] transition-colors"
+            aria-expanded={!agentsPinnedCollapsed}
+            aria-controls="sidebar-agents-pinned-content"
+          >
             <span className="text-[10px] font-semibold tracking-wider text-[var(--color-text-muted)] uppercase">
               {agentProjects.length > 0 && pinnedProjects.length > 0 ? 'Agents & Pinned' : agentProjects.length > 0 ? 'Agents' : 'Pinned'}
+            </span>
+            <span className="text-[10px] text-[var(--color-text-muted)] tabular-nums px-1.5 py-0.5 bg-white/[0.06] font-mono">
+              {totalCount}
             </span>
             <span className="text-[9px] font-mono text-[var(--color-text-muted)] opacity-50">
               <KeyCombo combo={useTerminalSettingsStore.getState().shortcutLayout === 'cmd-active-cmdshift-pinned' ? '⌥⌘ 1-9' : '⌘ 1-9'} />
             </span>
-          </div>
+            <span className="flex-1" />
+            <svg
+              className="w-2.5 h-2.5 text-[var(--color-text-muted)] flex-shrink-0"
+              style={{ transition: 'transform 0.2s ease', transform: agentsPinnedCollapsed ? 'rotate(0deg)' : 'rotate(90deg)' }}
+              fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+            </svg>
+          </button>
+          <div
+            id="sidebar-agents-pinned-content"
+            style={{
+              overflow: 'hidden',
+              maxHeight: agentsPinnedCollapsed ? 0 : 1200,
+              transition: 'max-height 0.2s ease',
+            }}
+          >
+            <div style={useScroll ? { maxHeight: SCROLL_MAX_HEIGHT, overflowY: 'auto' } : undefined}>
           {/* Agents zone — reorderable independently */}
           {agentProjects.length > 0 && (
             <div ref={agentsRef}>
@@ -1120,8 +1168,11 @@ export default function Sidebar(): React.JSX.Element {
               <div className="h-[2px] bg-[var(--color-accent)] mx-3" />
             )}
           </div>
+            </div>{/* scroll wrapper */}
+          </div>{/* collapse wrapper */}
         </div>
-      )}
+        )
+      })()}
 
       {/* Focus Group Selector (replaces branding area) */}
       <FocusGroupSelector />

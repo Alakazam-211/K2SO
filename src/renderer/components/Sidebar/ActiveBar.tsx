@@ -124,12 +124,12 @@ function useActiveBarItems(): ProjectWithWorkspaces[] {
     )
 
     const result = projects.filter((p) => {
-      // Skip pinned projects — they're always visible at the top
-      if (p.pinned) return false
-
-      // Skip single-agent workspaces (K2SO Agent, Custom Agent) — shown in agents section
-      // Coordinator workspaces with worktrees should still appear in the active bar
-      if (p.agentMode === 'agent' || p.agentMode === 'custom') return false
+      // 0.37.13 — pinned + agent-mode workspaces are no longer
+      // filtered out of Active. They show in both their own
+      // section (Agents & Pinned at the top) AND in Active if
+      // they meet the activity criteria below. This makes the
+      // 1-0 keyboard shortcuts work on the actual workspaces the
+      // user is using right now, not just the unpinned ones.
 
       // 1. Manually active — always included (explicit user signal,
       // wins over a stale dismiss).
@@ -350,7 +350,9 @@ export default function ActiveBar(): React.JSX.Element | null {
       <div
         style={{
           overflow: 'hidden',
-          maxHeight: collapsed ? 0 : 200,
+          // 0.37.13 — 320px fits all 10 shortcut-bound items (1-9 + 0)
+          // at ~28-30px per row. Anything beyond rolls off the end.
+          maxHeight: collapsed ? 0 : 320,
           transition: 'max-height 0.2s ease',
         }}
       >
@@ -384,9 +386,9 @@ export function getActiveBarItems(): ProjectWithWorkspaces[] {
   pruneExpiredDismissedProjects(now)
 
   return projects.filter((p) => {
-    if (p.pinned) return false
-    // Only exclude single-agent workspaces (shown in agents section), not pods
-    if (p.agentMode === 'agent' || p.agentMode === 'custom') return false
+    // 0.37.13 — keep pinned + agent-mode workspaces eligible for
+    // Active. Same rationale as the hook above: 1-0 shortcuts should
+    // work on the workspaces the user is actually using.
     if (p.manuallyActive) return true
     if (p.lastInteractionAt && (now - p.lastInteractionAt) < TWENTY_FOUR_HOURS) return true
     if (_dismissedProjects.has(p.id)) return false
