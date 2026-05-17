@@ -291,6 +291,13 @@ async fn main() {
     // signature derivation and unit tests.
     workspace_layouts_dedup::run_once();
 
+    // 0.38.0 — migrate `version: 1` layouts to v2 (metadata-only for
+    // daemon-backed tabs). Independent code_migrations marker
+    // (`0.38.0-layout-v2-emit`) so the dedup and the v2 emit can be
+    // re-run independently in future versions. Renderer also performs
+    // the same migration on read (`tabs.ts::migrateLayoutToV2`).
+    workspace_layouts_dedup::run_v2_emit_once();
+
     // daemon-run may have queued signals for offline agents that
     // never got injected (daemon crashed before the session came
     // online). Log them so operators can eyeball the queue; the

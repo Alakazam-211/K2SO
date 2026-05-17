@@ -307,44 +307,94 @@ export type TerminalPane = TerminalPaneData
 
 // ── Serialization Types ─────────────────────────────────────────────────
 
-export interface SerializedItem {
+/** 0.38.0 layout schema version stamped on serialize. Readers fall back
+ *  to v1 semantics when the field is missing or `< 2`. v1 → v2 migration
+ *  happens in-place on read; the daemon also runs a one-shot boot pass
+ *  (`workspace_layouts_dedup::run_once`) so disk rows converge eagerly. */
+export const LAYOUT_SCHEMA_VERSION = 2
+
+/** Discriminated union for one serialized item inside a paneGroup.
+ *
+ *  Terminal items split by version:
+ *   - v1 (legacy): carried daemon-owned data (cwd / command / args /
+ *     sessionId / renderer). Kept readable for migration; never emitted.
+ *   - v2 (current): paneGroupId is the canonical key (daemon's
+ *     `tab-<paneGroupId>` agent_name). Daemon owns cwd/command/args/
+ *     sessionId/renderer — those come back via
+ *     `k2so_sessions_list_for_workspace` in `reconcileWithDaemon`.
+ *
+ *  Heartbeat metadata fields (`heartbeatName`, `surfacedAgentName`,
+ *  `attachAgentName`, `projectPath`) stay on v2 terminals — the daemon's
+ *  list endpoint doesn't currently expose them and they're load-bearing
+ *  for close-as-minimize behavior in `closeTerminalForRenderer`.
+ *  Removing them is a follow-up once the daemon API grows. */
+export interface SerializedTerminalItemV2 {
   id: string
-  type: 'terminal' | 'file-viewer' | 'agent'
+  type: 'terminal'
+  /** The canonical key — equals the parent paneGroup id and (modulo
+   *  the `tab-` prefix) the daemon's agent_name. Daemon is source of
+   *  truth for command/args/cwd/sessionId; reconcile fills them in. */
+  paneGroupId: string
+  /** Load-bearing for close-as-minimize. See doc comment on the type. */
+  heartbeatName?: string
+  /** Load-bearing for close-as-minimize. See doc comment on the type. */
+  surfacedAgentName?: string
+  /** Load-bearing for close-as-minimize. See doc comment on the type. */
+  attachAgentName?: string
+  /** Load-bearing for close-as-minimize. See doc comment on the type. */
+  projectPath?: string
+}
+
+/** Legacy v1 terminal shape — read-only, never emitted by 0.38.0+.
+ *  Tolerated by readers via the v1→v2 migration in `restoreLayout`. */
+export interface SerializedTerminalItemV1 {
+  id: string
+  type: 'terminal'
   cwd?: string
   command?: string
   args?: string[]
-  sessionId?: string  // CLI tool session ID for resume on restart
-  filePath?: string
-  pinned?: boolean
-  scrollTop?: number   // file-viewer scroll position (for session restore)
-  cursorPos?: number   // file-viewer cursor offset (for session restore)
+  sessionId?: string
+  renderer?: 'alacritty' | 'alacritty-v2' | 'kessel'
+  heartbeatName?: string
+  surfacedAgentName?: string
+  attachAgentName?: string
+  projectPath?: string
+}
+
+export interface SerializedAgentItem {
+  id: string
+  type: 'agent'
   agentName?: string
   projectPath?: string
   /** Which section the system-pinned agent tab renders.
    *  See AgentItemData.section for semantics. Defaults to 'inbox'
    *  on deserialize when missing (legacy layouts). */
   section?: 'inbox' | 'chat'
-  /** 0.37.12 — heartbeat tab metadata. Without these, a restored
-   *  heartbeat-surfaced tab can't attach to the canonical daemon-side
-   *  heartbeat PTY (registered under `<project_id>:hb:<name>`); it
-   *  spawns a duplicate `claude --resume <X>` instead. `closeTerminalForRenderer`
-   *  also depends on `heartbeatName + surfacedAgentName` to recognize
-   *  the tab as a heartbeat (close-as-minimize semantics). See
-   *  `.k2so/prds/canonical-lane-restore.md`. */
-  heartbeatName?: string
-  surfacedAgentName?: string
-  /** v2_session_map agent_name override — when set, TerminalPane
-   *  spawns with this key instead of `tab-<terminalId>` so the
-   *  daemon's idempotency check finds the existing PTY and the
-   *  restored tab adopts it rather than duplicating. */
-  attachAgentName?: string
-  /** Phase 4.5+ renderer choice stamped when the tab was first
-   *  spawned. Preserved across app restarts so Kessel tabs come back
-   *  as Kessel tabs and v2 tabs come back as v2 tabs. Missing on rows
-   *  serialized before the field existed — restoreLayout falls back
-   *  to the user's current setting in that case. */
-  renderer?: 'alacritty' | 'alacritty-v2' | 'kessel'
+  /** 0.37.12 — Claude session UUID for the pinned chat tab.
+   *  Persisted so close→reopen resumes the same conversation
+   *  without a daemon roundtrip race. Chat section only. */
+  sessionId?: string
 }
+
+export interface SerializedFileViewerItem {
+  id: string
+  type: 'file-viewer'
+  filePath?: string
+  pinned?: boolean
+  /** Saved scroll / cursor position (file-viewer only). */
+  scrollTop?: number
+  cursorPos?: number
+}
+
+/** Union of all serialized item shapes accepted by `restoreLayout`.
+ *  Includes the legacy v1 terminal shape so pre-0.38.0 layouts deserialize
+ *  cleanly; `restoreLayout` migrates them to v2 before constructing Tab
+ *  objects. */
+export type SerializedItem =
+  | SerializedTerminalItemV2
+  | SerializedTerminalItemV1
+  | SerializedAgentItem
+  | SerializedFileViewerItem
 
 export interface SerializedPaneGroup {
   id: string
@@ -361,6 +411,8 @@ export interface SerializedTab {
 }
 
 export interface SerializedLayout {
+  /** Schema version. Absent / < 2 = v1; readers migrate to v2 in-place. */
+  version?: number
   tabs: SerializedTab[]
   activeTabId: string | null
   extraGroups?: Array<{ tabs: SerializedTab[], activeTabId: string | null }>
@@ -574,36 +626,31 @@ export function ensurePinnedAgentTabForMode(
   }, 0)
 }
 
-/** Serialize a single Tab to SerializedTab (used by serializeCurrentLayout and serializeAllWorkspaces). */
+/** Serialize a single Tab to SerializedTab (used by serializeCurrentLayout and serializeAllWorkspaces).
+ *  Emits the v2 terminal shape: paneGroupId is the canonical key; daemon
+ *  owns cwd/command/args/sessionId/renderer (those come back via
+ *  `reconcileWithDaemon` at restore time, not from layout JSON). */
 function serializeTab(tab: Tab): SerializedTab {
   const paneGroupsObj: Record<string, SerializedPaneGroup> = {}
   for (const [pgId, pg] of tab.paneGroups) {
     const serializedItems: SerializedItem[] = pg.items.map((item) => {
       if (item.type === 'terminal') {
         const d = item.data as TerminalItemData
-        return {
+        const v2: SerializedTerminalItemV2 = {
           id: item.id,
           type: 'terminal' as const,
-          cwd: d.cwd,
-          command: d.command,
-          args: d.args,
-          sessionId: d.sessionId,
-          // Persist the renderer so Kessel tabs survive restart
-          // as Kessel tabs. Older rows without this field fall back
-          // to currentRenderer() during restoreLayout.
-          renderer: d.renderer,
-          // 0.37.12 — heartbeat tab metadata. Without these, the
-          // restored TerminalPane spawns with `tab-<terminalId>`
-          // (idempotency miss) instead of attaching to the
-          // canonical heartbeat agent_name. Result: duplicate
-          // `claude --resume <X>` PTYs and the user's
-          // closeTerminalForRenderer can't recognize the tab as
-          // heartbeat-bonded. See `.k2so/prds/canonical-lane-restore.md`.
+          paneGroupId: pgId,
+          // Heartbeat metadata stays on v2 — daemon's list endpoint
+          // doesn't currently expose these, and they're load-bearing
+          // for close-as-minimize semantics in
+          // `closeTerminalForRenderer`. Removing them is a follow-up
+          // once the daemon API grows.
           heartbeatName: d.heartbeatName,
           projectPath: d.projectPath,
           surfacedAgentName: d.surfacedAgentName,
           attachAgentName: d.attachAgentName,
         }
+        return v2
       } else if (item.type === 'agent') {
         const d = item.data as AgentItemData
         return {
@@ -652,6 +699,7 @@ function serializeSnapshot(snapshot: WorkspaceTabSnapshot): SerializedLayout {
     activeTabId: group.activeTabId,
   }))
   return {
+    version: LAYOUT_SCHEMA_VERSION,
     tabs: snapshot.tabs.map(serializeTab),
     activeTabId: snapshot.activeTabId,
     extraGroups: serializedExtraGroups.length > 0 ? serializedExtraGroups : undefined,
@@ -2276,6 +2324,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       activeTabId: group.activeTabId,
     }))
     return {
+      version: LAYOUT_SCHEMA_VERSION,
       tabs: serializedTabs,
       activeTabId: state.activeTabId,
       extraGroups: serializedExtraGroups.length > 0 ? serializedExtraGroups : undefined,
@@ -2286,6 +2335,13 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
   restoreLayout: (layout: SerializedLayout, cwd: string) => {
     try {
+    // 0.38.0 — v1→v2 migration. Walks all paneGroup items and drops
+    // daemon-owned fields from terminal items. Daemon-owned data is
+    // refilled by `reconcileWithDaemon` after restoration. The on-disk
+    // copy converges to v2 on the next `saveLayoutForWorkspace` call,
+    // which `loadLayoutForWorkspace` triggers when migration happens.
+    migrateLayoutToV2(layout)
+
     const restoredTabs: Tab[] = layout.tabs.map((serializedTab) => {
       const paneGroups = new Map<string, PaneGroup>()
 
@@ -2314,52 +2370,28 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         const rawItems = Array.isArray(serializedPg?.items) ? serializedPg.items : []
         const items: Item[] = rawItems.map((si) => {
           if (si.type === 'terminal') {
-            // If this terminal had a CLI tool session, restore with --resume
-            let command = si.command
-            let args = si.args
-            const sessionId = si.sessionId
-
-            if (sessionId && command) {
-              const toolConfig = RESUMABLE_CLI_TOOLS[command]
-              if (toolConfig) {
-                if (toolConfig.resumeSubcommand) {
-                  // Subcommand-style (Codex): drop preset args; resumed
-                  // session carries its own model/permissions.
-                  args = [toolConfig.resumeSubcommand, sessionId]
-                } else if (toolConfig.resumeFlag) {
-                  // Flag-style: preserve original args (e.g. --dangerously-skip-permissions) and append the resume flag.
-                  const flag = toolConfig.resumeFlag
-                  const origArgs = (si.args ?? []).filter((a: string) => a !== flag && a !== sessionId)
-                  args = [...origArgs, flag, sessionId]
-                }
-              }
-            }
-
+            // After migrateLayoutToV2, terminal items are v2 shape:
+            // only paneGroupId + heartbeat metadata. cwd/command/args/
+            // sessionId/renderer come from the daemon at reconcile
+            // time. Default to undefined so TerminalPane attaches to
+            // the existing daemon PTY by paneGroupId; if no PTY
+            // exists, it spawns a fresh shell at the workspace cwd.
+            const t = si as SerializedTerminalItemV2
             return {
               id: crypto.randomUUID(),
               type: 'terminal' as const,
               data: {
                 terminalId: newPgId,
-                cwd: si.cwd ?? cwd,
-                command,
-                args,
-                sessionId,
-                // Preserve the stamped renderer across restart. Tabs
-                // serialized before renderer persistence shipped have
-                // no field — fall back to the current user setting.
-                renderer: si.renderer ?? currentRenderer(),
-                // 0.37.12 — restore heartbeat tab metadata so the
-                // TerminalPane spawn attaches to the canonical
-                // daemon-side heartbeat PTY (via attachAgentName)
-                // instead of registering under `tab-<terminalId>`
-                // and spawning a duplicate `claude --resume <X>`.
-                // closeTerminalForRenderer also depends on
-                // heartbeatName + surfacedAgentName to keep the
-                // PTY alive on tab close (close-as-minimize).
-                heartbeatName: si.heartbeatName,
-                projectPath: si.projectPath,
-                surfacedAgentName: si.surfacedAgentName,
-                attachAgentName: si.attachAgentName,
+                cwd,
+                renderer: currentRenderer(),
+                // Heartbeat metadata stays in the v2 schema — daemon's
+                // list endpoint doesn't expose these, and
+                // closeTerminalForRenderer depends on them to keep
+                // the PTY alive on tab close (close-as-minimize).
+                heartbeatName: t.heartbeatName,
+                projectPath: t.projectPath,
+                surfacedAgentName: t.surfacedAgentName,
+                attachAgentName: t.attachAgentName,
               },
             }
           } else if (si.type === 'agent') {
@@ -2460,31 +2492,20 @@ export const useTabsStore = create<TabsState>((set, get) => ({
               const rawItems = Array.isArray(serializedPg?.items) ? serializedPg.items : []
               const items: Item[] = rawItems.map((si) => {
                 if (si.type === 'terminal') {
-                  let command = si.command
-                  let args = si.args
-                  const sessionId = si.sessionId
-                  if (sessionId && command) {
-                    const toolConfig = RESUMABLE_CLI_TOOLS[command]
-                    if (toolConfig) {
-                      if (toolConfig.resumeSubcommand) {
-                        args = [toolConfig.resumeSubcommand, sessionId]
-                      } else if (toolConfig.resumeFlag) {
-                        const flag = toolConfig.resumeFlag
-                        const origArgs = (si.args ?? []).filter((a: string) => a !== flag && a !== sessionId)
-                        args = [...origArgs, flag, sessionId]
-                      }
-                    }
-                  }
+                  // v2: daemon owns command/args/cwd/sessionId/renderer.
+                  // Reconcile fills them in after restore.
+                  const t = si as SerializedTerminalItemV2
                   return {
                     id: crypto.randomUUID(),
                     type: 'terminal' as const,
                     data: {
                       terminalId: newPgId,
-                      cwd: si.cwd ?? cwd,
-                      command,
-                      args,
-                      sessionId,
-                      renderer: si.renderer ?? currentRenderer(),
+                      cwd,
+                      renderer: currentRenderer(),
+                      heartbeatName: t.heartbeatName,
+                      projectPath: t.projectPath,
+                      surfacedAgentName: t.surfacedAgentName,
+                      attachAgentName: t.attachAgentName,
                     },
                   }
                 } else if (si.type === 'agent') {
@@ -2605,10 +2626,12 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       if (sessions === null) return // daemon unreachable — leave layout alone
       if (get().activeWorkspaceKey !== key) return // user switched mid-query
 
-      const daemonPaneGroupIds = new Set<string>()
+      // Index daemon-side `tab-<X>` sessions by paneGroupId for fast lookup
+      // when refreshing existing terminal items and detecting orphans.
+      const daemonByPgId = new Map<string, DaemonSessionRow>()
       for (const s of sessions) {
         if (s.isV2 && typeof s.agentName === 'string' && s.agentName.startsWith('tab-')) {
-          daemonPaneGroupIds.add(s.agentName.slice(4))
+          daemonByPgId.set(s.agentName.slice(4), s)
         }
       }
 
@@ -2618,11 +2641,43 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         tab.paneGroups.forEach((_, pgId) => surfacedPgIds.add(pgId))
       }
 
+      // 0.38.0 v2 — refresh existing terminal items with daemon-owned
+      // command/args/cwd. After v1→v2 migration, the renderer no longer
+      // carries this data in layout JSON; the daemon's list endpoint is
+      // the canonical source. Mutates TerminalItemData in place so live
+      // TerminalPane components pick up the new values via the
+      // subscription that fires from the `set` call below.
+      let refreshedItems = 0
+      for (const tab of state.tabs) {
+        for (const [pgId, pg] of tab.paneGroups) {
+          const session = daemonByPgId.get(pgId)
+          if (!session) continue
+          for (const item of pg.items) {
+            if (item.type !== 'terminal') continue
+            const d = item.data as TerminalItemData
+            const nextCwd = session.cwd || d.cwd
+            const nextCmd = session.command ?? d.command
+            const nextArgs = session.args.length > 0 ? session.args : d.args
+            const nextSession = session.sessionId || d.sessionId
+            if (
+              d.cwd !== nextCwd ||
+              d.command !== nextCmd ||
+              !arraysEqual(d.args, nextArgs) ||
+              d.sessionId !== nextSession
+            ) {
+              d.cwd = nextCwd
+              d.command = nextCmd
+              d.args = nextArgs
+              d.sessionId = nextSession
+              refreshedItems += 1
+            }
+          }
+        }
+      }
+
       const adopted: Tab[] = []
-      for (const pgId of daemonPaneGroupIds) {
+      for (const [pgId, session] of daemonByPgId) {
         if (surfacedPgIds.has(pgId)) continue
-        const session = sessions.find((s) => s.agentName === `tab-${pgId}`)
-        if (!session) continue
         const pg = makeTerminalPaneGroup(
           pgId,
           session.cwd || cwd,
@@ -2639,10 +2694,25 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         })
       }
 
-      if (adopted.length > 0) {
-        console.warn(`[tabs] reconcile: adopted ${adopted.length} orphan daemon PTY(s) for ${key}`)
+      const changed = adopted.length > 0 || refreshedItems > 0
+      if (changed) {
+        if (adopted.length > 0) {
+          console.warn(`[tabs] reconcile: adopted ${adopted.length} orphan daemon PTY(s) for ${key}`)
+        }
+        if (refreshedItems > 0) {
+          console.warn(`[tabs] reconcile: refreshed ${refreshedItems} terminal item(s) with daemon data for ${key}`)
+        }
+        // Shallow-copy tabs so Zustand subscribers see the change even
+        // when only TerminalItemData fields mutated in place.
         set({ tabs: [...state.tabs, ...adopted] })
-        get().saveLayoutForWorkspace(projectId, workspaceId)
+        // Only persist when adopt changed the on-disk tab set. Refresh-only
+        // updates fill in transient fields (cwd/command/args/sessionId)
+        // that v2 serialization intentionally drops, so the rewrite would
+        // be byte-identical to disk — saving it every restore is a
+        // wasted SQL write and adds log noise.
+        if (adopted.length > 0) {
+          get().saveLayoutForWorkspace(projectId, workspaceId)
+        }
       }
     }
 
@@ -2676,9 +2746,17 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     }
 
     if (savedLayout && savedLayout.tabs && savedLayout.tabs.length > 0) {
+      const wasPreV2 = (savedLayout.version ?? 1) < LAYOUT_SCHEMA_VERSION
       get().restoreLayout(savedLayout, cwd)
       set({ activeWorkspaceKey: key })
       healAndSave()
+      if (wasPreV2) {
+        // v1 → v2 conversion happened inside restoreLayout. Persist the
+        // migrated shape so the disk copy converges and the next open
+        // is a pure-v2 path.
+        console.warn(`[tabs] migrated workspace_layouts to v2 for ${key}`)
+        get().saveLayoutForWorkspace(projectId, workspaceId)
+      }
       void reconcileWithDaemon()
     } else {
       // Set key early so race-condition guards work
@@ -2694,9 +2772,14 @@ export const useTabsStore = create<TabsState>((set, get) => ({
             try {
               const layout = JSON.parse(json) as SerializedLayout
               if (layout.tabs && layout.tabs.length > 0) {
+                const wasPreV2 = (layout.version ?? 1) < LAYOUT_SCHEMA_VERSION
                 set({ workspaceLayouts: { ...get().workspaceLayouts, [key]: layout } })
                 get().restoreLayout(layout, cwd)
                 healAndSave()
+                if (wasPreV2) {
+                  console.warn(`[tabs] migrated workspace_layouts to v2 for ${key}`)
+                  get().saveLayoutForWorkspace(projectId, workspaceId)
+                }
                 void reconcileWithDaemon()
                 return
               }
@@ -3115,12 +3198,17 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     }
 
     // Otherwise, save a session to the DB for this workspace so the tab
-    // is waiting when the user navigates there. Build a minimal serialized layout.
+    // is waiting when the user navigates there. Build a minimal v2
+    // serialized layout — daemon owns the PTY's cwd/command/args so we
+    // emit only metadata. `reconcileWithDaemon` fills them in when the
+    // user lands on the workspace and the daemon's `tab-<pgId>` session
+    // is discovered.
     const tabId = crypto.randomUUID()
     const pgId = crypto.randomUUID()
     const terminalId = pgId
 
     const layout: SerializedLayout = {
+      version: LAYOUT_SCHEMA_VERSION,
       tabs: [{
         id: tabId,
         title: options.title,
@@ -3130,11 +3218,9 @@ export const useTabsStore = create<TabsState>((set, get) => ({
             id: pgId,
             items: [{
               id: crypto.randomUUID(),
-              type: 'terminal',
-              cwd,
-              command: options.command,
-              args: options.args,
-            }],
+              type: 'terminal' as const,
+              paneGroupId: pgId,
+            } as SerializedTerminalItemV2],
             activeItemIndex: 0,
           }
         }
@@ -3318,6 +3404,60 @@ async function fetchDaemonSessions(projectPath: string): Promise<DaemonSessionRo
   }
 }
 
+/** Shallow array equality, treating `undefined` and `[]` as equivalent. */
+function arraysEqual(a: string[] | undefined, b: string[] | undefined): boolean {
+  const aLen = a?.length ?? 0
+  const bLen = b?.length ?? 0
+  if (aLen !== bLen) return false
+  if (aLen === 0) return true
+  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+  return a!.every((v, i) => v === b![i])
+}
+
+// ── 0.38.0 layout schema v2 migration ────────────────────────────────────
+
+/** v1 terminal items embedded daemon-owned data (cwd / command / args /
+ *  sessionId / renderer). v2 makes the daemon the single source of truth
+ *  — terminal items only carry their paneGroupId (the canonical key) plus
+ *  the heartbeat metadata the daemon's list endpoint doesn't yet expose.
+ *
+ *  Mutates `layout` in place. Returns whether anything changed (callers
+ *  use this to trigger a re-save so the disk copy converges to v2).
+ *  Idempotent — running on a v2 layout is a no-op. */
+function migrateLayoutToV2(layout: SerializedLayout): boolean {
+  if ((layout.version ?? 1) >= LAYOUT_SCHEMA_VERSION) return false
+
+  const migrateTab = (tab: SerializedTab): void => {
+    if (!tab.paneGroups || typeof tab.paneGroups !== 'object') return
+    for (const [pgId, pg] of Object.entries(tab.paneGroups)) {
+      if (!pg || !Array.isArray(pg.items)) continue
+      pg.items = pg.items.map((si) => {
+        if (!si || si.type !== 'terminal') return si
+        // Drop v1 daemon-owned fields; daemon refills via reconcile.
+        const v2: SerializedTerminalItemV2 = {
+          id: si.id,
+          type: 'terminal',
+          paneGroupId: pgId,
+          heartbeatName: (si as SerializedTerminalItemV1 | SerializedTerminalItemV2).heartbeatName,
+          surfacedAgentName: (si as SerializedTerminalItemV1 | SerializedTerminalItemV2).surfacedAgentName,
+          attachAgentName: (si as SerializedTerminalItemV1 | SerializedTerminalItemV2).attachAgentName,
+          projectPath: (si as SerializedTerminalItemV1 | SerializedTerminalItemV2).projectPath,
+        }
+        return v2
+      })
+    }
+  }
+
+  for (const tab of layout.tabs ?? []) migrateTab(tab)
+  if (layout.extraGroups) {
+    for (const group of layout.extraGroups) {
+      for (const tab of group.tabs ?? []) migrateTab(tab)
+    }
+  }
+  layout.version = LAYOUT_SCHEMA_VERSION
+  return true
+}
+
 // ── 0.38.0 layout heal-on-read ───────────────────────────────────────────
 
 /** Canonical identity of a tab. Two tabs that point to the same set of
@@ -3365,6 +3505,8 @@ interface LegacySerializedPaneData {
 /**
  * Convert legacy serialized panes (flat Record<string, PaneData>)
  * into the new SerializedPaneGroup format for backward-compat restore.
+ * Emits v1 terminal items; the v1→v2 migration pass in `restoreLayout`
+ * normalises them after.
  */
 function convertLegacyPanes(
   panes: Record<string, LegacySerializedPaneData> | undefined
@@ -3373,14 +3515,24 @@ function convertLegacyPanes(
 
   const result: Record<string, SerializedPaneGroup> = {}
   for (const [id, pane] of Object.entries(panes)) {
-    const item: SerializedItem = {
-      id,
-      type: pane.type,
-      cwd: pane.cwd,
-      command: pane.command,
-      args: pane.args,
-      filePath: pane.filePath,
-      pinned: pane.pinned,
+    let item: SerializedItem
+    if (pane.type === 'terminal') {
+      const t: SerializedTerminalItemV1 = {
+        id,
+        type: 'terminal',
+        cwd: pane.cwd,
+        command: pane.command,
+        args: pane.args,
+      }
+      item = t
+    } else {
+      const f: SerializedFileViewerItem = {
+        id,
+        type: 'file-viewer',
+        filePath: pane.filePath,
+        pinned: pane.pinned,
+      }
+      item = f
     }
     result[id] = {
       id,
