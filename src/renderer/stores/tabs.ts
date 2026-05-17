@@ -2588,9 +2588,98 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     // Kill any existing PTYs in the active view before restoring
     get().clearAllTabs()
 
+    // 0.38.0 — daemon-authoritative reconciliation. Query the daemon
+    // for live PTYs in this workspace and adopt any `tab-<X>` session
+    // that isn't already surfaced in a restored tab. This is what
+    // makes opening a workspace in a second window (focus, "New
+    // Window") show the same N tabs as the daemon's session map,
+    // rather than the renderer's stale layout snapshot.
+    //
+    // Adoption only in this commit. Drop-dead-tabs would also be
+    // correct under the invariant but risks surprising data loss if
+    // the daemon is briefly slow/unreachable at mount; layering it
+    // in is a follow-up.
+    const reconcileWithDaemon = async (): Promise<void> => {
+      if (get().activeWorkspaceKey !== key) return
+      const sessions = await fetchDaemonSessions(cwd)
+      if (sessions === null) return // daemon unreachable — leave layout alone
+      if (get().activeWorkspaceKey !== key) return // user switched mid-query
+
+      const daemonPaneGroupIds = new Set<string>()
+      for (const s of sessions) {
+        if (s.isV2 && typeof s.agentName === 'string' && s.agentName.startsWith('tab-')) {
+          daemonPaneGroupIds.add(s.agentName.slice(4))
+        }
+      }
+
+      const state = get()
+      const surfacedPgIds = new Set<string>()
+      for (const tab of state.tabs) {
+        tab.paneGroups.forEach((_, pgId) => surfacedPgIds.add(pgId))
+      }
+
+      const adopted: Tab[] = []
+      for (const pgId of daemonPaneGroupIds) {
+        if (surfacedPgIds.has(pgId)) continue
+        const session = sessions.find((s) => s.agentName === `tab-${pgId}`)
+        if (!session) continue
+        const pg = makeTerminalPaneGroup(
+          pgId,
+          session.cwd || cwd,
+          session.command
+            ? { command: session.command, args: session.args.length > 0 ? session.args : undefined }
+            : undefined,
+        )
+        tabCounter++
+        adopted.push({
+          id: crypto.randomUUID(),
+          title: session.command ?? `Terminal ${tabCounter}`,
+          mosaicTree: pgId,
+          paneGroups: new Map([[pgId, pg]]),
+        })
+      }
+
+      if (adopted.length > 0) {
+        console.warn(`[tabs] reconcile: adopted ${adopted.length} orphan daemon PTY(s) for ${key}`)
+        set({ tabs: [...state.tabs, ...adopted] })
+        get().saveLayoutForWorkspace(projectId, workspaceId)
+      }
+    }
+
+    // 0.38.0 — heal duplicate tab rows that pre-0.38.0 builds may have
+    // written into workspace_layouts.layout_json. Collapses tabs sharing
+    // paneGroup-id sets (which all attach to the same daemon PTY) and
+    // re-saves so the corrupt shape doesn't survive another open.
+    const healAndSave = (): void => {
+      const state = get()
+      const group0 = dedupTabsBySignature(state.tabs)
+      const cleanedExtraGroups = state.extraGroups.map((g) => {
+        const r = dedupTabsBySignature(g.tabs)
+        const newActive = g.activeTabId && r.idMap.has(g.activeTabId)
+          ? r.idMap.get(g.activeTabId)!
+          : g.activeTabId
+        return { tabs: r.tabs, activeTabId: newActive, removed: r.removed }
+      })
+      const totalRemoved = group0.removed + cleanedExtraGroups.reduce((n, g) => n + g.removed, 0)
+      if (totalRemoved > 0) {
+        const newActive = state.activeTabId && group0.idMap.has(state.activeTabId)
+          ? group0.idMap.get(state.activeTabId)!
+          : state.activeTabId
+        set({
+          tabs: group0.tabs,
+          activeTabId: newActive,
+          extraGroups: cleanedExtraGroups.map((g) => ({ tabs: g.tabs, activeTabId: g.activeTabId })),
+        })
+        console.warn(`[tabs] healed ${totalRemoved} duplicate tab row(s) on restore for ${key}`)
+        get().saveLayoutForWorkspace(projectId, workspaceId)
+      }
+    }
+
     if (savedLayout && savedLayout.tabs && savedLayout.tabs.length > 0) {
       get().restoreLayout(savedLayout, cwd)
       set({ activeWorkspaceKey: key })
+      healAndSave()
+      void reconcileWithDaemon()
     } else {
       // Set key early so race-condition guards work
       set({ activeWorkspaceKey: key })
@@ -2607,6 +2696,8 @@ export const useTabsStore = create<TabsState>((set, get) => ({
               if (layout.tabs && layout.tabs.length > 0) {
                 set({ workspaceLayouts: { ...get().workspaceLayouts, [key]: layout } })
                 get().restoreLayout(layout, cwd)
+                healAndSave()
+                void reconcileWithDaemon()
                 return
               }
             } catch (err) {
@@ -2614,6 +2705,9 @@ export const useTabsStore = create<TabsState>((set, get) => ({
             }
           }
           // No saved layout — auto-launch default agent after short delay
+          // (launchDefaultAgent has its own adoption flow for the
+          // empty-workspace case; reconcileWithDaemon's job is the
+          // existing-layout-plus-orphan-PTY case)
           get().launchDefaultAgent(key, cwd)
         })
         .catch(() => {
@@ -3192,6 +3286,69 @@ function replaceInTree(
     first: replaceInTree(tree.first, targetId, replacement) as MosaicNode<string>,
     second: replaceInTree(tree.second, targetId, replacement) as MosaicNode<string>
   }
+}
+
+// ── 0.38.0 daemon-authoritative reconciliation ───────────────────────────
+
+interface DaemonSessionRow {
+  sessionId: string
+  agentName: string
+  command: string | null
+  args: string[]
+  cwd: string
+  isV2: boolean
+}
+
+/** Query the daemon for live PTYs whose cwd is under `projectPath`.
+ *  Returns the full session list including all kinds (Cmd+T tabs,
+ *  pinned chat, heartbeats). Callers filter by `agentName` shape to
+ *  decide which sessions map to which tab class.
+ *
+ *  Returns `null` (not `[]`) on query failure so callers can
+ *  distinguish "daemon unreachable" from "workspace has no sessions"
+ *  and skip reconciliation rather than treating an empty result as
+ *  authoritative. */
+async function fetchDaemonSessions(projectPath: string): Promise<DaemonSessionRow[] | null> {
+  try {
+    const json = await invoke<string>('k2so_sessions_list_for_workspace', { path: projectPath })
+    return JSON.parse(json) as DaemonSessionRow[]
+  } catch (err) {
+    console.warn('[tabs] daemon list_sessions failed for', projectPath, err)
+    return null
+  }
+}
+
+// ── 0.38.0 layout heal-on-read ───────────────────────────────────────────
+
+/** Canonical identity of a tab. Two tabs that point to the same set of
+ *  paneGroup IDs are pointing at the same daemon-side session(s) and
+ *  are therefore duplicates regardless of their renderer-side tab UUIDs.
+ *  Pre-0.38.0, the sync:tabs-request broadcast race could leak duplicate
+ *  rows into workspace_layouts; this signature is what we collapse on. */
+function tabSignature(tab: Tab): string {
+  return [...tab.paneGroups.keys()].sort().join(',')
+}
+
+/** Collapse tabs that share canonical identity. Returns the cleaned list
+ *  plus an idMap so callers can remap any pointer (e.g. activeTabId)
+ *  that referenced a removed duplicate to its surviving twin. */
+function dedupTabsBySignature(
+  tabs: Tab[]
+): { tabs: Tab[]; idMap: Map<string, string>; removed: number } {
+  const seen = new Map<string, Tab>()
+  const idMap = new Map<string, string>()
+  const kept: Tab[] = []
+  for (const tab of tabs) {
+    const sig = tabSignature(tab)
+    const existing = seen.get(sig)
+    if (existing) {
+      idMap.set(tab.id, existing.id)
+    } else {
+      seen.set(sig, tab)
+      kept.push(tab)
+    }
+  }
+  return { tabs: kept, idMap, removed: tabs.length - kept.length }
 }
 
 // ── Legacy format conversion ─────────────────────────────────────────────

@@ -57,6 +57,7 @@ mod v2_session_map;
 mod v2_spawn;
 mod wake_headless;
 mod watchdog;
+mod workspace_layouts_dedup;
 mod workspace_msg;
 
 use std::fs;
@@ -281,6 +282,14 @@ async fn main() {
     // run BEFORE replay_all so the in-memory `pending_state` counter
     // is built from the post-migration shape. Idempotent.
     pending_live::migrate_legacy_dirs_to_bare_pid();
+
+    // 0.38.0 — heal corrupt `workspace_layouts.layout_json` rows
+    // written by pre-0.38.0 builds whose mount-time sync:tabs-request
+    // broadcast race appended duplicate tab entries that all pointed
+    // at the same daemon paneGroup. Gated by a code_migrations marker
+    // so it's a one-shot pass. See `workspace_layouts_dedup` for
+    // signature derivation and unit tests.
+    workspace_layouts_dedup::run_once();
 
     // daemon-run may have queued signals for offline agents that
     // never got injected (daemon crashed before the session came

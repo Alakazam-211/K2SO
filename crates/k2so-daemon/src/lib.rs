@@ -27,4 +27,5 @@ pub mod v2_session_map;
 pub mod v2_spawn;
 pub mod wake_headless;
 pub mod watchdog;
+pub mod workspace_layouts_dedup;
 pub mod workspace_msg;
