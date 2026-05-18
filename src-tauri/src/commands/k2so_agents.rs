@@ -2532,6 +2532,25 @@ pub fn k2so_session_set_surfaced(
     Ok(())
 }
 
+/// 0.38.0 commit 7 — broadcast cross-window when the pinned-chat
+/// refresh button is clicked. The originating window already kills
+/// the daemon PTY (via `/cli/sessions/v2/close`) and bumps its
+/// `refreshNonce` to remount TerminalPane. Other windows can't learn
+/// this from Commit 4's `session_removed` push (those filter for
+/// `tab-` agent names; pinned chat is the bare project_id), so we
+/// emit a Tauri-broadcast `chat:refreshed` event. Every window's
+/// AgentChatPane listener bumps its own `refreshNonce` when the
+/// payload's `projectPath` matches its workspace, keeping pinned
+/// chat sessions in sync across viewers.
+#[tauri::command]
+pub fn k2so_chat_refresh_broadcast(project_path: String) -> Result<(), String> {
+    k2so_core::agent_hooks::emit(
+        k2so_core::agent_hooks::HookEvent::ChatRefreshed,
+        serde_json::json!({ "projectPath": project_path }),
+    );
+    Ok(())
+}
+
 // `k2so_agents_heartbeat_noop` moved to k2so_core::agents::commands (re-exported).
 
 // `k2so_agents_heartbeat_action` moved to k2so_core::agents::commands (re-exported).

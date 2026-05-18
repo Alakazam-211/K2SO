@@ -137,8 +137,29 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
   // TerminalPane (key={refreshNonce}) and a re-run of the resolve
   // effect. Used when the user typed `exit` and the Claude process
   // ended — without a remount the dead PTY stays on screen.
+  //
+  // 0.38.0 commit 7 — Both the originating window AND every other
+  // viewer bump this via the `chat:refreshed` Tauri broadcast
+  // emitted by `k2so_chat_refresh_broadcast`. Keeps the pinned chat
+  // tab in sync after one window kills the daemon PTY.
   const [refreshNonce, setRefreshNonce] = useState(0)
   const [refreshing, setRefreshing] = useState(false)
+
+  // Listen for chat:refreshed broadcasts. Every window's
+  // AgentChatPane mounts this listener; the payload's `projectPath`
+  // filters to the workspace the pane is rendering. Idempotent —
+  // a remount via refreshNonce++ is safe to repeat.
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | null = null
+    listen<{ projectPath: string }>('chat:refreshed', (event) => {
+      if (event.payload.projectPath !== projectPath) return
+      setLaunchConfig(null)
+      setReady(false)
+      setRefreshNonce((n) => n + 1)
+    }).then((u) => { if (cancelled) u(); else unlisten = u })
+    return () => { cancelled = true; unlisten?.() }
+  }, [projectPath])
 
   const handleRefresh = useCallback(async (): Promise<void> => {
     if (refreshing) return
@@ -167,11 +188,19 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
       ).catch(() => {})
     } catch { /* ignore — refresh proceeds either way */ }
 
+    // 0.38.0 commit 7 — broadcast cross-window. The `chat:refreshed`
+    // listener below also fires in THIS window and bumps the same
+    // refreshNonce. That double-bump is harmless (idempotent
+    // remount); routing both paths through the listener keeps the
+    // originating window and every other viewer on identical state
+    // machines.
+    invoke('k2so_chat_refresh_broadcast', { projectPath })
+      .catch((e) => console.warn('[chat-refresh] broadcast failed:', e))
+
     setLaunchConfig(null)
     setReady(false)
-    setRefreshNonce((n) => n + 1)
     setRefreshing(false)
-  }, [projectId, agentName, refreshing])
+  }, [projectId, projectPath, agentName, refreshing])
 
   // 0.37.12 — fetch chat history for the dropdown title display
   // and the popover list. Runs on mount, when the current session

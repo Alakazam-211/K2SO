@@ -1221,6 +1221,7 @@ pub fn run() {
             commands::k2so_agents::k2so_agents_heartbeat_action,
             commands::k2so_agents::k2so_agents_save_session_id,
             commands::k2so_agents::k2so_session_set_surfaced,
+            commands::k2so_agents::k2so_chat_refresh_broadcast,
             commands::k2so_agents::k2so_agents_clear_session_id,
             // Workspace States
             commands::states::states_list,

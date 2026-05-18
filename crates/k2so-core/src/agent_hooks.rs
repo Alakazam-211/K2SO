@@ -57,6 +57,13 @@ pub enum HookEvent {
     /// state stays in sync across windows. Symmetric counterpart to
     /// `SessionSurfaced`. 0.38.0 commit 6.
     SessionUnsurfaced,
+    /// Fires when the pinned-chat refresh button kills the workspace's
+    /// chat PTY. The originating window remounts its TerminalPane via
+    /// `refreshNonce++`; every OTHER viewer needs the same remount so
+    /// they don't keep WS handles open to the now-dead session_id.
+    /// Payload carries `projectPath` so each window can filter to its
+    /// active workspace. 0.38.0 commit 7.
+    ChatRefreshed,
 }
 
 impl HookEvent {
@@ -73,6 +80,7 @@ impl HookEvent {
             Self::HookInjectionFailed => "hook-injection-failed",
             Self::SessionSurfaced => "session:surfaced",
             Self::SessionUnsurfaced => "session:unsurfaced",
+            Self::ChatRefreshed => "chat:refreshed",
         }
     }
 }
