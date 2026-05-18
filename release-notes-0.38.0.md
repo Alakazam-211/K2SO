@@ -1,5 +1,21 @@
 # 0.38.0 — Daemon-authoritative tabs + multi-window sync
 
+> ⚠️ **One-time migration note:** This release retires the duplicate
+> tab-state storage that used to live in `workspace_layouts.layout_json`
+> alongside the daemon's session map. As part of upgrading, the daemon
+> restarts with an empty in-memory session map and the migration strips
+> stale per-tab fields (`command`, `args`, `sessionId`) that v2 doesn't
+> need anymore. **Cmd+T terminal tabs (Claude, shell, etc.) will need
+> to be reloaded** — they'll re-open as fresh sessions instead of
+> resuming previous conversations. The conversation history files still
+> exist on disk; use the **chat-history dropdown** on the pinned Chat
+> tab to browse and re-attach to any past Claude session you want to
+> continue. **Pinned chat tabs and heartbeat tabs are unaffected** —
+> their session ids live in dedicated SQLite columns (`workspace_sessions.session_id`,
+> `workspace_heartbeats.last_session_id`) that survive both the daemon
+> restart and the schema migration.
+
+
 K2SO's biggest architectural shift since 0.37.0. Every Tauri window for
 a given workspace now sees **the same tab set**, driven by the daemon's
 `v2_session_map` rather than each window keeping its own private list.
