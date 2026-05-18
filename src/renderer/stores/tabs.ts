@@ -6,6 +6,12 @@ import { useSettingsStore } from '@/stores/settings'
 import { useTerminalSettingsStore, type TerminalRenderer } from '@/stores/terminal-settings'
 import { getDaemonWs } from '@/kessel/daemon-ws'
 import { useHeartbeatSessionsStore } from '@/stores/heartbeat-sessions'
+import {
+  subscribeToWorkspaceSessionEvents,
+  type SessionAddedEvent,
+  type SessionRemovedEvent,
+  type UnsubscribeFn,
+} from '@/stores/session-events'
 
 // Lazy reference to presets store — avoids circular dependency (presets → tabs → presets).
 // Set by presets.ts on init via registerPresetsStore().
@@ -14,27 +20,29 @@ export function registerPresetsStore(getter: () => { presets: any[] }): void {
   _presetsStoreRef = getter
 }
 
-// ── Cross-window tab sync ────────────────────────────────────────────────
+// ── Daemon-authoritative session events (0.38.0 Commit 4) ────────────────
+//
+// Pre-0.38.0 the renderer kept tabs in sync across windows by broadcasting
+// `sync:tabs` Tauri events on every add/remove/title. That path is gone:
+// the daemon's `/cli/sessions/events` WS now pushes the same lifecycle
+// signal to every connected viewer (and to the mobile companion), and
+// each window applies the events locally against its own restored layout.
+//
+// The active workspace's subscription handle lives here; workspace
+// switches tear it down before opening the next one. See
+// `subscribeForActiveWorkspace` / `tearDownActiveWorkspaceSubscription`.
+let activeSessionEventsUnsub: UnsubscribeFn | null = null
+let activeSessionEventsKey: string | null = null
 
-export const WINDOW_ID = crypto.randomUUID() // unique per window instance
-
-interface TabSyncPayload {
-  windowId: string
-  action: 'add' | 'remove' | 'title'
-  groupIndex: number
-  tabId: string
-  title?: string
-  terminalId?: string
-  cwd?: string
-  command?: string
-  args?: string[]
-}
-
-function broadcastTabChange(payload: TabSyncPayload): void {
-  invoke('broadcast_sync', {
-    channel: 'sync:tabs',
-    payload,
-  }).catch((e) => console.warn('[tabs] broadcast failed:', e))
+// Best-effort cleanup on window unload — the WS would close on its own
+// when the page unmounts, but explicit close gives the daemon a clean
+// disconnect notification instead of a TCP RST.
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => {
+    activeSessionEventsUnsub?.()
+    activeSessionEventsUnsub = null
+    activeSessionEventsKey = null
+  })
 }
 
 // ── Terminal close helpers ───────────────────────────────────────────────
@@ -568,9 +576,9 @@ interface TabsState {
   /** Get the pinned system agent tab if it exists. */
   getSystemAgentTab: () => Tab | undefined
 
-  // Cross-window sync
-  applyRemoteTabChange: (payload: TabSyncPayload) => void
-  broadcastAllTabs: () => void
+  // 0.38.0 Commit 4 — cross-window tab sync retired. Daemon push via
+  // `/cli/sessions/events` is the new source of truth; see
+  // `subscribeForActiveWorkspace` below the store body.
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -978,20 +986,9 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       activeTabId: tabId
     }))
 
-    // Broadcast to other windows
-    const termItem = paneGroup.items[0]
-    const termData = termItem?.data as TerminalItemData
-    broadcastTabChange({
-      windowId: WINDOW_ID,
-      action: 'add',
-      groupIndex: 0,
-      tabId,
-      title,
-      terminalId: termData?.terminalId,
-      cwd,
-      command: options?.command,
-      args: options?.args,
-    })
+    // 0.38.0 Commit 4 — no cross-window broadcast here. The daemon's
+    // `/cli/sessions/events` stream pushes `session_added` to every
+    // connected window once the v2 spawn registers the PTY.
 
     return paneGroupId
   },
@@ -1029,13 +1026,9 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       return { tabs: newTabs, activeTabId: newActiveId }
     })
 
-    // Broadcast removal to other windows
-    broadcastTabChange({
-      windowId: WINDOW_ID,
-      action: 'remove',
-      groupIndex: 0,
-      tabId,
-    })
+    // 0.38.0 Commit 4 — no cross-window broadcast here. The daemon's
+    // `/cli/sessions/events` push delivers `session_removed` to other
+    // windows after `closeTerminalForRenderer` unregisters the v2 PTY.
   },
 
   setActiveTab: (tabId: string) => {
@@ -1927,7 +1920,9 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       const result = mapTabAcrossGroups(state, tabId, (tab) => ({ ...tab, title }))
       return { tabs: result.tabs, extraGroups: result.extraGroups }
     })
-    broadcastTabChange({ windowId: WINDOW_ID, action: 'title', groupIndex: 0, tabId, title })
+    // 0.38.0 Commit 4 — title is renderer-local; the daemon owns
+    // session labels via `LabelChanged` on the grid WS. No
+    // cross-window broadcast needed.
   },
 
   renameTabByTitle: (oldTitle: string, newTitle: string) => {
@@ -2168,20 +2163,9 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       })
     }
 
-    // Broadcast to other windows
-    const termItem = pg.items[0]
-    const termData = termItem?.data as TerminalItemData
-    broadcastTabChange({
-      windowId: WINDOW_ID,
-      action: 'add',
-      groupIndex,
-      tabId,
-      title,
-      terminalId: termData?.terminalId,
-      cwd,
-      command: options?.command,
-      args: options?.args,
-    })
+    // 0.38.0 Commit 4 — no cross-window broadcast. The daemon's
+    // `/cli/sessions/events` WS push delivers `session_added` to other
+    // windows once the v2 spawn registers the PTY.
 
     return pgId
   },
@@ -2609,6 +2593,12 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     // Kill any existing PTYs in the active view before restoring
     get().clearAllTabs()
 
+    // 0.38.0 Commit 4 — tear down the previous workspace's WS push
+    // subscription before switching. The new one gets opened after
+    // the initial reconcile so any race between "subscribe before
+    // load" and "adopt during load" is impossible.
+    tearDownActiveWorkspaceSubscription()
+
     // 0.38.0 — daemon-authoritative reconciliation. Query the daemon
     // for live PTYs in this workspace and adopt any `tab-<X>` session
     // that isn't already surfaced in a restored tab. This is what
@@ -2623,7 +2613,15 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     const reconcileWithDaemon = async (): Promise<void> => {
       if (get().activeWorkspaceKey !== key) return
       const sessions = await fetchDaemonSessions(cwd)
-      if (sessions === null) return // daemon unreachable — leave layout alone
+      if (sessions === null) {
+        // Daemon unreachable — leave layout alone, but still attempt
+        // to open the push subscription. `subscribeToWorkspaceSessionEvents`
+        // has its own retry-with-backoff, so once the daemon comes
+        // back the renderer learns about live sessions via push
+        // (no second reconcile pass needed for the common case).
+        subscribeForActiveWorkspace(key, projectId, workspaceId, cwd)
+        return
+      }
       if (get().activeWorkspaceKey !== key) return // user switched mid-query
 
       // Index daemon-side `tab-<X>` sessions by paneGroupId for fast lookup
@@ -2678,20 +2676,15 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       const adopted: Tab[] = []
       for (const [pgId, session] of daemonByPgId) {
         if (surfacedPgIds.has(pgId)) continue
-        const pg = makeTerminalPaneGroup(
-          pgId,
-          session.cwd || cwd,
-          session.command
-            ? { command: session.command, args: session.args.length > 0 ? session.args : undefined }
-            : undefined,
+        adopted.push(
+          buildAdoptedTerminalTab({
+            paneGroupId: pgId,
+            cwd: session.cwd || cwd,
+            command: session.command ?? undefined,
+            args: session.args.length > 0 ? session.args : undefined,
+            sessionId: session.sessionId,
+          }),
         )
-        tabCounter++
-        adopted.push({
-          id: crypto.randomUUID(),
-          title: session.command ?? `Terminal ${tabCounter}`,
-          mosaicTree: pgId,
-          paneGroups: new Map([[pgId, pg]]),
-        })
       }
 
       const changed = adopted.length > 0 || refreshedItems > 0
@@ -2714,6 +2707,12 @@ export const useTabsStore = create<TabsState>((set, get) => ({
           get().saveLayoutForWorkspace(projectId, workspaceId)
         }
       }
+
+      // 0.38.0 Commit 4 — now that the renderer's state is in sync
+      // with the daemon's current snapshot, open the push subscription
+      // so any subsequent session_added / session_removed surfaces
+      // in this window without polling.
+      subscribeForActiveWorkspace(key, projectId, workspaceId, cwd)
     }
 
     // 0.38.0 — heal duplicate tab rows that pre-0.38.0 builds may have
@@ -2792,10 +2791,15 @@ export const useTabsStore = create<TabsState>((set, get) => ({
           // empty-workspace case; reconcileWithDaemon's job is the
           // existing-layout-plus-orphan-PTY case)
           get().launchDefaultAgent(key, cwd)
+          // 0.38.0 Commit 4 — even on the empty-workspace path we
+          // need the WS push subscription so subsequent Cmd+T or
+          // mobile-companion spawns surface here without polling.
+          subscribeForActiveWorkspace(key, projectId, workspaceId, cwd)
         })
         .catch(() => {
           // DB unavailable — auto-launch default agent
           get().launchDefaultAgent(key, cwd)
+          subscribeForActiveWorkspace(key, projectId, workspaceId, cwd)
         })
     }
   },
@@ -3241,104 +3245,6 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
     return pgId // terminal ID for background PTY spawning
   },
-
-  applyRemoteTabChange: (payload: TabSyncPayload) => {
-    // Ignore our own broadcasts
-    if (payload.windowId === WINDOW_ID) return
-
-    if (payload.action === 'add' && payload.terminalId && payload.cwd) {
-      // Check if we already have this tab
-      const existing = findTabAcrossGroups(get(), payload.tabId)
-      if (existing) return
-
-      tabCounter++
-      const pgId = payload.terminalId // reuse the same terminal ID
-      const pg = makeTerminalPaneGroup(pgId, payload.cwd, {
-        command: payload.command,
-        args: payload.args,
-      })
-      // Override the terminalId to match the source window's PTY
-      if (pg.items[0]) {
-        (pg.items[0].data as TerminalItemData).terminalId = payload.terminalId
-      }
-
-      const tab: Tab = {
-        id: payload.tabId,
-        title: payload.title ?? `Terminal ${tabCounter}`,
-        mosaicTree: pgId,
-        paneGroups: new Map([[pgId, pg]])
-      }
-
-      // Add to group 0 (main tabs) — the receiving window shows all synced tabs in main group
-      set((state) => ({
-        tabs: [...state.tabs, tab],
-      }))
-    } else if (payload.action === 'remove') {
-      // Remove the tab without killing the PTY (the source window handles PTY lifecycle)
-      const existing = findTabAcrossGroups(get(), payload.tabId)
-      if (!existing) return
-
-      set((state) => ({
-        tabs: state.tabs.filter((t) => t.id !== payload.tabId),
-        activeTabId: state.activeTabId === payload.tabId
-          ? (state.tabs.find((t) => t.id !== payload.tabId)?.id ?? null)
-          : state.activeTabId,
-      }))
-    } else if (payload.action === 'title') {
-      set((state) => mapTabAcrossGroups(state, payload.tabId, (tab) => ({
-        ...tab,
-        title: payload.title ?? tab.title,
-      })))
-    }
-  },
-
-  broadcastAllTabs: () => {
-    const state = get()
-    // Broadcast all tabs from group 0
-    for (const tab of state.tabs) {
-      for (const [, pg] of tab.paneGroups) {
-        for (const item of pg.items) {
-          if (item.type === 'terminal') {
-            const d = item.data as TerminalItemData
-            broadcastTabChange({
-              windowId: WINDOW_ID,
-              action: 'add',
-              groupIndex: 0,
-              tabId: tab.id,
-              title: tab.title,
-              terminalId: d.terminalId,
-              cwd: d.cwd,
-              command: d.command,
-              args: d.args,
-            })
-          }
-        }
-      }
-    }
-    // Broadcast extra groups
-    for (let gi = 0; gi < state.extraGroups.length; gi++) {
-      for (const tab of state.extraGroups[gi].tabs) {
-        for (const [, pg] of tab.paneGroups) {
-          for (const item of pg.items) {
-            if (item.type === 'terminal') {
-              const d = item.data as TerminalItemData
-              broadcastTabChange({
-                windowId: WINDOW_ID,
-                action: 'add',
-                groupIndex: gi + 1,
-                tabId: tab.id,
-                title: tab.title,
-                terminalId: d.terminalId,
-                cwd: d.cwd,
-                command: d.command,
-                args: d.args,
-              })
-            }
-          }
-        }
-      }
-    }
-  }
 }))
 
 // ── Tree utilities ───────────────────────────────────────────────────────
@@ -3489,6 +3395,219 @@ function dedupTabsBySignature(
     }
   }
   return { tabs: kept, idMap, removed: tabs.length - kept.length }
+}
+
+// ── 0.38.0 Commit 4: daemon-push session adoption helpers ───────────────
+
+/** Construct a new terminal Tab around a daemon-owned PTY. Shared
+ *  by reconcileWithDaemon (initial restore catch-up) and the
+ *  `session_added` push handler so both paths produce identical
+ *  shapes. The caller is responsible for inserting the returned
+ *  tab into state. */
+function buildAdoptedTerminalTab(args: {
+  paneGroupId: string
+  cwd: string
+  command?: string
+  args?: string[]
+  sessionId?: string
+}): Tab {
+  const pg = makeTerminalPaneGroup(
+    args.paneGroupId,
+    args.cwd,
+    args.command !== undefined
+      ? { command: args.command, args: args.args }
+      : undefined,
+  )
+  // Stamp the daemon-owned sessionId onto the new TerminalItemData so
+  // close-as-minimize cross-references work without a refresh round-trip.
+  if (args.sessionId && pg.items[0]?.type === 'terminal') {
+    (pg.items[0].data as TerminalItemData).sessionId = args.sessionId
+  }
+  tabCounter++
+  return {
+    id: crypto.randomUUID(),
+    title: args.command ?? `Terminal ${tabCounter}`,
+    mosaicTree: args.paneGroupId,
+    paneGroups: new Map([[args.paneGroupId, pg]]),
+  }
+}
+
+/** True when removing the tab is safe under the daemon-authoritative
+ *  invariant. Skip pinned/system tabs and any tab whose paneGroups
+ *  hold non-terminal items (agent panes, file viewers, etc.) — those
+ *  surfaces have their own lifecycle and are not driven by the
+ *  daemon's v2 session map. */
+function tabIsDropCandidateForSessionRemoval(tab: Tab, removedPgId: string): boolean {
+  if (tab.isSystemAgent) return false
+  if (tab.paneGroups.size !== 1) return false
+  if (!tab.paneGroups.has(removedPgId)) return false
+  const pg = tab.paneGroups.get(removedPgId)
+  if (!pg) return false
+  // Must be terminal-only — agent panes / file viewers / etc. block.
+  for (const item of pg.items) {
+    if (item.type !== 'terminal') return false
+  }
+  return true
+}
+
+/** Look up whether a paneGroupId is already surfaced by any tab
+ *  across both group 0 and extraGroups. Used by the `session_added`
+ *  handler to dedupe — local Cmd+T fires `addTab` which already
+ *  creates the tab; the daemon's subsequent `session_added` push
+ *  would otherwise add a duplicate.
+ *
+ *  Returns true if any tab in any group already includes the paneGroupId. */
+function isPaneGroupSurfaced(
+  state: { tabs: Tab[]; extraGroups: Array<{ tabs: Tab[]; activeTabId: string | null }> },
+  pgId: string,
+): boolean {
+  for (const tab of state.tabs) {
+    if (tab.paneGroups.has(pgId)) return true
+  }
+  for (const group of state.extraGroups) {
+    for (const tab of group.tabs) {
+      if (tab.paneGroups.has(pgId)) return true
+    }
+  }
+  return false
+}
+
+/** Open the daemon push subscription for the currently-loading
+ *  workspace. Tears down any existing subscription first so callers
+ *  don't need to worry about stacking. The handlers translate the
+ *  daemon's lifecycle events into store mutations (tab adoption,
+ *  tab drop). */
+function subscribeForActiveWorkspace(
+  key: string,
+  projectId: string,
+  workspaceId: string,
+  cwd: string,
+): void {
+  tearDownActiveWorkspaceSubscription()
+  activeSessionEventsKey = key
+
+  activeSessionEventsUnsub = subscribeToWorkspaceSessionEvents(cwd, {
+    onAdded: (event: SessionAddedEvent) => {
+      // Only adopt `tab-<paneGroupId>` sessions — pinned chat and
+      // heartbeats live under their own canonical agent_names with
+      // their own dedicated surfaces. Forwarded events still drive
+      // the mobile companion, the renderer just ignores them.
+      const pgId = event.pane_group_id
+      if (!pgId || !event.agent_name.startsWith('tab-')) return
+      // Workspace switched while the event was in flight — bail.
+      if (useTabsStore.getState().activeWorkspaceKey !== key) return
+      const state = useTabsStore.getState()
+      if (isPaneGroupSurfaced(state, pgId)) return
+      const tab = buildAdoptedTerminalTab({
+        paneGroupId: pgId,
+        cwd: event.workspace_path || cwd,
+        command: event.command ?? undefined,
+        args: event.args.length > 0 ? event.args : undefined,
+        sessionId: event.session_id,
+      })
+      console.warn(`[tabs] session_added push — adopting paneGroup=${pgId} for ${key}`)
+      useTabsStore.setState((s) => ({ tabs: [...s.tabs, tab] }))
+      useTabsStore.getState().saveLayoutForWorkspace(projectId, workspaceId)
+    },
+    onRemoved: (event: SessionRemovedEvent) => {
+      const pgId = event.pane_group_id
+      if (!pgId || !event.agent_name.startsWith('tab-')) return
+      if (useTabsStore.getState().activeWorkspaceKey !== key) return
+      const state = useTabsStore.getState()
+
+      const droppedFromMain = state.tabs.filter(
+        (t) => !tabIsDropCandidateForSessionRemoval(t, pgId),
+      )
+      const newExtraGroups = state.extraGroups.map((g) => ({
+        tabs: g.tabs.filter((t) => !tabIsDropCandidateForSessionRemoval(t, pgId)),
+        activeTabId: g.activeTabId,
+      }))
+      const mainDelta = state.tabs.length - droppedFromMain.length
+      const extraDelta = state.extraGroups.reduce(
+        (n, g, i) => n + (g.tabs.length - newExtraGroups[i].tabs.length),
+        0,
+      )
+      if (mainDelta === 0 && extraDelta === 0) return
+
+      // Re-derive activeTabId if we dropped the active one.
+      let newActiveId = state.activeTabId
+      if (newActiveId && !droppedFromMain.find((t) => t.id === newActiveId)) {
+        // Was it in extraGroups? If still present there, keep it.
+        const stillExists = newExtraGroups.some((g) =>
+          g.tabs.find((t) => t.id === newActiveId),
+        )
+        if (!stillExists) {
+          newActiveId = droppedFromMain[0]?.id ?? null
+        }
+      }
+      console.warn(`[tabs] session_removed push — dropped paneGroup=${pgId} for ${key}`)
+      useTabsStore.setState({
+        tabs: droppedFromMain,
+        activeTabId: newActiveId,
+        extraGroups: newExtraGroups.map((g) => ({
+          tabs: g.tabs,
+          activeTabId: g.tabs.find((t) => t.id === g.activeTabId)
+            ? g.activeTabId
+            : g.tabs[0]?.id ?? null,
+        })),
+      })
+      useTabsStore.getState().saveLayoutForWorkspace(projectId, workspaceId)
+    },
+    onHello: () => {
+      // First message after (re)connect. No-op on initial connect
+      // because the renderer was just reconciled. On a reconnect
+      // after a transient drop the renderer could have missed an
+      // emit window — defensively re-fetch the daemon's snapshot
+      // and re-run the orphan-adoption pass.
+      if (useTabsStore.getState().activeWorkspaceKey !== key) return
+      void (async () => {
+        const sessions = await fetchDaemonSessions(cwd)
+        if (sessions === null) return
+        if (useTabsStore.getState().activeWorkspaceKey !== key) return
+        const state = useTabsStore.getState()
+        const adopted: Tab[] = []
+        for (const s of sessions) {
+          if (!s.isV2 || !s.agentName.startsWith('tab-')) continue
+          const pgId = s.agentName.slice(4)
+          if (isPaneGroupSurfaced(state, pgId)) continue
+          adopted.push(
+            buildAdoptedTerminalTab({
+              paneGroupId: pgId,
+              cwd: s.cwd || cwd,
+              command: s.command ?? undefined,
+              args: s.args.length > 0 ? s.args : undefined,
+              sessionId: s.sessionId,
+            }),
+          )
+        }
+        if (adopted.length > 0) {
+          console.warn(`[tabs] hello reconcile — adopted ${adopted.length} orphan(s) for ${key}`)
+          useTabsStore.setState((s) => ({ tabs: [...s.tabs, ...adopted] }))
+          useTabsStore.getState().saveLayoutForWorkspace(projectId, workspaceId)
+        }
+      })()
+    },
+  })
+}
+
+/** Close the active workspace's WS subscription and forget the key.
+ *  Idempotent — safe to call when no subscription is active. */
+function tearDownActiveWorkspaceSubscription(): void {
+  if (activeSessionEventsUnsub) {
+    try {
+      activeSessionEventsUnsub()
+    } catch (err) {
+      console.warn('[tabs] failed to tear down session events sub:', err)
+    }
+    activeSessionEventsUnsub = null
+    activeSessionEventsKey = null
+  }
+}
+
+// Export for tests / external introspection. Internal callers should
+// use the `subscribeForActiveWorkspace` flow above.
+export function __getActiveSessionEventsKey(): string | null {
+  return activeSessionEventsKey
 }
 
 // ── Legacy format conversion ─────────────────────────────────────────────

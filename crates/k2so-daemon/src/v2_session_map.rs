@@ -43,8 +43,32 @@ fn shared() -> AgentMap {
 pub fn register(agent_name: impl Into<String>, session: Arc<DaemonPtySession>) {
     let key = agent_name.into();
     let map_arc = shared();
-    let mut map = map_arc.lock().unwrap();
-    map.insert(key, session);
+    {
+        let mut map = map_arc.lock().unwrap();
+        map.insert(key.clone(), Arc::clone(&session));
+    }
+    // 0.38.0 Commit 4 — fan out to `/cli/sessions/events` subscribers
+    // so connected renderers + the mobile companion learn about new
+    // sessions without polling. Best-effort: `let _ =` swallows the
+    // "no subscribers" Err that broadcast returns when nothing's
+    // listening (the test environments hit this path, as does any
+    // pre-WS-attach window during boot).
+    let cwd = session
+        .cwd
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let _ = crate::session_events::emit(
+        crate::session_events::SessionEvent::SessionAdded {
+            workspace_path: cwd,
+            pane_group_id: crate::session_events::pane_group_id_from_agent(&key),
+            agent_name: key,
+            command: session.program.clone(),
+            args: session.args.clone(),
+            session_id: session.session_id.to_string(),
+            is_v2: true,
+        },
+    );
 }
 
 /// Remove the map entry. Returns the Arc if one was present;
@@ -72,6 +96,24 @@ pub fn unregister(agent_name: &str) -> Option<Arc<DaemonPtySession>> {
     };
 
     if let Some(ref session) = removed {
+        // 0.38.0 Commit 4 — push to `/cli/sessions/events` subscribers
+        // BEFORE the DB cleanup so the renderer sees the drop event
+        // alongside (or just before) the existing surfaced/sleeping
+        // flips. Best-effort: emit returns Err when no subscribers
+        // are attached; callers don't care.
+        let cwd_emit = session
+            .cwd
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let _ = crate::session_events::emit(
+            crate::session_events::SessionEvent::SessionRemoved {
+                workspace_path: cwd_emit,
+                pane_group_id: crate::session_events::pane_group_id_from_agent(agent_name),
+                agent_name: agent_name.to_string(),
+            },
+        );
+
         let terminal_id = session.session_id.to_string();
         let db = k2so_core::db::shared();
         let conn = db.lock();

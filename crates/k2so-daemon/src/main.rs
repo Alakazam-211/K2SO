@@ -44,6 +44,8 @@ mod events;
 mod heartbeat_launch;
 mod pending_live;
 mod providers;
+mod session_events;
+mod session_events_ws;
 mod session_lookup;
 mod session_map;
 mod sessions_bytes_ws;
@@ -590,6 +592,26 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             }
             let params = parse_params(&path, &query);
             sessions_grid_ws::serve_session_grid_connection(stream, params).await;
+        }
+        // 0.38.0 Commit 4: daemon-authoritative session lifecycle
+        // stream. Pushes `session_added`/`session_removed` JSON
+        // frames to subscribers whose `path=` matches the affected
+        // session's cwd. Renderer + mobile companion consume the
+        // same wire format. See `.k2so/prds/daemon-authoritative-tabs.md`.
+        "/cli/sessions/events" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let params = parse_params(&path, &query);
+            session_events_ws::serve_session_events_connection(stream, params).await;
         }
         // Awareness Bus endpoints (0.34.0 Phase 3).
         // `/cli/awareness/publish` — POST JSON body → egress::deliver
