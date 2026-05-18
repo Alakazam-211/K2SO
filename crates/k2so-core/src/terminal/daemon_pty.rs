@@ -534,7 +534,18 @@ impl DaemonPtySession {
 
     /// Resize the PTY (which SIGWINCHes the child) and the local
     /// Term grid. Idempotent if called with the same dimensions.
+    ///
+    /// 0.38.0 commit 8 — clear the visible grid *before* reflowing so
+    /// full-screen TUIs that do in-place SIGWINCH redraws (notably
+    /// Claude) don't leave stale chrome above the new render. The
+    /// clear only nukes the visible viewport; `grid.clear_viewport()`
+    /// in alacritty preserves scrollback (history above the visible
+    /// area is intact and scrollable as before). The TUI's redraw on
+    /// SIGWINCH then fills the clean canvas. Other viewers see the
+    /// same clean repaint via the grid broadcast.
     pub fn resize(&self, cols: u16, rows: u16) {
+        use alacritty_terminal::vte::ansi::{ClearMode, Handler};
+
         let cols = cols.max(1);
         let rows = rows.max(1);
 
@@ -547,9 +558,11 @@ impl DaemonPtySession {
             cell_height: 20,
         });
 
-        // Reshape the Term grid to match. alacritty's resize
-        // handles scrollback reflow + cursor reposition naturally.
-        self.term.lock().resize(TermSize {
+        // Clear-then-reshape inside a single lock so the grid never
+        // observes the pre-clear stale chrome at the new dimensions.
+        let mut term = self.term.lock();
+        term.clear_screen(ClearMode::All);
+        term.resize(TermSize {
             cols: cols as usize,
             rows: rows as usize,
         });
