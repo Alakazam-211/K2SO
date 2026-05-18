@@ -566,15 +566,31 @@ impl DaemonPtySession {
             cell_height: 20,
         });
 
-        // Discard-then-reshape inside a single lock so the grid never
-        // observes the pre-clear stale chrome at the new dimensions.
         let mut term = self.term.lock();
-        term.goto(0, 0);
-        term.clear_screen(ClearMode::Below);
-        term.resize(TermSize {
-            cols: cols as usize,
-            rows: rows as usize,
-        });
+
+        // 0.38.0 commit 8/9 + 0.38.1 fix — only clear when dimensions
+        // actually change. Previously we cleared unconditionally,
+        // which was fine on real resizes but BROKE same-size resize
+        // calls (menu opens, focus transitions, observer noise):
+        // kernel doesn't SIGWINCH for a same-size resize → TUI
+        // doesn't redraw → we cleared the grid → user sees a black
+        // screen until the next interaction triggers Claude to
+        // repaint. Gating the clear on a real dimension change
+        // preserves the no-duplication win for true resizes while
+        // making same-size calls a true no-op.
+        let dims_changed = (term.columns() as u16) != cols
+            || (term.screen_lines() as u16) != rows;
+
+        if dims_changed {
+            // Discard-then-reshape inside the same lock so the grid
+            // never observes pre-clear stale chrome at new dims.
+            term.goto(0, 0);
+            term.clear_screen(ClearMode::Below);
+            term.resize(TermSize {
+                cols: cols as usize,
+                rows: rows as usize,
+            });
+        }
     }
 
     /// Handle to the daemon-side alacritty Term. Locked briefly
