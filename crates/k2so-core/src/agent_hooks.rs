@@ -51,6 +51,12 @@ pub enum HookEvent {
     /// means "this PTY is already running, mount a tab on it." See
     /// `.k2so/prds/heartbeat-active-session-tracking.md`.
     SessionSurfaced,
+    /// Fires when a workspace session's `surfaced` flag flips 1 → 0
+    /// (close-as-minimize). The PTY stays alive in the daemon; every
+    /// viewer drops the corresponding tab from its UI so the surface
+    /// state stays in sync across windows. Symmetric counterpart to
+    /// `SessionSurfaced`. 0.38.0 commit 6.
+    SessionUnsurfaced,
 }
 
 impl HookEvent {
@@ -66,6 +72,7 @@ impl HookEvent {
             Self::CliAiCommit => "cli:ai-commit",
             Self::HookInjectionFailed => "hook-injection-failed",
             Self::SessionSurfaced => "session:surfaced",
+            Self::SessionUnsurfaced => "session:unsurfaced",
         }
     }
 }

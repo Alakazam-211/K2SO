@@ -882,6 +882,52 @@ export function startAgentPolling(): void {
       },
     )
 
+    // 0.38.0 commit 6 — symmetric counterpart to `session:surfaced`.
+    // Fires when any window flips a workspace session's `surfaced`
+    // flag 1 → 0 (close-as-minimize). Every viewer drops the
+    // corresponding tab from its UI; the daemon-owned PTY stays
+    // alive in v2_session_map. Idempotent: no-op if the tab isn't
+    // present (e.g. this window already minimized locally).
+    listen<{
+      terminalId: string | null
+      projectPath: string
+      agentName: string
+      heartbeatName: string | null
+      attachAgentName?: string | null
+    }>(
+      'session:unsurfaced', (event) => {
+        const { terminalId, agentName } = event.payload
+        const heartbeatName = event.payload.heartbeatName
+        const tabsStore = useTabsStore.getState()
+        // Match by either terminalId on the item data OR by
+        // surfacedAgentName / heartbeatName on the tab — covers both
+        // stamped-metadata and cross-reference cases of the original
+        // closeTerminalForRenderer detection.
+        const matchTabId = tabsStore.tabs.find((t) =>
+          [...t.paneGroups.values()].some((pg) =>
+            pg.items.some((item) => {
+              if (item.type !== 'terminal') return false
+              const d = item.data as any
+              if (terminalId && d.terminalId === terminalId) return true
+              if (d.surfacedAgentName && d.surfacedAgentName === agentName) return true
+              if (heartbeatName && d.heartbeatName === heartbeatName) return true
+              return false
+            }),
+          ),
+        )?.id
+        if (!matchTabId) return
+        useTabsStore.setState((s) => {
+          const nextTabs = s.tabs.filter((t) => t.id !== matchTabId)
+          // If we just dropped the active tab, point active at whatever
+          // tab is left (or null if the group is empty).
+          const nextActive = s.activeTabId === matchTabId
+            ? (nextTabs[0]?.id ?? null)
+            : s.activeTabId
+          return { tabs: nextTabs, activeTabId: nextActive }
+        })
+      },
+    )
+
     // Watch for workspace switches — flush any pending companion terminals
     useProjectsStore.subscribe((state, prevState) => {
       if (state.activeProjectId && state.activeProjectId !== prevState.activeProjectId) {

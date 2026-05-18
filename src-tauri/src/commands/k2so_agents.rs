@@ -2512,6 +2512,22 @@ pub fn k2so_session_set_surfaced(
                 "attachAgentName": attach_agent_name,
             }),
         );
+    } else {
+        // 0.38.0 commit 6 — symmetric counterpart so every viewer
+        // drops the tab from its UI when one window minimizes. The
+        // PTY stays alive in the daemon (close-as-minimize); only the
+        // surface state propagates. Renderer's `session:unsurfaced`
+        // listener is idempotent (no-op if the tab isn't present).
+        k2so_core::agent_hooks::emit(
+            k2so_core::agent_hooks::HookEvent::SessionUnsurfaced,
+            serde_json::json!({
+                "projectPath": project_path,
+                "agentName": agent_name,
+                "terminalId": terminal_id,
+                "heartbeatName": heartbeat_name,
+                "attachAgentName": attach_agent_name,
+            }),
+        );
     }
     Ok(())
 }
