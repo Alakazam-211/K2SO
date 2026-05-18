@@ -1112,14 +1112,12 @@ export default function Sidebar(): React.JSX.Element {
                       {dragZone === 'agents' && dropIndex === idx && (
                         <div className="h-[2px] bg-[var(--color-accent)] mx-3" />
                       )}
-                      <div className="border-l-2 border-[var(--color-accent)]">
-                        <SingleProjectItem
-                          project={project}
-                          isActive={project.id === activeProjectId}
-                          onContextMenu={handleContextMenu}
-                          shortcutIndex={myStartIdx}
-                        />
-                      </div>
+                      <SingleProjectItem
+                        project={project}
+                        isActive={project.id === activeProjectId}
+                        onContextMenu={handleContextMenu}
+                        shortcutIndex={myStartIdx}
+                      />
                     </div>
                   )
                 })
