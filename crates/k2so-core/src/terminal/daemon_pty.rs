@@ -535,14 +535,22 @@ impl DaemonPtySession {
     /// Resize the PTY (which SIGWINCHes the child) and the local
     /// Term grid. Idempotent if called with the same dimensions.
     ///
-    /// 0.38.0 commit 8 — clear the visible grid *before* reflowing so
-    /// full-screen TUIs that do in-place SIGWINCH redraws (notably
-    /// Claude) don't leave stale chrome above the new render. The
-    /// clear only nukes the visible viewport; `grid.clear_viewport()`
-    /// in alacritty preserves scrollback (history above the visible
-    /// area is intact and scrollable as before). The TUI's redraw on
-    /// SIGWINCH then fills the clean canvas. Other viewers see the
-    /// same clean repaint via the grid broadcast.
+    /// 0.38.0 commits 8 + 9 — discard the visible grid *before*
+    /// reflowing so full-screen TUIs that do in-place SIGWINCH redraws
+    /// (notably Claude) don't leave stale chrome above the new render.
+    ///
+    /// Subtle: we use `goto(0,0) + ClearMode::Below` instead of the
+    /// more obvious `ClearMode::All`. In non-alt-screen mode (Claude's
+    /// TUI is not alt-screen), `ClearMode::All` calls
+    /// `grid.clear_viewport()` which **scrolls the visible content
+    /// INTO scrollback** before clearing — exactly the unwanted
+    /// "every resize appends a copy of the prompt to history"
+    /// behavior we just fixed in commit 9. `ClearMode::Below` uses
+    /// `grid.reset_region` which discards the cells outright. The
+    /// TUI's SIGWINCH-triggered repaint then fills the clean canvas.
+    /// Scrollback above the viewport remains untouched: real history
+    /// (heartbeat summaries, conversation, acknowledgements) is
+    /// preserved and scrollable as before.
     pub fn resize(&self, cols: u16, rows: u16) {
         use alacritty_terminal::vte::ansi::{ClearMode, Handler};
 
@@ -558,10 +566,11 @@ impl DaemonPtySession {
             cell_height: 20,
         });
 
-        // Clear-then-reshape inside a single lock so the grid never
+        // Discard-then-reshape inside a single lock so the grid never
         // observes the pre-clear stale chrome at the new dimensions.
         let mut term = self.term.lock();
-        term.clear_screen(ClearMode::All);
+        term.goto(0, 0);
+        term.clear_screen(ClearMode::Below);
         term.resize(TermSize {
             cols: cols as usize,
             rows: rows as usize,
