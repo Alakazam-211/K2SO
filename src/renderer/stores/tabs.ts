@@ -2826,31 +2826,31 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   },
 
   clearAllTabs: () => {
-    const state = get()
-    // Kill all PTYs in group 0
-    for (const tab of state.tabs) {
-      for (const [, pg] of tab.paneGroups) {
-        for (const item of pg.items) {
-          if (item.type === 'terminal') {
-            const data = item.data as TerminalItemData
-            closeTerminalForRenderer(data)
-          }
-        }
-      }
-    }
-    // Kill all PTYs in extra groups
-    for (const group of state.extraGroups) {
-      for (const tab of group.tabs) {
-        for (const [, pg] of tab.paneGroups) {
-          for (const item of pg.items) {
-            if (item.type === 'terminal') {
-              const data = item.data as TerminalItemData
-              closeTerminalForRenderer(data)
-            }
-          }
-        }
-      }
-    }
+    // 0.38.0 commit 5 — view-clear only. Previously this looped every
+    // terminal item and called `closeTerminalForRenderer` (which routes
+    // v2 sessions to `closeV2Session`, unregistering them from the
+    // daemon's v2_session_map and killing the PTY).
+    //
+    // That made every workspace switch / focus-window mount destructive
+    // to anyone else viewing the same workspace: the daemon's session
+    // got killed, the renderer respawned a fresh one with the same
+    // canonical agent_name, and any other window (main, another focus
+    // window) was left holding a WS handle to a dead session_id —
+    // "distinct forks of the same chat" from the user's perspective.
+    //
+    // Under the daemon-authoritative model, the renderer's tab list is
+    // a *view*. Clearing the view must not affect the daemon's session
+    // map. When TerminalPane components unmount, their grid WS closes
+    // gracefully (subscriber detach); the daemon's
+    // `Arc<DaemonPtySession>` stays alive in v2_session_map until
+    // something explicit (user Close Tab, project deletion, daemon
+    // restart) takes it down. Other viewers keep their subscriptions
+    // and don't see a flicker.
+    //
+    // Explicit user closes still kill — those go through `removeTab` /
+    // file-viewer-close / split-pane-replace, which call
+    // `closeTerminalForRenderer` directly. Those call sites are
+    // unchanged.
     set({ tabs: [], activeTabId: null, extraGroups: [], splitCount: 1, activeGroupIndex: 0 })
   },
 
