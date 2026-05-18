@@ -1063,7 +1063,7 @@ export default function Sidebar(): React.JSX.Element {
           <button
             type="button"
             onClick={() => setAgentsPinnedCollapsed((v) => !v)}
-            className="no-drag w-full flex items-center gap-1.5 px-4 pt-3 pb-1 text-left cursor-pointer hover:bg-white/[0.02] transition-colors"
+            className="no-drag w-full flex items-center gap-1.5 px-4 pt-3 pb-2 text-left cursor-pointer hover:bg-white/[0.02] transition-colors"
             aria-expanded={!agentsPinnedCollapsed}
             aria-controls="sidebar-agents-pinned-content"
           >
