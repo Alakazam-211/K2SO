@@ -700,30 +700,151 @@ impl TimeEntry {
     }
 }
 
-// ── Terminal Tabs (stub) ────────────────────────────────────────────────────
+// ── Workspace Tab Sessions ──────────────────────────────────────────────────
+//
+// 0.38.5 — daemon-side persistence of per-pane session metadata so Cmd+T
+// terminal tabs survive daemon restart. See
+// `0045_workspace_tab_sessions.sql` for the full rationale. Replaces the
+// stale `TerminalTab` + `TerminalPane` stubs that were created in
+// migration 0000 for a renderer-normalized layout design that never
+// shipped — the underlying tables stayed at 0 rows for the entire
+// lifetime of K2SO and were dropped by the 0045 migration.
 
-#[allow(dead_code)] // Scaffold for the persisted-terminal-tabs feature —
-                    // schema shape is agreed but CRUD hasn't shipped yet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TerminalTab {
-    pub id: String,
-    pub workspace_id: String,
-    pub title: String,
-    pub tab_order: i64,
-    pub created_at: i64,
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceTabSession {
+    pub project_id: String,
+    pub pane_group_id: String,
+    pub agent_name: String,
+    pub session_id: Option<String>,
+    pub command: Option<String>,
+    /// JSON-serialized `Vec<String>` so it round-trips through serde
+    /// without a custom column type.
+    pub args_json: Option<String>,
+    pub cwd: Option<String>,
+    pub last_seen_at: i64,
 }
 
-// ── Terminal Panes (stub) ───────────────────────────────────────────────────
+impl WorkspaceTabSession {
+    /// Upsert the row for `(project_id, pane_group_id)`. Called by
+    /// `v2_session_map::register` on every PTY registration so the
+    /// daemon's restart-time recovery picks up the most recent spawn
+    /// args. `session_id` is updated separately via `stamp_session_id`
+    /// once the CLI tool (claude / codex) reports it; first-time
+    /// upserts come through as `None` here.
+    pub fn upsert(
+        conn: &Connection,
+        row: &WorkspaceTabSession,
+    ) -> Result<()> {
+        conn.execute(
+            "INSERT INTO workspace_tab_sessions \
+                (project_id, pane_group_id, agent_name, session_id, command, args_json, cwd, last_seen_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, unixepoch()) \
+             ON CONFLICT(project_id, pane_group_id) DO UPDATE SET \
+                agent_name = excluded.agent_name, \
+                session_id = COALESCE(excluded.session_id, workspace_tab_sessions.session_id), \
+                command = excluded.command, \
+                args_json = excluded.args_json, \
+                cwd = excluded.cwd, \
+                last_seen_at = unixepoch()",
+            params![
+                row.project_id,
+                row.pane_group_id,
+                row.agent_name,
+                row.session_id,
+                row.command,
+                row.args_json,
+                row.cwd,
+            ],
+        )?;
+        Ok(())
+    }
 
-#[allow(dead_code)] // Scaffold for persisted pane splits — same deal as TerminalTab.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TerminalPane {
-    pub id: String,
-    pub tab_id: String,
-    pub split_direction: Option<String>,
-    pub split_ratio: Option<f64>,
-    pub pane_order: i64,
-    pub created_at: i64,
+    /// Look up the saved session for a `(project_id, pane_group_id)`
+    /// pair. Returns `None` if no row exists — the daemon then spawns
+    /// fresh (the pre-0.38.5 default behavior).
+    pub fn get(
+        conn: &Connection,
+        project_id: &str,
+        pane_group_id: &str,
+    ) -> Result<Option<WorkspaceTabSession>> {
+        let mut stmt = conn.prepare(
+            "SELECT project_id, pane_group_id, agent_name, session_id, \
+                    command, args_json, cwd, last_seen_at \
+             FROM workspace_tab_sessions \
+             WHERE project_id = ?1 AND pane_group_id = ?2",
+        )?;
+        let mut rows = stmt.query_map(params![project_id, pane_group_id], |r| {
+            Ok(WorkspaceTabSession {
+                project_id: r.get(0)?,
+                pane_group_id: r.get(1)?,
+                agent_name: r.get(2)?,
+                session_id: r.get(3)?,
+                command: r.get(4)?,
+                args_json: r.get(5)?,
+                cwd: r.get(6)?,
+                last_seen_at: r.get(7)?,
+            })
+        })?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Look up by canonical `agent_name`. The daemon's v2_session_map
+    /// is keyed by agent_name (which is `tab-<pane_group_id>` for
+    /// Cmd+T tabs, bare project_id for pinned chat, heartbeat name for
+    /// heartbeats) and v2_spawn often only has the agent_name in hand,
+    /// not the pane_group_id. The DB key uses `(project_id, pane_group_id)`
+    /// for normality with the renderer; this lookup bridges the two.
+    pub fn get_by_agent_name(
+        conn: &Connection,
+        project_id: &str,
+        agent_name: &str,
+    ) -> Result<Option<WorkspaceTabSession>> {
+        let mut stmt = conn.prepare(
+            "SELECT project_id, pane_group_id, agent_name, session_id, \
+                    command, args_json, cwd, last_seen_at \
+             FROM workspace_tab_sessions \
+             WHERE project_id = ?1 AND agent_name = ?2",
+        )?;
+        let mut rows = stmt.query_map(params![project_id, agent_name], |r| {
+            Ok(WorkspaceTabSession {
+                project_id: r.get(0)?,
+                pane_group_id: r.get(1)?,
+                agent_name: r.get(2)?,
+                session_id: r.get(3)?,
+                command: r.get(4)?,
+                args_json: r.get(5)?,
+                cwd: r.get(6)?,
+                last_seen_at: r.get(7)?,
+            })
+        })?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Stamp the CLI tool's session id after the renderer (or daemon)
+    /// has detected it. Separate from `upsert` because the session id
+    /// arrives later than the spawn — claude emits it on first turn,
+    /// not at process start. Idempotent if the value is unchanged.
+    pub fn stamp_session_id(
+        conn: &Connection,
+        project_id: &str,
+        pane_group_id: &str,
+        session_id: &str,
+    ) -> Result<()> {
+        conn.execute(
+            "UPDATE workspace_tab_sessions \
+             SET session_id = ?3, last_seen_at = unixepoch() \
+             WHERE project_id = ?1 AND pane_group_id = ?2",
+            params![project_id, pane_group_id, session_id],
+        )?;
+        Ok(())
+    }
 }
 
 // ── Workspace States ─────────────────────────────────────────────────────

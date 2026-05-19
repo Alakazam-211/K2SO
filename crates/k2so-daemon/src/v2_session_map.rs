@@ -58,17 +58,51 @@ pub fn register(agent_name: impl Into<String>, session: Arc<DaemonPtySession>) {
         .as_ref()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let pane_group_id_opt = crate::session_events::pane_group_id_from_agent(&key);
     let _ = crate::session_events::emit(
         crate::session_events::SessionEvent::SessionAdded {
-            workspace_path: cwd,
-            pane_group_id: crate::session_events::pane_group_id_from_agent(&key),
-            agent_name: key,
+            workspace_path: cwd.clone(),
+            pane_group_id: pane_group_id_opt.clone(),
+            agent_name: key.clone(),
             command: session.program.clone(),
             args: session.args.clone(),
             session_id: session.session_id.to_string(),
             is_v2: true,
         },
     );
+
+    // 0.38.5 — persist session-backing metadata so this PTY's spawn
+    // args + session_id survive a daemon restart. Only stamp rows for
+    // sessions where we have a resolvable workspace + a canonical
+    // pane_group_id; pinned-chat / heartbeat sessions whose
+    // agent_name isn't `tab-`-prefixed use the bare agent_name as
+    // pane_group_id (the helper handles both shapes). See
+    // `0045_workspace_tab_sessions.sql` for the architecture.
+    let pane_group_id = pane_group_id_opt.unwrap_or_else(|| key.clone());
+    if !cwd.is_empty() {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        if let Some(project_id) = k2so_core::agents::resolve_project_id(&conn, &cwd) {
+            let args_json = serde_json::to_string(&session.args).ok();
+            let row = k2so_core::db::schema::WorkspaceTabSession {
+                project_id,
+                pane_group_id,
+                agent_name: key,
+                // We don't know the CLI tool's own session id at
+                // spawn time — it gets stamped later by the
+                // session-id-detection path. Leave as None on
+                // first insert; subsequent upserts COALESCE so we
+                // don't overwrite a previously-stamped value with
+                // None.
+                session_id: None,
+                command: session.program.clone(),
+                args_json,
+                cwd: Some(cwd),
+                last_seen_at: 0, // ignored — table default is unixepoch()
+            };
+            let _ = k2so_core::db::schema::WorkspaceTabSession::upsert(&conn, &row);
+        }
+    }
 }
 
 /// Remove the map entry. Returns the Arc if one was present;

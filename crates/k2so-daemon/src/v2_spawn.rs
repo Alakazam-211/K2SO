@@ -161,6 +161,58 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
         };
     }
 
+    // 0.38.5 — restart-recovery: if the daemon was just restarted (app
+    // update / launchctl kickstart / crash) the in-memory
+    // v2_session_map is empty but `workspace_tab_sessions` still has
+    // the prior spawn's command + args + (claude) session_id. When
+    // the renderer's spawn request lands with empty command (which
+    // v2 schema makes the default for terminal items), substitute
+    // the persisted values so we re-run e.g. `claude --resume <id>`
+    // instead of dropping the user into a bare shell. Renderer-side
+    // command takes precedence on first spawn; only the empty case
+    // consults the table. See `0045_workspace_tab_sessions.sql`.
+    let mut command = req.command.clone();
+    let mut args = req.args.clone().unwrap_or_default();
+    if command.is_none() {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        if let Some(project_id) = k2so_core::agents::resolve_project_id(&conn, &req.cwd) {
+            if let Ok(Some(saved)) = k2so_core::db::schema::WorkspaceTabSession::get_by_agent_name(
+                &conn,
+                &project_id,
+                &req.agent_name,
+            ) {
+                if let Some(saved_cmd) = saved.command {
+                    let mut saved_args: Vec<String> = saved
+                        .args_json
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or_default();
+                    // If the persisted row has a session_id (e.g.
+                    // claude reported one on the prior run) AND the
+                    // args don't already carry `--resume`, splice it
+                    // in. The original args carry --dangerously-skip-
+                    // permissions and similar flags we want to keep.
+                    if let Some(sid) = saved.session_id.as_deref() {
+                        let already_has_resume = saved_args
+                            .iter()
+                            .any(|a| a == "--resume" || a == "-r");
+                        if !already_has_resume {
+                            saved_args.push("--resume".to_string());
+                            saved_args.push(sid.to_string());
+                        }
+                    }
+                    log_debug!(
+                        "[v2-spawn] restart-recovery: project={} agent={} replayed command={} args={:?}",
+                        project_id, req.agent_name, saved_cmd, saved_args
+                    );
+                    command = Some(saved_cmd);
+                    args = saved_args;
+                }
+            }
+        }
+    }
+
     // Spawn a fresh session.
     // Phase B: pick the label seed + source. Caller-supplied label
     // (with optional lock) takes priority; otherwise we leave the
@@ -181,8 +233,8 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
         cols: req.cols,
         rows: req.rows,
         cwd: Some(PathBuf::from(&req.cwd)),
-        program: req.command.clone(),
-        args: req.args.unwrap_or_default(),
+        program: command,
+        args,
         env: req.env.unwrap_or_default(),
         drain_on_exit: true,
         label: seed_label,
