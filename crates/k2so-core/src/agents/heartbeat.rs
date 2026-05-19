@@ -412,6 +412,23 @@ fn is_past_deadline(hb: &AgentHeartbeat) -> Option<String> {
             let v: serde_json::Value = serde_json::from_str(&hb.spec_json).ok()?;
             let every_secs = v.get("every_seconds").and_then(|s| s.as_i64()).unwrap_or(300);
             let elapsed = now.timestamp() - last_fire_time.timestamp();
+
+            // Pause-recovery (0.38.2): once `elapsed` exceeds 2× the
+            // interval, the scheduler was offline — laptop sleep,
+            // daemon down, app closed. The deadline check was
+            // designed for small slips (concurrency lock, brief
+            // crash) where firing slightly late is acceptable.
+            // Without this guard, an hourly heartbeat that misses
+            // even one cycle by >10 min grows `lateness`
+            // unboundedly and never fires again — observed live in
+            // production with the `triage` heartbeat dark for 22+
+            // days across 11 workspaces while the scheduler
+            // happily ticked `skipped_deadline` every interval.
+            // Treat large gaps as "next slot is now, fire it."
+            if elapsed > every_secs * 2 {
+                return None;
+            }
+
             let lateness = elapsed - every_secs;
             if lateness > deadline_secs {
                 Some(format!(
