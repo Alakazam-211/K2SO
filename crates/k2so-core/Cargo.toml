@@ -1,6 +1,6 @@
 [package]
 name = "k2so-core"
-version = "0.37.12"
+version = "0.38.1"
 edition = "2021"
 license = "MIT"
 description = "K2SO device-local core library: db, llm, terminal, companion, scheduler, agent_hooks, push_adapter. Linked by both src-tauri (Tauri app, thin client) and k2so-daemon (persistent-agent runtime)."
@@ -41,6 +41,14 @@ serde_yaml = "0.9"
 
 # Time handling in the activity feed + heartbeat audit rows.
 chrono = { version = "0.4", features = ["serde"] }
+
+# 0.38.2 — cron expression parsing + next-occurrence computation for the
+# heartbeat scheduler. Replaces our hand-rolled `is_past_deadline` +
+# scheduled-time arithmetic (which got DST + long-pause cases wrong;
+# heartbeats sat dark for 22 days while reporting `enabled=yes`).
+# Battle-tested in the rust ecosystem; we own thin wrappers + persistence
+# + concurrency policy; croner owns the time math.
+croner = "3"
 
 # UUIDs for agent sessions, heartbeat fires, etc. `serde` enables
 # Serialize/Deserialize impls used by session::SessionId (0.34.0).

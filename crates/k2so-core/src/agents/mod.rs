@@ -26,6 +26,7 @@ pub mod channel;
 pub mod checkin;
 pub mod commands;
 pub mod connections;
+pub mod cron_schedule;
 pub mod delegate;
 pub mod display;
 pub mod events;
