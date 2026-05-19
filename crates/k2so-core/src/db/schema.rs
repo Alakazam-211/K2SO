@@ -1342,6 +1342,40 @@ impl AgentHeartbeat {
         rows.collect()
     }
 
+    /// Active (non-archived) rows across ALL projects, with the project
+    /// name + path joined in. Used by the system-wide Heartbeats settings
+    /// page (0.38.3) so the operator can see + toggle every configured
+    /// heartbeat from one place rather than walking workspace-by-workspace.
+    pub fn list_all_active_with_project(
+        conn: &Connection,
+    ) -> Result<Vec<(AgentHeartbeat, String, String)>> {
+        let sql = format!(
+            "SELECT {}, p.name AS project_name, p.path AS project_path \
+             FROM workspace_heartbeats h \
+             JOIN projects p ON p.id = h.project_id \
+             WHERE h.archived_at IS NULL \
+             ORDER BY p.name, h.name",
+            // Qualify each column with the heartbeat alias so the JOIN
+            // doesn't collide on the duplicate `name` column.
+            Self::COLS
+                .split(", ")
+                .map(|c| format!("h.{}", c))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            let hb = Self::from_row(row)?;
+            // Two extra columns appended in the SELECT above. Their
+            // indices follow the AgentHeartbeat fields (which Self::COLS
+            // produced) — 17 fields + project_name (17) + project_path (18).
+            let project_name: String = row.get(17)?;
+            let project_path: String = row.get(18)?;
+            Ok((hb, project_name, project_path))
+        })?;
+        rows.collect()
+    }
+
     /// Active (non-archived) rows for a project. The Settings list and the
     /// sidebar's Live/Resumable/Scheduled sections both use this.
     pub fn list_active(conn: &Connection, project_id: &str) -> Result<Vec<AgentHeartbeat>> {
@@ -2029,6 +2063,40 @@ impl HeartbeatFire {
             schedule_name,
         ])?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Return the most recent `limit` fire rows across **all** projects
+    /// joined with project name. Used by the system-wide Heartbeats
+    /// settings page (0.38.3) as the rightmost universal audit log.
+    pub fn list_all_recent_with_project(
+        conn: &Connection,
+        limit: i64,
+    ) -> Result<Vec<(HeartbeatFire, String)>> {
+        let mut stmt = conn.prepare(
+            "SELECT h.id, h.project_id, h.agent_name, h.schedule_name, h.fired_at, h.mode, \
+                    h.decision, h.reason, h.inbox_priority, h.inbox_count, h.duration_ms, \
+                    p.name AS project_name \
+             FROM heartbeat_fires h JOIN projects p ON p.id = h.project_id \
+             ORDER BY h.fired_at DESC LIMIT ?1"
+        )?;
+        let rows = stmt.query_map(params![limit], |row| {
+            let fire = HeartbeatFire {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                agent_name: row.get(2)?,
+                schedule_name: row.get(3)?,
+                fired_at: row.get(4)?,
+                mode: row.get(5)?,
+                decision: row.get(6)?,
+                reason: row.get(7)?,
+                inbox_priority: row.get(8)?,
+                inbox_count: row.get(9)?,
+                duration_ms: row.get(10)?,
+            };
+            let project_name: String = row.get(11)?;
+            Ok((fire, project_name))
+        })?;
+        rows.collect()
     }
 
     /// Return the most recent `limit` fire rows for a project.

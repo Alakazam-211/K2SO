@@ -384,6 +384,83 @@ pub fn k2so_heartbeat_list(project_path: String) -> Result<Vec<AgentHeartbeat>, 
     k2so_core::agents::heartbeat::k2so_heartbeat_list(project_path)
 }
 
+/// 0.38.3 — most recent heartbeat fire records across ALL projects,
+/// joined with project name. Powers the universal audit log on the
+/// system-wide Heartbeats settings page (`WakeSchedulerSection`).
+/// Default limit 100 fires; bump for deeper investigation.
+#[tauri::command]
+pub fn k2so_heartbeat_fires_list_all(
+    limit: Option<i64>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let db = k2so_core::db::shared();
+    let conn = db.lock();
+    let rows = k2so_core::db::schema::HeartbeatFire::list_all_recent_with_project(
+        &conn,
+        limit.unwrap_or(100),
+    )
+    .map_err(|e| format!("list_all_recent: {}", e))?;
+    let out: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(fire, project_name)| {
+            serde_json::json!({
+                "id": fire.id,
+                "projectId": fire.project_id,
+                "projectName": project_name,
+                "agentName": fire.agent_name,
+                "scheduleName": fire.schedule_name,
+                "firedAt": fire.fired_at,
+                "mode": fire.mode,
+                "decision": fire.decision,
+                "reason": fire.reason,
+                "inboxPriority": fire.inbox_priority,
+                "inboxCount": fire.inbox_count,
+                "durationMs": fire.duration_ms,
+            })
+        })
+        .collect();
+    Ok(out)
+}
+
+/// 0.38.3 — list every active (non-archived) heartbeat across ALL
+/// workspaces, with the parent project's name + path joined in. Used
+/// by the system-wide Heartbeats settings page (`WakeSchedulerSection`)
+/// so the operator can see and toggle every heartbeat from one place.
+#[tauri::command]
+pub fn k2so_heartbeat_list_all() -> Result<Vec<serde_json::Value>, String> {
+    let db = k2so_core::db::shared();
+    let conn = db.lock();
+    let rows = k2so_core::db::schema::AgentHeartbeat::list_all_active_with_project(&conn)
+        .map_err(|e| format!("list_all_active: {}", e))?;
+    let out: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(hb, project_name, project_path)| {
+            // Hand-build the JSON so we keep the same camelCase the
+            // existing `k2so_heartbeat_list` payload uses (the renderer
+            // already knows that shape) and just append two extra
+            // fields for the joined project info.
+            serde_json::json!({
+                "id": hb.id,
+                "projectId": hb.project_id,
+                "name": hb.name,
+                "frequency": hb.frequency,
+                "specJson": hb.spec_json,
+                "wakeupPath": hb.wakeup_path,
+                "enabled": hb.enabled,
+                "lastFired": hb.last_fired,
+                "lastSessionId": hb.last_session_id,
+                "createdAt": hb.created_at,
+                "concurrencyPolicy": hb.concurrency_policy,
+                "startingDeadlineSecs": hb.starting_deadline_secs,
+                "activeDeadlineSecs": hb.active_deadline_secs,
+                "useWorkspaceSession": hb.use_workspace_session,
+                "projectName": project_name,
+                "projectPath": project_path,
+            })
+        })
+        .collect();
+    Ok(out)
+}
+
 #[tauri::command]
 pub fn k2so_heartbeat_list_archived(
     project_path: String,

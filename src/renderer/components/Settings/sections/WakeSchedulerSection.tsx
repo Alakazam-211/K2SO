@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useToastStore } from '@/stores/toast'
 import type { SettingEntry } from '../searchManifest'
+import { WakeupEditor, type HeartbeatRow } from './HeartbeatsSection'
 
 export const WAKE_SCHEDULER_MANIFEST: SettingEntry[] = [
   {
@@ -54,9 +55,108 @@ const MODE_DESCRIPTIONS: Record<WakeMode, string> = {
     'launchd fires scheduled heartbeats every N minutes. With "Wake System From Sleep" on, the laptop wakes from sleep (lid closed, on battery) to run agents — the configuration that makes overnight agent work possible.',
 }
 
+/** Row shape returned by `k2so_heartbeat_fires_list_all` — most recent
+ *  fire decisions across all workspaces. Used by the audit log column. */
+interface SystemFireRow {
+  id: number
+  projectId: string
+  projectName: string
+  agentName: string | null
+  scheduleName: string | null
+  firedAt: string
+  mode: string
+  decision: string
+  reason: string | null
+  durationMs: number | null
+}
+
+/** Decision → terse one-letter chip color. `fired` is the happy path; all
+ *  the `skipped_*` decisions are routine non-events; `error` is the only
+ *  one that should pop on visual scan. */
+function decisionStyle(decision: string): { label: string; color: string } {
+  if (decision === 'fired') return { label: '●', color: 'text-[var(--color-good,#57c98a)]' }
+  if (decision === 'error') return { label: '!', color: 'text-[var(--color-bad,#ef6f6f)]' }
+  if (decision === 'wakeup_file_missing') return { label: '!', color: 'text-[var(--color-bad,#ef6f6f)]' }
+  if (decision === 'not_due') return { label: '·', color: 'text-[var(--color-text-muted)]' }
+  return { label: '○', color: 'text-[var(--color-text-muted)]' }
+}
+
+/** "2026-05-19T07:01:23.456Z" → "07:01" today, "May 18 21:13" earlier, etc. */
+function formatFiredAt(iso: string): string {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return iso.slice(0, 16)
+  const now = new Date()
+  const sameDay = d.toDateString() === now.toDateString()
+  const hh = d.getHours().toString().padStart(2, '0')
+  const mm = d.getMinutes().toString().padStart(2, '0')
+  if (sameDay) return `${hh}:${mm}`
+  const mon = d.toLocaleString('en-US', { month: 'short' })
+  return `${mon} ${d.getDate()} ${hh}:${mm}`
+}
+
+/** Row shape returned by the `k2so_heartbeat_list_all` Tauri command —
+ *  every active heartbeat across all workspaces with the parent project's
+ *  name + path joined in. */
+interface SystemHeartbeatRow {
+  id: string
+  projectId: string
+  projectName: string
+  projectPath: string
+  name: string
+  frequency: string
+  specJson: string
+  wakeupPath: string
+  enabled: boolean
+  lastFired: string | null
+  useWorkspaceSession: boolean
+}
+
+/** Compact one-liner for the heartbeat list row — "Every day at 9 AM",
+ *  "Every 5min 1 AM–11 PM", etc. Mirrors HeartbeatsSection's `describeSpec`
+ *  but takes raw JSON instead of a typed row so we don't need to import
+ *  it here. */
+function describeHeartbeatSpec(specJson: string, frequency: string): string {
+  let spec: Record<string, unknown> = {}
+  try { spec = JSON.parse(specJson) } catch { /* fall through to frequency */ }
+  const fmt12 = (t: unknown): string => {
+    if (typeof t !== 'string' || !t.includes(':')) return ''
+    const [hh, mm] = t.split(':')
+    let h = parseInt(hh, 10); if (isNaN(h)) return t
+    const ap = h >= 12 ? 'PM' : 'AM'
+    if (h === 0) h = 12; else if (h > 12) h -= 12
+    return mm === '00' ? `${h} ${ap}` : `${h}:${mm} ${ap}`
+  }
+  const at = typeof spec.time === 'string' ? ` at ${fmt12(spec.time)}` : ''
+  switch (frequency) {
+    case 'daily': return `Every day${at}`
+    case 'weekly': return `${(spec.days as string[] | undefined ?? []).join(', ') || '—'}${at}`
+    case 'monthly': return `Day(s) ${(spec.days_of_month as number[] | undefined ?? []).join(', ') || '—'}${at}`
+    case 'yearly': return `${(spec.months as string[] | undefined ?? []).join(', ')} day(s) ${(spec.days_of_month as number[] | undefined ?? []).join(', ') || '—'}${at}`
+    case 'hourly': {
+      const every = (spec.every_seconds as number | undefined) ?? 3600
+      const start = fmt12((spec.start as string | undefined) ?? '00:00')
+      const end = fmt12((spec.end as string | undefined) ?? '23:59')
+      return `Every ${Math.round(every / 60)}min ${start}–${end}`
+    }
+    default: return frequency
+  }
+}
+
 export function WakeSchedulerSection(): React.JSX.Element {
   const [loaded, setLoaded] = useState(false)
   const [settings, setSettings] = useState<WakeSchedulerSettings>(DEFAULT_SETTINGS)
+  // 0.38.3 — system-wide heartbeat list rendered in the right column.
+  // Loads on mount + refreshes after any per-row toggle so the on-disk
+  // state and the visible state stay in lockstep.
+  const [heartbeats, setHeartbeats] = useState<SystemHeartbeatRow[]>([])
+  const [heartbeatsLoading, setHeartbeatsLoading] = useState(true)
+  // When non-null, render the `WakeupEditor` overlay (AIFileEditor +
+  // live preview, scoped to this heartbeat's WAKEUP.md). null = list view.
+  const [editingHeartbeat, setEditingHeartbeat] = useState<SystemHeartbeatRow | null>(null)
+  // 0.38.3 — universal audit log (right-most column). Most recent 100
+  // fires across all workspaces. Polled every 5s so the user sees
+  // newly-firing heartbeats live without having to reopen the page.
+  const [fires, setFires] = useState<SystemFireRow[]>([])
   // Last successfully-persisted snapshot. `dirty` is computed from
   // deep-equality against this — there's no separate `setDirty` flag
   // that can drift out of sync with the actual on-disk state. Apply
@@ -102,6 +202,97 @@ export function WakeSchedulerSection(): React.JSX.Element {
     setSettings((s) => ({ ...s, ...patch }))
   }, [])
 
+  // 0.38.3 — load system-wide heartbeats for the right-column list.
+  const refreshHeartbeats = useCallback(async () => {
+    setHeartbeatsLoading(true)
+    try {
+      const rows = await invoke<SystemHeartbeatRow[]>('k2so_heartbeat_list_all')
+      setHeartbeats(rows)
+    } catch (err) {
+      toast(`Failed to load heartbeats: ${String(err)}`, 'error')
+      setHeartbeats([])
+    } finally {
+      setHeartbeatsLoading(false)
+    }
+  }, [toast])
+
+  useEffect(() => {
+    void refreshHeartbeats()
+  }, [refreshHeartbeats])
+
+  // 0.38.3 — fires audit log. Polled every 5s so newly-firing
+  // heartbeats appear without page reload. Limit 100 keeps the list
+  // bounded; older fires fall off the visible window but stay in SQL.
+  useEffect(() => {
+    let cancelled = false
+    const tick = async (): Promise<void> => {
+      try {
+        const rows = await invoke<SystemFireRow[]>('k2so_heartbeat_fires_list_all', { limit: 100 })
+        if (!cancelled) setFires(rows)
+      } catch {
+        // Silent — the audit log is a read-only convenience; a transient
+        // failure shouldn't toast.
+      }
+    }
+    void tick()
+    const id = window.setInterval(tick, 5000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [])
+
+  const handleToggleEnabled = useCallback(
+    async (row: SystemHeartbeatRow, next: boolean) => {
+      // Optimistic — flip locally, fall back if the daemon rejects.
+      setHeartbeats((rows) =>
+        rows.map((r) => (r.id === row.id ? { ...r, enabled: next } : r)),
+      )
+      try {
+        await invoke('k2so_heartbeat_set_enabled', {
+          projectPath: row.projectPath,
+          name: row.name,
+          enabled: next,
+        })
+      } catch (err) {
+        toast(`Toggle failed for ${row.projectName}/${row.name}: ${String(err)}`, 'error')
+        setHeartbeats((rows) =>
+          rows.map((r) => (r.id === row.id ? { ...r, enabled: !next } : r)),
+        )
+      }
+    },
+    [toast],
+  )
+
+  const handleToggleUseWorkspaceSession = useCallback(
+    async (row: SystemHeartbeatRow, next: boolean) => {
+      setHeartbeats((rows) =>
+        rows.map((r) =>
+          r.id === row.id ? { ...r, useWorkspaceSession: next } : r,
+        ),
+      )
+      try {
+        await invoke('k2so_heartbeat_set_use_workspace_session', {
+          projectPath: row.projectPath,
+          name: row.name,
+          useWorkspaceSession: next,
+        })
+      } catch (err) {
+        toast(`Pinned-chat toggle failed: ${String(err)}`, 'error')
+        setHeartbeats((rows) =>
+          rows.map((r) =>
+            r.id === row.id ? { ...r, useWorkspaceSession: !next } : r,
+          ),
+        )
+      }
+    },
+    [toast],
+  )
+
+  const handleEditWakeup = useCallback((row: SystemHeartbeatRow) => {
+    setEditingHeartbeat(row)
+  }, [])
+
   const handleApply = useCallback(async () => {
     setApplying(true)
     try {
@@ -132,12 +323,65 @@ export function WakeSchedulerSection(): React.JSX.Element {
     return <div className="text-[10px] text-[var(--color-text-muted)]">Loading…</div>
   }
 
+  // 0.38.3 — when the user clicks "Edit Wakeup" on a row, render the
+  // WakeupEditor (AIFileEditor) takeover. The agent-name resolution
+  // mirrors ProjectsSection's: manager/coordinator/pod → __lead__,
+  // agent → k2so-agent, custom → slug of project name. Best-effort —
+  // WakeupEditor's AGENT.md fetch fails-soft if the slug doesn't match.
+  if (editingHeartbeat) {
+    // Convert SystemHeartbeatRow → HeartbeatRow shape WakeupEditor expects
+    const hb: HeartbeatRow = {
+      id: editingHeartbeat.id,
+      projectId: editingHeartbeat.projectId,
+      name: editingHeartbeat.name,
+      frequency: editingHeartbeat.frequency,
+      specJson: editingHeartbeat.specJson,
+      wakeupPath: editingHeartbeat.wakeupPath,
+      enabled: editingHeartbeat.enabled,
+      lastFired: editingHeartbeat.lastFired,
+      createdAt: 0,
+      useWorkspaceSession: editingHeartbeat.useWorkspaceSession,
+    }
+    const slug = editingHeartbeat.projectName.toLowerCase().replace(/\s+/g, '-')
+    const otherHeartbeats: HeartbeatRow[] = heartbeats
+      .filter((r) => r.projectId === editingHeartbeat.projectId && r.id !== editingHeartbeat.id)
+      .map((r) => ({
+        id: r.id,
+        projectId: r.projectId,
+        name: r.name,
+        frequency: r.frequency,
+        specJson: r.specJson,
+        wakeupPath: r.wakeupPath,
+        enabled: r.enabled,
+        lastFired: r.lastFired,
+        createdAt: 0,
+        useWorkspaceSession: r.useWorkspaceSession,
+      }))
+    return (
+      <div className="absolute inset-0 overflow-hidden bg-[var(--color-bg)]">
+        <WakeupEditor
+          projectPath={editingHeartbeat.projectPath}
+          agentName={slug}
+          heartbeat={hb}
+          otherHeartbeats={otherHeartbeats}
+          onClose={() => {
+            setEditingHeartbeat(null)
+            void refreshHeartbeats()
+          }}
+        />
+      </div>
+    )
+  }
+
   return (
-    // Constrain to 1/3 of the settings content width so the page can
-    // grow a right-side panel later (heartbeat preview, fire history,
-    // etc.) without rewriting the layout. `w-1/3` is relative to the
-    // parent container the Settings shell lays out for us.
-    <div data-settings-id="heartbeats" className="w-1/3 min-w-[280px]">
+    // 0.38.3 — Two-column layout: left = wake-scheduler launchd mode
+    // (the existing settings); right = system-wide heartbeat list with
+    // per-row enable toggle, pinned-chat checkbox, and edit-wakeup
+    // button. The right column inherits the same parent container so
+    // the page just spreads naturally on wider Settings panes.
+    <div data-settings-id="heartbeats" className="flex gap-8 items-start">
+      {/* ── Left column: launchd plist mode ─────────────────────────── */}
+      <div className="w-1/3 min-w-[280px] max-w-[420px] flex-shrink-0">
       <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-1 flex items-center gap-2">
         Heartbeats
         <span
@@ -279,6 +523,144 @@ export function WakeSchedulerSection(): React.JSX.Element {
         {dirty && !applying && (
           <span className="text-[10px] text-[var(--color-text-muted)]">Unsaved changes</span>
         )}
+      </div>
+      </div>
+      {/* ── Right column: every heartbeat across all workspaces ──────── */}
+      <div className="flex-1 min-w-0 max-w-[640px]">
+        <div className="flex items-baseline justify-between mb-1">
+          <h2 className="text-sm font-medium text-[var(--color-text-primary)]">
+            All Heartbeats
+          </h2>
+          <span className="text-[10px] text-[var(--color-text-muted)] tabular-nums">
+            {heartbeatsLoading ? 'loading…' : `${heartbeats.length} total`}
+          </span>
+        </div>
+        <p className="text-[10px] text-[var(--color-text-muted)] mb-3 leading-relaxed">
+          Every active heartbeat across every workspace. Toggle to
+          enable/disable, check the box to route this heartbeat&apos;s
+          wake into the workspace&apos;s pinned chat tab instead of its
+          own session, and click <span className="text-[var(--color-text-secondary)]">Edit Wakeup</span> to
+          open the prompt template in your default editor.
+        </p>
+        {heartbeats.length === 0 && !heartbeatsLoading && (
+          <div className="text-[10px] text-[var(--color-text-muted)] italic py-3">
+            No heartbeats configured. Add one inside any workspace at
+            <span className="text-[var(--color-text-secondary)]"> Workspaces → Heartbeats</span>.
+          </div>
+        )}
+        <div className="space-y-1">
+          {heartbeats.map((row) => (
+            <div
+              key={row.id}
+              className="border border-[var(--color-border)] hover:border-[var(--color-text-secondary)] transition-colors px-3 py-2 flex items-center gap-3"
+            >
+              <div className="flex-1 min-w-0">
+                <div className="text-xs text-[var(--color-text-secondary)] flex items-baseline gap-2">
+                  <span className="text-[var(--color-text-primary)] font-medium truncate">
+                    {row.projectName}
+                  </span>
+                  <span className="text-[var(--color-text-muted)]">/</span>
+                  <span className="truncate">{row.name}</span>
+                </div>
+                <div className="text-[10px] text-[var(--color-text-muted)] mt-0.5 truncate">
+                  {describeHeartbeatSpec(row.specJson, row.frequency)}
+                </div>
+              </div>
+              {/* Pinned-chat checkbox */}
+              <label
+                className="flex items-center gap-1.5 text-[10px] text-[var(--color-text-muted)] no-drag cursor-pointer select-none flex-shrink-0"
+                title="Deliver this heartbeat's wakeup into the workspace's pinned chat session instead of its own"
+              >
+                <input
+                  type="checkbox"
+                  checked={row.useWorkspaceSession}
+                  onChange={(e) => handleToggleUseWorkspaceSession(row, e.target.checked)}
+                  className="cursor-pointer"
+                />
+                Pinned&nbsp;chat
+              </label>
+              {/* Edit-wakeup */}
+              <button
+                type="button"
+                onClick={() => handleEditWakeup(row)}
+                className="text-[10px] px-2 py-1 border border-[var(--color-border)] hover:bg-white/[0.04] hover:border-[var(--color-text-secondary)] transition-colors cursor-pointer no-drag flex-shrink-0"
+                title={`Open ${row.wakeupPath}`}
+              >
+                Edit Wakeup
+              </button>
+              {/* Enable toggle */}
+              <button
+                type="button"
+                role="switch"
+                aria-checked={row.enabled}
+                onClick={() => handleToggleEnabled(row, !row.enabled)}
+                title={row.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
+                className={`w-7 h-3.5 flex items-center transition-colors no-drag cursor-pointer flex-shrink-0 ${
+                  row.enabled ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'
+                }`}
+              >
+                <span
+                  className={`w-2.5 h-2.5 bg-white block transition-transform ${
+                    row.enabled ? 'translate-x-3.5' : 'translate-x-0.5'
+                  }`}
+                />
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+      {/* ── Right-most column: universal fire audit log ──────────────── */}
+      <div className="flex-1 min-w-0 max-w-[420px]">
+        <div className="flex items-baseline justify-between mb-1">
+          <h2 className="text-sm font-medium text-[var(--color-text-primary)]">
+            Recent Fires
+          </h2>
+          <span className="text-[10px] text-[var(--color-text-muted)] tabular-nums">
+            last {fires.length}
+          </span>
+        </div>
+        <p className="text-[10px] text-[var(--color-text-muted)] mb-3 leading-relaxed">
+          Live audit feed of every scheduler decision across all
+          workspaces — fires, skips, errors. Updates every 5s. Hover
+          a row for the full skip reason.
+        </p>
+        <div className="space-y-0.5 max-h-[600px] overflow-y-auto">
+          {fires.length === 0 && (
+            <div className="text-[10px] text-[var(--color-text-muted)] italic py-3">
+              No fire decisions recorded yet. Heartbeats will appear
+              here on their next scheduler tick.
+            </div>
+          )}
+          {fires.map((fire) => {
+            const style = decisionStyle(fire.decision)
+            return (
+              <div
+                key={fire.id}
+                className="px-2 py-1 flex items-center gap-2 hover:bg-white/[0.03] transition-colors text-[10px] font-mono"
+                title={fire.reason ? `${fire.decision} — ${fire.reason}` : fire.decision}
+              >
+                <span className={`flex-shrink-0 ${style.color}`} aria-hidden="true">
+                  {style.label}
+                </span>
+                <span className="flex-shrink-0 text-[var(--color-text-muted)] tabular-nums w-[68px]">
+                  {formatFiredAt(fire.firedAt)}
+                </span>
+                <span className="flex-1 min-w-0 truncate text-[var(--color-text-secondary)]">
+                  <span className="text-[var(--color-text-primary)]">{fire.projectName}</span>
+                  {fire.scheduleName && (
+                    <>
+                      <span className="text-[var(--color-text-muted)]"> / </span>
+                      <span>{fire.scheduleName}</span>
+                    </>
+                  )}
+                </span>
+                <span className="flex-shrink-0 text-[var(--color-text-muted)] uppercase tracking-wider text-[8px]">
+                  {fire.decision === 'fired' ? 'fired' : fire.decision.replace(/^skipped_/, '')}
+                </span>
+              </div>
+            )
+          })}
+        </div>
       </div>
     </div>
   )
