@@ -203,11 +203,20 @@ export function WakeSchedulerSection(): React.JSX.Element {
   }, [])
 
   // 0.38.3 — load system-wide heartbeats for the right-column list.
+  // Sort case-insensitively by project name, then heartbeat name —
+  // the backend ORDER BY uses default collation (case-sensitive ASCII)
+  // so uppercase-prefixed workspaces clump above lowercase-prefixed
+  // ones. Override here for natural alphabetical reading.
   const refreshHeartbeats = useCallback(async () => {
     setHeartbeatsLoading(true)
     try {
       const rows = await invoke<SystemHeartbeatRow[]>('k2so_heartbeat_list_all')
-      setHeartbeats(rows)
+      const sorted = [...rows].sort((a, b) => {
+        const byProj = a.projectName.toLowerCase().localeCompare(b.projectName.toLowerCase())
+        if (byProj !== 0) return byProj
+        return a.name.toLowerCase().localeCompare(b.name.toLowerCase())
+      })
+      setHeartbeats(sorted)
     } catch (err) {
       toast(`Failed to load heartbeats: ${String(err)}`, 'error')
       setHeartbeats([])
@@ -566,7 +575,11 @@ export function WakeSchedulerSection(): React.JSX.Element {
                   {describeHeartbeatSpec(row.specJson, row.frequency)}
                 </div>
               </div>
-              {/* Pinned-chat checkbox */}
+              {/* Pinned-chat checkbox — themed to match the rest of
+                  settings (the native input's blue square didn't fit
+                  the dark + accent palette). Native input is the source
+                  of truth; the visible square is a sibling that flips
+                  state via the `peer-checked` Tailwind variant. */}
               <label
                 className="flex items-center gap-1.5 text-[10px] text-[var(--color-text-muted)] no-drag cursor-pointer select-none flex-shrink-0"
                 title="Deliver this heartbeat's wakeup into the workspace's pinned chat session instead of its own"
@@ -575,8 +588,31 @@ export function WakeSchedulerSection(): React.JSX.Element {
                   type="checkbox"
                   checked={row.useWorkspaceSession}
                   onChange={(e) => handleToggleUseWorkspaceSession(row, e.target.checked)}
-                  className="cursor-pointer"
+                  className="peer sr-only"
                 />
+                <span
+                  aria-hidden="true"
+                  className="
+                    w-3 h-3 flex items-center justify-center border transition-colors
+                    border-[var(--color-border)] bg-[var(--color-bg-elevated)]
+                    peer-checked:bg-[var(--color-accent)] peer-checked:border-[var(--color-accent)]
+                    peer-focus-visible:ring-1 peer-focus-visible:ring-[var(--color-accent)]
+                  "
+                >
+                  {row.useWorkspaceSession && (
+                    <svg
+                      viewBox="0 0 12 12"
+                      className="w-2.5 h-2.5"
+                      fill="none"
+                      stroke="white"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M2.5 6.5 L5 9 L9.5 3.5" />
+                    </svg>
+                  )}
+                </span>
                 Pinned&nbsp;chat
               </label>
               {/* Edit-wakeup */}
