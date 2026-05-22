@@ -1337,6 +1337,38 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         // heartbeat CRUD), not here — main.rs intercepts /cli/heartbeat/*
         // before this fallthrough dispatcher runs.
 
+        // ── 0.38.7: What's New popup ──────────────────────────────
+        //
+        // GET /cli/whats_new                — returns WhatsNewCheck JSON
+        //                                     (current, last_seen, has_new, content)
+        // POST /cli/whats_new/mark_seen     — writes current version to state file
+        // POST /cli/whats_new/reset         — clears state file (forces re-show)
+        //
+        // Daemon-side `env!("CARGO_PKG_VERSION")` is the truth source for
+        // the current version; the bundled `WHATS_NEW.md` is embedded
+        // into the binary at build time.
+        "/cli/whats_new" => {
+            let check = k2so_core::whats_new::check_for_user(env!("CARGO_PKG_VERSION"));
+            let body = serde_json::to_string(&check)
+                .unwrap_or_else(|_| "{\"has_new\":false}".to_string());
+            CliResponse::ok_json(body)
+        }
+        "/cli/whats_new/mark_seen" => {
+            match k2so_core::whats_new::write_last_seen(env!("CARGO_PKG_VERSION")) {
+                Ok(()) => CliResponse::ok_json(format!(
+                    r#"{{"success":true,"marked":"{}"}}"#,
+                    env!("CARGO_PKG_VERSION")
+                )),
+                Err(e) => CliResponse::bad_request(format!("failed to write state: {e}")),
+            }
+        }
+        "/cli/whats_new/reset" => {
+            match k2so_core::whats_new::clear_last_seen() {
+                Ok(()) => CliResponse::ok_json(r#"{"success":true,"cleared":true}"#.to_string()),
+                Err(e) => CliResponse::bad_request(format!("failed to clear state: {e}")),
+            }
+        }
+
         _ => CliResponse::not_found(),
     }
 }

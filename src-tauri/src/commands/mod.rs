@@ -26,3 +26,4 @@ pub mod kessel;
 pub mod kessel_term;
 pub mod skill_layers;
 pub mod permissions;
+pub mod whats_new;

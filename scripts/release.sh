@@ -85,6 +85,42 @@ sed -i '' "s/^version = \"[^\"]*\"/version = \"${VERSION}\"/" \
 sed -i '' "s/K2SO_CLI_VERSION=\"[^\"]*\"/K2SO_CLI_VERSION=\"${VERSION}\"/" cli/k2so
 echo "  Done."
 
+# ── Step 1.5: Verify WHATS_NEW.md has an entry for this version ──
+#
+# 0.38.7 release-script contract: every released version MUST have a
+# matching `## <version>` header in WHATS_NEW.md (the user-facing
+# changelog the Tauri popup displays on first launch after update).
+#
+# This is intentionally a hard gate — if the entry is missing, the
+# release halts BEFORE any build/sign/notarize work so the developer
+# has to write the user-facing notes first. WHATS_NEW.md is curated
+# user-friendly language (separate audience from release-notes-X.Y.Z.md
+# which goes to the GitHub release body).
+echo ""
+echo "Step 1.5: Verifying WHATS_NEW.md has an entry for ${VERSION}..."
+if [ ! -f "WHATS_NEW.md" ]; then
+    echo "  ERROR: WHATS_NEW.md not found at repo root." >&2
+    echo "  Create it before releasing — see existing entries for format." >&2
+    exit 1
+fi
+if ! grep -qE "^## ${VERSION//./\\.} " WHATS_NEW.md; then
+    echo "  ERROR: WHATS_NEW.md has no '## ${VERSION} — ...' section." >&2
+    echo "" >&2
+    echo "  Every release needs a user-facing changelog entry. Add a" >&2
+    echo "  section like:" >&2
+    echo "" >&2
+    echo "    ## ${VERSION} — Short headline" >&2
+    echo "" >&2
+    echo "    Friendly 1–3 paragraph description of what changed for" >&2
+    echo "    end users. Lead with what they'll notice, not implementation" >&2
+    echo "    detail. The Tauri app shows this in a popup on first launch" >&2
+    echo "    after this version installs." >&2
+    echo "" >&2
+    echo "  Then re-run: ./scripts/release.sh ${VERSION} ${NOTES_FILE:-<notes-file>}" >&2
+    exit 1
+fi
+echo "  Found '## ${VERSION}' entry. OK to proceed."
+
 # ── Step 2: Build ──
 echo ""
 echo "Step 2: Building release..."

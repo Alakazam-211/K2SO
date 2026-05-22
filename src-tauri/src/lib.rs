@@ -1100,6 +1100,10 @@ pub fn run() {
             commands::permissions::permissions_request_microphone,
             commands::permissions::permissions_request_apple_events,
             commands::permissions::permissions_request_local_network,
+            // What's New popup (0.38.7)
+            commands::whats_new::whats_new_check,
+            commands::whats_new::whats_new_mark_seen,
+            commands::whats_new::whats_new_reset,
             // Filesystem watcher
             watcher::fs_watch_dir,
             watcher::fs_unwatch_dir,

@@ -46,6 +46,7 @@ pub mod safe_delete;
 pub mod scheduler;
 pub mod terminal;
 pub mod wake;
+pub mod whats_new;
 
 // 0.34.0 Session Stream primitives — gated so flag-off builds compile
 // bit-for-bit like v0.33.0. See .k2so/prds/session-stream-and-awareness-bus.md
