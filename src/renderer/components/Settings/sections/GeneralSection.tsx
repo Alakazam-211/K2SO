@@ -159,6 +159,10 @@ export function GeneralSection(): React.JSX.Element {
         {/* CLI Version — right under App Version so it feels like part of the app */}
         <CLIVersionRow />
 
+        {/* Re-open the "What's new" popup for the current version. Pairs
+            with the auto-show on first launch after an update (0.38.7). */}
+        <WhatsNewRow />
+
         {/* Agentic Systems master switch */}
         <AgenticSystemsToggle />
 
@@ -323,6 +327,44 @@ function CLIVersionRow(): React.JSX.Element {
           </>
         )}
       </div>
+    </div>
+  )
+}
+
+// ── What's New — re-open the popup ──────────────────────────────────────
+// 0.38.8: small Settings row that lets the user re-read the most recent
+// version's changelog without waiting for the next update. Clicking the
+// button resets the last-seen marker daemon-side, then dispatches a
+// `k2so:show-whats-new` window event the WhatsNewModal listens for to
+// force-open. After the user dismisses, the marker gets re-stamped to
+// the current version so the popup doesn't auto-show on next launch
+// (idempotent with the normal dismiss flow).
+function WhatsNewRow(): React.JSX.Element {
+  const [busy, setBusy] = useState(false)
+
+  const handleClick = useCallback(async () => {
+    if (busy) return
+    setBusy(true)
+    try {
+      await invoke('whats_new_reset')
+      window.dispatchEvent(new CustomEvent('k2so:show-whats-new'))
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.debug('[whats-new] reset failed:', e)
+    }
+    setBusy(false)
+  }, [busy])
+
+  return (
+    <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
+      <span className="text-xs text-[var(--color-text-secondary)]">Release notes</span>
+      <button
+        onClick={handleClick}
+        disabled={busy}
+        className="px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer disabled:opacity-50"
+      >
+        {busy ? 'Opening…' : "Read what's new"}
+      </button>
     </div>
   )
 }

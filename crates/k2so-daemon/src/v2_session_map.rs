@@ -84,17 +84,32 @@ pub fn register(agent_name: impl Into<String>, session: Arc<DaemonPtySession>) {
         let conn = db.lock();
         if let Some(project_id) = k2so_core::agents::resolve_project_id(&conn, &cwd) {
             let args_json = serde_json::to_string(&session.args).ok();
+            // 0.38.8 — extract claude's session UUID from the args if
+            // present. v2_spawn::handle_v2_spawn auto-injects
+            // `--session-id <uuid>` for every Cmd+T claude spawn, so
+            // we can stamp `workspace_tab_sessions.session_id` here.
+            // Restart-recovery in v2_spawn reads this column to splice
+            // `--resume <uuid>` on the next daemon restart →
+            // conversation continuity for Cmd+T tabs.
+            let claude_session_id = session
+                .args
+                .windows(2)
+                .find_map(|w| {
+                    if w[0] == "--session-id" || w[0] == "--resume" {
+                        Some(w[1].clone())
+                    } else {
+                        None
+                    }
+                });
             let row = k2so_core::db::schema::WorkspaceTabSession {
                 project_id,
                 pane_group_id,
                 agent_name: key,
-                // We don't know the CLI tool's own session id at
-                // spawn time — it gets stamped later by the
-                // session-id-detection path. Leave as None on
-                // first insert; subsequent upserts COALESCE so we
-                // don't overwrite a previously-stamped value with
-                // None.
-                session_id: None,
+                // Set when spawn args carry --session-id / --resume;
+                // None otherwise. The upsert uses COALESCE so a
+                // subsequent re-register without the flag won't
+                // clobber a previously-stamped value.
+                session_id: claude_session_id,
                 command: session.program.clone(),
                 args_json,
                 cwd: Some(cwd),

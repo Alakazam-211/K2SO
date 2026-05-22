@@ -36,29 +36,42 @@ export default function WhatsNewModal(): React.JSX.Element | null {
   const [dismissing, setDismissing] = useState(false)
   const [pageIdx, setPageIdx] = useState(0)
 
-  // Initial check on mount.
-  useEffect(() => {
-    let cancelled = false
-    void (async () => {
-      try {
-        const data = await invoke<WhatsNewPayload>('whats_new_check')
-        if (cancelled) return
-        setPayload(data)
-        if (data.has_new) {
-          setVisible(true)
-          setPageIdx(0)
-        }
-      } catch (err) {
-        // Daemon unreachable or response malformed — silent fail; the
-        // popup is non-critical, app continues to load normally.
-        // eslint-disable-next-line no-console
-        console.debug('[whats-new] check failed:', err)
+  // Shared check function — used by initial mount AND by the
+  // `k2so:show-whats-new` event from Settings → Release notes button.
+  // The event-driven path force-opens regardless of `has_new` (the
+  // Settings button just reset state, so has_new should be true; but
+  // even if a race leaves it false, we want to surface SOMETHING when
+  // the user explicitly asks to re-read).
+  const runCheck = useCallback(async (forceShow: boolean) => {
+    try {
+      const data = await invoke<WhatsNewPayload>('whats_new_check')
+      setPayload(data)
+      if (data.has_new || forceShow) {
+        setVisible(true)
       }
-    })()
-    return () => {
-      cancelled = true
+    } catch (err) {
+      // Daemon unreachable or response malformed — silent fail on
+      // mount; the popup is non-critical. Surface the error via
+      // console for the Settings-button path.
+      // eslint-disable-next-line no-console
+      console.debug('[whats-new] check failed:', err)
     }
   }, [])
+
+  // Initial check on mount.
+  useEffect(() => {
+    void runCheck(false)
+  }, [runCheck])
+
+  // Listen for the "Read what's new" button in Settings. Resets daemon
+  // state then dispatches this event; we re-check and force-open.
+  useEffect(() => {
+    const handler = (): void => {
+      void runCheck(true)
+    }
+    window.addEventListener('k2so:show-whats-new', handler)
+    return () => window.removeEventListener('k2so:show-whats-new', handler)
+  }, [runCheck])
 
   // Split the joined markdown into one entry per version. The daemon
   // returns them newest-first (the order they appear in WHATS_NEW.md);

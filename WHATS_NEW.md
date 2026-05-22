@@ -3,6 +3,22 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.38.8 — Cmd+T tabs remember their conversations + popup fixes
+
+Two follow-ups to 0.38.5 and 0.38.7:
+
+- **Cmd+T `claude` tabs now resume their conversations** across daemon
+  restarts (app updates, kickstart, crash). Before: tabs came back as
+  fresh claude sessions. Now: they pick up exactly where you left off,
+  same as pinned chat does.
+- **"What's new" popup wasn't appearing** for some users after the
+  0.38.7 update — the renderer was checking the daemon before
+  credentials were written, missing the popup entirely. Fixed with a
+  short retry window so it survives launch races.
+- **New "Read what's new" button** in Settings → General (under the
+  CLI version row) — reopen the popup anytime to re-read what changed
+  in the current release.
+
 ## 0.38.7 — Update notes when K2SO updates
 
 You're seeing this because K2SO now shows a small "what's new" popup

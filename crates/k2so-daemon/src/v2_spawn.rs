@@ -188,12 +188,24 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
                         .as_deref()
                         .and_then(|s| serde_json::from_str(s).ok())
                         .unwrap_or_default();
-                    // If the persisted row has a session_id (e.g.
-                    // claude reported one on the prior run) AND the
-                    // args don't already carry `--resume`, splice it
-                    // in. The original args carry --dangerously-skip-
-                    // permissions and similar flags we want to keep.
+                    // If the persisted row has a session_id (claude's
+                    // session UUID from the original spawn), strip
+                    // any existing `--session-id` flag from saved args
+                    // (we replace it with `--resume` for unambiguous
+                    // resumption) and splice in `--resume <id>`. The
+                    // original args carry --dangerously-skip-permissions
+                    // and similar flags we want to keep.
                     if let Some(sid) = saved.session_id.as_deref() {
+                        // Drop any --session-id <value> pair.
+                        let mut i = 0;
+                        while i + 1 < saved_args.len() {
+                            if saved_args[i] == "--session-id" {
+                                saved_args.remove(i); // flag
+                                saved_args.remove(i); // value
+                            } else {
+                                i += 1;
+                            }
+                        }
                         let already_has_resume = saved_args
                             .iter()
                             .any(|a| a == "--resume" || a == "-r");
@@ -210,6 +222,29 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
                     args = saved_args;
                 }
             }
+        }
+    }
+
+    // 0.38.8 — Cmd+T session continuity. When spawning `claude` with
+    // no `--session-id` and no `--resume` (the common Cmd+T-from-the-
+    // Tauri-renderer shape), mint a fresh UUID and inject
+    // `--session-id <uuid>` so claude persists its conversation to a
+    // known-id JSONL. The v2_session_map::register hook reads the
+    // injected flag and stamps `workspace_tab_sessions.session_id`,
+    // which makes the restart-recovery branch above splice
+    // `--resume <uuid>` on the next daemon restart. Net: Cmd+T tabs
+    // resume the same conversation after app updates / kickstart.
+    if command.as_deref() == Some("claude") {
+        let has_session_id = args.iter().any(|a| a == "--session-id");
+        let has_resume = args.iter().any(|a| a == "--resume" || a == "-r");
+        if !has_session_id && !has_resume {
+            let new_sid = uuid::Uuid::new_v4().to_string();
+            log_debug!(
+                "[v2-spawn] auto-injected --session-id={} for agent={} cwd={}",
+                new_sid, req.agent_name, req.cwd
+            );
+            args.push("--session-id".to_string());
+            args.push(new_sid);
         }
     }
 
