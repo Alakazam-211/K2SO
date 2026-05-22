@@ -698,6 +698,7 @@ export default function App(): React.JSX.Element {
         <CommandPalette />
         <ContextMenu />
         <ConfirmDialog />
+        <WhatsNewModal />
         <HeartbeatScheduleDialog />
       <MergeDialog />
         <Toast />

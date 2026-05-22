@@ -3,6 +3,17 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.38.9 — "Read what's new" works while Settings is open
+
+Tiny hotfix to 0.38.8's new Settings button. Before: clicking
+**Read what's new** in Settings → General appeared to do nothing —
+the popup only appeared after you closed Settings. Cause: the popup
+component wasn't mounted in the Settings-open layout, so the
+button's open-popup event had nowhere to land.
+
+Now: the popup opens immediately on top of Settings, no need to
+close anything first.
+
 ## 0.38.8 — Cmd+T tabs remember their conversations + popup fixes
 
 Two follow-ups to 0.38.5 and 0.38.7:
