@@ -1,10 +1,10 @@
 //! Channel event queue — cross-workspace / background-push inbox for
 //! agents running on the adaptive-heartbeat channel model.
 //!
-//! When another workspace sends an agent a `k2so msg <ws>:inbox "…"`,
-//! or when a new work item lands in an agent's inbox while that
-//! agent isn't actively connected, K2SO drops a [`ChannelEvent`] into
-//! a per-agent queue here. The agent's next wake (via `k2so checkin`
+//! When a new work item lands in an agent's inbox while that agent
+//! isn't actively connected (e.g. via `k2so work send`, or any other
+//! inbox writer), K2SO drops a [`ChannelEvent`] into a per-agent
+//! queue here. The agent's next wake (via `k2so checkin`
 //! or the `/cli/events` drain route) reads them all in one shot,
 //! empties the queue, and acts on them.
 //!

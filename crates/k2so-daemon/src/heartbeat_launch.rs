@@ -316,23 +316,23 @@ fn run_workspace_session_delivery(
         return error_value("error", "failed to compose wake prompt", &hb.name);
     };
 
-    let result = crate::workspace_msg::deliver_live(project_path, &prompt);
-    let success = result
-        .get("success")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    // 0.38.6: heartbeat-initiated delivery is internal-to-daemon, not
+    // a user-typed `k2so msg` call. Sender identity is "heartbeat"
+    // so the wake prompt arrives in the recipient PTY tagged with a
+    // clear origin. The workspace token can be the project path
+    // directly (it's already a registered project).
+    let result =
+        crate::workspace_msg::deliver_live(project_path, &prompt, "heartbeat");
 
-    if success {
+    if result.success {
         let branch = result
-            .get("branch")
-            .and_then(|v| v.as_str())
-            .unwrap_or("workspace_session")
-            .to_string();
+            .branch
+            .clone()
+            .unwrap_or_else(|| "workspace_session".to_string());
         let target_id = result
-            .get("targetSessionId")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+            .target_session_id
+            .clone()
+            .unwrap_or_default();
         stamp_fired_and_release(project_id, &hb.name);
         write_audit(project_id, agent_name, hb, "fired",
             &format!("smart_launch (use_workspace_session): {branch} → {target_id}"));
@@ -345,14 +345,21 @@ fn run_workspace_session_delivery(
             "targetSessionId": target_id,
         })
     } else {
+        // Compose a single audit string from the canonical reason +
+        // hint so operators see both in one line.
         let reason = result
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("workspace_session delivery failed")
-            .to_string();
+            .reason
+            .as_deref()
+            .unwrap_or("workspace_session delivery failed");
+        let hint = result.hint.as_deref().unwrap_or("");
+        let audit_msg = if hint.is_empty() {
+            reason.to_string()
+        } else {
+            format!("{reason}: {hint}")
+        };
         release_lease(project_id, &hb.name);
-        write_audit(project_id, agent_name, hb, "error", &reason);
-        error_value("error", &reason, &hb.name)
+        write_audit(project_id, agent_name, hb, "error", &audit_msg);
+        error_value("error", &audit_msg, &hb.name)
     }
 }
 

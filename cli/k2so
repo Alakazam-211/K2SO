@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.37.12"
+K2SO_CLI_VERSION="0.38.5"
 
 set -euo pipefail
 
@@ -1854,32 +1854,52 @@ cmd_done() {
 }
 
 cmd_msg() {
-    # `k2so msg` — workspace-targeted messaging.
+    # `k2so msg <workspace> "text" [--from <name>]`
     #
-    # 0.37.0+ shape (preferred):
-    #   k2so msg <workspace> "text"            # → workspace inbox
-    #   k2so msg <workspace> "text" --wake     # → smart-launch cascade
-    #                                          #   (inject live → resume saved
-    #                                          #    session → fresh fire,
-    #                                          #    stamping session_id +
-    #                                          #    active_terminal_id)
+    # 0.38.6 deliver-or-loudly-fail contract: tries to deliver live to
+    # the workspace's running agent, spawning the agent if needed.
+    # Returns success only when the message has landed in the agent's
+    # session. Never silently writes to inbox. For queued tasks the
+    # recipient reads on their own schedule, use `k2so work send`.
     #
-    # `<workspace>` accepts a name (TestingK2SO), absolute path, or UUID.
-    # The daemon's `/cli/workspace/resolve` endpoint disambiguates;
-    # if the token doesn't match a workspace we fall back to the
-    # legacy agent-keyed flow (pre-0.37.0) with a deprecation warning.
+    # <workspace>   workspace name (preferred), absolute path, or UUID
+    # --from <name> sender identity (default: auto-derived from CWD/
+    #               K2SO_PROJECT_PATH; falls back to `external`)
     #
-    # Pre-0.37.0 shape (deprecated, still works):
-    #   k2so msg <agent> "text" [--wake] --agent <sender>
-    #   K2SO_AGENT_NAME=foo k2so msg <agent> "text"
-    local agent="${K2SO_AGENT_NAME:-}"
+    # Legacy flags `--wake` and `--agent <name>` are accepted as
+    # silent no-ops for one release so external scripts don't break
+    # overnight. They'll be removed in 0.39.x.
+
+    # `--help` / `-h` must be detected BEFORE arg-required validation
+    # below — closes the chronic UX bug where `k2so msg --help`
+    # errored with "message text required" instead of showing help.
+    for arg in "$@"; do
+        case "$arg" in
+            --help|-h)
+                cmd_help_msg
+                return 0
+                ;;
+        esac
+    done
+
     local target=""
     local text=""
-    local wake="false"
+    local explicit_from=""
+    local saw_wake="false"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --agent) agent="$2"; shift 2 ;;
-            --wake) wake="true"; shift ;;
+            --from) explicit_from="$2"; shift 2 ;;
+            --wake)
+                # Deprecated — msg always tries live now.
+                saw_wake="true"; shift ;;
+            --agent)
+                # Deprecated agent-keyed flow. Accept for backward
+                # compat, but the legacy routing path is gone.
+                echo "warning: '--agent' is deprecated for 'k2so msg'; use 'k2so msg <workspace>' instead." >&2
+                shift 2 ;;
+            -*)
+                echo "Error: unknown flag '$1' (try 'k2so msg --help')" >&2
+                exit 1 ;;
             *)
                 if [[ -z "$target" ]]; then target="$1"
                 else text="$1"
@@ -1887,42 +1907,75 @@ cmd_msg() {
                 shift ;;
         esac
     done
-    [[ -z "$target" ]] && { echo "Error: target required (workspace name | path | UUID, or agent name)" >&2; exit 1; }
-    [[ -z "$text" ]] && { echo "Error: message text required" >&2; exit 1; }
 
-    # Try resolving target as a workspace token. If the daemon recognizes
-    # it (matched a `projects` row), route through the new
-    # /cli/workspace/msg endpoint with smart-launch cascade.
-    local resolved_path
-    resolved_path=$(cli_request "/cli/workspace/resolve" "q=$(urlencode "$target")" 2>/dev/null \
-        | python3 -c 'import json,sys
-try:
-    print(json.load(sys.stdin).get("path",""))
-except Exception:
-    pass' 2>/dev/null)
+    [[ -z "$target" ]] && {
+        echo "Error: workspace required" >&2
+        echo "Usage: k2so msg <workspace> \"text\" [--from <name>]" >&2
+        echo "       Run 'k2so msg --help' for full reference." >&2
+        exit 1
+    }
+    [[ -z "$text" ]] && {
+        echo "Error: message text required" >&2
+        echo "Usage: k2so msg <workspace> \"text\" [--from <name>]" >&2
+        exit 1
+    }
 
-    if [ -n "$resolved_path" ]; then
-        # New flow — workspace-targeted msg.
-        local delivery="inbox"
-        [[ "$wake" == "true" ]] && delivery="live"
-        local sender="${agent:-cli}"
-        local params="workspace=$(urlencode "$resolved_path")"
-        params="${params}&text=$(urlencode "$text")"
-        params="${params}&delivery=${delivery}"
-        params="${params}&from=$(urlencode "$sender")"
-        cli_request "/cli/workspace/msg" "$params"
-        return
+    if [[ "$saw_wake" == "true" ]]; then
+        echo "note: '--wake' is now the default; the flag is a no-op and will be removed in 0.39.x." >&2
     fi
 
-    # Legacy agent-keyed path (deprecated). Print a warning to stderr
-    # and route through the old awareness-bus signal primitive.
-    [[ -z "$agent" ]] && { echo "Error: --agent required (or set K2SO_AGENT_NAME) for agent-keyed msg, or pass a workspace name/path/UUID" >&2; exit 1; }
-    echo "warning: 'k2so msg <agent>' is deprecated; use 'k2so msg <workspace>' instead. See \`k2so help\`." >&2
-    local delivery_flag=""
-    [[ "$wake" != "true" ]] && delivery_flag="--inbox"
-    local payload
-    payload=$(python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1]}))' "$text")
-    K2SO_AGENT_NAME="$agent" cmd_signal "$target" "msg" "$payload" $delivery_flag --from "$agent"
+    # Resolve sender identity.
+    #
+    # Priority:
+    #   1. Explicit --from <name>
+    #   2. Auto-derive from K2SO_PROJECT_PATH or CWD (look up workspace name)
+    #   3. Fallback: "external"
+    #
+    # The daemon also substitutes "external" defensively if it gets an
+    # empty string, so the recipient PTY always sees a [from ...] prefix.
+    local from="$explicit_from"
+    if [[ -z "$from" ]]; then
+        local sender_path="${K2SO_PROJECT_PATH:-$PWD}"
+        if [[ -n "$sender_path" ]]; then
+            local sender_name
+            sender_name=$(cli_request "/cli/workspace/resolve" "q=$(urlencode "$sender_path")" 2>/dev/null \
+                | python3 -c 'import json,sys,os
+try:
+    data = json.load(sys.stdin)
+    path = data.get("path","")
+    if path:
+        print(os.path.basename(path.rstrip("/")))
+except Exception:
+    pass' 2>/dev/null)
+            from="${sender_name:-external}"
+        else
+            from="external"
+        fi
+    fi
+
+    # Single canonical endpoint. Returns the canonical MsgResponse
+    # shape: {success, target_session_id, attempts, reason, hint}.
+    local params="workspace=$(urlencode "$target")"
+    params="${params}&text=$(urlencode "$text")"
+    params="${params}&from=$(urlencode "$from")"
+
+    local response
+    response=$(cli_request "/cli/workspace/msg" "$params")
+    local rc=$?
+    echo "$response"
+
+    # Exit code mirrors the response's success field so shell scripts
+    # can branch cleanly: `k2so msg foo "hi" && echo delivered`.
+    local success
+    success=$(echo "$response" | python3 -c 'import json,sys
+try:
+    print("true" if json.load(sys.stdin).get("success") else "false")
+except Exception:
+    print("false")' 2>/dev/null)
+    if [[ "$success" != "true" ]]; then
+        return 2
+    fi
+    return $rc
 }
 
 # ── Awareness Bus CLI verbs (0.34.0 Phase 3) ─────────────────────────
@@ -2998,15 +3051,64 @@ cmd_help() {
     # 20 verbs grouped by intent. `k2so help --advanced` (or
     # `k2so help -a`) shows the full surface, including daemon
     # lifecycle, PTY plumbing, heartbeat CRUD, and diagnostics.
-    #
-    # The audit that produced this split lives in the commit that
-    # introduced it. Rule of thumb: default help = "can I do the
-    # work my agent persona exists to do?" Advanced help = "can I
-    # operate the whole K2SO system?"
+    # `k2so help <verb>` (or per-verb `--help` flag) gets a focused
+    # reference for one verb.
     case "${1:-}" in
         -a|--advanced|advanced) cmd_help_advanced ;;
+        msg) cmd_help_msg ;;
         *) cmd_help_general ;;
     esac
+}
+
+cmd_help_msg() {
+    cat <<'EOF'
+k2so msg <workspace> "text" [--from <name>]
+
+Deliver a message to a workspace's agent, live. Spawns the agent if
+not already running. Returns success only when the message has landed
+in the agent's session.
+
+ARGUMENTS
+  <workspace>    Workspace name (preferred — see `k2so connections list`).
+                 Absolute path or project UUID also accepted.
+  "text"         The message body. Wrap in quotes if it has spaces.
+
+OPTIONS
+  --from <name>  Sender identity rendered as [from <name>] prefix in
+                 the recipient's session. Defaults to the sender's
+                 workspace name (auto-derived from K2SO_PROJECT_PATH
+                 or CWD). Falls back to `external` if neither resolves.
+
+RESPONSE (JSON)
+  {
+    "success": true,
+    "target_session_id": "<uuid>",
+    "attempts": 1
+  }
+
+  Failures include `reason` + `hint` fields:
+    workspace_not_found  — token didn't match a registered workspace
+    no_agent_mode        — workspace has no agent (use `work send`)
+    spawn_failed         — couldn't start the recipient's agent
+    pty_died             — target session crashed during delivery
+
+  Exit code 0 on success, 2 on any failure.
+
+RELATED VERBS
+  k2so work send <workspace> --title "..." --body "..."
+      Queue a task — recipient reads on their own schedule.
+      Use this when `msg` would be too intrusive.
+
+  k2so terminal write <id> "text"      (see `k2so help --advanced`)
+      Raw bytes to any PTY by terminal ID. Power-user escape hatch
+      for cases where `msg`'s workspace-keyed routing isn't what you
+      want. `target_session_id` from a `msg` response is a valid <id>.
+
+EXAMPLES
+  k2so msg scout_v3 "ready when you are"
+  k2so msg scout_v3 "ping" --from sms-bridge
+  k2so msg /Users/me/work/MyApp "deploy completed"
+EOF
 }
 
 cmd_help_general() {
@@ -3014,18 +3116,22 @@ cmd_help_general() {
 K2SO CLI — Agent interface to K2SO workspace orchestration
 
 COMMUNICATION
-  msg <workspace> "text" [--wake]    Send to a workspace's inbox (or pinned tab with --wake)
-                                     <workspace> = name | absolute path | UUID
-  signal <target> <kind> <payload>   Low-level signal emission [--inbox --from <sender>]
-  roster                             Who's online (live sessions + inbox-reachable agents)
-  feed [--agent <n>] [--limit N]     View activity feed
-  connections list                   Workspaces connected to this one
-  connections add|remove <path>      Manage workspace connections
+  msg <workspace> "text" [--from <n>]  Deliver live to the workspace's agent
+                                       (live-or-fail; see `k2so help msg`)
+                                       <workspace> = name | absolute path | UUID
+  work send <workspace> --title --body Queue a task in the recipient's inbox
+  signal <target> <kind> <payload>     Low-level signal emission [--inbox --from <sender>]
+  roster                               Who's online (live sessions + inbox-reachable agents)
+  feed [--agent <n>] [--limit N]       View activity feed
+  connections list                     Workspaces connected to this one
+  connections add|remove <path>        Manage workspace connections
 
 YOUR WORK
   work create --title "..." --body "..." [--priority H|N|L] [--agent <n>]
   work inbox                         Show workspace inbox
-  work send --workspace <path> --title "..." --body "..."
+  work send <workspace> --title "..." --body "..."
+                                     Queue a task to another workspace's inbox
+                                     (recipient reads on their schedule)
   checkin                            Agent check-in (heartbeat ping)
   status "message" [--agent <n>]     Report an agent status update
   done [--blocked "reason"]          Signal task completion (or blocked)
@@ -3069,8 +3175,18 @@ for completeness. See `k2so help` for the curated general list.
 ════════════════════════════════════════════════════════════════
   COMMUNICATION
 ════════════════════════════════════════════════════════════════
-  msg <target> "text" [--wake]           Send a message (wraps the
-                                         awareness primitive post-0.34.0).
+  msg <workspace> "text" [--from <n>]    Live-or-loudly-fail delivery
+                                         to the workspace's running
+                                         agent (spawns if needed).
+                                         See `k2so help msg`.
+  work send <workspace> --title --body   Queue a task — recipient
+                                         reads on their own schedule.
+  terminal write <id> "text"             Raw bytes to any PTY by id
+                                         (escape hatch when `msg`'s
+                                         workspace-keyed routing
+                                         isn't what you want; the
+                                         `target_session_id` returned
+                                         by `msg` is a valid <id>).
   signal <target> <kind> <payload>       Emit a raw AgentSignal.
     [--inbox]                              Delivery::Inbox (async).
     [--from <sender>]                      Sender identity; default $K2SO_AGENT_NAME|"cli".
@@ -3321,7 +3437,7 @@ cmd_update() {
 
     # Extract the version from the remote script
     local remote_version
-    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.37.12"//')
+    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.38.5"//')
     if [ -z "$remote_version" ]; then
         echo "Error: Could not parse remote version." >&2
         exit 1

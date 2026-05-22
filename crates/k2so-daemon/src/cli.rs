@@ -709,41 +709,29 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                 None => CliResponse::bad_request(format!("workspace not found: {q}")),
             }
         }
-        // Smart-cascade message delivery to a workspace's pinned tab.
-        // `delivery=live` runs the heartbeat-style cascade (inject →
-        // resume_and_fire → fresh_fire); `delivery=inbox` (default)
-        // writes a regular work item to the workspace inbox. Mirrors
-        // `k2so msg <workspace> "text" [--wake]` semantics.
+        // 0.38.6: `k2so msg <workspace>` is strictly live-or-fail.
+        // The endpoint accepts a workspace token (name | path | UUID),
+        // the message text, and a `from` sender identity (auto-derived
+        // by the CLI from the sender's workspace; defaults to "external"
+        // if empty). Returns the canonical [`MsgResponse`] JSON shape.
+        //
+        // The pre-0.38.6 `delivery=inbox` branch is retired — `msg`
+        // never silently writes to inbox now. Callers that want queued
+        // delivery use `k2so work send` (separate endpoint).
         "/cli/workspace/msg" => {
             let workspace = str_param(params, "workspace");
             let text = str_param(params, "text");
-            let delivery = opt_param(params, "delivery").unwrap_or_else(|| "inbox".to_string());
-            let sender = opt_param(params, "from").unwrap_or_else(|| "cli".to_string());
+            let from = opt_param(params, "from").unwrap_or_default();
             if workspace.is_empty() {
                 return CliResponse::bad_request("Missing workspace");
             }
             if text.is_empty() {
                 return CliResponse::bad_request("Missing text");
             }
-            // Accept name | path | UUID — resolve before dispatching.
-            let project_path = match crate::workspace_msg::resolve_workspace(&workspace) {
-                Some(p) => p,
-                None => {
-                    return CliResponse::bad_request(format!(
-                        "workspace not found: {workspace}"
-                    ));
-                }
-            };
-            let result = match delivery.as_str() {
-                "live" => crate::workspace_msg::deliver_live(&project_path, &text),
-                "inbox" => crate::workspace_msg::deliver_to_inbox(&project_path, &text, &sender),
-                other => {
-                    return CliResponse::bad_request(format!(
-                        "unknown delivery mode '{other}' (expected 'live' or 'inbox')"
-                    ));
-                }
-            };
-            CliResponse::ok_json(result.to_string())
+            let resp = crate::workspace_msg::deliver_live(&workspace, &text, &from);
+            let body = serde_json::to_string(&resp)
+                .unwrap_or_else(|_| "{\"success\":false}".to_string());
+            CliResponse::ok_json(body)
         }
         "/cli/workspace/remove" => {
             // Teardown modes (keep_current / restore_original) still

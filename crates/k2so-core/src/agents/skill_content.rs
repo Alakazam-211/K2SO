@@ -350,9 +350,11 @@ k2so done --blocked "waiting for API spec"
 
 ### Send Message (cross-workspace)
 ```
-k2so msg <workspace>:inbox "description of work needed"
-k2so msg --wake <workspace>:inbox "urgent — wake the agent"
+k2so msg <workspace> "text"                              # deliver live to the workspace's agent
+k2so work send <workspace> --title "..." --body "..."    # queue a task for the recipient's inbox
 ```
+
+`msg` is live-or-loudly-fail — succeeds only when the bytes land in the recipient's session. For queued tasks the recipient reads on their own schedule, use `work send`.
 
 ### Claim Files
 ```
@@ -409,11 +411,13 @@ k2so done --blocked "waiting for API access"
 ## Send Work to a Connected Workspace
 
 ```
-k2so msg <workspace-name>:inbox "description of work needed"
-k2so msg --wake <workspace-name>:inbox "urgent — wake the agent"
+k2so msg <workspace-name> "text"                              # deliver live to their agent
+k2so work send <workspace-name> --title "..." --body "..."    # queue a task in their inbox
 ```
 
-Only works for workspaces connected via `k2so connections`.
+`msg` delivers live: it succeeds only when the bytes have landed in the recipient's running session. If the recipient agent is offline or absent, it fails loudly with a `reason` you can act on — no silent inbox fallback. Use `work send` when you want to queue a task the recipient reads on their own schedule.
+
+Only workspaces connected via `k2so connections` are reachable.
 
 ## Claim Files
 
@@ -536,10 +540,12 @@ k2so work inbox                              # this workspace's inbox
 ## Cross-workspace messaging
 
 ```
-k2so connections list                        # who's wired up to me
-k2so msg <workspace>:inbox "work needed over there"
-k2so msg --wake <workspace>:inbox "urgent — wake their agent"
+k2so connections list                                    # who's wired up to me
+k2so msg <workspace> "text"                              # deliver live to their agent
+k2so work send <workspace> --title "..." --body "..."    # queue a task in their inbox
 ```
+
+`msg` is the inter-agent live-delivery primitive: succeeds only when the bytes land in the recipient's running session, fails loudly otherwise (with a `reason` and `hint` you can act on). For queued tasks the recipient reads on their own schedule, use `work send`.
 
 Only workspaces linked via Connected Workspaces in Settings (or `k2so connections`) are reachable.
 
