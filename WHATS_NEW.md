@@ -3,6 +3,23 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.38.13 — Faster launch + smarter memory threshold
+
+Cleanup pass on 0.38.12's two big additions:
+
+- **Launch speed.** The What's New popup's "is daemon ready?" retry
+  loop used to block a Tauri worker thread for up to 5 seconds at
+  app startup, contending with all the other launch-time work. Now
+  the retry happens renderer-side via plain `setTimeout` (yields
+  between attempts) and the popup's first check is deferred until
+  2 seconds after the rest of the UI has painted.
+- **Smarter memory warning.** The 800 MB threshold was firing
+  immediately on app launch because the local LLM loads ~1+ GB of
+  weights into the process address space. The watcher now captures
+  a settled baseline at the second sample and warns only on
+  **growth** above that (+800 MB) or a hard ceiling (3 GB). Either
+  signals a real leak; LLM steady-state is silent.
+
 ## 0.38.12 — Memory watcher + quieter heartbeat audit log
 
 Two improvements driven by an overnight crash report:

@@ -15,8 +15,6 @@
 //! in `k2so_core::whats_new`. Tauri is a thin client over the daemon
 //! HTTP surface.
 
-use std::time::Duration;
-
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -28,32 +26,27 @@ pub struct WhatsNewPayload {
     pub content: String,
 }
 
-/// `whats_new_check` fires on Tauri app mount — right when launchd is
-/// still bringing the daemon up. If we hit a single connect-and-fail
-/// at that moment the popup silently misses (the 0.38.7 launch-day
-/// regression). Poll for daemon reachability up to 10× at 500ms
-/// intervals (5s total) — same pattern as `check_daemon_version_and_restart`
-/// in lib.rs. Returns Ok on first success; the renderer treats any
-/// final Err as silent-skip (popup just doesn't show this launch).
+/// Single-shot check. Returns `Err` if the daemon is unreachable
+/// (no credential files, port unbound, etc.) — caller can retry.
+///
+/// 0.38.7–0.38.12 had a 10×500ms blocking retry loop here for the
+/// launch race. That worked but consumed a Tauri worker thread for
+/// up to 5 seconds, contending with other boot-time invocations.
+/// 0.38.13 moves the retry into the renderer (`WhatsNewModal`) where
+/// `setTimeout` yields control to the React event loop instead of
+/// blocking a worker thread.
+///
+/// Net effect on perceived launch perf: this command now returns
+/// almost instantly in the common case (daemon reachable) and on
+/// the rare miss the renderer handles the retry without choking the
+/// worker pool.
 #[tauri::command]
 pub fn whats_new_check() -> Result<WhatsNewPayload, String> {
-    let mut last_err = String::from("daemon unreachable: no attempts made");
-    for attempt in 0..10 {
-        if attempt > 0 {
-            std::thread::sleep(Duration::from_millis(500));
-        }
-        match crate::daemon_client::DaemonClient::try_connect() {
-            Ok(client) => match client.cli_get("/cli/whats_new", &[]) {
-                Ok(body) => {
-                    return serde_json::from_str::<WhatsNewPayload>(&body)
-                        .map_err(|e| format!("malformed whats_new response: {e} ({body})"));
-                }
-                Err(e) => last_err = format!("daemon /cli/whats_new: {e}"),
-            },
-            Err(e) => last_err = format!("daemon unreachable: {e}"),
-        }
-    }
-    Err(last_err)
+    let client = crate::daemon_client::DaemonClient::try_connect()
+        .map_err(|e| format!("daemon unreachable: {e}"))?;
+    let body = client.cli_get("/cli/whats_new", &[])?;
+    serde_json::from_str::<WhatsNewPayload>(&body)
+        .map_err(|e| format!("malformed whats_new response: {e} ({body})"))
 }
 
 #[tauri::command]

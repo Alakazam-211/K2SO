@@ -60,29 +60,51 @@ export default function WhatsNewModal({
   // Settings button just reset state, so has_new should be true; but
   // even if a race leaves it false, we want to surface SOMETHING when
   // the user explicitly asks to re-read).
+  //
+  // 0.38.13: Rust-side `whats_new_check` is now single-shot. If the
+  // daemon is briefly unreachable (launch race, kickstart-restart
+  // in progress, etc.), retry here in JS instead of blocking a
+  // Tauri worker thread. `setTimeout` yields control between
+  // attempts so the rest of the renderer can keep painting.
   const runCheck = useCallback(async (forceShow: boolean) => {
-    try {
-      const data = await invoke<WhatsNewPayload>('whats_new_check')
-      setPayload(data)
-      if (data.has_new || forceShow) {
-        setVisible(true)
+    const MAX_ATTEMPTS = 10
+    const BACKOFF_MS = 500
+    let attempt = 0
+    while (attempt < MAX_ATTEMPTS) {
+      try {
+        const data = await invoke<WhatsNewPayload>('whats_new_check')
+        setPayload(data)
+        if (data.has_new || forceShow) {
+          setVisible(true)
+        }
+        return
+      } catch (err) {
+        attempt += 1
+        if (attempt >= MAX_ATTEMPTS) {
+          // eslint-disable-next-line no-console
+          console.debug('[whats-new] check failed after retries:', err)
+          return
+        }
+        await new Promise((r) => setTimeout(r, BACKOFF_MS))
       }
-    } catch (err) {
-      // Daemon unreachable or response malformed — silent fail on
-      // mount; the popup is non-critical. Surface the error via
-      // console for the Settings-button path.
-      // eslint-disable-next-line no-console
-      console.debug('[whats-new] check failed:', err)
     }
   }, [])
 
   // Initial check on mount — `auto` mode only. The Settings instance
   // (mode='button-only') stays dormant until the Read-what's-new
   // button dispatches `k2so:show-whats-new`.
+  //
+  // 0.38.13: deferred by 2s so the popup check doesn't compete with
+  // workspace hydration, daemon version-check, and other boot-time
+  // invokes — improves perceived launch speed. After 2s the main
+  // UI has already painted, so the popup appears as a clear "after"
+  // event rather than a boot stampede contributor.
   useEffect(() => {
-    if (mode === 'auto') {
+    if (mode !== 'auto') return
+    const id = setTimeout(() => {
       void runCheck(false)
-    }
+    }, 2000)
+    return () => clearTimeout(id)
   }, [mode, runCheck])
 
   // Listen for the "Read what's new" button in Settings. Resets daemon
