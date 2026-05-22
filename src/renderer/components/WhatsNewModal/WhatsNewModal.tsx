@@ -15,22 +15,40 @@ interface VersionPage {
   body: string
 }
 
+interface WhatsNewModalProps {
+  /**
+   * - `auto` (default): runs `whats_new_check` on mount; opens the
+   *   popup if `has_new: true`. Used in the main + focus-mode layouts
+   *   so the popup fires automatically on first launch after every
+   *   K2SO update.
+   * - `button-only`: skips the mount-time check. Stays dormant until
+   *   the Settings "Read what's new" button dispatches
+   *   `k2so:show-whats-new`. Used in the Settings layout so opening
+   *   Settings never auto-fires the popup.
+   */
+  mode?: 'auto' | 'button-only'
+}
+
 /**
  * 0.38.7 — User-facing changelog popup with per-version pagination.
+ * 0.38.11 — split into two trigger modes so the Settings-mounted
+ * instance doesn't auto-fire on Settings open.
  *
- * Mounts at the app root. On mount, asks the daemon whether there's
- * something the user hasn't seen yet (via `whats_new_check`). If yes,
- * shows a modal — one version per page, newest first. The user can
- * navigate through every version they skipped. "Got it" marks the
- * current daemon version as seen; the modal won't reopen until the
- * next K2SO update.
+ * Mounts at the app root. On mount in `auto` mode, asks the daemon
+ * whether there's something the user hasn't seen yet (via
+ * `whats_new_check`). If yes, shows a modal — one version per page,
+ * newest first. The user can navigate through every version they
+ * skipped. "Got it" marks the current daemon version as seen; the
+ * modal won't reopen until the next K2SO update.
  *
  * Daemon-side logic lives in `k2so_core::whats_new`. This component
  * does client-side splitting of the markdown into per-version pages
  * for the pagination UI, but the source of truth for what to show is
  * the daemon's `slice_unseen` output.
  */
-export default function WhatsNewModal(): React.JSX.Element | null {
+export default function WhatsNewModal({
+  mode = 'auto'
+}: WhatsNewModalProps = {}): React.JSX.Element | null {
   const [payload, setPayload] = useState<WhatsNewPayload | null>(null)
   const [visible, setVisible] = useState(false)
   const [dismissing, setDismissing] = useState(false)
@@ -58,10 +76,14 @@ export default function WhatsNewModal(): React.JSX.Element | null {
     }
   }, [])
 
-  // Initial check on mount.
+  // Initial check on mount — `auto` mode only. The Settings instance
+  // (mode='button-only') stays dormant until the Read-what's-new
+  // button dispatches `k2so:show-whats-new`.
   useEffect(() => {
-    void runCheck(false)
-  }, [runCheck])
+    if (mode === 'auto') {
+      void runCheck(false)
+    }
+  }, [mode, runCheck])
 
   // Listen for the "Read what's new" button in Settings. Resets daemon
   // state then dispatches this event; we re-check and force-open.

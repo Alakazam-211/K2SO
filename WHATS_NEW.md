@@ -3,6 +3,19 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.38.11 — Split popup into auto-fire vs button-trigger
+
+Small architecture fix to the "What's new" popup. The popup is now
+explicitly two-purpose:
+
+- **Auto popup on the main screen** — fires once on first launch
+  after a K2SO update. Same as before.
+- **Button popup in Settings** — only opens when you click
+  **Read what's new** in Settings → General. Never auto-fires when
+  you happen to open Settings between updates.
+
+Same modal UI in both places; just cleaner separation under the hood.
+
 ## 0.38.10 — Heartbeats on freshly-flipped agent workspaces
 
 Hotfix: if you flipped a workspace to Custom / Workspace Manager /

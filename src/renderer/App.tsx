@@ -698,7 +698,9 @@ export default function App(): React.JSX.Element {
         <CommandPalette />
         <ContextMenu />
         <ConfirmDialog />
-        <WhatsNewModal />
+        {/* Settings instance: only opens via the "Read what's new"
+            button in Settings → General. Never auto-fires. */}
+        <WhatsNewModal mode="button-only" />
         <HeartbeatScheduleDialog />
       <MergeDialog />
         <Toast />
