@@ -3,6 +3,20 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.38.10 — Heartbeats on freshly-flipped agent workspaces
+
+Hotfix: if you flipped a workspace to Custom / Workspace Manager /
+K2SO Agent and immediately tried to add a heartbeat, you'd hit
+"No scheduleable agent found in this workspace." Cause: the
+validation was looking at `.k2so/agent/AGENT.md` on disk to confirm
+"this is an agent workspace," but a mode-flip writes the DB
+declaration immediately while AGENT.md may not be written yet.
+
+Now: heartbeat add/remove/rename trust `projects.agent_mode` — the
+column that's the source of truth for "this workspace is configured
+as an agent." If the mode is set, you can schedule heartbeats
+without waiting for any specific file to appear on disk.
+
 ## 0.38.9 — "Read what's new" works while Settings is open
 
 Tiny hotfix to 0.38.8's new Settings button. Before: clicking

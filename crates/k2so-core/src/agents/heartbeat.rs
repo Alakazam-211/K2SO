@@ -44,12 +44,32 @@ pub fn k2so_heartbeat_add(
         .ok_or_else(|| format!("Project not found: {}", project_path))?;
 
     // 0.37.0: heartbeats are workspace-level (.k2so/heartbeats/<sched>/),
-    // independent of which agent owns them. find_primary_agent is
-    // still required for validation (a workspace must have an agent
-    // to schedule against) but the path no longer routes through it.
-    let _agent_name = find_primary_agent(&project_path).ok_or(
-        "No scheduleable agent found in this workspace. Enable heartbeat on a Custom, Workspace Manager, or K2SO Agent workspace first.",
-    )?;
+    // independent of which agent owns them.
+    //
+    // 0.38.10 hotfix: validate against `projects.agent_mode` (the
+    // workspace-level declaration), not `find_primary_agent` (which
+    // probes `.k2so/agent/AGENT.md` for a `name:` field). Pre-0.38.10
+    // the disk probe rejected workspaces that had been mode-flipped
+    // to custom/manager/k2so-agent BEFORE AGENT.md was written (or
+    // whose AGENT.md lacked a `name:` frontmatter) — the DB knew
+    // they were bots but the disk hadn't caught up yet. The
+    // workspace-mode column is the authoritative signal; if the user
+    // said "this is an agent workspace," we trust that.
+    let mode: Option<String> = conn
+        .query_row(
+            "SELECT agent_mode FROM projects WHERE id = ?1",
+            rusqlite::params![project_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten();
+    let mode_str = mode.unwrap_or_default();
+    if !matches!(mode_str.as_str(), "custom" | "manager" | "k2so-agent") {
+        return Err(
+            "Workspace is not configured as an agent. Set mode to Custom, Workspace Manager, or K2SO Agent first (Settings → Workspaces or `k2so mode <type>`)."
+                .to_string(),
+        );
+    }
 
     // Create heartbeat folder and scaffold wakeup.md at the
     // workspace-level path the runtime reads from.
@@ -191,8 +211,10 @@ pub fn k2so_heartbeat_remove(project_path: String, name: String) -> Result<(), S
     let conn = db.lock();
     let project_id = resolve_project_id(&conn, &project_path)
         .ok_or_else(|| format!("Project not found: {}", project_path))?;
-    let _agent_name = find_primary_agent(&project_path)
-        .ok_or("No scheduleable agent in this workspace")?;
+    // 0.38.10: dropped the find_primary_agent disk probe — see add path
+    // for rationale. Remove is a row+folder cleanup; the workspace's
+    // agent name doesn't influence it. We trust the heartbeat row's
+    // existence as proof the workspace was once configured to schedule.
 
     AgentHeartbeat::delete(&conn, &project_id, &name).map_err(|e| e.to_string())?;
     // 0.37.0: heartbeats live at .k2so/heartbeats/<sched>/ now.
@@ -421,8 +443,9 @@ pub fn k2so_heartbeat_rename(
         return Err(format!("Heartbeat '{}' already exists", new_name));
     }
 
-    let _agent_name = find_primary_agent(&project_path)
-        .ok_or("No scheduleable agent in this workspace")?;
+    // 0.38.10: rename touches only the heartbeat row's name + its
+    // wakeup folder on disk; agent identity isn't part of either.
+    // Dropped the legacy find_primary_agent probe (see add path).
     // 0.37.0: rename within the workspace-level heartbeats dir.
     let hb_parent = crate::agents::workspace_heartbeats_dir(&project_path);
     let old_dir = hb_parent.join(&old_name);
