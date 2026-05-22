@@ -22,6 +22,7 @@ import CommandPalette from './components/CommandPalette/CommandPalette'
 import ContextMenu from './components/ContextMenu/ContextMenu'
 import ConfirmDialog from './components/ConfirmDialog/ConfirmDialog'
 import WhatsNewModal from './components/WhatsNewModal/WhatsNewModal'
+import MemoryWatcher from './components/MemoryWatcher/MemoryWatcher'
 import HeartbeatScheduleDialog from './components/HeartbeatScheduleDialog/HeartbeatScheduleDialog'
 import MergeDialog from './components/MergeDialog/MergeDialog'
 import Toast from './components/Toast/Toast'
@@ -190,6 +191,7 @@ function FocusModeContent({ activeProject, cwd }: { activeProject: any; cwd: str
       <ContextMenu />
       <ConfirmDialog />
       <WhatsNewModal />
+      <MemoryWatcher />
       <HeartbeatScheduleDialog />
       <MergeDialog />
       <Toast />
@@ -701,6 +703,7 @@ export default function App(): React.JSX.Element {
         {/* Settings instance: only opens via the "Read what's new"
             button in Settings → General. Never auto-fires. */}
         <WhatsNewModal mode="button-only" />
+        <MemoryWatcher />
         <HeartbeatScheduleDialog />
       <MergeDialog />
         <Toast />
@@ -751,6 +754,7 @@ export default function App(): React.JSX.Element {
       <ContextMenu />
       <ConfirmDialog />
       <WhatsNewModal />
+      <MemoryWatcher />
       <HeartbeatScheduleDialog />
       <MergeDialog />
       <Toast />

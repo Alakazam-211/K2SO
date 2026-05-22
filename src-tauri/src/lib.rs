@@ -1104,6 +1104,8 @@ pub fn run() {
             commands::whats_new::whats_new_check,
             commands::whats_new::whats_new_mark_seen,
             commands::whats_new::whats_new_reset,
+            // Memory watcher (0.38.12 — leak telemetry)
+            commands::memory_watcher::renderer_memory_status,
             // Filesystem watcher
             watcher::fs_watch_dir,
             watcher::fs_unwatch_dir,

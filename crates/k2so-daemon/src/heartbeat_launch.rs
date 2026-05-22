@@ -251,9 +251,7 @@ fn run_fresh_fire(
     wakeup_abs: &Path,
 ) -> serde_json::Value {
     let Some(prompt) = wake::compose_wake_prompt_from_path(wakeup_abs) else {
-        release_lease(project_id, &hb.name);
-        write_audit(project_id, agent_name, hb, "error", "failed to compose wake prompt");
-        return error_value("error", "failed to compose wake prompt", &hb.name);
+        return auto_disable_missing_wakeup(project_id, agent_name, hb, wakeup_abs);
     };
 
     // 0.37.0: every daemon-driven heartbeat fresh-fire goes through
@@ -310,10 +308,7 @@ fn run_workspace_session_delivery(
     wakeup_abs: &Path,
 ) -> serde_json::Value {
     let Some(prompt) = wake::compose_wake_prompt_from_path(wakeup_abs) else {
-        release_lease(project_id, &hb.name);
-        write_audit(project_id, agent_name, hb, "error",
-            "failed to compose wake prompt");
-        return error_value("error", "failed to compose wake prompt", &hb.name);
+        return auto_disable_missing_wakeup(project_id, agent_name, hb, wakeup_abs);
     };
 
     // 0.38.6: heartbeat-initiated delivery is internal-to-daemon, not
@@ -440,9 +435,7 @@ fn run_resume_and_fire(
     session_id: &str,
 ) -> serde_json::Value {
     let Some(prompt) = wake::compose_wake_prompt_from_path(wakeup_abs) else {
-        release_lease(project_id, &hb.name);
-        write_audit(project_id, agent_name, hb, "error", "failed to compose wake prompt");
-        return error_value("error", "failed to compose wake prompt", &hb.name);
+        return auto_disable_missing_wakeup(project_id, agent_name, hb, wakeup_abs);
     };
 
     // Resume + --print: rejoin the saved conversation, deliver the
@@ -586,4 +579,47 @@ fn error_value(decision: &str, reason: &str, name: &str) -> serde_json::Value {
         "reason": reason,
         "name": name,
     })
+}
+
+/// 0.38.12: when `compose_wake_prompt_from_path` returns None
+/// (almost always because WAKEUP.md is missing or unreadable),
+/// auto-disable the heartbeat so the daemon doesn't keep firing
+/// every tick.
+///
+/// Before this, every tick would re-attempt compose, fail, write
+/// `failed to compose wake prompt` to the audit log, and try again
+/// next tick — producing the chronic log spam noted in the
+/// memory-leak C3PO ticket (`c9b0d9a9`).
+///
+/// Flipping `enabled=false` takes the row out of
+/// `AgentHeartbeat::list_enabled` so subsequent ticks skip it
+/// entirely. The user can re-enable from Settings → Heartbeats
+/// after they restore WAKEUP.md. The audit entry uses the distinct
+/// `auto_disabled` decision so it shows up clearly in the fires
+/// table + sidebar.
+fn auto_disable_missing_wakeup(
+    project_id: &str,
+    agent_name: &str,
+    hb: &AgentHeartbeat,
+    wakeup_abs: &Path,
+) -> serde_json::Value {
+    release_lease(project_id, &hb.name);
+    let reason = format!(
+        "WAKEUP.md missing or unreadable at {}; heartbeat auto-disabled",
+        wakeup_abs.display()
+    );
+    write_audit(project_id, agent_name, hb, "auto_disabled", &reason);
+    {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        let _ = AgentHeartbeat::set_enabled(&conn, project_id, &hb.name, false);
+    }
+    k2so_core::log_debug!(
+        "[heartbeat] auto-disabled hb={} project={} agent={} reason=missing-wakeup path={}",
+        hb.name,
+        project_id,
+        agent_name,
+        wakeup_abs.display()
+    );
+    error_value("auto_disabled", &reason, &hb.name)
 }

@@ -3,6 +3,23 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.38.12 — Memory watcher + quieter heartbeat audit log
+
+Two improvements driven by an overnight crash report:
+
+- **Renderer memory watcher.** K2SO now logs its own memory usage
+  every 5 minutes (visible in the Web Inspector console as
+  `[k2so/memory] rss=...MB`). If the app ever crosses 800 MB you'll
+  see a toast suggesting a restart. Gives us telemetry to catch
+  Tauri-side memory leaks before macOS reaps the app under pressure.
+- **Heartbeats auto-disable when WAKEUP.md is missing.** Before:
+  a deleted or unreadable WAKEUP.md caused the heartbeat to retry
+  every tick, spamming the audit log with `failed to compose wake
+  prompt`. Now: the heartbeat flips to disabled on the first miss,
+  records a single `auto_disabled` audit entry, and stays quiet
+  until you fix the file and re-enable it from Settings →
+  Heartbeats.
+
 ## 0.38.11 — Split popup into auto-fire vs button-trigger
 
 Small architecture fix to the "What's new" popup. The popup is now
