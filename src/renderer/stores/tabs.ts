@@ -128,10 +128,6 @@ function closeTerminalForRenderer(data: TerminalItemData): void {
       // + PTY master. See .k2so/prds/alacritty-v2.md phase A6.
       closeV2Session(`tab-${data.terminalId}`)
       break
-    case 'kessel':
-      // Kessel sessions clean up via component unmount (Phase 6
-      // legacy behavior). No explicit close here.
-      break
   }
 }
 
@@ -192,7 +188,7 @@ export interface TerminalItemData {
    *  Terminal view components compare to performance.now() at their
    *  first-content render to report end-to-end spawn→visible time.
    *  Backends can measure themselves against this for an apples-to-
-   *  apples comparison (Alacritty vs Kessel). */
+   *  apples comparison between renderers. */
   spawnedAt?: number
   /**
    * Renderer selection — captured at tab creation from the user's
@@ -203,18 +199,8 @@ export interface TerminalItemData {
    *
    *   - 'alacritty'     (Legacy) — Tauri-local PTY (terminal_kill).
    *   - 'alacritty-v2'  — daemon-owned PTY (cli/sessions/v2/close).
-   *   - 'kessel'        — experimental multi-device (kessel_close).
    */
-  renderer?: 'alacritty' | 'alacritty-v2' | 'kessel'
-  /**
-   * Phase 4.5 — Kessel-specific SessionId UUID returned by the
-   * daemon's /cli/sessions/spawn. Populated lazily by the Kessel
-   * mount wrapper once the session is live; used by the
-   * SessionStreamView to subscribe to the right Frame stream.
-   * For renderer='alacritty' this stays empty and `terminalId`
-   * carries the alacritty-manager id instead.
-   */
-  kesselSessionId?: string
+  renderer?: 'alacritty' | 'alacritty-v2'
   /** Set on tabs that are attached to a heartbeat's live PTY.
    *  Closing the tab flips `surfaced=false` instead of killing the
    *  PTY (the heartbeat keeps firing in the background).
@@ -362,7 +348,7 @@ export interface SerializedTerminalItemV1 {
   command?: string
   args?: string[]
   sessionId?: string
-  renderer?: 'alacritty' | 'alacritty-v2' | 'kessel'
+  renderer?: 'alacritty' | 'alacritty-v2'
   heartbeatName?: string
   surfacedAgentName?: string
   attachAgentName?: string
@@ -866,8 +852,8 @@ function paneDataToItem(pane: PaneData): Item {
         args: pane.args,
         // Splits / paneDataToItem were silently dropping the renderer
         // field, which meant Cmd+D (split pane) always landed in
-        // Alacritty even when the user had Kessel selected. Snapshot
-        // the current setting for consistency with makeTerminalPaneGroup.
+        // Alacritty even when the user had a different renderer selected.
+        // Snapshot the current setting for consistency with makeTerminalPaneGroup.
         renderer: currentRenderer(),
         spawnedAt: performance.now(),
       },

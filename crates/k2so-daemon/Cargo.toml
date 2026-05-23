@@ -18,12 +18,10 @@ name = "k2so_daemon"
 path = "src/lib.rs"
 
 [dependencies]
-# 0.34.0 Session Stream + Awareness Bus primitives. TODO(0.39.0 Slice 3):
-# drop the `session_stream` feature once Slice 3 unconditionalizes the
-# session-stream modules in k2so-core (terminal/mod.rs + lib.rs still
-# have `#[cfg(feature = "session_stream")]` guards). Keeping the
-# feature on here so the daemon-side modules compile in.
-k2so-core = { path = "../k2so-core", features = ["session_stream"] }
+# Session Stream + Awareness Bus primitives are now always compiled
+# into k2so-core (the `session_stream` feature flag was retired in
+# 0.39.0e).
+k2so-core = { path = "../k2so-core" }
 
 # Cryptographic randomness for the per-boot hook auth token.
 getrandom = "0.2"
@@ -68,5 +66,4 @@ uuid = { version = "1", features = ["v4"] }
 # Enable k2so-core's `test-util` feature for integration tests that
 # need the in-memory DB helper (`db::init_for_tests`). Production
 # binaries don't link this path — only `cargo test` does.
-# session_stream stays until Slice 3 drops the cfg-guards in k2so-core.
-k2so-core = { path = "../k2so-core", features = ["session_stream", "test-util"] }
+k2so-core = { path = "../k2so-core", features = ["test-util"] }

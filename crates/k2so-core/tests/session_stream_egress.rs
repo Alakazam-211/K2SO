@@ -6,7 +6,7 @@
 //!
 //! The test-util DB is used so activity_feed rows actually land.
 
-#![cfg(all(feature = "session_stream", feature = "test-util"))]
+#![cfg(feature = "test-util")]
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};

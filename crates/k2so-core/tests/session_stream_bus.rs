@@ -5,8 +5,6 @@
 //! I/O-free tests only — E2 covers the filesystem inbox, E4 covers
 //! the composed egress path.
 
-#![cfg(feature = "session_stream")]
-
 use std::sync::Mutex;
 use std::time::Duration;
 

@@ -48,14 +48,11 @@ pub mod terminal;
 pub mod wake;
 pub mod whats_new;
 
-// 0.34.0 Session Stream primitives — gated so flag-off builds compile
-// bit-for-bit like v0.33.0. See .k2so/prds/session-stream-and-awareness-bus.md
-// for the phased rollout; plan at ~/.claude/plans/happy-hatching-locket.md.
-#[cfg(feature = "session_stream")]
+// Session Stream primitives — landed in 0.34.0 behind a feature flag;
+// the flag was retired in 0.39.0e (these are always-on now). See
+// .k2so/prds/session-stream-and-awareness-bus.md for the original rollout.
 pub mod awareness;
-#[cfg(feature = "session_stream")]
 pub mod session;
-#[cfg(feature = "session_stream")]
 pub mod term;
 
 /// Replace this process's `PATH` with the one a fresh login shell

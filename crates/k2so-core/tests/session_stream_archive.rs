@@ -8,8 +8,6 @@
 //!   - File appended, not truncated (two runs on the same path
 //!     coexist)
 
-#![cfg(feature = "session_stream")]
-
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;

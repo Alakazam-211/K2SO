@@ -4,8 +4,6 @@
 //! needs real data; Phase 1 sticks to hand-crafted byte sequences so
 //! the tests can be read end-to-end without inspecting a `.bin` blob.
 
-#![cfg(feature = "session_stream")]
-
 use k2so_core::session::{CursorOp, CursorShape, EraseMode, Frame, ModeKind, Style};
 use k2so_core::term::LineMux;
 

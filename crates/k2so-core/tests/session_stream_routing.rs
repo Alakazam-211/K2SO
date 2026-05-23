@@ -6,8 +6,6 @@
 //! tempdirs for the filesystem side; liveness tests use the
 //! session::registry singleton so there's a `TEST_LOCK` for those.
 
-#![cfg(feature = "session_stream")]
-
 use std::path::PathBuf;
 use std::sync::Mutex;
 

@@ -8,8 +8,6 @@
 //! NOT call `len()` / `list_ids()` because those read shared global
 //! state and would race with other tests in the same binary.
 
-#![cfg(feature = "session_stream")]
-
 use std::time::Duration;
 
 use k2so_core::session::{

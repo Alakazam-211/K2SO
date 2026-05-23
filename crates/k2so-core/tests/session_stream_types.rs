@@ -2,8 +2,6 @@
 //! round-trips through serde_json, plus sanity checks on `SeqnoGen`
 //! monotonicity and `SessionId` uniqueness.
 
-#![cfg(feature = "session_stream")]
-
 use k2so_core::awareness::{AgentAddress, AgentSignal, SignalKind, WorkspaceId};
 use k2so_core::session::{
     CursorOp, EraseMode, Frame, HarnessKind, Line, SemanticKind, SeqnoGen,

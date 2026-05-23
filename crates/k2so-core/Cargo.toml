@@ -16,16 +16,6 @@ path = "src/lib.rs"
 # Enable in src-tauri's [dev-dependencies] entry; NOT a runtime feature.
 test-util = []
 
-# TODO(0.39.0 Slice 3): remove this feature flag once Slice 3 finishes
-# unconditionalizing the session_stream modules in
-# crates/k2so-core/src/terminal/mod.rs + src/lib.rs (drop their
-# `#[cfg(feature = "session_stream")]` guards). Until then the flag
-# stays — k2so-daemon enables it in its dep entry so the daemon-side
-# session-stream modules compile in. The flag itself gates nothing
-# in source code that doesn't also need compiling, so it's a no-op
-# for behavior; removal is just a cleanup once the guards are gone.
-session_stream = []
-
 [dependencies]
 # Shared primitive deps.
 parking_lot = "0.12"
@@ -90,9 +80,8 @@ encoding_rs = "0.8"
 alacritty_terminal = "0.26.0-rc1"
 portable-pty = "0.8"
 
-# ANSI tokenizer used by the `session_stream`-gated line-mux producer
-# (`term::line_mux`) and the dual-emit PTY reader (`terminal::session_stream_pty`,
-# Phase 2). Pinned to "0.15" to match alacritty_terminal's transitive pin
+# ANSI tokenizer used by the line-mux producer (`term::line_mux`).
+# Pinned to "0.15" to match alacritty_terminal's transitive pin
 # — single `vte` entry in Cargo.lock. `ansi` feature unlocks
 # `vte::ansi::Processor` + `vte::ansi::Handler`, which alacritty's
 # `Term` implements so we can drive the grid ourselves from a custom

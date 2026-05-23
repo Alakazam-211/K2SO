@@ -3,8 +3,6 @@
 //!
 //! Types-only. Routing and egress are Phase 3.
 
-#![cfg(feature = "session_stream")]
-
 use chrono::Utc;
 use k2so_core::awareness::{
     AgentAddress, AgentSignal, PresenceState, Priority, ReservationAction,

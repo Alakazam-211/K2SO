@@ -13,19 +13,16 @@ mod font_renderer;
 // .k2so/prds/alacritty-v2.md plan). Minimal: no LineMux, no byte
 // broadcast, no ring, no APC. Uses alacritty's built-in
 // EventLoop::spawn() rather than a custom reader.
-#[cfg(feature = "session_stream")]
 pub mod daemon_pty;
 // Alacritty_v2 grid snapshot + delta wire types + serializers
 // (Phase A2). Shared between the daemon's WS endpoint (A3) and
 // the Tauri thin client (A5). Generic over `EventListener` so
 // it's usable with any Term variant.
-#[cfg(feature = "session_stream")]
 pub mod grid_snapshot;
 // Grow-then-shrink settle watcher (2026-04-22). Every Session Stream
 // spawn opens the PTY at an artificially large rows value; this
 // module owns the "has the initial paint settled?" decision that
 // drives the follow-up SIGWINCH shrink.
-#[cfg(feature = "session_stream")]
 pub mod grow_settle;
 // `bitmap_renderer` was deleted in 0.33.x. The DOM/grid broadcast
 // protocol that shipped in 0.32.13 retired bitmap rendering; the
@@ -34,7 +31,6 @@ pub mod grow_settle;
 pub use alacritty_backend::TerminalManager;
 pub use event_sink::TerminalEventSink;
 
-#[cfg(feature = "session_stream")]
 pub use daemon_pty::{
     AlacEvent, DaemonEventListener, DaemonPtyConfig, DaemonPtySession,
     LabelSource, SCROLLBACK_CAP,
@@ -43,10 +39,8 @@ pub use daemon_pty::{
 /// Re-export alacritty's `Dimensions` trait so daemon + Tauri
 /// consumers can call `term.columns()` / `term.screen_lines()`
 /// without a direct `alacritty_terminal` dependency.
-#[cfg(feature = "session_stream")]
 pub use alacritty_terminal::grid::Dimensions;
 
-#[cfg(feature = "session_stream")]
 pub use grid_snapshot::{
     build_emit, cell_to_run, encode_row_runs, resolve_color, snapshot_term,
     CellRun, CursorSnapshot, DamagedRow, EmitDecision, EmitState,

@@ -5,8 +5,6 @@
 //! about — the inbox module takes all roots as explicit parameters,
 //! unlike the bus singleton.
 
-#![cfg(feature = "session_stream")]
-
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;

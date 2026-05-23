@@ -191,146 +191,26 @@ fn shell_escape(s: &str) -> String {
 }
 
 
-// ── CLI DB Helpers ──────────────────────────────────────────────────────
-// These open a direct SQLite connection so CLI endpoints can read/write
-// project settings without needing the Tauri AppState. The /cli/*
-// dispatcher that drove them was retired in 0.39.0; the helpers stay
-// behind `#[allow(dead_code)]` until the open-core migration (see
-// deletion manifest Family 3) routes equivalent calls through the
-// daemon API.
-
-/// Update a single project setting in the DB by matching on project path.
-#[allow(dead_code)]
-fn cli_update_project_setting(project_path: &str, field: &str, value: &str) -> Result<(), String> {
-    let _db_path = dirs::home_dir()
-        .ok_or("No home dir")?
-        .join(".k2so")
-        .join("k2so.db");
-    // Shared process-wide connection — WAL + busy_timeout are already
-    // enabled by db::init_database, so no per-call PRAGMA setup needed.
-    let db = crate::db::shared();
-    let conn = db.lock();
-
-    // Validate field name to prevent SQL injection
-    let allowed = ["agent_mode", "worktree_mode", "heartbeat_enabled", "agent_enabled", "pinned", "tier_id"];
-    if !allowed.contains(&field) {
-        return Err(format!("Unknown setting: {}", field));
-    }
-
-    let sql = format!("UPDATE projects SET {} = ?1 WHERE path = ?2", field);
-    let rows = conn.execute(&sql, rusqlite::params![value, project_path])
-        .map_err(|e| format!("DB update failed: {}", e))?;
-
-    if rows == 0 {
-        return Err(format!("Project not found in DB: {}", project_path));
-    }
-
-    // Keep agent_enabled in sync when agent_mode changes
-    if field == "agent_mode" {
-        let enabled = if value == "off" { "0" } else { "1" };
-        let _ = conn.execute(
-            "UPDATE projects SET agent_enabled = ?1 WHERE path = ?2",
-            rusqlite::params![enabled, project_path],
-        );
-    }
-
-    Ok(())
-}
-
-// `cli_register_workspace` moved to k2so_core::agents::workspaces.
-// `cli_cleanup_stale_workspaces` moved to k2so_core::agents::workspaces.
+// ── CLI DB Helpers (retired 0.39.0e) ────────────────────────────────────
+// `cli_update_project_setting`, `cli_remove_workspace`, and
+// `cli_get_project_settings` were the in-process SQLite-backed
+// helpers the old Tauri /cli/* dispatcher routed through. The
+// dispatcher was deleted in 0.39.0a-d (8df44a05) and the three
+// helpers were orphaned behind `#[allow(dead_code)]`. They are now
+// removed: the equivalent surface lives on the daemon as
+// `/cli/agents/mode`, `/cli/agents/settings/*`, and
+// `/cli/workspace/remove` (see crates/k2so-daemon/src/cli.rs), and
+// the daemon delegates to `k2so_core::agents::settings::*` and
+// `k2so_core::agents::workspaces::*` for the actual DB work — the
+// canonical single source of truth.
 //
-// `cli_remove_workspace` kept below because the `mode` branch still
-// calls into src-tauri-only teardown helpers. Once
-// `teardown_workspace_harness_files` moves to core, the whole fn
-// collapses to `k2so_core::agents::workspaces::remove_workspace_db_only`.
-
-/// Remove a workspace from K2SO's DB (deregister). Does NOT delete files on disk.
-#[allow(dead_code)]
-fn cli_remove_workspace(
-    path: &str,
-    mode: Option<&str>,
-    _app_handle: &tauri::AppHandle,
-) -> Result<String, String> {
-    let _db_path = dirs::home_dir()
-        .ok_or("No home dir")?
-        .join(".k2so")
-        .join("k2so.db");
-    let db = crate::db::shared();
-    let conn = db.lock();
-
-    // Find the project ID
-    let project_id: String = conn.query_row(
-        "SELECT id FROM projects WHERE path = ?1",
-        rusqlite::params![path],
-        |row| row.get(0),
-    ).map_err(|_| format!("Workspace not found: {}", path))?;
-
-    // Phase 7e: if the caller specified a teardown mode, resolve the
-    // workspace-root symlinks first so downstream CLIs keep working or
-    // the workspace fully reverts. `.k2so/` is always preserved.
-    let teardown = match mode {
-        Some("keep_current") | Some("keep-current") => Some(
-            crate::commands::k2so_agents::teardown_workspace_harness_files(
-                path,
-                crate::commands::k2so_agents::TeardownMode::KeepCurrent,
-            ),
-        ),
-        Some("restore_original") | Some("restore-original") => Some(
-            crate::commands::k2so_agents::teardown_workspace_harness_files(
-                path,
-                crate::commands::k2so_agents::TeardownMode::RestoreOriginal,
-            ),
-        ),
-        Some(other) => return Err(format!(
-            "Unknown teardown mode '{}'. Expected 'keep_current' or 'restore_original'.",
-            other
-        )),
-        None => None,
-    };
-
-    // Delete workspaces first (foreign key)
-    conn.execute("DELETE FROM workspaces WHERE project_id = ?1", rusqlite::params![project_id])
-        .map_err(|e| format!("Failed to delete workspaces: {}", e))?;
-    conn.execute("DELETE FROM projects WHERE id = ?1", rusqlite::params![project_id])
-        .map_err(|e| format!("Failed to delete project: {}", e))?;
-
-    k2so_core::agent_hooks::emit(k2so_core::agent_hooks::HookEvent::SyncProjects, serde_json::Value::Null);
-    Ok(serde_json::json!({
-        "success": true,
-        "removed": path,
-        "teardown": teardown,
-    }).to_string())
-}
-
-#[allow(dead_code)]
-fn cli_get_project_settings(project_path: &str) -> Result<serde_json::Value, String> {
-    let _db_path = dirs::home_dir()
-        .ok_or("No home dir")?
-        .join(".k2so")
-        .join("k2so.db");
-    // Read-only path — the shared connection is writable, so we can't
-    // use PRAGMA query_only=ON without affecting concurrent writers.
-    // The query below is a single SELECT which is intrinsically safe.
-    let db = crate::db::shared();
-    let conn = db.lock();
-
-    conn.query_row(
-        "SELECT agent_mode, worktree_mode, heartbeat_enabled, agent_enabled, pinned, name, tier_id FROM projects WHERE path = ?1",
-        rusqlite::params![project_path],
-        |row| {
-            Ok(serde_json::json!({
-                "mode": row.get::<_, String>(0).unwrap_or_else(|_| "off".to_string()),
-                "worktreeMode": row.get::<_, i64>(1).unwrap_or(0) == 1,
-                "heartbeatEnabled": row.get::<_, i64>(2).unwrap_or(0) == 1,
-                "agentEnabled": row.get::<_, i64>(3).unwrap_or(0) == 1,
-                "pinned": row.get::<_, i64>(4).unwrap_or(0) == 1,
-                "name": row.get::<_, String>(5).unwrap_or_default(),
-                "stateId": row.get::<_, Option<String>>(6).unwrap_or(None),
-            }))
-        },
-    ).map_err(|e| format!("Project not found: {}", e))
-}
+// The workspace-harness teardown side of `cli_remove_workspace`
+// (`teardown_workspace_harness_files`) stays in Tauri for now under
+// `commands::k2so_agents`; callers that need both teardown and DB
+// removal should invoke the daemon route for the SQL delete and
+// then drive teardown directly. Folding teardown into the daemon
+// route is its own follow-up (move `teardown_workspace_harness_files`
+// into core first).
 
 /// Generate the notify hook bash script content.
 ///

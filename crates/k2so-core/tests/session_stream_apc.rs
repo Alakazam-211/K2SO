@@ -10,8 +10,6 @@
 //!   - `LineMux` wires the extractor in at the correct stream
 //!     position, preserving Text/APC/Text ordering
 
-#![cfg(feature = "session_stream")]
-
 use k2so_core::awareness::{
     AgentAddress, PresenceState, ReservationAction, SignalKind, TaskPhase,
 };

@@ -6,8 +6,6 @@
 //! — the synthetic corpus here proves the recognizer's state
 //! machine and the recognizer-attached LineMux integration path.
 
-#![cfg(feature = "session_stream")]
-
 use k2so_core::session::{Frame, SemanticKind};
 use k2so_core::term::{ClaudeCodeRecognizer, LineMux};
 

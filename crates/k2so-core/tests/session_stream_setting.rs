@@ -6,8 +6,6 @@
 //! `test-util` feature so the shared DB state doesn't contaminate
 //! the actual ~/.k2so/k2so.db.
 
-#![cfg(feature = "session_stream")]
-
 use k2so_core::agents::settings::{
     get_use_session_stream, update_project_setting,
 };

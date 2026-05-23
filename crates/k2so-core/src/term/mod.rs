@@ -5,7 +5,8 @@
 //! client-agnostic `Line` and `Frame` events — the Producer A of the
 //! Session Stream PRD.
 //!
-//! Feature-gated via `#[cfg(feature = "session_stream")]` in `lib.rs`.
+//! Originally gated behind `feature = "session_stream"`; the flag was
+//! retired in 0.39.0e and these modules are now always compiled in.
 
 pub mod apc;
 pub mod line_mux;
