@@ -2497,4 +2497,255 @@ mod tests {
     fn detect_active_session_unknown_provider_returns_none() {
         assert_eq!(detect_active_session("bogus", "/r").unwrap(), None);
     }
+
+    // ── Phase 2 Unit 6 additions ───────────────────────────────────
+    //
+    // Tests for the ~1,700 LoC migrated from the Tauri command into
+    // k2so-core under "Phase 2 Unit 6 — full IDE-history parsing
+    // surface" earlier in this file.
+
+    /// Each HOME-mutating test grabs this lock so cargo's parallel
+    /// runner can't see another test's HOME between the set + the
+    /// inner call. Shared with `themes::tests` + `skill_layers::tests`
+    /// via the crate-wide `themes::HOME_LOCK` static so the lock is a
+    /// true process-wide singleton, not a per-module mutex.
+    use crate::themes::HOME_LOCK as UNIT6_HOME_LOCK;
+
+    struct U6TempDir {
+        path: std::path::PathBuf,
+    }
+
+    impl U6TempDir {
+        fn new(label: &str) -> Self {
+            let pid = std::process::id();
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir().join(format!("k2so-ch-u6-{label}-{pid}-{nanos}"));
+            std::fs::create_dir_all(&path).expect("create tempdir");
+            Self { path }
+        }
+    }
+
+    impl Drop for U6TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    struct U6HomeGuard {
+        original: Option<std::ffi::OsString>,
+        _tmp: U6TempDir,
+    }
+
+    impl U6HomeGuard {
+        fn new(label: &str) -> Self {
+            let tmp = U6TempDir::new(label);
+            let original = std::env::var_os("HOME");
+            std::env::set_var("HOME", &tmp.path);
+            Self { original, _tmp: tmp }
+        }
+    }
+
+    impl Drop for U6HomeGuard {
+        fn drop(&mut self) {
+            match self.original.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn extract_worktree_branch_picks_up_branch_suffix() {
+        assert_eq!(
+            extract_worktree_branch("/repo/.worktrees/feature-x"),
+            Some("feature-x".to_string())
+        );
+        assert_eq!(extract_worktree_branch("/repo"), None);
+        assert_eq!(extract_worktree_branch(""), None);
+    }
+
+    #[test]
+    fn parse_claude_sessions_returns_empty_when_history_file_missing() {
+        let _g = UNIT6_HOME_LOCK.lock();
+        let _h = U6HomeGuard::new("claude-empty");
+        // fresh HOME → no ~/.claude/history.jsonl → empty Vec, not Err
+        let sessions = parse_claude_sessions(None).expect("must not error");
+        assert!(sessions.is_empty(), "got: {sessions:?}");
+    }
+
+    #[test]
+    fn parse_claude_sessions_parses_seeded_history() {
+        let _g = UNIT6_HOME_LOCK.lock();
+        let _h = U6HomeGuard::new("claude-seeded");
+        // Build ~/.claude/history.jsonl with two entries — same
+        // session_id repeated to exercise the SessionAccumulator
+        // collapse logic.
+        let claude_dir = dirs::home_dir().unwrap().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let history = "\
+{\"sessionId\":\"s1\",\"project\":\"/repo\",\"display\":\"first prompt\",\"timestamp\":100}
+{\"sessionId\":\"s1\",\"project\":\"/repo\",\"display\":\"second prompt\",\"timestamp\":200}
+{\"sessionId\":\"s2\",\"project\":\"/other\",\"display\":\"only one\",\"timestamp\":50}
+";
+        std::fs::write(claude_dir.join("history.jsonl"), history).unwrap();
+        let mut sessions = parse_claude_sessions(None).expect("parse");
+        sessions.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+        assert_eq!(sessions.len(), 2, "got: {sessions:?}");
+        let s1 = sessions.iter().find(|s| s.session_id == "s1").unwrap();
+        assert_eq!(s1.message_count, 2, "two entries collapse into one");
+        assert_eq!(s1.timestamp, 200, "last_timestamp wins");
+        assert_eq!(s1.title, "first prompt", "first_display wins (lowest ts)");
+        assert_eq!(s1.project, "/repo");
+        assert_eq!(s1.provider, "claude");
+    }
+
+    #[test]
+    fn parse_claude_sessions_filters_by_project() {
+        let _g = UNIT6_HOME_LOCK.lock();
+        let _h = U6HomeGuard::new("claude-filter");
+        let claude_dir = dirs::home_dir().unwrap().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let history = "\
+{\"sessionId\":\"a\",\"project\":\"/repo\",\"display\":\"x\",\"timestamp\":1}
+{\"sessionId\":\"b\",\"project\":\"/repo/.worktrees/feature\",\"display\":\"y\",\"timestamp\":2}
+{\"sessionId\":\"c\",\"project\":\"/other\",\"display\":\"z\",\"timestamp\":3}
+";
+        std::fs::write(claude_dir.join("history.jsonl"), history).unwrap();
+        let sessions = parse_claude_sessions(Some("/repo")).expect("parse");
+        // /repo and /repo/.worktrees/feature both match the project
+        // family — should yield 2 sessions, not the /other one.
+        assert_eq!(sessions.len(), 2, "got: {sessions:?}");
+        assert!(sessions.iter().any(|s| s.session_id == "a"));
+        assert!(sessions.iter().any(|s| s.session_id == "b"));
+        // The worktree session carries an origin_branch tag.
+        let b = sessions.iter().find(|s| s.session_id == "b").unwrap();
+        assert_eq!(b.origin_branch.as_deref(), Some("feature"));
+    }
+
+    #[test]
+    fn parse_cursor_sessions_returns_empty_when_chats_dir_missing() {
+        let _g = UNIT6_HOME_LOCK.lock();
+        let _h = U6HomeGuard::new("cursor-empty");
+        let sessions = parse_cursor_sessions(None).expect("must not error");
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn parse_cursor_ide_sessions_returns_empty_when_workspace_storage_missing() {
+        let _g = UNIT6_HOME_LOCK.lock();
+        let _h = U6HomeGuard::new("cursor-ide-empty");
+        let sessions = parse_cursor_ide_sessions(None).expect("must not error");
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn parse_gemini_sessions_returns_empty_when_tmp_dir_missing() {
+        let _g = UNIT6_HOME_LOCK.lock();
+        let _h = U6HomeGuard::new("gemini-empty");
+        let sessions = parse_gemini_sessions(None).expect("must not error");
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn parse_codex_sessions_returns_empty_when_sessions_dir_missing() {
+        let _g = UNIT6_HOME_LOCK.lock();
+        let _h = U6HomeGuard::new("codex-empty");
+        let sessions = parse_codex_sessions(None).expect("must not error");
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn list_all_sessions_returns_empty_for_clean_home() {
+        let _g = UNIT6_HOME_LOCK.lock();
+        let _h = U6HomeGuard::new("all-empty");
+        let sessions = list_all_sessions(None).expect("must not error");
+        assert!(
+            sessions.is_empty(),
+            "no provider data → empty; got: {sessions:?}"
+        );
+    }
+
+    #[test]
+    fn get_storage_paths_reports_none_for_clean_home() {
+        let _g = UNIT6_HOME_LOCK.lock();
+        let _h = U6HomeGuard::new("storage-empty");
+        let paths = get_storage_paths("/some/project").expect("get_storage_paths");
+        assert!(paths.claude_history_file.is_none(), "got: {paths:?}");
+        assert!(paths.codex_history_file.is_none());
+        assert!(paths.claude_sessions_dirs.is_empty());
+        assert!(paths.cursor_chats_dirs.is_empty());
+        assert!(paths.gemini_chats_dirs.is_empty());
+        assert!(paths.pi_chats_dirs.is_empty());
+        assert!(paths.codex_sessions_dirs.is_empty());
+    }
+
+    #[test]
+    fn get_storage_paths_picks_up_claude_history_file_when_present() {
+        let _g = UNIT6_HOME_LOCK.lock();
+        let _h = U6HomeGuard::new("storage-claude");
+        let claude_dir = dirs::home_dir().unwrap().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(claude_dir.join("history.jsonl"), "").unwrap();
+        let paths = get_storage_paths("/proj").expect("get_storage_paths");
+        assert!(paths.claude_history_file.is_some(), "got: {paths:?}");
+        assert!(
+            paths
+                .claude_history_file
+                .as_ref()
+                .unwrap()
+                .ends_with(".claude/history.jsonl")
+        );
+    }
+
+    #[test]
+    fn discover_ide_sessions_returns_empty_when_cursor_workspace_storage_missing() {
+        let _g = UNIT6_HOME_LOCK.lock();
+        let _h = U6HomeGuard::new("ide-empty");
+        let sessions = discover_ide_sessions("/proj").expect("must not error");
+        assert!(sessions.is_empty());
+    }
+
+    // ── DB-backed custom names + pin (chat_session_names table) ────
+    //
+    // The in-memory test DB is shared across the whole test binary, so
+    // we use unique session-ID prefixes to keep these from colliding
+    // with each other. Lock is intentionally separate from the HOME
+    // lock — these tests don't mutate HOME.
+
+    static UNIT6_DB_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    #[test]
+    fn rename_session_and_get_custom_names_round_trip() {
+        let _g = UNIT6_DB_LOCK.lock();
+        let sid = format!("u6-rn-{}-{}", std::process::id(), uuid::Uuid::new_v4());
+        rename_session("claude", &sid, "My Pinned Chat").expect("rename");
+        let names = get_custom_names().expect("get_custom_names");
+        let key = format!("claude:{}", sid);
+        assert_eq!(names.get(&key).map(|s| s.as_str()), Some("My Pinned Chat"));
+        // ON CONFLICT updates the existing row → not a new one.
+        rename_session("claude", &sid, "Renamed Again").expect("rename 2");
+        let names2 = get_custom_names().expect("get_custom_names 2");
+        assert_eq!(names2.get(&key).map(|s| s.as_str()), Some("Renamed Again"));
+    }
+
+    #[test]
+    fn toggle_pin_writes_and_clears_pinned_flag() {
+        let _g = UNIT6_DB_LOCK.lock();
+        let sid = format!("u6-pin-{}-{}", std::process::id(), uuid::Uuid::new_v4());
+        let key = format!("cursor:{}", sid);
+        // Pin it.
+        toggle_pin("cursor", &sid, true).expect("pin");
+        let pinned = get_pinned().expect("get_pinned");
+        assert!(pinned.iter().any(|k| k == &key), "got: {pinned:?}");
+        // Unpin it.
+        toggle_pin("cursor", &sid, false).expect("unpin");
+        let pinned2 = get_pinned().expect("get_pinned 2");
+        assert!(
+            !pinned2.iter().any(|k| k == &key),
+            "still pinned after unpin: {pinned2:?}"
+        );
+    }
 }

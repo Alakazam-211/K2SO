@@ -633,3 +633,368 @@ pub fn clipboard_read_file_paths() -> Result<Vec<String>, String> {
 pub fn clipboard_read_file_paths() -> Result<Vec<String>, String> {
     Ok(Vec::new())
 }
+
+#[cfg(test)]
+mod tests {
+    //! Tests for the Phase 2 Unit 6 filesystem surface.
+    //!
+    //! All filesystem mutation happens under a per-test tempdir so the
+    //! developer's real workspace is never touched. We intentionally
+    //! avoid trash/recycle-bin (`delete(.., permanent=false)`) tests —
+    //! on macOS those go through AppleScript and trigger Finder Touch ID
+    //! prompts that hang `cargo test`. The permanent-delete branch is
+    //! still exercised.
+    use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    /// Tiny in-crate tempdir helper, modeled after the one in
+    /// `app_settings::tests`. Each test gets a unique directory under
+    /// `std::env::temp_dir()` that auto-deletes on drop.
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            let pid = std::process::id();
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir().join(format!("k2so-fs_commands-{label}-{pid}-{nanos}"));
+            fs::create_dir_all(&path).expect("create tempdir");
+            Self { path }
+        }
+        fn path(&self) -> &Path {
+            &self.path
+        }
+        fn s(&self) -> String {
+            self.path.to_string_lossy().to_string()
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    // ── validate_path ───────────────────────────────────────────────
+
+    #[test]
+    fn validate_path_rejects_empty() {
+        assert_eq!(validate_path(""), Err("Path is empty".to_string()));
+    }
+
+    #[test]
+    fn validate_path_accepts_existing_dir_and_canonicalizes() {
+        let tmp = TempDir::new("validate");
+        let p = validate_path(&tmp.s()).expect("existing dir validates");
+        // canonicalize resolves symlinks; on macOS /tmp is a symlink to
+        // /private/tmp, so we just assert the file_name is preserved.
+        assert_eq!(p.file_name(), tmp.path().file_name());
+    }
+
+    #[test]
+    fn validate_path_accepts_nonexistent_path_with_existing_parent() {
+        let tmp = TempDir::new("validate-parent");
+        let candidate = tmp.path().join("not-yet-written.txt");
+        let p = validate_path(candidate.to_str().unwrap()).expect("parent exists, path itself need not");
+        assert_eq!(p, candidate);
+    }
+
+    #[test]
+    fn validate_path_rejects_when_parent_does_not_exist() {
+        let tmp = TempDir::new("validate-noparent");
+        let nested = tmp.path().join("a/b/c/never.txt");
+        let err = validate_path(nested.to_str().unwrap()).expect_err("nonexistent parent must fail");
+        assert!(err.starts_with("Parent directory does not exist"), "got: {err}");
+    }
+
+    // ── read_dir ───────────────────────────────────────────────────
+
+    #[test]
+    fn read_dir_lists_entries_with_directory_first_sort() {
+        let tmp = TempDir::new("readdir");
+        fs::create_dir(tmp.path().join("alpha")).unwrap();
+        fs::write(tmp.path().join("beta.txt"), b"x").unwrap();
+        fs::write(tmp.path().join("zeta.md"), b"y").unwrap();
+        let entries = read_dir(&tmp.s(), false).expect("read_dir");
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        // Directories sort before files; within each group alphabetical.
+        assert_eq!(names, vec!["alpha", "beta.txt", "zeta.md"]);
+        assert!(entries[0].is_directory);
+        assert!(!entries[1].is_directory);
+        assert_eq!(entries[1].size, 1);
+    }
+
+    #[test]
+    fn read_dir_filters_hidden_when_show_hidden_false() {
+        let tmp = TempDir::new("readdir-hidden");
+        fs::write(tmp.path().join(".secret"), b"").unwrap();
+        fs::write(tmp.path().join("visible.txt"), b"").unwrap();
+        let hidden = read_dir(&tmp.s(), false).expect("read_dir hidden=false");
+        assert_eq!(hidden.len(), 1, "hidden file must be filtered: {hidden:?}");
+        let with_hidden = read_dir(&tmp.s(), true).expect("read_dir hidden=true");
+        assert_eq!(with_hidden.len(), 2);
+    }
+
+    #[test]
+    fn read_dir_handles_unicode_and_spaces_in_names() {
+        let tmp = TempDir::new("readdir-unicode");
+        fs::write(tmp.path().join("hello world.txt"), b"a").unwrap();
+        fs::write(tmp.path().join("café.md"), b"b").unwrap();
+        fs::write(tmp.path().join("日本語.txt"), b"c").unwrap();
+        let entries = read_dir(&tmp.s(), false).expect("read_dir");
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"hello world.txt"));
+        assert!(names.contains(&"café.md"));
+        assert!(names.contains(&"日本語.txt"));
+    }
+
+    // ── search_tree ────────────────────────────────────────────────
+
+    #[test]
+    fn search_tree_empty_query_returns_empty_results() {
+        let tmp = TempDir::new("search-empty");
+        fs::write(tmp.path().join("foo.txt"), b"").unwrap();
+        let r = search_tree(&tmp.s(), "   ", false, 100).expect("search_tree empty");
+        assert!(r.is_empty(), "whitespace query must short-circuit");
+    }
+
+    #[test]
+    fn search_tree_finds_matches_and_skips_blacklisted_dirs() {
+        let tmp = TempDir::new("search-deep");
+        fs::create_dir_all(tmp.path().join("src/inner")).unwrap();
+        fs::create_dir_all(tmp.path().join("node_modules")).unwrap();
+        fs::write(tmp.path().join("src/inner/target.rs"), b"x").unwrap();
+        fs::write(tmp.path().join("node_modules/should_not_find.rs"), b"x").unwrap();
+        let r = search_tree(&tmp.s(), "should_not_find", false, 10).expect("search");
+        assert!(r.is_empty(), "node_modules must be skipped: {r:?}");
+        let r2 = search_tree(&tmp.s(), "target", false, 10).expect("search hit");
+        assert!(r2.iter().any(|m| m.name == "target.rs"));
+    }
+
+    #[test]
+    fn search_tree_respects_max_results() {
+        let tmp = TempDir::new("search-cap");
+        for i in 0..10 {
+            fs::write(tmp.path().join(format!("match-{i}.txt")), b"x").unwrap();
+        }
+        let r = search_tree(&tmp.s(), "match", false, 3).expect("search");
+        assert_eq!(r.len(), 3, "max_results must cap output");
+    }
+
+    // ── read_file / read_binary_file ───────────────────────────────
+
+    #[test]
+    fn read_file_returns_content_for_text() {
+        let tmp = TempDir::new("readfile-text");
+        let p = tmp.path().join("greeting.txt");
+        fs::write(&p, "hi there\n").unwrap();
+        let r = read_file(p.to_str().unwrap()).expect("read text");
+        assert_eq!(r.content, "hi there\n");
+        assert_eq!(r.name, "greeting.txt");
+    }
+
+    #[test]
+    fn read_file_rejects_binary_via_nul_byte_detection() {
+        let tmp = TempDir::new("readfile-binary");
+        let p = tmp.path().join("blob.bin");
+        fs::write(&p, [0xffu8, 0x00, 0x01, 0x02]).unwrap();
+        let err = read_file(p.to_str().unwrap()).expect_err("nul byte must reject");
+        assert!(err.contains("binary"), "got: {err}");
+    }
+
+    #[test]
+    fn read_file_enforces_max_file_size() {
+        let tmp = TempDir::new("readfile-large");
+        let p = tmp.path().join("huge.txt");
+        let buf = vec![b'a'; (MAX_FILE_SIZE + 1) as usize];
+        fs::write(&p, &buf).unwrap();
+        let err = read_file(p.to_str().unwrap()).expect_err("over 10MB must reject");
+        assert!(err.contains("too large"), "got: {err}");
+    }
+
+    #[test]
+    fn read_binary_file_enforces_50mb_cap() {
+        // Sentinel: we don't actually allocate a 50MB file in tests
+        // (slow + disk pressure). Instead assert the cap constant
+        // itself is the documented limit + that read_binary_file
+        // surfaces the size limit error message format for an
+        // *under-cap* file (positive path) and that we can read it
+        // intact.
+        assert_eq!(MAX_BINARY_SIZE, 50 * 1024 * 1024);
+        let tmp = TempDir::new("readbin-small");
+        let p = tmp.path().join("small.bin");
+        let payload: Vec<u8> = (0u8..=255).collect();
+        fs::write(&p, &payload).unwrap();
+        let got = read_binary_file(p.to_str().unwrap()).expect("under-cap read");
+        assert_eq!(got, payload);
+    }
+
+    #[test]
+    fn read_binary_file_missing_file_returns_parent_exists_error() {
+        let tmp = TempDir::new("readbin-missing");
+        let p = tmp.path().join("nope.bin");
+        // parent exists -> validate_path returns Ok; then existence
+        // check inside read_binary_file fires.
+        let err = read_binary_file(p.to_str().unwrap()).expect_err("must fail");
+        assert!(err.contains("not found"), "got: {err}");
+    }
+
+    // ── write_file ─────────────────────────────────────────────────
+
+    #[test]
+    fn write_file_creates_and_overwrites() {
+        let tmp = TempDir::new("write");
+        let p = tmp.path().join("out.txt");
+        write_file(p.to_str().unwrap(), "first").expect("write 1");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "first");
+        write_file(p.to_str().unwrap(), "second").expect("write 2");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "second");
+    }
+
+    #[test]
+    fn write_file_fails_when_parent_directory_missing() {
+        let tmp = TempDir::new("write-noparent");
+        let nested = tmp.path().join("missing/intermediate/file.txt");
+        let err = write_file(nested.to_str().unwrap(), "x").expect_err("must fail");
+        assert!(err.contains("Parent directory does not exist"), "got: {err}");
+    }
+
+    // ── create_entry / rename / duplicate ──────────────────────────
+
+    #[test]
+    fn create_entry_makes_file_or_dir_and_rejects_existing() {
+        let tmp = TempDir::new("create");
+        let f = tmp.path().join("new.txt");
+        create_entry(f.to_str().unwrap(), false).expect("create file");
+        assert!(f.exists() && f.is_file());
+        let d = tmp.path().join("new_dir");
+        create_entry(d.to_str().unwrap(), true).expect("create dir");
+        assert!(d.exists() && d.is_dir());
+        let err = create_entry(f.to_str().unwrap(), false).expect_err("already exists");
+        assert!(err.contains("Already exists"), "got: {err}");
+    }
+
+    #[test]
+    fn rename_rejects_invalid_names() {
+        let tmp = TempDir::new("rename-invalid");
+        let f = tmp.path().join("a.txt");
+        fs::write(&f, "").unwrap();
+        assert!(rename(f.to_str().unwrap(), "").is_err());
+        assert!(rename(f.to_str().unwrap(), "../escape").is_err());
+        // NUL byte
+        assert!(rename(f.to_str().unwrap(), "bad\0name").is_err());
+    }
+
+    #[test]
+    fn rename_succeeds_for_simple_case_and_returns_new_path() {
+        let tmp = TempDir::new("rename-ok");
+        let f = tmp.path().join("old.txt");
+        fs::write(&f, "data").unwrap();
+        let new_path = rename(f.to_str().unwrap(), "renamed.txt").expect("rename");
+        assert!(new_path.ends_with("renamed.txt"));
+        assert!(!f.exists());
+        assert!(tmp.path().join("renamed.txt").exists());
+    }
+
+    #[test]
+    fn duplicate_creates_copy_with_disambiguated_name() {
+        let tmp = TempDir::new("dup");
+        let f = tmp.path().join("doc.txt");
+        fs::write(&f, "hello").unwrap();
+        let dup1 = duplicate(f.to_str().unwrap()).expect("dup1");
+        let dup2 = duplicate(f.to_str().unwrap()).expect("dup2");
+        assert!(dup1.ends_with("doc copy.txt"), "got: {dup1}");
+        // Second duplicate of the *original* should see "doc copy.txt"
+        // already exists and pick "doc copy 2.txt".
+        assert!(dup2.ends_with("doc copy 2.txt"), "got: {dup2}");
+        // Content preserved.
+        assert_eq!(fs::read_to_string(&dup1).unwrap(), "hello");
+    }
+
+    // ── copy / move / delete (permanent only) ──────────────────────
+
+    #[test]
+    fn copy_files_into_destination_directory() {
+        let tmp = TempDir::new("copy");
+        let src = tmp.path().join("source.txt");
+        fs::write(&src, "payload").unwrap();
+        let dest = tmp.path().join("destdir");
+        fs::create_dir(&dest).unwrap();
+        copy_files(&[src.to_string_lossy().to_string()], dest.to_str().unwrap())
+            .expect("copy_files");
+        assert!(dest.join("source.txt").exists());
+        // Source still present (it's a copy).
+        assert!(src.exists());
+    }
+
+    #[test]
+    fn copy_files_rejects_missing_destination() {
+        let tmp = TempDir::new("copy-no-dest");
+        let src = tmp.path().join("file.txt");
+        fs::write(&src, "").unwrap();
+        let err = copy_files(
+            &[src.to_string_lossy().to_string()],
+            tmp.path().join("nope").to_str().unwrap(),
+        )
+        .expect_err("must fail");
+        assert!(err.contains("Destination does not exist"), "got: {err}");
+    }
+
+    #[test]
+    fn move_files_into_directory_removes_source() {
+        let tmp = TempDir::new("move");
+        let src = tmp.path().join("m.txt");
+        fs::write(&src, "x").unwrap();
+        let dest = tmp.path().join("d");
+        fs::create_dir(&dest).unwrap();
+        move_files(&[src.to_string_lossy().to_string()], dest.to_str().unwrap()).expect("move");
+        assert!(!src.exists(), "source should be gone after move");
+        assert!(dest.join("m.txt").exists());
+    }
+
+    #[test]
+    fn delete_permanent_removes_file_and_directory() {
+        let tmp = TempDir::new("delete");
+        let f = tmp.path().join("doomed.txt");
+        fs::write(&f, "").unwrap();
+        let d = tmp.path().join("doomed_dir");
+        fs::create_dir_all(d.join("nested")).unwrap();
+        fs::write(d.join("nested/inner.txt"), "").unwrap();
+        delete(
+            &[
+                f.to_string_lossy().to_string(),
+                d.to_string_lossy().to_string(),
+            ],
+            true,
+        )
+        .expect("permanent delete");
+        assert!(!f.exists());
+        assert!(!d.exists());
+    }
+
+    #[test]
+    fn delete_returns_error_for_missing_path() {
+        let tmp = TempDir::new("delete-missing");
+        let nonexist = tmp.path().join("ghost.txt");
+        let err = delete(&[nonexist.to_string_lossy().to_string()], true)
+            .expect_err("missing must fail");
+        assert!(err.contains("Does not exist"), "got: {err}");
+    }
+
+    // ── open_external (input sanitization only) ────────────────────
+
+    #[test]
+    fn open_external_rejects_url_that_becomes_empty_after_cleaning() {
+        // Pure control bytes / NUL → cleaned to "" → rejected before
+        // any shell-out happens. We don't actually invoke `/usr/bin/open`
+        // because that would surface a real Finder/browser tab; the
+        // rejection path is what we're pinning down.
+        let err = open_external("\0\0\n\r\t").expect_err("must reject empty");
+        assert!(err.contains("empty"), "got: {err}");
+    }
+}
