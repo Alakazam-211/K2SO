@@ -426,6 +426,28 @@ EXISTING: `/cli/events`, `/cli/awareness/{publish, subscribe}`, `/cli/hooks/stat
 
 ---
 
+## Findings from Unit 1 (apply to subsequent units)
+
+These surfaced during Unit 1 execution — not anticipated in the original plan, important for the other agents to know:
+
+### F1. Rustls 0.23 needs `CryptoProvider::install_default()` at daemon boot
+
+Tauri already does this; the daemon hadn't because nothing in the pre-Phase-2 daemon used TLS directly. Unit 1 wired the call into `crates/k2so-daemon/src/main.rs` before any HTTPS code path runs. **Implication for Unit 5 (Claude Auth)** and any unit that brings up a `reqwest`/HTTPS path: this is already done — no need to add it again, just be aware that TLS will Just Work.
+
+### F2. `tokio::runtime::Handle` capture pattern for non-tokio threads
+
+`companion::start_companion()` runs on a `std::thread::spawn`'d worker. From inside that worker, calling `app_event_source::subscribe()` triggers a `tokio::spawn` which panics with "no reactor running" because the worker thread isn't inside a tokio runtime. Unit 1's fix: capture a `tokio::runtime::Handle` at provider register time (when we're still on the runtime), then use `handle.spawn(...)` from inside the worker.
+
+**Implication for Unit 3 (Terminal PTY)**: `TerminalEventSink` migration will hit the identical pattern — PTY reader threads are `std::thread::spawn` workers that need to publish events into the tokio runtime. Reuse the handle-capture pattern. See `crates/k2so-daemon/src/companion_host.rs` for the reference impl.
+
+### F3. Two writers to `~/.k2so/settings.json` until Unit 7 consolidates
+
+After Unit 1, both Tauri's `settings_update` and the daemon's `companion_host::persist_companion_password_fields` write to the same file. Both use tmp+rename so reads are never torn, but there's no merge-on-write protection — the race window is single-digit milliseconds. **Tauri's `crate::companion::invalidate_all_sessions()` in `src-tauri/src/commands/settings.rs::settings_update` is now a no-op** because Tauri's in-process `STATE` is empty post-Unit-1; it's marked `TODO Phase 2 Unit 7`.
+
+**Implication for Unit 7 (Settings to daemon)**: the consolidation work is non-optional — keep `TODO Phase 2 Unit 7` markers visible so the agent doesn't miss them. Renderer password rotates go through `/cli/companion/set-password` which DOES invalidate daemon-side, so the practical gap is only "username changes via Tauri settings UI without a password rotate" — narrow, but a real correctness gap that must close in Unit 7.
+
+---
+
 ## Cross-cutting concerns
 
 ### 1. `lib.rs` is a sequence of startup-time migrations
@@ -555,4 +577,19 @@ After done: enter Phase 3 (contract hardening — TLS, auth, OpenAPI export, Mob
 - Prior audit: `/tmp/k2so-thin-client-reaudit-post-phase-1.md`
 - Loose-ends work: completed 2026-05-23 (uncommitted in current branch — `session_stream` feature flag retired, `tabs.ts` Kessel refs purged, `agent_hooks.rs` dead direct-DB helpers deleted)
 - Related PRD: `.k2so/prds/kessel-research-archive.md` (Kessel v2 future vision; out of Phase 2 scope)
-- Memory: `project_websocket_companion_plan.md`, `feedback_daemon_first.md`
+- Memory: `project_websocket_companion_plan.md`, `feedback_daemon_first.md`, `feedback_subagent_no_prod_reload.md`
+
+---
+
+## Execution log
+
+| Unit | Status | Branch / Commit | Notes |
+|---|---|---|---|
+| 1 — Companion + ngrok | **Merged to main** 2026-05-23 | `02efb165` | Keystone landed. Headless smoke verified: daemon-only run brings up ngrok at `https://k2.ngrok.app` without Tauri. See findings F1–F3. |
+| 2 — LLM subprocess | pending | — | Wave A |
+| 3 — Terminal PTY | pending | — | Wave B (after Unit 2 merges) — use F2 tokio-handle pattern |
+| 4 — DB-direct writes | pending | — | Wave C (after Unit 3 merges) |
+| 5 — Claude Auth | pending | — | Wave A — Keychain spike first |
+| 6 — FS + Chat + Themes + Skills + Review + ProjectConfig + WhatsNew | pending | — | Wave A — largest LoC |
+| 7 — `k2so_agents` BRIDGE + Settings | pending | — | Wave A — must close F3 |
+| 2.1 — CLI verb redesign | pending | — | After Units 2/5/6 merge |
