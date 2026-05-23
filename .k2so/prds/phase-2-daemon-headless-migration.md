@@ -628,7 +628,7 @@ After done: enter Phase 3 (contract hardening — TLS, auth, OpenAPI export, Mob
 
 ## Open questions
 
-1. **Daemon Keychain access from LaunchAgent** — must spike before Unit 5 commits.
+1. **Daemon Keychain access from LaunchAgent** — ✅ resolved by Unit 5 smoke (PASS).
 2. **`format.rs` PATH parity** — verify daemon's PATH matches user shell's PATH before deciding HOST vs MIGRATE.
 3. **K2SO Connect address book schema** — what's the on-disk format? Probably JSON in `~/.k2so/connect-hosts.json` with TLS cert pins. Out of Phase 2 scope but flag for Phase 3.1.
 4. **LLM subprocess supervision policy** — exact RSS threshold (start with 3GB?), exact concurrency cap (1?), exact restart cooldown.
@@ -653,7 +653,7 @@ After done: enter Phase 3 (contract hardening — TLS, auth, OpenAPI export, Mob
 | 3 — Terminal PTY | pending | — | Wave B (after Unit 2 merges) — use F2 tokio-handle pattern + F5 spawn_blocking |
 | 4 — DB-direct writes | pending | — | Wave C (after Unit 3 merges) — use F5 spawn_blocking for large libgit2 ops |
 | 5 — Claude Auth | **Merged to main** 2026-05-23 | `24ac632d` | Keychain spike PASSED. Method-gate gap discovered during smoke + backported to Unit 1's companion routes (`0298be18`); saved as `feedback_post_only_route_guards` memory. TODO Phase 2.1 left to retarget plist script at `k2so claude-auth refresh-now`. |
-| 6 — FS + Chat + Themes + Skills + Review + ProjectConfig + WhatsNew | pending | — | Wave A — largest LoC; use F5 spawn_blocking for large reads |
+| 6 — FS + Chat + Themes + Skills + Review + ProjectConfig + WhatsNew | **Merged to main** 2026-05-23 | `48f560a6` | Largest unit. 3,367 LoC deleted from src-tauri across 7 files. 6 new daemon route modules. 20 renderer files migrated. Method-gate via match-arm pattern guard (different shape from Units 5/7a's explicit 405; functionally equivalent — GETs fall through to 404). base64-in-JSON for `/cli/fs/read-binary` (50MB cap). K2SO Connect caveat documented inline for `open-finder`/`open-external`/`clipboard-paths`. **Quality gap**: new k2so-core modules (`fs_commands`, `themes`, `skill_layers`, `review_checklist`, chat_history extension ~1,700 LoC) shipped without unit tests — follow-up task created. |
 | 7a — App Settings + F3 close | **Merged to main** 2026-05-23 | `624c3354` | F3 closed. `app_settings::update()` runs in the daemon under a process-wide lock; on companion-credential change it calls `companion::invalidate_all_sessions` from inside the daemon process where live STATE lives. Unit test asserts session map empties. Method-gate guards folded in during merge conflict resolution. |
 | 7b — SKILL scaffolding + migration helpers → k2so-core | pending | — | Can land alongside 7a; no Tauri-command churn |
 | 7c — `k2so_agents` BRIDGE deletion + heartbeat-launchd MIGRATE | pending | — | After 7b empties the bodies; daemon owns its own heartbeat plist |
