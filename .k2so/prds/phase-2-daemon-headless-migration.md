@@ -491,7 +491,19 @@ Tauri already does this; the daemon hadn't because nothing in the pre-Phase-2 da
 
 **Implication for Unit 3 (Terminal PTY)**: `TerminalEventSink` migration will hit the identical pattern — PTY reader threads are `std::thread::spawn` workers that need to publish events into the tokio runtime. Reuse the handle-capture pattern. See `crates/k2so-daemon/src/companion_host.rs` for the reference impl.
 
-### F3. Two writers to `~/.k2so/settings.json` until Unit 7 consolidates
+### F4. `#[tokio::main]` + pre-runtime args-fork are incompatible
+
+The `#[tokio::main]` macro brings up the tokio runtime *before* the function body runs. Any unit that needs to dispatch on a CLI arg (e.g. `--llm-worker`) before tokio touches anything — typical for "this binary may run as a subprocess worker" patterns — must split into `fn main()` + `async fn async_main()` with manual `tokio::runtime::Builder::new_multi_thread().build()?.block_on()`. Pattern lives in `crates/k2so-daemon/src/main.rs::main` (added in Unit 2).
+
+**Implication for any unit that adds a subprocess worker entry point** (Unit 3 might if PTY reader processes go subprocess-ish; future R&D for sandboxed plugins): reuse the existing split, don't re-introduce `#[tokio::main]`.
+
+### F5. Long-running sync handlers belong on `tokio::task::spawn_blocking`
+
+Daemon HTTP handlers that do blocking work (multi-second LLM inference, large file I/O, libgit2 ops) must run inside `tokio::task::spawn_blocking` so the runtime's accept-loop threads stay free. Pattern in `crates/k2so-daemon/src/main.rs` under `"/cli/llm/chat"` (Unit 2).
+
+**Implication for Units 3, 4, 6**: any `/cli/*` handler that does blocking I/O (git status on a huge repo, large file reads in `/cli/fs/*`, PTY spawn) wraps the handler call in `spawn_blocking`. Don't block the accept loop.
+
+### F3. Two writers to `~/.k2so/settings.json` until Unit 7a consolidates
 
 After Unit 1, both Tauri's `settings_update` and the daemon's `companion_host::persist_companion_password_fields` write to the same file. Both use tmp+rename so reads are never torn, but there's no merge-on-write protection — the race window is single-digit milliseconds. **Tauri's `crate::companion::invalidate_all_sessions()` in `src-tauri/src/commands/settings.rs::settings_update` is now a no-op** because Tauri's in-process `STATE` is empty post-Unit-1; it's marked `TODO Phase 2 Unit 7`.
 
@@ -637,11 +649,11 @@ After done: enter Phase 3 (contract hardening — TLS, auth, OpenAPI export, Mob
 | Unit | Status | Branch / Commit | Notes |
 |---|---|---|---|
 | 1 — Companion + ngrok | **Merged to main** 2026-05-23 | `02efb165` | Keystone landed. Headless smoke verified: daemon-only run brings up ngrok at `https://k2.ngrok.app` without Tauri. See findings F1–F3. |
-| 2 — LLM subprocess | pending | — | Wave A |
-| 3 — Terminal PTY | pending | — | Wave B (after Unit 2 merges) — use F2 tokio-handle pattern |
-| 4 — DB-direct writes | pending | — | Wave C (after Unit 3 merges) |
-| 5 — Claude Auth | pending | — | Wave A — Keychain spike first |
-| 6 — FS + Chat + Themes + Skills + Review + ProjectConfig + WhatsNew | pending | — | Wave A — largest LoC |
+| 2 — LLM subprocess | **Merged to main** 2026-05-23 | `61300b84` | Supervisor: 60s timeout, 3GB RSS cap, max-inflight 1, queue depth 4, lazy auto-respawn. Resilience smoke confirmed: `pkill -9` worker mid-flight → 502 + daemon stays up + next chat respawns in <2s. Findings F4 + F5 below. Streaming chat deferred to Phase 3. |
+| 3 — Terminal PTY | pending | — | Wave B (after Unit 2 merges) — use F2 tokio-handle pattern + F5 spawn_blocking |
+| 4 — DB-direct writes | pending | — | Wave C (after Unit 3 merges) — use F5 spawn_blocking for large libgit2 ops |
+| 5 — Claude Auth | **Merged to main** 2026-05-23 | `24ac632d` | Keychain spike PASSED. Method-gate gap discovered during smoke + backported to Unit 1's companion routes (`0298be18`); saved as `feedback_post_only_route_guards` memory. TODO Phase 2.1 left to retarget plist script at `k2so claude-auth refresh-now`. |
+| 6 — FS + Chat + Themes + Skills + Review + ProjectConfig + WhatsNew | pending | — | Wave A — largest LoC; use F5 spawn_blocking for large reads |
 | 7a — App Settings + F3 close | pending | — | Wave A — bounded; closes the correctness gap Phase 3 needs |
 | 7b — SKILL scaffolding + migration helpers → k2so-core | pending | — | Can land alongside 7a; no Tauri-command churn |
 | 7c — `k2so_agents` BRIDGE deletion + heartbeat-launchd MIGRATE | pending | — | After 7b empties the bodies; daemon owns its own heartbeat plist |

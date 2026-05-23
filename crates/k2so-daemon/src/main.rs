@@ -847,6 +847,20 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             send_response(&mut stream, r.status, r.content_type, &r.body).await;
         }
         "/cli/llm/chat" => {
+            // Method gate (see feedback_post_only_route_guards memory + the
+            // /cli/claude-auth/refresh-now comment): the top-level dispatch
+            // lets a GET through on POST-allowlisted routes. Reject explicitly.
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -875,6 +889,17 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             send_response(&mut stream, r.status, r.content_type, &r.body).await;
         }
         "/cli/llm/load-model" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -900,6 +925,17 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             send_response(&mut stream, r.status, r.content_type, &r.body).await;
         }
         "/cli/llm/download-default" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
