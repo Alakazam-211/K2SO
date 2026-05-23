@@ -1177,12 +1177,9 @@ pub fn run() {
             commands::workspace_layouts::workspace_layout_load,
             commands::workspace_layouts::workspace_layout_load_all,
             commands::workspace_layouts::workspace_layout_delete,
-            // Claude Auth
-            commands::claude_auth::claude_auth_status,
-            commands::claude_auth::claude_auth_refresh,
-            commands::claude_auth::claude_auth_install_scheduler,
-            commands::claude_auth::claude_auth_uninstall_scheduler,
-            commands::claude_auth::claude_auth_scheduler_installed,
+            // Claude Auth: Phase 2 Unit 5 — moved to daemon
+            // (`/cli/claude-auth/*`). Renderer hits the daemon
+            // directly; no Tauri command surface remains.
             // K2SO Agents
             commands::k2so_agents::k2so_agents_list,
             commands::k2so_agents::k2so_agents_create,

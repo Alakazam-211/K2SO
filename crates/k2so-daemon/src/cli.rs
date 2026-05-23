@@ -1369,6 +1369,15 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             }
         }
 
+        // ── Phase 2 Unit 5: Claude Auth (GET status only) ───────────
+        //
+        // The three mutating routes — refresh-now, install-scheduler,
+        // uninstall-scheduler — are wired as explicit POST branches
+        // in `main.rs` (mirrors how Unit 1 wired the POST companion
+        // routes). Only the read-only status check goes through the
+        // generic GET dispatch.
+        "/cli/claude-auth/status" => crate::claude_auth_host::handle_status(),
+
         _ => CliResponse::not_found(),
     }
 }

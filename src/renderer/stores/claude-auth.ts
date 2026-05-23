@@ -1,5 +1,11 @@
 import { create } from 'zustand'
-import { invoke } from '@tauri-apps/api/core'
+import { getDaemonWs } from '@/kessel/daemon-ws'
+
+// Phase 2 Unit 5 — Claude Auth scheduler lives in k2so-daemon
+// (`/cli/claude-auth/*`). The Tauri-side `claude_auth_*` commands
+// were deleted along with `src-tauri/src/commands/claude_auth.rs`.
+// Helpers below call the daemon directly so the Settings panel
+// keeps working with no `invoke` shim in the middle.
 
 export type ClaudeAuthState = 'valid' | 'expiring' | 'expired' | 'missing' | 'unknown'
 
@@ -24,6 +30,67 @@ interface ClaudeAuthStore {
   uninstallScheduler: () => Promise<void>
 }
 
+async function daemonGet(pathSuffix: string): Promise<Response> {
+  const { port, token } = await getDaemonWs()
+  return fetch(
+    `http://127.0.0.1:${port}/cli/claude-auth/${pathSuffix}?token=${token}`,
+    { method: 'GET' },
+  )
+}
+
+async function daemonPost(pathSuffix: string): Promise<Response> {
+  const { port, token } = await getDaemonWs()
+  return fetch(
+    `http://127.0.0.1:${port}/cli/claude-auth/${pathSuffix}?token=${token}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    },
+  )
+}
+
+async function readDaemonError(res: Response, fallback: string): Promise<string> {
+  const text = await res.text()
+  try {
+    const parsed = JSON.parse(text)
+    if (parsed && typeof parsed.error === 'string') return parsed.error
+  } catch {
+    /* keep raw text */
+  }
+  return text || fallback
+}
+
+async function statusFromDaemon(): Promise<ClaudeAuthStatusResponse> {
+  const res = await daemonGet('status')
+  if (!res.ok) {
+    throw new Error(await readDaemonError(res, `claude-auth status ${res.status}`))
+  }
+  return (await res.json()) as ClaudeAuthStatusResponse
+}
+
+async function refreshOnDaemon(): Promise<ClaudeAuthStatusResponse> {
+  const res = await daemonPost('refresh-now')
+  if (!res.ok) {
+    throw new Error(await readDaemonError(res, `claude-auth refresh-now ${res.status}`))
+  }
+  return (await res.json()) as ClaudeAuthStatusResponse
+}
+
+async function installSchedulerOnDaemon(): Promise<void> {
+  const res = await daemonPost('install-scheduler')
+  if (!res.ok) {
+    throw new Error(await readDaemonError(res, `claude-auth install-scheduler ${res.status}`))
+  }
+}
+
+async function uninstallSchedulerOnDaemon(): Promise<void> {
+  const res = await daemonPost('uninstall-scheduler')
+  if (!res.ok) {
+    throw new Error(await readDaemonError(res, `claude-auth uninstall-scheduler ${res.status}`))
+  }
+}
+
 export const useClaudeAuthStore = create<ClaudeAuthStore>((set) => ({
   state: 'unknown',
   expiresAt: null,
@@ -34,7 +101,7 @@ export const useClaudeAuthStore = create<ClaudeAuthStore>((set) => ({
 
   fetchStatus: async () => {
     try {
-      const status = await invoke<ClaudeAuthStatusResponse>('claude_auth_status')
+      const status = await statusFromDaemon()
       set({
         state: status.state as ClaudeAuthState,
         expiresAt: status.expiresAt,
@@ -50,7 +117,7 @@ export const useClaudeAuthStore = create<ClaudeAuthStore>((set) => ({
   refresh: async () => {
     set({ refreshing: true, lastError: null })
     try {
-      const status = await invoke<ClaudeAuthStatusResponse>('claude_auth_refresh')
+      const status = await refreshOnDaemon()
       set({
         state: status.state as ClaudeAuthState,
         expiresAt: status.expiresAt,
@@ -65,7 +132,7 @@ export const useClaudeAuthStore = create<ClaudeAuthStore>((set) => ({
 
   installScheduler: async () => {
     try {
-      await invoke('claude_auth_install_scheduler')
+      await installSchedulerOnDaemon()
       set({ schedulerInstalled: true, lastError: null })
     } catch (e) {
       set({ lastError: String(e) })
@@ -75,7 +142,7 @@ export const useClaudeAuthStore = create<ClaudeAuthStore>((set) => ({
 
   uninstallScheduler: async () => {
     try {
-      await invoke('claude_auth_uninstall_scheduler')
+      await uninstallSchedulerOnDaemon()
       set({ schedulerInstalled: false, lastError: null })
     } catch (e) {
       set({ lastError: String(e) })

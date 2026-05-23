@@ -37,6 +37,7 @@
 mod agents_routes;
 mod awareness_ws;
 mod canonical_session;
+mod claude_auth_host;
 mod cli;
 mod cli_response;
 mod companion_host;
@@ -476,6 +477,14 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             // intermediaries.
             | "/cli/companion/set-password"
             | "/cli/companion/disconnect-session"
+            // Phase 2 Unit 5 — Claude Auth mutating routes. POST
+            // (not GET) so they're not idempotent-cached by any
+            // future proxy and so they parallel Unit 1's pattern
+            // for "this writes state". The status read-side stays
+            // a GET and goes through `cli::dispatch`.
+            | "/cli/claude-auth/refresh-now"
+            | "/cli/claude-auth/install-scheduler"
+            | "/cli/claude-auth/uninstall-scheduler"
     );
     if method != "GET" && !(is_post && post_allowed) {
         let _ = stream.read(&mut buf).await;
@@ -758,6 +767,113 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             let body_bytes = read_post_body(&mut stream, &mut buf).await;
             let result =
                 companion_routes::handle_companion_disconnect_session(&body_bytes);
+            send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/claude-auth/refresh-now — Phase 2 Unit 5.
+        // No body required (the refresh token comes from the local
+        // Keychain / credentials file). POST instead of GET because
+        // it mutates token state. Returns the same status payload
+        // shape as GET /cli/claude-auth/status.
+        //
+        // NOTE on method gating: the top-level dispatch only rejects
+        // non-GET/non-POST methods; it doesn't reject GET on a
+        // POST-allowlisted route (most routes accept both today and
+        // gate behavior on body-presence). For Unit 5's mutating
+        // routes — which have no body — we must explicitly reject
+        // GET in the handler, or a curl GET would silently install /
+        // refresh / uninstall the user's launchd scheduler. Caught
+        // during smoke testing.
+        "/cli/claude-auth/refresh-now" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            // Drain whatever body the client sent so the socket
+            // doesn't get half-read state. We don't use it.
+            let _ = read_post_body(&mut stream, &mut buf).await;
+            let result = claude_auth_host::handle_refresh_now();
+            send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/claude-auth/install-scheduler — Phase 2 Unit 5.
+        // Writes ~/.k2so/claude-auth-refresh.sh + loads the
+        // launchd plist (macOS) or installs the crontab entry
+        // (linux). Idempotent. POST-only (see /refresh-now comment).
+        "/cli/claude-auth/install-scheduler" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let _ = read_post_body(&mut stream, &mut buf).await;
+            let result = claude_auth_host::handle_install_scheduler();
+            send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/claude-auth/uninstall-scheduler — Phase 2 Unit 5.
+        // Unloads + removes the plist (macOS) or strips the
+        // crontab entry (linux). Idempotent. POST-only.
+        "/cli/claude-auth/uninstall-scheduler" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let _ = read_post_body(&mut stream, &mut buf).await;
+            let result = claude_auth_host::handle_uninstall_scheduler();
             send_response(&mut stream, result.status, "application/json", &result.body)
                 .await;
         }
