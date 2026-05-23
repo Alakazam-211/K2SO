@@ -51,13 +51,11 @@ mod state;
 // in-process. Small for now (ping + status); grows as daemon handlers
 // land.
 mod daemon_client;
-// Tauri-backed provider for k2so-core::companion::settings_bridge,
-// registered in setup() before the companion module reads credentials.
-mod companion_settings_provider;
-// Tauri-backed providers for k2so-core::companion's terminal /
-// event-sink / app-event-source bridges. Needs an AppHandle so lives
-// behind a register() call in setup().
-mod companion_host;
+// Phase 2 Unit 1 — companion bridges (settings + terminal + event
+// sink + app event source) moved to k2so-daemon. The daemon now
+// owns the ngrok tunnel and registers its own providers against
+// k2so-core's companion ambient slots. Tauri no longer needs these
+// shims because the renderer talks to `/cli/companion/*` directly.
 // Tauri-backed AgentHookEventSink impl registered in setup() — routes
 // agent-hook events (agent:lifecycle, agent:reply, sync:projects, …)
 // back onto Tauri's event bus.
@@ -255,12 +253,12 @@ pub fn run() {
     // first TLS use unless a provider is explicitly installed.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    // Wire up k2so-core's companion settings bridge to this app's
-    // settings.json. Must happen before the companion tunnel ever
-    // starts or any WS client authenticates.
-    k2so_core::companion::settings_bridge::set_provider(Box::new(
-        companion_settings_provider::TauriCompanionSettingsProvider,
-    ));
+    // Phase 2 Unit 1 — companion settings bridge moved to
+    // k2so-daemon. The daemon now reads settings.json directly via
+    // its own `DaemonCompanionSettingsProvider`. Tauri no longer
+    // registers a provider; the renderer reaches the companion
+    // tunnel via `/cli/companion/*` on the daemon, so this process
+    // doesn't need one.
 
     let db_handle = perf_timer!("startup_db_init", {
         match db::init_database() {
@@ -316,10 +314,12 @@ pub fn run() {
             }
             let _setup_guard = SetupGuard(__setup_start);
 
-            // Register Tauri-side impls for k2so-core's companion
-            // terminal / event-sink / app-event-source bridges. Must
-            // happen before any companion code runs or subscribes.
-            companion_host::register(app.handle().clone());
+            // Phase 2 Unit 1 — companion terminal / event-sink /
+            // app-event-source bridges moved to k2so-daemon. The
+            // daemon registers daemon-owned impls
+            // (`crates/k2so-daemon/src/companion_host.rs`) since the
+            // tunnel + WS clients now live there. Tauri no longer
+            // wires these bridges.
 
             // Agent-hook event sink: routes k2so_core::agent_hooks::emit
             // onto AppHandle::emit. Registered before any hook HTTP
@@ -919,43 +919,16 @@ pub fn run() {
                 // ownership, so this loop is gone.
             }
 
-            // Auto-start companion API if configured
-            {
-                let settings = commands::settings::read_settings();
-                if settings.companion.auto_start
-                    && !settings.companion.username.is_empty()
-                    && !settings.companion.password_hash.is_empty()
-                    && !settings.companion.ngrok_auth_token.is_empty()
-                {
-                    let handle = app.handle().clone();
-                    std::thread::spawn(move || {
-                        // Wait for hook server to initialize
-                        std::thread::sleep(std::time::Duration::from_secs(3));
-                        // Retry with backoff — ngrok free tier allows one session at a time.
-                        // If the app was killed, the old session lingers for ~30-60s on ngrok's side.
-                        let delays = [0, 5, 10, 20]; // seconds between retries
-                        for (i, delay) in delays.iter().enumerate() {
-                            if *delay > 0 {
-                                log_debug!("[companion] Auto-start retry {} in {}s...", i + 1, delay);
-                                std::thread::sleep(std::time::Duration::from_secs(*delay));
-                            }
-                            match companion::start_companion() {
-                                Ok(url) => {
-                                    log_debug!("[companion] Auto-started: {}", url);
-                                    return;
-                                }
-                                Err(e) => {
-                                    log_debug!("[companion] Auto-start attempt {} failed: {}", i + 1, e);
-                                    if e.contains("already running") || e.contains("cancelled") {
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                        log_debug!("[companion] Auto-start gave up after {} attempts", delays.len());
-                    });
-                }
-            }
+            // Phase 2 Unit 1 — companion ngrok tunnel autostart moved
+            // to k2so-daemon. The daemon now reads `companion.auto_start`
+            // from `~/.k2so/settings.json` on its own first boot and
+            // brings the tunnel up itself (see
+            // `crates/k2so-daemon/src/companion_host.rs::maybe_autostart`).
+            //
+            // Owning the tunnel daemon-side closes the K2SO Connect +
+            // Mobile Companion gap: with Tauri closed (or running on a
+            // different machine entirely), the daemon's tunnel stays
+            // reachable.
 
             // Clean up any stale .tmp files from interrupted model downloads
             llm::download::cleanup_stale_downloads();
@@ -1325,12 +1298,10 @@ pub fn run() {
             commands::skill_layers::skill_layers_create,
             commands::skill_layers::skill_layers_delete,
             commands::skill_layers::skill_layers_get_content,
-            // Companion API
-            commands::companion::companion_start,
-            commands::companion::companion_stop,
-            commands::companion::companion_status,
-            commands::companion::companion_set_password,
-            commands::companion::companion_disconnect_session,
+            // Phase 2 Unit 1 — companion API commands deleted; the
+            // renderer now calls `/cli/companion/{start,stop,status,
+            // set-password,disconnect-session}` on the daemon
+            // directly (see `CompanionSection.tsx`).
             // k2so-daemon lifecycle (Settings panel reads this to show
             // "daemon: running / not installed / unreachable") and
             // controls the launch agent install/uninstall/restart.

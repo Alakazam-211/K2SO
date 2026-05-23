@@ -1,7 +1,97 @@
 import React from 'react'
 import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { getDaemonWs } from '@/kessel/daemon-ws'
 import type { SettingEntry } from '../searchManifest'
+
+// Phase 2 Unit 1 — Companion tunnel lifecycle now lives in
+// k2so-daemon (`/cli/companion/*`). The Tauri-side
+// `companion_start`/`companion_stop`/`companion_status`/
+// `companion_set_password`/`companion_disconnect_session` commands
+// were deleted along with `src-tauri/src/commands/companion.rs`.
+//
+// Helpers below call the daemon directly so the Settings panel
+// keeps working with no `invoke` shim in the middle. The settings
+// reads/writes (username, ngrok token, etc.) still go through
+// Tauri's `settings_*` commands — that migration is Unit 7.
+
+interface CompanionStatus {
+  running: boolean
+  tunnelUrl?: string | null
+  connectedClients?: number
+  wsClients?: number
+  sessions?: Array<{ token: string; remoteAddr: string; createdAt: string }>
+}
+
+async function daemonGet(pathSuffix: string): Promise<Response> {
+  const { port, token } = await getDaemonWs()
+  return fetch(
+    `http://127.0.0.1:${port}/cli/companion/${pathSuffix}?token=${token}`,
+    { method: 'GET' },
+  )
+}
+
+async function daemonPostJson(
+  pathSuffix: string,
+  body: unknown,
+): Promise<Response> {
+  const { port, token } = await getDaemonWs()
+  return fetch(
+    `http://127.0.0.1:${port}/cli/companion/${pathSuffix}?token=${token}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  )
+}
+
+async function companionStatus(): Promise<CompanionStatus> {
+  const res = await daemonGet('status')
+  if (!res.ok) throw new Error(`companion status ${res.status}`)
+  return (await res.json()) as CompanionStatus
+}
+
+async function companionStart(): Promise<string> {
+  const res = await daemonGet('start')
+  const text = await res.text()
+  if (!res.ok) {
+    let msg = text
+    try {
+      const parsed = JSON.parse(text)
+      if (parsed && typeof parsed.error === 'string') msg = parsed.error
+    } catch {
+      /* keep raw text */
+    }
+    throw new Error(msg || `companion start ${res.status}`)
+  }
+  // Response shape: {"ok":true,"url":"..."}
+  try {
+    const parsed = JSON.parse(text)
+    if (parsed && typeof parsed.url === 'string') return parsed.url
+  } catch {
+    /* fall through */
+  }
+  return text
+}
+
+async function companionStop(): Promise<void> {
+  const res = await daemonGet('stop')
+  if (!res.ok) throw new Error(`companion stop ${res.status}`)
+}
+
+async function companionSetPassword(password: string): Promise<void> {
+  const res = await daemonPostJson('set-password', { password })
+  if (!res.ok) {
+    const body = await res.text()
+    throw new Error(body || `companion set-password ${res.status}`)
+  }
+}
+
+async function companionDisconnectSession(token: string): Promise<void> {
+  const res = await daemonPostJson('disconnect-session', { sessionToken: token })
+  if (!res.ok) throw new Error(`companion disconnect ${res.status}`)
+}
 
 export const COMPANION_MANIFEST: SettingEntry[] = [
   { id: 'companion.enable', section: 'companion', label: 'Enable Companion', description: 'Start the ngrok tunnel for the K2SO mobile companion app', keywords: ['mobile', 'companion', 'remote', 'ngrok', 'tunnel'] },
@@ -46,7 +136,7 @@ export function CompanionSection(): React.JSX.Element {
         setAllowRemoteSpawn(!!c.allowRemoteSpawn)
       } catch { /* ignore */ }
       try {
-        const status = await invoke<any>('companion_status')
+        const status = await companionStatus()
         if (status.running) {
           setEnabled(true)
           if (status.tunnelUrl) {
@@ -68,7 +158,7 @@ export function CompanionSection(): React.JSX.Element {
     if (!enabled && !autoStart) return
     const interval = setInterval(async () => {
       try {
-        const status = await invoke<any>('companion_status')
+        const status = await companionStatus()
         if (!status.running) {
           if (enabled) {
             // Tunnel genuinely stopped
@@ -96,7 +186,7 @@ export function CompanionSection(): React.JSX.Element {
     setError(null)
     try {
       if (enabled) {
-        await invoke('companion_stop')
+        await companionStop()
         setEnabled(false)
         setTunnelUrl(null)
         setConnectedClients(0)
@@ -106,7 +196,7 @@ export function CompanionSection(): React.JSX.Element {
         await invoke('settings_update', {
           updates: { companion: { enabled: true, username, ngrokAuthToken: ngrokToken } }
         })
-        const url = await invoke<string>('companion_start')
+        const url = await companionStart()
         setEnabled(true)
         setTunnelUrl(url)
       }
@@ -120,7 +210,7 @@ export function CompanionSection(): React.JSX.Element {
   const handleSetPassword = async () => {
     if (!password) return
     try {
-      await invoke('companion_set_password', { password })
+      await companionSetPassword(password)
       setPasswordSet(true)
       setPassword('')
     } catch (err: any) {
@@ -130,7 +220,7 @@ export function CompanionSection(): React.JSX.Element {
 
   const handleDisconnect = async (token: string) => {
     try {
-      await invoke('companion_disconnect_session', { sessionToken: token })
+      await companionDisconnectSession(token)
       setSessions((prev) => prev.filter((s) => s.token !== token))
     } catch { /* ignore */ }
   }

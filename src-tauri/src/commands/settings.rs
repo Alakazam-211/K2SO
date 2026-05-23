@@ -497,6 +497,17 @@ pub fn settings_update(app: AppHandle, updates: serde_json::Value) -> Result<App
     write_settings(&merged);
 
     if creds_changed {
+        // TODO Phase 2 Unit 7 — settings owner moves to daemon. This
+        // in-process invalidate is a no-op now that the companion
+        // runtime lives in the daemon (Tauri's `STATE` is always
+        // None post-Unit-1), so any tokens issued before a Tauri
+        // settings_update of `companion.username`/`passwordHash`
+        // stay live until the daemon's TTL expires. The renderer's
+        // password-rotate path goes through
+        // `/cli/companion/set-password` (which invalidates daemon-
+        // side), so the practical gap is narrow. Closing it
+        // properly needs Tauri's settings_update to route through
+        // `/cli/settings/update` — that's Unit 7.
         crate::companion::invalidate_all_sessions("credentials changed");
         let _ = app.emit("companion:sessions_invalidated", ());
     }
@@ -527,6 +538,11 @@ pub fn settings_reset(app: AppHandle) -> Result<AppSettings, String> {
     // A reset clears everything — the Keychain password has to go too, or
     // it becomes an undiscoverable secret that re-activates if the user
     // reconfigures companion.
+    // Keychain deletes work from any process via the `security` CLI,
+    // so this still propagates correctly to the daemon-owned
+    // tunnel. The invalidate below is a no-op on the Tauri side
+    // (see TODO above) — Unit 7 routes settings_reset through the
+    // daemon and closes this gap.
     crate::companion::keychain::delete_password_hash();
     crate::companion::invalidate_all_sessions("settings reset");
     let _ = app.emit("companion:sessions_invalidated", ());

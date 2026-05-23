@@ -62,6 +62,14 @@ futures-util = "0.3"
 # time (closes the concurrent-fires-share-session race).
 uuid = { version = "1", features = ["v4"] }
 
+# rustls — installed at daemon boot so the companion ngrok tunnel
+# can build a TLS session. Rustls 0.23 compiles both aws-lc-rs (via
+# reqwest's rustls-tls) and ring (via ngrok) into the binary; it
+# refuses to auto-pick and panics on first TLS use unless a
+# CryptoProvider is explicitly installed. Same pattern as src-tauri.
+# Required by Phase 2 Unit 1's daemon-owned companion autostart.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+
 [dev-dependencies]
 # Enable k2so-core's `test-util` feature for integration tests that
 # need the in-memory DB helper (`db::init_for_tests`). Production

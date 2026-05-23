@@ -39,6 +39,7 @@ mod awareness_ws;
 mod canonical_session;
 mod cli;
 mod cli_response;
+mod companion_host;
 mod companion_routes;
 mod events;
 mod heartbeat_launch;
@@ -115,6 +116,14 @@ async fn main() {
     // homebrew binaries, etc. See docs in k2so_core::enrich_path_from_login_shell.
     #[cfg(unix)]
     k2so_core::enrich_path_from_login_shell();
+
+    // Phase 2 Unit 1 — install a rustls CryptoProvider so the
+    // daemon-owned companion ngrok tunnel can negotiate TLS. Rustls
+    // 0.23 compiles both aws-lc-rs (via reqwest rustls-tls) and ring
+    // (via ngrok) into the binary; it refuses to auto-pick and
+    // panics on first TLS use unless a provider is explicitly
+    // installed. Mirrors the same call in src-tauri/src/lib.rs.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     log_debug!("[daemon] {}", BANNER);
 
@@ -276,6 +285,24 @@ async fn main() {
     // sessions. Before this, signals to live targets landed in the
     // bus + activity_feed but never in the target's PTY.
     providers::register_all();
+
+    // Phase 2 Unit 1 — register daemon-side companion bridges so
+    // k2so-core's companion module can run without Tauri being
+    // present. The terminal/settings/event bridges all read from
+    // daemon-owned state (TerminalManager singleton, ~/.k2so/settings.json,
+    // the broadcast event channel created above). Must precede the
+    // autostart fire below so the tunnel start sees a configured
+    // settings provider.
+    companion_host::register((*event_tx).clone());
+
+    // First-boot companion autostart. If `companion.auto_start` is
+    // true and credentials are present, kick off `start_companion()`
+    // on a detached thread (the tunnel takes a few seconds to come
+    // up and we don't want to block daemon boot on ngrok). Replaces
+    // the pre-Phase-2 Tauri-side autostart in `src-tauri/src/lib.rs`
+    // — the daemon now owns the tunnel lifecycle so Mobile Companion
+    // + K2SO Connect can reach it even with Tauri closed.
+    companion_host::maybe_autostart();
 
     // Phase 3.1 F3 — boot-time pending-live replay. Previous
     // 0.37.5 migration: legacy `<sanitized_pid>_<agent>/` queue dirs
@@ -443,6 +470,12 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         "/cli/awareness/publish"
             | "/cli/sessions/v2/spawn"
             | "/cli/sessions/v2/close"
+            // Phase 2 Unit 1 — body-bearing companion control routes.
+            // Password and session-token live in the body so they
+            // don't end up in URL-logged form on shared/loopback
+            // intermediaries.
+            | "/cli/companion/set-password"
+            | "/cli/companion/disconnect-session"
     );
     if method != "GET" && !(is_post && post_allowed) {
         let _ = stream.read(&mut buf).await;
@@ -682,6 +715,49 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             }
             let body_bytes = read_post_body(&mut stream, &mut buf).await;
             let result = v2_spawn::handle_v2_close(&body_bytes);
+            send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/companion/set-password — Phase 2 Unit 1.
+        // Body: `{"password": "..."}`. Hashes argon2id, stores in
+        // macOS Keychain (preferred) or settings.json (fallback),
+        // then invalidates every live companion session so the old
+        // token can't be replayed.
+        "/cli/companion/set-password" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let result = companion_routes::handle_companion_set_password(&body_bytes);
+            send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/companion/disconnect-session — Phase 2 Unit 1.
+        // Body: `{"sessionToken": "..."}`. Removes the session row
+        // and any WS clients still attached to it.
+        "/cli/companion/disconnect-session" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let result =
+                companion_routes::handle_companion_disconnect_session(&body_bytes);
             send_response(&mut stream, result.status, "application/json", &result.body)
                 .await;
         }

@@ -49,6 +49,10 @@ pub struct CompanionSettingsSnapshot {
     /// Opt-in: allow remote-spawn of shell commands. A real exposure
     /// increase — the startup banner warns about this.
     pub allow_remote_spawn: bool,
+    /// Whether the companion tunnel should be auto-started on host
+    /// boot. Read by the daemon's first-boot hook (Phase 2 Unit 1) so
+    /// the tunnel comes up without requiring Tauri to be running.
+    pub auto_start: bool,
 }
 
 /// Implemented by the Tauri app. `&self` methods so an `Arc` can live

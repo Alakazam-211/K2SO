@@ -20,7 +20,9 @@ pub mod review_checklist;
 pub mod format;
 pub mod themes;
 pub mod states;
-pub mod companion;
+// Phase 2 Unit 1 — `companion` command shims deleted. The renderer
+// hits `/cli/companion/*` on k2so-daemon directly; no Tauri-side
+// command surface for it remains.
 pub mod daemon;
 pub mod skill_layers;
 pub mod permissions;
