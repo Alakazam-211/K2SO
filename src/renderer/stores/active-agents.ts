@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
+import { daemonCliGet } from '@/lib/daemon-cli'
 import { useTabsStore, type TerminalItemData } from './tabs'
 import { useToastStore } from './toast'
 import { useProjectsStore } from './projects'
@@ -651,10 +652,11 @@ export function startAgentPolling(): void {
         // Detect and save session ID after a brief delay
         setTimeout(async () => {
           try {
-            const sessionId = await invoke<string | null>('chat_history_detect_active_session', {
+            const r = await daemonCliGet<{ sessionId: string | null }>('chat/detect-active', {
               provider: 'claude',
-              projectPath: cwd,
+              project_path: cwd,
             })
+            const sessionId = r.sessionId
             if (sessionId) {
               invoke('k2so_agents_save_session_id', {
                 projectPath: cwd,

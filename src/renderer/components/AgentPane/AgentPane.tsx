@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { daemonCliGet } from '@/lib/daemon-cli'
 import { useTabsStore } from '@/stores/tabs'
 import { useProjectsStore } from '@/stores/projects'
 import { addNavWorktree } from '@/components/Sidebar/Sidebar'
@@ -112,7 +113,7 @@ function WorktreeDetailPane({ worktreeId, projectPath }: { worktreeId: string; p
         })
         if (items.length > 0) {
           const taskPath = `${projectPath}/.k2so/agents/${agentTemplate}/work/active/${items[0].filename}`
-          const result = await invoke<{ content: string }>('fs_read_file', { path: taskPath })
+          const result = await daemonCliGet<{ content: string }>('fs/read-file', { path: taskPath })
           setTaskContent(result.content)
         } else {
           setTaskContent('')
@@ -137,7 +138,7 @@ function WorktreeDetailPane({ worktreeId, projectPath }: { worktreeId: string; p
         if (items.length > 0) {
           setReviewAvailable(true)
           const reviewPath = `${projectPath}/.k2so/agents/${agentTemplate}/work/done/${items[0].filename}`
-          const result = await invoke<{ content: string }>('fs_read_file', { path: reviewPath })
+          const result = await daemonCliGet<{ content: string }>('fs/read-file', { path: reviewPath })
           setReviewContent(result.content)
         } else {
           setReviewAvailable(false)

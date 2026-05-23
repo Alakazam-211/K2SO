@@ -4,6 +4,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useActiveAgentsStore } from '@/stores/active-agents'
 import { useHeartbeatSessionsStore } from '@/stores/heartbeat-sessions'
 import { invoke } from '@tauri-apps/api/core'
+import { daemonCliPost } from '@/lib/daemon-cli'
 import { startTabDrag } from '@/components/Terminal/TerminalArea'
 import { showContextMenu } from '@/lib/context-menu'
 import AgentCloseDialog from '@/components/AgentCloseDialog/AgentCloseDialog'
@@ -280,9 +281,9 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
         removeTabFromGroup(groupIndex, tab.id)
       }
     } else if (clickedId === 'show-in-finder' && fileViewerPath) {
-      invoke('fs_open_in_finder', { path: fileViewerPath }).catch((err) => console.warn('[tab-bar] show-in-finder', err))
+      daemonCliPost('fs/open-finder', { target: fileViewerPath }).catch((err) => console.warn('[tab-bar] show-in-finder', err))
     } else if (clickedId === 'copy-file-path' && fileViewerPath) {
-      invoke('fs_copy_path', { path: fileViewerPath }).catch((err) => console.warn('[tab-bar] copy-file-path', err))
+      navigator.clipboard.writeText(fileViewerPath).catch((err) => console.warn('[tab-bar] copy-file-path', err))
     } else if (clickedId === 'copy-terminal-id' && tabTerminalId) {
       // 0.37.11 — Copy the RAW terminal id (v2 session UUID or
       // canonical key). Pre-fix this constructed a

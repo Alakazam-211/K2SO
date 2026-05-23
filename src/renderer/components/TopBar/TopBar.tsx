@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { TOPBAR_HEIGHT } from '../../../shared/constants'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { daemonCliGet } from '@/lib/daemon-cli'
 import { useSettingsStore } from '@/stores/settings'
 import { useTabsStore } from '@/stores/tabs'
 import { useReviewQueueStore } from '@/stores/review-queue'
@@ -43,9 +44,9 @@ export default function TopBar({
     }
 
     let cancelled = false
-    invoke<boolean>('project_config_has_run_command', { path: projectPath })
-      .then((result) => {
-        if (!cancelled) setHasRun(result)
+    daemonCliGet<{ hasRunCommand: boolean }>('project-config/has-run-command', { project: projectPath })
+      .then((r) => {
+        if (!cancelled) setHasRun(r.hasRunCommand)
       })
       .catch(() => {
         if (!cancelled) setHasRun(false)
@@ -59,7 +60,7 @@ export default function TopBar({
   const handleRun = async (): Promise<void> => {
     if (!projectPath || !onRunCommand) return
     try {
-      const result = await invoke<{ command: string }>('project_config_run_command', { path: projectPath })
+      const result = await daemonCliGet<{ command: string }>('project-config/run-command', { project: projectPath })
       onRunCommand(result.command)
     } catch {
       // No run command configured

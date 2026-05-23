@@ -2,6 +2,7 @@ import React from 'react'
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { useSettingsStore } from '@/stores/settings'
 import { useProjectsStore, type ProjectWithWorkspaces } from '@/stores/projects'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
@@ -1919,7 +1920,7 @@ function ProjectContextEditor({ projectPath, projectName, onClose }: { projectPa
 
   // Load content
   useEffect(() => {
-    invoke<{ content: string }>('fs_read_file', { path: filePath })
+    daemonCliGet<{ content: string }>('fs/read-file', { path: filePath })
       .then((r) => setContent(r.content))
       .catch(() => setContent(''))
   }, [filePath])
@@ -2030,7 +2031,7 @@ function ProjectContextEditor({ projectPath, projectName, onClose }: { projectPa
                 code={content}
                 filePath={filePath}
                 onSave={async (c) => {
-                  try { await invoke('fs_write_file', { path: filePath, content: c }) } catch {}
+                  try { await daemonCliPost('fs/write-file', { path: filePath, content: c }) } catch {}
                 }}
                 onChange={(c) => setContent(c)}
               />
@@ -2073,7 +2074,7 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
   }, [defaultAgent, presets])
 
   useEffect(() => {
-    invoke<{ content: string }>('fs_read_file', { path: filePath })
+    daemonCliGet<{ content: string }>('fs/read-file', { path: filePath })
       .then((r) => setContent(r.content))
       .catch(() => setContent(''))
   }, [filePath])
@@ -2202,7 +2203,7 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
                 code={content}
                 filePath={filePath}
                 onSave={async (c) => {
-                  try { await invoke('fs_write_file', { path: filePath, content: c }) } catch {}
+                  try { await daemonCliPost('fs/write-file', { path: filePath, content: c }) } catch {}
                 }}
                 onChange={(c) => setContent(c)}
               />
@@ -3017,7 +3018,7 @@ function CursorMigrationPanel({ projectPath }: { projectPath: string }): React.J
 
   const fetchIdeSessions = useCallback(async () => {
     try {
-      const result = await invoke<CursorIdeSession[]>('chat_history_discover_ide_sessions', { projectPath })
+      const result = await daemonCliGet<CursorIdeSession[]>('chat/discover-ide', { project_path: projectPath })
       setSessions(result)
     } catch {
       setSessions([])
@@ -3046,10 +3047,11 @@ function CursorMigrationPanel({ projectPath }: { projectPath: string }): React.J
     for (const session of unmigratedSessions) {
       setMigratingIds(new Set([session.composerId]))
       try {
-        const count = await invoke<number>('chat_history_migrate_ide_sessions', {
-          projectPath,
-          composerIds: [session.composerId],
+        const r = await daemonCliPost<{ migrated: number }>('chat/migrate-ide', {
+          project_path: projectPath,
+          composer_ids: [session.composerId],
         })
+        const count = r.migrated
         if (count > 0) {
           succeeded++
           setJustMigratedIds((prev) => new Set([...prev, session.composerId]))

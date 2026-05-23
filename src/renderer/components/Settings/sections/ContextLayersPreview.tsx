@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { daemonCliGet } from '@/lib/daemon-cli'
 import Markdown from '@/components/Markdown/Markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -110,7 +111,7 @@ export function ContextLayersPreview({ projectPath, agentMode, onOpenSettings, o
   const loadLayers = useCallback(async () => {
     if (!tier) { setCustomLayers([]); return }
     try {
-      const list = await invoke<SkillLayer[]>('skill_layers_list', { tier })
+      const list = await daemonCliGet<SkillLayer[]>('skill-layers/list', { tier })
       setCustomLayers(list)
     } catch {
       setCustomLayers([])
@@ -128,7 +129,7 @@ export function ContextLayersPreview({ projectPath, agentMode, onOpenSettings, o
 
   const checkProjectContext = useCallback(async () => {
     try {
-      const r = await invoke<{ content: string }>('fs_read_file', { path: `${projectPath}/.k2so/PROJECT.md` })
+      const r = await daemonCliGet<{ content: string }>('fs/read-file', { path: `${projectPath}/.k2so/PROJECT.md` })
       setHasProjectContext(!!r.content && r.content.trim().length > 0)
     } catch {
       setHasProjectContext(false)
@@ -165,8 +166,8 @@ export function ContextLayersPreview({ projectPath, agentMode, onOpenSettings, o
       editAction: onOpenSettings,
       loadOnExpand: async () => {
         try {
-          const content = await invoke<string>('skill_layers_get_content', { tier, filename: layer.filename })
-          return content || '*Empty layer.*'
+          const r = await daemonCliGet<{ content: string }>('skill-layers/get-content', { tier, filename: layer.filename })
+          return r.content || '*Empty layer.*'
         } catch {
           return '*Failed to load layer content.*'
         }
@@ -183,7 +184,7 @@ export function ContextLayersPreview({ projectPath, agentMode, onOpenSettings, o
       description: '**Workspace-scoped.** Shared codebase knowledge — tech stack, conventions, key directories. Injected into every agent launch via --append-system-prompt.',
       loadOnExpand: async () => {
         try {
-          const r = await invoke<{ content: string }>('fs_read_file', { path: `${projectPath}/.k2so/PROJECT.md` })
+          const r = await daemonCliGet<{ content: string }>('fs/read-file', { path: `${projectPath}/.k2so/PROJECT.md` })
           return r.content || '*Empty file.*'
         } catch {
           return '*Failed to load PROJECT.md.*'
@@ -202,7 +203,7 @@ export function ContextLayersPreview({ projectPath, agentMode, onOpenSettings, o
       editAction: onEditHeartbeat ? () => onEditHeartbeat(hb.name) : undefined,
       loadOnExpand: async () => {
         try {
-          const r = await invoke<{ content: string }>('fs_read_file', { path: `${projectPath}/${hb.wakeupPath}` })
+          const r = await daemonCliGet<{ content: string }>('fs/read-file', { path: `${projectPath}/${hb.wakeupPath}` })
           return r.content || '*Empty WAKEUP.md.*'
         } catch {
           return '*Failed to load WAKEUP.md.*'

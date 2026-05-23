@@ -1,6 +1,7 @@
 import React from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import Markdown from '@/components/Markdown/Markdown'
 import remarkGfm from 'remark-gfm'
 import type { SettingEntry } from '../searchManifest'
@@ -109,7 +110,7 @@ export function AgentSkillsSection(): React.JSX.Element {
 
   const loadLayers = useCallback(async (tier: SkillTier) => {
     try {
-      const list = await invoke<SkillLayerInfo[]>('skill_layers_list', { tier })
+      const list = await daemonCliGet<SkillLayerInfo[]>('skill-layers/list', { tier })
       setLayers(list)
     } catch (err) {
       console.error('[agent-skills] Failed to load layers:', err)
@@ -138,7 +139,7 @@ export function AgentSkillsSection(): React.JSX.Element {
     const name = newName.trim()
     if (!name) return
     try {
-      await invoke<SkillLayerInfo>('skill_layers_create', { tier: activeTier, name })
+      await daemonCliPost<SkillLayerInfo>('skill-layers/create', { tier: activeTier, name })
       setNewName('')
       setAdding(false)
       loadLayers(activeTier)
@@ -149,7 +150,7 @@ export function AgentSkillsSection(): React.JSX.Element {
 
   const handleDelete = useCallback(async (filename: string) => {
     try {
-      await invoke('skill_layers_delete', { tier: activeTier, filename })
+      await daemonCliPost('skill-layers/delete', { tier: activeTier, filename })
       setConfirmDelete(null)
       loadLayers(activeTier)
     } catch (err) {
@@ -183,10 +184,10 @@ export function AgentSkillsSection(): React.JSX.Element {
       // If this is a user layer and we haven't cached its body yet,
       // fetch on open. Locked layers use the in-module description map.
       if (layer && userContent[layer.filename] === undefined) {
-        invoke<string>('skill_layers_get_content', { tier: activeTier, filename: layer.filename })
-          .then((content) => setUserContent((c) => ({
+        daemonCliGet<{ content: string }>('skill-layers/get-content', { tier: activeTier, filename: layer.filename })
+          .then((r) => setUserContent((c) => ({
             ...c,
-            [layer.filename]: content || '*Empty layer — click Edit to add content.*',
+            [layer.filename]: r.content || '*Empty layer — click Edit to add content.*',
           })))
           .catch(() => setUserContent((c) => ({ ...c, [layer.filename]: '*Failed to load content.*' })))
       }

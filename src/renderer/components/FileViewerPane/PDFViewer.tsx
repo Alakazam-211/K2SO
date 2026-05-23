@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+import { daemonCliGet } from '@/lib/daemon-cli'
 import * as pdfjsLib from 'pdfjs-dist'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -42,8 +42,14 @@ export function PDFViewer({ filePath }: PDFViewerProps): React.JSX.Element {
       setCurrentPage(1)
 
       try {
-        const bytes = await invoke<number[]>('fs_read_binary_file', { path: filePath })
-        const data = new Uint8Array(bytes)
+        // Daemon returns base64 — decode into a Uint8Array. Browser
+        // `atob` is the smallest path; ~50 MB files top out the
+        // implementation's V8 string limit headroom (~256 MB) by a
+        // wide margin so no chunking needed here.
+        const r = await daemonCliGet<{ base64: string }>('fs/read-binary', { path: filePath })
+        const binary = atob(r.base64)
+        const data = new Uint8Array(binary.length)
+        for (let i = 0; i < binary.length; i++) data[i] = binary.charCodeAt(i)
 
         const doc = await pdfjsLib.getDocument({ data }).promise
 

@@ -1,0 +1,251 @@
+//! Daemon-side `/cli/fs/*` route handlers (Phase 2 Unit 6).
+//!
+//! Every handler is a thin wrapper around `k2so_core::fs_commands::*`.
+//! Bodies for POST routes are JSON; query-string for GET routes.
+//!
+//! Binary reads (`/cli/fs/read-binary`) base64-encode the file content
+//! before placing it in the JSON response. This trades ~33% wire size
+//! for transport-format simplicity (the existing `/cli/*` dispatcher
+//! is JSON-only). Pre-Phase-3, this is acceptable up to the 50 MB
+//! `read_binary` cap — the renderer's PDF/DOCX viewers don't open
+//! anything larger.
+
+use std::collections::HashMap;
+
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use serde::Deserialize;
+
+use crate::cli_response::CliResponse;
+use k2so_core::fs_commands as fsc;
+
+// ── GET handlers (query-string) ───────────────────────────────────────
+
+pub fn handle_read_dir(params: &HashMap<String, String>) -> CliResponse {
+    let path = match params.get("path") {
+        Some(p) if !p.is_empty() => p.clone(),
+        _ => return CliResponse::bad_request("Missing 'path' parameter"),
+    };
+    let show_hidden = matches!(
+        params.get("show_hidden").map(|v| v.as_str()),
+        Some("1") | Some("true") | Some("on")
+    );
+    match fsc::read_dir(&path, show_hidden) {
+        Ok(entries) => CliResponse::ok_json(
+            serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string()),
+        ),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+pub fn handle_read_file(params: &HashMap<String, String>) -> CliResponse {
+    let path = match params.get("path") {
+        Some(p) if !p.is_empty() => p.clone(),
+        _ => return CliResponse::bad_request("Missing 'path' parameter"),
+    };
+    match fsc::read_file(&path) {
+        Ok(content) => CliResponse::ok_json(
+            serde_json::to_string(&content).unwrap_or_else(|_| "{}".to_string()),
+        ),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+/// Read a file as raw bytes and base64-encode for transport. The
+/// renderer decodes via `atob(...)` or a Uint8Array constructor; both
+/// PDF.js and the DOCX renderer take base64 directly.
+pub fn handle_read_binary(params: &HashMap<String, String>) -> CliResponse {
+    let path = match params.get("path") {
+        Some(p) if !p.is_empty() => p.clone(),
+        _ => return CliResponse::bad_request("Missing 'path' parameter"),
+    };
+    match fsc::read_binary_file(&path) {
+        Ok(bytes) => {
+            let b64 = B64.encode(&bytes);
+            CliResponse::ok_json(serde_json::json!({ "base64": b64 }).to_string())
+        }
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+pub fn handle_clipboard_paths(_params: &HashMap<String, String>) -> CliResponse {
+    match fsc::clipboard_read_file_paths() {
+        Ok(paths) => CliResponse::ok_json(
+            serde_json::to_string(&paths).unwrap_or_else(|_| "[]".to_string()),
+        ),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+// ── POST handlers (JSON bodies) ───────────────────────────────────────
+
+#[derive(Deserialize)]
+struct SearchTreeBody {
+    root: String,
+    query: String,
+    #[serde(default)]
+    show_hidden: bool,
+    #[serde(default)]
+    max_results: Option<usize>,
+}
+
+pub fn handle_search_tree(body: &[u8]) -> CliResponse {
+    let parsed: SearchTreeBody = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return CliResponse::bad_request(format!("invalid JSON body: {e}")),
+    };
+    let max = parsed.max_results.unwrap_or(500);
+    match fsc::search_tree(&parsed.root, &parsed.query, parsed.show_hidden, max) {
+        Ok(matches) => CliResponse::ok_json(
+            serde_json::to_string(&matches).unwrap_or_else(|_| "[]".to_string()),
+        ),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct WriteFileBody {
+    path: String,
+    content: String,
+}
+
+pub fn handle_write_file(body: &[u8]) -> CliResponse {
+    let parsed: WriteFileBody = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return CliResponse::bad_request(format!("invalid JSON body: {e}")),
+    };
+    match fsc::write_file(&parsed.path, &parsed.content) {
+        Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct MoveCopyBody {
+    sources: Vec<String>,
+    destination: String,
+}
+
+pub fn handle_move(body: &[u8]) -> CliResponse {
+    let parsed: MoveCopyBody = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return CliResponse::bad_request(format!("invalid JSON body: {e}")),
+    };
+    match fsc::move_files(&parsed.sources, &parsed.destination) {
+        Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+pub fn handle_copy(body: &[u8]) -> CliResponse {
+    let parsed: MoveCopyBody = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return CliResponse::bad_request(format!("invalid JSON body: {e}")),
+    };
+    match fsc::copy_files(&parsed.sources, &parsed.destination) {
+        Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct DeleteBody {
+    paths: Vec<String>,
+    #[serde(default)]
+    permanent: bool,
+}
+
+pub fn handle_delete(body: &[u8]) -> CliResponse {
+    let parsed: DeleteBody = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return CliResponse::bad_request(format!("invalid JSON body: {e}")),
+    };
+    match fsc::delete(&parsed.paths, parsed.permanent) {
+        Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct RenameBody {
+    old_path: String,
+    new_name: String,
+}
+
+pub fn handle_rename(body: &[u8]) -> CliResponse {
+    let parsed: RenameBody = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return CliResponse::bad_request(format!("invalid JSON body: {e}")),
+    };
+    match fsc::rename(&parsed.old_path, &parsed.new_name) {
+        Ok(new_path) => CliResponse::ok_json(
+            serde_json::json!({ "path": new_path }).to_string(),
+        ),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateBody {
+    path: String,
+    #[serde(default)]
+    is_directory: bool,
+}
+
+pub fn handle_create(body: &[u8]) -> CliResponse {
+    let parsed: CreateBody = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return CliResponse::bad_request(format!("invalid JSON body: {e}")),
+    };
+    match fsc::create_entry(&parsed.path, parsed.is_directory) {
+        Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct DuplicateBody {
+    path: String,
+}
+
+pub fn handle_duplicate(body: &[u8]) -> CliResponse {
+    let parsed: DuplicateBody = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return CliResponse::bad_request(format!("invalid JSON body: {e}")),
+    };
+    match fsc::duplicate(&parsed.path) {
+        Ok(new_path) => CliResponse::ok_json(
+            serde_json::json!({ "path": new_path }).to_string(),
+        ),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct OpenBody {
+    /// Local file path (open-finder) or URL (open-external).
+    target: String,
+}
+
+pub fn handle_open_finder(body: &[u8]) -> CliResponse {
+    let parsed: OpenBody = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return CliResponse::bad_request(format!("invalid JSON body: {e}")),
+    };
+    match fsc::open_in_finder(&parsed.target) {
+        Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+pub fn handle_open_external(body: &[u8]) -> CliResponse {
+    let parsed: OpenBody = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return CliResponse::bad_request(format!("invalid JSON body: {e}")),
+    };
+    match fsc::open_external(&parsed.target) {
+        Ok(msg) => CliResponse::ok_json(
+            serde_json::json!({ "success": true, "message": msg }).to_string(),
+        ),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}

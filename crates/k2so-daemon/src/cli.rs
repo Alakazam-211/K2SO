@@ -1342,6 +1342,50 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         // heartbeat CRUD), not here — main.rs intercepts /cli/heartbeat/*
         // before this fallthrough dispatcher runs.
 
+        // ── Phase 2 Unit 6: filesystem (GET) ──────────────────────
+        //
+        // POST routes (mutations) live in main.rs's dispatcher;
+        // these GETs use the query-string interface common to the
+        // rest of /cli/*.
+        "/cli/fs/read-dir" => crate::fs_routes::handle_read_dir(params),
+        "/cli/fs/read-file" => crate::fs_routes::handle_read_file(params),
+        "/cli/fs/read-binary" => crate::fs_routes::handle_read_binary(params),
+        "/cli/fs/clipboard-paths" => crate::fs_routes::handle_clipboard_paths(params),
+
+        // ── Phase 2 Unit 6: chat history (GET) ────────────────────
+        "/cli/chat/list" => crate::chat_routes::handle_list(params),
+        "/cli/chat/storage-paths" => crate::chat_routes::handle_storage_paths(params),
+        "/cli/chat/custom-names" => crate::chat_routes::handle_custom_names(params),
+        "/cli/chat/pinned" => crate::chat_routes::handle_pinned(params),
+        "/cli/chat/detect-active" => crate::chat_routes::handle_detect_active(params),
+        "/cli/chat/discover-ide" => crate::chat_routes::handle_discover_ide(params),
+        "/cli/chat/session-exists" => crate::chat_routes::handle_session_exists(params),
+
+        // ── Phase 2 Unit 6: themes (GET) ──────────────────────────
+        "/cli/themes/list" => crate::themes_routes::handle_list(params),
+        "/cli/themes/get-dir" => crate::themes_routes::handle_get_dir(params),
+        "/cli/themes/ensure-dir" => crate::themes_routes::handle_ensure_dir(params),
+
+        // ── Phase 2 Unit 6: skill layers (GET) ────────────────────
+        "/cli/skill-layers/list" => crate::skill_layers_routes::handle_list(params),
+        "/cli/skill-layers/get-content" => {
+            crate::skill_layers_routes::handle_get_content(params)
+        }
+
+        // ── Phase 2 Unit 6: review checklist (GET) ────────────────
+        "/cli/review-checklist/read" => {
+            crate::review_checklist_routes::handle_read(params)
+        }
+
+        // ── Phase 2 Unit 6: project config (GET) ──────────────────
+        "/cli/project-config/get" => crate::project_config_routes::handle_get(params),
+        "/cli/project-config/has-run-command" => {
+            crate::project_config_routes::handle_has_run_command(params)
+        }
+        "/cli/project-config/run-command" => {
+            crate::project_config_routes::handle_run_command(params)
+        }
+
         // ── 0.38.7: What's New popup ──────────────────────────────
         //
         // GET /cli/whats_new                — returns WhatsNewCheck JSON

@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
+import { daemonCliGet } from '@/lib/daemon-cli'
 import type { MosaicNode, MosaicDirection } from 'react-mosaic-component'
 import { RESUMABLE_CLI_TOOLS } from '@shared/constants'
 import { useSettingsStore } from '@/stores/settings'
@@ -1470,10 +1471,12 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     // broken tab on every retry. The next heartbeat fire will
     // self-heal via smart_launch's matching JSONL check, so we just
     // surface the wait state to the user here.
-    const jsonlExists = await invoke<boolean>('chat_history_session_exists', {
-      projectPath,
-      sessionId: hb.lastSessionId,
-    }).catch(() => true)
+    const jsonlExists = await daemonCliGet<{ exists: boolean }>('chat/session-exists', {
+      project_path: projectPath,
+      session_id: hb.lastSessionId,
+    })
+      .then((r) => r.exists)
+      .catch(() => true)
     if (!jsonlExists) {
       console.info(
         '[openHeartbeatTab] saved session %s has no JSONL on disk yet; click Launch to refire',
@@ -2857,10 +2860,11 @@ export const useTabsStore = create<TabsState>((set, get) => ({
             const toolConfig = RESUMABLE_CLI_TOOLS[d.command]
             if (!toolConfig) continue
             try {
-              const sessionId = await invoke<string | null>('chat_history_detect_active_session', {
+              const r = await daemonCliGet<{ sessionId: string | null }>('chat/detect-active', {
                 provider: toolConfig.provider,
-                projectPath: d.cwd,
+                project_path: d.cwd,
               })
+              const sessionId = r.sessionId
               if (sessionId) {
                 ;(item.data as TerminalItemData).sessionId = sessionId
                 updated = true
@@ -2990,10 +2994,11 @@ export const useTabsStore = create<TabsState>((set, get) => ({
           const toolConfig = RESUMABLE_CLI_TOOLS[agentOpts.command]
           if (toolConfig) {
             try {
-              const sessionId = await invoke<string | null>('chat_history_detect_active_session', {
+              const r = await daemonCliGet<{ sessionId: string | null }>('chat/detect-active', {
                 provider: toolConfig.provider,
-                projectPath: cwd,
+                project_path: cwd,
               })
+              const sessionId = r.sessionId
               if (sessionId) {
                 if (toolConfig.resumeSubcommand) {
                   agentOpts.args = [toolConfig.resumeSubcommand, sessionId]

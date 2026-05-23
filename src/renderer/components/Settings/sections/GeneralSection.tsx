@@ -1,6 +1,7 @@
 import React from 'react'
 import { useCallback, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { daemonCliGet } from '@/lib/daemon-cli'
 import { useSettingsStore } from '@/stores/settings'
 import { useUpdateStore } from '@/stores/update'
 import { checkForUpdate } from '@/hooks/useUpdateChecker'
@@ -346,7 +347,7 @@ function WhatsNewRow(): React.JSX.Element {
     if (busy) return
     setBusy(true)
     try {
-      await invoke('whats_new_reset')
+      await daemonCliGet('whats_new/reset')
       window.dispatchEvent(new CustomEvent('k2so:show-whats-new'))
     } catch (e) {
       // eslint-disable-next-line no-console

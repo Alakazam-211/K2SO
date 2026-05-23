@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { TerminalPane } from '@/terminal-v2/TerminalPane'
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 
 // ── Session file helpers ────────────────────────────────────────────
 
@@ -9,7 +10,7 @@ const SESSION_FILE = '.last_editor_session'
 
 async function readEditorSession(cwd: string): Promise<string | null> {
   try {
-    const result = await invoke<{ content: string }>('fs_read_file', {
+    const result = await daemonCliGet<{ content: string }>('fs/read-file', {
       path: `${cwd}/${SESSION_FILE}`,
     })
     const id = result.content.trim()
@@ -26,12 +27,13 @@ async function saveEditorSession(cwd: string, command: string | undefined): Prom
   if (!provider) return
 
   try {
-    const sessionId = await invoke<string | null>('chat_history_detect_active_session', {
+    const r = await daemonCliGet<{ sessionId: string | null }>('chat/detect-active', {
       provider,
-      projectPath: cwd,
+      project_path: cwd,
     })
+    const sessionId = r.sessionId
     if (sessionId) {
-      await invoke('fs_write_file', {
+      await daemonCliPost('fs/write-file', {
         path: `${cwd}/${SESSION_FILE}`,
         content: sessionId,
       })
@@ -225,7 +227,7 @@ export function AIFileEditor({
 
     const readOne = async (path: string) => {
       try {
-        const result = await invoke<{ content: string; path: string; name: string }>('fs_read_file', { path })
+        const result = await daemonCliGet<{ content: string; path: string; name: string }>('fs/read-file', { path })
         const prev = lastContentByPathRef.current.get(path)
         if (result.content !== prev) {
           lastContentByPathRef.current.set(path, result.content)

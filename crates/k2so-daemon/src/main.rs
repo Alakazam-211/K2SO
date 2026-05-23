@@ -37,17 +37,21 @@
 mod agents_routes;
 mod awareness_ws;
 mod canonical_session;
+mod chat_routes;
 mod claude_auth_host;
 mod cli;
 mod cli_response;
 mod companion_host;
 mod companion_routes;
 mod events;
+mod fs_routes;
 mod heartbeat_launch;
 mod llm_host;
 mod llm_routes;
 mod pending_live;
+mod project_config_routes;
 mod providers;
+mod review_checklist_routes;
 mod session_events;
 mod session_events_ws;
 mod session_lookup;
@@ -56,8 +60,10 @@ mod sessions_grid_ws;
 mod sessions_ws;
 mod settings_routes;
 mod signal_format;
+mod skill_layers_routes;
 mod spawn;
 mod terminal_routes;
+mod themes_routes;
 mod triage;
 mod v2_session_map;
 mod v2_spawn;
@@ -533,6 +539,31 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             // be reached via a stray GET / browser refresh.
             | "/cli/settings/update"
             | "/cli/settings/reset"
+            // Phase 2 Unit 6 — filesystem mutations + chat history
+            // mutations + theme/skill-layer/review-checklist
+            // mutations. JSON bodies carry the arguments (paths,
+            // file contents, source/destination tuples) so they
+            // aren't URL-encoded in proxy logs.
+            | "/cli/fs/search-tree"
+            | "/cli/fs/write-file"
+            | "/cli/fs/move"
+            | "/cli/fs/copy"
+            | "/cli/fs/delete"
+            | "/cli/fs/rename"
+            | "/cli/fs/create"
+            | "/cli/fs/duplicate"
+            | "/cli/fs/open-finder"
+            | "/cli/fs/open-external"
+            | "/cli/chat/rename"
+            | "/cli/chat/toggle-pin"
+            | "/cli/chat/migrate-ide"
+            | "/cli/themes/create-template"
+            | "/cli/themes/delete"
+            | "/cli/skill-layers/create"
+            | "/cli/skill-layers/delete"
+            | "/cli/review-checklist/write"
+            | "/cli/review-checklist/toggle"
+            | "/cli/review-checklist/init"
     );
     if method != "GET" && !(is_post && post_allowed) {
         let _ = stream.read(&mut buf).await;
@@ -1164,6 +1195,39 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             }
             let _ = stream.read(&mut buf).await;
             let result = settings_routes::handle_settings_reset();
+            send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // Phase 2 Unit 6 — POST routes for filesystem / chat /
+        // themes / skill-layers / review-checklist. All JSON-bodied;
+        // delegate to per-domain modules. The match-arm guard
+        // (`is_post && post_allowed && starts_with`) is the implicit
+        // method gate — a GET on these paths falls through to the
+        // generic `/cli/` catchall below, which returns a 404
+        // "unknown route" since dispatch doesn't have GET handlers
+        // for these paths. Functionally equivalent to Unit 5/7a's
+        // explicit 405s; the response code differs but no silent
+        // mutation is possible either way.
+        p if is_post && post_allowed && (
+            p.starts_with("/cli/fs/")
+                || p.starts_with("/cli/chat/")
+                || p.starts_with("/cli/themes/")
+                || p.starts_with("/cli/skill-layers/")
+                || p.starts_with("/cli/review-checklist/")
+        ) => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let result = dispatch_unit6_post(p, &body_bytes);
             send_response(&mut stream, result.status, "application/json", &result.body)
                 .await;
         }
@@ -1942,6 +2006,41 @@ fn write_restricted(path: &PathBuf, contents: &[u8]) -> std::io::Result<()> {
         .open(path)?;
     f.write_all(contents)?;
     Ok(())
+}
+
+/// Dispatch a Phase 2 Unit 6 POST request body to the right
+/// per-domain handler. Path matching is exact — unknown paths fall
+/// through to a 404 so the renderer surfaces "route not found"
+/// instead of a silent success.
+fn dispatch_unit6_post(path: &str, body: &[u8]) -> cli::CliResponse {
+    match path {
+        // Filesystem
+        "/cli/fs/search-tree" => fs_routes::handle_search_tree(body),
+        "/cli/fs/write-file" => fs_routes::handle_write_file(body),
+        "/cli/fs/move" => fs_routes::handle_move(body),
+        "/cli/fs/copy" => fs_routes::handle_copy(body),
+        "/cli/fs/delete" => fs_routes::handle_delete(body),
+        "/cli/fs/rename" => fs_routes::handle_rename(body),
+        "/cli/fs/create" => fs_routes::handle_create(body),
+        "/cli/fs/duplicate" => fs_routes::handle_duplicate(body),
+        "/cli/fs/open-finder" => fs_routes::handle_open_finder(body),
+        "/cli/fs/open-external" => fs_routes::handle_open_external(body),
+        // Chat history (state-mutating)
+        "/cli/chat/rename" => chat_routes::handle_rename(body),
+        "/cli/chat/toggle-pin" => chat_routes::handle_toggle_pin(body),
+        "/cli/chat/migrate-ide" => chat_routes::handle_migrate_ide(body),
+        // Themes
+        "/cli/themes/create-template" => themes_routes::handle_create_template(body),
+        "/cli/themes/delete" => themes_routes::handle_delete(body),
+        // Skill layers
+        "/cli/skill-layers/create" => skill_layers_routes::handle_create(body),
+        "/cli/skill-layers/delete" => skill_layers_routes::handle_delete(body),
+        // Review checklist
+        "/cli/review-checklist/write" => review_checklist_routes::handle_write(body),
+        "/cli/review-checklist/toggle" => review_checklist_routes::handle_toggle(body),
+        "/cli/review-checklist/init" => review_checklist_routes::handle_init(body),
+        _ => cli::CliResponse::not_found(),
+    }
 }
 
 /// 32-hex-char cryptographically random token. Same shape as the

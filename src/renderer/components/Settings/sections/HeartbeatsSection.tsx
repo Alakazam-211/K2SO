@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { daemonCliGet } from '@/lib/daemon-cli'
 import { useToastStore } from '@/stores/toast'
 import type { SettingEntry } from '../searchManifest'
 import { AIFileEditor } from '@/components/AIFileEditor/AIFileEditor'
@@ -362,7 +363,7 @@ export function WakeupEditor({ projectPath, agentName, heartbeat, otherHeartbeat
   // so the AI can catch conflicts/duplication without ballooning prompt size.
   const [agentMd, setAgentMd] = useState<string>('')
   useEffect(() => {
-    invoke<{ content: string }>('fs_read_file', {
+    daemonCliGet<{ content: string }>('fs/read-file', {
       path: `${projectPath}/.k2so/agents/${agentName}/AGENT.md`,
     })
       .then((r) => setAgentMd(r.content))

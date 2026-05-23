@@ -3042,6 +3042,7 @@ dependencies = [
  "argon2",
  "base64 0.22.1",
  "chrono",
+ "cocoa",
  "croner",
  "dirs 5.0.1",
  "encoding_rs",
@@ -3052,6 +3053,7 @@ dependencies = [
  "llama-cpp-2",
  "mio",
  "ngrok",
+ "objc",
  "parking_lot",
  "polling",
  "portable-pty",
@@ -3077,6 +3079,7 @@ dependencies = [
 name = "k2so-daemon"
 version = "0.37.12"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "dirs 5.0.1",
  "futures-util",

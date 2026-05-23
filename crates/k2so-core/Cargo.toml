@@ -115,3 +115,12 @@ tungstenite = "0.24"
 ngrok = "0.18"
 tokio = { version = "1", features = ["full"] }
 url = "2"
+
+# macOS-only: Cocoa + Objective-C runtime bindings used by
+# `fs_commands::clipboard_read_file_paths` to read the
+# `NSFilenamesPboardType` pasteboard entry (Finder Cmd+C file copy).
+# Phase 2 Unit 6 — migrated from src-tauri so the daemon owns the
+# pasteboard read alongside the rest of the filesystem surface.
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+objc = "0.2"

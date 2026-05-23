@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { invoke } from '@tauri-apps/api/core'
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { parseCustomThemeJson, type ThemeColors } from '@/lib/editor-themes'
 import type { HighlightStyle } from '@codemirror/language'
 
@@ -31,13 +31,13 @@ export const useCustomThemesStore = create<CustomThemesStore>((set, get) => ({
 
   loadCustomThemes: async () => {
     try {
-      const entries = await invoke<{ path: string; name: string; valid: boolean }[]>('themes_list_custom')
+      const entries = await daemonCliGet<{ path: string; name: string; valid: boolean }[]>('themes/list')
       const themes: CustomTheme[] = []
 
       for (const entry of entries) {
         if (!entry.valid) continue
         try {
-          const result = await invoke<{ content: string }>('fs_read_file', { path: entry.path })
+          const result = await daemonCliGet<{ content: string }>('fs/read-file', { path: entry.path })
           const parsed = parseCustomThemeJson(result.content)
           if (!parsed) continue
 
@@ -63,7 +63,10 @@ export const useCustomThemesStore = create<CustomThemesStore>((set, get) => ({
 
   openCreator: async (baseThemeJson: string) => {
     try {
-      const path = await invoke<string>('themes_create_template', { baseThemeJson })
+      const result = await daemonCliPost<{ path: string }>('themes/create-template', {
+        base_theme_json: baseThemeJson,
+      })
+      const path = result.path
       set({ creatorOpen: true, activeThemePath: path })
       return path
     } catch (err) {
@@ -82,7 +85,7 @@ export const useCustomThemesStore = create<CustomThemesStore>((set, get) => ({
     const theme = get().customThemes.find((t) => t.id === id)
     if (!theme) return
     try {
-      await invoke('themes_delete', { path: theme.path })
+      await daemonCliPost('themes/delete', { path: theme.path })
       set({ customThemes: get().customThemes.filter((t) => t.id !== id) })
     } catch (err) {
       console.error('[custom-themes] Failed to delete:', err)

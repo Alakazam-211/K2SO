@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
 import { useConfirmDialogStore } from '@/stores/confirm-dialog'
@@ -79,10 +80,10 @@ function extractAcceptanceCriteria(workItems: WorkItem[], projectPath: string): 
         const folders = ['done', 'active', 'inbox']
         for (const folder of folders) {
           try {
-            const content = await invoke<string>('fs_read_file', {
+            const r = await daemonCliGet<{ content: string }>('fs/read-file', {
               path: `${projectPath}/.k2so/agents/${item.assignedBy !== 'user' ? item.assignedBy : 'default'}/work/${folder}/${item.filename}`,
             })
-            return parseCriteria(content)
+            return parseCriteria(r.content)
           } catch {
             continue
           }
@@ -184,8 +185,8 @@ export default function ReviewPanel(): React.JSX.Element {
   const fetchChats = useCallback(async () => {
     if (!workspacePath) return
     try {
-      const sessions = await invoke<ChatSession[]>('chat_history_list_for_project', {
-        projectPath: workspacePath,
+      const sessions = await daemonCliGet<ChatSession[]>('chat/list', {
+        project_path: workspacePath,
       })
       setChats(sessions)
     } catch {
@@ -221,16 +222,16 @@ export default function ReviewPanel(): React.JSX.Element {
       ]
 
       // Init the file (only writes if it doesn't exist)
-      invoke('review_checklist_init', {
-        workspacePath: path,
+      daemonCliPost('review-checklist/init', {
+        workspace_path: path,
         items: initialItems,
-        agentName: review.agentName,
+        agent_name: review.agentName,
         branch: review.branch,
       }).catch(() => {})
 
       // Read current state from file
-      invoke<Array<{ text: string; checked: boolean; section: string }>>('review_checklist_read', {
-        workspacePath: path,
+      daemonCliGet<Array<{ text: string; checked: boolean; section: string }>>('review-checklist/read', {
+        workspace_path: path,
       }).then((items) => {
         setChecklistItems((prev) => {
           const next = new Map(prev)
@@ -427,10 +428,10 @@ export default function ReviewPanel(): React.JSX.Element {
     })
 
     // Persist to file
-    invoke<Array<{ text: string; checked: boolean; section: string }>>('review_checklist_toggle', {
-      workspacePath: path,
+    daemonCliPost<Array<{ text: string; checked: boolean; section: string }>>('review-checklist/toggle', {
+      workspace_path: path,
       index,
-      agentName: review.agentName,
+      agent_name: review.agentName,
       branch: review.branch,
     }).then((items) => {
       setChecklistItems((prev) => {
@@ -588,7 +589,7 @@ export default function ReviewPanel(): React.JSX.Element {
                       className="text-[11px] text-green-400 font-mono hover:underline truncate cursor-pointer"
                       onClick={(e) => {
                         e.stopPropagation()
-                        invoke('open_external', { url: previewUrl! }).catch(console.warn)
+                        daemonCliPost('fs/open-external', { target: previewUrl! }).catch(console.warn)
                       }}
                     >
                       {previewUrl}

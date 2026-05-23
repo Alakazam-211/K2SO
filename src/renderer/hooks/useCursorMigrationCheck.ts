@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+import { daemonCliGet } from '@/lib/daemon-cli'
 import { useProjectsStore } from '@/stores/projects'
 import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
@@ -26,8 +26,8 @@ export function useCursorMigrationCheck(): void {
     // Delay check slightly so it doesn't compete with project load
     const timer = setTimeout(async () => {
       try {
-        const sessions = await invoke<any[]>('chat_history_discover_ide_sessions', {
-          projectPath: activeProject.path,
+        const sessions = await daemonCliGet<any[]>('chat/discover-ide', {
+          project_path: activeProject.path,
         })
         const unmigrated = sessions.filter((s: any) => !s.alreadyMigrated && s.migratable)
         if (unmigrated.length > 0) {

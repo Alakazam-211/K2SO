@@ -1,3 +1,10 @@
+//! Skill-layer management (Phase 2 Unit 6).
+//!
+//! "Skill layers" are user-authored markdown fragments that augment
+//! K2SO's built-in agent prompts. They live under
+//! `~/.k2so/templates/<tier>/<filename>.md` where `<tier>` is one of
+//! `manager`, `agent-template`, or `custom-agent`.
+
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -38,23 +45,26 @@ fn filename_to_title(filename: &str) -> String {
         .join(" ")
 }
 
-/// List all custom layers for a tier.
-#[tauri::command]
-pub fn skill_layers_list(tier: String) -> Result<Vec<SkillLayer>, String> {
-    let dir = layers_dir(&tier)?;
+pub fn list(tier: &str) -> Result<Vec<SkillLayer>, String> {
+    let dir = layers_dir(tier)?;
     let mut layers = Vec::new();
-
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().map_or(false, |ext| ext == "md") {
-                let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let filename = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 let content = fs::read_to_string(&path).unwrap_or_default();
-                let preview = content.lines()
+                let preview = content
+                    .lines()
                     .find(|l| !l.trim().is_empty())
                     .unwrap_or("")
-                    .chars().take(80).collect::<String>();
-
+                    .chars()
+                    .take(80)
+                    .collect::<String>();
                 layers.push(SkillLayer {
                     title: filename_to_title(&filename),
                     filename,
@@ -64,31 +74,23 @@ pub fn skill_layers_list(tier: String) -> Result<Vec<SkillLayer>, String> {
             }
         }
     }
-
     layers.sort_by(|a, b| a.filename.cmp(&b.filename));
     Ok(layers)
 }
 
-/// Create a new custom layer file.
-#[tauri::command]
-pub fn skill_layers_create(tier: String, name: String) -> Result<SkillLayer, String> {
-    let dir = layers_dir(&tier)?;
-
-    // Sanitize name to kebab-case filename
-    let filename = name.to_lowercase()
+pub fn create(tier: &str, name: &str) -> Result<SkillLayer, String> {
+    let dir = layers_dir(tier)?;
+    let filename = name
+        .to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
         .collect::<String>();
     let filename = format!("{}.md", filename.trim_matches('-'));
-
     let path = dir.join(&filename);
     if path.exists() {
         return Err(format!("Layer '{}' already exists", filename));
     }
-
-    // Create with empty content (user will fill via AIFileEditor)
     fs::write(&path, "").map_err(|e| format!("Failed to create layer: {}", e))?;
-
     Ok(SkillLayer {
         title: filename_to_title(&filename),
         filename,
@@ -97,29 +99,19 @@ pub fn skill_layers_create(tier: String, name: String) -> Result<SkillLayer, Str
     })
 }
 
-/// Delete a custom layer file.
-#[tauri::command]
-pub fn skill_layers_delete(tier: String, filename: String) -> Result<(), String> {
-    let dir = layers_dir(&tier)?;
-    let path = dir.join(&filename);
-
+pub fn delete(tier: &str, filename: &str) -> Result<(), String> {
+    let dir = layers_dir(tier)?;
+    let path = dir.join(filename);
     if !path.exists() {
         return Err(format!("Layer '{}' not found", filename));
     }
-
-    // **0.37.6:** route to Trash. Skill layers are user-authored
-    // content (workspace-specific instructions the user added on
-    // top of K2SO's defaults) — recoverable from Trash on accidental
-    // delete or change-of-mind.
-    k2so_core::safe_delete::trash(&path)
-        .map_err(|e| format!("Failed to delete layer: {}", e))
+    // Route to Trash — skill layers are user-authored content that's
+    // worth a recovery path on accidental delete.
+    crate::safe_delete::trash(&path).map_err(|e| format!("Failed to delete layer: {}", e))
 }
 
-/// Get the full content of a layer file.
-#[tauri::command]
-pub fn skill_layers_get_content(tier: String, filename: String) -> Result<String, String> {
-    let dir = layers_dir(&tier)?;
-    let path = dir.join(&filename);
-
+pub fn get_content(tier: &str, filename: &str) -> Result<String, String> {
+    let dir = layers_dir(tier)?;
+    let path = dir.join(filename);
     fs::read_to_string(&path).map_err(|e| format!("Failed to read layer: {}", e))
 }

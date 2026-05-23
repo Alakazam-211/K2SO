@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { AIFileEditor } from '../AIFileEditor/AIFileEditor'
 import { useSettingsStore } from '@/stores/settings'
 import { usePresetsStore, parseCommand } from '@/stores/presets'
@@ -101,7 +102,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
   const handleManualRefresh = useCallback(async () => {
     if (!agentMdPath) return
     try {
-      const result = await invoke<{ content: string }>('fs_read_file', { path: agentMdPath })
+      const result = await daemonCliGet<{ content: string }>('fs/read-file', { path: agentMdPath })
       handleFileChange(result.content)
     } catch (err) {
       console.error('[agent-editor] Manual refresh failed:', err)
@@ -115,7 +116,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
   const handleClose = useCallback(async () => {
     try {
       if (agentMdPath) {
-        const result = await invoke<{ content: string }>('fs_read_file', { path: agentMdPath })
+        const result = await daemonCliGet<{ content: string }>('fs/read-file', { path: agentMdPath })
         await invoke('k2so_agents_save_agent_md', {
           projectPath,
           agentName,
@@ -331,7 +332,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
                 code={agentContent}
                 filePath={agentMdPath}
                 onSave={async (content) => {
-                  try { await invoke('fs_write_file', { path: agentMdPath, content }) } catch (err) { console.error('[agent-editor] Save failed:', err) }
+                  try { await daemonCliPost('fs/write-file', { path: agentMdPath, content }) } catch (err) { console.error('[agent-editor] Save failed:', err) }
                 }}
                 onChange={(content) => setAgentContent(content)}
               />

@@ -64,6 +64,13 @@ pub enum HookEvent {
     /// Payload carries `projectPath` so each window can filter to its
     /// active workspace. 0.38.0 commit 7.
     ChatRefreshed,
+    /// Fires when chat-session metadata changes daemon-side (rename,
+    /// pin/unpin). The renderer's chat-history sidebar re-fetches its
+    /// list. Phase 2 Unit 6 — previously emitted from Tauri's
+    /// `chat_history_rename_session` / `chat_history_toggle_pin`
+    /// commands; those are now thin proxies (deleted) over the daemon's
+    /// `/cli/chat/rename` + `/cli/chat/toggle-pin` routes.
+    SyncChatHistory,
 }
 
 impl HookEvent {
@@ -81,6 +88,7 @@ impl HookEvent {
             Self::SessionSurfaced => "session:surfaced",
             Self::SessionUnsurfaced => "session:unsurfaced",
             Self::ChatRefreshed => "chat:refreshed",
+            Self::SyncChatHistory => "sync:chat-history",
         }
     }
 }

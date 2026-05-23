@@ -25,6 +25,7 @@
 
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 
 import { useKesselConfig } from '../kessel/config-context'
 import { useIsTabVisible } from '@/contexts/TabVisibilityContext'
@@ -1200,7 +1201,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       // API. Query the native pasteboard: if file paths are
       // present, paste them shell-escaped (matching v1's drag-drop
       // behavior). Fall back to text paste otherwise.
-      invoke<string[]>('clipboard_read_file_paths')
+      daemonCliGet<string[]>('fs/clipboard-paths')
         .then((paths) => {
           if (paths && paths.length > 0) {
             sendInput(buildDropPayload(paths))
@@ -1467,7 +1468,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       e.stopPropagation()
 
       if (clicked.type === 'url') {
-        invoke('open_external', { url: clicked.target }).catch((err) =>
+        daemonCliPost('fs/open-external', { target: clicked.target }).catch((err) =>
           console.warn('[terminal-v2/link]', err),
         )
       } else if (clicked.type === 'file' && clicked.filePath) {

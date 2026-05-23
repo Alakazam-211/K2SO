@@ -2,6 +2,7 @@ import React, { Suspense, lazy, useState, useEffect, useCallback, useRef, useLay
 import Markdown from '@/components/Markdown/Markdown'
 import remarkGfm from 'remark-gfm'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 // 0.39.0 bundle-perf: PDFViewer pulls in pdfjs-dist (~600KB gzip),
 // DocxViewer pulls in mammoth (~200KB), CodeEditor pulls in
 // @codemirror/* (~100KB). Lazy-load all three so they only enter the
@@ -272,7 +273,7 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
     setLoading(true)
     setError(null)
     try {
-      const result = await invoke<{ content: string }>('fs_read_file', { path: filePath })
+      const result = await daemonCliGet<{ content: string }>('fs/read-file', { path: filePath })
       setContent(result.content)
     } catch {
       // File doesn't exist yet (e.g., untitled document) — start with empty content
@@ -355,7 +356,7 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
         return
       }
       try {
-        const result = await invoke<{ content: string }>('fs_read_file', { path: filePath })
+        const result = await daemonCliGet<{ content: string }>('fs/read-file', { path: filePath })
         // Functional update avoids stale closure over content
         setContent(prev => result.content !== prev ? result.content : prev)
       } catch {
@@ -373,7 +374,7 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
     if (toSave === content) return // Nothing changed
     setSaving(true)
     try {
-      await invoke('fs_write_file', { path: filePath, content: toSave })
+      await daemonCliPost('fs/write-file', { path: filePath, content: toSave })
       setContent(toSave)
       setEditedContent(null)
     } catch (err) {

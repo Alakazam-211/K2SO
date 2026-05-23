@@ -926,22 +926,8 @@ pub fn run() {
             commands::agents::presets_delete,
             commands::agents::presets_reorder,
             commands::agents::presets_reset_built_ins,
-            // Filesystem
-            commands::filesystem::fs_read_dir,
-            commands::filesystem::fs_open_in_finder,
-            commands::filesystem::fs_copy_path,
-            commands::filesystem::fs_search_tree,
-            commands::filesystem::clipboard_read_file_paths,
-            commands::filesystem::fs_read_file,
-            commands::filesystem::fs_read_binary_file,
-            commands::filesystem::fs_write_file,
-            commands::filesystem::fs_move_files,
-            commands::filesystem::fs_copy_files,
-            commands::filesystem::fs_delete,
-            commands::filesystem::fs_rename,
-            commands::filesystem::fs_create_entry,
-            commands::filesystem::fs_duplicate,
-            commands::filesystem::open_external,
+            // Phase 2 Unit 6 — `commands::filesystem::*` shims
+            // deleted. Renderer hits `/cli/fs/*` on the daemon.
             // 0.37.9 — macOS permissions surface for Settings UI
             commands::permissions::permissions_get_status,
             commands::permissions::permissions_request_full_disk_access,
@@ -949,10 +935,8 @@ pub fn run() {
             commands::permissions::permissions_request_microphone,
             commands::permissions::permissions_request_apple_events,
             commands::permissions::permissions_request_local_network,
-            // What's New popup (0.38.7)
-            commands::whats_new::whats_new_check,
-            commands::whats_new::whats_new_mark_seen,
-            commands::whats_new::whats_new_reset,
+            // Phase 2 Unit 6 — `commands::whats_new::*` shims
+            // deleted. Renderer hits `/cli/whats_new*` on the daemon.
             // Memory watcher (0.38.12 — leak telemetry)
             commands::memory_watcher::renderer_memory_status,
             // Filesystem watcher
@@ -968,10 +952,9 @@ pub fn run() {
             commands::settings::set_document_edited,
             commands::settings::set_relaunch_mode,
             commands::settings::relaunch_via_open,
-            // Project Config
-            commands::project_config::project_config_get,
-            commands::project_config::project_config_has_run_command,
-            commands::project_config::project_config_run_command,
+            // Phase 2 Unit 6 — `commands::project_config::*` shims
+            // deleted. Renderer hits `/cli/project-config/*` on the
+            // daemon.
             // Terminal
             commands::terminal::terminal_create,
             commands::terminal::terminal_write,
@@ -1027,18 +1010,8 @@ pub fn run() {
             // Phase 2 Unit 2 — `assistant_*` commands deleted. LLM
             // moved to k2so-daemon (/cli/llm/*); renderer calls the
             // daemon directly.
-            // Chat History
-            commands::chat_history::chat_history_list,
-            commands::chat_history::chat_history_list_for_project,
-            commands::chat_history::chat_history_detect_active_session,
-            commands::chat_history::chat_history_session_exists,
-            commands::chat_history::chat_history_get_storage_paths,
-            commands::chat_history::chat_history_get_custom_names,
-            commands::chat_history::chat_history_rename_session,
-            commands::chat_history::chat_history_get_pinned,
-            commands::chat_history::chat_history_toggle_pin,
-            commands::chat_history::chat_history_discover_ide_sessions,
-            commands::chat_history::chat_history_migrate_ide_sessions,
+            // Phase 2 Unit 6 — `commands::chat_history::*` shims
+            // deleted. Renderer hits `/cli/chat/*` on the daemon.
             // Timer
             commands::timer::timer_entries_list,
             commands::timer::timer_entry_create,
@@ -1153,24 +1126,17 @@ pub fn run() {
             commands::k2so_agents::k2so_agents_preview_claude_md,
             commands::k2so_agents::k2so_agents_regenerate_claude_md,
             commands::k2so_agents::k2so_agents_save_agent_md,
-            // Review Checklist
-            commands::review_checklist::review_checklist_read,
-            commands::review_checklist::review_checklist_write,
-            commands::review_checklist::review_checklist_toggle,
-            commands::review_checklist::review_checklist_init,
+            // Phase 2 Unit 6 — `commands::review_checklist::*` shims
+            // deleted. Renderer hits `/cli/review-checklist/*` on the
+            // daemon.
             // Format
             commands::format::format_file,
             commands::format::format_file_check,
-            commands::themes::get_themes_dir,
-            commands::themes::themes_ensure_dir,
-            commands::themes::themes_create_template,
-            commands::themes::themes_list_custom,
-            commands::themes::themes_delete,
-            // Skill Layers
-            commands::skill_layers::skill_layers_list,
-            commands::skill_layers::skill_layers_create,
-            commands::skill_layers::skill_layers_delete,
-            commands::skill_layers::skill_layers_get_content,
+            // Phase 2 Unit 6 — `commands::themes::*` shims deleted.
+            // Renderer hits `/cli/themes/*` on the daemon.
+            // Phase 2 Unit 6 — `commands::skill_layers::*` shims
+            // deleted. Renderer hits `/cli/skill-layers/*` on the
+            // daemon.
             // Phase 2 Unit 1 — companion API commands deleted; the
             // renderer now calls `/cli/companion/{start,stop,status,
             // set-password,disconnect-session}` on the daemon

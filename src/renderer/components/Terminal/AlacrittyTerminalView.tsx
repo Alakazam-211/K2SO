@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import { useSettingsStore } from '@/stores/settings'
 import { keyEventToSequence, naturalTextEditingSequence } from '@/lib/key-mapping'
@@ -632,7 +633,7 @@ export function AlacrittyTerminalView({
     // WKWebView doesn't expose to the web clipboard API. Query the native
     // pasteboard — if file paths are present, paste them shell-escaped to
     // match drag-drop behavior.
-    invoke<string[]>('clipboard_read_file_paths').then((paths) => {
+    daemonCliGet<string[]>('fs/clipboard-paths').then((paths) => {
       if (!ptyIdRef.current) return
       if (paths && paths.length > 0) {
         invoke('terminal_write', { id: ptyIdRef.current, data: buildDropPayload(paths) })
@@ -847,7 +848,7 @@ export function AlacrittyTerminalView({
     e.stopPropagation()
 
     if (clicked.type === 'url') {
-      invoke('open_external', { url: clicked.target }).catch((e: unknown) => console.warn('[terminal-link]', e))
+      daemonCliPost('fs/open-external', { target: clicked.target }).catch((e: unknown) => console.warn('[terminal-link]', e))
     } else if (clicked.type === 'file' && clicked.filePath) {
       const tabsStore = useTabsStore.getState()
       const openInSplit = useTerminalSettingsStore.getState().openLinksInSplitPane

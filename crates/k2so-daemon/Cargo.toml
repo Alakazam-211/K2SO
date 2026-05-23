@@ -88,6 +88,13 @@ libc = "0.2"
 # import it without a re-export hop.
 parking_lot = "0.12"
 
+# base64 — Phase 2 Unit 6 `/cli/fs/read-binary` encodes file bytes
+# into the JSON response so the existing `/cli/*` dispatcher (JSON
+# only) can carry them. ~33% wire overhead, but stays within the
+# 50 MB binary-read cap which is the renderer's worst case (PDFs,
+# DOCX, images). A streaming WS endpoint is Phase 3 work.
+base64 = "0.22"
+
 [dev-dependencies]
 # Enable k2so-core's `test-util` feature for integration tests that
 # need the in-memory DB helper (`db::init_for_tests`). Production

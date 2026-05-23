@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore, type TerminalItemData } from '@/stores/tabs'
 import { useSettingsStore } from '@/stores/settings'
@@ -213,7 +214,7 @@ export default function ChatHistory(): React.JSX.Element {
     setError(null)
 
     try {
-      const result = await invoke<ChatSession[]>('chat_history_list_for_project', { projectPath })
+      const result = await daemonCliGet<ChatSession[]>('chat/list', { project_path: projectPath })
       setSessions(result)
     } catch (e) {
       console.error('[chat-history]', e)
@@ -227,13 +228,13 @@ export default function ChatHistory(): React.JSX.Element {
   // Fetch custom names and pinned state
   const fetchCustomNames = useCallback(async () => {
     try {
-      const names = await invoke<Record<string, string>>('chat_history_get_custom_names')
+      const names = await daemonCliGet<Record<string, string>>('chat/custom-names')
       setCustomNames(names)
     } catch {
       // ignore
     }
     try {
-      const pinned = await invoke<string[]>('chat_history_get_pinned')
+      const pinned = await daemonCliGet<string[]>('chat/pinned')
       setPinnedKeys(new Set(pinned))
     } catch {
       // ignore
@@ -308,7 +309,7 @@ export default function ChatHistory(): React.JSX.Element {
   const handleAgenticSearch = useCallback(async () => {
     if (!projectPath || !searchQuery.trim()) return
 
-    const paths = await invoke<ChatStoragePaths>('chat_history_get_storage_paths', { projectPath })
+    const paths = await daemonCliGet<ChatStoragePaths>('chat/storage-paths', { project_path: projectPath })
     const agent = useSettingsStore.getState().defaultAgent || 'claude'
 
     // Build the search prompt with available paths
@@ -348,9 +349,9 @@ export default function ChatHistory(): React.JSX.Element {
     const key = `${session.provider}:${session.sessionId}`
     const isPinned = pinnedKeys.has(key)
     try {
-      await invoke('chat_history_toggle_pin', {
+      await daemonCliPost('chat/toggle-pin', {
         provider: session.provider,
-        sessionId: session.sessionId,
+        session_id: session.sessionId,
         pinned: !isPinned,
       })
       setPinnedKeys((prev) => {
@@ -429,10 +430,10 @@ export default function ChatHistory(): React.JSX.Element {
       return
     }
     try {
-      await invoke('chat_history_rename_session', {
+      await daemonCliPost('chat/rename', {
         provider: renamingSession.provider,
-        sessionId: renamingSession.sessionId,
-        customName: renameValue.trim(),
+        session_id: renamingSession.sessionId,
+        custom_name: renameValue.trim(),
       })
       // Update local custom names
       const key = `${renamingSession.provider}:${renamingSession.sessionId}`

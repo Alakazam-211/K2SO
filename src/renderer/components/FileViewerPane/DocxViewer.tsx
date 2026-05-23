@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+import { daemonCliGet } from '@/lib/daemon-cli'
 import mammoth from 'mammoth'
 
 interface DocxViewerProps {
@@ -19,13 +19,14 @@ export function DocxViewer({ filePath }: DocxViewerProps): React.JSX.Element {
       setError(null)
 
       try {
-        // Read the file as binary via the existing Tauri command
-        const bytes = await invoke<number[]>('fs_read_binary_file', { path: filePath })
+        // Read the file as base64 via the daemon and decode locally.
+        const r = await daemonCliGet<{ base64: string }>('fs/read-binary', { path: filePath })
 
         if (cancelled) return
 
-        // Convert the number array to a Uint8Array, then to an ArrayBuffer
-        const uint8 = new Uint8Array(bytes)
+        const binary = atob(r.base64)
+        const uint8 = new Uint8Array(binary.length)
+        for (let i = 0; i < binary.length; i++) uint8[i] = binary.charCodeAt(i)
         const arrayBuffer = uint8.buffer
 
         // Convert DOCX to HTML using mammoth

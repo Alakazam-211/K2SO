@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+import { daemonCliGet } from '@/lib/daemon-cli'
 import Markdown from '../Markdown/Markdown'
 
 interface WhatsNewPayload {
@@ -72,7 +72,7 @@ export default function WhatsNewModal({
     let attempt = 0
     while (attempt < MAX_ATTEMPTS) {
       try {
-        const data = await invoke<WhatsNewPayload>('whats_new_check')
+        const data = await daemonCliGet<WhatsNewPayload>('whats_new')
         setPayload(data)
         if (data.has_new || forceShow) {
           setVisible(true)
@@ -160,7 +160,7 @@ export default function WhatsNewModal({
     if (dismissing) return
     setDismissing(true)
     try {
-      await invoke('whats_new_mark_seen')
+      await daemonCliGet('whats_new/mark_seen')
     } catch (err) {
       // eslint-disable-next-line no-console
       console.debug('[whats-new] mark_seen failed:', err)

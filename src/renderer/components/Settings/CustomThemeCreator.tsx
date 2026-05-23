@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { AIFileEditor } from '../AIFileEditor/AIFileEditor'
 import { CodeEditor } from '../FileViewerPane/CodeEditor'
 import { parseCustomThemeJson, serializeThemeToJson, DEFAULT_COLORS, DEFAULT_SYNTAX } from '@/lib/editor-themes'
@@ -126,7 +127,8 @@ export function CustomThemeCreator({ onClose, currentThemeId, existingThemePath 
   useEffect(() => {
     const init = async () => {
       try {
-        const dir = await invoke<string>('themes_ensure_dir')
+        const r = await daemonCliGet<{ path: string }>('themes/ensure-dir')
+        const dir = r.path
         setThemesDir(dir)
 
         let path: string
@@ -141,13 +143,14 @@ export function CustomThemeCreator({ onClose, currentThemeId, existingThemePath 
             DEFAULT_COLORS,
             DEFAULT_SYNTAX
           )
-          path = await invoke<string>('themes_create_template', { baseThemeJson: baseJson })
+          const tmpl = await daemonCliPost<{ path: string }>('themes/create-template', { base_theme_json: baseJson })
+          path = tmpl.path
         }
 
         setThemePath(path)
 
         // Parse the initial file to set preview
-        const { content } = await invoke<{ content: string }>('fs_read_file', { path })
+        const { content } = await daemonCliGet<{ content: string }>('fs/read-file', { path })
         const parsed = parseCustomThemeJson(content)
         if (parsed) {
           setThemeOverride({ colors: parsed.colors, highlight: parsed.highlight, isLight: parsed.type === 'light' })
@@ -178,8 +181,8 @@ export function CustomThemeCreator({ onClose, currentThemeId, existingThemePath 
     if (!themePath && !themesDir) return
     try {
       // Scan for most recent json in the dir
-      const entries = await invoke<{ name: string; path: string; isDirectory: boolean; modifiedAt: number }[]>(
-        'fs_read_dir', { path: themesDir! }
+      const entries = await daemonCliGet<{ name: string; path: string; isDirectory: boolean; modifiedAt: number }[]>(
+        'fs/read-dir', { path: themesDir! }
       )
       const matching = entries
         .filter((e: any) => !e.isDirectory && e.name.endsWith('.json') && !e.name.startsWith('.'))
@@ -190,7 +193,7 @@ export function CustomThemeCreator({ onClose, currentThemeId, existingThemePath 
         return
       }
       console.log('[theme-creator] Manual refresh: reading', target.path)
-      const result = await invoke<{ content: string }>('fs_read_file', { path: target.path })
+      const result = await daemonCliGet<{ content: string }>('fs/read-file', { path: target.path })
       const content = result.content
       console.log('[theme-creator] Manual refresh: got content, length:', content.length)
       handleFileChange(content)
