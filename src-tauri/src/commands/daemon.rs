@@ -183,24 +183,45 @@ pub fn daemon_log_path() -> Result<String, String> {
     Ok(dir.join("daemon.stdout.log").to_string_lossy().to_string())
 }
 
-/// Read the "keep daemon running when K2SO quits" preference. Reads
-/// from `~/.k2so/settings.json` via the same `read_settings()` path
-/// the rest of the Settings toggles use. Defaults to `true` —
-/// persistent agents are the 0.33.0 flagship feature, so the default
-/// respects that.
+/// Read the "keep daemon running when K2SO quits" preference. Routed
+/// through `/cli/settings/get` so the daemon's `app_settings` lock is
+/// the sole reader/writer in normal flows. Falls back to the in-process
+/// `k2so_core::app_settings::load()` if the daemon is unreachable —
+/// a Tauri-only debug session shouldn't lose toggle visibility just
+/// because the daemon plist isn't installed yet.
+///
+/// Defaults to `true` — persistent agents are the 0.33.0 flagship
+/// feature, so the default respects that.
+///
+/// JSON field name is camelCase (`keepDaemonOnQuit`) because
+/// `AppSettings` is `#[serde(rename_all = "camelCase")]`.
 #[tauri::command]
 pub fn get_keep_daemon_on_quit() -> bool {
-    crate::commands::settings::read_settings().keep_daemon_on_quit
+    if let Ok(client) = DaemonClient::try_connect() {
+        if let Ok(body) = client.cli_get("/cli/settings/get", &[]) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                if let Some(b) = v.get("keepDaemonOnQuit").and_then(|x| x.as_bool()) {
+                    return b;
+                }
+            }
+        }
+    }
+    k2so_core::app_settings::load().keep_daemon_on_quit
 }
 
 /// Update the "keep daemon running when K2SO quits" preference.
-/// Writes through the same JSON file the rest of the app uses so
-/// everything stays in one place.
+/// Sends a partial-update body to `/cli/settings/update` so the
+/// daemon's `app_settings::update` performs the deep-merge + atomic
+/// JSON file write in one place. The daemon's process-wide settings
+/// lock prevents racing writers; pre-Unit-7c this command bypassed
+/// that lock by writing the JSON directly.
 #[tauri::command]
 pub fn set_keep_daemon_on_quit(keep: bool) -> Result<(), String> {
-    let mut settings = crate::commands::settings::read_settings();
-    settings.keep_daemon_on_quit = keep;
-    crate::commands::settings::write_settings(&settings);
+    let client = DaemonClient::try_connect()?;
+    let _ = client.cli_post_json(
+        "/cli/settings/update",
+        &serde_json::json!({ "keepDaemonOnQuit": keep }),
+    )?;
     Ok(())
 }
 

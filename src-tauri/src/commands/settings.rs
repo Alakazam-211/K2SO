@@ -7,28 +7,23 @@
 
 //! Tauri-side host shims for global app settings.
 //!
-//! Phase 2 Unit 7a — the actual `AppSettings` schema + the
-//! `~/.k2so/settings.json` writer have moved into
-//! `k2so_core::app_settings`, and the daemon (`/cli/settings/{get,update,reset}`)
-//! is the sole writer in normal flows. This file now contains:
+//! Phase 2 Unit 7c — the residual `read_settings`/`write_settings`
+//! compat wrappers (last hold-outs from Unit 7a) are gone. Every
+//! Tauri-side reader now calls `k2so_core::app_settings::load()`
+//! directly; writers go through the daemon's `/cli/settings/{update,
+//! reset}` route so the daemon's process-wide settings lock is the
+//! sole serializer.
 //!
-//! - A `pub use` re-export of `AppSettings` so legacy importers
-//!   (`commands::daemon::get_keep_daemon_on_quit`, `k2so_agents.rs::install_heartbeat_*`)
-//!   keep compiling without churn.
-//! - `read_settings()` / `write_settings()` thin wrappers around
-//!   `k2so_core::app_settings::{load, save}` — kept here until
-//!   Unit 7c deletes the file outright. Both wrappers preserve the
-//!   pre-Unit-7a signatures (sync, infallible-by-design, no `AppHandle`).
+//! What's left in this file:
+//!
+//! - A `pub use` re-export of `AppSettings` so any external
+//!   importers keep compiling without rename churn.
 //! - `settings_get` / `settings_update` / `settings_reset` Tauri
-//!   commands, now thin daemon proxies via `DaemonClient`.
-//! - CLI-install / window-edited / relaunch helpers — these are
-//!   genuine HOST concerns (sudo-bound symlink writes, native window
-//!   AppKit calls, `.app` relaunch). They stay.
-//!
-//! After Unit 7c lands, the only thing left in this file will be the
-//! HOST helpers. Until then, leaving `read_settings`/`write_settings`
-//! callable from `daemon.rs` + `k2so_agents.rs` keeps the diff
-//! bounded.
+//!   commands, thin daemon proxies via `DaemonClient`.
+//! - CLI-install / window-edited / relaunch helpers — genuine HOST
+//!   concerns (sudo-bound symlink writes, native window AppKit
+//!   calls, `.app` relaunch). They stay because the daemon has no
+//!   business writing `/usr/local/bin/k2so` or talking to AppKit.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,25 +34,6 @@ use crate::daemon_client::DaemonClient;
 // ── Settings types — now re-exported from k2so-core ─────────────────────
 
 pub use k2so_core::app_settings::AppSettings;
-
-// ── Thin compat wrappers (Unit 7a) ──────────────────────────────────────
-
-/// Pre-Unit-7a callers in this crate read settings via `read_settings()`.
-/// Keep the signature stable and forward to `k2so_core::app_settings::load`.
-/// Unit 7c will retire this helper along with its remaining caller in
-/// `commands/daemon.rs`.
-pub(crate) fn read_settings() -> AppSettings {
-    k2so_core::app_settings::load()
-}
-
-/// Pre-Unit-7a callers in this crate wrote settings via `write_settings()`.
-/// Forward to `k2so_core::app_settings::save`, swallowing errors to match
-/// the legacy infallible signature.
-pub(crate) fn write_settings(settings: &AppSettings) {
-    if let Err(e) = k2so_core::app_settings::save(settings) {
-        log_debug!("[settings] write_settings: {e}");
-    }
-}
 
 // ── Tauri commands — daemon proxies ─────────────────────────────────────
 

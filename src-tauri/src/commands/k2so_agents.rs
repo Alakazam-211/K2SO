@@ -2139,441 +2139,79 @@ pub fn k2so_agents_preview_schedule(
     Ok(results)
 }
 
-// ── Heartbeat Scheduler ─────────────────────────────────────────────────
+// ── Heartbeat Scheduler — Phase 2 Unit 7c ───────────────────────────────
+//
+// Pre-Unit-7c these commands wrote `~/.k2so/heartbeat.sh` + installed
+// the launchd plist (macOS) / crontab entry (Linux) directly from
+// Tauri. Unit 7c moved the install/uninstall body to
+// `k2so_core::agents::heartbeat_install` and added daemon routes at
+// `/cli/heartbeat/{install-launchd, uninstall-launchd,
+// apply-wake-scheduler}`. The wrappers below are thin daemon-HTTP
+// proxies so K2SO Connect (remote daemon, no Tauri) can install its
+// own scheduler under its own GUI session and the renderer keeps
+// using the same `invoke('k2so_agents_*_heartbeat')` shape.
 
-/// Install the heartbeat scheduler (launchd on macOS, cron on Linux).
-/// The heartbeat script reads ~/.k2so/heartbeat.port, checks if K2SO is alive,
-/// and triggers triage for projects that have heartbeat enabled.
+/// Install the heartbeat scheduler via the daemon. The daemon reads
+/// the current `wake_scheduler` settings, generates `heartbeat.sh`,
+/// and loads the plist (macOS) or installs the crontab entry (Linux).
 #[tauri::command]
 pub fn k2so_agents_install_heartbeat(
     _state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<(), String> {
-    let k2so_home = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".k2so");
-    fs::create_dir_all(&k2so_home).map_err(|e| e.to_string())?;
-
-    // P5.6: heartbeat-projects.txt has been retired. The daemon now
-    // serves the active project list from `agent_heartbeats` directly
-    // via `/cli/heartbeat/active-projects`, so heartbeat.sh queries
-    // it on every tick. Self-healing — a stale file can no longer
-    // make a workspace silent. Clean up the legacy artifact if it
-    // still exists on disk.
-    let _ = fs::remove_file(k2so_home.join("heartbeat-projects.txt"));
-
-    // Generate heartbeat script
-    let script_path = k2so_home.join("heartbeat.sh");
-    let script = generate_heartbeat_script();
-    fs::write(&script_path, &script)
-        .map_err(|e| format!("Failed to write heartbeat script: {}", e))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))
-            .map_err(|e| e.to_string())?;
-    }
-
-    // Install platform scheduler. Interval + wake-from-sleep come
-    // from the user's Settings > Wake Scheduler panel; defaults are
-    // 5-minute cadence with wake_system=false.
-    #[cfg(target_os = "macos")]
-    {
-        let settings = crate::commands::settings::read_settings();
-        let interval_secs = settings.wake_scheduler.interval_minutes.max(1) as u32 * 60;
-        install_heartbeat_launchd(
-            &script_path,
-            interval_secs,
-            settings.wake_scheduler.wake_system,
-        )?;
-    }
-
-    #[cfg(target_os = "linux")]
-    install_heartbeat_cron(&script_path)?;
-
+    let client = crate::daemon_client::DaemonClient::try_connect()?;
+    let settings = k2so_core::app_settings::load();
+    let cfg = &settings.wake_scheduler;
+    let interval_secs = cfg.interval_minutes.max(1) as u32 * 60;
+    let body = serde_json::json!({
+        "interval_seconds": interval_secs,
+        "wake_system": cfg.wake_system,
+    });
+    let _ = client.cli_post_json("/cli/heartbeat/install-launchd", &body)?;
     Ok(())
 }
 
-/// Apply the wake-scheduler settings stored in `AppSettings.wake_scheduler`.
-///
-/// Dispatches based on `.mode`:
-/// - `"off"`: no heartbeat plist, no daemon wakes.
-/// - `"on_demand"`: uninstall heartbeat plist; daemon still fires when
-///   launched by Tauri app lifecycle but system stays asleep.
-/// - `"heartbeat"`: install heartbeat plist with user's interval +
-///   optional `WakeSystem: true` for lid-closed overnight fires.
-///
-/// Called from Settings > Wake Scheduler after the user clicks Apply.
-/// Idempotent — safe to call on every Apply click even if nothing
-/// changed. Also called on app startup so the plist matches settings
-/// even after a manual edit to settings.json.
+/// Apply the user's Wake Scheduler settings — daemon decides between
+/// install / uninstall based on `mode`. See `heartbeat_launchd_routes`
+/// in the daemon for the routing.
 #[tauri::command]
 pub fn k2so_agents_apply_wake_scheduler() -> Result<String, String> {
-    let settings = crate::commands::settings::read_settings();
+    let client = crate::daemon_client::DaemonClient::try_connect()?;
+    let settings = k2so_core::app_settings::load();
     let cfg = &settings.wake_scheduler;
-
-    let k2so_home = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".k2so");
-    let script_path = k2so_home.join("heartbeat.sh");
-
-    match cfg.mode.as_str() {
-        "off" | "on_demand" => {
-            #[cfg(target_os = "macos")]
-            {
-                let _ = uninstall_heartbeat_launchd();
-            }
-            #[cfg(target_os = "linux")]
-            {
-                let _ = uninstall_heartbeat_cron();
-            }
-            Ok(format!("Wake scheduler set to '{}' — heartbeat plist removed.", cfg.mode))
-        }
-        "heartbeat" => {
-            if !script_path.exists() {
-                return Err(format!(
-                    "Cannot install wake scheduler: heartbeat.sh not generated yet. \
-                     Enable heartbeat on at least one project first, then apply."
-                ));
-            }
-            let interval_secs = cfg.interval_minutes.max(1) as u32 * 60;
-            #[cfg(target_os = "macos")]
-            install_heartbeat_launchd(&script_path, interval_secs, cfg.wake_system)?;
-            #[cfg(target_os = "linux")]
-            install_heartbeat_cron(&script_path)?;
-            Ok(format!(
-                "Wake scheduler set: every {} min{}.",
-                cfg.interval_minutes,
-                if cfg.wake_system {
-                    " (wakes system from sleep)"
-                } else {
-                    ""
-                }
-            ))
-        }
-        other => Err(format!(
-            "Unknown wake scheduler mode '{}'. Expected 'off', 'on_demand', or 'heartbeat'.",
-            other
-        )),
-    }
+    let body = serde_json::json!({
+        "mode": cfg.mode,
+        "interval_minutes": cfg.interval_minutes,
+        "wake_system": cfg.wake_system,
+    });
+    let resp = client.cli_post_json("/cli/heartbeat/apply-wake-scheduler", &body)?;
+    let v: serde_json::Value = serde_json::from_str(&resp)
+        .map_err(|e| format!("decode apply-wake-scheduler: {e}"))?;
+    Ok(v.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string())
 }
 
-/// Uninstall the heartbeat scheduler.
+/// Uninstall the heartbeat scheduler via the daemon.
 #[tauri::command]
 pub fn k2so_agents_uninstall_heartbeat() -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    uninstall_heartbeat_launchd()?;
-
-    #[cfg(target_os = "linux")]
-    uninstall_heartbeat_cron()?;
-
-    // Clean up script
-    let k2so_home = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".k2so");
-    let _ = fs::remove_file(k2so_home.join("heartbeat.sh"));
-    let _ = fs::remove_file(k2so_home.join("heartbeat-projects.txt"));
-
+    let client = crate::daemon_client::DaemonClient::try_connect()?;
+    let _ = client.cli_post_json(
+        "/cli/heartbeat/uninstall-launchd",
+        &serde_json::json!({}),
+    )?;
     Ok(())
 }
 
-/// Update the heartbeat project list (called when heartbeat toggle changes).
-/// Auto-uninstalls the scheduler when no projects have heartbeat enabled,
-/// and auto-installs when at least one does.
+/// Refresh the heartbeat-scheduler lifecycle when the toggle changes.
+/// Same idempotent re-apply as `k2so_agents_apply_wake_scheduler` —
+/// the daemon's `apply-wake-scheduler` route handles the install /
+/// uninstall transition uniformly. Pre-Unit-7c this also wrote the
+/// retired `heartbeat-projects.txt`; that file was killed in P5.6
+/// when `/cli/heartbeat/active-projects` started serving the live
+/// project list from `agent_heartbeats`.
 #[tauri::command]
 pub fn k2so_agents_update_heartbeat_projects(
-    state: tauri::State<'_, crate::state::AppState>,
+    _state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<(), String> {
-    let conn = state.db.lock();
-    let projects = crate::db::schema::Project::list(&conn).map_err(|e| e.to_string())?;
-    let heartbeat_paths: Vec<String> = projects
-        .iter()
-        .filter(|p| p.heartbeat_mode != "off")
-        .map(|p| p.path.clone())
-        .collect();
-    drop(conn);
-
-    let k2so_home = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".k2so");
-    let paths_file = k2so_home.join("heartbeat-projects.txt");
-    fs::write(&paths_file, heartbeat_paths.join("\n"))
-        .map_err(|e| format!("Failed to write heartbeat projects: {}", e))?;
-
-    // Auto-manage scheduler lifecycle: uninstall when empty, install when needed
-    if heartbeat_paths.is_empty() {
-        #[cfg(target_os = "macos")]
-        { let _ = uninstall_heartbeat_launchd(); }
-        #[cfg(target_os = "linux")]
-        { let _ = uninstall_heartbeat_cron(); }
-    } else {
-        // Ensure scheduler is installed (idempotent — unloads before
-        // loading). Pulls interval + wake_system from user settings
-        // so a Settings > Wake Scheduler toggle is reflected on the
-        // next project-list refresh without a manual reinstall.
-        let script_path = k2so_home.join("heartbeat.sh");
-        if script_path.exists() {
-            #[cfg(target_os = "macos")]
-            {
-                let settings = crate::commands::settings::read_settings();
-                let interval_secs =
-                    settings.wake_scheduler.interval_minutes.max(1) as u32 * 60;
-                let _ = install_heartbeat_launchd(
-                    &script_path,
-                    interval_secs,
-                    settings.wake_scheduler.wake_system,
-                );
-            }
-            #[cfg(target_os = "linux")]
-            { let _ = install_heartbeat_cron(&script_path); }
-        }
-    }
-
-    Ok(())
-}
-
-fn generate_heartbeat_script() -> String {
-    let home = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("~"))
-        .to_string_lossy()
-        .to_string();
-
-    format!(r##"#!/bin/bash
-# K2SO Agent Heartbeat — DO NOT EDIT (managed by K2SO)
-# Asks the daemon which projects have active heartbeats, then ticks each.
-# P5.6: replaces the legacy heartbeat-projects.txt file with a daemon
-# query so the project list never goes stale.
-
-PORT_FILE="{home}/.k2so/heartbeat.port"
-LOG_FILE="{home}/.k2so/heartbeat.log"
-TOKEN_FILE="{home}/.k2so/heartbeat.token"
-
-ts() {{ date '+%Y-%m-%d %H:%M:%S'; }}
-
-# Pure-bash URL encoding (no python3 dependency)
-urlencode() {{
-    local string="$1" length="${{#1}}" i c
-    local encoded=""
-    for (( i = 0; i < length; i++ )); do
-        c="${{string:i:1}}"
-        case "$c" in
-            [a-zA-Z0-9._~-]) encoded+="$c" ;;
-            *) encoded+=$(printf '%%%02X' "'$c") ;;
-        esac
-    done
-    printf '%s' "$encoded"
-}}
-
-# Read K2SO port
-if [ ! -f "$PORT_FILE" ]; then
-    exit 0
-fi
-PORT=$(cat "$PORT_FILE" 2>/dev/null)
-if [ -z "$PORT" ] || ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
-    exit 0
-fi
-
-# Check if K2SO is alive (server returns JSON with "status":"ok")
-HEALTH=$(curl -s --connect-timeout 2 "http://127.0.0.1:$PORT/health" 2>/dev/null)
-if ! echo "$HEALTH" | grep -q '"ok"'; then
-    exit 0
-fi
-
-# Read auth token
-TOKEN=""
-if [ -f "$TOKEN_FILE" ]; then
-    TOKEN=$(cat "$TOKEN_FILE" 2>/dev/null)
-fi
-
-if [ -z "$TOKEN" ]; then
-    echo "$(ts) ERROR: No auth token available — skipping heartbeat" >> "$LOG_FILE"
-    exit 0
-fi
-
-# Ask the daemon for the current list of projects with active heartbeats.
-# Newline-delimited plain text — derived from agent_heartbeats so it's
-# always in sync with the user's actual configuration. Empty response =
-# no work to do this tick.
-PROJECTS=$(curl -s --connect-timeout 2 --max-time 5 \
-    "http://127.0.0.1:$PORT/cli/heartbeat/active-projects?token=$TOKEN" 2>>"$LOG_FILE")
-if [ -z "$PROJECTS" ]; then
-    # No heartbeat-enabled projects — silent no-op. Trim log and exit.
-    if [ -f "$LOG_FILE" ]; then
-        tail -200 "$LOG_FILE" > "$LOG_FILE.tmp" 2>/dev/null && mv -f "$LOG_FILE.tmp" "$LOG_FILE" 2>/dev/null
-    fi
-    exit 0
-fi
-
-# Trigger triage for each heartbeat-enabled project. We log EVERY tick
-# (fires, skips, errors) so users can see when the heartbeat ran.
-while IFS= read -r project_path; do
-    [ -z "$project_path" ] && continue
-    ENCODED_PATH=$(urlencode "$project_path")
-    RESULT=$(curl -sG "http://127.0.0.1:$PORT/cli/scheduler-tick?token=$TOKEN&project=$ENCODED_PATH" --connect-timeout 5 --max-time 30 2>>"$LOG_FILE")
-    CURL_EXIT=$?
-    if [ "$CURL_EXIT" -ne 0 ]; then
-        echo "$(ts) ERROR curl exit=$CURL_EXIT project=$project_path" >> "$LOG_FILE"
-        continue
-    fi
-    COUNT=$(echo "$RESULT" | grep -o '"count":[0-9]*' | grep -o '[0-9]*' | head -1 || echo 0)
-    SKIPPED=$(echo "$RESULT" | grep -o '"skipped":"[^"]*"' | sed 's/"skipped":"\([^"]*\)"/\1/')
-    if [ -n "$SKIPPED" ]; then
-        echo "$(ts) tick project=$project_path skipped=$SKIPPED" >> "$LOG_FILE"
-    elif [ -n "$COUNT" ] && [ "$COUNT" -gt 0 ] 2>/dev/null; then
-        echo "$(ts) tick project=$project_path launched=$COUNT" >> "$LOG_FILE"
-    else
-        echo "$(ts) tick project=$project_path launched=0" >> "$LOG_FILE"
-    fi
-done <<< "$PROJECTS"
-
-# Trim log (atomic: write to tmp then move)
-if [ -f "$LOG_FILE" ]; then
-    tail -200 "$LOG_FILE" > "$LOG_FILE.tmp" 2>/dev/null && mv -f "$LOG_FILE.tmp" "$LOG_FILE" 2>/dev/null
-fi
-"##, home = home)
-}
-
-/// Install (or reinstall) the heartbeat launchd plist with a
-/// user-configurable interval + optional wake-from-sleep behavior.
-/// - `interval_seconds` maps to `StartInterval` (60 = every minute,
-///   300 = every 5 minutes, etc.).
-/// - `wake_system` sets `WakeSystem: true` so launchd wakes a
-///   sleeping machine — the mechanism that makes lid-closed overnight
-///   agent work possible.
-///
-/// Idempotent: unloads any existing plist with the same label before
-/// writing, then loads the new one. Safe to call repeatedly with
-/// different settings.
-#[cfg(target_os = "macos")]
-fn install_heartbeat_launchd(
-    script_path: &Path,
-    interval_seconds: u32,
-    wake_system: bool,
-) -> Result<(), String> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
-    let plist_path = home.join("Library/LaunchAgents/com.k2so.agent-heartbeat.plist");
-
-    // Ensure dir exists
-    if let Some(parent) = plist_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-
-    // Unload existing
-    if plist_path.exists() {
-        let _ = std::process::Command::new("launchctl")
-            .args(["unload", &plist_path.to_string_lossy()])
-            .output();
-    }
-
-    let wake_key = if wake_system {
-        "\n    <key>WakeSystem</key>\n    <true/>"
-    } else {
-        ""
-    };
-
-    let plist = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.k2so.agent-heartbeat</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/bash</string>
-        <string>{script}</string>
-    </array>
-    <key>StartInterval</key>
-    <integer>{interval}</integer>{wake_key}
-    <key>RunAtLoad</key>
-    <false/>
-    <key>StandardErrorPath</key>
-    <string>{home}/.k2so/heartbeat-stderr.log</string>
-</dict>
-</plist>"#,
-        script = script_path.to_string_lossy(),
-        interval = interval_seconds,
-        wake_key = wake_key,
-        home = home.to_string_lossy(),
-    );
-
-    fs::write(&plist_path, &plist).map_err(|e| format!("Failed to write plist: {}", e))?;
-
-    let output = std::process::Command::new("launchctl")
-        .args(["load", &plist_path.to_string_lossy()])
-        .output()
-        .map_err(|e| format!("launchctl failed: {}", e))?;
-
-    if !output.status.success() {
-        return Err(format!("launchctl load failed: {}", String::from_utf8_lossy(&output.stderr)));
-    }
-
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn uninstall_heartbeat_launchd() -> Result<(), String> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
-    let plist_path = home.join("Library/LaunchAgents/com.k2so.agent-heartbeat.plist");
-    if plist_path.exists() {
-        let _ = std::process::Command::new("launchctl")
-            .args(["unload", &plist_path.to_string_lossy()])
-            .output();
-        fs::remove_file(&plist_path).map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn install_heartbeat_cron(script_path: &Path) -> Result<(), String> {
-    let marker = "# k2so-agent-heartbeat";
-    let entry = format!("* * * * * {} {}", script_path.to_string_lossy(), marker);
-
-    let existing = std::process::Command::new("crontab")
-        .args(["-l"])
-        .output()
-        .ok()
-        .and_then(|o| if o.status.success() { String::from_utf8(o.stdout).ok() } else { None })
-        .unwrap_or_default();
-
-    let mut lines: Vec<&str> = existing.lines().filter(|l| !l.contains("k2so-agent-heartbeat")).collect();
-    lines.push(&entry);
-    let new_crontab = lines.join("\n") + "\n";
-
-    let mut child = std::process::Command::new("crontab")
-        .args(["-"])
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-
-    use std::io::Write;
-    child.stdin.as_mut().ok_or("stdin")?.write_all(new_crontab.as_bytes()).map_err(|e| e.to_string())?;
-    child.wait().map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn uninstall_heartbeat_cron() -> Result<(), String> {
-    let existing = std::process::Command::new("crontab")
-        .args(["-l"])
-        .output()
-        .ok()
-        .and_then(|o| if o.status.success() { String::from_utf8(o.stdout).ok() } else { None })
-        .unwrap_or_default();
-
-    let new_crontab: String = existing.lines()
-        .filter(|l| !l.contains("k2so-agent-heartbeat"))
-        .collect::<Vec<&str>>()
-        .join("\n") + "\n";
-
-    let mut child = std::process::Command::new("crontab")
-        .args(["-"])
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-
-    use std::io::Write;
-    child.stdin.as_mut().ok_or("stdin")?.write_all(new_crontab.as_bytes()).map_err(|e| e.to_string())?;
-    child.wait().map_err(|e| e.to_string())?;
+    let _ = k2so_agents_apply_wake_scheduler();
     Ok(())
 }
 

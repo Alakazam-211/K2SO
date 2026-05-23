@@ -46,6 +46,7 @@ mod companion_routes;
 mod events;
 mod fs_routes;
 mod heartbeat_launch;
+mod heartbeat_launchd_routes;
 mod llm_host;
 mod llm_routes;
 mod pending_live;
@@ -597,6 +598,12 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             | "/cli/terminal/log"
             | "/cli/terminal/lifecycle-write"
             | "/cli/terminal/set-focus"
+            // Phase 2 Unit 7c — heartbeat-launchd installer + orphan-
+            // agents sweep. Body-bearing writes; method-gated below.
+            | "/cli/heartbeat/install-launchd"
+            | "/cli/heartbeat/uninstall-launchd"
+            | "/cli/heartbeat/apply-wake-scheduler"
+            | "/cli/agents/archive-orphans"
     );
     if method != "GET" && !(is_post && post_allowed) {
         let _ = stream.read(&mut buf).await;
@@ -1488,6 +1495,162 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             let r = terminal_lifecycle_routes::handle_set_focus(&body_bytes);
             send_response(&mut stream, r.status, r.content_type, &r.body).await;
         }
+        // Phase 2 Unit 7c — heartbeat-launchd installer routes.
+        // Daemon owns its own `com.k2so.agent-heartbeat.plist` so
+        // K2SO Connect (remote daemon without Tauri) can install +
+        // remove the scheduler under its own GUI session. Method
+        // gates are inline so a stray GET can't trigger a
+        // launchctl bootstrap. See `crates/k2so-core/src/agents/
+        // heartbeat_install.rs` for the install/uninstall bodies.
+        "/cli/heartbeat/install-launchd" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            // launchctl bootstrap can stall briefly under load; F5.
+            let r = tokio::task::spawn_blocking(move || {
+                heartbeat_launchd_routes::handle_install_launchd(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/heartbeat/uninstall-launchd" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let r = tokio::task::spawn_blocking(move || {
+                heartbeat_launchd_routes::handle_uninstall_launchd(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/heartbeat/apply-wake-scheduler" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let r = tokio::task::spawn_blocking(move || {
+                heartbeat_launchd_routes::handle_apply_wake_scheduler(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        // Phase 2 Unit 7c — orphan-agent sweep, refactored out of
+        // src-tauri/src/commands/projects.rs's agent_mode-change
+        // path. Body: `{"project_path": "/path"}`.
+        "/cli/agents/archive-orphans" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            // fs walk + db lock — F5.
+            let r = tokio::task::spawn_blocking(move || {
+                handle_archive_orphans(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
         // Phase 2 Unit 6 — POST routes for filesystem / chat /
         // themes / skill-layers / review-checklist. All JSON-bodied;
         // delegate to per-domain modules. The match-arm guard
@@ -2362,6 +2525,27 @@ fn write_restricted(path: &PathBuf, contents: &[u8]) -> std::io::Result<()> {
         .open(path)?;
     f.write_all(contents)?;
     Ok(())
+}
+
+/// Phase 2 Unit 7c — orphan top-tier agent sweep. Inlined handler
+/// (instead of a routes module) because the body is two lines of
+/// JSON parse + a direct call into `k2so_core::agents::workspace`.
+/// Returns `{"success":true,"archived":["<name>", ...]}`.
+fn handle_archive_orphans(body: &[u8]) -> cli::CliResponse {
+    #[derive(serde::Deserialize)]
+    struct Req {
+        project_path: String,
+    }
+    let req: Req = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return cli::CliResponse::bad_request(format!("invalid body: {e}")),
+    };
+    let archived = k2so_core::agents::workspace::archive_orphan_top_tier_agents(
+        &req.project_path,
+    );
+    cli::CliResponse::ok_json(
+        serde_json::json!({ "success": true, "archived": archived }).to_string(),
+    )
 }
 
 /// Dispatch a Phase 2 Unit 6 POST request body to the right

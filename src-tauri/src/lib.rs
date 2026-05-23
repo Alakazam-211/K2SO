@@ -61,10 +61,10 @@ mod daemon_client;
 // agent-hook events (agent:lifecycle, agent:reply, sync:projects, …)
 // back onto Tauri's event bus.
 mod agent_hook_sink;
-// Tauri-backed WorkspaceRegenProvider impl — lets the core
-// build_launch path eagerly regen workspace SKILL.md through the
-// src-tauri scaffolding orchestrator.
-mod workspace_regen_provider;
+// Phase 2 Unit 7c — `workspace_regen_provider` module retired. The
+// SKILL scaffolding moved to k2so-core in Unit 7b; build_launch now
+// calls `workspace::write_workspace_skill_file` directly so the
+// daemon-side and Tauri-side regen paths are identical.
 // Background subscriber for the daemon's /events WebSocket. Spawned in
 // setup() once; reconnects forever so we survive daemon restarts.
 mod daemon_events;
@@ -293,16 +293,13 @@ pub fn run() {
                 agent_hook_sink::TauriAgentHookEventSink::new(app.handle().clone()),
             ));
 
-            // Workspace regen bridge: lets
-            // k2so_core::agents::build_launch invoke the src-tauri-
-            // resident workspace-SKILL.md scaffolding orchestrator
-            // (`k2so_agents_generate_workspace_claude_md`). Daemon
-            // + test contexts run without a provider and silently
-            // skip the eager regen; freshness arrives on next Tauri
-            // startup.
-            k2so_core::agents::workspace_regen::set_provider(Box::new(
-                workspace_regen_provider::TauriWorkspaceRegenProvider,
-            ));
+            // Phase 2 Unit 7c — workspace regen bridge retired.
+            // `k2so_core::agents::build_launch` now calls
+            // `workspace::write_workspace_skill_file` directly (the
+            // SKILL scaffolding moved into k2so-core during Unit 7b),
+            // so the WorkspaceRegenProvider trait + Tauri impl that
+            // used to forward eager regens back into src-tauri are
+            // gone. Both daemon and Tauri contexts hit the same body.
 
             // Subscribe to the daemon's /events WebSocket. Daemon-
             // originated hook events arrive here and are re-emitted via
@@ -631,8 +628,14 @@ pub fn run() {
                         // (NSApplication terminate: goes straight to
                         // RunEvent::ExitRequested) — it always closes
                         // everything regardless of the toggle.
+                        // Phase 2 Unit 7c — read directly from
+                        // k2so-core to drop the last Tauri-side
+                        // `read_settings()` call site. Daemon-owned
+                        // writes still synchronize because both
+                        // sides read the same `~/.k2so/settings.json`
+                        // through `k2so_core::app_settings::load`.
                         let keep_running =
-                            commands::settings::read_settings().keep_daemon_on_quit;
+                            k2so_core::app_settings::load().keep_daemon_on_quit;
                         if keep_running {
                             window::save_window_state(&app_handle);
                             api.prevent_close();

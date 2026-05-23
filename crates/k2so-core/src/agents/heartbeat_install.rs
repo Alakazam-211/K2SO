@@ -318,3 +318,314 @@ fn ensure_platform_installed(_script_path: &Path) -> Result<bool, String> {
 fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
+
+// ── Phase 2 Unit 7c — explicit install/uninstall/apply (daemon-owned) ──
+//
+// Pre-Unit-7c the heartbeat-launchd installer lived in
+// `src-tauri/src/commands/k2so_agents.rs`, called via Tauri commands
+// triggered from the Settings > Heartbeats UI. With Unit 7c the daemon
+// owns its own scheduler plist — K2SO Connect (remote daemon) must
+// install + remove its own launchd agent without depending on a Tauri
+// process on the same host. The functions below back the daemon's
+// `/cli/heartbeat/{install-launchd, uninstall-launchd, apply-wake-scheduler}`
+// routes.
+
+/// Write `heartbeat.sh` to `~/.k2so/` (chmod 0755). Idempotent —
+/// callers can invoke before every install_launchd / install_cron pass
+/// without worrying about double-write.
+///
+/// Returns the script path so the caller can hand it to the platform
+/// installer.
+pub fn write_heartbeat_script() -> Result<PathBuf, String> {
+    let k2so_home = home_dir().join(".k2so");
+    fs::create_dir_all(&k2so_home).map_err(|e| format!("create ~/.k2so: {e}"))?;
+
+    // Clean up the retired heartbeat-projects.txt artifact (pre-P5.6).
+    let _ = fs::remove_file(k2so_home.join("heartbeat-projects.txt"));
+
+    let script_path = k2so_home.join("heartbeat.sh");
+    let script = generate_heartbeat_script();
+    fs::write(&script_path, &script)
+        .map_err(|e| format!("write heartbeat.sh: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("chmod heartbeat.sh: {e}"))?;
+    }
+    Ok(script_path)
+}
+
+/// Install (or reinstall) the heartbeat launchd plist with a
+/// user-configurable interval + optional wake-from-sleep behavior.
+///
+/// - `interval_seconds` maps to `StartInterval` (60 = every minute,
+///   300 = every 5 minutes, etc.).
+/// - `wake_system` sets `WakeSystem: true` so launchd wakes a sleeping
+///   machine — the mechanism that makes lid-closed overnight agent
+///   work possible.
+///
+/// Idempotent: unloads any existing plist with the same label before
+/// writing, then loads the new one. Safe to call repeatedly with
+/// different settings.
+///
+/// Returns the plist path on success so callers can surface it for
+/// audit / display.
+#[cfg(target_os = "macos")]
+pub fn install_heartbeat_launchd(
+    script_path: &Path,
+    interval_seconds: u32,
+    wake_system: bool,
+) -> Result<PathBuf, String> {
+    let home = home_dir();
+    let plist_path = home.join("Library/LaunchAgents/com.k2so.agent-heartbeat.plist");
+
+    if let Some(parent) = plist_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create LaunchAgents dir: {e}"))?;
+    }
+
+    if plist_path.exists() {
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", &plist_path.to_string_lossy()])
+            .output();
+    }
+
+    let wake_key = if wake_system {
+        "\n    <key>WakeSystem</key>\n    <true/>"
+    } else {
+        ""
+    };
+
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.k2so.agent-heartbeat</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{script}</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>{interval}</integer>{wake_key}
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardErrorPath</key>
+    <string>{home}/.k2so/heartbeat-stderr.log</string>
+</dict>
+</plist>"#,
+        script = script_path.to_string_lossy(),
+        interval = interval_seconds,
+        wake_key = wake_key,
+        home = home.to_string_lossy(),
+    );
+
+    fs::write(&plist_path, &plist).map_err(|e| format!("write plist: {e}"))?;
+
+    let output = std::process::Command::new("launchctl")
+        .args(["load", &plist_path.to_string_lossy()])
+        .output()
+        .map_err(|e| format!("launchctl: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "launchctl load failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    Ok(plist_path)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn install_heartbeat_launchd(
+    _script_path: &Path,
+    _interval_seconds: u32,
+    _wake_system: bool,
+) -> Result<PathBuf, String> {
+    Err("install_heartbeat_launchd is macOS-only".to_string())
+}
+
+/// Uninstall the heartbeat launchd plist. Idempotent — missing plist
+/// is treated as success.
+#[cfg(target_os = "macos")]
+pub fn uninstall_heartbeat_launchd() -> Result<(), String> {
+    let home = home_dir();
+    let plist_path = home.join("Library/LaunchAgents/com.k2so.agent-heartbeat.plist");
+    if plist_path.exists() {
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", &plist_path.to_string_lossy()])
+            .output();
+        fs::remove_file(&plist_path)
+            .map_err(|e| format!("remove plist: {e}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn uninstall_heartbeat_launchd() -> Result<(), String> {
+    Ok(())
+}
+
+/// Install the heartbeat crontab entry (Linux). Replaces any pre-
+/// existing `k2so-agent-heartbeat` entry. Idempotent.
+#[cfg(target_os = "linux")]
+pub fn install_heartbeat_cron(script_path: &Path) -> Result<(), String> {
+    let marker = "# k2so-agent-heartbeat";
+    let entry = format!("* * * * * {} {}", script_path.to_string_lossy(), marker);
+
+    let existing = std::process::Command::new("crontab")
+        .args(["-l"])
+        .output()
+        .ok()
+        .and_then(|o| if o.status.success() { String::from_utf8(o.stdout).ok() } else { None })
+        .unwrap_or_default();
+
+    let mut lines: Vec<&str> = existing
+        .lines()
+        .filter(|l| !l.contains("k2so-agent-heartbeat"))
+        .collect();
+    lines.push(&entry);
+    let new_crontab = lines.join("\n") + "\n";
+
+    let mut child = std::process::Command::new("crontab")
+        .args(["-"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn crontab: {e}"))?;
+
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| "crontab stdin".to_string())?
+        .write_all(new_crontab.as_bytes())
+        .map_err(|e| format!("write crontab: {e}"))?;
+    child.wait().map_err(|e| format!("wait crontab: {e}"))?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn install_heartbeat_cron(_script_path: &Path) -> Result<(), String> {
+    Err("install_heartbeat_cron is Linux-only".to_string())
+}
+
+/// Uninstall the heartbeat crontab entry. Idempotent.
+#[cfg(target_os = "linux")]
+pub fn uninstall_heartbeat_cron() -> Result<(), String> {
+    let existing = std::process::Command::new("crontab")
+        .args(["-l"])
+        .output()
+        .ok()
+        .and_then(|o| if o.status.success() { String::from_utf8(o.stdout).ok() } else { None })
+        .unwrap_or_default();
+
+    let new_crontab: String = existing
+        .lines()
+        .filter(|l| !l.contains("k2so-agent-heartbeat"))
+        .collect::<Vec<&str>>()
+        .join("\n")
+        + "\n";
+
+    let mut child = std::process::Command::new("crontab")
+        .args(["-"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn crontab: {e}"))?;
+
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| "crontab stdin".to_string())?
+        .write_all(new_crontab.as_bytes())
+        .map_err(|e| format!("write crontab: {e}"))?;
+    child.wait().map_err(|e| format!("wait crontab: {e}"))?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn uninstall_heartbeat_cron() -> Result<(), String> {
+    Ok(())
+}
+
+/// Install heartbeat scheduler with the given interval / wake-system
+/// settings (macOS launchd or Linux cron). Refreshes `heartbeat.sh`
+/// before installing. Returns a brief human-readable summary.
+pub fn install_heartbeat_scheduler(
+    interval_seconds: u32,
+    wake_system: bool,
+) -> Result<String, String> {
+    let script_path = write_heartbeat_script()?;
+    #[cfg(target_os = "macos")]
+    {
+        install_heartbeat_launchd(&script_path, interval_seconds, wake_system)?;
+        let mins = interval_seconds.max(60) / 60;
+        return Ok(format!(
+            "heartbeat scheduler installed (every {} min{}).",
+            mins,
+            if wake_system { " — wakes system from sleep" } else { "" }
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = interval_seconds;
+        let _ = wake_system;
+        install_heartbeat_cron(&script_path)?;
+        return Ok("heartbeat crontab entry installed.".to_string());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (script_path, interval_seconds, wake_system);
+        Err("unsupported platform".to_string())
+    }
+}
+
+/// Uninstall whichever scheduler is appropriate for this OS, and
+/// remove the on-disk heartbeat script. Idempotent.
+pub fn uninstall_heartbeat_scheduler() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    uninstall_heartbeat_launchd()?;
+    #[cfg(target_os = "linux")]
+    uninstall_heartbeat_cron()?;
+    let k2so_home = home_dir().join(".k2so");
+    let _ = fs::remove_file(k2so_home.join("heartbeat.sh"));
+    let _ = fs::remove_file(k2so_home.join("heartbeat-projects.txt"));
+    Ok(())
+}
+
+/// Apply the user's wake-scheduler settings:
+///
+/// - `mode == "off"` or `"on_demand"` → uninstall any active plist /
+///   crontab entry; daemon still fires when started by Tauri/CLI but
+///   the system stays asleep.
+/// - `mode == "heartbeat"` → write heartbeat.sh + install the plist /
+///   crontab entry with the user's `interval_minutes` + `wake_system`.
+///
+/// Idempotent — safe to call on every Apply click even if nothing
+/// changed.
+pub fn apply_wake_scheduler(
+    mode: &str,
+    interval_minutes: u32,
+    wake_system: bool,
+) -> Result<String, String> {
+    match mode {
+        "off" | "on_demand" => {
+            uninstall_heartbeat_scheduler()?;
+            Ok(format!(
+                "wake scheduler set to '{}' — heartbeat plist removed.",
+                mode
+            ))
+        }
+        "heartbeat" => {
+            let interval_secs = interval_minutes.max(1) * 60;
+            install_heartbeat_scheduler(interval_secs, wake_system)
+        }
+        other => Err(format!(
+            "unknown wake scheduler mode '{}'. Expected 'off', 'on_demand', or 'heartbeat'.",
+            other
+        )),
+    }
+}

@@ -48,7 +48,6 @@ pub mod unification;
 pub mod wake;
 pub mod work_item;
 pub mod workspace;
-pub mod workspace_regen;
 pub mod workspaces;
 
 /// Resolve a project's primary-key id from its filesystem path. `None`

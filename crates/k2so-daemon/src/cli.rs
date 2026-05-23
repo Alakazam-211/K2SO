@@ -1333,7 +1333,9 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                         std::path::Path::new(&source),
                     ) {
                         Ok(outcome) => {
-                            let _ = k2so_core::agents::workspace_regen::regen_workspace_skill(&p);
+                            // Unit 7c: regen directly (workspace_regen
+                            // bridge retired — body lives in k2so-core).
+                            k2so_core::agents::workspace::write_workspace_skill_file(&p);
                             respond(Ok::<_, String>(outcome))
                         }
                         Err(e) => CliResponse::bad_request(e),
@@ -1351,7 +1353,8 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                 if let Err(e) = k2so_core::agents::onboarding::unskip_harness_management(&p) {
                     return CliResponse::bad_request(e);
                 }
-                let _ = k2so_core::agents::workspace_regen::regen_workspace_skill(&p);
+                // Unit 7c: regen directly (bridge retired — body in core).
+                k2so_core::agents::workspace::write_workspace_skill_file(&p);
                 CliResponse::ok_json(r#"{"success":true}"#.to_string())
             }
             Err(r) => r,

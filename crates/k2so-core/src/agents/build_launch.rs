@@ -146,11 +146,13 @@ pub fn k2so_agents_build_launch(
     // Eagerly regen the workspace-root SKILL.md so the Claude session
     // (which launches from the workspace root) picks up the latest
     // CLI tools, PROJECT.md, and primary agent persona via the
-    // symlinked ./CLAUDE.md → SKILL.md discovery path. Goes through
-    // the WorkspaceRegenProvider bridge because the full regen
-    // orchestrator still lives in src-tauri; the daemon context
-    // no-ops and relies on Tauri's next startup for freshness.
-    let _ = super::workspace_regen::regen_workspace_skill(&project_path);
+    // symlinked ./CLAUDE.md → SKILL.md discovery path. Phase 2 Unit
+    // 7c: now calls `workspace::write_workspace_skill_file` directly
+    // — the SKILL scaffolding moved to k2so-core in Unit 7b so the
+    // WorkspaceRegenProvider bridge that used to forward this call
+    // back to src-tauri is no longer needed. Both daemon and Tauri
+    // contexts hit the same body now.
+    super::workspace::write_workspace_skill_file(&project_path);
 
     // Check for previous session to resume. Lookup order:
     //   1. Heartbeat-scoped: agent_heartbeats.last_session_id (only when

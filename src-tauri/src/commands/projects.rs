@@ -366,7 +366,22 @@ pub fn projects_update(
         None
     };
     if let Some(path) = project_path_for_archive {
-        crate::commands::k2so_agents::archive_orphan_top_tier_agents(&path);
+        // Phase 2 Unit 7c — route the orphan sweep through the
+        // daemon's `/cli/agents/archive-orphans` so the daemon's DB
+        // lock is the sole writer. Falls back to the in-process
+        // k2so-core helper if the daemon is unreachable; both call
+        // the same `workspace::archive_orphan_top_tier_agents` body.
+        let daemon_handled = (|| -> Result<(), String> {
+            let client = crate::daemon_client::DaemonClient::try_connect()?;
+            let _ = client.cli_post_json(
+                "/cli/agents/archive-orphans",
+                &serde_json::json!({ "project_path": path }),
+            )?;
+            Ok(())
+        })();
+        if daemon_handled.is_err() {
+            let _ = k2so_core::agents::workspace::archive_orphan_top_tier_agents(&path);
+        }
     }
 
     let conn = state.db.lock();
