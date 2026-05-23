@@ -25,7 +25,9 @@ pub struct AppState {
     /// AppState and any in-core caller (companion, future agent_hooks)
     /// lock the same Mutex around the same TerminalManager instance.
     pub terminal_manager: Arc<Mutex<crate::terminal::TerminalManager>>,
-    /// Same pattern: Arc clone of `k2so_core::llm::shared()`.
-    pub llm_manager: Arc<Mutex<crate::llm::LlmManager>>,
+    // Phase 2 Unit 2 — `llm_manager: Arc<Mutex<llm::LlmManager>>`
+    // removed. LLM inference + model lifecycle moved to k2so-daemon
+    // (see `crates/k2so-daemon/src/llm_host.rs`); Tauri no longer
+    // holds a handle.
     pub watchers: Mutex<HashMap<String, notify::RecommendedWatcher>>,
 }

@@ -44,6 +44,8 @@ mod companion_host;
 mod companion_routes;
 mod events;
 mod heartbeat_launch;
+mod llm_host;
+mod llm_routes;
 mod pending_live;
 mod providers;
 mod session_events;
@@ -95,8 +97,32 @@ struct DaemonState {
     event_tx: Arc<broadcast::Sender<WireEvent>>,
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() {
+fn main() {
+    // Phase 2 Unit 2 — LLM worker subprocess fork. Daemon spawns
+    // itself as `k2so-daemon --llm-worker <payload_path>` to run one
+    // inference pass in an isolated child process. Worker exits via
+    // `libc::_exit(0)` so it never returns from here. Must be the
+    // very first thing we do — before tokio runtime init, before
+    // rustls provider install, before anything that allocates GPU
+    // resources we'd rather the parent daemon own. See
+    // `llm_host::worker_main` for the protocol contract.
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() == 3 && args[1] == "--llm-worker" {
+        llm_host::worker_main(&args[2]);
+        // unreachable — worker_main calls libc::_exit. The `!`
+        // return type prevents fall-through.
+    }
+
+    // Real daemon path — boot the multi-thread tokio runtime and
+    // run the async main body.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime");
+    rt.block_on(async_main());
+}
+
+async fn async_main() {
     // Force a reference to k2so-core so the crate boundary is exercised
     // at build-time until we actually use it for real work.
     k2so_core::__scaffolding_marker();
@@ -305,6 +331,15 @@ async fn main() {
     // + K2SO Connect can reach it even with Tauri closed.
     companion_host::maybe_autostart();
 
+    // Phase 2 Unit 2 — LLM first-boot discovery. Cheap synchronous
+    // check that the default model file exists, then caches its
+    // path on `llm_host::shared()`. We do NOT load the model in the
+    // daemon process — Metal/ggml stays in the subprocess worker so
+    // a crash never takes the daemon down. If the model is missing
+    // the daemon still boots cleanly; clients call
+    // `/cli/llm/download-default` to fetch.
+    llm_host::maybe_first_boot_discover();
+
     // Phase 3.1 F3 — boot-time pending-live replay. Previous
     // 0.37.5 migration: legacy `<sanitized_pid>_<agent>/` queue dirs
     // (pre-0.37.5 keying) merged into bare `<sanitized_pid>/`. MUST
@@ -485,6 +520,13 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             | "/cli/claude-auth/refresh-now"
             | "/cli/claude-auth/install-scheduler"
             | "/cli/claude-auth/uninstall-scheduler"
+            // Phase 2 Unit 2 — LLM control + chat. Chat body
+            // carries the user message + workspace context. Load
+            // takes a path. Download-default takes no body but is
+            // a write-side operation so we accept POST for it too.
+            | "/cli/llm/chat"
+            | "/cli/llm/load-model"
+            | "/cli/llm/download-default"
     );
     if method != "GET" && !(is_post && post_allowed) {
         let _ = stream.read(&mut buf).await;
@@ -767,6 +809,112 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             let result = companion_routes::handle_companion_set_password(&body_bytes);
             send_response(&mut stream, result.status, "application/json", &result.body)
                 .await;
+        }
+        // ── Phase 2 Unit 2 — /cli/llm/* ────────────────────────────
+        // GET routes are cheap; POST routes go through llm_routes
+        // which owns the supervisor's subprocess machinery. All
+        // five routes are token-gated by the standard query-string
+        // check so callers must pass `?token=<token>` like every
+        // other /cli/* endpoint.
+        "/cli/llm/check" => {
+            let _ = stream.read(&mut buf).await;
+            if !token_ok(&query, state.token.as_str()) {
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let r = llm_routes::handle_check();
+            send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/llm/status" => {
+            let _ = stream.read(&mut buf).await;
+            if !token_ok(&query, state.token.as_str()) {
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let r = llm_routes::handle_status();
+            send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/llm/chat" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            // Inference is CPU/GPU heavy and may block for tens of
+            // seconds. Run on a blocking worker so the runtime's
+            // accept-loop threads stay free.
+            let r = tokio::task::spawn_blocking(move || {
+                llm_routes::handle_chat(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/llm/load-model" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let r = tokio::task::spawn_blocking(move || {
+                llm_routes::handle_load_model(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/llm/download-default" => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            // Body is currently empty; read+drop to flush.
+            let _ = read_post_body(&mut stream, &mut buf).await;
+            let r = llm_routes::handle_download_default(&state.event_tx);
+            send_response(&mut stream, r.status, r.content_type, &r.body).await;
         }
         // POST /cli/companion/disconnect-session — Phase 2 Unit 1.
         // Body: `{"sessionToken": "..."}`. Removes the session row

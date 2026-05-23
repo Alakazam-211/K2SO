@@ -9,7 +9,10 @@ pub mod filesystem;
 pub mod settings;
 pub mod project_config;
 pub mod workspace_ops;
-pub mod assistant;
+// Phase 2 Unit 2 — `assistant` command shims deleted. The renderer
+// hits `/cli/llm/*` on k2so-daemon directly; the daemon owns the
+// LLM worker subprocess + supervisor (timeout/RSS/queue/crash
+// isolation). No Tauri-side LLM surface remains.
 pub mod chat_history;
 pub mod timer;
 pub mod updater;

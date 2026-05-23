@@ -1,8 +1,10 @@
 import React from 'react'
 import { useCallback, useEffect, useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
 import { useAssistantStore } from '@/stores/assistant'
 import { useSettingsStore } from '@/stores/settings'
+// Phase 2 Unit 2 — Tauri `assistant_*` commands deleted. Daemon owns
+// /cli/llm/* and the renderer calls it directly via the daemon client.
+import { llmCheck, llmDownloadDefault, llmLoadModel, llmStatus } from '@/lib/llmDaemonClient'
 
 export function LocalLLMSettings(): React.JSX.Element {
   const { isDownloading, downloadProgress, modelLoaded } = useAssistantStore()
@@ -15,22 +17,22 @@ export function LocalLLMSettings(): React.JSX.Element {
   const [loadingModel, setLoadingModel] = useState(false)
 
   useEffect(() => {
-    invoke<{ loaded: boolean; modelPath: string | null; downloading: boolean }>('assistant_status')
+    llmStatus()
       .then((status) => {
         setModelPath(status.modelPath)
         if (status.modelPath) setCustomPath(status.modelPath)
       })
       .catch((e) => console.warn('[settings]', e))
 
-    invoke<boolean>('assistant_check_model')
-      .then((exists) => setModelExists(exists))
+    llmCheck()
+      .then((res) => setModelExists(!!res.ok))
       .catch((e) => console.warn('[settings]', e))
   }, [modelLoaded])
 
   const handleDownload = useCallback(async () => {
     try {
       setLoadError(null)
-      await invoke('assistant_download_default_model')
+      await llmDownloadDefault()
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err))
     }
@@ -41,7 +43,7 @@ export function LocalLLMSettings(): React.JSX.Element {
     setLoadingModel(true)
     setLoadError(null)
     try {
-      const finalPath = await invoke<string>('assistant_load_model', { path: customPath.trim() })
+      const finalPath = await llmLoadModel(customPath.trim())
       setModelPath(finalPath)
       setCustomPath(finalPath)
       useAssistantStore.getState().setModelLoaded(true)

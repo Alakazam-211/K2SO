@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { llmChat } from '@/lib/llmDaemonClient'
 import { useAssistantStore, type DebugPass, type InteractionLogEntry } from '../../stores/assistant'
 import { useSettingsStore } from '../../stores/settings'
 import { useTabsStore } from '../../stores/tabs'
@@ -732,11 +733,13 @@ export default function AssistantBar(): React.JSX.Element | null {
         }
       } catch { /* not a git repo */ }
 
-      const response = await invoke<ChatResponse>('assistant_chat', {
+      // Phase 2 Unit 2 — `invoke('assistant_chat')` retired; daemon
+      // owns /cli/llm/chat and the subprocess supervisor.
+      const response = await llmChat({
         message: trimmed,
         workspacePath,
         isGitRepo,
-      })
+      }) as ChatResponse
 
       // If the user pressed Escape while we were waiting, discard the result
       if (abortedRef.current) {

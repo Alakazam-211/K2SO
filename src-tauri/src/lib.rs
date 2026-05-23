@@ -37,9 +37,10 @@ pub use k2so_core::{editors, fs_abstract, fs_atomic, project_config};
 // launch path can share the same code. Re-exported at the historical
 // `crate::git::*` path so all existing call sites resolve unchanged.
 pub use k2so_core::git;
-// `llm` now lives in k2so-core. Downstream callers keep their
-// `crate::llm::*` paths working through this re-export.
-pub use k2so_core::llm;
+// Phase 2 Unit 2 — `llm` re-export removed. LLM inference + model
+// management moved entirely to k2so-daemon; Tauri no longer touches
+// llama.cpp or the model lifecycle. The renderer calls /cli/llm/* on
+// the daemon directly.
 mod menu;
 // `perf` now lives in the k2so-core crate. Re-exported so existing
 // `crate::perf_timer!` / `crate::perf_hist!` / `crate::perf::*` call sites
@@ -182,50 +183,11 @@ fn check_daemon_version_and_restart() {
     });
 }
 
-/// Entry point for the LLM worker subprocess.
-/// Loads the model, runs inference, prints the result to stdout, then exits.
-pub fn llm_worker_main(payload_path: &str) {
-    let raw = match std::fs::read_to_string(payload_path) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Failed to read payload: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    let payload: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Failed to parse payload: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    let model_path = payload["model"].as_str().unwrap_or("");
-    let system_prompt = payload["system"].as_str().unwrap_or("");
-    let user_message = payload["message"].as_str().unwrap_or("");
-
-    let mut manager = llm::LlmManager::new();
-    if let Err(e) = manager.load_model(model_path) {
-        eprintln!("Failed to load model: {e}");
-        std::process::exit(1);
-    }
-
-    match manager.generate(system_prompt, user_message) {
-        Ok(output) => {
-            // Write to stdout and flush BEFORE _exit (which skips cleanup)
-            use std::io::Write;
-            let _ = std::io::stdout().write_all(output.as_bytes());
-            let _ = std::io::stdout().flush();
-            // Force-exit to skip Metal cleanup (same _exit trick as shutdown)
-            unsafe { libc::_exit(0); }
-        }
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    }
-}
+// Phase 2 Unit 2 — `llm_worker_main` moved to k2so-daemon's
+// `llm_host::worker_main`. The daemon now spawns itself with
+// `--llm-worker <payload_path>` for inference. Tauri is no longer
+// an LLM host; deleted alongside `commands/assistant.rs` and the
+// `--llm-worker` arm in `src-tauri/src/main.rs`.
 
 /// 0.39.0: `warm_http_pool_async` (Kessel reqwest-runtime warmup) was
 /// removed alongside the Kessel renderer. Kept as an empty stub so
@@ -280,7 +242,8 @@ pub fn run() {
         // handle collection, not the owner — companion + future
         // agent_hooks in core see the same underlying managers.
         terminal_manager: terminal::shared(),
-        llm_manager: llm::shared(),
+        // Phase 2 Unit 2 — `llm_manager` field deleted; LLM lives
+        // in the daemon now.
         watchers: Mutex::new(HashMap::new()),
     };
 
@@ -690,30 +653,15 @@ pub fn run() {
                         }
                         window::save_window_state(&app_handle);
 
-                        // Parallelize LLM unload and terminal kill with a 5-second timeout.
-                        // These have no dependency on each other and can run concurrently.
-                        // Zed pattern: log panics instead of silently swallowing them.
-                        let handle_for_llm = app_handle.clone();
+                        // Phase 2 Unit 2 — the LLM lives in the daemon
+                        // now; Tauri no longer owns a model handle, so
+                        // there's nothing to unload here. We only need
+                        // to kill terminals before exit. Spawn the
+                        // terminal kill on a worker thread so a stuck
+                        // PTY reaper can't hang the quit indefinitely.
+                        // Zed pattern: log panics instead of silently
+                        // swallowing them.
                         let handle_for_term = app_handle.clone();
-
-                        let llm_thread = std::thread::spawn(move || {
-                            if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                if let Some(state) = handle_for_llm.try_state::<AppState>() {
-                                    // Use try_lock to avoid blocking if model is still loading
-                                    if let Some(mut manager) = state.llm_manager.try_lock() {
-                                        manager.unload();
-                                    } else {
-                                        log_debug!("[shutdown] LLM lock busy (model loading?) — skipping unload");
-                                    }
-                                }
-                            })) {
-                                let msg = panic.downcast_ref::<String>()
-                                    .map(|s| s.as_str())
-                                    .or_else(|| panic.downcast_ref::<&str>().copied())
-                                    .unwrap_or("unknown panic");
-                                log_debug!("[shutdown] LLM unload panicked: {}", msg);
-                            }
-                        });
 
                         let term_thread = std::thread::spawn(move || {
                             if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -730,35 +678,22 @@ pub fn run() {
                             }
                         });
 
-                        // Wait up to 5 seconds for both to complete (increased from 2s).
-                        // LLM Metal cleanup and terminal process reaping can take time.
+                        // Wait up to 5 seconds for terminal cleanup to
+                        // complete. Terminal process reaping can take
+                        // time on macOS when launchd-managed children
+                        // haven't drained their pipes yet.
                         let timeout = std::time::Duration::from_secs(5);
                         let (done_tx, done_rx) = std::sync::mpsc::channel();
-                        let done_tx2 = done_tx.clone();
 
-                        std::thread::spawn(move || {
-                            let _ = llm_thread.join();
-                            let _ = done_tx.send("llm");
-                        });
                         std::thread::spawn(move || {
                             let _ = term_thread.join();
-                            let _ = done_tx2.send("term");
+                            let _ = done_tx.send("term");
                         });
 
-                        let start = std::time::Instant::now();
-                        let mut completed = 0u32;
-                        while completed < 2 {
-                            let remaining = timeout.saturating_sub(start.elapsed());
-                            if remaining.is_zero() {
+                        match done_rx.recv_timeout(timeout) {
+                            Ok(_) => {}
+                            Err(_) => {
                                 log_debug!("[shutdown] Cleanup timed out after 5s — exiting anyway");
-                                break;
-                            }
-                            match done_rx.recv_timeout(remaining) {
-                                Ok(_) => completed += 1,
-                                Err(_) => {
-                                    log_debug!("[shutdown] Cleanup timed out after 5s — exiting anyway");
-                                    break;
-                                }
                             }
                         }
 
@@ -768,14 +703,6 @@ pub fn run() {
                         // Tauri quit — the daemon process keeps running
                         // (launchd-managed) and the CLI still needs a
                         // valid port file to find it.
-
-                        // Force-drop the LLM model to release Metal/GPU resources.
-                        if let Some(state) = app_handle.try_state::<AppState>() {
-                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                let mut manager = state.llm_manager.lock();
-                                manager.unload();
-                            }));
-                        }
 
                         // Use _exit() to skip C++ static destructors (ggml_metal).
                         // Without this, __cxa_finalize_ranges runs ggml's Metal cleanup
@@ -930,60 +857,12 @@ pub fn run() {
             // different machine entirely), the daemon's tunnel stays
             // reachable.
 
-            // Clean up any stale .tmp files from interrupted model downloads
-            llm::download::cleanup_stale_downloads();
-
-            // Auto-download AI model on first launch if not present
-            {
-                let app_handle_for_download = app.handle().clone();
-                std::thread::spawn(move || {
-                    match llm::download::default_model_exists() {
-                        Ok(false) => {
-                            log_debug!("[llm] Default model not found, starting download...");
-                            if let Some(state) = app_handle_for_download.try_state::<AppState>() {
-                                let manager = state.llm_manager.lock();
-                                manager.downloading.store(true, std::sync::atomic::Ordering::Relaxed);
-                            }
-                            let dest = match llm::download::default_model_path() {
-                                Ok(p) => p,
-                                Err(e) => { log_debug!("[llm] Error getting model path: {e}"); return; }
-                            };
-                            let dest_str = dest.to_string_lossy().to_string();
-                            let progress_app = app_handle_for_download.clone();
-                            let result = llm::download::download_model(
-                                llm::download::DEFAULT_MODEL_URL,
-                                &dest_str,
-                                move |p| {
-                                    let _ = progress_app.emit("assistant:download-progress", p);
-                                },
-                            );
-                            if let Some(state) = app_handle_for_download.try_state::<AppState>() {
-                                let mut manager = state.llm_manager.lock();
-                                manager.downloading.store(false, std::sync::atomic::Ordering::Relaxed);
-                                if result.is_ok() {
-                                    let _ = manager.load_model(&dest_str);
-                                    log_debug!("[llm] Model downloaded and loaded successfully");
-                                }
-                            }
-                            if let Err(e) = result {
-                                log_debug!("[llm] Auto-download failed: {e}");
-                            }
-                        }
-                        Ok(true) => {
-                            // Model exists, try to load it
-                            log_debug!("[llm] Default model found, loading...");
-                            if let Some(state) = app_handle_for_download.try_state::<AppState>() {
-                                let mut manager = state.llm_manager.lock();
-                                if let Ok(path) = llm::download::default_model_path() {
-                                    let _ = manager.load_model(&path.to_string_lossy());
-                                    log_debug!("[llm] Model loaded successfully");
-                                }
-                            }
-                        }
-                        Err(e) => log_debug!("[llm] Error checking model: {e}"),
-                    }
-                });
-            }
+            // Phase 2 Unit 2 — LLM stale-tmp cleanup, default-model
+            // auto-download, and model auto-load moved to k2so-daemon's
+            // first-boot pass (see `llm_host::maybe_first_boot_discover`).
+            // The renderer kicks off downloads via /cli/llm/download-default
+            // and polls /cli/llm/status for readiness. Tauri is no longer
+            // involved in the LLM lifecycle.
 
             // Menubar / system tray icon. Pairs with the persistent-
             // agents feature: once Cmd+Q leaves the daemon running,
@@ -1145,12 +1024,9 @@ pub fn run() {
             commands::workspace_ops::workspace_new_tab,
             commands::workspace_ops::workspace_close_tab,
             commands::workspace_ops::workspace_arrange,
-            // Assistant (LLM)
-            commands::assistant::assistant_chat,
-            commands::assistant::assistant_status,
-            commands::assistant::assistant_load_model,
-            commands::assistant::assistant_download_default_model,
-            commands::assistant::assistant_check_model,
+            // Phase 2 Unit 2 — `assistant_*` commands deleted. LLM
+            // moved to k2so-daemon (/cli/llm/*); renderer calls the
+            // daemon directly.
             // Chat History
             commands::chat_history::chat_history_list,
             commands::chat_history::chat_history_list_for_project,

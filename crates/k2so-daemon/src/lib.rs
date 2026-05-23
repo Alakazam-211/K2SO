@@ -15,6 +15,8 @@ pub mod companion_host;
 pub mod companion_routes;
 pub mod events;
 pub mod heartbeat_launch;
+pub mod llm_host;
+pub mod llm_routes;
 pub mod pending_live;
 pub mod providers;
 pub mod session_events;

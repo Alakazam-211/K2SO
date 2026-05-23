@@ -11,12 +11,11 @@ fn main() {
     #[cfg(unix)]
     k2so_core::raise_nofile_limit();
 
-    // Check if invoked as an LLM worker subprocess
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() == 3 && args[1] == "--llm-worker" {
-        k2so_lib::llm_worker_main(&args[2]);
-        return;
-    }
+    // Phase 2 Unit 2 — `--llm-worker` arm moved to k2so-daemon. The
+    // daemon now spawns itself as `k2so-daemon --llm-worker <payload>`
+    // to run inference in an isolated child process. Tauri is no
+    // longer involved in the LLM lifecycle; the renderer calls
+    // `/cli/llm/*` on the daemon directly.
 
     // Fire the reqwest pool warmup IMMEDIATELY — before Tauri even
     // starts parsing the window config. reqwest::blocking's tokio

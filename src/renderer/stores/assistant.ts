@@ -1,6 +1,13 @@
 import { create } from 'zustand'
-import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { llmStatus } from '@/lib/llmDaemonClient'
+
+// Phase 2 Unit 2 — `invoke('assistant_*')` calls retired. The daemon
+// now owns the LLM lifecycle; the store polls `/cli/llm/status`
+// directly (see `lib/llmDaemonClient.ts`). The download-progress
+// event still flows via Tauri's event bus for now — daemon broadcasts
+// `assistant:download-progress` on `/events` and Tauri's
+// `daemon_events.rs` re-emits it onto the local event bus.
 
 /** Maximum number of commands to keep in history. */
 const MAX_HISTORY = 50
@@ -126,9 +133,11 @@ export const useAssistantStore = create<AssistantState>((set) => ({
   clearLog: () => set({ interactionLog: [] }),
 }))
 
-// Poll backend status until model is loaded (it loads async on startup)
+// Poll backend status until model is loaded (it loads async on startup).
+// Phase 2 Unit 2: now polls the daemon's /cli/llm/status route instead
+// of Tauri's `assistant_status` command.
 const pollModelStatus = (): void => {
-  invoke<{ loaded: boolean; modelPath: string | null; downloading: boolean }>('assistant_status')
+  llmStatus()
     .then((status) => {
       const store = useAssistantStore.getState()
       if (status.loaded) {
