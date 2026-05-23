@@ -381,6 +381,9 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
         ("0043_heartbeat_use_workspace_session", include_str!("../../drizzle_sql/0043_heartbeat_use_workspace_session.sql")),
         ("0044_clear_ghost_heartbeat_active_terminals", include_str!("../../drizzle_sql/0044_clear_ghost_heartbeat_active_terminals.sql")),
         ("0045_workspace_tab_sessions", include_str!("../../drizzle_sql/0045_workspace_tab_sessions.sql")),
+        ("0046_prune_legacy_layout_tables", include_str!("../../drizzle_sql/0046_prune_legacy_layout_tables.sql")),
+        ("0047_drop_agent_sessions_archive", include_str!("../../drizzle_sql/0047_drop_agent_sessions_archive.sql")),
+        ("0048_prune_index_artifacts", include_str!("../../drizzle_sql/0048_prune_index_artifacts.sql")),
     ];
 
     for (name, sql) in migrations {
