@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { terminalListRunning, terminalWrite } from '@/lib/terminal-daemon'
 import { useRunningAgentsStore } from '@/stores/running-agents'
 import { useTabsStore } from '@/stores/tabs'
 import { useProjectsStore } from '@/stores/projects'
@@ -40,7 +41,7 @@ export default function RunningAgentsPanel(): React.JSX.Element | null {
 
     const load = async () => {
       try {
-        const result = await invoke<RunningAgentInfo[]>('terminal_list_running_agents')
+        const result = (await terminalListRunning()) as RunningAgentInfo[]
         // Enrich with tab titles from frontend state
         const tabsState = useTabsStore.getState()
         const allTabs = [
@@ -253,9 +254,9 @@ export default function RunningAgentsPanel(): React.JSX.Element | null {
     try {
       // Two-phase write: paste text first, then send Enter after delay
       // CLI LLMs swallow \r when it arrives in the same paste event
-      await invoke('terminal_write', { id: terminalId, data: message })
+      await terminalWrite(terminalId, message)
       await new Promise((r) => setTimeout(r, 150))
-      await invoke('terminal_write', { id: terminalId, data: '\r' })
+      await terminalWrite(terminalId, '\r')
       setSendingTo(null)
       setMessage('')
       requestAnimationFrame(() => inputRef.current?.focus())

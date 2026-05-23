@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
+import { terminalListRunning } from '@/lib/terminal-daemon'
 
 /**
  * Heartbeat sessions store — drives the sidebar Heartbeats panel.
@@ -165,9 +166,7 @@ export const useHeartbeatSessionsStore = create<HeartbeatSessionsState>((set, ge
       const [activeRows, archivedRows, running, agentName] = await Promise.all([
         invoke<HeartbeatRow[]>('k2so_heartbeat_list', { projectPath }),
         invoke<HeartbeatRow[]>('k2so_heartbeat_list_archived', { projectPath }),
-        invoke<RunningAgentInfo[]>('terminal_list_running_agents').catch(
-          (): RunningAgentInfo[] => [],
-        ),
+        terminalListRunning().catch((): RunningAgentInfo[] => []),
         resolvePrimaryAgent(projectPath),
       ])
 

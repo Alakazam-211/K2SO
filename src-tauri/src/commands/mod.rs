@@ -3,7 +3,13 @@ pub mod workspaces;
 pub mod focus_groups;
 pub mod workspace_sections;
 pub mod agents;
-pub mod terminal;
+// Phase 2 Unit 3 — `commands::terminal` deleted. PTY lifecycle
+// (create/kill/resize/scroll/etc.) moved to k2so-daemon as
+// `/cli/terminal/*` routes. The TerminalManager singleton lives
+// in k2so-core (still re-exported via `crate::terminal::*` in lib.rs);
+// the daemon's `terminal_event_sink` broadcasts events that
+// daemon_events.rs re-emits, so the renderer event contract is
+// unchanged.
 pub mod git;
 pub mod settings;
 pub mod workspace_ops;

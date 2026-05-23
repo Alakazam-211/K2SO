@@ -62,6 +62,8 @@ mod settings_routes;
 mod signal_format;
 mod skill_layers_routes;
 mod spawn;
+mod terminal_event_sink;
+mod terminal_lifecycle_routes;
 mod terminal_routes;
 mod themes_routes;
 mod triage;
@@ -339,6 +341,17 @@ async fn async_main() {
     // settings provider.
     companion_host::register((*event_tx).clone());
 
+    // Phase 2 Unit 3 — daemon-side terminal event sink. Wires
+    // `k2so_core::terminal::TerminalManager`'s event emissions onto
+    // the daemon's broadcast channel as `WireEvent` frames named
+    // `terminal:{title,bell,exit,grid}:<id>`. Tauri's
+    // `daemon_events.rs` re-emits them via `AppHandle::emit` so the
+    // renderer's existing `listen('terminal:grid:<id>')` subscribers
+    // keep working. Must run BEFORE any `/cli/terminal/create`
+    // request can land, which means before `start_listener` accepts
+    // its first connection (we register synchronously here).
+    terminal_event_sink::register((*event_tx).clone());
+
     // First-boot companion autostart. If `companion.auto_start` is
     // true and credentials are present, kick off `start_companion()`
     // on a detached thread (the tunnel takes a few seconds to come
@@ -574,6 +587,16 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             | "/cli/review-checklist/write"
             | "/cli/review-checklist/toggle"
             | "/cli/review-checklist/init"
+            // Phase 2 Unit 3 — terminal PTY lifecycle. JSON-bodied
+            // mutating routes; method-gated per-handler below.
+            | "/cli/terminal/create"
+            | "/cli/terminal/kill"
+            | "/cli/terminal/resize"
+            | "/cli/terminal/kill-foreground"
+            | "/cli/terminal/scroll"
+            | "/cli/terminal/log"
+            | "/cli/terminal/lifecycle-write"
+            | "/cli/terminal/set-focus"
     );
     if method != "GET" && !(is_post && post_allowed) {
         let _ = stream.read(&mut buf).await;
@@ -1207,6 +1230,263 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             let result = settings_routes::handle_settings_reset();
             send_response(&mut stream, result.status, "application/json", &result.body)
                 .await;
+        }
+        // Phase 2 Unit 3 — terminal PTY lifecycle (POST routes).
+        // Each handler runs through the process-wide
+        // `k2so_core::terminal::shared()` TerminalManager so daemon
+        // ownership is uniform. The blocking create handler is
+        // dispatched via `tokio::task::spawn_blocking` (F5) since
+        // posix_spawn + alacritty Term::new can stall briefly under
+        // load. The non-blocking handlers (kill/resize/scroll/etc.)
+        // are cheap mutex+method calls and run inline.
+        //
+        // Method gate: see the long-form comment on
+        // `/cli/claude-auth/refresh-now`. The top-level dispatch
+        // does NOT reject GET on POST-allowlisted routes — without
+        // the explicit `if !is_post` guard, a curl GET could
+        // silently spawn / kill a PTY.
+        "/cli/terminal/create" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            // F5: posix_spawn + alacritty Term::new can block; run
+            // off the accept-loop thread pool.
+            let r = tokio::task::spawn_blocking(move || {
+                terminal_lifecycle_routes::handle_create(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/terminal/kill" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            // Kill can block briefly waiting on child reap; F5.
+            let r = tokio::task::spawn_blocking(move || {
+                terminal_lifecycle_routes::handle_kill(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/terminal/resize" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let r = terminal_lifecycle_routes::handle_resize(&body_bytes);
+            send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/terminal/kill-foreground" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let r = terminal_lifecycle_routes::handle_kill_foreground(&body_bytes);
+            send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/terminal/scroll" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let r = terminal_lifecycle_routes::handle_scroll(&body_bytes);
+            send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/terminal/log" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let r = terminal_lifecycle_routes::handle_log(&body_bytes);
+            send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        // POST /cli/terminal/lifecycle-write — byte-level write for
+        // TerminalManager-owned terminals. The existing
+        // /cli/terminal/write (GET, in terminal_routes.rs) operates on
+        // the session_map's UUID-keyed sessions; the legacy
+        // arbitrary-string TerminalManager IDs need a parallel path.
+        // Body: `{"id":"...","data":"..."}`.
+        "/cli/terminal/lifecycle-write" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let r = terminal_lifecycle_routes::handle_lifecycle_write(&body_bytes);
+            send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/terminal/set-focus" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let r = terminal_lifecycle_routes::handle_set_focus(&body_bytes);
+            send_response(&mut stream, r.status, r.content_type, &r.body).await;
         }
         // Phase 2 Unit 6 — POST routes for filesystem / chat /
         // themes / skill-layers / review-checklist. All JSON-bodied;

@@ -13,8 +13,8 @@
  *   4. If mouse leaves the window → `startDrag` is called for Finder drops
  */
 
-import { invoke } from '@tauri-apps/api/core'
 import { startDrag } from '@crabnebula/tauri-plugin-drag'
+import { terminalWrite } from '@/lib/terminal-daemon'
 
 // ── State ────────────────────────────────────────────────────────────
 
@@ -216,10 +216,10 @@ export function beginFileDrag(paths: string[], startX: number, startY: number, c
             new CustomEvent('k2so:terminal-write', { detail: { data } }),
           )
         } else {
-          invoke('terminal_write', {
-            id: termContainer.dataset.terminalId,
-            data
-          }).catch((e) => console.warn('[file-drag]', e))
+          const tid = termContainer.dataset.terminalId
+          if (tid) {
+            terminalWrite(tid, data).catch((e) => console.warn('[file-drag]', e))
+          }
         }
         dragPaths = []
         return

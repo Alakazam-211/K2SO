@@ -1,6 +1,11 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { daemonCliGet } from '@/lib/daemon-cli'
+import {
+  terminalCreate,
+  terminalExists,
+  terminalGetForegroundCommand,
+} from '@/lib/terminal-daemon'
 import { useTabsStore, type TerminalItemData } from './tabs'
 import { useToastStore } from './toast'
 import { useProjectsStore } from './projects'
@@ -387,7 +392,7 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
     await Promise.all(
       terminals.map(async (t) => {
         try {
-          const command = await invoke<string | null>('terminal_get_foreground_command', { id: t.terminalId })
+          const command = await terminalGetForegroundCommand(t.terminalId)
           if (command && KNOWN_AGENT_COMMANDS.has(command)) {
             const lastOutput = outputTimestamps.get(t.terminalId) ?? 0
             const status: 'active' | 'idle' = (now - lastOutput < AGENT_IDLE_THRESHOLD_MS) ? 'active' : 'idle'
@@ -601,9 +606,9 @@ export function startAgentPolling(): void {
         if (wsId) {
           const bgTerminalId = worktreeChatId(wsId)
           try {
-            const exists = await invoke<boolean>('terminal_exists', { id: bgTerminalId })
+            const exists = await terminalExists(bgTerminalId)
             if (!exists) {
-              await invoke('terminal_create', { cwd, command, args, id: bgTerminalId })
+              await terminalCreate({ cwd, command, args, id: bgTerminalId })
             }
             // Register system-managed worktree session
             invoke('k2so_agents_lock', {
@@ -633,9 +638,9 @@ export function startAgentPolling(): void {
       }
       const bgTerminalId = agentChatId(owningProject.id, agentName)
       try {
-        const exists = await invoke<boolean>('terminal_exists', { id: bgTerminalId })
+        const exists = await terminalExists(bgTerminalId)
         if (!exists) {
-          await invoke('terminal_create', {
+          await terminalCreate({
             cwd,
             command,
             args,

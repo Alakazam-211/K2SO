@@ -180,7 +180,7 @@ pub fn handle_download_default(event_tx: &Arc<tokio::sync::broadcast::Sender<cra
             move |p| {
                 // Emit progress over the daemon's event channel.
                 let _ = event_tx_progress.send(crate::events::WireEvent {
-                    event: "assistant:download-progress",
+                    event: "assistant:download-progress".to_string(),
                     payload: serde_json::json!({
                         "percent": p.percent,
                         "bytesDownloaded": p.bytes_downloaded,

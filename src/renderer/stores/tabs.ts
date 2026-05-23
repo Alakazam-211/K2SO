@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { daemonCliGet } from '@/lib/daemon-cli'
+import { terminalKill } from '@/lib/terminal-daemon'
 import type { MosaicNode, MosaicDirection } from 'react-mosaic-component'
 import { RESUMABLE_CLI_TOOLS } from '@shared/constants'
 import { useSettingsStore } from '@/stores/settings'
@@ -118,9 +119,11 @@ function closeTerminalForRenderer(data: TerminalItemData): void {
   const renderer = data.renderer ?? 'alacritty'
   switch (renderer) {
     case 'alacritty':
-      // Tauri-local PTY; dies with TerminalManager.
-      invoke('terminal_kill', { id: data.terminalId }).catch((e) =>
-        console.warn('[tabs] terminal_kill failed:', e),
+      // Phase 2 Unit 3 — PTY now lives in the daemon. The terminal
+      // survives Tauri quit; explicit close happens via the daemon's
+      // /cli/terminal/kill route.
+      terminalKill(data.terminalId).catch((e) =>
+        console.warn('[tabs] terminal/kill failed:', e),
       )
       break
     case 'alacritty-v2':

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { terminalExists } from '@/lib/terminal-daemon'
 import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
 import { TerminalPane } from '@/terminal-v2/TerminalPane'
@@ -319,7 +320,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
 
       // Step 1: Reattach if PTY already alive in this Tauri session
       try {
-        const exists = await invoke<boolean>('terminal_exists', { id: myTerminalId })
+        const exists = await terminalExists(myTerminalId)
         if (!cancelled && exists) {
           setLaunchConfig(null)
           setReady(true)

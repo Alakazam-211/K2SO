@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { terminalKill } from '@/lib/terminal-daemon'
 import { TerminalPane } from '@/terminal-v2/TerminalPane'
 import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 
@@ -301,7 +302,7 @@ export function AIFileEditor({
       clearTimeout(t)
       // Save session before killing so it can be resumed next time
       saveEditorSession(cwdRef.current, commandRef.current).finally(() => {
-        invoke('terminal_kill', { id }).catch(() => {})
+        terminalKill(id).catch(() => {})
       })
     }
   }, [])
@@ -325,7 +326,7 @@ export function AIFileEditor({
       }
     }
     await saveEditorSession(cwd, commandRef.current)
-    invoke('terminal_kill', { id: terminalIdRef.current }).catch(() => {})
+    terminalKill(terminalIdRef.current).catch(() => {})
     onClose()
   }, [cwd, onClose, isDirty, onSaveRequested])
 

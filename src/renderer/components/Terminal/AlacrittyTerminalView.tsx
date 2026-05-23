@@ -1,7 +1,15 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
+import {
+  terminalCreate,
+  terminalExists,
+  terminalGetGrid,
+  terminalResize,
+  terminalScroll,
+  terminalSetFocus,
+  terminalWrite,
+} from '@/lib/terminal-daemon'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import { useSettingsStore } from '@/stores/settings'
 import { keyEventToSequence, naturalTextEditingSequence } from '@/lib/key-mapping'
@@ -345,7 +353,7 @@ export function AlacrittyTerminalView({
     if (cols !== lastColsRef.current || rows !== lastRowsRef.current) {
       lastColsRef.current = cols
       lastRowsRef.current = rows
-      invoke('terminal_resize', { id: ptyIdRef.current, cols, rows }).catch((e) => console.warn('[terminal]', e))
+      terminalResize(ptyIdRef.current, cols, rows).catch((e) => console.warn('[terminal]', e))
     }
   }, [fontSize, created, calculateDimensions, measureCell])
 
@@ -362,7 +370,7 @@ export function AlacrittyTerminalView({
       // Measure cell metrics first
       measureCell()
 
-      const exists = await invoke<boolean>('terminal_exists', { id: terminalId })
+      const exists = await terminalExists(terminalId)
 
       if (!exists) {
         // Measure container and create terminal with correct initial dimensions
@@ -375,17 +383,20 @@ export function AlacrittyTerminalView({
           'color:#ff0;font-weight:bold',
           { cwd, command, args, cols, rows },
         )
-        await invoke('terminal_create', {
-          id: terminalId, cwd,
-          command: command ?? null, args: args ?? null,
-          cols, rows,
+        await terminalCreate({
+          id: terminalId,
+          cwd,
+          command: command ?? null,
+          args: args ?? null,
+          cols,
+          rows,
         })
       }
 
       // Reattach: get current grid state
       if (exists) {
         try {
-          const grid = await invoke<GridUpdate>('terminal_get_grid', { id: terminalId })
+          const grid = await terminalGetGrid<GridUpdate>(terminalId)
           if (mounted) applyGridUpdate(grid)
         } catch { /* fallback */ }
         // Reset so the resize poll fires on the next tick
@@ -418,7 +429,7 @@ export function AlacrittyTerminalView({
         })
       }
 
-      invoke('terminal_set_focus', { id: terminalId, focused: true }).catch((e) => console.warn('[terminal]', e))
+      terminalSetFocus(terminalId, true).catch((e) => console.warn('[terminal]', e))
 
       // Parity instrumentation with Kessel's SessionStreamView.
       // first-frame = first grid update received.
@@ -541,7 +552,7 @@ export function AlacrittyTerminalView({
 
           // Accept the drop — paste paths into terminal (images get
           // bracketed-paste wrapping so Claude Code's image detector fires)
-          invoke('terminal_write', { id: ptyIdRef.current, data: buildDropPayload(paths) })
+          terminalWrite(ptyIdRef.current, buildDropPayload(paths))
         }
       )
     }
@@ -572,7 +583,7 @@ export function AlacrittyTerminalView({
       lastColsRef.current = cols
       lastRowsRef.current = rows
       if (ptyIdRef.current) {
-        invoke('terminal_resize', { id: ptyIdRef.current, cols, rows }).catch((e) => console.warn('[terminal]', e))
+        terminalResize(ptyIdRef.current, cols, rows).catch((e) => console.warn('[terminal]', e))
       }
     }
 
@@ -594,10 +605,10 @@ export function AlacrittyTerminalView({
   // ── Focus tracking ─────────────────────────────────────────────────
 
   const handleFocus = useCallback(() => {
-    if (ptyIdRef.current) invoke('terminal_set_focus', { id: ptyIdRef.current, focused: true }).catch((e) => console.warn('[terminal]', e))
+    if (ptyIdRef.current) terminalSetFocus(ptyIdRef.current, true).catch((e) => console.warn('[terminal]', e))
   }, [])
   const handleBlur = useCallback(() => {
-    if (ptyIdRef.current) invoke('terminal_set_focus', { id: ptyIdRef.current, focused: false }).catch((e) => console.warn('[terminal]', e))
+    if (ptyIdRef.current) terminalSetFocus(ptyIdRef.current, false).catch((e) => console.warn('[terminal]', e))
   }, [])
 
   // ── Keyboard ───────────────────────────────────────────────────────
@@ -610,7 +621,7 @@ export function AlacrittyTerminalView({
       const seq = naturalTextEditingSequence(ne)
       if (seq) {
         e.preventDefault(); e.stopPropagation()
-        invoke('terminal_write', { id: ptyIdRef.current, data: seq })
+        terminalWrite(ptyIdRef.current, seq)
         return
       }
     }
@@ -618,7 +629,7 @@ export function AlacrittyTerminalView({
     const data = keyEventToSequence(ne, termModeRef.current)
     if (data) {
       e.preventDefault(); e.stopPropagation()
-      invoke('terminal_write', { id: ptyIdRef.current, data })
+      terminalWrite(ptyIdRef.current, data)
     }
   }, [naturalTextEditing])
 
@@ -636,7 +647,7 @@ export function AlacrittyTerminalView({
     daemonCliGet<string[]>('fs/clipboard-paths').then((paths) => {
       if (!ptyIdRef.current) return
       if (paths && paths.length > 0) {
-        invoke('terminal_write', { id: ptyIdRef.current, data: buildDropPayload(paths) })
+        terminalWrite(ptyIdRef.current, buildDropPayload(paths))
         return
       }
       if (!text) return
@@ -648,10 +659,10 @@ export function AlacrittyTerminalView({
         )
         return
       }
-      invoke('terminal_write', { id: ptyIdRef.current, data: text })
+      terminalWrite(ptyIdRef.current, text)
     }).catch(() => {
       if (!text || !ptyIdRef.current) return
-      invoke('terminal_write', { id: ptyIdRef.current, data: text })
+      terminalWrite(ptyIdRef.current, text)
     })
   }, [])
 
@@ -683,7 +694,7 @@ export function AlacrittyTerminalView({
         const lines = Math.round(accum / lineHeight)
         const delta = -lines
         if (delta !== 0) {
-          invoke('terminal_scroll', { id: ptyIdRef.current, delta }).catch((e) => console.warn('[terminal]', e))
+          terminalScroll(ptyIdRef.current, delta).catch((e) => console.warn('[terminal]', e))
         }
       }, 50)
     }
@@ -726,14 +737,14 @@ export function AlacrittyTerminalView({
         if (filePath) paths.push(filePath)
       }
       if (paths.length > 0) {
-        invoke('terminal_write', { id: ptyIdRef.current, data: buildDropPayload(paths) })
+        terminalWrite(ptyIdRef.current, buildDropPayload(paths))
       }
     }
 
     // Handle text drops
     const text = e.dataTransfer.getData('text/plain')
     if (text && files.length === 0) {
-      invoke('terminal_write', { id: ptyIdRef.current, data: text })
+      terminalWrite(ptyIdRef.current, text)
     }
   }, [])
 

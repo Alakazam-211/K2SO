@@ -69,18 +69,23 @@ struct DaemonCompanionEventSink {
 
 impl CompanionEventSink for DaemonCompanionEventSink {
     fn emit(&self, event: &str, payload: serde_json::Value) {
-        let static_name: &'static str = match event {
-            "companion:tunnel_activated" => "companion:tunnel_activated",
-            "companion:tunnel_deactivated" => "companion:tunnel_deactivated",
+        // Phase 2 Unit 3: WireEvent.event is `String` now (was
+        // `&'static str`) so we can pass the dynamic event name
+        // straight through. Still guard known names so a typo in
+        // a future companion event surfaces in logs instead of
+        // silently broadcasting.
+        match event {
+            "companion:tunnel_activated"
+            | "companion:tunnel_deactivated" => {}
             other => {
                 log_debug!(
-                    "[daemon/companion] dropping unknown companion event '{other}' (no static interning)"
+                    "[daemon/companion] dropping unknown companion event '{other}'"
                 );
                 return;
             }
-        };
+        }
         let _ = self.tx.send(WireEvent {
-            event: static_name,
+            event: event.to_string(),
             payload,
         });
     }
@@ -123,7 +128,13 @@ impl AppEventSource for DaemonAppEventSource {
             loop {
                 match rx.recv().await {
                     Ok(frame) => {
-                        if !wanted.contains(&frame.event) {
+                        // Phase 2 Unit 3: WireEvent.event is now `String`
+                        // (so we can carry dynamic terminal-event names
+                        // like `terminal:grid:<uuid>`). The wanted-list
+                        // is still static-name based, so compare on
+                        // `as_str`.
+                        let event_name = frame.event.as_str();
+                        if !wanted.iter().any(|w| *w == event_name) {
                             continue;
                         }
                         // companion's handler signature expects a JSON
@@ -131,7 +142,7 @@ impl AppEventSource for DaemonAppEventSource {
                         // form, which is a raw JSON-encoded string).
                         let payload_str =
                             serde_json::to_string(&frame.payload).unwrap_or_default();
-                        (handler_arc)(frame.event, &payload_str);
+                        (handler_arc)(event_name, &payload_str);
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         log_debug!(

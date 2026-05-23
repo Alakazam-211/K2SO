@@ -1138,6 +1138,26 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         "/cli/terminal/read" => crate::terminal_routes::handle_read(params),
         "/cli/terminal/write" => crate::terminal_routes::handle_write(params),
 
+        // ── Phase 2 Unit 3: terminal lifecycle GETs ─────────────────
+        // Read-only inspection routes for the TerminalManager
+        // singleton. Mutating siblings (create/kill/resize/...) are
+        // POST routes in `main.rs` with method-gated handlers.
+        "/cli/terminal/active-count" => {
+            crate::terminal_lifecycle_routes::handle_active_count(params)
+        }
+        "/cli/terminal/foreground-cmd" => {
+            crate::terminal_lifecycle_routes::handle_foreground_cmd(params)
+        }
+        "/cli/terminal/exists" => {
+            crate::terminal_lifecycle_routes::handle_exists(params)
+        }
+        "/cli/terminal/get-grid" => {
+            crate::terminal_lifecycle_routes::handle_get_grid(params)
+        }
+        "/cli/terminal/list-running" => {
+            crate::terminal_lifecycle_routes::handle_list_running(params)
+        }
+
         // ── Phase 4 H2: live-session enumeration ────────────────────
         // Replaces the Tauri endpoint that walked AppState's
         // terminal_manager. Now a walk of session_map + registry.

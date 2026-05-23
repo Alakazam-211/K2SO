@@ -33,9 +33,14 @@ use k2so_core::log_debug;
 
 /// One frame sent over the event WS. Matches the wire format the Tauri
 /// receiver's JSON deserializer expects (see `src-tauri/src/daemon_events.rs`).
+///
+/// `event` is `String` (not `&'static str`) because Phase 2 Unit 3 added
+/// dynamic per-terminal events like `terminal:grid:<uuid>` where the
+/// terminal-id segment can't be a static literal. All existing callers
+/// can pass either an owned `String` or a `String::from(&'static str)`.
 #[derive(Clone, Debug, Serialize)]
 pub struct WireEvent {
-    pub event: &'static str,
+    pub event: String,
     pub payload: serde_json::Value,
 }
 
@@ -63,7 +68,7 @@ impl DaemonBroadcastSink {
 impl AgentHookEventSink for DaemonBroadcastSink {
     fn emit(&self, event: HookEvent, payload: serde_json::Value) {
         let frame = WireEvent {
-            event: event.event_name(),
+            event: event.event_name().to_string(),
             payload,
         };
         // Silent on "no receivers" — the daemon fires events whether or
@@ -167,7 +172,7 @@ mod tests {
             serde_json::json!({"paneId": "p1", "eventType": "start"}),
         );
         let frame = rx.try_recv().expect("broadcast delivered");
-        assert_eq!(frame.event, "agent:lifecycle");
+        assert_eq!(frame.event.as_str(), "agent:lifecycle");
         let json = serde_json::to_string(&frame).expect("serialize");
         assert!(json.contains(r#""event":"agent:lifecycle""#), "{json}");
         assert!(json.contains(r#""paneId":"p1""#), "{json}");

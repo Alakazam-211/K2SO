@@ -38,6 +38,13 @@ impl CliResponse {
             body: serde_json::json!({ "error": err.to_string() }).to_string(),
         }
     }
+    pub fn internal_error(err: impl std::fmt::Display) -> Self {
+        Self {
+            status: "500 Internal Server Error",
+            content_type: "application/json",
+            body: serde_json::json!({ "error": err.to_string() }).to_string(),
+        }
+    }
     pub fn not_found() -> Self {
         Self {
             status: "404 Not Found",

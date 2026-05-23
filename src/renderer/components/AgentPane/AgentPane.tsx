@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { terminalExists } from '@/lib/terminal-daemon'
 import { daemonCliGet } from '@/lib/daemon-cli'
 import { useTabsStore } from '@/stores/tabs'
 import { useProjectsStore } from '@/stores/projects'
@@ -322,7 +323,7 @@ function WorktreeChatTerminal({
     const resolve = async (): Promise<void> => {
       const myTerminalId = terminalIdRef.current
       try {
-        const exists = await invoke<boolean>('terminal_exists', { id: myTerminalId })
+        const exists = await terminalExists(myTerminalId)
         if (!cancelled && exists) {
           setLaunchConfig(null)
           setReady(true)

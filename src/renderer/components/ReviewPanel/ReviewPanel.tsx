@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
+import { terminalGetGrid } from '@/lib/terminal-daemon'
 import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
 import { useConfirmDialogStore } from '@/stores/confirm-dialog'
@@ -314,7 +315,7 @@ export default function ReviewPanel(): React.JSX.Element {
       const pollId = setInterval(async () => {
         attempts++
         try {
-          const grid = await invoke<{ lines: Array<{ text: string }> }>('terminal_get_grid', { id: terminalId })
+          const grid = await terminalGetGrid<{ lines: Array<{ text: string }> }>(terminalId)
           const allText = grid.lines.map((l) => l.text).join('\n')
           const match = allText.match(urlPattern)
           if (match) {

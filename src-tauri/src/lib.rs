@@ -71,8 +71,10 @@ mod daemon_events;
 // `terminal` now lives in k2so-core. Re-exported so existing
 // `crate::terminal::*` paths keep working.
 pub use k2so_core::terminal;
-// Local Tauri-backed implementation of k2so_core::terminal::TerminalEventSink.
-mod terminal_event_sink;
+// Phase 2 Unit 3 — `terminal_event_sink` module removed. The
+// daemon owns the TerminalEventSink now (broadcasts events over
+// /events WS). Tauri's `daemon_events.rs` re-emits them via
+// AppHandle::emit so the renderer's listeners are unchanged.
 mod watcher;
 mod window;
 
@@ -238,12 +240,12 @@ pub fn run() {
         // and HTTP endpoints take the same write lock on the same
         // physical SQLite connection.
         db: db_handle,
-        // Arc clone of the k2so-core singletons. AppState is now a
-        // handle collection, not the owner — companion + future
-        // agent_hooks in core see the same underlying managers.
-        terminal_manager: terminal::shared(),
         // Phase 2 Unit 2 — `llm_manager` field deleted; LLM lives
         // in the daemon now.
+        // Phase 2 Unit 3 — `terminal_manager` field deleted; the
+        // daemon owns the TerminalManager lifecycle now (every
+        // `terminal_*` Tauri command was replaced by a daemon
+        // `/cli/terminal/*` HTTP route).
         watchers: Mutex::new(HashMap::new()),
     };
 
@@ -653,49 +655,18 @@ pub fn run() {
                         }
                         window::save_window_state(&app_handle);
 
+                        // Phase 2 Unit 3 — terminal PTY lifecycle moved
+                        // to the daemon. Tauri quit MUST NOT kill the
+                        // PTYs anymore: K2SO Connect (daemon on remote
+                        // machine) and Mobile Companion both require
+                        // PTYs to survive the local Tauri quitting.
+                        // The daemon process owns the TerminalManager
+                        // and reaps dead PTYs in its own watchdog (see
+                        // `crates/k2so-daemon/src/watchdog.rs`).
+                        //
                         // Phase 2 Unit 2 — the LLM lives in the daemon
                         // now; Tauri no longer owns a model handle, so
-                        // there's nothing to unload here. We only need
-                        // to kill terminals before exit. Spawn the
-                        // terminal kill on a worker thread so a stuck
-                        // PTY reaper can't hang the quit indefinitely.
-                        // Zed pattern: log panics instead of silently
-                        // swallowing them.
-                        let handle_for_term = app_handle.clone();
-
-                        let term_thread = std::thread::spawn(move || {
-                            if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                if let Some(state) = handle_for_term.try_state::<AppState>() {
-                                    let mut manager = state.terminal_manager.lock();
-                                    manager.kill_all();
-                                }
-                            })) {
-                                let msg = panic.downcast_ref::<String>()
-                                    .map(|s| s.as_str())
-                                    .or_else(|| panic.downcast_ref::<&str>().copied())
-                                    .unwrap_or("unknown panic");
-                                log_debug!("[shutdown] Terminal kill panicked: {}", msg);
-                            }
-                        });
-
-                        // Wait up to 5 seconds for terminal cleanup to
-                        // complete. Terminal process reaping can take
-                        // time on macOS when launchd-managed children
-                        // haven't drained their pipes yet.
-                        let timeout = std::time::Duration::from_secs(5);
-                        let (done_tx, done_rx) = std::sync::mpsc::channel();
-
-                        std::thread::spawn(move || {
-                            let _ = term_thread.join();
-                            let _ = done_tx.send("term");
-                        });
-
-                        match done_rx.recv_timeout(timeout) {
-                            Ok(_) => {}
-                            Err(_) => {
-                                log_debug!("[shutdown] Cleanup timed out after 5s — exiting anyway");
-                            }
-                        }
+                        // there's nothing to unload here either.
 
                         // Phase 4 H7: the daemon is the sole writer of
                         // ~/.k2so/heartbeat.port since Tauri retired
@@ -885,24 +856,17 @@ pub fn run() {
             // Phase 2 Unit 6 — `commands::project_config::*` shims
             // deleted. Renderer hits `/cli/project-config/*` on the
             // daemon.
-            // Terminal
-            commands::terminal::terminal_create,
-            commands::terminal::terminal_write,
-            commands::terminal::terminal_resize,
-            commands::terminal::terminal_kill,
-            commands::terminal::terminal_active_count_for_path,
-            commands::terminal::terminal_kill_foreground,
-            commands::terminal::terminal_get_foreground_command,
-            commands::terminal::terminal_exists,
-            commands::terminal::terminal_get_grid,
-            commands::terminal::terminal_scroll,
-            commands::terminal::terminal_log,
-            commands::terminal::terminal_set_font_size,
-            commands::terminal::terminal_get_cell_metrics,
-            commands::terminal::terminal_set_focus,
-            commands::terminal::terminal_get_selection_text,
-            commands::terminal::terminal_read_lines,
-            commands::terminal::terminal_list_running_agents,
+            // Phase 2 Unit 3 — `commands::terminal::*` shims deleted.
+            // PTY lifecycle now owned by the daemon; the renderer
+            // hits `/cli/terminal/{create,kill,resize,scroll,log,
+            // kill-foreground,set-focus,active-count,foreground-cmd,
+            // exists,get-grid,list-running}` and the legacy
+            // `lifecycle-write` route on k2so-daemon directly. The
+            // daemon's TerminalEventSink broadcasts grid/title/exit/
+            // bell events over /events WS; daemon_events.rs re-emits
+            // via AppHandle::emit so the renderer's
+            // `listen('terminal:grid:<id>')` subscribers see the
+            // same events as before.
             // Git
             commands::git::git_info,
             commands::git::git_branches,
