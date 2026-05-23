@@ -732,7 +732,26 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         // macOS Keychain (preferred) or settings.json (fallback),
         // then invalidates every live companion session so the old
         // token can't be replayed.
+        //
+        // Method gate: see the long-form note on /cli/claude-auth/
+        // refresh-now below — the top-level dispatch lets a GET
+        // through on POST-allowlisted routes. Mirror Unit 5's
+        // explicit `if !is_post` guard so a GET against this route
+        // can't trigger the password rotation. Especially important
+        // here because this is one of the routes Mobile Companion
+        // and K2SO Connect will hit over the ngrok tunnel.
         "/cli/companion/set-password" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -752,7 +771,21 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         // POST /cli/companion/disconnect-session — Phase 2 Unit 1.
         // Body: `{"sessionToken": "..."}`. Removes the session row
         // and any WS clients still attached to it.
+        //
+        // Method gate: same rationale as /cli/companion/set-password
+        // above. Don't let a GET disconnect a live session.
         "/cli/companion/disconnect-session" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
