@@ -304,24 +304,72 @@ Each unit is sized for one subagent session. Units 1–4 must respect the depend
 
 ---
 
-### Unit 7 — `k2so_agents.rs` BRIDGE deletion + Settings to daemon
+### Unit 7 — split into 7a / 7b / 7c
+
+The original framing — "delete 6,237 LoC of thin re-exports + move 1,200 LoC of SKILL scaffolding" — materially undercounts the work. A scope audit on 2026-05-23 found that `k2so_agents.rs` contains: ~1,500 LoC of one-shot migration helpers called from `lib.rs` setup hooks, ~3,500 LoC of SKILL scaffolding (not 1,200), ~440 LoC of heartbeat-launchd installer, ~200 LoC of triage logic, and real BRIDGE re-exports on top — plus 75 renderer `invoke()` call sites and cross-file references from `lib.rs`, `projects.rs`, `agent_hooks.rs`, and `daemon.rs`. Attempting all of it in one session risks a half-finished merge.
+
+The unit is split into three landings:
+
+#### Unit 7a — App Settings to daemon + F3 close [BOUNDED — Wave A]
 
 **Files in scope:**
-- `commands/k2so_agents.rs` (6,237 — 80 `#[tauri::command]` entries; sample at line 103–167 confirms 3-line `k2so_core::*` re-exports)
-- `commands/settings.rs` (785)
-- `workspace_regen_provider.rs` (27)
-- SKILL.md scaffolding logic at `commands/k2so_agents.rs:1443–3357` may need to move into `k2so-core` so the daemon can call it directly
+- `src-tauri/src/commands/settings.rs` (785 — `settings_update`, `settings_reset`, related accessors; `read_settings`/`write_settings` stay until 7c since `daemon.rs` references them)
+- `crates/k2so-core/src/app_settings.rs` (NEW — global `AppSettings` struct + tmp+rename atomic writes)
+- `crates/k2so-daemon/src/main.rs` (POST allowlist + handler branches for new routes)
+- ~25 renderer `invoke` call sites in `src/renderer/components/Settings/sections/*`
 
 **Daemon work:**
-- Most routes already exist (`/cli/agents/*`, `/cli/heartbeat/*`, `/cli/work/*`, `/cli/reviews`, `/cli/onboarding/*`). Audit and fill any gaps.
-- Add `/cli/settings/{get,update,reset}` (existing `/cli/settings` covers get).
-- Move SKILL regen orchestrator from `commands/k2so_agents.rs` into `k2so-core::agents::workspace`.
+- New `k2so_core::app_settings` module: `pub fn load()`, `pub fn save()`, `pub fn update(partial)`.
+- New routes: `GET /cli/settings/get`, `POST /cli/settings/update`, `POST /cli/settings/reset`.
+- **F3 closure**: `app_settings::update()` detects when companion-affecting fields change (username, password, port) and triggers daemon-side companion invalidation directly. No more two-writer race on `~/.k2so/settings.json`.
 
-**Renderer TS changes**: Renderer's existing `daemonInvoke()` helper expands to cover all `k2so_*` invokes.
+**Tauri side:**
+- Replace `commands/settings.rs::settings_update` body with a daemon proxy (don't delete the file yet — `daemon.rs::{get,set}_keep_daemon_on_quit` still references it; 7c will delete).
+- Resolve the `TODO Phase 2 Unit 7` markers.
 
-**LoC**: ~6,200 deleted, ~1,200 moved into `k2so-core` (SKILL scaffolding), ~700 deleted (settings).
+**Renderer:**
+- Migrate ~25 Settings UI `invoke()` calls to daemon CLI.
 
-**Dependencies**: Independent. Largest cleanup.
+**LoC**: ~400 moved/refactored, ~30 LoC F3 fix.
+
+**Dependencies**: None. Wave A.
+
+#### Unit 7b — SKILL scaffolding + migration helpers to k2so-core [LARGE, NO TAURI CHURN]
+
+**Files in scope:**
+- `src-tauri/src/commands/k2so_agents.rs:1443–4964` — SKILL scaffolding (~3,500 LoC): `write_workspace_skill_file_with_body`, `adopt_workspace_skill_drift`, `strip_workspace_skill_tail`, `append_workspace_source_regions`, `migrate_and_symlink_root_claude_md`, `import_claude_md_into_user_notes`, `harvest_per_agent_claude_md_files`, `archive_claude_md_file`, `inject_first_migration_banner`, `safe_symlink_harness_file`, `write_workspace_harness_discovery_targets`, `write_cursor_rules_mdc`, `scaffold_aider_conf`, `teardown_workspace_harness_files`, `find_latest_archive`, `k2so_agents_teardown_workspace`, `k2so_agents_preview_workspace_ingest`, `k2so_agents_run_workspace_ingest`, `ensure_all_skills_up_to_date`
+- `src-tauri/src/commands/k2so_agents.rs:609–1251` — one-shot migration helpers (~1,500 LoC): `archive_orphan_top_tier_agents`, `repair_mismigrated_heartbeats`, `promote_legacy_heartbeat`, `ensure_workspace_wakeups`, `migrate_filenames_to_uppercase`, `migrate_or_scaffold_lead_heartbeat`, `detect_interrupted_regen`
+- New module: `crates/k2so-core/src/agents/workspace.rs` (or similar — propose at landing time)
+- Constants and section markers (`K2SO_SECTION_BEGIN/END`, `SKILL_VERSION_WORKSPACE`) get a public home alongside the scaffolding.
+
+**Goal:** Move bodies into k2so-core. The Tauri `#[tauri::command]` wrappers in `k2so_agents.rs` become trivial `pub use` re-exports — they STAY in `k2so_agents.rs` until 7c. **No renderer changes**, **no `lib.rs::invoke_handler!` changes**. Tauri-side compile must still pass at unit-merge time.
+
+**Daemon work:** Daemon's first-boot hook calls the now-public k2so-core functions directly (replacing Tauri's `lib.rs` setup-hook calls for these migrations — the daemon should run them on its own boot, not Tauri's).
+
+**LoC**: ~5,000 moved into k2so-core; same LoC reduced from bodies in `k2so_agents.rs` (becomes `pub use` re-exports until 7c finishes the job).
+
+**Dependencies**: None. Can land alongside 7a or any other Wave A unit.
+
+#### Unit 7c — `k2so_agents.rs` final BRIDGE deletion + heartbeat-launchd MIGRATE
+
+**Files in scope:**
+- `src-tauri/src/commands/k2so_agents.rs` (entire file — fully deletable after 7b)
+- `src-tauri/src/commands/settings.rs` (entire file — last accessors `read_settings`/`write_settings` move to daemon)
+- `src-tauri/src/workspace_regen_provider.rs` (27)
+- `src-tauri/src/commands/daemon.rs` (refactor `get_keep_daemon_on_quit`/`set_keep_daemon_on_quit` to call daemon HTTP)
+- `src-tauri/src/lib.rs` (~70 `invoke_handler!` entries removed, 13 setup-hook calls cleaned up)
+- `src-tauri/src/commands/projects.rs:369` (replace `archive_orphan_top_tier_agents` call with daemon HTTP)
+- `src-tauri/src/commands/mod.rs` (remove module decls)
+- ~45 remaining renderer invoke call sites
+
+**Heartbeat-launchd MIGRATE** (`k2so_agents.rs:2700–3138`, ~440 LoC):
+- Move `install_heartbeat_launchd`, `install_heartbeat_cron`, `generate_heartbeat_script`, `k2so_agents_install_heartbeat`, `k2so_agents_apply_wake_scheduler`, `k2so_agents_uninstall_heartbeat` into daemon-side `crates/k2so-daemon/src/heartbeat_launch.rs` (already partially exists).
+- New routes: `/cli/heartbeat/install-launchd`, `/cli/heartbeat/uninstall-launchd`, `/cli/heartbeat/apply-wake-scheduler`.
+- **Rationale**: required for K2SO Connect — a remote daemon must install its own scheduler plist without depending on Tauri being present. Daemon already manages its own `com.k2so.daemon` plist via Unit 1's pattern; the heartbeat is the next plist to come under daemon ownership.
+
+**LoC**: ~6,600 deleted from src-tauri, ~440 moved to daemon (heartbeat installer).
+
+**Dependencies**: Must land after 7b (which empties the body bodies). Other Wave units can land any time.
 
 ---
 
@@ -388,9 +436,12 @@ The full `/cli/*` route table that Mobile Companion and K2SO Connect will harden
 - EXISTING: `/cli/states/{list,get,set}` — add NEW `/cli/states/{create,update,delete}`
 - NEW: `/cli/window-state/{get,set}`
 
-### Settings (extend EXISTING — Unit 7 + Unit 1)
+### Settings (extend EXISTING — Unit 7a + Unit 1)
 - EXISTING: `/cli/settings`
-- NEW: `/cli/settings/{update, reset}`, `/cli/companion/{settings, set-password, disconnect-session}`
+- NEW: `/cli/settings/{get, update, reset}`, `/cli/companion/{settings, set-password, disconnect-session}`
+
+### Heartbeat-launchd (NEW — Unit 7c)
+`/cli/heartbeat/{install-launchd, uninstall-launchd, apply-wake-scheduler}` — daemon writes/uninstalls the heartbeat plist on its own; required for K2SO Connect.
 
 ### Agents / Work / Reviews / Heartbeats (mostly EXIST — Unit 7)
 EXISTING (incomplete list): `/cli/agents/*` (list, create, delete, profile, work, heartbeat, lock, unlock, triage, launch, delegate, running, reap, generate-claude-md), `/cli/agent/{update, reply, complete}`, `/cli/work/*`, `/cli/reviews`, `/cli/review/*`, `/cli/onboarding/*`, `/cli/heartbeat/*`, `/cli/scheduler-tick`
@@ -591,5 +642,7 @@ After done: enter Phase 3 (contract hardening — TLS, auth, OpenAPI export, Mob
 | 4 — DB-direct writes | pending | — | Wave C (after Unit 3 merges) |
 | 5 — Claude Auth | pending | — | Wave A — Keychain spike first |
 | 6 — FS + Chat + Themes + Skills + Review + ProjectConfig + WhatsNew | pending | — | Wave A — largest LoC |
-| 7 — `k2so_agents` BRIDGE + Settings | pending | — | Wave A — must close F3 |
+| 7a — App Settings + F3 close | pending | — | Wave A — bounded; closes the correctness gap Phase 3 needs |
+| 7b — SKILL scaffolding + migration helpers → k2so-core | pending | — | Can land alongside 7a; no Tauri-command churn |
+| 7c — `k2so_agents` BRIDGE deletion + heartbeat-launchd MIGRATE | pending | — | After 7b empties the bodies; daemon owns its own heartbeat plist |
 | 2.1 — CLI verb redesign | pending | — | After Units 2/5/6 merge |
