@@ -1,7 +1,11 @@
 import React from 'react'
 import { useEffect, useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
 import { getDaemonWs } from '@/kessel/daemon-ws'
+// Phase 2 Unit 7a — settings live in the daemon. The companion
+// tunnel control endpoints (`/cli/companion/{start,stop,status,...}`)
+// landed in Unit 1; the settings read/write now follows the same
+// direct-daemon pattern.
+import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
 import type { SettingEntry } from '../searchManifest'
 
 // Phase 2 Unit 1 — Companion tunnel lifecycle now lives in
@@ -123,8 +127,8 @@ export function CompanionSection(): React.JSX.Element {
   useEffect(() => {
     const load = async () => {
       try {
-        const settings = await invoke<any>('settings_get')
-        const c = settings?.companion || {}
+        const settings = await settingsGet()
+        const c = (settings as any)?.companion || {}
         setUsername(c.username || '')
         // Post-0.32.12 the hash itself moves to Keychain and passwordHash is
         // blanked; `passwordSet` is the durable indicator. Fall back to the
@@ -191,10 +195,10 @@ export function CompanionSection(): React.JSX.Element {
         setTunnelUrl(null)
         setConnectedClients(0)
         setSessions([])
-        await invoke('settings_update', { updates: { companion: { enabled: false } } })
+        await settingsUpdate({ companion: { enabled: false } })
       } else {
-        await invoke('settings_update', {
-          updates: { companion: { enabled: true, username, ngrokAuthToken: ngrokToken } }
+        await settingsUpdate({
+          companion: { enabled: true, username, ngrokAuthToken: ngrokToken }
         })
         const url = await companionStart()
         setEnabled(true)
@@ -300,7 +304,7 @@ export function CompanionSection(): React.JSX.Element {
             onClick={() => {
               const next = !autoStart
               setAutoStart(next)
-              invoke('settings_update', { updates: { companion: { autoStart: next } } }).catch(() => {})
+              settingsUpdate({ companion: { autoStart: next } }).catch(() => {})
             }}
             className={`w-7 h-3.5 flex items-center transition-colors no-drag cursor-pointer flex-shrink-0 ${autoStart ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'}`}
           >
@@ -321,7 +325,7 @@ export function CompanionSection(): React.JSX.Element {
             onClick={() => {
               const next = !allowRemoteSpawn
               setAllowRemoteSpawn(next)
-              invoke('settings_update', { updates: { companion: { allowRemoteSpawn: next } } }).catch(() => {})
+              settingsUpdate({ companion: { allowRemoteSpawn: next } }).catch(() => {})
             }}
             className={`w-7 h-3.5 flex items-center transition-colors no-drag cursor-pointer flex-shrink-0 ${allowRemoteSpawn ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'}`}
           >
@@ -331,7 +335,7 @@ export function CompanionSection(): React.JSX.Element {
 
         <div className="flex items-center justify-between py-2.5 border-b border-[var(--color-border)]">
           <span className="text-xs text-[var(--color-text-secondary)]">Username</span>
-          <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} onBlur={() => invoke('settings_update', { updates: { companion: { username } } }).catch(() => {})} placeholder="Enter username" className="w-48 px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag" />
+          <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} onBlur={() => settingsUpdate({ companion: { username } }).catch(() => {})} placeholder="Enter username" className="w-48 px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag" />
         </div>
 
         <div className="flex items-center justify-between py-2.5 border-b border-[var(--color-border)]">
@@ -347,7 +351,7 @@ export function CompanionSection(): React.JSX.Element {
 
         <div className="flex items-center justify-between py-2.5 border-b border-[var(--color-border)]">
           <span className="text-xs text-[var(--color-text-secondary)]">ngrok Auth Token</span>
-          <input type="password" value={ngrokToken} onChange={(e) => setNgrokToken(e.target.value)} onBlur={() => invoke('settings_update', { updates: { companion: { ngrokAuthToken: ngrokToken } } }).catch(() => {})} placeholder="Enter ngrok token" className="w-48 px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag" />
+          <input type="password" value={ngrokToken} onChange={(e) => setNgrokToken(e.target.value)} onBlur={() => settingsUpdate({ companion: { ngrokAuthToken: ngrokToken } }).catch(() => {})} placeholder="Enter ngrok token" className="w-48 px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag" />
         </div>
 
         <div className="flex items-center justify-between py-2.5 border-b border-[var(--color-border)]">
@@ -355,7 +359,7 @@ export function CompanionSection(): React.JSX.Element {
             <span className="text-xs text-[var(--color-text-secondary)]">Custom Domain</span>
             <p className="text-[10px] text-[var(--color-text-muted)]">Paid plans only (e.g. myapp.ngrok.app)</p>
           </div>
-          <input type="text" value={ngrokDomain} onChange={(e) => setNgrokDomain(e.target.value)} onBlur={() => invoke('settings_update', { updates: { companion: { ngrokDomain: ngrokDomain } } }).catch(() => {})} placeholder="Optional" className="w-48 px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag" />
+          <input type="text" value={ngrokDomain} onChange={(e) => setNgrokDomain(e.target.value)} onBlur={() => settingsUpdate({ companion: { ngrokDomain: ngrokDomain } }).catch(() => {})} placeholder="Optional" className="w-48 px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag" />
         </div>
       </div>
 

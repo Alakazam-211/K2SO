@@ -99,6 +99,35 @@ impl DaemonClient {
         Ok(body)
     }
 
+    /// POST a JSON body to a `/cli/*` route. `body` is serialized as
+    /// `application/json`; the auth token rides in the query string
+    /// (same wire shape `cli_get` uses, so a single daemon-token
+    /// rotation invalidates GET and POST identically). Returns the
+    /// raw response body on 2xx; any non-2xx is surfaced as `Err`.
+    pub fn cli_post_json(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<String, String> {
+        let url = format!(
+            "http://127.0.0.1:{}{}?token={}",
+            self.port, path, self.token
+        );
+        let response = self
+            .http
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send()
+            .map_err(|e| format!("daemon {path}: {e}"))?;
+        let status = response.status();
+        let resp_body = response.text().unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!("daemon {path} {}: {resp_body}", status.as_u16()));
+        }
+        Ok(resp_body)
+    }
+
     /// Hit `GET /status?token=<t>` and decode the JSON body.
     pub fn status(&self) -> Result<DaemonStatus, String> {
         let url = format!("http://127.0.0.1:{}/status?token={}", self.port, self.token);

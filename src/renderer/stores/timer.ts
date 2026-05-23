@@ -2,7 +2,9 @@ import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { useProjectsStore } from '@/stores/projects'
 import { useToastStore } from '@/stores/toast'
-import type { AppSettingsResponse } from '@shared/types'
+// Phase 2 Unit 7a — settings live in the daemon. timer_* invokes
+// (DB-backed time entries) remain Tauri-side until Unit 4.
+import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -202,7 +204,7 @@ export const useTimerStore = create<TimerState>((set, get) => ({
 
   initFromSettings: async () => {
     try {
-      const result = await invoke<AppSettingsResponse>('settings_get')
+      const result = await settingsGet()
       const timer = result.timer ?? {}
       set({
         visible: timer.visible ?? true,
@@ -462,9 +464,9 @@ export const useTimerStore = create<TimerState>((set, get) => ({
     // Optimistic update locally
     set({ [key]: value } as any)
     try {
-      const currentSettings = await invoke<AppSettingsResponse>('settings_get')
+      const currentSettings = await settingsGet()
       const timer = { ...(currentSettings.timer ?? {}), [key]: value }
-      await invoke('settings_update', { updates: { timer } })
+      await settingsUpdate({ timer })
     } catch (err) {
       console.error('[timer] Failed to persist setting:', err)
     }

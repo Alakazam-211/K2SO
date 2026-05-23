@@ -54,6 +54,7 @@ mod session_lookup;
 mod sessions_bytes_ws;
 mod sessions_grid_ws;
 mod sessions_ws;
+mod settings_routes;
 mod signal_format;
 mod spawn;
 mod terminal_routes;
@@ -527,6 +528,11 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             | "/cli/llm/chat"
             | "/cli/llm/load-model"
             | "/cli/llm/download-default"
+            // Phase 2 Unit 7a — settings writes. Partial settings
+            // payloads live in the body; `reset` is POST so it can't
+            // be reached via a stray GET / browser refresh.
+            | "/cli/settings/update"
+            | "/cli/settings/reset"
     );
     if method != "GET" && !(is_post && post_allowed) {
         let _ = stream.read(&mut buf).await;
@@ -1091,6 +1097,73 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             }
             let _ = read_post_body(&mut stream, &mut buf).await;
             let result = claude_auth_host::handle_uninstall_scheduler();
+            send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/settings/update — Phase 2 Unit 7a.
+        // Body: arbitrary JSON object deep-merged into settings.json.
+        // F3 closure runs inside `app_settings::update()` — companion-
+        // credential changes invalidate live sessions server-side, in
+        // the same process that owns the live companion runtime.
+        // Method gate per feedback_post_only_route_guards memory.
+        "/cli/settings/update" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let result = settings_routes::handle_settings_update(&body_bytes);
+            send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/settings/reset — Phase 2 Unit 7a.
+        // Restores `AppSettings::default()`, deletes Keychain hash,
+        // invalidates every live companion session. POST (not GET)
+        // so a browser refresh can't accidentally trigger it.
+        // Method gate per feedback_post_only_route_guards memory.
+        "/cli/settings/reset" => {
+            if !is_post {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "405 Method Not Allowed",
+                    "application/json",
+                    r#"{"error":"POST required"}"#,
+                )
+                .await;
+                return;
+            }
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let _ = stream.read(&mut buf).await;
+            let result = settings_routes::handle_settings_reset();
             send_response(&mut stream, result.status, "application/json", &result.body)
                 .await;
         }

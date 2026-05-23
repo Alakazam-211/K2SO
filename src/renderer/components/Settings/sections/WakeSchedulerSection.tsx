@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useToastStore } from '@/stores/toast'
+// Phase 2 Unit 7a — settings live in the daemon.
+import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
 import type { SettingEntry } from '../searchManifest'
 import { WakeupEditor, type HeartbeatRow } from './HeartbeatsSection'
 
@@ -176,7 +178,7 @@ export function WakeSchedulerSection(): React.JSX.Element {
     let cancelled = false
     void (async () => {
       try {
-        const app = await invoke<AppSettingsShape>('settings_get')
+        const app = (await settingsGet()) as unknown as AppSettingsShape
         if (cancelled) return
         const cur = app.wakeScheduler ?? DEFAULT_SETTINGS
         const normalized: WakeSchedulerSettings = {
@@ -305,13 +307,11 @@ export function WakeSchedulerSection(): React.JSX.Element {
   const handleApply = useCallback(async () => {
     setApplying(true)
     try {
-      await invoke('settings_update', {
-        updates: {
-          wakeScheduler: {
-            mode: settings.mode,
-            intervalMinutes: settings.intervalMinutes,
-            wakeSystem: settings.wakeSystem,
-          },
+      await settingsUpdate({
+        wakeScheduler: {
+          mode: settings.mode,
+          intervalMinutes: settings.intervalMinutes,
+          wakeSystem: settings.wakeSystem,
         },
       })
       const msg = await invoke<string>('k2so_agents_apply_wake_scheduler')

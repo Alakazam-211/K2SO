@@ -461,6 +461,11 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
 
+        // ── Settings (Phase 2 Unit 7a) ──────────────────────────────
+        // GET only; update + reset are POST-allowlisted in main.rs
+        // because they have bodies / are destructive.
+        "/cli/settings/get" => crate::settings_routes::handle_settings_get(),
+
         // ── Companion tunnel + globals ──────────────────────────────
         "/cli/companion/start" => match k2so_core::companion::start_companion() {
             Ok(url) => CliResponse::ok_json(

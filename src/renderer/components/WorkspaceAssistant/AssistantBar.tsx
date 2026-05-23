@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { llmChat } from '@/lib/llmDaemonClient'
+import { settingsUpdate } from '@/lib/daemon-settings'
 import { useAssistantStore, type DebugPass, type InteractionLogEntry } from '../../stores/assistant'
 import { useSettingsStore } from '../../stores/settings'
 import { useTabsStore } from '../../stores/tabs'
@@ -490,7 +491,7 @@ async function executeToolCalls(toolCalls: ToolCall[]): Promise<string> {
             update = { [parts[i]]: update }
           }
 
-          await invoke('settings_update', { updates: update })
+          await settingsUpdate(update as Record<string, unknown>)
           await useSettingsStore.getState().fetchSettings()
           results.push(`Updated ${settingsPath} to ${JSON.stringify(settingsValue)}`)
           break

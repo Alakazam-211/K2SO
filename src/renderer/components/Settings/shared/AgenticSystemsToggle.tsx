@@ -1,6 +1,7 @@
 import React from 'react'
 import { useSettingsStore } from '@/stores/settings'
-import { invoke } from '@tauri-apps/api/core'
+// Phase 2 Unit 7a — settings live in the daemon.
+import { settingsUpdate } from '@/lib/daemon-settings'
 
 export function AgenticSystemsToggle(): React.JSX.Element {
   const enabled = useSettingsStore((s) => s.agenticSystemsEnabled)
@@ -8,7 +9,7 @@ export function AgenticSystemsToggle(): React.JSX.Element {
   const toggle = async () => {
     const newVal = !enabled
     useSettingsStore.setState({ agenticSystemsEnabled: newVal })
-    await invoke('settings_update', { updates: { agenticSystemsEnabled: newVal } }).catch(console.error)
+    await settingsUpdate({ agenticSystemsEnabled: newVal }).catch(console.error)
   }
 
   return (

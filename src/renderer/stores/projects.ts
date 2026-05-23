@@ -1,5 +1,7 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
+// Phase 2 Unit 7a — settings live in the daemon.
+import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
 import { useGitInitDialogStore } from './git-init-dialog'
 import { useToastStore } from './toast'
 import { useTabsStore, ensurePinnedAgentTabForMode } from './tabs'
@@ -152,7 +154,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
             // Settings hydration hasn't completed yet — invoke directly
             // so we don't miss the restore. This path runs once per app
             // session at most.
-            const settings = await invoke<{ lastActiveProjectId?: string | null; lastActiveWorkspaceId?: string | null }>('settings_get')
+            const settings = await settingsGet()
             lastActiveProjectId = settings.lastActiveProjectId ?? null
             lastActiveWorkspaceId = settings.lastActiveWorkspaceId ?? null
           }
@@ -345,7 +347,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
       })
 
       // Persist for session restore
-      invoke('settings_update', { updates: { lastActiveProjectId: id, lastActiveWorkspaceId: newWorkspaceId } }).catch(() => {})
+      settingsUpdate({ lastActiveProjectId: id, lastActiveWorkspaceId: newWorkspaceId }).catch(() => {})
 
       if (newWorkspaceId) {
         const cwd = project.workspaces[0]?.worktreePath ?? project.path ?? '~'
@@ -377,7 +379,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     })
 
     // Persist for session restore
-    invoke('settings_update', { updates: { lastActiveProjectId: projectId, lastActiveWorkspaceId: workspaceId } }).catch(() => {})
+    settingsUpdate({ lastActiveProjectId: projectId, lastActiveWorkspaceId: workspaceId }).catch(() => {})
 
     // 24h Active Bar persistence — bumping lastInteractionAt on every
     // workspace activation means a workspace stays in the Active Bar

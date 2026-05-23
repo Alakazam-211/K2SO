@@ -1,0 +1,76 @@
+// Phase 2 Unit 7a — daemon-direct App Settings client.
+//
+// Before this unit, `invoke('settings_{get,update,reset}')` walked
+// through Tauri's `commands/settings.rs` which loaded + merged +
+// wrote `~/.k2so/settings.json` in-process. Co-existing with the
+// daemon's writers caused the F3 race: rotating companion creds in
+// Tauri left live daemon-side sessions valid until TTL expired.
+//
+// Post-Unit-7a the daemon (`/cli/settings/{get,update,reset}`) is the
+// sole writer. These helpers go straight at it from the renderer so:
+//
+// 1. The Tauri proxy shim (still present for back-compat) can be
+//    dropped in Unit 7c without renderer churn.
+// 2. The same code path works in K2SO Connect mode where Tauri is
+//    on Machine A and the daemon is on Machine B — there is no
+//    `invoke('settings_*')` to call there.
+//
+// Shape matches `AppSettingsResponse` from `@shared/types`. The
+// daemon returns the canonical post-merge state on every write, so
+// callers can update local store state from the response without a
+// follow-up read.
+
+import { getDaemonWs } from '@/kessel/daemon-ws'
+import type { AppSettingsResponse } from '@shared/types'
+
+async function daemonUrl(path: string): Promise<string> {
+  const { port, token } = await getDaemonWs()
+  return `http://127.0.0.1:${port}${path}?token=${token}`
+}
+
+/** GET `/cli/settings/get` — full settings snapshot. */
+export async function settingsGet(): Promise<AppSettingsResponse> {
+  const url = await daemonUrl('/cli/settings/get')
+  const res = await fetch(url, { method: 'GET' })
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(`settings_get ${res.status}: ${body}`)
+  }
+  return (await res.json()) as AppSettingsResponse
+}
+
+/** POST `/cli/settings/update` — deep-merges `updates` into settings.
+ *  Returns the full post-merge `AppSettings`. The daemon-side handler
+ *  invalidates active companion sessions when `companion.username` or
+ *  `companion.passwordHash` change (F3 closure). */
+export async function settingsUpdate(
+  updates: Record<string, unknown>,
+): Promise<AppSettingsResponse> {
+  const url = await daemonUrl('/cli/settings/update')
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  })
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(`settings_update ${res.status}: ${body}`)
+  }
+  return (await res.json()) as AppSettingsResponse
+}
+
+/** POST `/cli/settings/reset` — restores defaults, deletes the Keychain
+ *  companion password, invalidates every live companion session. */
+export async function settingsReset(): Promise<AppSettingsResponse> {
+  const url = await daemonUrl('/cli/settings/reset')
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  })
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(`settings_reset ${res.status}: ${body}`)
+  }
+  return (await res.json()) as AppSettingsResponse
+}

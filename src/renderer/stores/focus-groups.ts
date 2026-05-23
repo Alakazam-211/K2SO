@@ -1,6 +1,9 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
-import type { AppSettingsResponse } from '@shared/types'
+// Phase 2 Unit 7a — settings live in the daemon. `focus_groups_*`
+// invokes still exist (Unit 4 territory); only the settings invokes
+// move here.
+import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
 import { useToastStore } from './toast'
 import { useProjectsStore } from './projects'
 
@@ -47,7 +50,7 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
     set({ activeFocusGroupId: id })
     // Persist to settings so it restores on next launch
     if (id !== null) {
-      invoke('settings_update', { updates: { activeFocusGroupId: id } }).catch((e) => console.warn('[focus-groups] settings_update failed:', e))
+      settingsUpdate({ activeFocusGroupId: id }).catch((e) => console.warn('[focus-groups] settings_update failed:', e))
 
       // Auto-activate the first workspace in the new focus group
       const projectsState = useProjectsStore.getState()
@@ -81,7 +84,7 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
         const nextId = remaining.length > 0 ? remaining[0].id : null
         set({ activeFocusGroupId: nextId })
         if (nextId) {
-          invoke('settings_update', { updates: { activeFocusGroupId: nextId } }).catch((e) => console.warn('[focus-groups] settings_update failed:', e))
+          settingsUpdate({ activeFocusGroupId: nextId }).catch((e) => console.warn('[focus-groups] settings_update failed:', e))
         }
       }
       await invoke('focus_groups_delete', { id })
@@ -137,12 +140,12 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
         if (groups.length > 0 && !get().activeFocusGroupId) {
           const firstId = groups[0].id
           set({ activeFocusGroupId: firstId })
-          invoke('settings_update', { updates: { activeFocusGroupId: firstId } }).catch((e) => console.warn('[focus-groups] settings_update failed:', e))
+          settingsUpdate({ activeFocusGroupId: firstId }).catch((e) => console.warn('[focus-groups] settings_update failed:', e))
         }
       } else {
         set({ activeFocusGroupId: null })
       }
-      await invoke('settings_update', { updates: { focusGroupsEnabled: enabled } })
+      await settingsUpdate({ focusGroupsEnabled: enabled })
     } catch (err) {
       console.error('[focus-groups] setFocusGroupsEnabled failed:', err)
     }
@@ -150,7 +153,7 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
 
   initFromSettings: async () => {
     try {
-      const settings = await invoke<AppSettingsResponse>('settings_get')
+      const settings = await settingsGet()
       const enabled = settings.focusGroupsEnabled ?? false
       set({ focusGroupsEnabled: enabled })
       await get().fetchFocusGroups()

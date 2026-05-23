@@ -4,8 +4,8 @@ import {
   SIDEBAR_MIN_WIDTH,
   SIDEBAR_MAX_WIDTH
 } from '../../shared/constants'
-import { invoke } from '@tauri-apps/api/core'
-import type { AppSettingsResponse } from '@shared/types'
+// Phase 2 Unit 7a — settings live in the daemon.
+import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
 
 interface SidebarState {
   isCollapsed: boolean
@@ -25,7 +25,7 @@ export const useSidebarStore = create<SidebarState>((set, get) => ({
   toggle: () => {
     const next = !get().isCollapsed
     set({ isCollapsed: next })
-    invoke('settings_update', { updates: { sidebarCollapsed: next } }).catch((e: unknown) => console.error('[sidebar]', e))
+    settingsUpdate({ sidebarCollapsed: next }).catch((e: unknown) => console.error('[sidebar]', e))
   },
 
   setWidth: (width: number) =>
@@ -33,17 +33,17 @@ export const useSidebarStore = create<SidebarState>((set, get) => ({
 
   collapse: () => {
     set({ isCollapsed: true })
-    invoke('settings_update', { updates: { sidebarCollapsed: true } }).catch((e: unknown) => console.error('[sidebar]', e))
+    settingsUpdate({ sidebarCollapsed: true }).catch((e: unknown) => console.error('[sidebar]', e))
   },
 
   expand: () => {
     set({ isCollapsed: false })
-    invoke('settings_update', { updates: { sidebarCollapsed: false } }).catch((e: unknown) => console.error('[sidebar]', e))
+    settingsUpdate({ sidebarCollapsed: false }).catch((e: unknown) => console.error('[sidebar]', e))
   },
 
   initFromSettings: async () => {
     try {
-      const settings = await invoke<AppSettingsResponse>('settings_get')
+      const settings = await settingsGet()
       set({ isCollapsed: settings.sidebarCollapsed })
     } catch {
       // ignore — use defaults

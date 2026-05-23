@@ -4,8 +4,8 @@ import {
   SIDEBAR_MIN_WIDTH,
   SIDEBAR_MAX_WIDTH
 } from '../../shared/constants'
-import { invoke } from '@tauri-apps/api/core'
-import type { AppSettingsResponse } from '@shared/types'
+// Phase 2 Unit 7a — settings live in the daemon.
+import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
 
 type PanelTab = 'files' | 'changes' | 'history' | 'workspace'
 
@@ -64,12 +64,12 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
   toggleLeftPanel: () => {
     const next = !get().leftPanelOpen
     set({ leftPanelOpen: next })
-    invoke('settings_update', { updates: { leftPanelOpen: next } }).catch((e: unknown) => console.error('[panels]', e))
+    settingsUpdate({ leftPanelOpen: next }).catch((e: unknown) => console.error('[panels]', e))
   },
   toggleRightPanel: () => {
     const next = !get().rightPanelOpen
     set({ rightPanelOpen: next })
-    invoke('settings_update', { updates: { rightPanelOpen: next } }).catch((e: unknown) => console.error('[panels]', e))
+    settingsUpdate({ rightPanelOpen: next }).catch((e: unknown) => console.error('[panels]', e))
   },
 
   setLeftPanelWidth: (width) =>
@@ -79,11 +79,11 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
 
   setLeftPanelActiveTab: (tab) => {
     set({ leftPanelActiveTab: tab })
-    invoke('settings_update', { updates: { leftPanelActiveTab: tab } }).catch((e: unknown) => console.error('[panels]', e))
+    settingsUpdate({ leftPanelActiveTab: tab }).catch((e: unknown) => console.error('[panels]', e))
   },
   setRightPanelActiveTab: (tab) => {
     set({ rightPanelActiveTab: tab })
-    invoke('settings_update', { updates: { rightPanelActiveTab: tab } }).catch((e: unknown) => console.error('[panels]', e))
+    settingsUpdate({ rightPanelActiveTab: tab }).catch((e: unknown) => console.error('[panels]', e))
   },
 
   moveTabToLeft: (tab) => {
@@ -97,12 +97,12 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
           : s.rightPanelActiveTab
     }))
     const s = get()
-    invoke('settings_update', { updates: {
+    settingsUpdate({
       leftPanelTabs: s.leftPanelTabs,
       rightPanelTabs: s.rightPanelTabs,
       leftPanelActiveTab: s.leftPanelActiveTab,
       rightPanelActiveTab: s.rightPanelActiveTab
-    } }).catch((e: unknown) => console.error('[panels]', e))
+    }).catch((e: unknown) => console.error('[panels]', e))
   },
 
   moveTabToRight: (tab) => {
@@ -118,12 +118,12 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
           : s.leftPanelActiveTab
     }))
     const s = get()
-    invoke('settings_update', { updates: {
+    settingsUpdate({
       leftPanelTabs: s.leftPanelTabs,
       rightPanelTabs: s.rightPanelTabs,
       leftPanelActiveTab: s.leftPanelActiveTab,
       rightPanelActiveTab: s.rightPanelActiveTab
-    } }).catch((e: unknown) => console.error('[panels]', e))
+    }).catch((e: unknown) => console.error('[panels]', e))
   },
 
   moveFocusWorkspaceHeader: (side) => {
@@ -152,7 +152,7 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
 
   initFromSettings: async () => {
     try {
-      const settings = await invoke<AppSettingsResponse>('settings_get')
+      const settings = await settingsGet()
 
       // Migrate old tab names to new ones
       const VALID_TABS: PanelTab[] = ['files', 'changes', 'history', 'workspace']
@@ -208,12 +208,12 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
       if (!panelsInitialized) {
         panelsInitialized = true
         setTimeout(() => {
-          invoke('settings_update', { updates: {
+          settingsUpdate({
             leftPanelTabs: leftTabs,
             rightPanelTabs: rightTabs,
             leftPanelActiveTab: leftActive,
             rightPanelActiveTab: rightActive,
-          } }).catch((e: unknown) => console.error('[panels] migration persist failed:', e))
+          }).catch((e: unknown) => console.error('[panels] migration persist failed:', e))
         }, 2000)
       }
     } catch {

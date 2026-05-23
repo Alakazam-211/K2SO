@@ -1,7 +1,15 @@
 import { create } from 'zustand'
-import { invoke } from '@tauri-apps/api/core'
 import { getDefaultKeybindings } from '@shared/hotkeys'
 import type { AppSettingsResponse, EditorSettingsBackend } from '@shared/types'
+// Phase 2 Unit 7a — settings live in the daemon; renderer hits
+// `/cli/settings/{get,update,reset}` directly. The Tauri `settings_*`
+// proxy commands still exist (back-compat for any caller not yet
+// migrated) but the renderer prefers the daemon-direct path.
+import {
+  settingsGet,
+  settingsUpdate,
+  settingsReset,
+} from '@/lib/daemon-settings'
 
 export type SettingsSection = 'general' | 'terminal' | 'code-editor' | 'editors-agents' | 'keybindings' | 'projects' | 'timer' | 'workspace-states' | 'agent-skills' | 'heartbeats' | 'companion' | 'wake-scheduler' | 'permissions' | 'dictation-lab'
 
@@ -119,7 +127,7 @@ async function persistAndApply(
 ): Promise<void> {
   _writeSeq++
   try {
-    const result = await invoke<AppSettingsResponse>('settings_update', { updates })
+    const result = await settingsUpdate(updates)
     set({
       terminal: result.terminal,
       keybindings: result.keybindings,
@@ -279,7 +287,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   resetAllSettings: async () => {
-    const result = await invoke<AppSettingsResponse>('settings_reset')
+    const result = await settingsReset()
     set({
       terminal: result.terminal,
       keybindings: result.keybindings,
@@ -290,7 +298,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   fetchSettings: async () => {
     const seqBefore = _writeSeq
-    const result = await invoke<AppSettingsResponse>('settings_get')
+    const result = await settingsGet()
     // If a write happened while we were fetching, skip — the write's result is fresher
     if (_writeSeq !== seqBefore) return
     set({
