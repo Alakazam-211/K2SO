@@ -47,6 +47,7 @@ pub mod triage_summary;
 pub mod unification;
 pub mod wake;
 pub mod work_item;
+pub mod workspace;
 pub mod workspace_regen;
 pub mod workspaces;
 

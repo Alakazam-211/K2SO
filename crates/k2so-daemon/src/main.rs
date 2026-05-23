@@ -253,6 +253,16 @@ async fn async_main() {
     // and `k2so_core::agents::unification`.
     run_workspace_unification_sweep();
 
+    // Phase 2 Unit 7b — boot-time per-workspace legacy migrations +
+    // SKILL.md refresh. Each helper is idempotent: archive_orphan
+    // returns immediately when there are no orphans, the heartbeat
+    // migrators no-op once rows exist, ensure_all_skills_up_to_date
+    // is checksum-gated. Pre-Phase-2 these ran from Tauri's setup
+    // hook in `src-tauri/src/lib.rs`; relocating to the daemon means
+    // they fire on `launchctl bootstrap` boots even when Tauri is
+    // closed, and on remote daemons that have no Tauri at all.
+    run_workspace_legacy_migrations_sweep();
+
     let listener = match TcpListener::bind("127.0.0.1:0").await {
         Ok(l) => l,
         Err(e) => {
@@ -1910,6 +1920,72 @@ fn run_workspace_unification_sweep() {
     // failure on one workspace doesn't stop the sweep. See
     // `canonical_session::boot_sweep_ensure_canonical_sessions`.
     crate::canonical_session::boot_sweep_ensure_canonical_sessions();
+}
+
+/// Phase 2 Unit 7b — daemon-side replacement for the per-workspace
+/// migration loop that previously lived in `src-tauri/src/lib.rs::setup`.
+/// Walks every registered project and runs:
+///
+///   1. `migrate_filenames_to_uppercase`  — agent.md → AGENT.md, etc.
+///   2. `detect_interrupted_regen`        — surface stale .regen-in-flight markers.
+///   3. `harvest_per_agent_claude_md_files` — archive pre-0.32.7 per-agent CLAUDE.md.
+///   4. `migrate_or_scaffold_lead_heartbeat` — manager workspaces get a triage row.
+///   5. `ensure_workspace_wakeups`        — scaffold missing wakeup files.
+///   6. `promote_legacy_heartbeat`        — single-slot → multi-heartbeat table.
+///   7. `repair_mismigrated_heartbeats`   — fix wakeup_path pointing at wrong agent.
+///   8. `archive_orphan_top_tier_agents`  — sweep orphan agent dirs.
+///   9. `ensure_all_skills_up_to_date`    — universal SKILL.md refresh.
+///
+/// Every helper is idempotent and gated on its own sentinel / row check;
+/// the sweep is cheap on a clean boot (no work to do) and resilient if a
+/// single workspace explodes — a failure on one path doesn't stop the
+/// daemon from booting and serving the rest.
+fn run_workspace_legacy_migrations_sweep() {
+    use k2so_core::agents::workspace;
+
+    let projects = {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        match k2so_core::db::schema::Project::list(&conn) {
+            Ok(rows) => rows,
+            Err(e) => {
+                log_debug!("[daemon/migrations] WARN: list projects: {e}");
+                return;
+            }
+        }
+    };
+
+    if projects.is_empty() {
+        return;
+    }
+
+    let total = projects.len();
+    for project in &projects {
+        // Skip the audit-bucket sentinel rows seeded by
+        // `db::seed_audit_sentinels`. Their "path" is a bare token,
+        // not a real filesystem path; the migration helpers would
+        // happily scaffold `<cwd>/_orphan/.k2so/...` and the file
+        // watcher would loop.
+        if project.id == "_orphan" || project.id == "_broadcast" {
+            continue;
+        }
+        if !std::path::Path::new(&project.path).exists() {
+            continue;
+        }
+
+        workspace::migrate_filenames_to_uppercase(&project.path);
+        workspace::detect_interrupted_regen(&project.path);
+        workspace::harvest_per_agent_claude_md_files(&project.path);
+        workspace::migrate_or_scaffold_lead_heartbeat(&project.path);
+        workspace::ensure_workspace_wakeups(&project.path);
+        workspace::promote_legacy_heartbeat(&project.path);
+        workspace::repair_mismigrated_heartbeats(&project.path);
+        let _ = workspace::archive_orphan_top_tier_agents(&project.path);
+        workspace::ensure_all_skills_up_to_date(&project.path);
+    }
+    log_debug!(
+        "[daemon/migrations] swept {total} workspace(s) for legacy heartbeat + SKILL migrations"
+    );
 }
 
 /// Move heartbeat WAKEUP.md files from `.k2so/agent/heartbeats/<sched>/`

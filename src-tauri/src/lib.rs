@@ -760,91 +760,21 @@ pub fn run() {
             }
             prime_hook_config_from_daemon();
             check_daemon_version_and_restart();
-            {
-                // One-shot migration: ensure every registered project has
-                // a workspace `.k2so/wakeup.md` and every existing agent
-                // has its own `wakeup.md` (if its type supports wake-up).
-                // Runs on every launch but is a no-op for projects already
-                // migrated — `ensure_*_wakeup` never overwrites an existing
-                // file. Spawns off the main thread so a slow filesystem
-                // can't delay startup.
-                {
-                    let handle = app.handle().clone();
-                    std::thread::spawn(move || {
-                        use tauri::Manager;
-                        let projects = match handle.try_state::<crate::state::AppState>() {
-                            Some(state) => {
-                                let conn = state.db.lock();
-                                crate::db::schema::Project::list(&conn).unwrap_or_default()
-                            }
-                            None => return,
-                        };
-                        for project in &projects {
-                            // Skip audit-bucket sentinels (`_orphan`,
-                            // `_broadcast`) — these are SQL-only rows
-                            // seeded by `db::seed_audit_sentinels` and
-                            // their "path" is a bare token, not a real
-                            // filesystem path. Treating them as projects
-                            // made every migration write scaffolds to
-                            // `<cwd>/_orphan/` and `<cwd>/_broadcast/`,
-                            // which under `tauri dev` (CWD=src-tauri)
-                            // caused the file watcher to detect those
-                            // writes and restart the app in an infinite
-                            // loop (Phase 4.5 diagnostic).
-                            if project.id == "_orphan" || project.id == "_broadcast" {
-                                continue;
-                            }
-                            // 0.32.7 filename standardization: rename all lowercase
-                            // agent.md / wakeup.md on disk → AGENT.md / WAKEUP.md.
-                            // Must run BEFORE the heartbeat migrations below so those
-                            // find the UPPERCASE filenames on disk. Idempotent.
-                            crate::commands::k2so_agents::migrate_filenames_to_uppercase(&project.path);
-                            // 0.32.7 CLAUDE.md harvest: archive any per-agent
-                            // Detect whether a previous SKILL.md regen crashed
-                            // mid-way. Doesn't auto-repair — subsequent regens
-                            // are idempotent — but surfaces a diagnostic so the
-                            // user can inspect .k2so/migration/ if they hit
-                            // unexpected staleness.
-                            crate::commands::k2so_agents::detect_interrupted_regen(&project.path);
-                            // CLAUDE.md files left behind by the pre-0.32.7
-                            // generator into .k2so/migration/ so nothing the
-                            // user (or Claude `# memory`) authored is lost.
-                            // Root ./CLAUDE.md is handled by the workspace
-                            // skill writer later in the boot path. Idempotent.
-                            crate::commands::k2so_agents::harvest_per_agent_claude_md_files(&project.path);
-                            // Multi-heartbeat migration / scaffold for __lead__. Must run
-                            // before `ensure_workspace_wakeups` so the legacy
-                            // `.k2so/wakeup.md` content gets picked up before any new
-                            // scaffold writes over it. Idempotent.
-                            crate::commands::k2so_agents::migrate_or_scaffold_lead_heartbeat(&project.path);
-                            crate::commands::k2so_agents::ensure_workspace_wakeups(&project.path);
-                            // One-time promote of legacy single-slot heartbeat_schedule
-                            // into the multi-heartbeat agent_heartbeats table. Idempotent.
-                            crate::commands::k2so_agents::promote_legacy_heartbeat(&project.path);
-                            // Repair any mis-migrated rows from earlier 0.32.0 runs where
-                            // find_primary_agent picked an orphan agent dir. Idempotent.
-                            crate::commands::k2so_agents::repair_mismigrated_heartbeats(&project.path);
-                            // Archive orphan top-tier agents left behind by prior agent-mode
-                            // swaps. Templates preserved. Idempotent.
-                            crate::commands::k2so_agents::archive_orphan_top_tier_agents(&project.path);
-                            // Universal skill refresh. Drives the managed-markers upgrade
-                            // protocol for EVERY skill (workspace + every agent's),
-                            // so future skill version bumps roll out automatically
-                            // without adding a new migration helper. See
-                            // ensure_all_skills_up_to_date for the contract.
-                            crate::commands::k2so_agents::ensure_all_skills_up_to_date(&project.path);
-                        }
-                    });
-                }
-
-                // Phase 4 H7: the old 60s heartbeat.port watchdog used
-                // to periodically rewrite heartbeat.port with Tauri's
-                // own port. Post-H7 the daemon owns heartbeat.port and
-                // runs its own re-claim loop (see
-                // `run_heartbeat_port_watchdog` in k2so-daemon). Tauri
-                // re-writing the file would fight the daemon for
-                // ownership, so this loop is gone.
-            }
+            // Phase 2 Unit 7b: the per-workspace legacy migrations
+            // (filename uppercase, CLAUDE.md harvest, heartbeat
+            // promote/repair, orphan archive) + `ensure_all_skills_up_to_date`
+            // now run in `k2so-daemon::main::run_workspace_legacy_migrations_sweep`.
+            // The daemon executes the same idempotent sweep on its
+            // own boot, so this Tauri-side thread is gone. Remote
+            // daemons (K2SO Connect) and headless boots now pick up
+            // these migrations without Tauri being present.
+            //
+            // Phase 4 H7: the old 60s heartbeat.port watchdog used to
+            // periodically rewrite heartbeat.port with Tauri's own port.
+            // Post-H7 the daemon owns heartbeat.port and runs its own
+            // re-claim loop (see `run_heartbeat_port_watchdog` in
+            // k2so-daemon). Tauri re-writing the file would fight the
+            // daemon for ownership, so this loop is gone.
 
             // Phase 2 Unit 1 — companion ngrok tunnel autostart moved
             // to k2so-daemon. The daemon now reads `companion.auto_start`
