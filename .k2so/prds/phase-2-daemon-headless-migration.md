@@ -654,7 +654,7 @@ After done: enter Phase 3 (contract hardening — TLS, auth, OpenAPI export, Mob
 | 4 — DB-direct writes | pending | — | Wave C (after Unit 3 merges) — use F5 spawn_blocking for large libgit2 ops |
 | 5 — Claude Auth | **Merged to main** 2026-05-23 | `24ac632d` | Keychain spike PASSED. Method-gate gap discovered during smoke + backported to Unit 1's companion routes (`0298be18`); saved as `feedback_post_only_route_guards` memory. TODO Phase 2.1 left to retarget plist script at `k2so claude-auth refresh-now`. |
 | 6 — FS + Chat + Themes + Skills + Review + ProjectConfig + WhatsNew | pending | — | Wave A — largest LoC; use F5 spawn_blocking for large reads |
-| 7a — App Settings + F3 close | pending | — | Wave A — bounded; closes the correctness gap Phase 3 needs |
+| 7a — App Settings + F3 close | **Merged to main** 2026-05-23 | `624c3354` | F3 closed. `app_settings::update()` runs in the daemon under a process-wide lock; on companion-credential change it calls `companion::invalidate_all_sessions` from inside the daemon process where live STATE lives. Unit test asserts session map empties. Method-gate guards folded in during merge conflict resolution. |
 | 7b — SKILL scaffolding + migration helpers → k2so-core | pending | — | Can land alongside 7a; no Tauri-command churn |
 | 7c — `k2so_agents` BRIDGE deletion + heartbeat-launchd MIGRATE | pending | — | After 7b empties the bodies; daemon owns its own heartbeat plist |
 | 2.1 — CLI verb redesign | pending | — | After Units 2/5/6 merge |
