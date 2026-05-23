@@ -28,7 +28,6 @@ use k2so_core::db::init_for_tests;
 
 use k2so_daemon::agents_routes;
 use k2so_daemon::session_lookup;
-use k2so_daemon::session_map;
 use k2so_daemon::v2_session_map;
 
 /// Serialize — the DB, session_map, and the global shared
@@ -90,13 +89,8 @@ fn clear_projects() {
 }
 
 fn drain_session_map() {
-    // A9: agent spawn helpers now register in v2_session_map.
-    // Drain both so test isolation is preserved across the
-    // legacy/v2 boundary.
-    for (name, s) in session_map::snapshot() {
-        let _ = s.kill();
-        session_map::unregister(&name);
-    }
+    // Post-0.39.0: only the v2 map remains; the legacy v1 map was
+    // retired along with the Kessel-T0 renderer.
     for (name, _) in v2_session_map::snapshot() {
         v2_session_map::unregister(&name);
     }

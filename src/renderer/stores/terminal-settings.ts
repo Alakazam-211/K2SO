@@ -20,19 +20,22 @@ export type ShortcutModifierLayout = 'cmd-active-cmdshift-pinned' | 'cmd-pinned-
  *   in 0.34–0.36; v2 is now production-hardened.
  * - `alacritty` (legacy): in-process alacritty_terminal engine + DOM
  *   renderer. PTY lives in the Tauri process; session dies with the
- *   app. Labeled "Alacritty (Legacy)" in the UI; retires once we're
- *   confident v2 covers every workflow.
- * - `kessel`: experimental JSON-stream renderer for the six T1-capable
- *   CLI tools (Claude, Gemini, Cursor Agent, Codex, Goose, pi-mono).
- *   Multi-subscriber, per-device native reflow. Tracks
- *   `.k2so/prds/kessel-t1.md`. Labeled "Kessel (BETA)".
+ *   app. Removed from the Settings UI in 0.37.0; the setter and
+ *   persist migration both coerce it to `alacritty-v2`. The legacy
+ *   Rust spawn path remains compiled in to host any pre-existing
+ *   in-flight tabs gracefully and is slated for removal in a later
+ *   release.
  *
  * Changes to this setting only affect NEW tabs; already-open tabs
  * keep their chosen renderer. Zustand's persist middleware means
  * existing users keep whatever they had set — only fresh installs
  * see the new `alacritty-v2` default.
+ *
+ * 0.39.0: The experimental `kessel` JSON-stream renderer was
+ * retired; any persisted value gets coerced to `alacritty-v2` on
+ * load via the v3 migration below.
  */
-export type TerminalRenderer = 'alacritty' | 'alacritty-v2' | 'kessel'
+export type TerminalRenderer = 'alacritty' | 'alacritty-v2'
 
 interface TerminalSettingsState {
   fontSize: number
@@ -102,7 +105,10 @@ export const useTerminalSettingsStore = create<TerminalSettingsState>()(
         // setter coerces any programmatic attempt to set it (e.g.,
         // someone editing localStorage by hand or invoking via
         // DevTools) so the chosen renderer stays on a supported path.
-        const normalized = renderer === 'alacritty' ? 'alacritty-v2' : renderer
+        // 0.39.0: 'kessel' was retired; same coercion applies. Treat
+        // anything other than 'alacritty-v2' as a legacy/unknown
+        // value and snap it back.
+        const normalized = renderer === 'alacritty-v2' ? renderer : 'alacritty-v2'
         set({ renderer: normalized })
       }
     }),
@@ -118,17 +124,26 @@ export const useTerminalSettingsStore = create<TerminalSettingsState>()(
         shortcutLayout: state.shortcutLayout,
         renderer: state.renderer,
       }),
-      version: 2,
+      version: 3,
       // 0.37.0 (v1 → v2): force-migrate users who had the persisted
       // renderer set to 'alacritty' (Legacy) onto 'alacritty-v2'.
       // The legacy option is removed from the Settings UI and the
       // Rust spawn path is slated for deletion in a later release;
       // this migration ensures no user is left on a renderer that
       // will eventually stop working.
+      //
+      // 0.39.0 (v2 → v3): the experimental 'kessel' JSON-stream
+      // renderer was retired alongside the open-core thin-client
+      // cleanup. Any persisted 'kessel' value is migrated forward
+      // to 'alacritty-v2' so users land on the only remaining
+      // supported renderer on next launch.
       migrate: (persisted: unknown, version: number) => {
-        if (version < 2 && persisted && typeof persisted === 'object') {
+        if (persisted && typeof persisted === 'object') {
           const ps = persisted as { renderer?: string }
-          if (ps.renderer === 'alacritty') {
+          if (version < 2 && ps.renderer === 'alacritty') {
+            return { ...ps, renderer: 'alacritty-v2' }
+          }
+          if (version < 3 && ps.renderer === 'kessel') {
             return { ...ps, renderer: 'alacritty-v2' }
           }
         }

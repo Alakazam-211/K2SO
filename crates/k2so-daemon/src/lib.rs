@@ -18,7 +18,6 @@ pub mod providers;
 pub mod session_events;
 pub mod session_events_ws;
 pub mod session_lookup;
-pub mod session_map;
 pub mod sessions_grid_ws;
 pub mod sessions_ws;
 pub mod signal_format;

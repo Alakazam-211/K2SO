@@ -441,7 +441,9 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
     }
 
     let mut launchable = Vec::new();
-    let now = chrono::Utc::now();
+    // (Pre-0.39.0d: `let now = chrono::Utc::now();` was declared here
+    // for the custom-agent legacy timing loop's `next_wake`
+    // comparisons. The loop was retired in 0.39.0d.)
 
     // Step 1: workspace inbox → __lead__
     let ws_inbox = workspace_inbox_dir(&project_path);
@@ -537,71 +539,24 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
             };
 
             if agent_type == "custom" {
-                let config = read_heartbeat_config(&project_path, &name);
-
-                if config.mode == "persistent" {
-                    audit(
-                        Some(&name),
-                        &mode_str,
-                        "skipped_custom_timing",
-                        Some("persistent mode — always running"),
-                        None,
-                        None,
-                    );
-                    continue;
-                }
-
-                if let Some(ref hours) = config.active_hours {
-                    if !is_within_active_hours(hours, &now) {
-                        audit(
-                            Some(&name),
-                            &mode_str,
-                            "skipped_custom_timing",
-                            Some("outside active hours"),
-                            None,
-                            None,
-                        );
-                        continue;
-                    }
-                }
-
-                let should_wake = match &config.next_wake {
-                    Some(next) => chrono::DateTime::parse_from_rfc3339(next)
-                        .map(|t| now >= t)
-                        .unwrap_or(true),
-                    None => true,
-                };
-
-                if should_wake {
-                    let mut updated = config.clone();
-                    updated.last_wake = Some(now.to_rfc3339());
-                    updated.next_wake = Some(
-                        (now + chrono::Duration::seconds(updated.interval_seconds as i64))
-                            .to_rfc3339(),
-                    );
-                    let _ = write_heartbeat_config(&project_path, &name, &updated);
-                    audit(
-                        Some(&name),
-                        &mode_str,
-                        "fired",
-                        Some(&format!(
-                            "custom agent next_wake elapsed (interval {}s)",
-                            updated.interval_seconds
-                        )),
-                        None,
-                        None,
-                    );
-                    launchable.push(name);
-                } else {
-                    audit(
-                        Some(&name),
-                        &mode_str,
-                        "skipped_custom_timing",
-                        Some("next_wake not elapsed"),
-                        None,
-                        None,
-                    );
-                }
+                // (Pre-0.39.0d: the legacy per-agent scheduler loop here
+                // read `<agent>/heartbeat.json` via `read_heartbeat_config`
+                // and fired wakes based on `next_wake` / `active_hours` /
+                // `interval_seconds`. Retired in 0.39.0d — workspace-
+                // scoped scheduled heartbeats in the `agent_heartbeats`
+                // DB table are the canonical path for custom agents now.
+                // The on-disk reader/writer + `k2so heartbeat get/set/
+                // noop/action` CLI verbs still exist for legacy
+                // operators reading the JSON file directly, but the
+                // scheduler tick no longer consumes them.)
+                audit(
+                    Some(&name),
+                    &mode_str,
+                    "skipped_custom_timing",
+                    Some("custom-agent legacy loop retired in 0.39.0d — use agent_heartbeats DB row"),
+                    None,
+                    None,
+                );
             } else {
                 // Manager / coordinator / agent-template / k2so: inbox-based.
                 let inbox = agent_work_dir(&project_path, &name, "inbox");

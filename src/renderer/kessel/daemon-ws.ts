@@ -73,25 +73,16 @@ export function getDaemonWs(): Promise<DaemonWsAvailable> {
  *  themselves and will surface a real error at that point if the
  *  daemon isn't reachable.
  *
- *  Also kicks the Rust-side `kessel_warm_http` command so the
- *  reqwest::blocking::Client's internal tokio runtime spins up
- *  BEFORE the user's first Cmd+T. Without this, the first spawn
- *  paid ~500-800ms of pure runtime initialization cost — measured
- *  in Rosson's logs as e2e=643ms for tab 1 vs e2e=64ms for tab 2. */
+ *  0.39.0: the Rust-side `kessel_warm_http` companion call was
+ *  removed along with the Kessel renderer (the v1 spawn path was
+ *  retired; daemon spawns now go through the alacritty-v2 WS handler
+ *  which doesn't share the blocking reqwest runtime). This function
+ *  is now just a creds-cache primer — kept so callers don't have to
+ *  drop the no-op invocation. */
 export function prewarmDaemonWs(): void {
-  // Resolve cached creds first (populates the Rust-side cache too
-  // via kessel_daemon_ws's load_creds call path eventually).
-  getDaemonWs()
-    .then(async () => {
-      try {
-        // Materialize the blocking reqwest runtime + pool so the
-        // user's first spawn hits warm metal.
-        await invoke('kessel_warm_http')
-      } catch {
-        /* best-effort; real spawn will just pay the cost itself */
-      }
-    })
-    .catch(() => {
-      /* daemon not ready yet — real spawn will retry from disk */
-    })
+  // Resolve cached creds. Subsequent getDaemonWs() callers reuse the
+  // cached promise so the disk read only happens once per app session.
+  getDaemonWs().catch(() => {
+    /* daemon not ready yet — real subscribers will retry from disk */
+  })
 }

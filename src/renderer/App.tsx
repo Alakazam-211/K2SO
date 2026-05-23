@@ -48,8 +48,11 @@ import CountdownOverlay from './components/Timer/CountdownOverlay'
 import MemoDialog from './components/Timer/MemoDialog'
 import ExtendTimerDialog from './components/Timer/ExtendTimerDialog'
 import { useCursorMigrationCheck } from './hooks/useCursorMigrationCheck'
-import { HarnessLab } from './kessel/HarnessLab'
 import { prewarmDaemonWs } from './kessel/daemon-ws'
+// TODO(0.39.x): rename src/renderer/kessel/ to a non-Kessel name.
+// Only daemon-ws.ts + config-context.tsx + config.ts remain after the
+// Kessel renderer deletion; these are shared terminal infrastructure
+// used by terminal-v2 + AgentChatPane + tabs/session-events stores.
 
 /** Parse focus mode project ID. Two sources because URL fragments
  *  are stripped by Tauri's `WebviewUrl::App` in production builds:
@@ -233,11 +236,6 @@ export default function App(): React.JSX.Element {
   const settingsOpen = useSettingsStore((s) => s.settingsOpen)
   const openSettings = useSettingsStore((s) => s.openSettings)
 
-  // Phase 4.5 — Kessel Harness Lab (Cmd+Shift+K). Dev/visual
-  // validation surface for the new Session Stream pipeline. Not
-  // persisted to any store since it's intended as a sandbox.
-  const [kesselLabOpen, setKesselLabOpen] = useState(false)
-
   const toggleCommandPalette = useCommandPaletteStore((s) => s.toggle)
 
   const toggleAssistant = useAssistantStore((s) => s.toggle)
@@ -276,11 +274,6 @@ export default function App(): React.JSX.Element {
       if (e.metaKey && e.key === 'j') {
         e.preventDefault()
         toggleRunningAgents()
-      }
-      // Cmd+Shift+K — open the Kessel Harness Lab (Phase 4.5).
-      if (e.metaKey && e.shiftKey && (e.key === 'K' || e.key === 'k')) {
-        e.preventDefault()
-        setKesselLabOpen((v) => !v)
       }
       // Cmd+[ to go back, Cmd+] to go forward
       if (e.metaKey && !e.shiftKey && e.key === '[') {
@@ -701,7 +694,15 @@ export default function App(): React.JSX.Element {
         <ContextMenu />
         <ConfirmDialog />
         {/* Settings instance: only opens via the "Read what's new"
-            button in Settings → General. Never auto-fires. */}
+            button in Settings → General. Never auto-fires.
+            TODO(0.39.x): the audit flagged this as a duplicate mount,
+            but Settings/Focus/Default layouts are mutually exclusive
+            so this listener is required while the user is in Settings.
+            Real fix is to hoist WhatsNewModal above the layout switch
+            so a single instance is always mounted; deferred to avoid
+            breaking the Settings → General "Read what's new" button
+            (which dispatches `k2so:show-whats-new` to whichever modal
+            is mounted). */}
         <WhatsNewModal mode="button-only" />
         <MemoryWatcher />
         <HeartbeatScheduleDialog />
@@ -711,7 +712,6 @@ export default function App(): React.JSX.Element {
         <CountdownOverlay />
         <MemoDialog />
       <ExtendTimerDialog />
-      <HarnessLab open={kesselLabOpen} onClose={() => setKesselLabOpen(false)} />
       </>
     )
   }
@@ -762,7 +762,6 @@ export default function App(): React.JSX.Element {
       <CountdownOverlay />
       <MemoDialog />
       <ExtendTimerDialog />
-      <HarnessLab open={kesselLabOpen} onClose={() => setKesselLabOpen(false)} />
       {showQuitDialog && (
         <AgentCloseDialog
           agents={quitAgents}

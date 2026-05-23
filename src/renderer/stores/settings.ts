@@ -44,6 +44,13 @@ interface SettingsState {
   // Pre-select a specific project in the projects section
   initialProjectId: string | null
 
+  // 0.39.0: last-active project/workspace IDs cached here so projects.ts
+  // doesn't re-invoke settings_get on hydration. Source of truth is the
+  // daemon's settings.json — the persist path still goes through
+  // settings_update (see useProjectsStore.setActiveProject).
+  lastActiveProjectId: string | null
+  lastActiveWorkspaceId: string | null
+
   // Loading state
   loaded: boolean
 
@@ -121,6 +128,8 @@ async function persistAndApply(
       agenticSystemsEnabled: result.agenticSystemsEnabled ?? false,
       claudeAuthAutoRefresh: result.claudeAuthAutoRefresh ?? false,
       editor: mergeEditorDefaults(result.editor),
+      lastActiveProjectId: result.lastActiveProjectId ?? null,
+      lastActiveWorkspaceId: result.lastActiveWorkspaceId ?? null,
       loaded: true
     })
   } catch (e) {
@@ -140,6 +149,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   editor: { ...DEFAULT_EDITOR },
   defaultAgent: 'claude',
   initialProjectId: null,
+  lastActiveProjectId: null,
+  lastActiveWorkspaceId: null,
   loaded: false,
   pendingUpdateCheck: false,
 
@@ -290,6 +301,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       agenticSystemsEnabled: result.agenticSystemsEnabled ?? false,
       claudeAuthAutoRefresh: result.claudeAuthAutoRefresh ?? false,
       editor: mergeEditorDefaults(result.editor),
+      lastActiveProjectId: result.lastActiveProjectId ?? null,
+      lastActiveWorkspaceId: result.lastActiveWorkspaceId ?? null,
       loaded: true
     })
   }

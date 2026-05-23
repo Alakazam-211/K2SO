@@ -103,15 +103,19 @@ export default function MemoryWatcher(): React.JSX.Element | null {
       }
     }
 
-    // First sample fires 5s after mount so the renderer can finish
-    // its initial layout work before we ask the OS for our RSS.
+    // First sample fires 10s after mount so the renderer can finish
+    // its initial layout work, workspace hydration, and any deferred
+    // popups before we ask the OS for our RSS. 0.39.0 bumped this from
+    // 5s to 10s — empirically the first 10s of app launch are the
+    // busiest, and the renderer_memory_status invoke was competing
+    // with workspace hydration for the Tauri worker pool.
     // Subsequent samples are on the regular interval.
     const startTimer = setTimeout(() => {
       void sample()
       timer = setInterval(() => {
         void sample()
       }, POLL_MS)
-    }, 5_000)
+    }, 10_000)
 
     return () => {
       cancelled = true

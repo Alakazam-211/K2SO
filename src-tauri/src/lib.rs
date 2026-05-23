@@ -229,15 +229,12 @@ pub fn llm_worker_main(payload_path: &str) {
     }
 }
 
-/// Re-export so `main.rs` can fire the reqwest warmup thread BEFORE
-/// `run()` starts Tauri's window initialization. See
-/// `commands::kessel::warm_http_pool_async` for rationale — in one
-/// sentence, the first `reqwest::blocking::Client::send()` call takes
-/// ~500-800ms to spin up a tokio runtime, and we want that cost
-/// absorbed by daemon-creds polling instead of the first Cmd+T.
-pub fn warm_http_pool_async() {
-    commands::kessel::warm_http_pool_async();
-}
+/// 0.39.0: `warm_http_pool_async` (Kessel reqwest-runtime warmup) was
+/// removed alongside the Kessel renderer. Kept as an empty stub so
+/// `main.rs` doesn't fail to link — it now does nothing, which is
+/// correct because the alacritty-v2 WS spawn path doesn't share the
+/// blocking reqwest runtime the old Kessel spawn path needed warm.
+pub fn warm_http_pool_async() {}
 
 pub fn run() {
     // Ignore SIGPIPE so writing to a dead PTY returns EPIPE instead of
@@ -1346,20 +1343,6 @@ pub fn run() {
             commands::daemon::daemon_ws_url,
             commands::daemon::get_keep_daemon_on_quit,
             commands::daemon::set_keep_daemon_on_quit,
-            // Kessel — terminal spawn path optimized to skip the
-            // browser fetch overhead. See commands/kessel.rs.
-            commands::kessel::kessel_spawn,
-            commands::kessel::kessel_daemon_ws,
-            commands::kessel::kessel_write,
-            commands::kessel::kessel_resize,
-            commands::kessel::kessel_warm_http,
-            commands::kessel::kessel_close,
-            // Canvas Plan Phase 4 — client-side alacritty Term
-            // driven by the daemon's byte stream.
-            commands::kessel_term::kessel_term_attach,
-            commands::kessel_term::kessel_term_grid_snapshot,
-            commands::kessel_term::kessel_term_resize,
-            commands::kessel_term::kessel_term_detach,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {

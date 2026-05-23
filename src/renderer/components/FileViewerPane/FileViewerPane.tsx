@@ -1,11 +1,21 @@
-import React, { useState, useEffect, useCallback, useRef, useLayoutEffect, useImperativeHandle, useMemo } from 'react'
+import React, { Suspense, lazy, useState, useEffect, useCallback, useRef, useLayoutEffect, useImperativeHandle, useMemo } from 'react'
 import Markdown from '@/components/Markdown/Markdown'
 import remarkGfm from 'remark-gfm'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
-import { PDFViewer } from './PDFViewer'
-import { DocxViewer } from './DocxViewer'
+// 0.39.0 bundle-perf: PDFViewer pulls in pdfjs-dist (~600KB gzip),
+// DocxViewer pulls in mammoth (~200KB), CodeEditor pulls in
+// @codemirror/* (~100KB). Lazy-load all three so they only enter the
+// bundle when the user actually opens a matching file. The Suspense
+// fallback shows briefly during the dynamic import — see the JSX
+// usages below.
+const PDFViewer = lazy(() => import('./PDFViewer').then((m) => ({ default: m.PDFViewer })))
+const DocxViewer = lazy(() => import('./DocxViewer').then((m) => ({ default: m.DocxViewer })))
+const CodeEditor = lazy(() => import('./CodeEditor').then((m) => ({ default: m.CodeEditor })))
+// `getLanguageName` is a synchronous helper used in the status bar —
+// importing it eagerly is fine (it's a small string table, not the
+// CodeMirror bundle). Bundlers tree-shake the rest of the module.
+import { getLanguageName } from './CodeEditor'
 import { HighlightedCodeBlock } from './CodeHighlighter'
-import { CodeEditor, getLanguageName } from './CodeEditor'
 import { DiffViewer } from '@/components/DiffViewer/DiffViewer'
 import { useTabsStore } from '@/stores/tabs'
 import { useSettingsStore } from '@/stores/settings'
@@ -698,11 +708,15 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
       {/* Content */}
       {category === 'pdf' ? (
         <div className="flex-1 overflow-hidden">
-          <PDFViewer filePath={filePath} />
+          <Suspense fallback={<div className="p-4 text-xs text-[var(--color-text-muted)]">Loading PDF…</div>}>
+            <PDFViewer filePath={filePath} />
+          </Suspense>
         </div>
       ) : category === 'docx' ? (
         <div className="flex-1 overflow-hidden">
-          <DocxViewer filePath={filePath} />
+          <Suspense fallback={<div className="p-4 text-xs text-[var(--color-text-muted)]">Loading document…</div>}>
+            <DocxViewer filePath={filePath} />
+          </Suspense>
         </div>
       ) : category === 'image' && viewMode === 'rendered' ? (
         <div className="flex-1 overflow-y-auto overflow-x-hidden" ref={contentRef}>
@@ -733,18 +747,20 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
       ) : (
         <>
           <div className="flex-1 overflow-hidden" ref={editorContainerRef}>
-            <CodeEditor
-              code={editedContent ?? content}
-              filePath={filePath}
-              onSave={saveFile}
-              onChange={(newContent) => setEditedContent(newContent)}
-              onCursorChange={(line, col, selections) => setCursorInfo({ line, col, selections })}
-              initialScrollTop={initialScrollTop}
-              initialCursorPos={initialCursorPos}
-              onPersistState={paneGroupId ? ({ scrollTop, cursorPos }) => {
-                setFileViewerState(tabId, paneGroupId, paneId, { scrollTop, cursorPos })
-              } : undefined}
-            />
+            <Suspense fallback={<div className="p-4 text-xs text-[var(--color-text-muted)]">Loading editor…</div>}>
+              <CodeEditor
+                code={editedContent ?? content}
+                filePath={filePath}
+                onSave={saveFile}
+                onChange={(newContent) => setEditedContent(newContent)}
+                onCursorChange={(line, col, selections) => setCursorInfo({ line, col, selections })}
+                initialScrollTop={initialScrollTop}
+                initialCursorPos={initialCursorPos}
+                onPersistState={paneGroupId ? ({ scrollTop, cursorPos }) => {
+                  setFileViewerState(tabId, paneGroupId, paneId, { scrollTop, cursorPos })
+                } : undefined}
+              />
+            </Suspense>
           </div>
           {/* Status bar */}
           <div className="flex items-center gap-3 border-t border-[var(--color-border)] bg-[#111111] px-3 py-0.5 flex-shrink-0 text-[10px] text-[var(--color-text-muted)] font-mono">

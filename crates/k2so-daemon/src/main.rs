@@ -47,7 +47,6 @@ mod providers;
 mod session_events;
 mod session_events_ws;
 mod session_lookup;
-mod session_map;
 mod sessions_bytes_ws;
 mod sessions_grid_ws;
 mod sessions_ws;
@@ -442,8 +441,6 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
     let post_allowed = matches!(
         path_and_query.split_once('?').map(|(p, _)| p).unwrap_or(path_and_query),
         "/cli/awareness/publish"
-            | "/cli/sessions/spawn"
-            | "/cli/sessions/close"
             | "/cli/sessions/v2/spawn"
             | "/cli/sessions/v2/close"
     );
@@ -646,48 +643,6 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
                 return;
             }
             awareness_ws::serve_awareness_subscribe_connection(stream).await;
-        }
-        // POST /cli/sessions/spawn — daemon-side session spawn
-        // (Phase 3.1 F2). External callers send a JSON SpawnRequest;
-        // daemon spawns the session, registers it in session_map
-        // keyed by agent_name, returns {sessionId, agentName}.
-        "/cli/sessions/spawn" => {
-            if !token_ok(&query, state.token.as_str()) {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "403 Forbidden",
-                    "application/json",
-                    r#"{"error":"invalid or missing token"}"#,
-                )
-                .await;
-                return;
-            }
-            let body_bytes = read_post_body(&mut stream, &mut buf).await;
-            let result = awareness_ws::handle_sessions_spawn(&body_bytes).await;
-            send_response(&mut stream, result.status, "application/json", &result.body)
-                .await;
-        }
-        // POST /cli/sessions/close — frontend calls this on tab
-        // unmount. Removes from session_map; Arc drop → child kill
-        // + PTY master FD close. Without this, every Cmd+T leaks an
-        // FD and ~14 spawns hit the per-process limit.
-        "/cli/sessions/close" => {
-            if !token_ok(&query, state.token.as_str()) {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "403 Forbidden",
-                    "application/json",
-                    r#"{"error":"invalid or missing token"}"#,
-                )
-                .await;
-                return;
-            }
-            let body_bytes = read_post_body(&mut stream, &mut buf).await;
-            let result = awareness_ws::handle_sessions_close(&body_bytes);
-            send_response(&mut stream, result.status, "application/json", &result.body)
-                .await;
         }
         // POST /cli/sessions/v2/spawn — Alacritty_v2 find-or-spawn
         // (A4). Parallel to /cli/sessions/spawn but produces a
@@ -1365,15 +1320,12 @@ fn run_workspace_unification_sweep() {
         "[daemon/unification] swept {total} workspace(s): migrated={migrated} already_done={already_done} errors={errors}",
     );
 
-    // Rewrite stale `wakeup_path` rows in workspace_heartbeats. Pre-
-    // 0.37.0 every heartbeat row pointed at
-    // `.k2so/agents/<primary>/heartbeats/<sched>/WAKEUP.md`; the
-    // unification migration moved those files to
-    // `.k2so/heartbeats/<sched>/WAKEUP.md` but doesn't touch the DB
-    // (the migration code is filesystem-only, kept testable without
-    // a DB). Run a single-pass rewrite here so heartbeat fires after
-    // first 0.37.0 boot find their wakeup files at the new location.
-    rewrite_legacy_heartbeat_wakeup_paths();
+    // (Pre-0.39.0d: `rewrite_legacy_heartbeat_wakeup_paths()` ran
+    // here to rewrite pre-0.37.0 `wakeup_path` rows in
+    // `workspace_heartbeats` to the post-unification layout. Removed
+    // in 0.39.0d now that the 0.37.0+ version floor is established —
+    // any workspace upgrading from pre-0.37.0 must first pass
+    // through a 0.37.x build to pick up this one-time migration.)
 
     // Migrate heartbeat WAKEUP.md files written to the wrong
     // location. Between the unification migration shipping (which
@@ -1389,11 +1341,12 @@ fn run_workspace_unification_sweep() {
     // Sweep moves them into place once at boot.
     migrate_orphaned_agent_heartbeats();
 
-    // After all the migration sweeps run, move whatever's left in the
-    // pre-0.37.0 directories out of the way so they stop polluting
-    // `.k2so/`. Idempotent + reversible (moves to .archive/, doesn't
-    // delete) — see `archive_legacy_unification_dirs`.
-    archive_legacy_unification_dirs();
+    // (Pre-0.39.0d: `archive_legacy_unification_dirs()` ran here to
+    // sweep pre-0.37.0 `.k2so/agents/` + `.k2so/agent/heartbeats/`
+    // dirs into `.k2so/.archive/0.37.0-unification/`. Removed in
+    // 0.39.0d now that the 0.37.0+ version floor is established —
+    // workspaces still on the legacy layout must first upgrade
+    // through a 0.37.x build to pick up the one-time migration.)
 
     // 0.37.5: re-key any legacy `<pid>:<agent>` v2_session_map
     // entries to bare `<pid>` so post-upgrade lookups under the new
@@ -1488,214 +1441,12 @@ fn migrate_orphaned_agent_heartbeats() {
     }
 }
 
-/// Move pre-0.37.0 layout directories out of `.k2so/` and into
-/// `.k2so/.archive/0.37.0-unification/` so they stop polluting the
-/// active workspace folder. Reversible — files are moved, not deleted.
-///
-/// Sweeps two legacy locations per workspace:
-///
-///   1. `.k2so/agents/` (plural) — pre-0.37.0 multi-agent root.
-///      Migration has already copied AGENT.md / SKILL.md / WAKEUP.md
-///      content forward; whatever remains here is residue.
-///   2. `.k2so/agent/heartbeats/` (singular `agent`, with nested
-///      heartbeats subdir) — 0.36.x→0.37.0 half-state. Heartbeats now
-///      live at workspace-level `.k2so/heartbeats/`. The orphan
-///      handler above already moved any active wakeup files; this
-///      sweep handles whatever's still sitting under the agent dir.
-///
-/// Idempotent: if the destination archive path already exists for a
-/// workspace, the legacy dir is left alone (already archived, don't
-/// double-move). The `.k2so/.archive/0.37.0-unification/MIGRATED.md`
-/// marker explains what's there and that it's safe to delete once
-/// the user has confirmed nothing important got swept up.
-fn archive_legacy_unification_dirs() {
-    let projects = {
-        let db = k2so_core::db::shared();
-        let conn = db.lock();
-        match k2so_core::db::schema::Project::list(&conn) {
-            Ok(rows) => rows,
-            Err(_) => return,
-        }
-    };
-
-    const ARCHIVE_TAG: &str = "0.37.0-unification";
-    let mut archived = 0usize;
-
-    for project in &projects {
-        let project_root = std::path::Path::new(&project.path);
-        if !project_root.exists() {
-            continue;
-        }
-        let archive_root = project_root.join(".k2so/.archive").join(ARCHIVE_TAG);
-
-        // Pattern 1: `.k2so/agents/` (plural).
-        let plural = project_root.join(".k2so/agents");
-        if plural.is_dir() {
-            let dest = archive_root.join("agents");
-            if dest.exists() {
-                // Already archived for this workspace — don't double-move.
-            } else if let Err(e) = fs::create_dir_all(&archive_root) {
-                log_debug!(
-                    "[daemon/unification-archive] WARN: create {archive_root:?}: {e}"
-                );
-            } else if let Err(e) = fs::rename(&plural, &dest) {
-                log_debug!(
-                    "[daemon/unification-archive] WARN: archive {plural:?} → {dest:?}: {e}"
-                );
-            } else {
-                log_debug!(
-                    "[daemon/unification-archive] archived {plural:?} → {dest:?}"
-                );
-                archived += 1;
-            }
-        }
-
-        // Pattern 2: `.k2so/agent/heartbeats/` (singular `agent`,
-        // with heartbeats nested under). Don't touch `.k2so/agent/`
-        // itself — that's the post-0.37.0 canonical location for the
-        // workspace's primary agent.
-        let nested_hb = project_root.join(".k2so/agent/heartbeats");
-        if nested_hb.is_dir() {
-            let dest = archive_root.join("agent-heartbeats");
-            if dest.exists() {
-                // Already archived.
-            } else if let Err(e) = fs::create_dir_all(&archive_root) {
-                log_debug!(
-                    "[daemon/unification-archive] WARN: create {archive_root:?}: {e}"
-                );
-            } else if let Err(e) = fs::rename(&nested_hb, &dest) {
-                log_debug!(
-                    "[daemon/unification-archive] WARN: archive {nested_hb:?} → {dest:?}: {e}"
-                );
-            } else {
-                log_debug!(
-                    "[daemon/unification-archive] archived {nested_hb:?} → {dest:?}"
-                );
-                archived += 1;
-            }
-        }
-
-        // Drop the marker once we've actually moved something.
-        if archive_root.exists() {
-            let marker = archive_root.join("MIGRATED.md");
-            if !marker.exists() {
-                let body = format!(
-                    "# 0.37.0 unification — archived legacy layout\n\
-                     \n\
-                     This folder contains directories that lived under `.k2so/`\n\
-                     in the pre-0.37.0 (or transitional 0.36.x→0.37.0) layout.\n\
-                     The unification migration already moved active content to\n\
-                     the canonical post-0.37.0 paths:\n\
-                     \n\
-                     - `.k2so/agent/AGENT.md`         — primary workspace agent\n\
-                     - `.k2so/agent-templates/<role>/`— role personas (delegate)\n\
-                     - `.k2so/heartbeats/<sched>/`    — workspace-level heartbeats\n\
-                     \n\
-                     What's archived here:\n\
-                     - `agents/` — pre-0.37.0 multi-agent root (plural)\n\
-                     - `agent-heartbeats/` — heartbeats nested under the singular\n\
-                       `.k2so/agent/` directory in the half-state\n\
-                     \n\
-                     Safe to delete once you've confirmed nothing important got\n\
-                     swept up. Created by k2so-daemon at boot.\n"
-                );
-                let _ = fs::write(&marker, body);
-            }
-        }
-    }
-
-    if archived > 0 {
-        log_debug!(
-            "[daemon/unification-archive] archived {archived} legacy dir(s) to .k2so/.archive/{ARCHIVE_TAG}/"
-        );
-    }
-}
-
-/// Rewrite any `workspace_heartbeats.wakeup_path` rows whose paths
-/// reference a legacy nested-under-agent layout. Two patterns:
-///
-///   1. Pre-0.37.0: `.k2so/agents/<primary>/heartbeats/<sched>/...`
-///      (plural `agents/`, named per-agent subdir).
-///   2. 0.36.x→0.37.0 half-state: `.k2so/agent/heartbeats/<sched>/...`
-///      (singular `agent/`, post-unification but still nested).
-///
-/// Post-0.37.0 the canonical layout is `.k2so/heartbeats/<sched>/`.
-/// This sweep walks every row, detects either legacy pattern, and
-/// rewrites in place. Idempotent — rows already pointing at the
-/// canonical layout are untouched.
-fn rewrite_legacy_heartbeat_wakeup_paths() {
-    let db = k2so_core::db::shared();
-    let conn = db.lock();
-    let rows: Vec<(String, String, String)> = match conn.prepare(
-        "SELECT id, name, wakeup_path FROM workspace_heartbeats \
-         WHERE wakeup_path LIKE '%/.k2so/agents/%/heartbeats/%' \
-            OR wakeup_path LIKE '.k2so/agents/%/heartbeats/%' \
-            OR wakeup_path LIKE '%/.k2so/agent/heartbeats/%' \
-            OR wakeup_path LIKE '.k2so/agent/heartbeats/%'",
-    ) {
-        Ok(mut stmt) => stmt
-            .query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
-            })
-            .map(|rows| rows.flatten().collect())
-            .unwrap_or_default(),
-        Err(e) => {
-            log_debug!("[daemon/unification] WARN: scan stale wakeup_path: {e}");
-            return;
-        }
-    };
-
-    if rows.is_empty() {
-        return;
-    }
-
-    let mut rewritten = 0usize;
-    for (id, name, old) in &rows {
-        // Two legacy patterns to normalize to `.k2so/heartbeats/<sched>/...`:
-        //
-        //   1. `.k2so/agents/<primary>/heartbeats/<sched>/...`
-        //      (pre-0.37.0; named per-agent subdir before plural→singular)
-        //   2. `.k2so/agent/heartbeats/<sched>/...`
-        //      (0.36.x→0.37.0 half-state; singular `agent` but still nested)
-        //
-        // Try the plural pattern first (longer match), then fall back to
-        // the singular form. Either way the result strips the agent dir
-        // and leaves `.k2so/heartbeats/<sched>/...`.
-        let new_path = if let Some(start) = old.find(".k2so/agents/") {
-            let after = &old[start + ".k2so/agents/".len()..];
-            let Some(slash) = after.find('/') else { continue };
-            let rest = &after[slash..];
-            if !rest.starts_with("/heartbeats/") {
-                continue;
-            }
-            let prefix = &old[..start];
-            format!("{prefix}.k2so{rest}")
-        } else if let Some(start) = old.find(".k2so/agent/heartbeats/") {
-            // Singular `agent` doesn't have a per-name subdir — the path
-            // segment to drop is just `agent`.
-            let prefix = &old[..start];
-            let rest = &old[start + ".k2so/agent".len()..]; // /heartbeats/<sched>/...
-            format!("{prefix}.k2so{rest}")
-        } else {
-            continue;
-        };
-        match conn.execute(
-            "UPDATE workspace_heartbeats SET wakeup_path = ?1 WHERE id = ?2",
-            rusqlite::params![new_path, id],
-        ) {
-            Ok(_) => {
-                log_debug!(
-                    "[daemon/unification] rewrote wakeup_path for hb={name}: {old} → {new_path}"
-                );
-                rewritten += 1;
-            }
-            Err(e) => log_debug!("[daemon/unification] WARN: rewrite wakeup_path for hb={name}: {e}"),
-        }
-    }
-    log_debug!(
-        "[daemon/unification] rewrote {rewritten} heartbeat wakeup_path row(s) to post-migration layout"
-    );
-}
+// (Pre-0.39.0d: `archive_legacy_unification_dirs()` and
+// `rewrite_legacy_heartbeat_wakeup_paths()` lived here as one-time
+// pre-0.37.0 → post-0.37.0 layout migrations. Both were removed in
+// 0.39.0d once the 0.37.0+ version floor was established — any
+// workspace upgrading from pre-0.37.0 must first pass through a
+// 0.37.x build to pick up these migrations.)
 
 /// Write `contents` to `path` with permissions 0600 so other users on the
 /// same machine can't read the auth token or port.

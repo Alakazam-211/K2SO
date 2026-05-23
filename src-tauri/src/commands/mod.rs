@@ -22,8 +22,6 @@ pub mod themes;
 pub mod states;
 pub mod companion;
 pub mod daemon;
-pub mod kessel;
-pub mod kessel_term;
 pub mod skill_layers;
 pub mod permissions;
 pub mod whats_new;

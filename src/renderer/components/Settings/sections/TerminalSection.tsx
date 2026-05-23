@@ -15,7 +15,7 @@ export const TERMINAL_MANIFEST: SettingEntry[] = [
   { id: 'terminal.natural-text-editing', section: 'terminal', label: 'Natural Text Editing', description: 'Opt+Arrow word motion, Cmd+Arrow line motion', keywords: ['keyboard', 'edit', 'opt', 'alt'] },
   { id: 'terminal.link-click-mode', section: 'terminal', label: 'Link Click Mode', description: 'Click vs Cmd+Click to activate links', keywords: ['link', 'url', 'click'] },
   { id: 'terminal.open-links-in-split', section: 'terminal', label: 'Open Links in Split Pane', description: 'Open file links in a sibling pane when splits are active', keywords: ['link', 'split', 'pane'] },
-  { id: 'terminal.renderer', section: 'terminal', label: 'Terminal Renderer', description: 'Alacritty (default), Alacritty (Legacy), or Kessel (BETA)', keywords: ['renderer', 'engine', 'kessel', 'alacritty', 'v2', 'session stream', 'beta', 'legacy'] },
+  { id: 'terminal.renderer', section: 'terminal', label: 'Terminal Renderer', description: 'Alacritty (default)', keywords: ['renderer', 'engine', 'alacritty', 'v2', 'session stream', 'legacy'] },
 ]
 
 export function TerminalSection(): React.JSX.Element {
@@ -136,27 +136,15 @@ export function TerminalSection(): React.JSX.Element {
 
         {/* Terminal Renderer.
          *
-         *  0.37.0: "Alacritty (Legacy)" removed from the option list.
-         *  Anyone whose persisted setting is `alacritty` gets coerced
-         *  to `alacritty-v2` on the next render via the
-         *  `coerceLegacyToV2` effect below — they can't switch back.
-         *  Kessel stays available for the JSON-stream beta path.
-         *
-         *  - "Alacritty" = v2, daemon-hosted. Survives Tauri quit,
-         *    supports heartbeat continuity. The only general-purpose
-         *    option going forward.
-         *  - "Kessel (BETA)" = experimental JSON-stream multi-device
-         *    renderer for T1-capable CLI tools (see
-         *    .k2so/prds/kessel-t1.md).
-         *
-         *  Changing this setting only affects NEW tabs. Existing tabs
-         *  keep whatever renderer they were created with; the legacy
-         *  Rust spawn path remains compiled in for now to host those
-         *  in-flight tabs gracefully (slated for full removal in a
-         *  later release once the long-tail of legacy tabs is empty).
+         *  0.39.0: Only one renderer remains — daemon-hosted Alacritty
+         *  (v2). The Kessel JSON-stream beta was retired; any persisted
+         *  'alacritty' (Legacy) or 'kessel' value is coerced to
+         *  'alacritty-v2' by the store's setter and persist migration.
+         *  The dropdown is kept as a single-option control for
+         *  discoverability + future renderer additions.
          */}
         <SettingRow settingId="terminal.renderer" label={
-          <span title="Alacritty runs on the daemon, survives Tauri quit, and supports heartbeats. Kessel is experimental — for JSON-stream-capable CLI tools only. Changing this only affects NEW terminals; existing tabs keep their current renderer.">
+          <span title="Alacritty runs on the daemon, survives Tauri quit, and supports heartbeats. Changing this only affects NEW terminals; existing tabs keep their current renderer.">
             Terminal Renderer
           </span>
         }>
@@ -164,7 +152,6 @@ export function TerminalSection(): React.JSX.Element {
             value={renderer === 'alacritty' ? 'alacritty-v2' : renderer}
             options={[
               { value: 'alacritty-v2', label: 'Alacritty' },
-              { value: 'kessel', label: 'Kessel (BETA)' },
             ]}
             onChange={(v) => setRenderer(v as TerminalRenderer)}
           />

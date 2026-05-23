@@ -219,21 +219,14 @@ fn execute(
             session.write(&[0x03])?;
         }
         Escalation::Kill => {
-            // Legacy SessionStreamSession exposes an explicit kill();
-            // DaemonPtySession (v2) doesn't — dropping the registry
-            // Arc closes the PTY channel which SIGHUPs the child.
-            // Unregistering from v2_session_map releases the daemon's
-            // copy of the Arc; once any in-flight WS handler also
-            // drops its clone, the IO thread exits and the child
-            // dies. Same end state, slightly indirect path.
-            match session {
-                LiveSession::Legacy(s) => {
-                    s.kill().map_err(std::io::Error::other)?;
-                }
-                LiveSession::V2(_) => {
-                    v2_session_map::unregister(agent);
-                }
-            }
+            // DaemonPtySession (v2) doesn't expose an explicit kill();
+            // dropping the registry Arc closes the PTY channel which
+            // SIGHUPs the child. Unregistering from v2_session_map
+            // releases the daemon's copy of the Arc; once any in-flight
+            // WS handler also drops its clone, the IO thread exits and
+            // the child dies.
+            let _ = session;
+            v2_session_map::unregister(agent);
         }
         Escalation::None => unreachable!(),
     }

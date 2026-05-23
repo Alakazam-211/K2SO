@@ -5,20 +5,14 @@ pub mod event_sink;
 pub mod grid_types;
 pub mod reflow;
 mod font_renderer;
-// 0.34.0 Session Stream PTY reader (Phase 2). Parallel code path to
-// alacritty_backend's EventLoop::spawn(); replaces it for sessions
-// where the `use_session_stream` project setting is 'on'. Gated on
-// the `session_stream` feature to keep flag-off builds bit-for-bit
-// equivalent to v0.33.0.
-#[cfg(feature = "session_stream")]
-pub mod session_stream_pty;
+// 0.34.0 Session Stream PTY reader (Phase 2) was retired in 0.39.0
+// alongside the Kessel-T0 renderer. The Alacritty_v2 `daemon_pty`
+// module below is now the only daemon-side terminal type.
+
 // Alacritty_v2 daemon-hosted PTY + Term module (Phase A1 of the
-// .k2so/prds/alacritty-v2.md plan). Parallel to `session_stream_pty`
-// but minimal: no LineMux, no byte broadcast, no ring, no APC. Uses
-// alacritty's built-in EventLoop::spawn() rather than a custom
-// reader. Intended to become the single daemon-side terminal type
-// once v1 retires; `session_stream_pty` stays alive only for the
-// Kessel-T0 fallback path during the transition.
+// .k2so/prds/alacritty-v2.md plan). Minimal: no LineMux, no byte
+// broadcast, no ring, no APC. Uses alacritty's built-in
+// EventLoop::spawn() rather than a custom reader.
 #[cfg(feature = "session_stream")]
 pub mod daemon_pty;
 // Alacritty_v2 grid snapshot + delta wire types + serializers
@@ -39,12 +33,6 @@ pub mod grow_settle;
 
 pub use alacritty_backend::TerminalManager;
 pub use event_sink::TerminalEventSink;
-
-#[cfg(feature = "session_stream")]
-pub use session_stream_pty::{
-    spawn_session_stream, spawn_session_stream_and_grow, NoopListener,
-    SessionStreamSession, SpawnConfig, GROW_ROWS,
-};
 
 #[cfg(feature = "session_stream")]
 pub use daemon_pty::{

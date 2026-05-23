@@ -16,10 +16,14 @@ path = "src/lib.rs"
 # Enable in src-tauri's [dev-dependencies] entry; NOT a runtime feature.
 test-util = []
 
-# Gates the 0.34.0 Session Stream + Awareness Bus primitives (session/,
-# awareness/, term/). Flag off = modules don't compile in; zero impact
-# on the alacritty-backed terminal path. See the PRD at
-# .k2so/prds/session-stream-and-awareness-bus.md for the phased rollout.
+# TODO(0.39.0 Slice 3): remove this feature flag once Slice 3 finishes
+# unconditionalizing the session_stream modules in
+# crates/k2so-core/src/terminal/mod.rs + src/lib.rs (drop their
+# `#[cfg(feature = "session_stream")]` guards). Until then the flag
+# stays — k2so-daemon enables it in its dep entry so the daemon-side
+# session-stream modules compile in. The flag itself gates nothing
+# in source code that doesn't also need compiling, so it's a no-op
+# for behavior; removal is just a cleanup once the guards are gone.
 session_stream = []
 
 [dependencies]

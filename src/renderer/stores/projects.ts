@@ -4,6 +4,7 @@ import { useGitInitDialogStore } from './git-init-dialog'
 import { useToastStore } from './toast'
 import { useTabsStore, ensurePinnedAgentTabForMode } from './tabs'
 import { useFocusGroupsStore } from './focus-groups'
+import { useSettingsStore } from './settings'
 
 // Debounce touchInteraction to avoid excessive DB writes (5 min per project)
 const TOUCH_DEBOUNCE_MS = 5 * 60 * 1000
@@ -135,21 +136,38 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
         let restoredProject = null
         let restoredWorkspaceId: string | null = null
 
-        // Try to restore from saved session
+        // 0.39.0: read from the already-loaded settings store instead of
+        // re-invoking `settings_get`. Saves ~20-50ms on boot. The store
+        // initializes via `useSettingsStore.getState().fetchSettings()`
+        // at module import (settings.ts:312), so by the time projects
+        // hydrate, the cached snapshot is usually ready. If the store
+        // hasn't finished its initial fetch yet (rare boot-race), fall
+        // back to the direct invoke so we don't lose the last-session
+        // restore — but in the common case we skip the second roundtrip.
         try {
-          const settings = await invoke<{ lastActiveProjectId?: string | null; lastActiveWorkspaceId?: string | null }>('settings_get')
-          if (settings.lastActiveProjectId) {
-            const savedProject = projectsWithWorkspaces.find((p) => p.id === settings.lastActiveProjectId)
+          const settingsState = useSettingsStore.getState()
+          let lastActiveProjectId = settingsState.lastActiveProjectId
+          let lastActiveWorkspaceId = settingsState.lastActiveWorkspaceId
+          if (!settingsState.loaded) {
+            // Settings hydration hasn't completed yet — invoke directly
+            // so we don't miss the restore. This path runs once per app
+            // session at most.
+            const settings = await invoke<{ lastActiveProjectId?: string | null; lastActiveWorkspaceId?: string | null }>('settings_get')
+            lastActiveProjectId = settings.lastActiveProjectId ?? null
+            lastActiveWorkspaceId = settings.lastActiveWorkspaceId ?? null
+          }
+          if (lastActiveProjectId) {
+            const savedProject = projectsWithWorkspaces.find((p) => p.id === lastActiveProjectId)
             if (savedProject) {
               restoredProject = savedProject
               // Restore exact workspace, or fall back to first
-              restoredWorkspaceId = settings.lastActiveWorkspaceId
-                && savedProject.workspaces.find((w) => w.id === settings.lastActiveWorkspaceId)
-                ? settings.lastActiveWorkspaceId
+              restoredWorkspaceId = lastActiveWorkspaceId
+                && savedProject.workspaces.find((w) => w.id === lastActiveWorkspaceId)
+                ? lastActiveWorkspaceId
                 : savedProject.workspaces[0]?.id ?? null
             }
           }
-        } catch { /* settings_read failed, fall back to first */ }
+        } catch { /* settings read failed, fall back to first */ }
 
         // Fall back to first project if restore failed
         if (!restoredProject) {

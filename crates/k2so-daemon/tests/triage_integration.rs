@@ -25,7 +25,6 @@ use std::sync::Mutex as StdMutex;
 use k2so_core::db::init_for_tests;
 
 use k2so_daemon::session_lookup;
-use k2so_daemon::session_map;
 use k2so_daemon::triage;
 use k2so_daemon::v2_session_map;
 
@@ -81,12 +80,7 @@ fn clear_projects() {
 }
 
 fn drain_session_map() {
-    // A9: spawn helpers now produce v2 sessions. Drain both maps so
-    // tests don't leak across each other.
-    for (name, s) in session_map::snapshot() {
-        let _ = s.kill();
-        session_map::unregister(&name);
-    }
+    // Post-0.39.0: only the v2 map remains.
     for (name, _) in v2_session_map::snapshot() {
         v2_session_map::unregister(&name);
     }

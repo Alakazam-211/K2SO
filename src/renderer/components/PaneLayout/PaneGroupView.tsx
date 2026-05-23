@@ -1,6 +1,5 @@
 import { useCallback, useContext, useState } from 'react'
 import { AlacrittyTerminalView } from '@/components/Terminal/AlacrittyTerminalView'
-import { KesselTerminal } from '@/kessel/KesselTerminal'
 import { TerminalPane } from '@/terminal-v2/TerminalPane'
 import { FileViewerPane } from '@/components/FileViewerPane/FileViewerPane'
 import { AgentPane } from '@/components/AgentPane/AgentPane'
@@ -216,17 +215,7 @@ export function PaneGroupView({ tabId, paneGroupId }: PaneGroupViewProps): React
                   { terminalId: td.terminalId, cwd: td.cwd },
                 )
               }
-              if (raw.renderer === 'kessel') {
-                content = (
-                  <KesselTerminal
-                    terminalId={td.terminalId}
-                    cwd={td.cwd}
-                    command={td.command}
-                    args={td.args}
-                    spawnedAt={td.spawnedAt}
-                  />
-                )
-              } else if (raw.renderer === 'alacritty-v2') {
+              if (raw.renderer === 'alacritty-v2') {
                 // A5: daemon-hosted v2 thin client.
                 // See .k2so/prds/alacritty-v2.md.
                 content = (
