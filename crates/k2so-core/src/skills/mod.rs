@@ -41,6 +41,7 @@
 //!   recoverable for ~30 days if a user needs the originals back.
 
 pub mod consolidation;
+pub mod content;
 pub mod crud;
 pub mod writer;
 

@@ -40,11 +40,13 @@ pub mod scheduler;
 pub mod session;
 pub mod settings;
 pub mod skill;
-pub mod skill_content;
+/// Phase 2.5c: `skill_content` relocated to [`crate::skills::content`].
+/// Back-compat alias for callers that still reference
+/// `agents::skill_content::*`.
+pub use crate::skills::content as skill_content;
 /// Phase 2.5c: `skill_writer` relocated to [`crate::skills::writer`].
-/// Re-exported here as a back-compat alias so `agents/workspace.rs`
-/// (deferred to Phase 2.5d) and any external callers that still
-/// reference `agents::skill_writer::*` keep resolving without churn.
+/// Back-compat alias for callers that still reference
+/// `agents::skill_writer::*`.
 pub use crate::skills::writer as skill_writer;
 pub mod terminal_id;
 pub mod triage_summary;
