@@ -247,68 +247,20 @@ pub fn k2so_agents_update_profile(
     k2so_core::agents::commands::update_profile(project_path, agent_name, content)
 }
 
-#[tauri::command]
-pub fn k2so_agents_work_list(
-    project_path: String,
-    agent_name: String,
-    folder: Option<String>,
-) -> Result<Vec<WorkItem>, String> {
-    k2so_core::agents::commands::work_list(project_path, agent_name, folder)
-}
+// Phase 2.1c Item 2 — `k2so_agents_work_list`, `k2so_agents_work_create`,
+// `k2so_agents_work_move`, and `k2so_agents_workspace_inbox_list`
+// removed. The renderer migrated to the workspace inbox primitive
+// (`k2so_inbox_*` in `commands::inbox`), which mirrors the daemon's
+// `/cli/inbox/*` HTTP routes. The legacy per-agent `.k2so/agents/<name>/work/`
+// surface is itself being retired with the Phase 2.1 1:1 (workspace==agent)
+// refactor; new code should use the workspace-level inbox.
 
-#[tauri::command]
-pub fn k2so_agents_work_create(
-    project_path: String,
-    agent_name: Option<String>,
-    title: String,
-    body: String,
-    priority: Option<String>,
-    item_type: Option<String>,
-    source: Option<String>,
-) -> Result<WorkItem, String> {
-    k2so_core::agents::commands::work_create(
-        project_path, agent_name, title, body, priority, item_type, source,
-    )
-}
-
-#[tauri::command]
-pub fn k2so_agents_work_move(
-    project_path: String,
-    agent_name: String,
-    filename: String,
-    from_folder: String,
-    to_folder: String,
-) -> Result<(), String> {
-    k2so_core::agents::commands::work_move(
-        project_path,
-        agent_name,
-        filename,
-        from_folder,
-        to_folder,
-    )
-}
-
-#[tauri::command]
-pub fn k2so_agents_workspace_inbox_list(
-    project_path: String,
-) -> Result<Vec<WorkItem>, String> {
-    k2so_core::agents::commands::workspace_inbox_list(project_path)
-}
-
-#[tauri::command]
-pub fn k2so_agents_workspace_inbox_create(
-    workspace_path: String,
-    title: String,
-    body: String,
-    priority: Option<String>,
-    item_type: Option<String>,
-    assigned_by: Option<String>,
-    source: Option<String>,
-) -> Result<WorkItem, String> {
-    k2so_core::agents::commands::workspace_inbox_create(
-        workspace_path, title, body, priority, item_type, assigned_by, source,
-    )
-}
+// Phase 2.1c Item 2 — `k2so_agents_workspace_inbox_create` removed.
+// Zero frontend callers (audit-verified). The core function
+// `k2so_core::agents::commands::workspace_inbox_create` stays because
+// daemon `workspace_msg.rs::deliver_to_inbox` still depends on it; new
+// callers should use `commands::inbox::k2so_inbox_compose` (workspace
+// inbox primitive) instead.
 
 // ── Path helpers ────────────────────────────────────────────────────────
 //

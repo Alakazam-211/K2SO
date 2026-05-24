@@ -2726,9 +2726,10 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
   }, [projectPath])
 
   const fetchWsInbox = useCallback(async () => {
+    // Phase 2.1c Item 2 — workspace inbox primitive count endpoint.
     try {
-      const items = await invoke<unknown[]>('k2so_agents_workspace_inbox_list', { projectPath })
-      setWsInboxCount(items.length)
+      const count = await invoke<number>('k2so_inbox_count', { projectPath })
+      setWsInboxCount(count)
     } catch {
       setWsInboxCount(0)
     }

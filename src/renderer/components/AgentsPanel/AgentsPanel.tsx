@@ -51,9 +51,13 @@ export default function AgentsPanel(): React.JSX.Element {
 
   const fetchWsInbox = useCallback(async () => {
     if (!activeProject) return
+    // Phase 2.1c Item 2 — migrated to the workspace inbox primitive's
+    // lightweight count endpoint (avoids pulling full payloads for
+    // a sidebar badge). Defaults to 0 on error to keep the sidebar
+    // intact when the daemon is briefly unreachable.
     try {
-      const items = await invoke<unknown[]>('k2so_agents_workspace_inbox_list', { projectPath: activeProject.path })
-      setWsInboxCount(items.length)
+      const count = await invoke<number>('k2so_inbox_count', { projectPath: activeProject.path })
+      setWsInboxCount(count)
     } catch {
       setWsInboxCount(0)
     }
@@ -378,9 +382,10 @@ function WorkspaceInboxButton({ projectPath }: { projectPath: string }): React.J
 
   useEffect(() => {
     const check = async () => {
+      // Phase 2.1c Item 2 — workspace inbox primitive count endpoint.
       try {
-        const items = await invoke<unknown[]>('k2so_agents_workspace_inbox_list', { projectPath })
-        setCount(items.length)
+        const c = await invoke<number>('k2so_inbox_count', { projectPath })
+        setCount(c)
       } catch { setCount(0) }
     }
     check()

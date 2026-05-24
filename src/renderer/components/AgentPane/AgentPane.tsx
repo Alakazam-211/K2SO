@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { terminalExists } from '@/lib/terminal-daemon'
-import { daemonCliGet } from '@/lib/daemon-cli'
 import { useTabsStore } from '@/stores/tabs'
 import { useProjectsStore } from '@/stores/projects'
 import { addNavWorktree } from '@/components/Sidebar/Sidebar'
@@ -24,17 +23,6 @@ interface AgentPaneProps {
    *  deterministic without a daemon roundtrip race. */
   restoredSessionId?: string
   onClose?: () => void
-}
-
-interface WorkItem {
-  filename: string
-  title: string
-  priority: string
-  assignedBy: string
-  created: string
-  itemType: string
-  folder: string
-  bodyPreview: string
 }
 
 /**
@@ -75,10 +63,18 @@ function WorktreeDetailPane({ worktreeId, projectPath }: { worktreeId: string; p
   const [activeTab, setActiveTab] = useState<'task' | 'chat' | 'review'>(
     worktreeLastTab.get(worktreeId) ?? 'chat'
   )
-  const [taskContent, setTaskContent] = useState<string>('')
-  const [reviewContent, setReviewContent] = useState<string>('')
+  // Phase 2.1c Item 2 — Task/Review content fetching is paused.
+  // The legacy `k2so_agents_work_list` Tauri command (which scanned
+  // per-agent `.k2so/agents/<name>/work/{active,done}/` for the
+  // worktree's task/review markdown) is removed; the workspace
+  // inbox primitive that replaces it is workspace-level only.
+  // The worktree-task UX needs its own primitive (TODO: surface
+  // the worktree's CLAUDE.md or task frontmatter via a daemon
+  // route). Until then, Task/Review tabs show their empty-state.
+  const [taskContent] = useState<string>('')
+  const [reviewContent] = useState<string>('')
   const [chatMounted, setChatMounted] = useState(activeTab === 'chat')
-  const [reviewAvailable, setReviewAvailable] = useState(false)
+  const [reviewAvailable] = useState(false)
 
   const workspace = useProjectsStore(useCallback((s) => {
     for (const p of s.projects) {
@@ -100,58 +96,13 @@ function WorktreeDetailPane({ worktreeId, projectPath }: { worktreeId: string; p
   const agentTemplate = agentMatch?.[1]
   const worktreePath = workspace?.worktreePath || projectPath
 
-  useEffect(() => {
-    if (!agentTemplate) {
-      setTaskContent('')
-      return
-    }
-    const loadTask = async (): Promise<void> => {
-      try {
-        const items = await invoke<WorkItem[]>('k2so_agents_work_list', {
-          projectPath,
-          agentName: agentTemplate,
-          folder: 'active',
-        })
-        if (items.length > 0) {
-          const taskPath = `${projectPath}/.k2so/agents/${agentTemplate}/work/active/${items[0].filename}`
-          const result = await daemonCliGet<{ content: string }>('fs/read-file', { path: taskPath })
-          setTaskContent(result.content)
-        } else {
-          setTaskContent('')
-        }
-      } catch { setTaskContent('') }
-    }
-    loadTask()
-  }, [projectPath, agentTemplate])
-
-  useEffect(() => {
-    if (!agentTemplate) {
-      setReviewAvailable(false)
-      return
-    }
-    const loadReview = async (): Promise<void> => {
-      try {
-        const items = await invoke<WorkItem[]>('k2so_agents_work_list', {
-          projectPath,
-          agentName: agentTemplate,
-          folder: 'done',
-        })
-        if (items.length > 0) {
-          setReviewAvailable(true)
-          const reviewPath = `${projectPath}/.k2so/agents/${agentTemplate}/work/done/${items[0].filename}`
-          const result = await daemonCliGet<{ content: string }>('fs/read-file', { path: reviewPath })
-          setReviewContent(result.content)
-        } else {
-          setReviewAvailable(false)
-          setReviewContent('')
-        }
-      } catch {
-        setReviewAvailable(false)
-        setReviewContent('')
-      }
-    }
-    loadReview()
-  }, [projectPath, agentTemplate])
+  // Phase 2.1c Item 2 — Task/Review fetch effects removed.
+  // See the state-init comments above for the rationale; the
+  // worktree-task surface needs its own daemon route before this
+  // can come back. `projectPath`/`agentTemplate` are intentionally
+  // referenced here just so the variables don't flag as unused.
+  void projectPath
+  void agentTemplate
 
   useEffect(() => {
     if (activeTab === 'chat') setChatMounted(true)

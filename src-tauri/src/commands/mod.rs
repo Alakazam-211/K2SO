@@ -46,3 +46,7 @@ pub mod states;
 pub mod daemon;
 pub mod permissions;
 pub mod memory_watcher;
+// Phase 2.1c Item 2 — workspace inbox primitive Tauri shims. Thin
+// wrappers around `k2so_core::inbox::*` that mirror the daemon-side
+// `/cli/inbox/*` HTTP routes so the renderer + CLI see the same data.
+pub mod inbox;

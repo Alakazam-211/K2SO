@@ -5,14 +5,21 @@ import { useTabsStore } from '@/stores/tabs'
 
 // ── Types ───────────────────────────────────────────────────────────────
 
-interface WorkItem {
+// Phase 2.1c Item 2 — migrated from the legacy `WorkItem` shape
+// (returned by `k2so_agents_work_list` / `k2so_agents_workspace_inbox_list`)
+// to the workspace-inbox primitive's `InboxItem` shape. Field rename:
+// `assignedBy` → `from`, `itemType` is gone, new `id` (filename stem).
+// The legacy `.k2so/agents/<name>/work/` per-agent surface is being
+// retired alongside the Phase 2.1 1:1 (workspace==agent) refactor.
+interface InboxItem {
+  id: string
   filename: string
+  folder: string
   title: string
   priority: string
-  assignedBy: string
   created: string
-  itemType: string
-  folder: string
+  source: string
+  from: string
   bodyPreview: string
 }
 
@@ -40,7 +47,7 @@ const priorityBadge = (p: string): string => {
 
 // ── Kanban Card ─────────────────────────────────────────────────────────
 
-function KanbanCard({ item, onClick }: { item: WorkItem; onClick: () => void }): React.JSX.Element {
+function KanbanCard({ item, onClick }: { item: InboxItem; onClick: () => void }): React.JSX.Element {
   return (
     <div
       onClick={onClick}
@@ -54,12 +61,12 @@ function KanbanCard({ item, onClick }: { item: WorkItem; onClick: () => void }):
         <span className={`text-[9px] font-medium px-1.5 py-0.5 ${priorityBadge(item.priority)}`}>
           {item.priority}
         </span>
-        <span className="text-[9px] text-[var(--color-text-muted)]">{item.itemType}</span>
+        <span className="text-[9px] text-[var(--color-text-muted)]">{item.source}</span>
       </div>
-      {item.assignedBy && item.assignedBy !== 'user' && item.assignedBy !== 'external' && item.assignedBy !== 'delegated' && (
+      {item.from && item.from !== 'user' && item.from !== 'self' && item.from !== 'cli' && item.from !== 'unknown' && (
         <div className="mt-2">
           <span className="text-[9px] font-medium px-1.5 py-0.5 bg-[var(--color-accent)]/10 text-[var(--color-accent)]">
-            {item.assignedBy}
+            {item.from}
           </span>
         </div>
       )}
@@ -69,22 +76,21 @@ function KanbanCard({ item, onClick }: { item: WorkItem; onClick: () => void }):
 
 // ── Kanban Column ───────────────────────────────────────────────────────
 
-function KanbanColumn({ title, items, color, projectPath, agentDir, onOpenFile }: {
+function KanbanColumn({ title, items, color, projectPath, onOpenFile }: {
   title: string
-  items: WorkItem[]
+  items: InboxItem[]
   color: string
   projectPath: string
-  agentDir?: string
+  /**
+   * Phase 2.1c Item 2 — `agentDir` prop dropped. After the inbox
+   * primitive migration, all items resolve to `.k2so/inbox/[<folder>/]<filename>`
+   * (workspace-level). Per-agent paths are no longer rendered here.
+   */
   onOpenFile: (path: string) => void
 }): React.JSX.Element {
-  const resolvePath = (item: WorkItem): string => {
-    if (item.assignedBy && item.assignedBy !== 'user' && item.assignedBy !== 'external' && item.assignedBy !== 'delegated') {
-      return `${projectPath}/.k2so/agents/${item.assignedBy}/work/${item.folder}/${item.filename}`
-    }
-    if (agentDir) {
-      return `${agentDir}/work/${item.folder}/${item.filename}`
-    }
-    return `${projectPath}/.k2so/work/${item.folder}/${item.filename}`
+  const resolvePath = (item: InboxItem): string => {
+    const base = `${projectPath}/.k2so/inbox`
+    return item.folder ? `${base}/${item.folder}/${item.filename}` : `${base}/${item.filename}`
   }
 
   return (
@@ -129,16 +135,17 @@ export function AgentInboxPane({ agentName, projectPath }: AgentInboxPaneProps):
   const isWorkspaceBoard = agentName === '__workspace__'
 
   const [profile, setProfile] = useState<AgentProfile | null>(null)
-  const [workItems, setWorkItems] = useState<WorkItem[]>([])
-  const [wsInboxItems, setWsInboxItems] = useState<WorkItem[]>([])
-  const [allAgentWork, setAllAgentWork] = useState<WorkItem[]>([])
+  // Top-level inbox arrivals (untriaged). Workspace inbox primitive.
+  const [inboxItems, setInboxItems] = useState<InboxItem[]>([])
+  // Items the agent moved into `active/`.
+  const [activeItems, setActiveItems] = useState<InboxItem[]>([])
+  // Items the agent moved into `done/`.
+  const [doneItems, setDoneItems] = useState<InboxItem[]>([])
   // 0.37.4: header label is the agent's display name (AGENT.md
   // `display_name:` → `name:` → projects.name fallback). Daemon-side
   // helper is mtime-cached so this fetch is cheap; we still hold a
   // local copy so the header doesn't flicker every re-render.
   const [displayName, setDisplayName] = useState<string>(agentName)
-
-  const agentDir = `${projectPath}/.k2so/agents/${agentName}`
 
   const fetchProfile = useCallback(async () => {
     if (isWorkspaceBoard) return
@@ -168,30 +175,36 @@ export function AgentInboxPane({ agentName, projectPath }: AgentInboxPaneProps):
     || profile?.agentType === 'coordinator'
     || profile?.agentType === 'manager'
 
+  // Phase 2.1c Item 2 — migrated to the workspace inbox primitive
+  // (`k2so_inbox_list`). The legacy per-agent `.k2so/agents/<name>/work/`
+  // queues are being retired alongside the Phase 2.1 1:1
+  // (workspace==agent) refactor; the kanban now reads the workspace
+  // inbox directly. The three columns map to:
+  //   - Inbox     → top-level (.k2so/inbox/*.md)
+  //   - Active    → .k2so/inbox/active/*.md
+  //   - Done      → .k2so/inbox/done/*.md
+  // Manager / workspace-board views render the same data with
+  // different column labels (Unassigned / In Progress / Review).
   const fetchWork = useCallback(async () => {
-    if (isWorkspaceBoard || isManager) {
-      try {
-        const wsItems = await invoke<WorkItem[]>('k2so_agents_workspace_inbox_list', { projectPath })
-        setWsInboxItems(wsItems)
-      } catch { setWsInboxItems([]) }
-      try {
-        const agents = await invoke<{ name: string }[]>('k2so_agents_list', { projectPath })
-        const all: WorkItem[] = []
-        for (const agent of agents) {
-          if (agent.name === agentName) continue
-          try {
-            const items = await invoke<WorkItem[]>('k2so_agents_work_list', { projectPath, agentName: agent.name, folder: null })
-            all.push(...items.map((i) => ({ ...i, assignedBy: agent.name })))
-          } catch { /* skip */ }
-        }
-        setAllAgentWork(all)
-      } catch { setAllAgentWork([]) }
-    } else {
-      try {
-        setWorkItems(await invoke<WorkItem[]>('k2so_agents_work_list', { projectPath, agentName, folder: null }))
-      } catch { setWorkItems([]) }
+    try {
+      const [inbox, active, done] = await Promise.all([
+        invoke<InboxItem[]>('k2so_inbox_list', { projectPath, folder: '' }),
+        invoke<InboxItem[]>('k2so_inbox_list', { projectPath, folder: 'active' }),
+        invoke<InboxItem[]>('k2so_inbox_list', { projectPath, folder: 'done' }),
+      ])
+      setInboxItems(inbox)
+      setActiveItems(active)
+      setDoneItems(done)
+    } catch {
+      // Defensive: keep last-good state on transient daemon errors.
+      // Avoid resetting to [] mid-render so the kanban doesn't
+      // flicker between empty and populated on each poll failure.
     }
-  }, [projectPath, agentName, isWorkspaceBoard, isManager])
+    // Suppress unused-var warning when isWorkspaceBoard/isManager
+    // are read only to drive the column labels below.
+    void isWorkspaceBoard
+    void isManager
+  }, [projectPath, isWorkspaceBoard, isManager])
 
   useEffect(() => {
     fetchProfile()
@@ -227,15 +240,10 @@ export function AgentInboxPane({ agentName, projectPath }: AgentInboxPaneProps):
 
   const openFile = (filePath: string): void => useTabsStore.getState().openFileAsTab(filePath)
 
-  // Single-agent columns
-  const inbox = workItems.filter((w) => w.folder === 'inbox')
-  const active = workItems.filter((w) => w.folder === 'active')
-  const done = workItems.filter((w) => w.folder === 'done')
-
-  // Workspace / manager columns
-  const wsUnassigned = wsInboxItems
-  const wsInProgress = allAgentWork.filter((w) => w.folder === 'inbox' || w.folder === 'active')
-  const wsReview = allAgentWork.filter((w) => w.folder === 'done')
+  // Phase 2.1c Item 2 — all three views (single-agent / manager /
+  // workspace-board) render the same workspace-inbox-primitive
+  // data, just with different column labels. Per-agent fan-out is
+  // intentionally gone (see fetchWork notes above).
 
   return (
     <div className="h-full flex flex-col bg-[var(--color-bg)] overflow-hidden">
@@ -253,21 +261,21 @@ export function AgentInboxPane({ agentName, projectPath }: AgentInboxPaneProps):
       <div className="flex-1 overflow-hidden min-h-0 relative">
         {isWorkspaceBoard ? (
           <div className="absolute inset-0 z-10 flex gap-3 p-3 overflow-y-auto">
-            <KanbanColumn title="Unassigned" items={wsUnassigned} color="text-[var(--color-accent)]" projectPath={projectPath} onOpenFile={openFile} />
-            <KanbanColumn title="In Progress" items={wsInProgress} color="text-yellow-400" projectPath={projectPath} onOpenFile={openFile} />
-            <KanbanColumn title="Review" items={wsReview} color="text-green-400" projectPath={projectPath} onOpenFile={openFile} />
+            <KanbanColumn title="Unassigned" items={inboxItems} color="text-[var(--color-accent)]" projectPath={projectPath} onOpenFile={openFile} />
+            <KanbanColumn title="In Progress" items={activeItems} color="text-yellow-400" projectPath={projectPath} onOpenFile={openFile} />
+            <KanbanColumn title="Review" items={doneItems} color="text-green-400" projectPath={projectPath} onOpenFile={openFile} />
           </div>
         ) : isManager ? (
           <div className="absolute inset-0 z-10 flex gap-3 p-3 overflow-y-auto bg-[var(--color-bg)]">
-            <KanbanColumn title="Inbox" items={wsUnassigned} color="text-[var(--color-accent)]" projectPath={projectPath} onOpenFile={openFile} />
-            <KanbanColumn title="Delegated" items={wsInProgress} color="text-yellow-400" projectPath={projectPath} onOpenFile={openFile} />
-            <KanbanColumn title="Review" items={wsReview} color="text-green-400" projectPath={projectPath} onOpenFile={openFile} />
+            <KanbanColumn title="Inbox" items={inboxItems} color="text-[var(--color-accent)]" projectPath={projectPath} onOpenFile={openFile} />
+            <KanbanColumn title="Delegated" items={activeItems} color="text-yellow-400" projectPath={projectPath} onOpenFile={openFile} />
+            <KanbanColumn title="Review" items={doneItems} color="text-green-400" projectPath={projectPath} onOpenFile={openFile} />
           </div>
         ) : (
           <div className="absolute inset-0 z-10 flex gap-3 p-3 overflow-y-auto bg-[var(--color-bg)]">
-            <KanbanColumn title="Inbox" items={inbox} color="text-[var(--color-accent)]" projectPath={projectPath} agentDir={agentDir} onOpenFile={openFile} />
-            <KanbanColumn title="Active" items={active} color="text-yellow-400" projectPath={projectPath} agentDir={agentDir} onOpenFile={openFile} />
-            <KanbanColumn title="Done" items={done} color="text-green-400" projectPath={projectPath} agentDir={agentDir} onOpenFile={openFile} />
+            <KanbanColumn title="Inbox" items={inboxItems} color="text-[var(--color-accent)]" projectPath={projectPath} onOpenFile={openFile} />
+            <KanbanColumn title="Active" items={activeItems} color="text-yellow-400" projectPath={projectPath} onOpenFile={openFile} />
+            <KanbanColumn title="Done" items={doneItems} color="text-green-400" projectPath={projectPath} onOpenFile={openFile} />
           </div>
         )}
       </div>

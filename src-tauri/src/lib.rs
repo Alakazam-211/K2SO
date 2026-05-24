@@ -860,10 +860,28 @@ pub fn run() {
             commands::states::states_create,
             commands::states::states_update,
             commands::states::states_delete,
-            commands::k2so_agents::k2so_agents_work_list,
-            commands::k2so_agents::k2so_agents_work_create,
+            // Phase 2.1c Item 2 — workspace inbox primitive (replaces
+            // the legacy `k2so_agents_work_*` + `k2so_agents_workspace_inbox_list`
+            // calls). Thin wrappers around `k2so_core::inbox::*` that
+            // mirror the daemon-side `/cli/inbox/*` routes.
+            commands::inbox::k2so_inbox_list,
+            commands::inbox::k2so_inbox_count,
+            commands::inbox::k2so_inbox_folders,
+            commands::inbox::k2so_inbox_read,
+            commands::inbox::k2so_inbox_search,
+            commands::inbox::k2so_inbox_compose,
+            commands::inbox::k2so_inbox_move,
+            commands::inbox::k2so_inbox_archive,
+            commands::inbox::k2so_inbox_delete,
+            commands::inbox::k2so_inbox_respond,
+            // Legacy `k2so_agents_work_list` removed — its renderer
+            // callers now use `k2so_inbox_list` above. The per-agent
+            // work-queue surface is itself being retired with the
+            // Phase 2.1 1:1 (workspace==agent) refactor.
             commands::k2so_agents::k2so_agents_delegate,
-            commands::k2so_agents::k2so_agents_work_move,
+            // `k2so_agents_work_create` and `k2so_agents_work_move`
+            // had zero frontend callers (confirmed via Phase 2.1c
+            // audit) and are removed here.
             commands::k2so_agents::k2so_agents_get_profile,
             commands::k2so_agents::k2so_agents_update_profile,
             commands::k2so_agents::k2so_agents_regenerate_agent_context,
@@ -888,8 +906,13 @@ pub fn run() {
             commands::k2so_agents::k2so_agents_review_approve,
             commands::k2so_agents::k2so_agents_review_reject,
             commands::k2so_agents::k2so_agents_review_request_changes,
-            commands::k2so_agents::k2so_agents_workspace_inbox_list,
-            commands::k2so_agents::k2so_agents_workspace_inbox_create,
+            // `k2so_agents_workspace_inbox_list` and
+            // `k2so_agents_workspace_inbox_create` removed (Phase 2.1c
+            // Item 2) — renderer migrated to `k2so_inbox_*` above; the
+            // last server-side caller of `workspace_inbox_create`
+            // (daemon's `workspace_msg.rs::deliver_to_inbox`) uses
+            // `k2so_core::agents::commands::workspace_inbox_create`
+            // directly, not the Tauri shim.
             commands::k2so_agents::k2so_agents_lock,
             commands::k2so_agents::k2so_agents_unlock,
             commands::k2so_agents::k2so_agents_triage_summary,

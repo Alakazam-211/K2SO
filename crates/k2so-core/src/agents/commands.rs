@@ -11,12 +11,20 @@
 //! - **Agent CRUD**: [`list`], [`create`], [`delete`] (+ forced
 //!   `delete_inner`), [`get_profile`], [`update_profile`],
 //!   [`update_field`] (+ its pure helper [`update_agent_md_field`]).
-//! - **Per-agent work queue**: [`work_list`], [`work_create`],
-//!   [`work_move`].
-//! - **Workspace inbox**: [`workspace_inbox_list`],
-//!   [`workspace_inbox_create`].
+//! - **Workspace inbox composition**: [`workspace_inbox_create`]
+//!   (legacy `.k2so/work/inbox/` writer; only daemon
+//!   `workspace_msg.rs::deliver_to_inbox` still uses it. New
+//!   workspace-inbox callers should use `k2so_core::inbox::compose`
+//!   instead — that writes to the post-Phase-2.1 `.k2so/inbox/`
+//!   primitive).
 //! - **Wakeup + backup helpers** used by the commands above:
 //!   [`ensure_agent_wakeup`], [`cleanup_agent_backups`].
+//!
+//! Phase 2.1c Item 2 — removed the per-agent work-queue functions
+//! (`work_list`, `work_create`, `work_move`) and the legacy workspace
+//! `workspace_inbox_list`. They had no remaining callers after the
+//! React frontend migrated to the workspace inbox primitive
+//! (`k2so_core::inbox::*`).
 //!
 //! Every function is host-agnostic — uses `db::shared()` +
 //! `fs_atomic::*` + core agent-system primitives, no AppHandle, no
@@ -35,7 +43,7 @@ use crate::agents::scheduler::{
 use crate::agents::session::simple_date;
 use crate::agents::skill_writer::{generate_default_agent_body, write_agent_skill_file};
 use crate::agents::wake::{agent_wakeup_path, wakeup_template_for};
-use crate::agents::work_item::{atomic_write, read_work_item, WorkItem};
+use crate::agents::work_item::{atomic_write, WorkItem};
 use crate::agents::{agent_dir, agent_type_for, agents_dir, parse_frontmatter, resolve_project_id};
 use crate::db::schema::WorkspaceSession;
 use crate::fs_atomic::{atomic_write_str, log_if_err};
@@ -476,170 +484,17 @@ fn body_preview(body: &str) -> String {
     }
 }
 
-/// List an agent's work items across the given folder(s). `folder`
-/// None = inbox + active + done. Filters to `.md` only.
-pub fn work_list(
-    project_path: String,
-    agent_name: String,
-    folder: Option<String>,
-) -> Result<Vec<WorkItem>, String> {
-    let folders = match folder.as_deref() {
-        Some(f) => vec![f.to_string()],
-        None => vec![
-            "inbox".to_string(),
-            "active".to_string(),
-            "done".to_string(),
-        ],
-    };
-
-    let mut items = Vec::new();
-    for f in &folders {
-        let dir = agent_work_dir(&project_path, &agent_name, f);
-        if !dir.exists() {
-            continue;
-        }
-        for entry in fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
-            let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "md") {
-                if let Some(item) = read_work_item(&path, f) {
-                    items.push(item);
-                }
-            }
-        }
-    }
-
-    Ok(items)
-}
-
-/// Create a work item in either a specific agent's inbox or the
-/// workspace inbox (agent_name = None). Pushes a channel event to
-/// the receiving agent's queue so channel-based agents get nudged.
-pub fn work_create(
-    project_path: String,
-    agent_name: Option<String>,
-    title: String,
-    body: String,
-    priority: Option<String>,
-    item_type: Option<String>,
-    source: Option<String>,
-) -> Result<WorkItem, String> {
-    let target_dir = match &agent_name {
-        Some(name) => {
-            let dir = agent_work_dir(&project_path, name, "inbox");
-            if !dir.exists() {
-                return Err(format!("Agent '{}' does not exist", name));
-            }
-            dir
-        }
-        None => {
-            let dir = crate::agents::scheduler::workspace_inbox_dir(&project_path);
-            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            dir
-        }
-    };
-
-    let priority = priority.unwrap_or_else(|| "normal".to_string());
-    let item_type = item_type.unwrap_or_else(|| "task".to_string());
-    let source = source.unwrap_or_else(|| "manual".to_string());
-
-    let slug = work_item_slug(&title);
-    let filename = format!("{}.md", slug);
-
-    let now = simple_date();
-    let content = format!(
-        "---\ntitle: {}\npriority: {}\nassigned_by: user\ncreated: {}\ntype: {}\nsource: {}\n---\n\n{}\n",
-        title, priority, now, item_type, source, body
-    );
-
-    let path = target_dir.join(&filename);
-    atomic_write(&path, &content)?;
-
-    let preview = body_preview(&body);
-    // Push channel event for persistent agents.
-    match &agent_name {
-        Some(agent) => push_agent_event(
-            &project_path,
-            agent,
-            "work-item",
-            &format!(
-                "New work item in your inbox: \"{}\" (priority: {})",
-                title, priority
-            ),
-            &priority,
-        ),
-        None => push_agent_event(
-            &project_path,
-            "__lead__",
-            "work-item",
-            &format!(
-                "New item in workspace inbox: \"{}\" (priority: {})",
-                title, priority
-            ),
-            &priority,
-        ),
-    }
-
-    Ok(WorkItem {
-        filename,
-        title,
-        priority,
-        assigned_by: "user".to_string(),
-        created: now,
-        item_type,
-        folder: if agent_name.is_some() {
-            "inbox".to_string()
-        } else {
-            "workspace-inbox".to_string()
-        },
-        body_preview: preview,
-        source,
-    })
-}
-
-/// Move a work item between folders (inbox ↔ active ↔ done).
-pub fn work_move(
-    project_path: String,
-    agent_name: String,
-    filename: String,
-    from_folder: String,
-    to_folder: String,
-) -> Result<(), String> {
-    let source = agent_work_dir(&project_path, &agent_name, &from_folder).join(&filename);
-    let target_dir = agent_work_dir(&project_path, &agent_name, &to_folder);
-    let target = target_dir.join(&filename);
-
-    if !source.exists() {
-        return Err(format!(
-            "Work item not found: {}/{}",
-            from_folder, filename
-        ));
-    }
-    if !target_dir.exists() {
-        fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
-    }
-
-    fs::rename(&source, &target).map_err(|e| format!("Failed to move work item: {}", e))?;
-    Ok(())
-}
+// Phase 2.1c Item 2 — `work_list`, `work_create`, `work_move`, and
+// `workspace_inbox_list` removed (zero remaining callers; the
+// renderer migrated to `k2so_core::inbox::*` via the new
+// `commands::inbox::k2so_inbox_*` Tauri shims). The daemon CLI
+// surface for these had already been hard-deprecated in Phase 2.1b.
+//
+// `workspace_inbox_create` below stays — daemon's `workspace_msg.rs::
+// deliver_to_inbox` is its last caller. New callers should use the
+// workspace inbox primitive (`k2so_core::inbox::compose`) instead.
 
 // ── Workspace inbox ────────────────────────────────────────────────────
-
-pub fn workspace_inbox_list(project_path: String) -> Result<Vec<WorkItem>, String> {
-    let dir = crate::agents::scheduler::workspace_inbox_dir(&project_path);
-    if !dir.exists() {
-        return Ok(vec![]);
-    }
-    let mut items = Vec::new();
-    for entry in fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
-        let path = entry.path();
-        if path.extension().map_or(false, |ext| ext == "md") {
-            if let Some(item) = read_work_item(&path, "inbox") {
-                items.push(item);
-            }
-        }
-    }
-    Ok(items)
-}
 
 pub fn workspace_inbox_create(
     workspace_path: String,

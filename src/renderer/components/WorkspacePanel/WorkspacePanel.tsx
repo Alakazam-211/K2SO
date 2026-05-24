@@ -33,17 +33,9 @@ interface K2soAgentInfo {
   agentType: string
 }
 
-interface WorkItem {
-  filename: string
-  title: string
-  priority: string
-  assignedBy: string
-  created: string
-  itemType: string
-  folder: string
-  bodyPreview: string
-  source: string
-}
+// Phase 2.1c Item 2 — `WorkItem` interface removed. The badge fetch
+// now uses `invoke<number>('k2so_inbox_count', ...)` so the only
+// renderer-side type that survived the migration is the count itself.
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -111,11 +103,12 @@ export default function WorkspacePanel(): React.JSX.Element {
         const result = await invoke<K2soAgentInfo[]>('k2so_agents_list', { projectPath: activeProjectPath })
         if (!cancelled) setAgents(result)
       } catch { if (!cancelled) setAgents([]) }
+      // Phase 2.1c Item 2 — workspace inbox primitive count endpoint
+      // (replaces the legacy `k2so_agents_workspace_inbox_list` whose
+      // full-payload fetch was wasted bandwidth for a sidebar badge).
       try {
-        const items = await invoke<WorkItem[]>('k2so_agents_workspace_inbox_list', {
-          projectPath: activeProjectPath,
-        })
-        if (!cancelled) setWsInboxCount(items.length)
+        const count = await invoke<number>('k2so_inbox_count', { projectPath: activeProjectPath })
+        if (!cancelled) setWsInboxCount(count)
       } catch { if (!cancelled) setWsInboxCount(0) }
     }
     load()
