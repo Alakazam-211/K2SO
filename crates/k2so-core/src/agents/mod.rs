@@ -62,7 +62,9 @@ pub use crate::workspace::scheduler;
 /// Phase 2.5c: `session` relocated to [`crate::workspace::session`].
 /// Back-compat alias.
 pub use crate::workspace::session;
-pub mod settings;
+/// Phase 2.5c: `settings` relocated to [`crate::workspace::settings`].
+/// Back-compat alias.
+pub use crate::workspace::settings;
 /// Phase 2.5c: `skill` (versioning + upgrade protocol) relocated to
 /// [`crate::skills::version`]. Back-compat alias.
 pub use crate::skills::version as skill;

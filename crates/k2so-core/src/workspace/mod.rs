@@ -16,6 +16,7 @@ pub mod launch_profile;
 pub mod onboarding;
 pub mod scheduler;
 pub mod session;
+pub mod settings;
 pub mod triage;
 pub mod wake_prompts;
 
