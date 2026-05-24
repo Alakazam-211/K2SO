@@ -35,7 +35,7 @@ These were settled during the Phase 2.5 Workstream D research + user feedback an
    - **K2SO Hosted**: $2-?/mo — K2SO operates the backbone + provisions per-user subdomains under K2SO-owned domain
    - **BYO**: ngrok + LocalXpose (with K2SO affiliate link) + Cloudflare for advanced users — K2SO doesn't operate but captures affiliate revenue where possible
 
-2. **K2SO owns the domain** — likely `k2.dev` pending trademark clearance + domain purchase. See trademark notes in this PRD's open questions.
+2. **K2SO owns `k2.dev`** — domain purchased 2026-05-23. Subdomain provisioning shape (`<user>.k2.dev`, `<user>-<port>.k2.dev`, etc.) is now concrete; backbone implementation will resolve DNS under this zone.
 
 3. **K2SO bearer-token auth end-to-end** — regardless of which tunnel provider is in use, the application-layer auth is K2SO's. Tunnel layer provides transport security (TLS) only. This keeps auth identical across all 5 tunnel providers and across all 3 tiers.
 
@@ -139,7 +139,7 @@ These are the questions a focused research pass should answer before committing 
 4. **Competitive pricing**: K2SO's "expose any port" feature competes with ngrok Pro at $20/mo. What's the pricing ladder K2SO should adopt? $2 Companion-only / $5-10 Multi-port / $20+ Pro Companion?
 5. **AWS-native primitives** — full evaluation: App Runner + custom domain, Lightsail + FRP, API Gateway + Lambda (unlikely fit), Global Accelerator (probably overkill), CloudFront + ALB. Include a "why AWS isn't simpler" rebuttal section.
 6. **Per-port URL UX decision**: `<sub>-3000.k2.dev` vs `<sub>.k2.dev:3000` (presentation layer)
-7. **Domain decision**: `k2.dev` purchase contingent on K2 trademark clearance (Class 9 + Class 42 USPTO TESS search). Alternative domains if K2 is taken in software space.
+7. **Trademark posture**: `k2.dev` domain is owned. K2 software trademark (USPTO Class 9 + Class 42) clearance still recommended **before public rebrand of K2SO → K2** and before any K2-branded marketing ships. Initial scan: K2 Advisors L.L.C. holds K2 in Class 36 (financial services) — does not conflict with software. Domain ownership is independent of trademark protection.
 8. **Self-hosted DDoS exposure**: if Phase 2.6 lands on Pangolin/FRP, what's the realistic DDoS risk for K2SO's tunnel backbone? Mitigations: Cloudflare in front (we're already a CF customer for DNS), rate limiting, ban lists.
 
 ---
@@ -181,7 +181,7 @@ Phase 2.6 is complete when:
 1. ✅ Re-spike research subagent has returned answers to all 8 open questions
 2. ✅ `tunnel-provider-decision.md` committed at `.k2so/prds/` per the template in Phase 2.5 Workstream E.1
 3. ✅ Phase 3 Workstream B section in `.k2so/prds/phase-3-contract-hardening.md` updated with concrete TLS + auth requirements tied to the chosen backbone
-4. ✅ Domain purchase decision made (K2 trademark cleared OR alternative domain chosen and purchased)
+4. ✅ Domain locked: `k2.dev` purchased 2026-05-23. K2 software-class trademark search remains a separate prerequisite for a future K2SO → K2 product rebrand (not blocking Phase 2.6 close).
 5. ✅ Phase 4 PRD drafted (or stub'd) at `.k2so/prds/phase-4-hosted-tier.md` capturing the K2SO Hosted middle tier implementation scope
 
 ---
