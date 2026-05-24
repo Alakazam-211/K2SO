@@ -128,6 +128,28 @@ impl DaemonClient {
         Ok(resp_body)
     }
 
+    /// Convenience: GET a /cli/* route and decode the JSON body into `T`.
+    /// Returns the same error shape as `cli_get` for HTTP failures and
+    /// adds a serde decoding error on success-with-bad-body.
+    pub fn cli_get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        params: &[(&str, &str)],
+    ) -> Result<T, String> {
+        let body = self.cli_get(path, params)?;
+        serde_json::from_str(&body).map_err(|e| format!("decode {path}: {e}: body={body}"))
+    }
+
+    /// Convenience: POST a JSON body and decode the JSON response into `T`.
+    pub fn cli_post_json_decode<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<T, String> {
+        let resp = self.cli_post_json(path, body)?;
+        serde_json::from_str(&resp).map_err(|e| format!("decode {path}: {e}: body={resp}"))
+    }
+
     /// Hit `GET /status?token=<t>` and decode the JSON body.
     pub fn status(&self) -> Result<DaemonStatus, String> {
         let url = format!("http://127.0.0.1:{}/status?token={}", self.port, self.token);

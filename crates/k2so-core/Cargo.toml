@@ -94,6 +94,11 @@ vte = { version = "0.15", features = ["std", "ansi"] }
 fontdue = "0.9"
 qoi = "0.4"
 
+# Phase 2 Unit 4 — image decode + resize for `projects_ops::detect_project_icon`.
+# Loads PNG/JPG/ICO icons from user projects and resamples to 48×48 for
+# the data URL the renderer caches on Project.icon_url.
+image = { version = "0.25", default-features = false, features = ["ico", "png", "jpeg"] }
+
 # Low-level primitives used by the alacritty PTY event loop.
 libc = "0.2"
 polling = "3"

@@ -2350,10 +2350,12 @@ pub fn k2so_agents_save_agent_md(
 
 #[tauri::command]
 pub fn workspace_session_get(
-    state: tauri::State<'_, crate::state::AppState>,
     project_id: String,
 ) -> Result<Option<WorkspaceSession>, String> {
-    let conn = state.db.lock();
+    // Phase 2 Unit 4: AppState.db is gone; read directly through the
+    // shared core handle. Unit 7d will move this into k2so-core.
+    let db = crate::db::shared();
+    let conn = db.lock();
     WorkspaceSession::get(&conn, &project_id).map_err(|e| e.to_string())
 }
 
@@ -2381,37 +2383,42 @@ pub fn workspace_session_set_session_id(
 
 // ── Workspace Relations ─────────────────────────────────────────────────
 
+// Phase 2 Unit 4: AppState.db is gone; these readers + writers go
+// straight through `k2so_core::db::shared()`. Unit 7d will route the
+// writers through the daemon's HTTP surface; until then the in-process
+// lock is fine — k2so-core's `ReentrantMutex<Connection>` serializes
+// against the daemon's own writes via SQLite WAL.
+
 #[tauri::command]
 pub fn workspace_relations_list(
-    state: tauri::State<'_, crate::state::AppState>,
     project_id: String,
 ) -> Result<Vec<WorkspaceRelation>, String> {
-    let conn = state.db.lock();
+    let db = crate::db::shared();
+    let conn = db.lock();
     WorkspaceRelation::list_for_source(&conn, &project_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn workspace_relations_list_incoming(
-    state: tauri::State<'_, crate::state::AppState>,
     project_id: String,
 ) -> Result<Vec<WorkspaceRelation>, String> {
-    let conn = state.db.lock();
+    let db = crate::db::shared();
+    let conn = db.lock();
     WorkspaceRelation::list_for_target(&conn, &project_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn workspace_relations_create(
-    state: tauri::State<'_, crate::state::AppState>,
     source_project_id: String,
     target_project_id: String,
     relation_type: Option<String>,
 ) -> Result<WorkspaceRelation, String> {
-    let conn = state.db.lock();
+    let db = crate::db::shared();
+    let conn = db.lock();
     let id = uuid::Uuid::new_v4().to_string();
     let rel_type = relation_type.unwrap_or_else(|| "oversees".to_string());
     WorkspaceRelation::create(&conn, &id, &source_project_id, &target_project_id, &rel_type)
         .map_err(|e| e.to_string())?;
-    // Return the created relation
     Ok(WorkspaceRelation {
         id,
         source_project_id,
@@ -2425,11 +2432,9 @@ pub fn workspace_relations_create(
 }
 
 #[tauri::command]
-pub fn workspace_relations_delete(
-    state: tauri::State<'_, crate::state::AppState>,
-    id: String,
-) -> Result<(), String> {
-    let conn = state.db.lock();
+pub fn workspace_relations_delete(id: String) -> Result<(), String> {
+    let db = crate::db::shared();
+    let conn = db.lock();
     WorkspaceRelation::delete(&conn, &id).map_err(|e| e.to_string())?;
     Ok(())
 }

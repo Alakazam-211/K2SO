@@ -1,7 +1,17 @@
-use serde::Serialize;
-use tauri::State;
+//! Workspace layout commands.
+//!
+//! Phase 2 Unit 4 — bodies became thin proxies into the daemon's
+//! `/cli/workspace-layouts/*` routes. The `WorkspaceLayout` struct
+//! shape now lives in `k2so_core::db_ops` and is re-exported below
+//! for type continuity in the renderer-facing return type.
 
-use crate::state::AppState;
+use serde::Serialize;
+
+use crate::daemon_client::DaemonClient;
+
+fn daemon() -> Result<DaemonClient, String> {
+    DaemonClient::try_connect()
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -11,100 +21,67 @@ pub struct WorkspaceLayout {
     pub layout_json: String,
 }
 
-/// Save (upsert) a workspace layout.
+impl From<k2so_core::db_ops::WorkspaceLayout> for WorkspaceLayout {
+    fn from(l: k2so_core::db_ops::WorkspaceLayout) -> Self {
+        Self {
+            project_id: l.project_id,
+            workspace_id: l.workspace_id,
+            layout_json: l.layout_json,
+        }
+    }
+}
+
 #[tauri::command]
 pub fn workspace_layout_save(
-    state: State<'_, AppState>,
     project_id: String,
     workspace_id: String,
     layout_json: String,
 ) -> Result<(), String> {
-    let conn = state.db.lock();
-    let id = format!("{}:{}", project_id, workspace_id);
-
-    conn.execute(
-        "INSERT INTO workspace_layouts (id, project_id, workspace_id, layout_json, updated_at)
-         VALUES (?1, ?2, ?3, ?4, unixepoch())
-         ON CONFLICT(project_id, workspace_id)
-         DO UPDATE SET layout_json = excluded.layout_json, updated_at = unixepoch()",
-        rusqlite::params![id, project_id, workspace_id, layout_json],
-    )
-    .map_err(|e| e.to_string())?;
-
-    Ok(())
+    daemon()?
+        .cli_post_json(
+            "/cli/workspace-layouts/save",
+            &serde_json::json!({
+                "projectId": project_id,
+                "workspaceId": workspace_id,
+                "layoutJson": layout_json,
+            }),
+        )
+        .map(|_| ())
 }
 
-/// Load a single workspace layout.
 #[tauri::command]
 pub fn workspace_layout_load(
-    state: State<'_, AppState>,
     project_id: String,
     workspace_id: String,
 ) -> Result<Option<String>, String> {
-    let conn = state.db.lock();
-
-    let result = conn.query_row(
-        "SELECT layout_json FROM workspace_layouts WHERE project_id = ?1 AND workspace_id = ?2",
-        rusqlite::params![project_id, workspace_id],
-        |row| row.get::<_, String>(0),
-    );
-
-    match result {
-        Ok(json) => Ok(Some(json)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.to_string()),
-    }
+    daemon()?.cli_get_json(
+        "/cli/workspace-layouts/load",
+        &[
+            ("project_id", &project_id),
+            ("workspace_id", &workspace_id),
+        ],
+    )
 }
 
-/// Load all workspace layouts (used on app startup).
 #[tauri::command]
-pub fn workspace_layout_load_all(
-    state: State<'_, AppState>,
-) -> Result<Vec<WorkspaceLayout>, String> {
-    let conn = state.db.lock();
-
-    let mut stmt = conn
-        .prepare("SELECT project_id, workspace_id, layout_json FROM workspace_layouts")
-        .map_err(|e| e.to_string())?;
-
-    let layouts = stmt
-        .query_map([], |row| {
-            Ok(WorkspaceLayout {
-                project_id: row.get(0)?,
-                workspace_id: row.get(1)?,
-                layout_json: row.get(2)?,
-            })
-        })
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-
-    Ok(layouts)
+pub fn workspace_layout_load_all() -> Result<Vec<WorkspaceLayout>, String> {
+    let layouts: Vec<k2so_core::db_ops::WorkspaceLayout> = daemon()?
+        .cli_get_json("/cli/workspace-layouts/load-all", &[])?;
+    Ok(layouts.into_iter().map(Into::into).collect())
 }
 
-/// Delete workspace layout(s) for a project (used when removing a project).
 #[tauri::command]
 pub fn workspace_layout_delete(
-    state: State<'_, AppState>,
     project_id: String,
     workspace_id: Option<String>,
 ) -> Result<(), String> {
-    let conn = state.db.lock();
-
-    if let Some(ws_id) = workspace_id {
-        conn.execute(
-            "DELETE FROM workspace_layouts WHERE project_id = ?1 AND workspace_id = ?2",
-            rusqlite::params![project_id, ws_id],
+    daemon()?
+        .cli_post_json(
+            "/cli/workspace-layouts/delete",
+            &serde_json::json!({
+                "projectId": project_id,
+                "workspaceId": workspace_id,
+            }),
         )
-        .map_err(|e| e.to_string())?;
-    } else {
-        // Delete all layouts for this project
-        conn.execute(
-            "DELETE FROM workspace_layouts WHERE project_id = ?1",
-            rusqlite::params![project_id],
-        )
-        .map_err(|e| e.to_string())?;
-    }
-
-    Ok(())
+        .map(|_| ())
 }

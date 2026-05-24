@@ -43,8 +43,10 @@ mod cli;
 mod cli_response;
 mod companion_host;
 mod companion_routes;
+mod db_routes;
 mod events;
 mod fs_routes;
+mod git_routes;
 mod heartbeat_launch;
 mod heartbeat_launchd_routes;
 mod llm_host;
@@ -265,6 +267,15 @@ async fn async_main() {
     // they fire on `launchctl bootstrap` boots even when Tauri is
     // closed, and on remote daemons that have no Tauri at all.
     run_workspace_legacy_migrations_sweep();
+
+    // Phase 2 Unit 4 — workspace_layouts one-shot migration moved
+    // from `src-tauri/src/lib.rs::migrate_workspace_layouts_to_db`.
+    // Reads `~/.k2so/settings.json#workspaceLayouts`, inserts each
+    // pre-existing layout into the `workspace_layouts` table, then
+    // strips the key from settings.json. Idempotent on the second
+    // boot (the key is gone). Running daemon-side means a remote
+    // daemon (K2SO Connect) picks it up without Tauri being present.
+    k2so_core::db_ops::migrate_workspace_layouts_to_db();
 
     let listener = match TcpListener::bind("127.0.0.1:0").await {
         Ok(l) => l,
@@ -604,6 +615,37 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             | "/cli/heartbeat/uninstall-launchd"
             | "/cli/heartbeat/apply-wake-scheduler"
             | "/cli/agents/archive-orphans"
+            // Phase 2 Unit 4 — DB-writing routes (states / workspaces /
+            // focus-groups / sections / workspace-layouts / timer /
+            // presets / window-state / projects / git). JSON-bodied
+            // writes — implicit method gate via the `starts_with`
+            // dispatch arm in handle_connection that runs Unit 4's
+            // POST dispatch. Listed explicitly here so the top-level
+            // 405 guard never short-circuits them.
+            | "/cli/states/create" | "/cli/states/update" | "/cli/states/delete"
+            | "/cli/workspaces/create" | "/cli/workspaces/delete" | "/cli/workspaces/set-nav-visible"
+            | "/cli/focus-groups/create" | "/cli/focus-groups/update" | "/cli/focus-groups/delete"
+            | "/cli/focus-groups/assign" | "/cli/focus-groups/reconcile"
+            | "/cli/sections/create" | "/cli/sections/update" | "/cli/sections/delete"
+            | "/cli/sections/reorder" | "/cli/sections/assign"
+            | "/cli/workspace-layouts/save" | "/cli/workspace-layouts/delete"
+            | "/cli/timer/create" | "/cli/timer/delete"
+            | "/cli/presets/create" | "/cli/presets/update" | "/cli/presets/delete"
+            | "/cli/presets/reorder" | "/cli/presets/reset"
+            | "/cli/window-state/set"
+            | "/cli/projects/create" | "/cli/projects/update" | "/cli/projects/delete"
+            | "/cli/projects/reorder" | "/cli/projects/touch-interaction"
+            | "/cli/projects/touch-interaction-clear" | "/cli/projects/add-from-path"
+            | "/cli/projects/add-without-git" | "/cli/projects/init-git-and-open"
+            | "/cli/projects/enable-worktrees" | "/cli/projects/detect-icon"
+            | "/cli/projects/set-icon" | "/cli/projects/clear-icon"
+            | "/cli/projects/open-in-finder" | "/cli/projects/open-in-editor"
+            | "/cli/projects/open-in-terminal" | "/cli/projects/refresh-editors"
+            | "/cli/git/create-worktree" | "/cli/git/remove-worktree"
+            | "/cli/git/reopen-worktree" | "/cli/git/stage" | "/cli/git/unstage"
+            | "/cli/git/stage-all" | "/cli/git/commit" | "/cli/git/merge-branch"
+            | "/cli/git/abort-merge" | "/cli/git/resolve" | "/cli/git/delete-branch"
+            | "/cli/git/prune-worktrees"
     );
     if method != "GET" && !(is_post && post_allowed) {
         let _ = stream.read(&mut buf).await;
@@ -1650,6 +1692,66 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
                     .to_string(),
             });
             send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        // Phase 2 Unit 4 — POST routes for git (libgit2 ops). F5:
+        // spawn_blocking because diff/merge/status on large repos
+        // can block for 100s of ms.
+        p if is_post && post_allowed && p.starts_with("/cli/git/") => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let p_owned = p.to_string();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::git_routes::dispatch_unit4_git_post(&p_owned, &body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            send_response(&mut stream, result.status, result.content_type, &result.body)
+                .await;
+        }
+        // Phase 2 Unit 4 — POST routes for DB-writing domains. JSON-
+        // bodied writes; per-route allowlist + same implicit gate
+        // pattern as Unit 6. Dispatch is `dispatch_unit4_post`.
+        p if is_post && post_allowed && (
+            p.starts_with("/cli/states/")
+                || p.starts_with("/cli/workspaces/")
+                || p.starts_with("/cli/focus-groups/")
+                || p.starts_with("/cli/sections/")
+                || p.starts_with("/cli/workspace-layouts/")
+                || p.starts_with("/cli/timer/")
+                || p.starts_with("/cli/presets/")
+                || p.starts_with("/cli/window-state/")
+                || p.starts_with("/cli/projects/")
+        ) => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = read_post_body(&mut stream, &mut buf).await;
+            let result = crate::db_routes::dispatch_unit4_post(p, &body_bytes);
+            send_response(&mut stream, result.status, result.content_type, &result.body)
+                .await;
         }
         // Phase 2 Unit 6 — POST routes for filesystem / chat /
         // themes / skill-layers / review-checklist. All JSON-bodied;

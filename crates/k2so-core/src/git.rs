@@ -5,7 +5,7 @@ use std::process::Command;
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitInfo {
     pub is_repo: bool,
@@ -16,7 +16,7 @@ pub struct GitInfo {
     pub untracked_files: i32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchList {
     pub current: String,
@@ -24,7 +24,7 @@ pub struct BranchList {
     pub remote: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeInfo {
     pub path: String,
@@ -33,7 +33,7 @@ pub struct WorktreeInfo {
     pub is_bare: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangedFile {
     pub path: String,
@@ -342,7 +342,7 @@ pub fn create_worktree(
     })
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct WorktreeCreateResult {
     pub path: String,
     pub branch: String,
@@ -549,7 +549,7 @@ pub fn get_changed_files(path: &str) -> Vec<ChangedFile> {
 
 // ── Diff Types ───────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffHunk {
     pub old_start: u32,
@@ -559,13 +559,13 @@ pub struct DiffHunk {
     pub lines: Vec<DiffLine>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct DiffLine {
     pub kind: String, // "add", "remove", "context"
     pub content: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileDiffSummary {
     pub path: String,
@@ -903,7 +903,7 @@ pub fn stage_all(repo_path: &str) -> Result<(), String> {
 
 // ── Commit Function ──────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitResult {
     pub oid: String,
@@ -935,7 +935,7 @@ pub fn commit(repo_path: &str, message: &str) -> Result<CommitResult, String> {
 
 // ── Merge Functions ──────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeResult {
     pub success: bool,
@@ -943,7 +943,7 @@ pub struct MergeResult {
     pub merged_files: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeStatus {
     pub in_progress: bool,

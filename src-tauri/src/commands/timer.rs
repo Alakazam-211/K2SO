@@ -1,22 +1,47 @@
-use crate::db::schema::TimeEntry;
-use crate::state::AppState;
-use tauri::{AppHandle, Emitter, State};
+//! Timer commands.
+//!
+//! Phase 2 Unit 4 — bodies became thin proxies into the daemon's
+//! `/cli/timer/*` routes.
+
+use k2so_core::db::schema::TimeEntry;
+use serde_json::json;
+use tauri::{AppHandle, Emitter};
+
+use crate::daemon_client::DaemonClient;
+
+fn daemon() -> Result<DaemonClient, String> {
+    DaemonClient::try_connect()
+}
+
+fn opt(v: Option<i64>) -> String {
+    v.map(|n| n.to_string()).unwrap_or_default()
+}
 
 #[tauri::command]
 pub fn timer_entries_list(
-    state: State<'_, AppState>,
     start: Option<i64>,
     end: Option<i64>,
     project_id: Option<String>,
 ) -> Result<Vec<TimeEntry>, String> {
-    let conn = state.db.lock();
-    TimeEntry::list(&conn, start, end, project_id.as_deref()).map_err(|e| e.to_string())
+    let s = opt(start);
+    let e = opt(end);
+    let pid = project_id.unwrap_or_default();
+    let mut params: Vec<(&str, &str)> = Vec::new();
+    if !s.is_empty() {
+        params.push(("start", &s));
+    }
+    if !e.is_empty() {
+        params.push(("end", &e));
+    }
+    if !pid.is_empty() {
+        params.push(("project_id", &pid));
+    }
+    daemon()?.cli_get_json("/cli/timer/entries-list", &params)
 }
 
 #[tauri::command]
 pub fn timer_entry_create(
     app: AppHandle,
-    state: State<'_, AppState>,
     id: String,
     project_id: Option<String>,
     start_time: i64,
@@ -24,74 +49,50 @@ pub fn timer_entry_create(
     duration_seconds: i64,
     memo: Option<String>,
 ) -> Result<(), String> {
-    let conn = state.db.lock();
-    TimeEntry::create(
-        &conn,
-        &id,
-        project_id.as_deref(),
-        start_time,
-        end_time,
-        duration_seconds,
-        memo.as_deref(),
-    )
-    .map_err(|e| e.to_string())?;
-    drop(conn);
+    daemon()?.cli_post_json(
+        "/cli/timer/create",
+        &json!({
+            "id": id,
+            "projectId": project_id,
+            "startTime": start_time,
+            "endTime": end_time,
+            "durationSeconds": duration_seconds,
+            "memo": memo,
+        }),
+    )?;
     let _ = app.emit("sync:timer-entries", ());
     Ok(())
 }
 
 #[tauri::command]
-pub fn timer_entry_delete(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<(), String> {
-    let conn = state.db.lock();
-    TimeEntry::delete(&conn, id.as_str()).map_err(|e| e.to_string())?;
-    drop(conn);
+pub fn timer_entry_delete(app: AppHandle, id: String) -> Result<(), String> {
+    daemon()?
+        .cli_post_json("/cli/timer/delete", &json!({ "id": id }))?;
     let _ = app.emit("sync:timer-entries", ());
     Ok(())
 }
 
 #[tauri::command]
 pub fn timer_entries_export(
-    state: State<'_, AppState>,
     format: String,
     start: Option<i64>,
     end: Option<i64>,
     project_id: Option<String>,
 ) -> Result<String, String> {
-    let conn = state.db.lock();
-    let entries =
-        TimeEntry::list(&conn, start, end, project_id.as_deref()).map_err(|e| e.to_string())?;
-
-    match format.as_str() {
-        "csv" => {
-            let mut csv = String::from("id,project_id,start_time,end_time,duration_seconds,memo,created_at\n");
-            for e in &entries {
-                csv.push_str(&format!(
-                    "{},{},{},{},{},{},{}\n",
-                    e.id,
-                    e.project_id.as_deref().unwrap_or(""),
-                    e.start_time,
-                    e.end_time,
-                    e.duration_seconds,
-                    csv_escape(e.memo.as_deref().unwrap_or("")),
-                    e.created_at,
-                ));
-            }
-            Ok(csv)
-        }
-        _ => {
-            serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())
-        }
+    let s = opt(start);
+    let e = opt(end);
+    let pid = project_id.unwrap_or_default();
+    let mut params: Vec<(&str, &str)> = vec![("format", &format)];
+    if !s.is_empty() {
+        params.push(("start", &s));
     }
-}
-
-fn csv_escape(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
+    if !e.is_empty() {
+        params.push(("end", &e));
     }
+    if !pid.is_empty() {
+        params.push(("project_id", &pid));
+    }
+    // Returns raw text (csv) or json string — both are text/plain or
+    // application/json bodies; treat as raw string.
+    daemon()?.cli_get("/cli/timer/entries-export", &params)
 }

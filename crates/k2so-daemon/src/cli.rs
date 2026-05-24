@@ -1450,6 +1450,39 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         // generic GET dispatch.
         "/cli/claude-auth/status" => crate::claude_auth_host::handle_status(),
 
+        // ── Phase 2 Unit 4: states / workspaces / focus-groups / sections /
+        //                    layouts / timer / presets / window-state /
+        //                    projects / git (GET endpoints) ─────────────
+        // `/cli/states/{list,get,set}` already exist above — Unit 4 only
+        // adds the POST mutations (`create`/`update`/`delete`).
+        "/cli/workspaces/list" => crate::db_routes::handle_workspaces_list(params),
+        "/cli/focus-groups/list" => crate::db_routes::handle_focus_groups_list(),
+        "/cli/sections/list" => crate::db_routes::handle_sections_list(params),
+        "/cli/workspace-layouts/load" => crate::db_routes::handle_layout_load(params),
+        "/cli/workspace-layouts/load-all" => crate::db_routes::handle_layout_load_all(),
+        "/cli/timer/entries-list" => crate::db_routes::handle_timer_entries_list(params),
+        "/cli/timer/entries-export" => crate::db_routes::handle_timer_entries_export(params),
+        "/cli/presets/list" => crate::db_routes::handle_presets_list(),
+        "/cli/window-state/get" => crate::db_routes::handle_window_state_get(),
+        "/cli/projects/list" => crate::db_routes::handle_projects_list(),
+        "/cli/projects/get-icon" => crate::db_routes::handle_projects_get_icon(params),
+        "/cli/projects/get-editors" => crate::db_routes::handle_projects_get_editors(),
+        "/cli/projects/get-all-editors" => crate::db_routes::handle_projects_get_all_editors(),
+        // Git GETs — libgit2 operations. Per F5, these can block the
+        // accept loop on large repos. The dispatch is sync (matches
+        // existing fs/* pattern). Acceptable today; if a slow handler
+        // starves the accept loop in practice, lift to spawn_blocking
+        // in main.rs via a `starts_with("/cli/git/")` GET arm.
+        "/cli/git/info" => crate::git_routes::handle_git_info(params),
+        "/cli/git/branches" => crate::git_routes::handle_git_branches(params),
+        "/cli/git/worktrees" => crate::git_routes::handle_git_worktrees(params),
+        "/cli/git/changes" => crate::git_routes::handle_git_changes(params),
+        "/cli/git/diff-file" => crate::git_routes::handle_git_diff_file(params),
+        "/cli/git/diff-summary" => crate::git_routes::handle_git_diff_summary(params),
+        "/cli/git/diff-between" => crate::git_routes::handle_git_diff_between_branches(params),
+        "/cli/git/file-at-ref" => crate::git_routes::handle_git_file_at_ref(params),
+        "/cli/git/merge-status" => crate::git_routes::handle_git_merge_status(params),
+
         _ => CliResponse::not_found(),
     }
 }

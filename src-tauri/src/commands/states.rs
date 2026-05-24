@@ -1,24 +1,30 @@
 //! Workspace state management commands.
+//!
+//! Phase 2 Unit 4 — bodies became thin proxies into the daemon's
+//! `/cli/states/*` routes. The `#[tauri::command]` wrappers stay so
+//! `invoke_handler!` in lib.rs can keep dispatching.
 
-use tauri::State;
-use crate::state::AppState;
-use crate::db::schema::WorkspaceState;
+use k2so_core::db::schema::WorkspaceState;
+use serde_json::json;
 
-#[tauri::command]
-pub fn states_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceState>, String> {
-    let conn = state.db.lock();
-    WorkspaceState::list(&conn).map_err(|e| e.to_string())
+use crate::daemon_client::DaemonClient;
+
+fn daemon() -> Result<DaemonClient, String> {
+    DaemonClient::try_connect()
 }
 
 #[tauri::command]
-pub fn states_get(state: State<'_, AppState>, id: String) -> Result<WorkspaceState, String> {
-    let conn = state.db.lock();
-    WorkspaceState::get(&conn, &id).map_err(|e| e.to_string())
+pub fn states_list() -> Result<Vec<WorkspaceState>, String> {
+    daemon()?.cli_get_json("/cli/states/list", &[])
+}
+
+#[tauri::command]
+pub fn states_get(id: String) -> Result<WorkspaceState, String> {
+    daemon()?.cli_get_json("/cli/states/get", &[("id", &id)])
 }
 
 #[tauri::command]
 pub fn states_create(
-    state: State<'_, AppState>,
     name: String,
     description: Option<String>,
     cap_features: String,
@@ -28,18 +34,23 @@ pub fn states_create(
     cap_audits: String,
     heartbeat: bool,
 ) -> Result<WorkspaceState, String> {
-    let conn = state.db.lock();
-    let id = format!("state-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("custom"));
-    WorkspaceState::create(
-        &conn, &id, &name, description.as_deref(),
-        &cap_features, &cap_issues, &cap_crashes, &cap_security, &cap_audits, heartbeat,
-    ).map_err(|e| e.to_string())?;
-    WorkspaceState::get(&conn, &id).map_err(|e| e.to_string())
+    daemon()?.cli_post_json_decode(
+        "/cli/states/create",
+        &json!({
+            "name": name,
+            "description": description,
+            "capFeatures": cap_features,
+            "capIssues": cap_issues,
+            "capCrashes": cap_crashes,
+            "capSecurity": cap_security,
+            "capAudits": cap_audits,
+            "heartbeat": heartbeat,
+        }),
+    )
 }
 
 #[tauri::command]
 pub fn states_update(
-    state: State<'_, AppState>,
     id: String,
     name: Option<String>,
     description: Option<String>,
@@ -50,19 +61,25 @@ pub fn states_update(
     cap_audits: Option<String>,
     heartbeat: Option<bool>,
 ) -> Result<WorkspaceState, String> {
-    let conn = state.db.lock();
-    WorkspaceState::update(
-        &conn, &id,
-        name.as_deref(), description.as_deref(),
-        cap_features.as_deref(), cap_issues.as_deref(),
-        cap_crashes.as_deref(), cap_security.as_deref(),
-        cap_audits.as_deref(), heartbeat,
-    ).map_err(|e| e.to_string())?;
-    WorkspaceState::get(&conn, &id).map_err(|e| e.to_string())
+    daemon()?.cli_post_json_decode(
+        "/cli/states/update",
+        &json!({
+            "id": id,
+            "name": name,
+            "description": description,
+            "capFeatures": cap_features,
+            "capIssues": cap_issues,
+            "capCrashes": cap_crashes,
+            "capSecurity": cap_security,
+            "capAudits": cap_audits,
+            "heartbeat": heartbeat,
+        }),
+    )
 }
 
 #[tauri::command]
-pub fn states_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let conn = state.db.lock();
-    WorkspaceState::delete(&conn, &id).map_err(|e| e.to_string())
+pub fn states_delete(id: String) -> Result<(), String> {
+    daemon()?
+        .cli_post_json("/cli/states/delete", &json!({ "id": id }))
+        .map(|_| ())
 }

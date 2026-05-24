@@ -224,7 +224,7 @@ pub fn run() {
     // tunnel via `/cli/companion/*` on the daemon, so this process
     // doesn't need one.
 
-    let db_handle = perf_timer!("startup_db_init", {
+    let _ = perf_timer!("startup_db_init", {
         match db::init_database() {
             Ok(c) => c,
             Err(e) => {
@@ -235,17 +235,13 @@ pub fn run() {
         }
     });
 
+    // Phase 2 Unit 4: AppState shrunk to the `watchers` field only —
+    // every other piece of process-wide state (LLM in Unit 2, terminal
+    // manager in Unit 3, DB connection in Unit 4) moved into the
+    // daemon. The handle is kept solely so `watcher.rs::fs_watch_dir`
+    // / `fs_unwatch_dir` can register + tear down notify watchers
+    // through Tauri's `State<>` injection.
     let app_state = AppState {
-        // Same Arc lives in AppState and in db::SHARED — Tauri commands
-        // and HTTP endpoints take the same write lock on the same
-        // physical SQLite connection.
-        db: db_handle,
-        // Phase 2 Unit 2 — `llm_manager` field deleted; LLM lives
-        // in the daemon now.
-        // Phase 2 Unit 3 — `terminal_manager` field deleted; the
-        // daemon owns the TerminalManager lifecycle now (every
-        // `terminal_*` Tauri command was replaced by a daemon
-        // `/cli/terminal/*` HTTP route).
         watchers: Mutex::new(HashMap::new()),
     };
 
@@ -308,15 +304,14 @@ pub fn run() {
             // forever so we survive launchctl unload/load cycles.
             daemon_events::spawn_subscriber(app.handle().clone());
 
-            // Migrate old JSON window state to SQLite (one-time migration)
-            perf_timer!("startup_migrate_window_state", {
-                window::migrate_json_window_state(app.handle());
-            });
-
-            // Migrate workspace_layouts from settings.json → SQLite (one-time)
-            perf_timer!("startup_migrate_workspace_layouts", {
-                migrate_workspace_layouts_to_db(app.handle());
-            });
+            // Phase 2 Unit 4 — window-state JSON→SQLite migration was
+            // dead code as of 2026-05-23 (the source file was already
+            // cleaned up by the migration itself ages ago). Deleted.
+            //
+            // Phase 2 Unit 4 — workspace_layouts settings.json→SQLite
+            // migration moved into the daemon's first-boot pass
+            // (`k2so_core::db_ops::migrate_workspace_layouts_to_db`)
+            // so K2SO Connect and headless daemons pick it up.
 
             // Create skill layer template directories if they don't exist
             if let Some(home) = dirs::home_dir() {
@@ -333,14 +328,14 @@ pub fn run() {
             perf_timer!("startup_migrate_legacy_agent_types", {
                 const MIGRATION_ID: &str = "legacy_agent_types_v1";
                 let needs_run = {
-                    let state = app.state::<AppState>();
-                    let db = state.db.lock();
+                    let db_arc = crate::db::shared();
+                    let db = db_arc.lock();
                     !db::has_code_migration_applied(&db, MIGRATION_ID)
                 };
                 if needs_run {
                     let paths: Vec<String> = {
-                        let state = app.state::<AppState>();
-                        let db = state.db.lock();
+                        let db_arc = crate::db::shared();
+                        let db = db_arc.lock();
                         let mut p = Vec::new();
                         if let Ok(mut stmt) = db.prepare("SELECT path FROM projects") {
                             if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
@@ -381,8 +376,8 @@ pub fn run() {
                         }
                     }
                     // Record completion — idempotent via INSERT OR IGNORE.
-                    let state = app.state::<AppState>();
-                    let db = state.db.lock();
+                    let db_arc = crate::db::shared();
+                    let db = db_arc.lock();
                     db::mark_code_migration_applied(
                         &db,
                         MIGRATION_ID,
@@ -411,8 +406,8 @@ pub fn run() {
                 // (neither row present → runs as usual).
                 const MIGRATION_ID: &str = "install_daemon_plist_v2";
                 let needs_run = {
-                    let state = app.state::<AppState>();
-                    let db = state.db.lock();
+                    let db_arc = crate::db::shared();
+                    let db = db_arc.lock();
                     !db::has_code_migration_applied(&db, MIGRATION_ID)
                 };
                 let opted_in = !cfg!(debug_assertions)
@@ -436,8 +431,8 @@ pub fn run() {
                                         path.display(),
                                         daemon_bin.display()
                                     );
-                                    let state = app.state::<AppState>();
-                                    let db = state.db.lock();
+                                    let db_arc = crate::db::shared();
+                                    let db = db_arc.lock();
                                     db::mark_code_migration_applied(
                                         &db,
                                         MIGRATION_ID,
@@ -498,96 +493,14 @@ pub fn run() {
                 }
             });
 
-            // SKILL.md regeneration for all workspaces. 0.32.13 changes:
-            //
-            // 1. Version gate — only regen when the project's last-regen
-            //    K2SO version differs from the current binary. Binary
-            //    upgrades trigger one regen; subsequent launches at the
-            //    same version skip the entire pass (baseline: 3.8 s →
-            //    ~few ms for the DB read).
-            // 2. Background deferral — the queue of projects that do
-            //    need regen runs on a post-UI thread. The window shows
-            //    immediately; skill writes complete asynchronously and
-            //    emit `startup:skill_regen_complete` when done.
-            perf_timer!("startup_skill_regen_gate", {
-                const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-                let stale_projects: Vec<(String, String)> = {
-                    let state = app.state::<AppState>();
-                    let db = state.db.lock();
-                    let mut projects = Vec::new();
-                    if let Ok(mut stmt) = db.prepare(
-                        "SELECT path, agent_mode, skill_regen_version FROM projects",
-                    ) {
-                        if let Ok(rows) = stmt.query_map([], |row| {
-                            let path: String = row.get(0)?;
-                            let mode: String = row.get(1)?;
-                            let last_ver: Option<String> = row.get(2)?;
-                            Ok((path, mode, last_ver))
-                        }) {
-                            for row in rows.flatten() {
-                                let (path, mode, last_ver) = row;
-                                // Stale if never regen'd OR the binary
-                                // version has moved since last regen.
-                                let stale = last_ver
-                                    .as_deref()
-                                    .map(|v| v != CURRENT_VERSION)
-                                    .unwrap_or(true);
-                                if stale {
-                                    projects.push((path, mode));
-                                }
-                            }
-                        }
-                    }
-                    projects
-                };
-
-                if stale_projects.is_empty() {
-                    log_debug!(
-                        "[k2so] SKILL regen: all projects current at {} — skipping",
-                        CURRENT_VERSION
-                    );
-                } else {
-                    log_debug!(
-                        "[k2so] SKILL regen: {} project(s) stale, deferring to background",
-                        stale_projects.len()
-                    );
-                    let handle_for_thread = app.handle().clone();
-                    std::thread::spawn(move || {
-                        let bg_start = std::time::Instant::now();
-                        for (path, mode) in &stale_projects {
-                            if mode != "off" {
-                                let _ = commands::k2so_agents::k2so_agents_regenerate_skills(path.clone());
-                                let _ = commands::k2so_agents::k2so_agents_generate_workspace_claude_md(path.clone());
-                            }
-                            commands::k2so_agents::write_workspace_skill_file(path);
-                            // Record completion for this project so the
-                            // next launch skips it.
-                            let state = handle_for_thread.state::<AppState>();
-                            let db = state.db.lock();
-                            let _ = db.execute(
-                                "UPDATE projects SET skill_regen_version = ?1 WHERE path = ?2",
-                                rusqlite::params![CURRENT_VERSION, path],
-                            );
-                        }
-                        if crate::perf::is_enabled() {
-                            use std::io::Write;
-                            let _ = writeln!(
-                                std::io::stderr(),
-                                "[perf] startup_skill_regen_background — {}µs ({} projects)",
-                                bg_start.elapsed().as_micros(),
-                                stale_projects.len()
-                            );
-                        }
-                        let _ = handle_for_thread.emit(
-                            "startup:skill_regen_complete",
-                            serde_json::json!({
-                                "projectCount": stale_projects.len(),
-                                "durationMs": bg_start.elapsed().as_millis(),
-                            }),
-                        );
-                    });
-                }
-            });
+            // Phase 2 Unit 4 — SKILL regeneration moved to the daemon's
+            // boot sweep (`run_workspace_legacy_migrations_sweep` →
+            // `ensure_all_skills_up_to_date`). The per-version
+            // `skill_regen_version` gate this block used was replaced
+            // by per-file checksum gates inside k2so-core's
+            // `ensure_skill_up_to_date`, so a stale `skill_regen_version`
+            // value is harmless — the writers don't touch disk if the
+            // file already matches. Block deleted; daemon owns the pass.
 
             // Apply saved window state on startup
             if let Some(saved) = window::load_window_state(app.handle()) {
@@ -1115,93 +1028,8 @@ pub fn run() {
         });
 }
 
-/// True when at least one project has heartbeat enabled. Used by the
-/// window close handler to decide whether to keep the app alive after
-/// the user clicks the red button. If heartbeat is fully off, red-button
-/// quits normally — we don't force the user to Cmd+Q unless they're
-/// actually relying on autonomous wakes.
-fn any_heartbeat_enabled() -> bool {
-    let db = crate::db::shared();
-    let conn = db.lock();
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM projects WHERE heartbeat_enabled = 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    count > 0
-}
-
-/// One-time migration: move workspace_layouts from settings.json → workspace_layouts SQLite table.
-fn migrate_workspace_layouts_to_db(app: &tauri::AppHandle) {
-    let settings_path = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".k2so")
-        .join("settings.json");
-
-    if !settings_path.exists() {
-        return;
-    }
-
-    let raw = match std::fs::read_to_string(&settings_path) {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-
-    let mut parsed: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-
-    let layouts = match parsed.get("workspaceLayouts") {
-        Some(v) if v.is_object() && !v.as_object().unwrap().is_empty() => {
-            v.as_object().unwrap().clone()
-        }
-        _ => return, // Nothing to migrate
-    };
-
-    // Get the DB connection from managed state
-    let state = app.state::<AppState>();
-    let conn = state.db.lock();
-
-    let mut migrated = 0usize;
-    for (key, layout_val) in &layouts {
-        // key format: "projectId:workspaceId"
-        let parts: Vec<&str> = key.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            continue;
-        }
-        let project_id = parts[0];
-        let workspace_id = parts[1];
-
-        let layout_json = match serde_json::to_string(layout_val) {
-            Ok(j) => j,
-            Err(_) => continue,
-        };
-
-        let id = key.clone();
-        if conn.execute(
-            "INSERT OR IGNORE INTO workspace_layouts (id, project_id, workspace_id, layout_json, updated_at)
-             VALUES (?1, ?2, ?3, ?4, unixepoch())",
-            rusqlite::params![id, project_id, workspace_id, layout_json],
-        ).is_ok() {
-            migrated += 1;
-        }
-    }
-
-    if migrated > 0 {
-        log_debug!("[k2so] Migrated {} workspace layout(s) from settings.json to SQLite", migrated);
-
-        // Remove workspaceLayouts from settings.json
-        if let Some(obj) = parsed.as_object_mut() {
-            obj.remove("workspaceLayouts");
-        }
-        if let Ok(json) = serde_json::to_string_pretty(&parsed) {
-            let tmp = settings_path.with_extension("json.tmp");
-            if std::fs::write(&tmp, &json).is_ok() {
-                std::fs::rename(&tmp, &settings_path).ok();
-            }
-        }
-    }
-}
+// Phase 2 Unit 4: `any_heartbeat_enabled` was dead code (no callers
+// in lib.rs after the red-button refactor) — deleted.
+// `migrate_workspace_layouts_to_db` moved to
+// `k2so_core::db_ops::migrate_workspace_layouts_to_db`; the daemon
+// runs it on its own first boot now.

@@ -3049,6 +3049,7 @@ dependencies = [
  "fontdue",
  "git2",
  "ignore",
+ "image",
  "libc",
  "llama-cpp-2",
  "mio",
