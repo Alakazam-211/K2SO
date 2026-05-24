@@ -11,12 +11,6 @@
 //! - **Agent CRUD**: [`list`], [`create`], [`delete`] (+ forced
 //!   `delete_inner`), [`get_profile`], [`update_profile`],
 //!   [`update_field`] (+ its pure helper [`update_agent_md_field`]).
-//! - **Workspace inbox composition**: [`workspace_inbox_create`]
-//!   (legacy `.k2so/work/inbox/` writer; only daemon
-//!   `workspace_msg.rs::deliver_to_inbox` still uses it. New
-//!   workspace-inbox callers should use `k2so_core::inbox::compose`
-//!   instead — that writes to the post-Phase-2.1 `.k2so/inbox/`
-//!   primitive).
 //! - **Wakeup + backup helpers** used by the commands above:
 //!   [`ensure_agent_wakeup`], [`cleanup_agent_backups`].
 //!
@@ -25,6 +19,13 @@
 //! `workspace_inbox_list`. They had no remaining callers after the
 //! React frontend migrated to the workspace inbox primitive
 //! (`k2so_core::inbox::*`).
+//!
+//! Phase 2.1 wrap-up (0.39.0f) — removed `workspace_inbox_create`
+//! (the legacy `.k2so/work/inbox/` writer). Its sole caller, the
+//! daemon's `workspace_msg::deliver_to_inbox`, was retired in the
+//! same commit. New inbox-delivery callers should compose against
+//! `k2so_core::inbox::compose` directly so they land in the
+//! canonical `.k2so/inbox/` primitive the renderer reads.
 //!
 //! Every function is host-agnostic — uses `db::shared()` +
 //! `fs_atomic::*` + core agent-system primitives, no AppHandle, no
@@ -43,7 +44,7 @@ use crate::agents::scheduler::{
 use crate::agents::session::simple_date;
 use crate::agents::skill_writer::{generate_default_agent_body, write_agent_skill_file};
 use crate::agents::wake::{agent_wakeup_path, wakeup_template_for};
-use crate::agents::work_item::{atomic_write, WorkItem};
+use crate::agents::work_item::atomic_write;
 use crate::agents::{agent_dir, agent_type_for, agents_dir, parse_frontmatter, resolve_project_id};
 use crate::db::schema::WorkspaceSession;
 use crate::fs_atomic::{atomic_write_str, log_if_err};
@@ -455,34 +456,10 @@ pub fn update_field(
     Ok(updated)
 }
 
-// ── Work queue ─────────────────────────────────────────────────────────
-
-/// Build a filename-safe slug from a title — lowercase, non-alphanum
-/// collapsed to `-`, empty segments dropped, capped at 60 chars.
-fn work_item_slug(title: &str) -> String {
-    let slug: String = title
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<&str>>()
-        .join("-");
-    slug[..slug.len().min(60)].to_string()
-}
-
-/// 120-char body preview with ellipsis on truncation. Matches the
-/// shape the sidebar + CLI renderers expect.
-fn body_preview(body: &str) -> String {
-    let trimmed = body.trim();
-    let preview: String = trimmed.chars().take(120).collect();
-    if trimmed.chars().count() > 120 {
-        format!("{}...", preview.trim())
-    } else {
-        preview
-    }
-}
+// Phase 2.1 wrap-up (0.39.0f) — the `work_item_slug` + `body_preview`
+// helpers (last used by `workspace_inbox_create`) were removed with
+// the function itself. The post-Phase-2.1 inbox primitive has its own
+// slug + preview helpers in `k2so_core::inbox`.
 
 // Phase 2.1c Item 2 — `work_list`, `work_create`, `work_move`, and
 // `workspace_inbox_list` removed (zero remaining callers; the
@@ -490,76 +467,23 @@ fn body_preview(body: &str) -> String {
 // `commands::inbox::k2so_inbox_*` Tauri shims). The daemon CLI
 // surface for these had already been hard-deprecated in Phase 2.1b.
 //
-// `workspace_inbox_create` below stays — daemon's `workspace_msg.rs::
-// deliver_to_inbox` is its last caller. New callers should use the
-// workspace inbox primitive (`k2so_core::inbox::compose`) instead.
-
-// ── Workspace inbox ────────────────────────────────────────────────────
-
-pub fn workspace_inbox_create(
-    workspace_path: String,
-    title: String,
-    body: String,
-    priority: Option<String>,
-    item_type: Option<String>,
-    assigned_by: Option<String>,
-    source: Option<String>,
-) -> Result<WorkItem, String> {
-    let dir = crate::agents::scheduler::workspace_inbox_dir(&workspace_path);
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-
-    let priority = priority.unwrap_or_else(|| "normal".to_string());
-    let item_type = item_type.unwrap_or_else(|| "task".to_string());
-    let assigned_by = assigned_by.unwrap_or_else(|| "external".to_string());
-    let source = source.unwrap_or_else(|| "manual".to_string());
-
-    let slug = work_item_slug(&title);
-    let filename = format!("{}.md", slug);
-
-    let now = simple_date();
-    let content = format!(
-        "---\ntitle: {}\npriority: {}\nassigned_by: {}\ncreated: {}\ntype: {}\nsource: {}\n---\n\n{}\n",
-        title, priority, assigned_by, now, item_type, source, body
-    );
-
-    let path = dir.join(&filename);
-    atomic_write(&path, &content)?;
-
-    Ok(WorkItem {
-        filename,
-        title,
-        priority,
-        assigned_by,
-        created: now,
-        item_type,
-        folder: "workspace-inbox".to_string(),
-        body_preview: body_preview(&body),
-        source,
-    })
-}
+// Phase 2.1 wrap-up (0.39.0f) — `workspace_inbox_create` removed.
+// Its sole caller (the daemon's `workspace_msg::deliver_to_inbox`)
+// was retired in the same commit. The function wrote to the legacy
+// `.k2so/work/inbox/` layout, which the post-Phase-2.1 migration
+// hook (in `inbox::migrate_work_to_inbox`) now sends to the macOS
+// Recycle Bin. New inbox-delivery callers should use
+// `k2so_core::inbox::compose` so they land in `.k2so/inbox/` where
+// the renderer + CLI actually read from.
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn work_item_slug_lowercases_and_dasheses() {
-        assert_eq!(work_item_slug("Fix Auth Module"), "fix-auth-module");
-        assert_eq!(work_item_slug("Hello, World!"), "hello-world");
-    }
-
-    #[test]
-    fn work_item_slug_caps_at_60_chars() {
-        let long = "x".repeat(200);
-        assert!(work_item_slug(&long).len() <= 60);
-    }
-
-    #[test]
-    fn body_preview_trims_and_ellipsizes() {
-        let preview = body_preview(&"a".repeat(150));
-        assert!(preview.ends_with("..."));
-        assert!(preview.len() <= 128);
-    }
+    // `work_item_slug_*` and `body_preview_*` tests removed alongside
+    // their helpers in the Phase 2.1 wrap-up. Equivalent coverage for
+    // the `k2so_core::inbox` slug/preview helpers lives in that
+    // module's own test suite.
 
     #[test]
     fn update_agent_md_field_replaces_frontmatter_key() {

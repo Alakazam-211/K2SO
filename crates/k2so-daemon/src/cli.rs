@@ -154,9 +154,10 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         // 0.39.0f Phase 2.1c: `/cli/work/inbox/create` retired →
         // POST /cli/inbox/compose?project=<target-workspace>. The
         // sole CLI caller (cmd_msg_inbox_form) was migrated in
-        // Phase 2.1c; the Tauri-side caller (workspace_inbox_create)
-        // is the next unit. Route entry kept as a 410-Gone so any
-        // straggler gets a clear signal.
+        // Phase 2.1c; the Tauri-side caller `workspace_inbox_create`
+        // and its daemon dependency `deliver_to_inbox` were deleted
+        // in the Phase 2.1 wrap-up. Route entry kept as a 410-Gone
+        // so any external straggler gets a clear signal.
         "/cli/work/inbox/create" => CliResponse::gone(
             "work/* routes deprecated in Phase 2.1; use /cli/inbox/compose with project=<target-workspace> — see `k2so help-deprecated`",
         ),

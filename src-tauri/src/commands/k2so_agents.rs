@@ -256,11 +256,15 @@ pub fn k2so_agents_update_profile(
 // refactor; new code should use the workspace-level inbox.
 
 // Phase 2.1c Item 2 — `k2so_agents_workspace_inbox_create` removed.
-// Zero frontend callers (audit-verified). The core function
-// `k2so_core::agents::commands::workspace_inbox_create` stays because
-// daemon `workspace_msg.rs::deliver_to_inbox` still depends on it; new
-// callers should use `commands::inbox::k2so_inbox_compose` (workspace
-// inbox primitive) instead.
+// Zero frontend callers (audit-verified).
+//
+// Phase 2.1 wrap-up (0.39.0f) — the core function
+// `k2so_core::agents::commands::workspace_inbox_create` was also
+// deleted, along with its sole caller (daemon's
+// `workspace_msg::deliver_to_inbox`). All inbox-delivery callers now
+// use `commands::inbox::k2so_inbox_compose` (renderer) or
+// `k2so_core::inbox::compose` (Rust), which land in the canonical
+// post-Phase-2.1 `.k2so/inbox/` layout.
 
 // ── Path helpers ────────────────────────────────────────────────────────
 //

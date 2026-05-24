@@ -226,54 +226,15 @@ pub fn format_message(from: &str, text: &str) -> String {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Inbox delivery (separate verb — kept for `work send` callers)
-// ─────────────────────────────────────────────────────────────────────
-
-/// Deliver `text` to the workspace's inbox as a regular work item.
-/// Becomes a markdown file at `<project>/.k2so/work/inbox/<id>-<title>.md`.
-///
-/// **Not called by `deliver_live`.** Per 0.38.6, `msg` is strictly
-/// live-or-fail. This helper stays exposed for `work send` and any
-/// future explicit-inbox path (exercised by integration tests too).
-#[allow(dead_code)]
-pub fn deliver_to_inbox(
-    project_path: &str,
-    text: &str,
-    sender: &str,
-) -> serde_json::Value {
-    let title = text
-        .lines()
-        .next()
-        .unwrap_or("(empty)")
-        .chars()
-        .take(80)
-        .collect::<String>();
-    let result = k2so_core::agents::commands::workspace_inbox_create(
-        project_path.to_string(),
-        title,
-        text.to_string(),
-        Some("normal".to_string()),
-        Some("message".to_string()),
-        Some(sender.to_string()),
-        Some("k2so msg".to_string()),
-    );
-    match result {
-        Ok(v) => serde_json::json!({
-            "success": true,
-            "delivery": "inbox",
-            "result": v,
-        }),
-        Err(e) => serde_json::json!({
-            "success": false,
-            "delivery": "inbox",
-            "error": e.to_string(),
-        }),
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────
 // Public entry — `deliver_live` (retry-wrapped)
 // ─────────────────────────────────────────────────────────────────────
+//
+// Phase 2.1 wrap-up (0.39.0f): the pre-0.38.6 `deliver_to_inbox` helper
+// (and its dependency on `k2so_core::agents::commands::workspace_inbox_create`,
+// which wrote to the retired `.k2so/work/inbox/` layout) was removed
+// here. `msg` is strictly live-or-fail; new inbox-delivery callers
+// should compose against `k2so_core::inbox::compose` directly so they
+// land in the canonical `.k2so/inbox/` location the renderer reads.
 
 const MAX_ATTEMPTS: u8 = 3;
 const BACKOFF_MS: [u64; 2] = [200, 400];

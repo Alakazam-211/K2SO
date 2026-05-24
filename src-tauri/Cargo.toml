@@ -111,6 +111,9 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # test binary run. Only active for cargo test / cargo bench.
 k2so-core = { path = "../crates/k2so-core", features = ["test-util"] }
 
+# Sandbox dirs for the worktree command's path-safety unit tests.
+tempfile = "3"
+
 [[bench]]
 name = "perf"
 harness = false

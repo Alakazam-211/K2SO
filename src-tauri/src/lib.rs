@@ -874,6 +874,11 @@ pub fn run() {
             commands::inbox::k2so_inbox_archive,
             commands::inbox::k2so_inbox_delete,
             commands::inbox::k2so_inbox_respond,
+            // Phase 2.1 wrap-up — generic worktree fs reader (powers
+            // WorktreeDetailPane's Task tab; renders the worktree's
+            // CLAUDE.md as Markdown). Path-canonicalized + traversal-
+            // rejecting so it's safe to expose to the renderer.
+            commands::worktree::read_worktree_file,
             // Legacy `k2so_agents_work_list` removed — its renderer
             // callers now use `k2so_inbox_list` above. The per-agent
             // work-queue surface is itself being retired with the
@@ -908,11 +913,11 @@ pub fn run() {
             commands::k2so_agents::k2so_agents_review_request_changes,
             // `k2so_agents_workspace_inbox_list` and
             // `k2so_agents_workspace_inbox_create` removed (Phase 2.1c
-            // Item 2) — renderer migrated to `k2so_inbox_*` above; the
-            // last server-side caller of `workspace_inbox_create`
-            // (daemon's `workspace_msg.rs::deliver_to_inbox`) uses
-            // `k2so_core::agents::commands::workspace_inbox_create`
-            // directly, not the Tauri shim.
+            // Item 2) — renderer migrated to `k2so_inbox_*` above.
+            // Phase 2.1 wrap-up (0.39.0f) also retired the core helper
+            // `workspace_inbox_create` and its daemon caller
+            // `workspace_msg::deliver_to_inbox` — the inbox-delivery
+            // path is now `k2so_core::inbox::compose` end-to-end.
             commands::k2so_agents::k2so_agents_lock,
             commands::k2so_agents::k2so_agents_unlock,
             commands::k2so_agents::k2so_agents_triage_summary,

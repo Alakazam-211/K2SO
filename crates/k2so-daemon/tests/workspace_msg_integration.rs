@@ -1,17 +1,20 @@
 //! 0.37.0 simplified messaging — `k2so msg <workspace> "text" [--wake]`.
 //!
-//! Pins the workspace-token resolver and the inbox delivery path
-//! against the schema after unification. The smart-cascade
-//! `deliver_live` path requires spawning `claude` (or a substitute)
-//! and is exercised end-to-end through `cli/k2so` against a live
-//! daemon — those checks live in CI's smoke harness, not here.
+//! Pins the workspace-token resolver against the schema after
+//! unification. The smart-cascade `deliver_live` path requires
+//! spawning `claude` (or a substitute) and is exercised end-to-end
+//! through `cli/k2so` against a live daemon — those checks live in
+//! CI's smoke harness, not here.
 //!
 //! What we cover here:
 //! - `resolve_workspace` accepts name | absolute path | UUID and
 //!   only returns a hit when a `projects` row matches.
-//! - `deliver_to_inbox` writes a real markdown file into
-//!   `<project>/.k2so/work/inbox/` and the daemon's response
-//!   reflects the work-item shape SMS-bridge consumers depend on.
+//!
+//! 0.39.0f Phase 2.1 wrap-up: the pre-0.38.6 `deliver_to_inbox` tests
+//! moved to history alongside the function itself. New inbox-delivery
+//! callers should hit `k2so_core::inbox::compose` directly (covered by
+//! that crate's own test suite + the `inbox_shape_tauri_parity.sh`
+//! CLI test).
 
 #![cfg(unix)]
 
@@ -126,84 +129,6 @@ fn resolve_workspace_empty_token_returns_none() {
     assert!(resolved.is_none(), "empty token must short-circuit, not match every row");
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// deliver_to_inbox
-// ─────────────────────────────────────────────────────────────────────
-
-#[test]
-fn deliver_to_inbox_writes_markdown_file() {
-    let _g = lock();
-    init_for_tests();
-    let workspace_id = "ws-msg-inbox";
-    let project = setup_project(workspace_id, "InboxTarget");
-    let project_path = project.to_string_lossy().into_owned();
-
-    // The body's first line becomes the title (truncated to 80 chars).
-    let body = "first line is the title\nsecond line is body content\nthird line";
-    let result = workspace_msg::deliver_to_inbox(&project_path, body, "test-sender");
-
-    assert_eq!(
-        result.get("success").and_then(|v| v.as_bool()),
-        Some(true),
-        "deliver_to_inbox should report success: {result}"
-    );
-    assert_eq!(
-        result.get("delivery").and_then(|v| v.as_str()),
-        Some("inbox"),
-        "delivery field must be 'inbox'"
-    );
-
-    // The work-item record should expose the title + sender so SMS
-    // bridge consumers can echo back what was filed.
-    let inner = result.get("result").expect("result subobject present");
-    assert_eq!(
-        inner.get("title").and_then(|v| v.as_str()),
-        Some("first line is the title"),
-        "title must be the body's first line"
-    );
-    assert_eq!(
-        inner.get("assignedBy").and_then(|v| v.as_str()),
-        Some("test-sender"),
-        "assignedBy must echo the sender argument"
-    );
-
-    // Verify the file actually landed on disk.
-    let inbox_dir = project.join(".k2so/work/inbox");
-    let files: Vec<_> = std::fs::read_dir(&inbox_dir)
-        .expect("inbox dir should exist after deliver")
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("md"))
-        .collect();
-    assert_eq!(files.len(), 1, "exactly one .md file should land per call");
-
-    let written = std::fs::read_to_string(files[0].path()).unwrap();
-    assert!(
-        written.contains("title: first line is the title"),
-        "frontmatter must carry the title"
-    );
-    assert!(
-        written.contains("second line is body content"),
-        "body content must be preserved"
-    );
-}
-
-#[test]
-fn deliver_to_inbox_truncates_long_first_line_for_title() {
-    let _g = lock();
-    init_for_tests();
-    let workspace_id = "ws-msg-inbox-long";
-    let project = setup_project(workspace_id, "InboxLong");
-    let project_path = project.to_string_lossy().into_owned();
-
-    // 100-char first line should truncate to 80 chars in the title.
-    let long_first = "x".repeat(100);
-    let body = format!("{long_first}\nrest");
-    let result = workspace_msg::deliver_to_inbox(&project_path, &body, "cli");
-
-    let title = result
-        .get("result")
-        .and_then(|r| r.get("title"))
-        .and_then(|v| v.as_str())
-        .expect("title present");
-    assert_eq!(title.chars().count(), 80, "title must truncate to 80 chars");
-}
+// 0.39.0f Phase 2.1 wrap-up: the two `deliver_to_inbox_*` tests that
+// previously lived here were removed when the function was deleted
+// from `workspace_msg.rs`. See the module docstring above.

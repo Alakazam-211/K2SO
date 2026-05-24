@@ -59,22 +59,46 @@ export function AgentPane({ agentName, projectPath, section, restoredSessionId }
 
 const worktreeLastTab = new Map<string, 'task' | 'chat' | 'review'>()
 
+// ── Review tab types (mirrors k2so_core::agents::reviews::ReviewItem) ─
+
+interface WorktreeReviewDiffFile {
+  path: string
+  status: string
+  additions: number
+  deletions: number
+}
+
+interface WorktreeReviewWorkItem {
+  filename: string
+  title: string
+  priority: string
+  assignedBy: string
+  itemType: string
+  folder: string
+}
+
+interface WorktreeReviewItem {
+  agentName: string
+  branch: string
+  worktreePath: string | null
+  workItems: WorktreeReviewWorkItem[]
+  diffSummary: WorktreeReviewDiffFile[]
+}
+
 function WorktreeDetailPane({ worktreeId, projectPath }: { worktreeId: string; projectPath: string }): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<'task' | 'chat' | 'review'>(
     worktreeLastTab.get(worktreeId) ?? 'chat'
   )
-  // Phase 2.1c Item 2 — Task/Review content fetching is paused.
-  // The legacy `k2so_agents_work_list` Tauri command (which scanned
-  // per-agent `.k2so/agents/<name>/work/{active,done}/` for the
-  // worktree's task/review markdown) is removed; the workspace
-  // inbox primitive that replaces it is workspace-level only.
-  // The worktree-task UX needs its own primitive (TODO: surface
-  // the worktree's CLAUDE.md or task frontmatter via a daemon
-  // route). Until then, Task/Review tabs show their empty-state.
-  const [taskContent] = useState<string>('')
-  const [reviewContent] = useState<string>('')
+  // Phase 2.1 wrap-up — Task tab reads `<worktree>/CLAUDE.md` via the
+  // `read_worktree_file` Tauri command (path-canonicalized, traversal-
+  // rejecting). Review tab fetches `k2so_agents_review_queue` and
+  // filters client-side by this worktree's branch.
+  const [taskContent, setTaskContent] = useState<string>('')
+  const [taskError, setTaskError] = useState<string | null>(null)
+  const [taskLoaded, setTaskLoaded] = useState(false)
+  const [reviewItem, setReviewItem] = useState<WorktreeReviewItem | null>(null)
+  const [reviewLoaded, setReviewLoaded] = useState(false)
   const [chatMounted, setChatMounted] = useState(activeTab === 'chat')
-  const [reviewAvailable] = useState(false)
 
   const workspace = useProjectsStore(useCallback((s) => {
     for (const p of s.projects) {
@@ -95,21 +119,94 @@ function WorktreeDetailPane({ worktreeId, projectPath }: { worktreeId: string; p
   const agentMatch = workspace?.name?.match(/^agent\/([^/]+)\//)
   const agentTemplate = agentMatch?.[1]
   const worktreePath = workspace?.worktreePath || projectPath
+  const branch = workspace?.branch ?? null
 
-  // Phase 2.1c Item 2 — Task/Review fetch effects removed.
-  // See the state-init comments above for the rationale; the
-  // worktree-task surface needs its own daemon route before this
-  // can come back. `projectPath`/`agentTemplate` are intentionally
-  // referenced here just so the variables don't flag as unused.
-  void projectPath
-  void agentTemplate
+  // Task tab — load <worktree>/CLAUDE.md whenever the worktree changes.
+  // The fetch is gated on `worktreePath` being a non-empty absolute path
+  // (the Tauri command rejects non-absolute paths anyway, but skipping
+  // the call when we know it's the bare projectPath fallback avoids a
+  // noisy "not_found" round-trip).
+  useEffect(() => {
+    let cancelled = false
+    setTaskLoaded(false)
+    setTaskContent('')
+    setTaskError(null)
+    if (!worktreePath || worktreePath === projectPath) {
+      // No worktree path resolved yet — leave empty state.
+      setTaskLoaded(true)
+      return () => { cancelled = true }
+    }
+    invoke<string>('read_worktree_file', {
+      worktreePath,
+      relativePath: 'CLAUDE.md',
+    })
+      .then((content) => {
+        if (cancelled) return
+        setTaskContent(content)
+        setTaskLoaded(true)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        const msg = typeof err === 'string' ? err : String(err)
+        // `not_found` is the expected empty-state case; anything else
+        // is a real error worth surfacing.
+        if (msg === 'not_found' || msg.includes('not_found')) {
+          setTaskError(null)
+        } else {
+          setTaskError(msg)
+        }
+        setTaskLoaded(true)
+      })
+    return () => { cancelled = true }
+  }, [worktreePath, projectPath])
+
+  // Review tab — fetch the workspace's review queue and filter to just
+  // this worktree's row. The daemon's `/cli/reviews` route already
+  // returns `branch` + `worktreePath` per item, so filtering happens
+  // in the renderer with no daemon change. Empty result → empty state.
+  useEffect(() => {
+    let cancelled = false
+    setReviewLoaded(false)
+    setReviewItem(null)
+    if (!projectPath || !branch) {
+      setReviewLoaded(true)
+      return () => { cancelled = true }
+    }
+    invoke<WorktreeReviewItem[]>('k2so_agents_review_queue', { projectPath })
+      .then((items) => {
+        if (cancelled) return
+        // Prefer worktreePath match (most precise). Fall back to
+        // branch match for review items whose worktree was already
+        // removed but whose done/ items remain.
+        const matchByPath = worktreePath
+          ? items.find((it) => it.worktreePath === worktreePath)
+          : undefined
+        const matchByBranch = items.find((it) => it.branch === branch)
+        setReviewItem(matchByPath ?? matchByBranch ?? null)
+        setReviewLoaded(true)
+      })
+      .catch((err: unknown) => {
+        // Reviews failing should not break the pane — log + show
+        // empty state. Matches the badge-fetch pattern called out in
+        // memory/feedback_test_discipline.md as an acceptable
+        // defensive-catch exception.
+        console.warn('[WorktreeDetailPane] review_queue fetch failed:', err)
+        if (cancelled) return
+        setReviewItem(null)
+        setReviewLoaded(true)
+      })
+    return () => { cancelled = true }
+  }, [projectPath, branch, worktreePath])
 
   useEffect(() => {
     if (activeTab === 'chat') setChatMounted(true)
   }, [activeTab])
 
+  const reviewAvailable = reviewItem !== null
+  const taskDisabled = !taskContent && taskLoaded && !taskError
+
   const tabs: Array<{ key: 'task' | 'chat' | 'review'; label: string; disabled: boolean }> = [
-    { key: 'task', label: 'Task', disabled: !agentTemplate || !taskContent },
+    { key: 'task', label: 'Task', disabled: taskDisabled },
     { key: 'chat', label: 'Chat', disabled: false },
     { key: 'review', label: 'Review', disabled: !reviewAvailable },
   ]
@@ -178,14 +275,26 @@ function WorktreeDetailPane({ worktreeId, projectPath }: { worktreeId: string; p
       <div className="flex-1 overflow-hidden relative">
         {activeTab === 'task' && (
           <div className="h-full overflow-y-auto p-4">
-            {taskContent ? (
+            {!taskLoaded ? (
+              <div className="flex items-center justify-center h-full">
+                <p className="text-xs text-[var(--color-text-muted)]">Loading task brief…</p>
+              </div>
+            ) : taskError ? (
+              <div className="flex items-center justify-center h-full">
+                <p className="text-xs text-[var(--color-text-muted)]">
+                  Failed to load CLAUDE.md: {taskError}
+                </p>
+              </div>
+            ) : taskContent ? (
               <div className="prose prose-sm prose-invert max-w-none">
                 <Markdown remarkPlugins={[remarkGfm]}>{taskContent}</Markdown>
               </div>
             ) : (
               <div className="flex items-center justify-center h-full">
-                <p className="text-xs text-[var(--color-text-muted)]">
-                  {agentTemplate ? 'No active task assigned.' : 'This worktree was not created by the agent system.'}
+                <p className="text-xs text-[var(--color-text-muted)] text-center max-w-md leading-relaxed">
+                  This worktree has no <code>CLAUDE.md</code>. The Task brief is
+                  rendered here when the harness or <code>k2so delegate</code>
+                  {' '}writes one to the worktree root.
                 </p>
               </div>
             )}
@@ -209,10 +318,64 @@ function WorktreeDetailPane({ worktreeId, projectPath }: { worktreeId: string; p
 
         {activeTab === 'review' && (
           <div className="h-full overflow-y-auto p-4">
-            {reviewAvailable ? (
+            {!reviewLoaded ? (
+              <div className="flex items-center justify-center h-full">
+                <p className="text-xs text-[var(--color-text-muted)]">Loading review queue…</p>
+              </div>
+            ) : reviewItem ? (
               <div className="space-y-4">
-                <div className="prose prose-sm prose-invert max-w-none">
-                  <Markdown remarkPlugins={[remarkGfm]}>{reviewContent}</Markdown>
+                <div className="space-y-2">
+                  <div className="text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">
+                    Completed work
+                  </div>
+                  {reviewItem.workItems.length === 0 ? (
+                    <p className="text-xs text-[var(--color-text-muted)]">
+                      Worktree branch has diffs but no work items in <code>done/</code>.
+                    </p>
+                  ) : (
+                    <ul className="space-y-1">
+                      {reviewItem.workItems.map((wi) => (
+                        <li
+                          key={wi.filename}
+                          className="text-xs text-[var(--color-text-primary)] flex items-start gap-2"
+                        >
+                          <span className="text-[var(--color-text-muted)] flex-shrink-0">·</span>
+                          <span className="flex-1 truncate">{wi.title}</span>
+                          <span className="text-[9px] uppercase tracking-wide text-[var(--color-text-muted)] flex-shrink-0">
+                            {wi.priority}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <div className="text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">
+                    Diff vs main ({reviewItem.diffSummary.length} files)
+                  </div>
+                  {reviewItem.diffSummary.length === 0 ? (
+                    <p className="text-xs text-[var(--color-text-muted)]">
+                      No file changes detected.
+                    </p>
+                  ) : (
+                    <ul className="space-y-0.5 font-mono">
+                      {reviewItem.diffSummary.slice(0, 50).map((f) => (
+                        <li key={f.path} className="text-[11px] flex items-center gap-2">
+                          <span className="w-3 flex-shrink-0 text-[var(--color-text-muted)]">{f.status}</span>
+                          <span className="flex-1 truncate text-[var(--color-text-primary)]">{f.path}</span>
+                          <span className="text-[10px] text-[var(--color-text-muted)] flex-shrink-0">
+                            +{f.additions} -{f.deletions}
+                          </span>
+                        </li>
+                      ))}
+                      {reviewItem.diffSummary.length > 50 && (
+                        <li className="text-[10px] text-[var(--color-text-muted)] pl-5">
+                          … and {reviewItem.diffSummary.length - 50} more files
+                        </li>
+                      )}
+                    </ul>
+                  )}
                 </div>
 
                 <div className="border-t border-[var(--color-border)] pt-4 space-y-3">
@@ -236,7 +399,7 @@ function WorktreeDetailPane({ worktreeId, projectPath }: { worktreeId: string; p
             ) : (
               <div className="flex items-center justify-center h-full">
                 <p className="text-xs text-[var(--color-text-muted)]">
-                  No completed work to review yet.
+                  No pending reviews for this worktree.
                 </p>
               </div>
             )}
