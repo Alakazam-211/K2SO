@@ -59,7 +59,9 @@ pub mod reviews;
 pub use crate::workspace::scheduler;
 pub mod session;
 pub mod settings;
-pub mod skill;
+/// Phase 2.5c: `skill` (versioning + upgrade protocol) relocated to
+/// [`crate::skills::version`]. Back-compat alias.
+pub use crate::skills::version as skill;
 /// Phase 2.5c: `skill_content` relocated to [`crate::skills::content`].
 /// Back-compat alias for callers that still reference
 /// `agents::skill_content::*`.

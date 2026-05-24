@@ -43,6 +43,7 @@
 pub mod consolidation;
 pub mod content;
 pub mod crud;
+pub mod version;
 pub mod writer;
 
 pub use crud::SkillSummary;
