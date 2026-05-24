@@ -21,7 +21,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-pub mod build_launch;
+/// Phase 2.5c: `build_launch` relocated to
+/// [`crate::workspace::agent_launch`]. The rename clarifies that this
+/// composes a launch from workspace context, not a generic build step.
+pub use crate::workspace::agent_launch as build_launch;
 pub mod channel;
 /// Phase 2.5c: `checkin` relocated to [`crate::workspace::checkin`].
 /// Back-compat alias.
