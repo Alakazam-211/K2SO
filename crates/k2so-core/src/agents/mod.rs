@@ -40,7 +40,8 @@ pub use crate::heartbeats as heartbeat;
 /// [`crate::heartbeats::install`]. Back-compat alias.
 pub use crate::heartbeats::install as heartbeat_install;
 pub mod launch_profile;
-pub mod onboarding;
+/// Phase 2.5c: `onboarding` relocated to [`crate::workspace::onboarding`].
+pub use crate::workspace::onboarding;
 pub mod resume_chat;
 pub mod reviews;
 /// Phase 2.5c: `scheduler` relocated to [`crate::workspace::scheduler`].
@@ -59,7 +60,8 @@ pub use crate::skills::content as skill_content;
 /// `agents::skill_writer::*`.
 pub use crate::skills::writer as skill_writer;
 pub mod terminal_id;
-pub mod triage_summary;
+/// Phase 2.5c: `triage_summary` relocated to [`crate::workspace::triage`].
+pub use crate::workspace::triage as triage_summary;
 pub mod unification;
 /// Phase 2.5c: `wake` relocated to [`crate::workspace::wake_prompts`]
 /// (renamed to avoid collision with the top-level `crate::wake` module).

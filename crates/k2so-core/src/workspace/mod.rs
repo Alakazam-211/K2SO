@@ -11,5 +11,7 @@
 //! catalogue and rationale.
 
 pub mod checkin;
+pub mod onboarding;
 pub mod scheduler;
+pub mod triage;
 pub mod wake_prompts;
