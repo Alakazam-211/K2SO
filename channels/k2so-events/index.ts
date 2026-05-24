@@ -14,8 +14,18 @@
  * Environment variables (set by K2SO when launching):
  *   K2SO_PORT         - Port of K2SO's agent_hooks HTTP server
  *   K2SO_HOOK_TOKEN   - Auth token for the HTTP server
- *   K2SO_AGENT_NAME   - Name of the agent this channel serves
- *   K2SO_PROJECT_PATH - Project path for event filtering
+ *   K2SO_AGENT_NAME   - Optional. Agent identity this channel represents.
+ *                       Post-0.39.0f Phase 2.1: when unset, we resolve the
+ *                       workspace's primary agent at startup via the
+ *                       daemon's `/cli/workspace/agent-display-name`
+ *                       endpoint (the same answer the Tauri UI shows).
+ *                       The pre-0.39.0f `__lead__` literal default was
+ *                       removed — empty/missing identity falls back to
+ *                       the daemon-resolved name and errors loudly if
+ *                       the workspace can't be located.
+ *   K2SO_PROJECT_PATH - Project path for event filtering. Required for
+ *                       resolving the agent name when K2SO_AGENT_NAME
+ *                       is unset.
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -25,9 +35,14 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 
 const PORT = process.env.K2SO_PORT || ''
 const TOKEN = process.env.K2SO_HOOK_TOKEN || ''
-const AGENT_NAME = process.env.K2SO_AGENT_NAME || '__lead__'
 const PROJECT_PATH = process.env.K2SO_PROJECT_PATH || ''
 const POLL_INTERVAL_MS = 1000 // Poll every second
+
+// 0.39.0f Phase 2.1: dropped the `__lead__` literal default. When the
+// env var is unset we resolve from the daemon at startup (see
+// `resolveAgentName` below). The let-binding is so the resolver can
+// fill it in before the first poll tick.
+let AGENT_NAME = process.env.K2SO_AGENT_NAME || ''
 
 if (!PORT || !TOKEN) {
   console.error('[k2so-events] Missing K2SO_PORT or K2SO_HOOK_TOKEN environment variables')
@@ -35,6 +50,46 @@ if (!PORT || !TOKEN) {
 }
 
 const BASE_URL = `http://127.0.0.1:${PORT}`
+
+/**
+ * Resolve the workspace's primary agent display name from the daemon.
+ * Same endpoint the Tauri UI uses (`k2so_workspace_agent_display_name`),
+ * so the channel server represents the same identity the user sees.
+ *
+ * Errors loudly if the project path is unknown — that means the
+ * channel server was launched without proper env (a real bug), and
+ * silently picking a wrong identity would route events to nowhere.
+ */
+async function resolveAgentName(): Promise<string> {
+  if (!PROJECT_PATH) {
+    console.error(
+      '[k2so-events] FATAL: K2SO_AGENT_NAME is unset AND K2SO_PROJECT_PATH is missing — ' +
+      'cannot resolve workspace identity. This channel server was launched without ' +
+      'the env vars K2SO normally provides; refusing to start with an unknown agent identity.',
+    )
+    process.exit(1)
+  }
+  const params = new URLSearchParams({ token: TOKEN, project: PROJECT_PATH })
+  const response = await fetch(
+    `${BASE_URL}/cli/workspace/agent-display-name?${params}`,
+    { signal: AbortSignal.timeout(5000) },
+  )
+  if (!response.ok) {
+    console.error(
+      `[k2so-events] FATAL: daemon refused agent-display-name lookup (${response.status}) for ${PROJECT_PATH}`,
+    )
+    process.exit(1)
+  }
+  const body = (await response.json()) as { display_name?: string }
+  const name = body.display_name?.trim()
+  if (!name) {
+    console.error(
+      `[k2so-events] FATAL: daemon returned empty display_name for ${PROJECT_PATH}`,
+    )
+    process.exit(1)
+  }
+  return name
+}
 
 // ── MCP Server Setup ─────────────────────────────────────────────────────
 
@@ -128,6 +183,15 @@ async function pollEvents(): Promise<void> {
 // ── Main ─────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  // Resolve the agent identity BEFORE connecting to the MCP transport
+  // so the first poll tick uses the real name. resolveAgentName
+  // exits the process on failure (rather than silently routing to the
+  // wrong identity); we never proceed past this line with an empty
+  // AGENT_NAME.
+  if (!AGENT_NAME) {
+    AGENT_NAME = await resolveAgentName()
+  }
+
   const transport = new StdioServerTransport()
   await server.connect(transport)
 

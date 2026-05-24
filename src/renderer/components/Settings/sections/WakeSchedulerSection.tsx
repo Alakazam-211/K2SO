@@ -334,9 +334,12 @@ export function WakeSchedulerSection(): React.JSX.Element {
 
   // 0.38.3 — when the user clicks "Edit Wakeup" on a row, render the
   // WakeupEditor (AIFileEditor) takeover. The agent-name resolution
-  // mirrors ProjectsSection's: manager/coordinator/pod → __lead__,
-  // agent → k2so-agent, custom → slug of project name. Best-effort —
-  // WakeupEditor's AGENT.md fetch fails-soft if the slug doesn't match.
+  // uses the project-name slug as a best-effort fallback; the proper
+  // resolver lives in ProjectsSection (`primaryAgentName` useEffect)
+  // and post-0.39.0f Phase 2.1 calls `k2so_workspace_agent_display_name`.
+  // This panel renders the system-wide heartbeat list and doesn't have
+  // a per-row resolved name handy, so the slug is the cheap fallback
+  // for now — WakeupEditor's AGENT.md fetch fails-soft on mismatch.
   if (editingHeartbeat) {
     // Convert SystemHeartbeatRow → HeartbeatRow shape WakeupEditor expects
     const hb: HeartbeatRow = {

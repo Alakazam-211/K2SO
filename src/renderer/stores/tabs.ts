@@ -598,10 +598,15 @@ export function ensurePinnedAgentTabForMode(
       title = 'K2SO'
     }
 
-    // Resolve the actual primary agent name from the backend
-    let agentName = '__lead__'
+    // Resolve the actual primary agent name from the backend. The
+    // daemon's `agent_display_name` helper is total (always returns
+    // a string — folder basename if AGENT.md is missing), so the
+    // pinned tab gets a routable identity even when the agent list
+    // call fails. Post-0.39.0f Phase 2.1: no `__lead__` fallback —
+    // the daemon owns primary-agent resolution end-to-end.
+    const { invoke } = await import('@tauri-apps/api/core')
+    let agentName = ''
     try {
-      const { invoke } = await import('@tauri-apps/api/core')
       const agents = await invoke<Array<{ name: string; isManager: boolean; agentType: string }>>('k2so_agents_list', { projectPath })
       if (agents && agents.length > 0) {
         // Find the primary agent: manager/coordinator first, then first custom, then first agent
@@ -617,7 +622,17 @@ export function ensurePinnedAgentTabForMode(
         }
       }
     } catch {
-      // Fall back to __lead__ if agent list fails
+      // Fall through to the display-name resolver below.
+    }
+    if (!agentName) {
+      try {
+        agentName = await invoke<string>('k2so_workspace_agent_display_name', { projectPath })
+      } catch {
+        // As an absolute last resort use the project path basename so
+        // we never emit an empty routing key. The daemon will refuse
+        // the unknown name loudly when it's used.
+        agentName = projectPath.split('/').filter(Boolean).pop() ?? 'agent'
+      }
     }
 
     tabsStore.ensureSystemAgentTabs(agentName, projectPath, title)
@@ -1297,7 +1312,10 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       const sysAgentName = Array.from(sysTab.paneGroups.values())[0]?.items[0]?.type === 'agent'
         ? (Array.from(sysTab.paneGroups.values())[0].items[0].data as AgentItemData).agentName
         : null
-      if (agentName === sysAgentName || agentName === '__lead__' || agentName === '__workspace__') {
+      // 0.39.0f Phase 2.1: the `__lead__` literal was removed from
+      // routing — the system tab redirect now keys solely on the
+      // resolved primary agent name or the workspace-board sentinel.
+      if (agentName === sysAgentName || agentName === '__workspace__') {
         set({ activeTabId: sysTab.id })
         return
       }

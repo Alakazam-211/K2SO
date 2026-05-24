@@ -691,8 +691,11 @@ interface HeartbeatsPanelProps {
   agentName: string | null
   /** Workspace agent mode (manager / agent / custom / coordinator / pod). Used
       to derive a friendly display label for the header — e.g. "Workspace
-      Manager" instead of the raw dir name (`pod-leader` / `__lead__`) or the
-      internal sentinel. Optional for backwards compatibility. */
+      Manager" instead of the raw dir name (`pod-leader` or whatever the
+      manager's agent folder is named). Pre-0.39.0f Phase 2.1 this also had
+      to hide the `__lead__` routing sentinel; the sentinel is now gone, so
+      the only reason left is the "Workspace Manager" friendliness. Optional
+      for backwards compatibility. */
   agentMode?: string | null
   /** Open the WakeupEditor for a heartbeat row. The Settings page lifts
    *  this state to ProjectDetail so the editor can render inside the

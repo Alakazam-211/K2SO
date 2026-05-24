@@ -976,6 +976,17 @@ function ProjectDetail({
   // workspace, there's no audit to show — collapse the right column so
   // we don't leave an empty frame next to every Off workspace.
   const [historyEmpty, setHistoryEmpty] = useState(false)
+  // 0.39.0f Phase 2.1: the workspace's primary agent identity, resolved
+  // via the daemon-first `k2so_workspace_agent_display_name` helper
+  // (which falls back to AGENT.md `name:` then folder basename). The
+  // pre-unification code keyed off `mode` and hard-coded `__lead__` /
+  // `k2so-agent` / `slug(project.name)`; that triplet drifted from
+  // reality whenever the user renamed the agent or the workspace
+  // identity changed. Resolving via the daemon keeps the Wakeup editor,
+  // the HeartbeatsPanel header, and the SystemHeartbeatRow all in sync.
+  // Empty string while loading — children handle the loading state by
+  // suspending their reads until the name is known.
+  const [primaryAgentName, setPrimaryAgentName] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Close editor when project changes (user navigated away without using back button)
@@ -984,6 +995,28 @@ function ProjectDetail({
     setAgentEditorName('')
     setWakeupEditingHb(null)
   }, [project.id])
+
+  // Resolve the workspace's primary agent display name once per
+  // project. Used by the WakeupEditor takeover (agentName prop) and
+  // the HeartbeatsPanel (agentName prop). The fetch is a single
+  // daemon call; the resolver is total so we always end up with a
+  // non-empty string for non-`off` workspaces.
+  useEffect(() => {
+    let cancelled = false
+    if ((project.agentMode || 'off') === 'off') {
+      setPrimaryAgentName('')
+      return () => { cancelled = true }
+    }
+    invoke<string>('k2so_workspace_agent_display_name', { projectPath: project.path })
+      .then((n) => { if (!cancelled) setPrimaryAgentName(n) })
+      .catch((err) => {
+        if (!cancelled) {
+          console.error('[primary-agent-name] resolve failed:', err)
+          setPrimaryAgentName('')
+        }
+      })
+    return () => { cancelled = true }
+  }, [project.path, project.agentMode])
 
 
   const handleDetectIcon = async (): Promise<void> => {
@@ -1078,13 +1111,16 @@ function ProjectDetail({
   // squeezed inside the right-rail aside or fighting the workspaces
   // sidebar's stacking context with a fixed overlay.
   if (wakeupEditingHb) {
-    const mode = (project.agentMode || 'off') as string
-    const wakeupAgentName =
-      mode === 'manager' || mode === 'coordinator' || mode === 'pod'
-        ? '__lead__'
-        : mode === 'agent'
-          ? 'k2so-agent'
-          : project.name.toLowerCase().replace(/\s+/g, '-')
+    // 0.39.0f Phase 2.1: agentName resolves through the daemon's
+    // `k2so_workspace_agent_display_name` helper (see the
+    // primaryAgentName useEffect above). The legacy mode→literal
+    // mapping (`manager`→`__lead__`, `agent`→`k2so-agent`,
+    // `custom`→slug(project.name)) drifted from AGENT.md whenever the
+    // user renamed the agent; the single resolver keeps the editor
+    // pointed at the actual on-disk identity. Empty string only
+    // while the resolver is in-flight — fall back to the slug then.
+    const wakeupAgentName = primaryAgentName
+      || project.name.toLowerCase().replace(/\s+/g, '-')
     return (
       <SectionErrorBoundary>
         <div className="absolute inset-0 overflow-hidden bg-[var(--color-bg)]">
@@ -1497,16 +1533,11 @@ function ProjectDetail({
               key={`hb-${hbRefreshNonce}`}
               projectPath={project.path}
               agentMode={project.agentMode || null}
-              agentName={(() => {
-                const mode = project.agentMode || 'off'
-                if (mode === 'manager' || mode === 'coordinator' || mode === 'pod') return '__lead__'
-                if (mode === 'agent') return 'k2so-agent'
-                // Custom mode — backend find_primary_agent scans for the
-                // custom-typed agent by reading AGENT.md frontmatter. The
-                // UI just needs a display name; use the project.name as a
-                // reasonable fallback until we wire a lookup.
-                return project.name.toLowerCase().replace(/\s+/g, '-')
-              })()}
+              // 0.39.0f Phase 2.1: single daemon-resolved primary
+              // agent identity, no mode→literal mapping. See
+              // primaryAgentName useEffect above for the resolver.
+              agentName={primaryAgentName
+                || project.name.toLowerCase().replace(/\s+/g, '-')}
               onConfigureWakeup={(row) => setWakeupEditingHb(row)}
             />
             <ShowHeartbeatSessionsToggle projectPath={project.path} />
@@ -2222,8 +2253,10 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
 // and writes new values via `k2so_workspace_set_agent_display_name`.
 //
 // Why a separate field from the technical agent name? Because in
-// 0.37.4 the technical name (`__lead__`, `k2so-agent`, custom-agent
-// directory name) still keys infrastructure layers — v2_session_map,
+// 0.37.4 the technical name (the agent's AGENT.md `name:` /
+// directory basename — historically the `__lead__` sentinel for
+// manager workspaces, removed in 0.39.0f Phase 2.1) still keys
+// infrastructure layers — v2_session_map,
 // `workspace_sessions.terminal_id`, pending_live queue dirs. Editing
 // the technical name would cascade through all of them and risk
 // dropping the live PTY. The display name decouples the
@@ -2234,7 +2267,7 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
 // the technical name from infrastructure, collapse `display_name:`
 // and `name:` back into one field. Until then, this is the cheap
 // stepping stone that fixes the user-visible "I renamed my agent
-// and the inbox tab still says __lead__" complaint.
+// and the inbox tab still says the wrong name" complaint.
 
 function AgentDisplayNameField({
   projectPath,
@@ -2881,13 +2914,16 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
               </div>
               <p className="text-[10px] text-[var(--color-text-muted)] truncate">{manager.role}</p>
               {/* 0.37.4: friendly display label, separate from the
-                  internal `__lead__` routing key so the inbox tab
-                  can show something more human. Manage Persona
+                  internal agent identity (directory basename / AGENT.md
+                  `name:`) so the inbox tab can show something more
+                  human. Pre-0.39.0f Phase 2.1 the manager identity was
+                  the `__lead__` sentinel — removed; the identity is now
+                  the workspace's primary agent name. Manage Persona
                   rides as the trailing slot so input | save | persona
                   all sit on one row. */}
               <AgentDisplayNameField
                 projectPath={projectPath}
-                helpText="Shown on the inbox tab — what you call this manager. Internal routing key (__lead__) is unchanged."
+                helpText="Shown on the inbox tab — what you call this manager. The internal agent identity (folder basename) is unchanged."
                 trailing={
                   <button
                     onClick={() => onOpenEditor(manager.name)}

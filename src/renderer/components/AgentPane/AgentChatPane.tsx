@@ -565,7 +565,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
           // suffix because post-unification there's at most one
           // agent per workspace, and the suffix only created
           // opportunities for the renderer to compute the wrong
-          // name (mode→__lead__ hardcoding when AGENT.md said
+          // name (mode→legacy-sentinel hardcoding when AGENT.md said
           // scout — see C3PO 5c80bef1, the SMS Bridge bug). The
           // daemon's `canonical_session::canonical_key_for(pid)`
           // helper is the single source of truth for the shape.
