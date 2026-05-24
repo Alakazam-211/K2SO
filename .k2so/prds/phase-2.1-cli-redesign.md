@@ -275,3 +275,284 @@ Phase 2.1 can also land **alongside Phase 3 Workstream A** (typed router) if Pha
 - `.k2so/prds/phase-3-contract-hardening.md` — Phase 3 (Workstream A typed router may absorb Phase 2.1's new routes).
 - `cli/k2so` — current implementation; 3,854 LoC, 96 cmd_ functions, 114 cli_request calls, ~19 non-cli_request functions audited above.
 - Memory: `feedback_post_only_route_guards` (Phase 2.1's new daemon routes inherit this rule).
+
+---
+
+# Appendix A — CLI Surface Area Review (2026-05-23)
+
+User-driven review covering: (1) which verbs duplicate each other, (2) which concepts could collapse to flags on a single verb, (3) which are deprecation candidates, (4) which are named poorly, (5) how `k2so help` should be reorganized.
+
+The four user verdicts that drive this appendix (decided 2026-05-23 in a single conversation):
+1. ✅ Consolidate `msg` + `work send` + `signal` under `msg` with flags.
+2. ✅ Consolidate `checkin` + `status` + `done` under `checkin` with flags.
+3. ✅ Move to 3-tier help: daily / advanced / internal.
+4. ✅ Capture all findings in this PRD (this appendix).
+
+---
+
+## A1 — Real duplicates (collapse)
+
+These are the same surface implemented twice. **All 5 land in Phase 2.1.**
+
+| Today | Phase 2.1 result | Reason |
+|---|---|---|
+| `agent <op>` + `agents <op>` (both dispatch to `cmd_agents_*` for create/delete/update/list/profile) | **`agent` only** — `agents` becomes an alias with deprecation warning | Two paths to the same function. Singular for single-item ops, plural for list views — pick singular as the canonical to match `git`, `docker`, etc. |
+| `whatsnew` + `whats-new` | **`whats-new` only** | Consistency with `app-update`, `commit-merge`. `whatsnew` becomes a deprecation-warned alias. |
+| `agent delete` + `agent remove` (and same for `agents` cluster) | **`agent remove`** | Parallels `workspace remove`, `heartbeat remove`. "remove" implies the entity can be re-added; "delete" sounds permanent. |
+| `heartbeat archive` + `heartbeat remove` (share an impl) | **`heartbeat remove [--purge]`** | Verb split implied two different things when it was always one impl. `--purge` makes the difference explicit. |
+| `app-update` + `update` | **`update [--cli\|--app]` (default: `--app`)** | Users confuse these every time. One verb, semantic flags. |
+
+**Net**: -5 distinct verb spellings, 0 lost functionality.
+
+---
+
+## A2 — Conceptual overlaps → unify under flags
+
+The biggest UX wins. **Each is a user-approved consolidation.**
+
+### A2.1 — `msg` + `work send` + `signal` → `msg` with flags ⭐
+
+Three current verbs for "deliver content to another workspace":
+
+| Today | Phase 2.1 |
+|---|---|
+| `msg <ws> "text"` (live delivery, blocks until landed) | `msg <ws> "text"` *(default: live)* |
+| `work send <ws> --title "..." --body "..."` (inbox queue) | `msg <ws> --inbox --title "..." --body "..."` |
+| `signal <target> <kind> <payload>` (raw AgentSignal; `--inbox` flag for async) | `msg <ws> --signal <kind> <payload>` |
+
+**Implementation:**
+- `cmd_msg` gains `--inbox` and `--signal <kind>` flags
+- `cmd_work_send` becomes a deprecation-warned wrapper that calls `cmd_msg --inbox` (kept for one release cycle, then removed)
+- `cmd_signal` becomes a deprecation-warned wrapper that calls `cmd_msg --signal`
+- Top-level `signal` verb → `k2so help-deprecated signal` → "Use `k2so msg --signal <kind>` instead"
+- `work` cluster keeps `create / inbox / move`; loses `send`
+
+**Mental model**: one verb for "send something to a workspace"; three flags = three delivery modes.
+
+**Daemon side**: routes don't change (msg still hits `/cli/msg/send` or whatever the daemon-side route is; inbox hits the inbox endpoint; signal hits `/cli/awareness/publish`). The CLI is what consolidates, not the protocol.
+
+### A2.2 — `checkin` + `status` + `done` → `checkin` with flags
+
+Three current verbs for "agent reports in":
+
+| Today | Phase 2.1 |
+|---|---|
+| `checkin` (heartbeat ping; "I'm alive") | `checkin` *(default: ping)* |
+| `status "message"` | `checkin --status "message"` |
+| `done` | `checkin --done` |
+| `done --blocked "reason"` | `checkin --done --blocked "reason"` |
+
+**Implementation:**
+- `cmd_checkin` gains `--status` and `--done` flags
+- `cmd_status` and `cmd_done` become deprecation-warned wrappers
+- **Keep `done` as a shortcut alias** — agents type `done` constantly; muscle memory matters. Soft-deprecate `status`; preserve `done` with a longer deprecation timeline (or permanently keep as a shortcut)
+
+**Mental model**: `checkin` is the umbrella for agent self-reporting; flags clarify what's being reported.
+
+### A2.3 — `commit` + `commit-merge` → `commit [--merge]`
+
+```
+k2so commit -m "fix"              # commit only
+k2so commit -m "fix" --merge      # commit then merge into main
+```
+
+`cmd_commit_merge` becomes a deprecation-warned wrapper.
+
+### A2.4 — `agents lock` + `agents unlock` → `agent lock [--release]`
+
+```
+k2so agent lock <n>               # acquire lock
+k2so agent lock <n> --release     # release lock
+```
+
+(Note: dropping `s` per A1 unification.) `cmd_agents_unlock` deprecates to `cmd_agent_lock --release`.
+
+### A2.5 — `heartbeat enable` + `heartbeat disable` → `heartbeat enable <n> [--off]`
+
+Trivial collapse; `cmd_heartbeat_disable` deprecates to `cmd_heartbeat_enable_disable false`.
+
+---
+
+## A3 — Deprecation candidates
+
+| Verb | Phase 2.1 verdict | Replacement |
+|---|---|---|
+| `agents create` (top-level) | **Hard-deprecate** | Workspaces own their primary agent; use `workspace launch` or `workspace update` |
+| `agents delete` (top-level) | **Hard-deprecate** | Use `workspace remove` |
+| `agents generate-md` | **Hide → `help --internal`** | Called by orchestrators, not humans |
+| `agents launch <n>` | **Hide → `help --advanced`** | Power-user; `workspace launch` (Phase 2.1) covers the user case |
+| `agents triage`, `agents reap` | **Hide → `help --advanced`** | Diagnostic verbs |
+| `agents lock` / `unlock` | **Hide → `help --advanced`** + collapse per A2.4 | Debugging |
+| `workspace agent-name`, `set-agent-name`, `resume-chat-args` | **Hide → `help --internal`** (or remove if no human callers) | Looks like orchestrator-internal RPC. Audit before removing. |
+| `agentic on/off` | **Fold into `settings`** | Single global toggle; `settings --agentic on` |
+| `state list/get/set` | **Fold into `settings`** | Workspace state IS a setting; `settings --state <id>` |
+| `mode <off\|agent\|manager>` | **Fold into `settings`** | Same: `settings --mode manager` |
+| `hooks status` | **Move to `help --advanced`** + relocate to `daemon hooks` | Diagnostic; hooks are daemon-managed |
+| `feed` | **Rename to `activity`** + hide in `help --advanced` | "feed" is generic; `activity` matches the SQL table name |
+| `roster` | **Rename to `who`** + hide in `help --advanced` | Cute jargon → CLI convention (Unix `who`) |
+| `reserve` / `release` | **Move to `help --advanced`** | File-lock primitive; niche |
+| `companion` | **Move to `daemon companion`** | Daemon-managed (Unit 1 + Unit 7c) |
+| `skills` | **Rename → `workspace skills`** if it manages workspace skill layers | Verb too vague; clarify by scoping |
+| `onboarding later` / `fresh` | **Rename to `defer` / `start-fresh`** | Unclear current names |
+
+---
+
+## A4 — Help reorganization (3 tiers)
+
+Replace current 2-tier help with **3 tiers** plus the existing `help-deprecated`:
+
+### Tier 1: `k2so help` — daily verbs (~15)
+
+```
+TALK TO OTHERS
+  msg <workspace> "text"                Deliver live (default)
+      --inbox [--title "..."] [--body]    Queue to inbox instead
+      --signal <kind> <payload>           Emit raw signal (power-user)
+  who                                   Who's online (was: roster)
+  connections list/add/remove           Cross-workspace links
+
+YOUR WORK
+  work create --title "..." --body "..." [--priority H|N|L]
+  work inbox                            Workspace inbox
+  work move --file <f> --from <a> --to <b>
+  checkin                               Agent ping (default)
+      --status "message"                  Report status (was: status)
+      --done [--blocked "reason"]         Task complete (was: done)
+  done                                  Shortcut for `checkin --done`
+
+DELEGATION + REVIEW
+  delegate <agent> <file>               Spawn agent in worktree
+  reviews                               Pending reviews
+  review approve|reject|feedback <agent> [--reason]
+
+WORKSPACE
+  workspaces list                       Yellow pages (Phase 2.1 new)
+  workspaces running                    Live sessions
+  workspace launch [--workspace <path>] Smart cascade spawn-or-attach
+  workspace profile [--workspace <path>] Read agent AGENT.md
+  workspace update --field <f> --value <v>
+
+INFO
+  help                                  This help
+  help --advanced                       Power-user verbs (heartbeats, daemon, settings, etc.)
+  help --internal                       Orchestrator-RPC verbs (rare; agent runtimes use)
+  help-deprecated                       Retired verb → new equivalent map
+  whats-new                             Changelog popup
+  version                               CLI version
+```
+
+### Tier 2: `k2so help --advanced` — power-user verbs
+
+Daily verbs + plus:
+- `heartbeat *` (entire cluster — add/list/remove/fire/show/edit/rename/status/wakeup/schedule/etc.)
+- `daemon status/start/stop/restart/log/uninstall/companion/hooks`
+- `settings` (with --mode, --state, --agentic, --companion flags subsuming the old top-level verbs)
+- `update [--cli|--app]` (subsuming `app-update`)
+- `onboarding scan/adopt/defer/start-fresh`
+- `commit [--merge]` (subsuming `commit-merge`)
+- `workspace create/open/remove`
+- `agent update/profile` (single-item ops; multi-item moved to `workspaces`)
+- `whats-new` (with `--reset`, `--mark-seen` flags)
+
+### Tier 3: `k2so help --internal` — orchestrator-RPC
+
+Verbs that humans rarely run directly; documented as "called by agent runtimes":
+- `terminal spawn/write/read`
+- `sessions spawn/list/live/compact/set-label`
+- `agents triage/reap/lock/launch/generate-md` (`agents` plural here because they operate on multiple)
+- `workspace agent-name/set-agent-name/resume-chat-args`
+- `reserve/release`
+- `hooks status`
+- `signal <target>` (raw — `msg --signal` is the daily form)
+
+### `k2so help-deprecated`
+
+Static text listing every retired or hidden-by-default verb + its new equivalent. Per-deprecated-verb error messages reference this.
+
+---
+
+## A5 — Naming issues (pure renames)
+
+| Today | Phase 2.1 | Reason |
+|---|---|---|
+| `whatsnew` | `whats-new` (deprecate spelling) | Consistency |
+| `agentic` (top-level) | (folded into `settings --agentic`) | Vague verb name |
+| `state` (top-level) | (folded into `settings --state`) | Generic; collides with mental models |
+| `mode` (top-level) | (folded into `settings --mode`) | Generic |
+| `feed` | `activity` | Generic → table-aligned |
+| `roster` | `who` | CLI convention |
+| `heartbeat noop` / `action` | Keep but document as "called by agent runtime" | Internal terminology |
+| `heartbeat use-pinned-session on/off <n>` | `heartbeat edit <n> --pinned-session [on/off]` | Wordy → flag on edit |
+| `workspace resume-chat-args` | (remove if internal-only) | Implementation detail in verb name |
+| `onboarding later` | `onboarding defer` | Clearer intent |
+| `onboarding fresh` | `onboarding start-fresh` | Clearer intent |
+
+---
+
+## A6 — Proposed final verb taxonomy
+
+**Daily verbs (15 top-level):**
+`msg`, `work`, `checkin`, `done` (alias), `delegate`, `reviews`, `review`, `workspace`, `workspaces`, `who`, `activity`, `connections`, `commit`, `whats-new`, `help`, `version`
+
+**Power-user (5 top-level):**
+`heartbeat`, `daemon`, `settings` (subsumes `mode`/`state`/`agentic`/`companion`), `update` (subsumes `app-update`), `onboarding`
+
+**Internal (4 top-level):**
+`terminal`, `sessions`, `agent` (single-item subcommands), `hooks`
+
+**Hard-deprecated (removed; error message → `help-deprecated`):**
+`agents create`, `agents delete`, `agentic`, `state`, `mode`, `app-update`, `commit-merge`, `companion`, `whatsnew`, `roster`, `feed`, `signal` (top-level; `msg --signal` is the new form), `work send` (top-level; `msg --inbox` is the new form), `status` (`checkin --status` is the new form)
+
+**Net change**: 37 top-level verbs → ~24 (15 daily + 5 power + 4 internal). Plus the corresponding flag additions on the surviving verbs.
+
+---
+
+## A7 — Updated cli/k2so LoC estimate
+
+Original Phase 2.1 estimate: 3,854 → ~2,800 LoC.
+**Updated with Appendix A changes**: 3,854 → ~2,400 LoC.
+
+Why lower: the consolidations in A2 (msg + work send + signal; checkin + status + done; commit + commit-merge; etc.) delete more lines than they add, because the new flag handlers are smaller than the duplicate dispatch + duplicate option parsing they replace.
+
+Net per category:
+- A1 duplicate removal: ~200 LoC deleted
+- A2 flag consolidations: ~400 LoC deleted (3 verbs → 1 verb × 3 collapses)
+- A3 hard deprecations: ~300 LoC deleted (entire functions)
+- A4 help reorganization: ~50 LoC added (new help tier) but ~100 LoC of advanced-help text restructured
+- A5 renames: ~0 net (rename ≠ delete)
+
+Total: ~3,854 → ~2,400. CLI script becomes meaningfully shorter while gaining new workspace-keyed verbs.
+
+---
+
+## A8 — Verification tests (new)
+
+Beyond the K2SO Connect tests in the main PRD body, Appendix A adds:
+
+- `tests/cli/msg_inbox_subsumes_work_send.sh` — verify `msg <ws> --inbox --title "..." --body "..."` lands in the recipient's inbox identically to the legacy `work send`.
+- `tests/cli/msg_signal_subsumes_signal_verb.sh` — verify `msg <ws> --signal <kind> <payload>` produces the same `AgentSignal` as the legacy `signal` verb.
+- `tests/cli/checkin_status_subsumes_status_verb.sh` — verify `checkin --status "msg"` produces the same activity_feed entry as `status "msg"`.
+- `tests/cli/checkin_done_subsumes_done_verb.sh` — verify `checkin --done [--blocked]` parity with `done [--blocked]`.
+- `tests/cli/agent_remove_subsumes_delete.sh` — verify `agent remove` and `agent delete` produce identical results (one shows deprecation, the other doesn't).
+- `tests/cli/help_three_tiers.sh` — verify `k2so help`, `k2so help --advanced`, and `k2so help --internal` each show the right verb set.
+- `tests/cli/help_deprecated_lists_all_retired.sh` — verify every hard-deprecated verb appears in `help-deprecated` output with a replacement.
+- `tests/cli/hard_deprecated_verbs_fail_with_helpful_error.sh` — verify `agents create`, `signal`, `app-update`, etc. all exit non-zero with a pointer to the new verb.
+
+---
+
+## A9 — Implementation order
+
+Within Phase 2.1's single landing, the subagent should sequence:
+
+1. **Add new daemon routes first** (so CLI verbs have something to call): `/cli/workspaces/{list, running, launch, profile, update}`, `/cli/templates/*`.
+2. **Add new CLI verbs** that use the new routes: `cmd_workspaces_list`, `cmd_workspace_launch`, etc.
+3. **Add flag handlers to existing verbs**: `cmd_msg` gets `--inbox` + `--signal`; `cmd_checkin` gets `--status` + `--done`.
+4. **Add deprecation wrappers**: `cmd_work_send` calls `cmd_msg --inbox` with deprecation warning; `cmd_signal` calls `cmd_msg --signal`; etc.
+5. **Add `help-deprecated`** + reorganize `cmd_help` into the 3-tier structure.
+6. **Hard-deprecate** `agents create / delete`, `agentic`, `state`, `mode`, `app-update`, `commit-merge`, `companion`, `roster`, `feed`, `signal` (top-level), `work send` (top-level), `status` (top-level): replace each function body with an error message + `help-deprecated` pointer.
+7. **Rename**: `feed` → `activity`, `roster` → `who`, `onboarding later/fresh` → `defer/start-fresh`. The old names become hard-deprecated.
+8. **Delete dead code paths** uncovered by the audit (old comments, unused helpers, etc.).
+9. **Run the test suite** (existing + new from A8).
+10. **`K2SO_DAEMON_URL=<remote>` end-to-end smoke** against a foreground daemon on a different port.
+
+Total subagent time estimate: 60-90 min (larger than the original ~30-60 min estimate because Appendix A roughly doubled the scope).
