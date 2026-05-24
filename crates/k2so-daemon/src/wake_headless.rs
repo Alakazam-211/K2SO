@@ -119,7 +119,7 @@ pub fn spawn_wake_headless(
     let project_id = {
         let db = k2so_core::db::shared();
         let conn = db.lock();
-        k2so_core::agents::resolve_project_id(&conn, project_path)
+        k2so_core::workspace::agent_identity::resolve_project_id(&conn, project_path)
     };
 
     // 0.37.8 — heartbeat fires get their own per-heartbeat canonical

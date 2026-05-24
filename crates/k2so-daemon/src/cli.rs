@@ -192,7 +192,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                 // total (always returns a string) so callers without
                 // an explicit agent still get a routable identity.
                 let agent = opt_param(params, "agent").unwrap_or_else(|| {
-                    k2so_core::agents::find_primary_agent(&p)
+                    k2so_core::workspace::agent_identity::find_primary_agent(&p)
                         .unwrap_or_else(|| k2so_core::workspace::display::agent_display_name(&p))
                 });
                 let events = k2so_core::workspace::events::drain_agent_events(&p, &agent);
@@ -548,7 +548,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                 }
                 let db = k2so_core::db::shared();
                 let conn = db.lock();
-                let project_id = match k2so_core::agents::resolve_project_id(&conn, &p) {
+                let project_id = match k2so_core::workspace::agent_identity::resolve_project_id(&conn, &p) {
                     Some(pid) => pid,
                     None => return CliResponse::bad_request(
                         format!("project not registered: {p}"),
@@ -626,7 +626,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                         };
                         if let Some(project_id) = project_id_opt {
                             if let Some(agent_name) =
-                                k2so_core::agents::find_primary_agent(&p)
+                                k2so_core::workspace::agent_identity::find_primary_agent(&p)
                             {
                                 let canonical_key = format!("{project_id}:{agent_name}");
                                 if let Some(session) =
@@ -767,7 +767,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                 ) {
                     Ok(md) => {
                         let claude_md_path =
-                            k2so_core::agents::agent_dir(&p, &agent).join("CLAUDE.md");
+                            k2so_core::workspace::agent_identity::agent_dir(&p, &agent).join("CLAUDE.md");
                         if let Err(e) =
                             k2so_core::workspace::work_item::atomic_write(&claude_md_path, &md)
                         {

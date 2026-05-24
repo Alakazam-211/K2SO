@@ -139,7 +139,7 @@ pub fn ensure_canonical_session(project_path: &str) -> Result<EnsureOutcome, Str
     // 1. Resolve project_id + primary agent.
     let project_id = lookup_project_id(project_path)
         .ok_or_else(|| format!("project not registered: {project_path}"))?;
-    let agent_name = k2so_core::agents::find_primary_agent(project_path)
+    let agent_name = k2so_core::workspace::agent_identity::find_primary_agent(project_path)
         .ok_or_else(|| "no primary agent in workspace".to_string())?;
 
     // 2. Single-flight: if canonical session is already live, return.

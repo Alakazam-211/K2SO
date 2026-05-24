@@ -457,8 +457,8 @@ fn spawn_terminal_impl(
     let project_id = {
         let db = k2so_core::db::shared();
         let conn = db.lock();
-        k2so_core::agents::resolve_project_id(&conn, &cwd)
-            .or_else(|| k2so_core::agents::resolve_project_id(&conn, project_path))
+        k2so_core::workspace::agent_identity::resolve_project_id(&conn, &cwd)
+            .or_else(|| k2so_core::workspace::agent_identity::resolve_project_id(&conn, project_path))
     };
     let outcome = match spawn_agent_session_v2_blocking(SpawnWorkspaceSessionRequest {
         agent_name: agent_name.clone(),

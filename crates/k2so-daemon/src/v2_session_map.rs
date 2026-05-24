@@ -82,7 +82,7 @@ pub fn register(agent_name: impl Into<String>, session: Arc<DaemonPtySession>) {
     if !cwd.is_empty() {
         let db = k2so_core::db::shared();
         let conn = db.lock();
-        if let Some(project_id) = k2so_core::agents::resolve_project_id(&conn, &cwd) {
+        if let Some(project_id) = k2so_core::workspace::agent_identity::resolve_project_id(&conn, &cwd) {
             let args_json = serde_json::to_string(&session.args).ok();
             // 0.38.8 — extract claude's session UUID from the args if
             // present. v2_spawn::handle_v2_spawn auto-injects

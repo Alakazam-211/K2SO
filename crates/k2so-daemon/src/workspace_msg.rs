@@ -38,7 +38,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use k2so_core::agents::resolve_project_id;
+use k2so_core::workspace::agent_identity::resolve_project_id;
 use k2so_core::db::schema::WorkspaceSession;
 use k2so_core::log_debug;
 use k2so_core::session::SessionId;
@@ -419,7 +419,7 @@ fn resume_and_fire(
     text: &str,
     from: &str,
 ) -> MsgResponse {
-    let agent_name = match k2so_core::agents::find_primary_agent(project_path) {
+    let agent_name = match k2so_core::workspace::agent_identity::find_primary_agent(project_path) {
         Some(n) => n,
         None => return MsgResponse::fail(MsgReason::NoAgentMode),
     };
@@ -441,7 +441,7 @@ fn resume_and_fire(
 }
 
 fn fresh_fire(project_path: &str, project_id: &str, text: &str, from: &str) -> MsgResponse {
-    let agent_name = match k2so_core::agents::find_primary_agent(project_path) {
+    let agent_name = match k2so_core::workspace::agent_identity::find_primary_agent(project_path) {
         Some(n) => n,
         None => return MsgResponse::fail(MsgReason::NoAgentMode),
     };

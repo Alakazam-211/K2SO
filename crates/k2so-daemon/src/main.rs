@@ -2118,7 +2118,7 @@ fn handle_cli_heartbeat(
             }
             let db = k2so_core::db::shared();
             let conn = db.lock();
-            let project_id = k2so_core::agents::resolve_project_id(&conn, project_path)
+            let project_id = k2so_core::workspace::agent_identity::resolve_project_id(&conn, project_path)
                 .ok_or_else(|| format!("Project not found: {project_path}"))?;
             k2so_core::db::schema::HeartbeatFire::list_by_schedule_name(
                 &conn,
@@ -2155,7 +2155,7 @@ fn handle_cli_heartbeat(
             }
             let db = k2so_core::db::shared();
             let conn = db.lock();
-            let project_id = k2so_core::agents::resolve_project_id(&conn, project_path)
+            let project_id = k2so_core::workspace::agent_identity::resolve_project_id(&conn, project_path)
                 .ok_or_else(|| format!("Project not found: {project_path}"))?;
             let hb_row =
                 k2so_core::db::schema::AgentHeartbeat::get_by_name(&conn, &project_id, &name)
@@ -2273,7 +2273,7 @@ fn handle_cli_heartbeat_log(
         .clamp(1, 500);
     let db = k2so_core::db::shared();
     let conn = db.lock();
-    let project_id = k2so_core::agents::resolve_project_id(&conn, project_path)
+    let project_id = k2so_core::workspace::agent_identity::resolve_project_id(&conn, project_path)
         .ok_or_else(|| format!("Project not found: {project_path}"))?;
     k2so_core::db::schema::HeartbeatFire::list_by_project(&conn, &project_id, limit)
         .map(|rows| serde_json::to_string(&rows).unwrap_or_default())

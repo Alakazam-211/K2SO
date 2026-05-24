@@ -88,7 +88,7 @@ pub fn spawn_wake_via_session_stream(
     let project_id = {
         let db = k2so_core::db::shared();
         let conn = db.lock();
-        k2so_core::agents::resolve_project_id(&conn, project_path)
+        k2so_core::workspace::agent_identity::resolve_project_id(&conn, project_path)
     };
     let outcome = spawn_agent_session_v2_blocking(SpawnWorkspaceSessionRequest {
         agent_name: agent_name.to_string(),
@@ -113,7 +113,7 @@ pub fn spawn_wake_via_session_stream(
         let db = k2so_core::db::shared();
         let conn = db.lock();
         if let Some(project_id) =
-            k2so_core::agents::resolve_project_id(&conn, project_path)
+            k2so_core::workspace::agent_identity::resolve_project_id(&conn, project_path)
         {
             let _ = k2so_core::db::schema::AgentHeartbeat::save_session_id(
                 &conn, &project_id, hb_name, &pinned_session_id,
@@ -193,7 +193,7 @@ pub fn handle_agents_launch(
     let project_id = {
         let db = k2so_core::db::shared();
         let conn = db.lock();
-        k2so_core::agents::resolve_project_id(&conn, project_path)
+        k2so_core::workspace::agent_identity::resolve_project_id(&conn, project_path)
     };
     let outcome = match spawn_agent_session_v2_blocking(SpawnWorkspaceSessionRequest {
         agent_name: agent.clone(),

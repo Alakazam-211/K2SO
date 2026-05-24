@@ -176,7 +176,7 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
     if command.is_none() {
         let db = k2so_core::db::shared();
         let conn = db.lock();
-        if let Some(project_id) = k2so_core::agents::resolve_project_id(&conn, &req.cwd) {
+        if let Some(project_id) = k2so_core::workspace::agent_identity::resolve_project_id(&conn, &req.cwd) {
             if let Ok(Some(saved)) = k2so_core::db::schema::WorkspaceTabSession::get_by_agent_name(
                 &conn,
                 &project_id,
@@ -320,12 +320,12 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
         } else if let Some((pid, _bare)) = req.agent_name.split_once(':') {
             // Legacy `<pid>:<agent>` shape from a 0.37.4 renderer.
             if pid.is_empty() {
-                k2so_core::agents::resolve_project_id(&conn, &req.cwd)
+                k2so_core::workspace::agent_identity::resolve_project_id(&conn, &req.cwd)
             } else {
                 Some(pid.to_string())
             }
         } else {
-            k2so_core::agents::resolve_project_id(&conn, &req.cwd)
+            k2so_core::workspace::agent_identity::resolve_project_id(&conn, &req.cwd)
         };
         if let Some(project_id) = project_id_opt {
             // Symmetric session-id-keyed stamping — mirrors the
