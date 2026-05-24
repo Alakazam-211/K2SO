@@ -1115,7 +1115,7 @@ pub fn k2so_agents_review_request_changes(
 /// Respects workspace state capabilities — items with "off" capability are excluded.
 #[tauri::command]
 pub fn k2so_agents_triage_summary(project_path: String) -> Result<String, String> {
-    k2so_core::agents::triage_summary::triage_summary(&project_path)
+    k2so_core::workspace::triage::triage_summary(&project_path)
 }
 
 /// Determine what should be launched based on triage.
@@ -1142,7 +1142,7 @@ pub fn k2so_agents_triage_summary(project_path: String) -> Result<String, String
 #[tauri::command]
 #[allow(deprecated)]
 pub fn k2so_agents_triage_decide(project_path: String) -> Result<Vec<String>, String> {
-    k2so_core::agents::triage_summary::triage_decide(&project_path)
+    k2so_core::workspace::triage::triage_decide(&project_path)
 }
 
 

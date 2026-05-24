@@ -6,7 +6,7 @@
 //! `test-util` feature so the shared DB state doesn't contaminate
 //! the actual ~/.k2so/k2so.db.
 
-use k2so_core::agents::settings::{
+use k2so_core::workspace::settings::{
     get_use_session_stream, update_project_setting,
 };
 use k2so_core::db::{init_for_tests, shared};
@@ -140,7 +140,7 @@ fn unknown_field_still_rejected() {
 // G6 — settings JSON exposes useSessionStream for the UI toggle
 // ─────────────────────────────────────────────────────────────────────
 
-use k2so_core::agents::settings::get_project_settings;
+use k2so_core::workspace::settings::get_project_settings;
 
 #[test]
 fn get_project_settings_exposes_use_session_stream_bool() {
