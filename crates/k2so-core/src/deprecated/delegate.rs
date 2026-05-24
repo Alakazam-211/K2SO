@@ -1,21 +1,27 @@
-//! Agent delegation — "assign this work-item to a sub-agent in its
-//! own worktree."
+//! Agent delegation — DEPRECATED in Phase 2.1 (0.39.0g).
 //!
-//! The workflow, end to end:
+//! Pre-Phase-2.1, K2SO owned the spawn lifecycle for delegated sub-agents:
+//! the daemon (or the UI Delegate button) called
+//! [`k2so_agents_delegate`] which created a worktree, registered it,
+//! moved the work item into the agent's `active/`, generated CLAUDE.md,
+//! and returned a launch JSON the caller used to spawn `claude` in the
+//! new worktree.
 //!
-//! 1. Read the work item from `inbox/` + find its slug.
-//! 2. Create a git worktree on a new branch (`agent/<name>/<slug>`).
-//! 3. Register the worktree in the `workspaces` DB table so it shows
-//!    up in the sidebar tab bar.
-//! 4. Move the work item from `inbox/` → the agent's `active/` with
-//!    `worktree_path` + `branch` added to the frontmatter.
-//! 5. Generate the agent's CLAUDE.md with task context and write it
-//!    into the worktree root.
-//! 6. Return the launch JSON the UI (or daemon) uses to spawn
-//!    `claude` in the worktree.
+//! Phase 2.1 (PRD A23) reframed delegation as a harness responsibility:
+//! K2SO no longer spawns sub-agent processes; the parent harness owns
+//! the spawn and K2SO just tracks the workspace state. The four public
+//! frontmatter helpers ([`add_worktree_to_frontmatter`],
+//! [`strip_worktree_from_frontmatter`], [`update_assigned_by`],
+//! [`shorten_slug`]) are still used by the review queue (`reviews.rs`)
+//! and the legacy `agent_launch` path; they're preserved with
+//! `#[deprecated]` annotations so callers see compiler warnings at
+//! every use site. The top-level [`k2so_agents_delegate`] is kept
+//! for the daemon's `agents_routes.rs` delegate route + the
+//! `agent_launch` inbox-delegate branch — both will be retired in
+//! Phase 2.5d.
 //!
-//! This is the code path behind the UI "Delegate" button + the
-//! inbox-delegate branch of `k2so_agents_build_launch`.
+//! Relocated to `deprecated/` in Phase 2.5c (0.39.0h) so the module
+//! tree advertises this surface as retired.
 
 use std::fs;
 use std::path::PathBuf;
@@ -28,6 +34,10 @@ use crate::log_debug;
 
 /// Shorten a slug to a maximum length, breaking at word boundaries.
 /// Strips common filler prefixes (`bug-`, `feature-`, `task-`).
+#[deprecated(
+    since = "0.39.0h",
+    note = "Harness owns spawn lifecycle post-Phase-2.1; see Phase 2.1 PRD A23"
+)]
 pub fn shorten_slug(slug: &str, max_len: usize) -> String {
     let stripped = slug
         .strip_prefix("bug-")
@@ -48,6 +58,10 @@ pub fn shorten_slug(slug: &str, max_len: usize) -> String {
 
 /// Overwrite the `assigned_by:` frontmatter field (creating the field
 /// is not this fn's job — caller ensures it exists).
+#[deprecated(
+    since = "0.39.0h",
+    note = "Harness owns spawn lifecycle post-Phase-2.1; see Phase 2.1 PRD A23"
+)]
 pub fn update_assigned_by(content: &str, new_value: &str) -> String {
     if content.starts_with("---") {
         if let Some(end) = content[3..].find("---") {
@@ -73,6 +87,10 @@ pub fn update_assigned_by(content: &str, new_value: &str) -> String {
 /// Stamp `worktree_path:` and `branch:` onto a work item's frontmatter.
 /// Called when moving an item from `inbox/` to `active/` during
 /// delegate.
+#[deprecated(
+    since = "0.39.0h",
+    note = "Harness owns spawn lifecycle post-Phase-2.1; see Phase 2.1 PRD A23"
+)]
 pub fn add_worktree_to_frontmatter(
     content: &str,
     worktree_path: &str,
@@ -94,6 +112,10 @@ pub fn add_worktree_to_frontmatter(
 /// Strip `worktree_path:` and `branch:` from frontmatter. Called on
 /// rejection/retry so the re-queued work item doesn't reference a
 /// worktree that was cleaned up.
+#[deprecated(
+    since = "0.39.0h",
+    note = "Harness owns spawn lifecycle post-Phase-2.1; see Phase 2.1 PRD A23"
+)]
 pub fn strip_worktree_from_frontmatter(content: &str) -> String {
     if content.starts_with("---") {
         if let Some(end_idx) = content[3..].find("---") {
@@ -125,6 +147,10 @@ pub fn strip_worktree_from_frontmatter(content: &str) -> String {
 ///   still in `src-tauri/src/commands/k2so_agents.rs`).
 /// - `k2so_agents_build_launch` when an agent's inbox has work but
 ///   no active worktree yet.
+#[deprecated(
+    since = "0.39.0h",
+    note = "Harness owns spawn lifecycle post-Phase-2.1; see Phase 2.1 PRD A23"
+)]
 pub fn k2so_agents_delegate(
     project_path: String,
     target_agent: String,

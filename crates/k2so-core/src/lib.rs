@@ -35,6 +35,9 @@ pub mod chat_history;
 pub mod companion;
 pub mod db;
 pub mod db_ops;
+// Phase 2.5c: retired-but-preserved surface; modules here are
+// `#[deprecated]` and exist only for the deprecation window.
+pub mod deprecated;
 pub mod editors;
 pub mod fs_abstract;
 pub mod fs_atomic;
