@@ -10,4 +10,5 @@
 //! See `.k2so/prds/phase-2.5c-core-rename.md` for the relocation
 //! catalogue and rationale.
 
+pub mod checkin;
 pub mod scheduler;

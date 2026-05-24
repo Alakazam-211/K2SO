@@ -23,7 +23,9 @@ use std::path::PathBuf;
 
 pub mod build_launch;
 pub mod channel;
-pub mod checkin;
+/// Phase 2.5c: `checkin` relocated to [`crate::workspace::checkin`].
+/// Back-compat alias.
+pub use crate::workspace::checkin;
 pub mod commands;
 pub mod connections;
 pub mod cron_schedule;
