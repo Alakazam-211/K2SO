@@ -924,6 +924,92 @@ cmd_daemon_uninstall() {
     echo "Daemon uninstalled."
 }
 
+# 0.39.0f Phase 2.1c: `k2so daemon companion <start|stop|status>` —
+# wired to existing /cli/companion/{start,stop,status} routes (Unit 1
+# + Unit 7c). Replaces the top-level `k2so companion` verb cut by
+# Phase 2.1b. The daemon owns the companion (ngrok tunnel + server),
+# so the verb lives under `k2so daemon`.
+cmd_daemon_companion() {
+    local sub="${1:-status}"
+    shift || true
+    case "$sub" in
+        start)
+            # /cli/companion/start is a GET in the dispatch table (no body).
+            # Returns {"ok":true,"url":"<tunnel-url>"} on success or
+            # {"error":"..."} on failure.
+            cli_request "/cli/companion/start" | python3 -c '
+import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+    if data.get("ok"):
+        url = data.get("url") or ""
+        print(f"Companion started.{(\" Tunnel: \" + url) if url else \"\"}")
+    else:
+        msg = data.get("error") or "unknown error"
+        print(f"Failed to start companion: {msg}", file=sys.stderr)
+        sys.exit(1)
+except Exception as e:
+    print(f"Failed to parse daemon response: {e}", file=sys.stderr)
+    sys.exit(1)
+'
+            ;;
+        stop)
+            cli_request "/cli/companion/stop" | python3 -c '
+import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+    if data.get("ok"):
+        print("Companion stopped.")
+    else:
+        msg = data.get("error") or "unknown error"
+        print(f"Failed to stop companion: {msg}", file=sys.stderr)
+        sys.exit(1)
+except Exception as e:
+    print(f"Failed to parse daemon response: {e}", file=sys.stderr)
+    sys.exit(1)
+'
+            ;;
+        status)
+            local as_json=0
+            [ "${1:-}" = "--json" ] && as_json=1
+            local raw
+            raw=$(cli_request "/cli/companion/status")
+            if [ "$as_json" = "1" ]; then
+                printf '%s\n' "$raw"
+                return 0
+            fi
+            printf '%s' "$raw" | python3 -c '
+import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+except Exception as e:
+    print(f"Failed to parse companion status: {e}", file=sys.stderr)
+    sys.exit(1)
+running = data.get("running", False)
+url = data.get("tunnelUrl") or ""
+clients = data.get("connectedClients", 0)
+ws_clients = data.get("wsClients", 0)
+sessions = data.get("sessions") or []
+print("Companion server")
+print(f"  Running:    {\"yes\" if running else \"no\"}")
+if running:
+    print(f"  Tunnel URL: {url or \"(not connected)\"}")
+    print(f"  Sessions:   {clients}")
+    print(f"  WS clients: {ws_clients}")
+    for s in sessions:
+        tok = s.get("token", "")
+        addr = s.get("remoteAddr", "")
+        created = s.get("createdAt", "")
+        print(f"    - {tok} from {addr} (created {created})")
+'
+            ;;
+        *)
+            echo "Usage: k2so daemon companion <start|stop|status [--json]>" >&2
+            exit 1
+            ;;
+    esac
+}
+
 cmd_reviews() {
     cli_request "/cli/reviews" | python3 -c "
 import json, sys
@@ -2239,9 +2325,9 @@ except: pass
 }
 
 # 0.39.0f Phase 2.1b: cmd_companion orphan removed. The `companion`
-# top-level verb is hard-deprecated at dispatch; the future home is
-# `k2so daemon companion <start|stop|status>` (not yet wired into
-# the `daemon` dispatch — see Phase 2.5).
+# top-level verb is hard-deprecated at dispatch; the new home is
+# `k2so daemon companion <start|stop|status>` — wired into the
+# `daemon` dispatch by Phase 2.1c (see cmd_daemon_companion above).
 
 cmd_skills() {
     local subcmd="${1:-regenerate}"
@@ -3785,7 +3871,11 @@ EOF
 # ── Phase 2.1: msg --inbox / --signal flag handlers ───────────────────
 
 cmd_msg_inbox_form() {
-    # Forward to /cli/work/inbox/create for cross-workspace inbox delivery.
+    # 0.39.0f Phase 2.1c: migrated from /cli/work/inbox/create (now 410)
+    # to POST /cli/inbox/compose?project=<target>. The new inbox surface
+    # uses `project=<path>` to target a different workspace's inbox —
+    # same shape as the local `inbox compose` POST, just with a different
+    # `project` parameter than the caller's PWD.
     # `msg <ws> --inbox --title "..." --body "..."`
     local target="$1"
     shift
@@ -3815,12 +3905,21 @@ except: pass' 2>/dev/null)
         exit 1
     }
 
-    local params="workspace=$(urlencode "$resolved")"
+    # POST to /cli/inbox/compose with project=<target-workspace>. Note
+    # we deliberately do NOT call cli_post_json or cli_request here —
+    # cli_request hard-codes project=$PROJECT (caller's PWD), and we
+    # need to override it to address the recipient's workspace.
+    local params="token=${TOKEN}&project=$(urlencode "$resolved")"
     params="${params}&title=$(urlencode "$title")"
     [[ -n "$body" ]] && params="${params}&body=$(urlencode "$body")"
     [[ -n "$priority" ]] && params="${params}&priority=$(urlencode "$priority")"
-    [[ -n "$from" ]] && params="${params}&assigned_by=$(urlencode "$from")"
-    cli_request "/cli/work/inbox/create" "$params"
+    # `--from` was historically `assigned_by` on the old work-route;
+    # the inbox-compose route names it `from` (writes to the YAML
+    # frontmatter `from:` field — identical persisted shape).
+    [[ -n "$from" ]] && params="${params}&from=$(urlencode "$from")"
+    curl -sG -X POST "${BASE_URL}/cli/inbox/compose" \
+        --connect-timeout 5 --max-time 30 \
+        -d "$params" 2>/dev/null
     echo
 }
 
@@ -4173,7 +4272,8 @@ EOF
             restart)   shift 2; cmd_daemon_restart "$@" ;;
             log|logs)  shift 2; cmd_daemon_log "$@" ;;
             uninstall) shift 2; cmd_daemon_uninstall "$@" ;;
-            *)         echo "Usage: k2so daemon <status|start|stop|restart|log|uninstall>" >&2; exit 1 ;;
+            companion) shift 2; cmd_daemon_companion "$@" ;;
+            *)         echo "Usage: k2so daemon <status|start|stop|restart|log|uninstall|companion>" >&2; exit 1 ;;
         esac
         ;;
     settings)

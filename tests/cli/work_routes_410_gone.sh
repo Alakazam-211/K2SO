@@ -41,5 +41,8 @@ probe "/cli/work/inbox"
 probe "/cli/agents/work" "agent=foo"
 probe "/cli/agents/work/create" "title=x&body=y"
 probe "/cli/agents/work/move" "agent=foo&filename=bar&from=inbox&to=active"
+# 0.39.0f Phase 2.1c — cross-workspace inbox delivery migrated to
+# POST /cli/inbox/compose?project=<target>. Old route now 410.
+probe "/cli/work/inbox/create" "workspace=${SANDBOX_HOME}&title=x&body=y"
 
 echo "OK: all /cli/work/* and /cli/agents/work* routes return 410 Gone"

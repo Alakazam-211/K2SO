@@ -151,25 +151,15 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         "/cli/agents/work/move" => CliResponse::gone(
             "work/* routes deprecated in Phase 2.1; use /cli/inbox/move — see `k2so help-deprecated`",
         ),
-        "/cli/work/inbox/create" => {
-            // workspace path may override `project` for cross-workspace
-            // delegation — matches the Tauri-side behavior.
-            let workspace = opt_param(params, "workspace")
-                .or_else(|| need_project(params).ok())
-                .unwrap_or_default();
-            if workspace.is_empty() {
-                return CliResponse::bad_request("Missing workspace (or project_path) parameter");
-            }
-            respond(k2so_core::agents::commands::workspace_inbox_create(
-                workspace,
-                str_param(params, "title"),
-                str_param(params, "body"),
-                opt_param(params, "priority"),
-                opt_param(params, "type"),
-                opt_param(params, "assigned_by"),
-                opt_param(params, "source"),
-            ))
-        }
+        // 0.39.0f Phase 2.1c: `/cli/work/inbox/create` retired →
+        // POST /cli/inbox/compose?project=<target-workspace>. The
+        // sole CLI caller (cmd_msg_inbox_form) was migrated in
+        // Phase 2.1c; the Tauri-side caller (workspace_inbox_create)
+        // is the next unit. Route entry kept as a 410-Gone so any
+        // straggler gets a clear signal.
+        "/cli/work/inbox/create" => CliResponse::gone(
+            "work/* routes deprecated in Phase 2.1; use /cli/inbox/compose with project=<target-workspace> — see `k2so help-deprecated`",
+        ),
 
         // ── Agent lifecycle: lock + session ─────────────────────────
         "/cli/agents/lock" => match need_project(params) {
