@@ -1457,20 +1457,17 @@ function ProjectDetail({
               and the main settings column stays focused on workspace
               identity/mode/worktree setup. See the aside below. */}
 
-          {/* Skills list — always shown. Pre-Phase-2.5b this was gated
-              on `agentMode === 'manager'` because only the multi-agent
-              manager mode rendered the legacy `.k2so/agents/<name>/`
-              tree. Under the Phase 2.1 workspace==agent invariant + the
-              Phase 2.5b consolidation every workspace has skill profiles
-              (the workspace's own agent is the first skill), so gating
-              the section by mode is wrong — we'd hide the only place
-              the user can manage the workspace's own skill. The panel
-              itself is mode-aware: Workspace Manager workspaces render
-              the manager subsection; other modes render only the
-              skill list + Project Context. */}
-          <div className="pt-2 border-t border-[var(--color-border)]">
-            <ProjectAgentsPanel projectPath={project.path} onOpenEditor={(name) => { setAgentEditorName(name); setAgentEditorOpen(true) }} />
-          </div>
+          {/* Manager block + Project Context — gated to !== 'off'.
+              In 0.39.0h Skills was promoted out of ProjectAgentsPanel
+              to its own top-level SettingsGroup (always visible).
+              What's left in ProjectAgentsPanel (Manager + Project
+              Context) is agent-mode-specific content, so hide it
+              when the workspace's agent mode is 'off'. */}
+          {(project.agentMode || 'off') !== 'off' && (
+            <div className="pt-2 border-t border-[var(--color-border)]">
+              <ProjectAgentsPanel projectPath={project.path} onOpenEditor={(name) => { setAgentEditorName(name); setAgentEditorOpen(true) }} />
+            </div>
+          )}
 
           {/* Connected Workspaces — for manager, coordinator, and custom modes */}
           {((project.agentMode || 'off') === 'manager' || project.agentMode === 'coordinator' || (project.agentMode || 'off') === 'custom') && (
