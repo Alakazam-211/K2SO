@@ -322,6 +322,29 @@ heartbeat       A workspace-scoped scheduled wake (cron-like) that
 
 ---
 
+## `k2so glossary harness` (single-term lookup)
+
+```
+harness         The IDE / agent-runtime layer K2SO integrates with —
+                Claude Code, Cursor, etc. K2SO writes the harness's
+                configuration files (settings.json, hooks.json) so
+                the harness knows about K2SO's workflows, but K2SO
+                does NOT manage the harness's runtime.
+
+                Specifically: the harness owns spawn lifecycle (sub-
+                agents, worktrees, sessions). K2SO owns coordination
+                surface (inbox, heartbeats, skills documentation,
+                workspace metadata). Together they form a complete
+                stack: harness for execution, K2SO for orchestration.
+
+                See also: `k2so help-deprecated delegate` for the
+                Phase 2.1 handoff (K2SO no longer spawns; harness does);
+                `k2so glossary skill` for skill profiles the harness
+                loads on spawn.
+```
+
+---
+
 ## `k2so glossary worktree` (single-term lookup)
 
 ```
