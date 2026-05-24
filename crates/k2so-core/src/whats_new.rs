@@ -419,6 +419,15 @@ Daemon owns sessions.
 
     #[test]
     fn read_write_clear_state_roundtrips() {
+        // Acquire the crate-wide HOME_LOCK so this test serializes with
+        // every other `$HOME`-mutating test across modules (themes,
+        // skill_layers, chat_history, app_settings). Phase 2 Unit 6's
+        // 68-test backfill (commit b65a5195) added many tests that
+        // mutate $HOME, exposing this test's pre-existing assumption
+        // that "no other tests touch state_path" as false. Lock kills
+        // the race.
+        let _g = crate::themes::HOME_LOCK.lock();
+
         // Use a process-isolated HOME so we don't trample the real user's state.
         let tmp = std::env::temp_dir().join(format!(
             "k2so-whats-new-test-{}-{}",
@@ -430,9 +439,9 @@ Daemon owns sessions.
         ));
         std::fs::create_dir_all(&tmp).unwrap();
         let prev_home = std::env::var("HOME").ok();
-        // SAFETY: tests in this crate aren't run in parallel against $HOME
-        // (no other tests touch state_path). The roundtrip is bounded by
-        // the unique tmp dir; we restore $HOME at the end.
+        // SAFETY: HOME_LOCK above prevents any other test from racing
+        // $HOME during this test's lifetime; restore happens before
+        // the guard drops.
         unsafe { std::env::set_var("HOME", &tmp); }
 
         // Empty state initially.

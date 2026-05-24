@@ -603,9 +603,16 @@ mod tests {
         }
     }
 
-    // Single-threaded mutex so the HOME-mutating tests don't race each
-    // other across cargo's parallel test runner.
-    static TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    // Re-use the crate-wide HOME_LOCK from `themes` so the HOME-mutating
+    // tests across modules (themes, skill_layers, chat_history, app_settings,
+    // whats_new) all serialize on a single mutex. Cargo's parallel runner
+    // would otherwise race separate per-module locks against each other
+    // — they each guard their own module's tests but nothing stops two
+    // modules from mutating `$HOME` simultaneously. Phase 2 Unit 6's
+    // 68-test backfill (commit b65a5195) widened that pre-existing race
+    // and broke `whats_new::tests::read_write_clear_state_roundtrips`
+    // reliably; centralizing on one lock closes it.
+    use crate::themes::HOME_LOCK as TEST_LOCK;
 
     #[test]
     fn load_returns_defaults_when_file_missing() {
