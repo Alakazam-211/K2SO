@@ -41,7 +41,11 @@ pub mod session;
 pub mod settings;
 pub mod skill;
 pub mod skill_content;
-pub mod skill_writer;
+/// Phase 2.5c: `skill_writer` relocated to [`crate::skills::writer`].
+/// Re-exported here as a back-compat alias so `agents/workspace.rs`
+/// (deferred to Phase 2.5d) and any external callers that still
+/// reference `agents::skill_writer::*` keep resolving without churn.
+pub use crate::skills::writer as skill_writer;
 pub mod terminal_id;
 pub mod triage_summary;
 pub mod unification;

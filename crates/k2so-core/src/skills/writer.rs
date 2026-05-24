@@ -19,8 +19,8 @@
 //! | `.github/copilot-instructions.md` | marker-injected block | GitHub Copilot |
 //!
 //! The canonical path is upgrade-tracked (the full SKILL upgrade
-//! protocol in [`super::skill`]); symlinks always point at it, so a
-//! version bump propagates to every harness on its next discovery
+//! protocol in [`crate::agents::skill`]); symlinks always point at it,
+//! so a version bump propagates to every harness on its next discovery
 //! pass without writing to each location individually.
 
 use std::fs;
