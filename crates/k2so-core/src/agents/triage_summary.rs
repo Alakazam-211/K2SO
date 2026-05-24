@@ -24,16 +24,18 @@
 //! exercise this shape.
 
 use std::fs;
+use std::path::Path;
 
 use crate::agents::scheduler::{
-    agent_work_dir, get_workspace_state, is_agent_locked, workspace_inbox_dir,
+    agent_work_dir, get_workspace_state, is_agent_locked,
 };
 use crate::agents::work_item::{read_work_item, WorkItem};
 use crate::agents::{agents_dir, parse_frontmatter};
+use crate::inbox::{list_folder as inbox_list_folder, InboxItem};
 
 /// Plain-text triage summary. Walks `.k2so/agents/*/work/inbox` +
-/// `.k2so/work/inbox` on disk (no DB access) and renders a human-
-/// readable report.
+/// `.k2so/inbox/` (root-level untriaged arrivals) on disk (no DB
+/// access) and renders a human-readable report.
 ///
 /// Workspace-state capability gating:
 /// - `off`  → items in that source category are silently omitted.
@@ -150,45 +152,38 @@ pub fn triage_summary(project_path: &str) -> Result<String, String> {
         summary.push('\n');
     }
 
-    let ws_inbox = workspace_inbox_dir(project_path);
-    if ws_inbox.exists() {
-        let ws_items: Vec<WorkItem> = fs::read_dir(&ws_inbox)
-            .ok()
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .filter(|e| e.path().extension().map_or(false, |ext| ext == "md"))
-                    .filter_map(|e| read_work_item(&e.path(), "inbox"))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        if !ws_items.is_empty() {
-            let lead_locked = is_agent_locked(project_path, "__lead__");
-            summary.push_str("Workspace Inbox (unassigned — needs Coordinator):\n");
-            if lead_locked {
-                summary.push_str("  Coordinator: LOCKED (active session running)\n");
-            }
-            for item in &ws_items {
-                let cap_status = ws_state
-                    .as_ref()
-                    .map(|t| t.capability_for_source(&item.source).to_string())
-                    .unwrap_or_else(|| "auto".to_string());
-                if cap_status == "off" {
-                    continue;
-                }
-                let gate_label = if cap_status == "gated" {
-                    " [NEEDS APPROVAL]"
-                } else {
-                    ""
-                };
-                summary.push_str(&format!(
-                    "  \"{}\" (priority: {}, type: {}, source: {}{})\n",
-                    item.title, item.priority, item.item_type, item.source, gate_label
-                ));
-            }
-            summary.push('\n');
+    // Post-Phase-2.1: workspace inbox is `.k2so/inbox/`. Root-level
+    // items (`folder == ""`) are untriaged arrivals that still need a
+    // home — they're the items __lead__ would triage.
+    let ws_items: Vec<InboxItem> = inbox_list_folder(Path::new(project_path), "");
+    if !ws_items.is_empty() {
+        let lead_locked = is_agent_locked(project_path, "__lead__");
+        summary.push_str("Workspace Inbox (unassigned — needs Coordinator):\n");
+        if lead_locked {
+            summary.push_str("  Coordinator: LOCKED (active session running)\n");
         }
+        for item in &ws_items {
+            let cap_status = ws_state
+                .as_ref()
+                .map(|t| t.capability_for_source(&item.source).to_string())
+                .unwrap_or_else(|| "auto".to_string());
+            if cap_status == "off" {
+                continue;
+            }
+            let gate_label = if cap_status == "gated" {
+                " [NEEDS APPROVAL]"
+            } else {
+                ""
+            };
+            // `type` field dropped in the WorkItem → InboxItem
+            // migration (no analogue on the new shape). `source` is
+            // preserved and now does double duty.
+            summary.push_str(&format!(
+                "  \"{}\" (priority: {}, source: {}{})\n",
+                item.title, item.priority, item.source, gate_label
+            ));
+        }
+        summary.push('\n');
     }
 
     if summary.is_empty() {
@@ -245,15 +240,10 @@ pub fn triage_decide(project_path: &str) -> Result<Vec<String>, String> {
 
     let mut launchable = Vec::new();
 
-    // Step 1: Check workspace inbox
-    let ws_inbox = workspace_inbox_dir(project_path);
-    let has_workspace_inbox = ws_inbox.exists()
-        && fs::read_dir(&ws_inbox)
-            .map(|e| {
-                e.flatten()
-                    .any(|e| e.path().extension().map_or(false, |ext| ext == "md"))
-            })
-            .unwrap_or(false);
+    // Step 1: Check workspace inbox (post-Phase-2.1: `.k2so/inbox/`
+    // root-level items are the untriaged arrivals that wake __lead__).
+    let has_workspace_inbox =
+        !inbox_list_folder(Path::new(project_path), "").is_empty();
 
     if has_workspace_inbox {
         launchable.push("__lead__".to_string());
@@ -316,7 +306,9 @@ mod tests {
                 .join("inbox"),
         )
         .unwrap();
-        fs::create_dir_all(dir.join(".k2so").join("work").join("inbox")).unwrap();
+        // Post-Phase-2.1: workspace inbox is `.k2so/inbox/`, not
+        // `.k2so/work/inbox/`.
+        fs::create_dir_all(dir.join(".k2so").join("inbox")).unwrap();
         dir
     }
 
@@ -342,8 +334,9 @@ mod tests {
     #[allow(deprecated)]
     fn triage_decide_picks_up_workspace_inbox() {
         let dir = fixture();
+        // Post-Phase-2.1 path.
         fs::write(
-            dir.join(".k2so").join("work").join("inbox").join("task.md"),
+            dir.join(".k2so").join("inbox").join("task.md"),
             "---\ntitle: Test\n---\nBody",
         )
         .unwrap();

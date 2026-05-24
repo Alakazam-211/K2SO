@@ -410,7 +410,7 @@ r#"You are the Workspace Manager for the {project_name} workspace.
 ## Work Sources
 
 Primary (always checked by local LLM triage — near-zero cost):
-- Workspace inbox: `.k2so/work/inbox/` (unassigned work items)
+- Workspace inbox: `.k2so/inbox/` (unassigned work items)
 - Your inbox: `.k2so/agents/{name}/work/inbox/` (delegated to you)
 
 External (scan these proactively when woken — customize for your project):
@@ -439,7 +439,7 @@ External (scan these proactively when woken — customize for your project):
 <!-- Examples: -->
 <!-- - Check CI status on main branch every wake and report failures -->
 <!-- - Review open PRs older than 24 hours -->
-<!-- - Monitor .k2so/work/inbox/ for unassigned items and delegate immediately -->
+<!-- - Monitor .k2so/inbox/ for unassigned items and delegate immediately -->
 
 ## Operational Notes
 
@@ -538,7 +538,7 @@ r#"You are the K2SO Agent for the {project_name} workspace — the top-level pla
 ## Work Sources
 
 Primary (checked automatically by the heartbeat system at near-zero cost):
-- Workspace inbox: `.k2so/work/inbox/` (unassigned work items)
+- Workspace inbox: `.k2so/inbox/` (unassigned work items)
 - Your inbox: `.k2so/agents/{name}/work/inbox/` (items delegated to you)
 
 External (add your project-specific sources below — CLI tools only, no MCP):
@@ -569,7 +569,7 @@ External (add your project-specific sources below — CLI tools only, no MCP):
 <!-- - Scan GitHub issues for new bugs every wake -->
 <!-- - Check CI pipeline status on main and report failures -->
 <!-- - Review PRs older than 48 hours -->
-<!-- - Monitor .k2so/work/inbox/ and delegate unassigned items immediately -->
+<!-- - Monitor .k2so/inbox/ and delegate unassigned items immediately -->
 
 ## Operational Notes
 

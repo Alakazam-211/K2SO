@@ -47,7 +47,7 @@ fn signal_kind_all_variants_round_trip() {
         },
         SignalKind::TaskLifecycle {
             phase: TaskPhase::Started,
-            task_ref: Some(".k2so/work/inbox/foo.md".into()),
+            task_ref: Some(".k2so/inbox/foo.md".into()),
         },
         SignalKind::TaskLifecycle {
             phase: TaskPhase::Done,

@@ -25,7 +25,7 @@ pub use k2so_core::agents::{
 pub use k2so_core::agents::scheduler::{
     agent_work_dir, count_md_files, get_highest_inbox_priority, get_workspace_state,
     is_agent_locked, is_within_active_hours, k2so_agents_scheduler_tick as core_scheduler_tick,
-    priority_label, priority_rank, read_heartbeat_config, workspace_inbox_dir,
+    priority_label, priority_rank, read_heartbeat_config,
     write_heartbeat_config, ActiveHours, AgentHeartbeatConfig,
 };
 
@@ -269,9 +269,13 @@ pub fn k2so_agents_update_profile(
 // ── Path helpers ────────────────────────────────────────────────────────
 //
 // `agents_dir` + `agent_dir` now live in k2so_core::agents (re-exported
-// above so local call sites resolve unchanged). `agent_work_dir` and
-// `workspace_inbox_dir` now also live in k2so_core::agents::scheduler
-// alongside the rest of the heartbeat-fire dependency closure.
+// above so local call sites resolve unchanged). `agent_work_dir` also
+// lives in k2so_core::agents::scheduler alongside the rest of the
+// heartbeat-fire dependency closure.
+//
+// `workspace_inbox_dir` (legacy `.k2so/work/inbox/`) is no longer
+// re-exported — the function is deprecated and the workspace inbox
+// now lives at `.k2so/inbox/` via `k2so_core::inbox::*`.
 
 // ── Wake-up templates ──────────────────────────────────────────────────
 //
@@ -1026,19 +1030,19 @@ k2so agent complete --agent <n> --file <f>  # Complete work (auto-merge or submi
 const WORKFLOW_DOCS: &str = r#"## Workflow
 
 ### If you are the Lead Agent (orchestrator):
-1. Check for work: `k2so work inbox`
+1. Check for work: `k2so inbox` (workspace-implicit; pass `--workspace <path>` to target another)
 2. Read each request and decide which agent should handle it
 3. Assign work with a single command — K2SO handles everything else:
    ```
-   k2so delegate backend-eng .k2so/work/inbox/add-oauth-support.md
+   k2so delegate backend-eng .k2so/inbox/add-oauth-support.md
    ```
    This creates a worktree, writes a CLAUDE.md, and launches the agent automatically.
 4. To break a large request into sub-tasks first:
    ```
-   k2so work create --agent backend-eng --title "Build API endpoints" --body "..." --priority high
-   k2so work create --agent frontend-eng --title "Build login UI" --body "..." --priority high
+   k2so inbox compose --title "Build API endpoints" --body "..."
+   k2so inbox compose --title "Build login UI" --body "..."
    ```
-   Then delegate each: `k2so delegate backend-eng .k2so/agents/backend-eng/work/inbox/build-api-endpoints.md`
+   Then delegate each: `k2so delegate backend-eng .k2so/inbox/build-api-endpoints.md`
 5. If a request is blocked or needs user input, leave it in the workspace inbox
 6. You orchestrate — you do NOT implement code yourself
 

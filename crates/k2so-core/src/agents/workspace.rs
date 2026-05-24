@@ -28,7 +28,6 @@ use std::path::{Path, PathBuf};
 
 use crate::agents::heartbeat::k2so_heartbeat_add;
 use crate::agents::onboarding::is_harness_management_skipped;
-use crate::agents::scheduler::workspace_inbox_dir as _workspace_inbox_dir_unused;
 use crate::agents::skill::{
     skill_checksum_hex, skill_source_agent_md_begin, skill_source_agent_md_end,
     SKILL_END_MARKER, SKILL_SOURCE_PROJECT_MD_BEGIN, SKILL_SOURCE_PROJECT_MD_END,
@@ -45,11 +44,6 @@ use crate::agents::{
 };
 use crate::db::schema::{AgentHeartbeat, WorkspaceSession};
 use crate::fs_atomic::{self, atomic_symlink, atomic_write_str, log_if_err, unique_archive_path};
-
-// Re-export to satisfy the unused-import warning while keeping a clear
-// declaration of what we depend on.
-#[allow(unused_imports)]
-use _workspace_inbox_dir_unused as _;
 
 // ══════════════════════════════════════════════════════════════════════
 // Constants
@@ -2114,19 +2108,19 @@ k2so agent complete --agent <n> --file <f>  # Complete work (auto-merge or submi
 const WORKFLOW_DOCS: &str = r#"## Workflow
 
 ### If you are the Lead Agent (orchestrator):
-1. Check for work: `k2so work inbox`
+1. Check for work: `k2so inbox` (workspace-implicit; pass `--workspace <path>` to target another)
 2. Read each request and decide which agent should handle it
 3. Assign work with a single command — K2SO handles everything else:
    ```
-   k2so delegate backend-eng .k2so/work/inbox/add-oauth-support.md
+   k2so delegate backend-eng .k2so/inbox/add-oauth-support.md
    ```
    This creates a worktree, writes a CLAUDE.md, and launches the agent automatically.
 4. To break a large request into sub-tasks first:
    ```
-   k2so work create --agent backend-eng --title "Build API endpoints" --body "..." --priority high
-   k2so work create --agent frontend-eng --title "Build login UI" --body "..." --priority high
+   k2so inbox compose --title "Build API endpoints" --body "..."
+   k2so inbox compose --title "Build login UI" --body "..."
    ```
-   Then delegate each: `k2so delegate backend-eng .k2so/agents/backend-eng/work/inbox/build-api-endpoints.md`
+   Then delegate each: `k2so delegate backend-eng .k2so/inbox/build-api-endpoints.md`
 5. If a request is blocked or needs user input, leave it in the workspace inbox
 6. You orchestrate — you do NOT implement code yourself
 
@@ -2177,9 +2171,13 @@ pub fn regenerate_workspace_skill(project_path: String) -> Result<String, String
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "workspace".to_string());
 
-    // Scaffold .k2so/ structure if it doesn't exist
+    // Scaffold .k2so/ structure if it doesn't exist.
+    // Post-Phase-2.1: the workspace inbox lives at `.k2so/inbox/` (the
+    // unified `k2so_core::inbox::*` primitive). The legacy
+    // `.k2so/work/inbox/` was retired and the first-boot daemon hook
+    // trashes any straggler.
     let k2so_dir = PathBuf::from(&project_path).join(".k2so");
-    let _ = fs::create_dir_all(k2so_dir.join("work").join("inbox"));
+    let _ = fs::create_dir_all(k2so_dir.join("inbox"));
     let _ = fs::create_dir_all(k2so_dir.join("prds"));
 
     // 0.37.0 unification check: if the workspace has been migrated to
@@ -2276,23 +2274,24 @@ pub fn regenerate_workspace_skill(project_path: String) -> Result<String, String
         }
     }
 
-    // List workspace inbox items
+    // List workspace inbox items.
+    //
+    // Post-Phase-2.1: workspace inbox lives at `.k2so/inbox/` (the
+    // unified `k2so_core::inbox::*` primitive). Root-level items
+    // (`folder == ""`) are the untriaged arrivals; sub-foldered items
+    // have already been organized and aren't surfaced in the manager's
+    // skill summary.
     let mut inbox_summary = String::new();
-    let ws_inbox = crate::agents::scheduler::workspace_inbox_dir(&project_path);
-    if ws_inbox.exists() {
-        if let Ok(entries) = fs::read_dir(&ws_inbox) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "md") {
-                    if let Some(item) = read_work_item(&path, "inbox") {
-                        inbox_summary.push_str(&format!(
-                            "- **{}** (priority: {}, type: {})\n",
-                            item.title, item.priority, item.item_type
-                        ));
-                    }
-                }
-            }
-        }
+    let ws_inbox_items =
+        crate::inbox::list_folder(std::path::Path::new(&project_path), "");
+    for item in &ws_inbox_items {
+        // `type` dropped in the WorkItem → InboxItem migration; `source`
+        // (the WorkItem `source` field) is preserved on InboxItem and
+        // does double duty here.
+        inbox_summary.push_str(&format!(
+            "- **{}** (priority: {}, source: {})\n",
+            item.title, item.priority, item.source
+        ));
     }
 
     // Detect mode — read from DB, fall back to filesystem

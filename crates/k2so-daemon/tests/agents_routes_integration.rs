@@ -254,7 +254,12 @@ async fn delegate_creates_worktree_and_spawns_session() {
 
     // Seed a work item in the workspace inbox (delegate moves it
     // to the target agent's active/ folder).
-    let workspace_inbox = proj.join(".k2so/work/inbox");
+    //
+    // Post-Phase-2.1: the workspace inbox lives at `.k2so/inbox/` (the
+    // unified `k2so_core::inbox::*` primitive). Pre-2.1 this was
+    // `.k2so/work/inbox/` — the first-boot migration helper trashes the
+    // old location.
+    let workspace_inbox = proj.join(".k2so/inbox");
     std::fs::create_dir_all(&workspace_inbox).unwrap();
     let work_file = workspace_inbox.join("fix-widget.md");
     std::fs::write(

@@ -695,8 +695,14 @@ fi
 run agents delete test-feedback-agent --force > /dev/null 2>&1 || true
 
 # ═══════════════════════════════════════════════════════════════════════
-section "12c. Cross-Workspace Work Send"
+section "12c. Cross-Workspace Inbox Message (post-Phase-2.1: msg --inbox)"
 # ═══════════════════════════════════════════════════════════════════════
+#
+# Pre-Phase-2.1 this exercised `work send --workspace X --title Y --body Z`,
+# which wrote into `<target>/.k2so/work/inbox/`. The CLI verb is now
+# `msg <workspace> --inbox --title "..." --body "..."` (hard-deprecation
+# at 0.39.0f Phase 2.1b) and the landing path is `<target>/.k2so/inbox/`
+# via the unified `k2so_core::inbox::compose` primitive.
 
 mkdir -p "$TEST_WORKSPACE_2"
 if ! git -C "$TEST_WORKSPACE_2" rev-parse --git-dir > /dev/null 2>&1; then
@@ -707,17 +713,17 @@ if ! git -C "$TEST_WORKSPACE_2" rev-parse --git-dir > /dev/null 2>&1; then
 fi
 run workspace open "$TEST_WORKSPACE_2" > /dev/null 2>&1 || true
 
-OUTPUT=$(run work send --workspace "$TEST_WORKSPACE_2" --title "Cross workspace task" --body "Sent from test suite")
-if echo "$OUTPUT" | grep -q "cross-workspace-task\|Cross workspace"; then
-    pass "work send creates item in target workspace"
+OUTPUT=$(run msg "$TEST_WORKSPACE_2" --inbox --title "Cross workspace task" --body "Sent from test suite")
+if echo "$OUTPUT" | grep -q "cross-workspace-task\|Cross workspace\|success"; then
+    pass "msg --inbox creates item in target workspace"
 else
-    fail "work send" "Output: $OUTPUT"
+    fail "msg --inbox" "Output: $OUTPUT"
 fi
 
-if ls "$TEST_WORKSPACE_2/.k2so/work/inbox/"*.md > /dev/null 2>&1; then
-    pass "work send file exists in target inbox"
+if ls "$TEST_WORKSPACE_2/.k2so/inbox/"*.md > /dev/null 2>&1; then
+    pass "msg --inbox file exists in target inbox"
 else
-    fail "work send file" "No .md file in $TEST_WORKSPACE_2/.k2so/work/inbox/"
+    fail "msg --inbox file" "No .md file in $TEST_WORKSPACE_2/.k2so/inbox/"
 fi
 
 # Cleanup second workspace
@@ -1272,8 +1278,8 @@ for branch in $(git -C "$TEST_WORKSPACE" branch --list 'agent/*' 2>/dev/null); d
     git -C "$TEST_WORKSPACE" branch -D "$branch" > /dev/null 2>&1 || true
 done
 
-# Remove workspace inbox items
-rm -f "$TEST_WORKSPACE/.k2so/work/inbox/"*.md 2>/dev/null || true
+# Remove workspace inbox items (post-Phase-2.1: `.k2so/inbox/`)
+rm -f "$TEST_WORKSPACE/.k2so/inbox/"*.md 2>/dev/null || true
 
 # Clean up second test workspace if it exists
 run workspace remove "$TEST_WORKSPACE_2" > /dev/null 2>&1 || true

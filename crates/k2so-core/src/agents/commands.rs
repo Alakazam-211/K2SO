@@ -250,7 +250,10 @@ pub fn create(
         .map_err(|e| format!("Failed to create active: {}", e))?;
     fs::create_dir_all(agent_work_dir(&project_path, &name, "done"))
         .map_err(|e| format!("Failed to create done: {}", e))?;
-    let _ = fs::create_dir_all(crate::agents::scheduler::workspace_inbox_dir(&project_path));
+    // Post-Phase-2.1: scaffold the unified workspace inbox at
+    // `.k2so/inbox/` (not the retired `.k2so/work/inbox/`). Best-effort —
+    // an existing inbox is fine.
+    let _ = fs::create_dir_all(crate::inbox::inbox_root(std::path::Path::new(&project_path)));
 
     let agent_md = dir.join("AGENT.md");
     let mut frontmatter = format!("name: {}\nrole: {}\ntype: {}", name, role, agent_type);

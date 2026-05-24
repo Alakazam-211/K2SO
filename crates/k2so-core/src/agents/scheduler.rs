@@ -8,8 +8,8 @@
 //!
 //! Differentiates between:
 //!
-//! - The workspace-level `__lead__` agent (fires when `.k2so/work/inbox/`
-//!   has items).
+//! - The workspace-level `__lead__` agent (fires when `.k2so/inbox/`
+//!   has items at the root level — untriaged arrivals).
 //! - Top-tier agents with type `manager`/`custom`/`k2so` under
 //!   `.k2so/agents/<name>/` (fires when that agent's inbox has items OR
 //!   its custom-timing `next_wake` has elapsed).
@@ -35,7 +35,22 @@ use crate::scheduler::should_project_fire;
 
 // ── Path helpers private to the scheduler path ──────────────────────────
 
-/// `<project>/.k2so/work/inbox/`.
+/// **LEGACY — `.k2so/work/inbox/` (pre-Phase-2.1).**
+///
+/// Returns the path to the now-retired `.k2so/work/inbox/` directory.
+/// Phase 2.1 moved workspace-level work items into the unified
+/// `.k2so/inbox/` primitive (`k2so_core::inbox::*`); the first-boot
+/// migration hook (`migrate_work_to_inbox`) moves any straggler `.md`
+/// files into the new location and trashes `.k2so/work/`.
+///
+/// This function is kept alive only because [`crate::agents::checkin`]
+/// still references it pending the `__lead__` agent obsolescence
+/// decision (a separate workstream). Once `__lead__` retires, this
+/// helper and its remaining caller go away in lockstep.
+///
+/// **Do NOT add new callers.** Read the workspace inbox via
+/// `k2so_core::inbox::list_folder(workspace, "")` instead.
+#[deprecated(note = "Pre-Phase-2.1 path. Use `k2so_core::inbox::list_folder` for reads.")]
 pub fn workspace_inbox_dir(project_path: &str) -> PathBuf {
     PathBuf::from(project_path)
         .join(".k2so")
@@ -446,18 +461,13 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
     // comparisons. The loop was retired in 0.39.0d.)
 
     // Step 1: workspace inbox → __lead__
-    let ws_inbox = workspace_inbox_dir(&project_path);
-    let ws_inbox_count = if ws_inbox.exists() {
-        fs::read_dir(&ws_inbox)
-            .map(|e| {
-                e.flatten()
-                    .filter(|e| e.path().extension().map_or(false, |ext| ext == "md"))
-                    .count() as i64
-            })
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    //
+    // Post-Phase-2.1: the workspace inbox is `.k2so/inbox/` and items at
+    // the root level (`folder == ""`) are untriaged arrivals. We count
+    // only root-level items here — sub-foldered items have already been
+    // organized by the workspace agent and shouldn't re-wake __lead__.
+    let ws_inbox_count =
+        crate::inbox::list_folder(Path::new(&project_path), "").len() as i64;
     let has_workspace_inbox = ws_inbox_count > 0;
 
     if has_workspace_inbox {
