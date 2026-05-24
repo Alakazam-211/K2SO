@@ -1483,6 +1483,20 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         "/cli/git/file-at-ref" => crate::git_routes::handle_git_file_at_ref(params),
         "/cli/git/merge-status" => crate::git_routes::handle_git_merge_status(params),
 
+        // ── Phase 2.1: Workspace inbox (read endpoints) ───────────
+        // The default-list (`/cli/inbox`) and the explicit-list
+        // (`/cli/inbox/list`) both route to the same handler — A22's
+        // mock has `inbox` as the default verb that's equivalent to
+        // `inbox list`. Empty `folder` param means top-level.
+        "/cli/inbox" | "/cli/inbox/list" => crate::inbox_routes::handle_list(params),
+        "/cli/inbox/read" => crate::inbox_routes::handle_read(params),
+        "/cli/inbox/folders" => crate::inbox_routes::handle_folders(params),
+        "/cli/inbox/search" => crate::inbox_routes::handle_search(params),
+
+        // ── Phase 2.1: Glossary ──────────────────────────────────
+        "/cli/glossary" | "/cli/glossary/list" => crate::inbox_routes::handle_glossary_list(),
+        "/cli/glossary/get" => crate::inbox_routes::handle_glossary_get(params),
+
         _ => CliResponse::not_found(),
     }
 }

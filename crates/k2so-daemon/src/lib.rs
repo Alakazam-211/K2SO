@@ -18,6 +18,7 @@ pub mod events;
 pub mod fs_routes;
 pub mod heartbeat_launch;
 pub mod heartbeat_launchd_routes;
+pub mod inbox_routes;
 pub mod llm_host;
 pub mod llm_routes;
 pub mod pending_live;

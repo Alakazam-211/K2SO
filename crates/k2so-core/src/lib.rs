@@ -41,6 +41,7 @@ pub mod fs_atomic;
 pub mod fs_commands;
 pub mod git;
 pub mod hook_config;
+pub mod inbox;
 pub mod llm;
 pub mod perf;
 pub mod project_config;

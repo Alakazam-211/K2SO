@@ -49,6 +49,7 @@ mod fs_routes;
 mod git_routes;
 mod heartbeat_launch;
 mod heartbeat_launchd_routes;
+mod inbox_routes;
 mod llm_host;
 mod llm_routes;
 mod pending_live;
@@ -646,6 +647,18 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             | "/cli/git/stage-all" | "/cli/git/commit" | "/cli/git/merge-branch"
             | "/cli/git/abort-merge" | "/cli/git/resolve" | "/cli/git/delete-branch"
             | "/cli/git/prune-worktrees"
+            // Phase 2.1 — workspace inbox mutating routes (A22.1).
+            // Query-string POSTs (no JSON body); dispatched via
+            // `inbox_routes::dispatch_post`. The `/cli/inbox/migrate`
+            // route is a one-shot helper for tests / explicit
+            // re-migration triggers — daemon first-boot also auto-
+            // invokes (Phase 2.1b wiring).
+            | "/cli/inbox/compose"
+            | "/cli/inbox/move"
+            | "/cli/inbox/archive"
+            | "/cli/inbox/delete"
+            | "/cli/inbox/respond"
+            | "/cli/inbox/migrate"
     );
     if method != "GET" && !(is_post && post_allowed) {
         let _ = stream.read(&mut buf).await;
@@ -1785,6 +1798,40 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             let result = dispatch_unit6_post(p, &body_bytes);
             send_response(&mut stream, result.status, "application/json", &result.body)
                 .await;
+        }
+        // Phase 2.1 — workspace inbox POST routes. Query-string only
+        // (no body). Token gate is explicit per method-gate rule;
+        // body is drained to keep the connection clean. Filesystem
+        // operations run in spawn_blocking per F5 (atomic-rename of
+        // a `.md` file isn't slow, but `safe_delete::trash` calls
+        // into macOS Finder via AppleScript and CAN block).
+        p if is_post && post_allowed && p.starts_with("/cli/inbox/") => {
+            if !token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            // Drain body (we don't use it — params come from query).
+            let _ = read_post_body(&mut stream, &mut buf).await;
+            let params = parse_params(&path, &query);
+            let p_owned = p.to_string();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::inbox_routes::dispatch_post(&p_owned, &params)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            send_response(&mut stream, result.status, result.content_type, &result.body).await;
         }
         // Unified /cli/* dispatch. Auth + param validation +
         // per-route handler all live in `cli::dispatch`; main.rs
