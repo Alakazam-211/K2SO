@@ -197,3 +197,185 @@ pub fn triage_summary(project_path: &str) -> Result<String, String> {
         Ok(summary)
     }
 }
+
+/// Determine what should be launched based on triage.
+///
+/// Agents are templates — the same agent (e.g., "backend-eng") can run
+/// in multiple worktrees simultaneously. Each inbox item gets its own
+/// worktree when delegated.
+///
+/// Triage order:
+/// 1. Workspace inbox has items → wake lead agent ("__lead__")
+/// 2. Sub-agent inboxes have items → wake those agents (one launch per inbox item)
+///
+/// **DEPRECATED — `legacy-per-agent-heartbeat` chokepoint.**
+/// Pre-0.30s K2SO used inbox contents to decide whether to autonomously
+/// wake an agent. The new model lives in the `agent_heartbeats` table
+/// (workspace-scoped, explicit schedules). This function is being kept
+/// alive only for the launch-failure-retry path in active-agents.ts;
+/// gated on `projects.heartbeat_mode != 'off'` so opted-out workspaces
+/// don't get auto-launched even if a stray caller invokes us. Planned
+/// for removal in 0.37.x.
+///
+/// Phase 2 Unit 7d: moved from `src-tauri/src/commands/k2so_agents.rs`
+/// so the daemon and any other thin client can call the same code
+/// without depending on the Tauri command crate.
+#[deprecated(
+    note = "Inbox-driven triage — superseded by agent_heartbeats. \
+            Planned for removal in 0.37.x. See `legacy-per-agent-heartbeat` tag."
+)]
+pub fn triage_decide(project_path: &str) -> Result<Vec<String>, String> {
+    // Gate 0: project must have heartbeats enabled. Without this, an
+    // inbox with items unconditionally fires wakes — which is what was
+    // happening to the K2SO workspace in 0.36.3 even with all DB
+    // heartbeat rows disabled.
+    let project_mode = {
+        let db = crate::db::shared();
+        let conn = db.lock();
+        conn.query_row(
+            "SELECT heartbeat_mode FROM projects WHERE path = ?1",
+            rusqlite::params![project_path],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+    };
+    if project_mode.as_deref() == Some("off") {
+        return Ok(Vec::new());
+    }
+
+    let mut launchable = Vec::new();
+
+    // Step 1: Check workspace inbox
+    let ws_inbox = workspace_inbox_dir(project_path);
+    let has_workspace_inbox = ws_inbox.exists()
+        && fs::read_dir(&ws_inbox)
+            .map(|e| {
+                e.flatten()
+                    .any(|e| e.path().extension().map_or(false, |ext| ext == "md"))
+            })
+            .unwrap_or(false);
+
+    if has_workspace_inbox {
+        launchable.push("__lead__".to_string());
+    }
+
+    // Step 2: Check sub-agent inboxes
+    // An agent is a template/role — it can have multiple items in its
+    // inbox and each one gets its own worktree. We launch once per
+    // agent that has inbox items. The delegate/build_launch function
+    // handles picking the top-priority item.
+    let dir = agents_dir(project_path);
+    if dir.exists() {
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+
+                let inbox = agent_work_dir(project_path, &name, "inbox");
+                let has_inbox = inbox.exists()
+                    && fs::read_dir(&inbox)
+                        .map(|e| {
+                            e.flatten()
+                                .any(|e| e.path().extension().map_or(false, |ext| ext == "md"))
+                        })
+                        .unwrap_or(false);
+
+                if has_inbox {
+                    launchable.push(name);
+                }
+            }
+        }
+    }
+
+    Ok(launchable)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests for `triage_decide` — exercising the inbox-driven wake
+    //! decision logic. Tests scaffold a workspace under
+    //! `std::env::temp_dir()` (uuid-suffixed) to match the existing
+    //! core-test convention (k2so-core has no `tempfile` dev-dep).
+    //! `heartbeat_mode` DB lookup returns `None` for projects not
+    //! registered in the shared DB — fine for these tests because the
+    //! function treats `None` as not-gated-off.
+    use super::*;
+    use std::fs;
+    use uuid::Uuid;
+
+    fn fixture() -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("k2so-triage-decide-{}", Uuid::new_v4()));
+        fs::create_dir_all(
+            dir.join(".k2so")
+                .join("agents")
+                .join("backend-eng")
+                .join("work")
+                .join("inbox"),
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join(".k2so").join("work").join("inbox")).unwrap();
+        dir
+    }
+
+    fn cleanup(dir: &std::path::Path) {
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn triage_decide_returns_empty_when_no_inbox_items() {
+        let dir = fixture();
+        let project = dir.to_string_lossy().to_string();
+        let launchable = triage_decide(&project).unwrap();
+        assert!(
+            launchable.is_empty(),
+            "no inbox items → empty: {:?}",
+            launchable
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn triage_decide_picks_up_workspace_inbox() {
+        let dir = fixture();
+        fs::write(
+            dir.join(".k2so").join("work").join("inbox").join("task.md"),
+            "---\ntitle: Test\n---\nBody",
+        )
+        .unwrap();
+        let launchable = triage_decide(&dir.to_string_lossy()).unwrap();
+        assert!(
+            launchable.contains(&"__lead__".to_string()),
+            "workspace inbox triggers __lead__: {:?}",
+            launchable
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn triage_decide_picks_up_agent_inbox() {
+        let dir = fixture();
+        fs::write(
+            dir.join(".k2so")
+                .join("agents")
+                .join("backend-eng")
+                .join("work")
+                .join("inbox")
+                .join("oauth.md"),
+            "---\ntitle: OAuth\n---\nBody",
+        )
+        .unwrap();
+        let launchable = triage_decide(&dir.to_string_lossy()).unwrap();
+        assert!(
+            launchable.contains(&"backend-eng".to_string()),
+            "agent inbox triggers agent: {:?}",
+            launchable
+        );
+        cleanup(&dir);
+    }
+}

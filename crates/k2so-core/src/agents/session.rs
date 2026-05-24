@@ -114,6 +114,103 @@ pub fn k2so_agents_clear_session_id(
     Ok(())
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// Surfaced flag + chat refresh broadcast — Phase 2 Unit 7d
+// ══════════════════════════════════════════════════════════════════════
+//
+// Moved from `src-tauri/src/commands/k2so_agents.rs`. These functions
+// flip per-workspace-session state and broadcast a hook event so every
+// renderer window (or future remote companion) reacts in sync. Bodies
+// are pure data + agent_hooks::emit calls — no Tauri AppHandle needed.
+
+/// Toggle the per-session `surfaced` flag. When transitioning 0 → 1,
+/// emits `HookEvent::SessionSurfaced` so the renderer creates a tab
+/// that ATTACHES to the existing PTY (no fresh spawn). When
+/// transitioning 1 → 0, the renderer is expected to remove the tab
+/// without killing the PTY (the heartbeat session keeps running in
+/// the background). See `.k2so/prds/heartbeat-active-session-tracking.md`.
+///
+/// `terminal_id`, `command`, `args`, `heartbeat_name` are forwarded
+/// in the surfaced-event payload so the renderer can construct a tab
+/// without re-querying — kept minimal because the event listener is
+/// a hot path. Pass empty strings / empty Vec / None when not
+/// applicable.
+#[allow(clippy::too_many_arguments)]
+pub fn k2so_session_set_surfaced(
+    project_path: String,
+    agent_name: String,
+    surfaced: bool,
+    terminal_id: Option<String>,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    heartbeat_name: Option<String>,
+    attach_agent_name: Option<String>,
+) -> Result<(), String> {
+    let db = crate::db::shared();
+    let conn = db.lock();
+    let project_id = resolve_project_id(&conn, &project_path)
+        .ok_or_else(|| format!("Project not found: {}", project_path))?;
+    WorkspaceSession::set_surfaced(&conn, &project_id, surfaced)
+        .map_err(|e| format!("set surfaced flag: {}", e))?;
+    drop(conn);
+
+    if surfaced {
+        // Emit on every `surfaced=true` call (not just 0→1 transitions)
+        // so the user can re-summon a tab even when the DB flag was
+        // left as `1` by a prior surface that the renderer subsequently
+        // dropped (e.g. close-minimize that skipped the surfaced=false
+        // flip). The renderer's listener already checks whether a tab
+        // exists before creating one, so re-emit is idempotent.
+        crate::agent_hooks::emit(
+            crate::agent_hooks::HookEvent::SessionSurfaced,
+            serde_json::json!({
+                "projectPath": project_path,
+                "agentName": agent_name,
+                "terminalId": terminal_id,
+                "command": command,
+                "args": args,
+                "heartbeatName": heartbeat_name,
+                "attachAgentName": attach_agent_name,
+            }),
+        );
+    } else {
+        // 0.38.0 commit 6 — symmetric counterpart so every viewer
+        // drops the tab from its UI when one window minimizes. The
+        // PTY stays alive in the daemon (close-as-minimize); only the
+        // surface state propagates. Renderer's `session:unsurfaced`
+        // listener is idempotent (no-op if the tab isn't present).
+        crate::agent_hooks::emit(
+            crate::agent_hooks::HookEvent::SessionUnsurfaced,
+            serde_json::json!({
+                "projectPath": project_path,
+                "agentName": agent_name,
+                "terminalId": terminal_id,
+                "heartbeatName": heartbeat_name,
+                "attachAgentName": attach_agent_name,
+            }),
+        );
+    }
+    Ok(())
+}
+
+/// 0.38.0 commit 7 — broadcast cross-window when the pinned-chat
+/// refresh button is clicked. The originating window already kills
+/// the daemon PTY (via `/cli/sessions/v2/close`) and bumps its
+/// `refreshNonce` to remount TerminalPane. Other windows can't learn
+/// this from Commit 4's `session_removed` push (those filter for
+/// `tab-` agent names; pinned chat is the bare project_id), so we
+/// emit a Tauri-broadcast `chat:refreshed` event. Every window's
+/// AgentChatPane listener bumps its own `refreshNonce` when the
+/// payload's `projectPath` matches its workspace, keeping pinned
+/// chat sessions in sync across viewers.
+pub fn k2so_chat_refresh_broadcast(project_path: String) -> Result<(), String> {
+    crate::agent_hooks::emit(
+        crate::agent_hooks::HookEvent::ChatRefreshed,
+        serde_json::json!({ "projectPath": project_path }),
+    );
+    Ok(())
+}
+
 // ── Date helpers used only by the lockfile body ────────────────────────
 //
 // `simple_date` writes an ISO-8601 day stamp into the legacy .lock file
