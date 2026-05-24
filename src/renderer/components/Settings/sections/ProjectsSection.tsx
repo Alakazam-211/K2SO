@@ -1481,6 +1481,18 @@ function ProjectDetail({
         </div>
       </SettingsGroup>}
 
+      {/* ── Group 2.5: Skills — promoted out of Agent Settings in 0.39.0h.
+          Phase 2.1 invariant: workspace has ONE primary agent + N skill
+          profiles. Primary-agent and skills are sibling concepts, so
+          the visual hierarchy renders them as sibling SettingsGroups
+          rather than parent (Agent Settings) → child (Skills). Always
+          visible regardless of `agenticSystemsEnabled` / `agentMode`
+          per the Phase 2.5b followup — every workspace can manage its
+          skill profiles. */}
+      <SettingsGroup title="Skills">
+        <ProjectSkillsPanel projectPath={project.path} onOpenEditor={(name) => { setAgentEditorName(name); setAgentEditorOpen(true) }} />
+      </SettingsGroup>
+
       {/* ── Group 3: Worktree Management ── */}
       <SettingsGroup title="Worktrees">
         {/* Worktrees table */}
@@ -2755,20 +2767,13 @@ interface SkillSummary {
 }
 
 function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string; onOpenEditor: (agentName: string) => void }): React.JSX.Element {
-  // `agents` still drives the Workspace Manager subsection — it carries
-  // the `isCoordinator`/role info the manager block needs. Phase 2.5b
-  // followup: the per-row skill list below comes from the dedicated
-  // `k2so_skills_list` verb instead, so the list shape is the same
-  // whether the workspace is in manager / agent / custom / off mode.
+  // `agents` drives the Workspace Manager subsection — it carries the
+  // `isCoordinator`/role info the manager block needs. Phase 2.5 polish
+  // (0.39.0h): the Skills list got promoted out of this panel into its
+  // own top-level `ProjectSkillsPanel` SettingsGroup, so this component
+  // is now just Manager + Project Context.
   const [agents, setAgents] = useState<K2soAgentInfo[]>([])
-  const [skills, setSkills] = useState<SkillSummary[]>([])
   const [wsInboxCount, setWsInboxCount] = useState(0)
-  const [loading, setLoading] = useState(true)
-  const [showCreate, setShowCreate] = useState(false)
-  const [newName, setNewName] = useState('')
-  const [newSeed, setNewSeed] = useState('')
-  const [creating, setCreating] = useState(false)
-  const nameInputRef = useRef<HTMLInputElement>(null)
 
   const fetchAgents = useCallback(async () => {
     try {
@@ -2776,21 +2781,6 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
       setAgents(result)
     } catch {
       setAgents([])
-    }
-  }, [projectPath])
-
-  const fetchSkills = useCallback(async () => {
-    // Phase 2.5b followup: dedicated `.k2so/skills/` enumerator. Returns
-    // every skill folder regardless of workspace mode, so the renamed
-    // Skills section works under every mode (Off / K2SO Agent / Manager
-    // / Custom).
-    try {
-      const result = await invoke<SkillSummary[]>('k2so_skills_list', { projectPath })
-      setSkills(result)
-    } catch {
-      setSkills([])
-    } finally {
-      setLoading(false)
     }
   }, [projectPath])
 
@@ -2806,94 +2796,10 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
 
   useEffect(() => {
     fetchAgents()
-    fetchSkills()
     fetchWsInbox()
-  }, [fetchAgents, fetchSkills, fetchWsInbox])
-
-  useEffect(() => {
-    if (showCreate) {
-      requestAnimationFrame(() => nameInputRef.current?.focus())
-    }
-  }, [showCreate])
-
-  const handleCreate = useCallback(async () => {
-    if (!newName.trim()) return
-    setCreating(true)
-    try {
-      await invoke('k2so_skills_create', {
-        projectPath,
-        name: newName.trim().toLowerCase().replace(/\s+/g, '-'),
-        fromSkill: newSeed.trim() ? newSeed.trim() : null,
-      })
-      setNewName('')
-      setNewSeed('')
-      setShowCreate(false)
-      await fetchSkills()
-      await fetchAgents()
-    } catch (e) {
-      console.error('[skills] Create failed:', e)
-    } finally {
-      setCreating(false)
-    }
-  }, [projectPath, newName, newSeed, fetchSkills, fetchAgents])
-
-  const handleDelete = useCallback(async (name: string) => {
-    const confirmed = await useConfirmDialogStore.getState().confirm({
-      title: `Remove Skill "${name}"?`,
-      message: 'The skill folder (.k2so/skills/' + name + '/) will be moved to the recycle bin. You can restore it within ~30 days if you change your mind.',
-      confirmLabel: 'Remove',
-      destructive: true,
-    })
-    if (!confirmed) return
-    try {
-      await invoke('k2so_skills_remove', { projectPath, name })
-      await fetchSkills()
-      await fetchAgents()
-    } catch (e) {
-      console.error('[skills] Remove failed:', e)
-    }
-  }, [projectPath, fetchSkills, fetchAgents])
+  }, [fetchAgents, fetchWsInbox])
 
   const manager = agents.find((a) => a.isCoordinator)
-  // Filter the manager out of the per-row skill list so it isn't
-  // rendered twice (once in the Workspace Manager block above, once
-  // here). Other skills — including the K2SO planner agent + every
-  // sub-agent template — render in the list.
-  const skillRows = skills.filter((s) => !manager || s.name !== manager.name)
-
-  const SkillListItem = ({ skill }: { skill: SkillSummary }) => (
-    <div className="px-3 py-2 border-b border-[var(--color-border)] last:border-b-0">
-      <div className="flex items-center justify-between">
-        <div className="flex-1 min-w-0 mr-3">
-          <div className="flex items-center">
-            <span className="text-xs font-medium text-[var(--color-text-primary)] flex-shrink-0">{skill.name}</span>
-          </div>
-          {skill.title && skill.title !== skill.name && (
-            <p className="text-[10px] text-[var(--color-text-muted)] truncate mt-0.5">{skill.title}</p>
-          )}
-        </div>
-        <div className="flex items-center gap-1 flex-shrink-0">
-          <button
-            onClick={() => onOpenEditor(skill.name)}
-            className="px-2 py-0.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer"
-            title="Edit .k2so/skills/{skill.name}/SKILL.md"
-          >
-            Edit
-          </button>
-          <button
-            onClick={() => handleDelete(skill.name)}
-            className="w-5 h-5 flex items-center justify-center text-[var(--color-text-muted)] hover:text-red-400 transition-colors no-drag cursor-pointer"
-            title="Remove skill (recoverable via recycle bin)"
-          >
-            <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5">
-              <line x1="1" y1="1" x2="7" y2="7" />
-              <line x1="7" y1="1" x2="1" y2="7" />
-            </svg>
-          </button>
-        </div>
-      </div>
-    </div>
-  )
 
   return (
     <div className="space-y-3">
@@ -2978,85 +2884,223 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
           list above — each row has its own WAKEUP.md now). See the
           migrate_or_scaffold_lead_heartbeat startup pass. */}
 
-      {/* Skills section — Phase 2.5b followup: renamed from
-          "Agent Templates" and always rendered (was previously gated
-          on `agentMode === 'manager'`). Lists every documentation
-          profile under `.k2so/skills/<name>/` so the user can edit
-          per-skill SKILL.md files without first switching into
-          manager mode. */}
-      <div>
-        <div className="flex items-center justify-between mb-1">
-          <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider flex items-center gap-1.5">
-            Skills
-            {skillRows.length > 0 && (
-              <span className="text-[9px] tabular-nums font-medium px-1.5 py-0.5 bg-white/5 text-[var(--color-text-muted)]">{skillRows.length}</span>
-            )}
-          </h3>
+      {/* Skills section was promoted out of this panel in 0.39.0h
+          Phase 2.5 polish — it now renders as its own top-level
+          SettingsGroup (`ProjectSkillsPanel`) above Worktrees. The
+          workspace==agent invariant (Phase 2.1) means primary-agent +
+          skill-profiles are siblings, not parent-child; the visual
+          hierarchy matches that. */}
+    </div>
+  )
+}
+
+// ── Project Skills Panel ────────────────────────────────────────────
+//
+// Promoted out of ProjectAgentsPanel in 0.39.0h. Renders the Skills
+// list as its own top-level Settings group. Always visible (regardless
+// of agent mode / `agenticSystemsEnabled`) — per the Phase 2.5b
+// followup, every workspace has skill profiles. Fetches its own skills
+// + agents (the latter only to filter the workspace manager out of the
+// per-row list so it isn't duplicated next to the Workspace Manager
+// block in Agent Settings).
+
+function ProjectSkillsPanel({ projectPath, onOpenEditor }: { projectPath: string; onOpenEditor: (agentName: string) => void }): React.JSX.Element {
+  const [skills, setSkills] = useState<SkillSummary[]>([])
+  const [agents, setAgents] = useState<K2soAgentInfo[]>([])
+  const [loading, setLoading] = useState(true)
+  const [showCreate, setShowCreate] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [newSeed, setNewSeed] = useState('')
+  const [creating, setCreating] = useState(false)
+  const nameInputRef = useRef<HTMLInputElement>(null)
+
+  const fetchSkills = useCallback(async () => {
+    // Phase 2.5b followup: dedicated `.k2so/skills/` enumerator. Returns
+    // every skill folder regardless of workspace mode, so the Skills
+    // section works under every mode (Off / K2SO Agent / Manager /
+    // Custom).
+    try {
+      const result = await invoke<SkillSummary[]>('k2so_skills_list', { projectPath })
+      setSkills(result)
+    } catch {
+      setSkills([])
+    } finally {
+      setLoading(false)
+    }
+  }, [projectPath])
+
+  const fetchAgents = useCallback(async () => {
+    try {
+      const result = await invoke<K2soAgentInfo[]>('k2so_agents_list', { projectPath })
+      setAgents(result)
+    } catch {
+      setAgents([])
+    }
+  }, [projectPath])
+
+  useEffect(() => {
+    fetchSkills()
+    fetchAgents()
+  }, [fetchSkills, fetchAgents])
+
+  useEffect(() => {
+    if (showCreate) {
+      requestAnimationFrame(() => nameInputRef.current?.focus())
+    }
+  }, [showCreate])
+
+  const handleCreate = useCallback(async () => {
+    if (!newName.trim()) return
+    setCreating(true)
+    try {
+      await invoke('k2so_skills_create', {
+        projectPath,
+        name: newName.trim().toLowerCase().replace(/\s+/g, '-'),
+        fromSkill: newSeed.trim() ? newSeed.trim() : null,
+      })
+      setNewName('')
+      setNewSeed('')
+      setShowCreate(false)
+      await fetchSkills()
+      await fetchAgents()
+    } catch (e) {
+      console.error('[skills] Create failed:', e)
+    } finally {
+      setCreating(false)
+    }
+  }, [projectPath, newName, newSeed, fetchSkills, fetchAgents])
+
+  const handleDelete = useCallback(async (name: string) => {
+    const confirmed = await useConfirmDialogStore.getState().confirm({
+      title: `Remove Skill "${name}"?`,
+      message: 'The skill folder (.k2so/skills/' + name + '/) will be moved to the recycle bin. You can restore it within ~30 days if you change your mind.',
+      confirmLabel: 'Remove',
+      destructive: true,
+    })
+    if (!confirmed) return
+    try {
+      await invoke('k2so_skills_remove', { projectPath, name })
+      await fetchSkills()
+      await fetchAgents()
+    } catch (e) {
+      console.error('[skills] Remove failed:', e)
+    }
+  }, [projectPath, fetchSkills, fetchAgents])
+
+  const manager = agents.find((a) => a.isCoordinator)
+  // Filter the manager out of the per-row skill list so it isn't
+  // rendered twice (once in the Workspace Manager block inside Agent
+  // Settings, once here). Other skills — including the K2SO planner
+  // agent + every sub-agent template — render in the list.
+  const skillRows = skills.filter((s) => !manager || s.name !== manager.name)
+
+  const SkillListItem = ({ skill }: { skill: SkillSummary }): React.JSX.Element => (
+    <div className="px-3 py-2 border-b border-[var(--color-border)] last:border-b-0">
+      <div className="flex items-center justify-between">
+        <div className="flex-1 min-w-0 mr-3">
+          <div className="flex items-center">
+            <span className="text-xs font-medium text-[var(--color-text-primary)] flex-shrink-0">{skill.name}</span>
+          </div>
+          {skill.title && skill.title !== skill.name && (
+            <p className="text-[10px] text-[var(--color-text-muted)] truncate mt-0.5">{skill.title}</p>
+          )}
+        </div>
+        <div className="flex items-center gap-1 flex-shrink-0">
           <button
-            onClick={() => setShowCreate(!showCreate)}
-            className="px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer"
+            onClick={() => onOpenEditor(skill.name)}
+            className="px-2 py-0.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer"
+            title="Edit .k2so/skills/{skill.name}/SKILL.md"
           >
-            {showCreate ? 'Cancel' : '+ New Skill'}
+            Edit
+          </button>
+          <button
+            onClick={() => handleDelete(skill.name)}
+            className="w-5 h-5 flex items-center justify-center text-[var(--color-text-muted)] hover:text-red-400 transition-colors no-drag cursor-pointer"
+            title="Remove skill (recoverable via recycle bin)"
+          >
+            <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <line x1="1" y1="1" x2="7" y2="7" />
+              <line x1="7" y1="1" x2="1" y2="7" />
+            </svg>
           </button>
         </div>
-
-        {/* Create form — A19 "any skill can seed any other": the
-            optional seed dropdown lets the user start a new skill from
-            an existing one's SKILL.md body. Defaults to blank scaffold
-            when no seed is picked. */}
-        {showCreate && (
-          <div className="border border-[var(--color-border)] p-3 space-y-2 mb-2">
-            <input
-              ref={nameInputRef}
-              type="text"
-              placeholder="Skill name (e.g. backend-eng)"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              className="w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] px-2 py-1.5 outline-none focus:border-[var(--color-accent)] placeholder:text-[var(--color-text-muted)]"
-              onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
-            />
-            {skills.length > 0 && (
-              <select
-                value={newSeed}
-                onChange={(e) => setNewSeed(e.target.value)}
-                className="w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] px-2 py-1.5 outline-none focus:border-[var(--color-accent)]"
-              >
-                <option value="">Blank skill (no seed)</option>
-                {skills.map((s) => (
-                  <option key={s.name} value={s.name}>Seed from: {s.name}</option>
-                ))}
-              </select>
-            )}
-            <button
-              onClick={handleCreate}
-              disabled={creating || !newName.trim()}
-              className="px-3 py-1 text-xs font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer disabled:opacity-50"
-            >
-              {creating ? 'Creating...' : 'Create Skill'}
-            </button>
-          </div>
-        )}
-
-        {/* Skill list. Counts dropped from per-row display — the
-            inbox/active/done numbers came from the legacy multi-agent
-            work surface and don't map onto the post-Phase-2.5b skills
-            primitive (a skill is a doc profile, not a work queue). The
-            Workspace Manager subsection above still shows the
-            workspace inbox count, which is the relevant unit of work. */}
-        {loading ? (
-          <p className="text-[10px] text-[var(--color-text-muted)]">Loading skills...</p>
-        ) : skillRows.length === 0 && !showCreate ? (
-          <p className="text-[10px] text-[var(--color-text-muted)]">
-            No skills yet. Create one to give your agent a specialized capability profile.
-          </p>
-        ) : (
-          <div className="border border-[var(--color-border)]">
-            {skillRows.map((skill) => (
-              <SkillListItem key={skill.name} skill={skill} />
-            ))}
-          </div>
-        )}
       </div>
+    </div>
+  )
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <span className="flex items-center gap-1.5">
+          {skillRows.length > 0 && (
+            <span className="text-[9px] tabular-nums font-medium px-1.5 py-0.5 bg-white/5 text-[var(--color-text-muted)]">{skillRows.length}</span>
+          )}
+        </span>
+        <button
+          onClick={() => setShowCreate(!showCreate)}
+          className="px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-muted)] transition-colors no-drag cursor-pointer"
+        >
+          {showCreate ? 'Cancel' : '+ New Skill'}
+        </button>
+      </div>
+
+      {/* Create form — A19 "any skill can seed any other": the
+          optional seed dropdown lets the user start a new skill from
+          an existing one's SKILL.md body. Defaults to blank scaffold
+          when no seed is picked. */}
+      {showCreate && (
+        <div className="border border-[var(--color-border)] p-3 space-y-2 mb-2">
+          <input
+            ref={nameInputRef}
+            type="text"
+            placeholder="Skill name (e.g. backend-eng)"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            className="w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] px-2 py-1.5 outline-none focus:border-[var(--color-accent)] placeholder:text-[var(--color-text-muted)]"
+            onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
+          />
+          {skills.length > 0 && (
+            <select
+              value={newSeed}
+              onChange={(e) => setNewSeed(e.target.value)}
+              className="w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] px-2 py-1.5 outline-none focus:border-[var(--color-accent)]"
+            >
+              <option value="">Blank skill (no seed)</option>
+              {skills.map((s) => (
+                <option key={s.name} value={s.name}>Seed from: {s.name}</option>
+              ))}
+            </select>
+          )}
+          <button
+            onClick={handleCreate}
+            disabled={creating || !newName.trim()}
+            className="px-3 py-1 text-xs font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer disabled:opacity-50"
+          >
+            {creating ? 'Creating...' : 'Create Skill'}
+          </button>
+        </div>
+      )}
+
+      {/* Skill list. Counts dropped from per-row display — the
+          inbox/active/done numbers came from the legacy multi-agent
+          work surface and don't map onto the post-Phase-2.5b skills
+          primitive (a skill is a doc profile, not a work queue). The
+          Workspace Manager subsection (inside Agent Settings) still
+          shows the workspace inbox count, which is the relevant unit
+          of work. */}
+      {loading ? (
+        <p className="text-[10px] text-[var(--color-text-muted)]">Loading skills...</p>
+      ) : skillRows.length === 0 && !showCreate ? (
+        <p className="text-[10px] text-[var(--color-text-muted)]">
+          No skills yet. Create one to give your agent a specialized capability profile.
+        </p>
+      ) : (
+        <div className="border border-[var(--color-border)]">
+          {skillRows.map((skill) => (
+            <SkillListItem key={skill.name} skill={skill} />
+          ))}
+        </div>
+      )}
     </div>
   )
 }
