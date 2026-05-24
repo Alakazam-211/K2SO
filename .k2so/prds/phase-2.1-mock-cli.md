@@ -30,7 +30,7 @@ YOUR INBOX
   inbox respond <id> "text"             Reply (back to sender)
   inbox move <id> <folder>              File into folder (creates if needed)
   inbox archive <id>                    Standard archive (preserved + searchable)
-  inbox delete <id>                     Standard delete (gone)
+  inbox delete <id>                     Move to macOS Recycle Bin (recoverable from Trash)
   inbox search "query"                  Search inbox + folders
   inbox folders                         List folders this workspace has created
 
@@ -186,12 +186,12 @@ K2SO glossary — definitions of K2SO-specific terms
   agent            The workspace's primary AI assistant (1:1 with workspace)
   agentic          Global toggle for K2SO's autonomous systems
   companion        Daemon's ngrok-tunneled server (Mobile + K2SO Connect)
+  connections      Cross-workspace links: which workspaces can read each other's status
   harness          IDE integration layer (Claude/Cursor config K2SO writes)
   heartbeat        Workspace-scoped scheduled wake (cron-like)
   hooks            Claude Code / Cursor integration hooks (NOT git hooks)
   inbox            Workspace's email-like communication channel
   onboarding       First-launch flow for registering a workspace
-  reservation      Short-term lock on a file path (for multi-agent coordination)
   signal           Typed event sent between workspaces (msg, status, presence, etc.)
   skill            Documentation profile for a role/capability
   skill-template   Master skill definition that can be instantiated
@@ -200,6 +200,26 @@ K2SO glossary — definitions of K2SO-specific terms
   worktree         Git worktree — a working directory linked to a different branch
 
 Run `k2so glossary <term>` for a full definition.
+```
+
+---
+
+## `k2so glossary connections` (single-term lookup)
+
+```
+connections     Cross-workspace links. When workspace A "connects" to
+                workspace B, A can read B's `who` / `activity` / inbox
+                presence; B can show up in A's `workspace list`. Used
+                for declaring "these workspaces work together" so K2SO
+                surfaces the right context.
+
+                Manage via: `k2so connections list` / `add <path>` /
+                `remove <path>`. Connections are symmetric (both sides
+                see each other) and persisted per-workspace.
+
+                NOT the same as: skill profiles (`k2so skills`), live
+                sessions (`k2so workspace list --running`), or ngrok
+                tunnel state (`k2so daemon companion`).
 ```
 
 ---
@@ -221,9 +241,15 @@ inbox           The workspace's email-like communication channel. Items
 
                 Storage: `.k2so/inbox/<id>.md` (top-level) and
                 `.k2so/inbox/<folder>/<id>.md` (after `inbox move`).
-                Legacy items from pre-Phase-2.1 K2SO may still live at
-                `.k2so/work/{inbox,active,done}/` — `k2so inbox list`
-                surfaces both with `[legacy]` tags.
+
+                Migration from pre-Phase-2.1 K2SO: the daemon runs a
+                one-shot migration on its first boot after upgrade.
+                Old `.k2so/work/{inbox,active,done}/*.md` files are
+                atomic-renamed into `.k2so/inbox/{,active,done}/`, then
+                the empty `.k2so/work/` folder is sent to the macOS
+                Recycle Bin (recoverable if anything was missed). After
+                migration there's no `.k2so/work/`; everything lives
+                under `.k2so/inbox/`.
 
                 See also: `k2so inbox --help` for the full verb surface,
                 `k2so msg --help` for sending into someone else's inbox.
@@ -331,8 +357,10 @@ SUBCOMMANDS
                             Write your own inbox item (self-note / task)
   respond <id> "text"       Reply (back to sender)
   move <id> <folder>        File into a folder (creates folder if needed)
-  archive <id>              Standard archive (preserved + searchable)
-  delete <id>               Standard delete (gone)
+  archive <id>              Standard archive (preserved + searchable; goes to inbox/done/)
+  delete <id>               Move to macOS Recycle Bin (recoverable from Trash)
+                            Use `inbox archive` for "done but keep around";
+                            use `inbox delete` only for "actually remove this."
   search "query"            Search inbox + all folders
   folders                   List folders this workspace has created
 
@@ -676,9 +704,15 @@ EXAMPLES OF MIGRATION
 ## `k2so heartbeat --help`
 
 ```
-k2so heartbeat <family> <subcommand>
+k2so heartbeat [<family> <subcommand>]
 
-Manage workspace-scoped scheduled wakes. Three families:
+Manage workspace-scoped scheduled wakes.
+
+DEFAULT (no args)
+  k2so heartbeat                                Lists active heartbeat schedules
+                                                (= `heartbeat schedule list`)
+
+THREE FAMILIES:
 
 SCHEDULE (CRUD on heartbeat definitions)
   heartbeat schedule add --name <n> <spec>
