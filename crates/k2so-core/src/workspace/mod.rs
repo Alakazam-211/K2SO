@@ -12,3 +12,4 @@
 
 pub mod checkin;
 pub mod scheduler;
+pub mod wake_prompts;

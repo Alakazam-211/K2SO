@@ -61,7 +61,10 @@ pub use crate::skills::writer as skill_writer;
 pub mod terminal_id;
 pub mod triage_summary;
 pub mod unification;
-pub mod wake;
+/// Phase 2.5c: `wake` relocated to [`crate::workspace::wake_prompts`]
+/// (renamed to avoid collision with the top-level `crate::wake` module).
+/// Back-compat alias keeps `agents::wake::*` resolving.
+pub use crate::workspace::wake_prompts as wake;
 pub mod work_item;
 pub mod workspace;
 pub mod workspaces;
