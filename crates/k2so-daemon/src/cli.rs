@@ -164,7 +164,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
 
         // ── Agent lifecycle: lock + session ─────────────────────────
         "/cli/agents/lock" => match need_project(params) {
-            Ok(p) => respond_unit(k2so_core::agents::session::k2so_agents_lock(
+            Ok(p) => respond_unit(k2so_core::workspace::session::k2so_agents_lock(
                 p,
                 str_param(params, "agent"),
                 opt_param(params, "terminal_id"),
@@ -173,7 +173,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
         "/cli/agents/unlock" => match need_project(params) {
-            Ok(p) => respond_unit(k2so_core::agents::session::k2so_agents_unlock(
+            Ok(p) => respond_unit(k2so_core::workspace::session::k2so_agents_unlock(
                 p,
                 str_param(params, "agent"),
             )),
@@ -193,9 +193,9 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                 // an explicit agent still get a routable identity.
                 let agent = opt_param(params, "agent").unwrap_or_else(|| {
                     k2so_core::agents::find_primary_agent(&p)
-                        .unwrap_or_else(|| k2so_core::agents::display::agent_display_name(&p))
+                        .unwrap_or_else(|| k2so_core::workspace::display::agent_display_name(&p))
                 });
-                let events = k2so_core::agents::events::drain_agent_events(&p, &agent);
+                let events = k2so_core::workspace::events::drain_agent_events(&p, &agent);
                 CliResponse::ok_json(
                     serde_json::to_string(&events).unwrap_or_else(|_| "[]".to_string()),
                 )
@@ -273,7 +273,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         "/cli/mode" => match need_project(params) {
             Ok(p) => {
                 if let Some(mode) = opt_param(params, "set") {
-                    match k2so_core::agents::settings::update_project_setting(&p, "agent_mode", &mode) {
+                    match k2so_core::workspace::settings::update_project_setting(&p, "agent_mode", &mode) {
                         Ok(()) => {
                             k2so_core::agent_hooks::emit(
                                 k2so_core::agent_hooks::HookEvent::SyncProjects,
@@ -330,7 +330,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                 } else {
                     // Read current mode. Falls back to filesystem-
                     // detection if DB has no row.
-                    match k2so_core::agents::settings::get_project_settings(&p) {
+                    match k2so_core::workspace::settings::get_project_settings(&p) {
                         Ok(settings) => CliResponse::ok_json(
                             serde_json::to_string(&settings).unwrap_or_default(),
                         ),
@@ -360,7 +360,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
         "/cli/settings" => match need_project(params) {
-            Ok(p) => match k2so_core::agents::settings::get_project_settings(&p) {
+            Ok(p) => match k2so_core::workspace::settings::get_project_settings(&p) {
                 Ok(s) => CliResponse::ok_json(serde_json::to_string(&s).unwrap_or_default()),
                 Err(e) => CliResponse::bad_request(e),
             },
@@ -370,7 +370,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Ok(p) => {
                 let enable = bool_param(params, "enable");
                 let value = if enable { "1" } else { "0" };
-                match k2so_core::agents::settings::update_project_setting(&p, "worktree_mode", value) {
+                match k2so_core::workspace::settings::update_project_setting(&p, "worktree_mode", value) {
                     Ok(()) => {
                         k2so_core::agent_hooks::emit(
                             k2so_core::agent_hooks::HookEvent::SyncProjects,
@@ -390,7 +390,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             // Global toggle, not project-specific.
             if let Some(enable) = opt_param(params, "enable") {
                 let on = enable == "1" || enable == "true" || enable == "on";
-                match k2so_core::agents::settings::set_agentic_enabled(on) {
+                match k2so_core::workspace::settings::set_agentic_enabled(on) {
                     Ok(()) => {
                         k2so_core::agent_hooks::emit(
                             k2so_core::agent_hooks::HookEvent::SyncSettings,
@@ -404,7 +404,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                     Err(e) => CliResponse::bad_request(e),
                 }
             } else {
-                let enabled = k2so_core::agents::settings::get_agentic_enabled();
+                let enabled = k2so_core::workspace::settings::get_agentic_enabled();
                 CliResponse::ok_json(
                     serde_json::json!({"agenticEnabled": enabled}).to_string(),
                 )
@@ -478,7 +478,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         "/cli/checkin" => match need_project(params) {
             Ok(p) => {
                 let agent = str_param(params, "agent");
-                match k2so_core::agents::checkin::checkin(&p, &agent) {
+                match k2so_core::workspace::checkin::checkin(&p, &agent) {
                     Ok(body) => CliResponse::ok_json(body),
                     Err(e) => CliResponse::bad_request(e),
                 }
@@ -580,7 +580,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         "/cli/workspace/agent-display-name" => match need_project(params) {
             Ok(p) => CliResponse::ok_json(
                 serde_json::json!({
-                    "display_name": k2so_core::agents::display::agent_display_name(&p),
+                    "display_name": k2so_core::workspace::display::agent_display_name(&p),
                 })
                 .to_string(),
             ),
@@ -606,7 +606,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                 if new_name.is_empty() {
                     return CliResponse::bad_request("Missing name");
                 }
-                match k2so_core::agents::display::set_agent_display_name(&p, &new_name) {
+                match k2so_core::workspace::display::set_agent_display_name(&p, &new_name) {
                     Ok(()) => {
                         // Phase B: live-session label propagation.
                         // The canonical workspace+agent session is
@@ -762,14 +762,14 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                 if agent.is_empty() {
                     return CliResponse::bad_request("Missing 'agent' parameter");
                 }
-                match k2so_core::agents::skill_content::generate_agent_claude_md_content(
+                match k2so_core::skills::content::generate_agent_claude_md_content(
                     &p, &agent, None,
                 ) {
                     Ok(md) => {
                         let claude_md_path =
                             k2so_core::agents::agent_dir(&p, &agent).join("CLAUDE.md");
                         if let Err(e) =
-                            k2so_core::agents::work_item::atomic_write(&claude_md_path, &md)
+                            k2so_core::workspace::work_item::atomic_write(&claude_md_path, &md)
                         {
                             return CliResponse::bad_request(e);
                         }
@@ -829,7 +829,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         "/cli/states/set" => match need_project(params) {
             Ok(p) => {
                 let state_id = str_param(params, "state_id");
-                match k2so_core::agents::settings::update_project_setting(&p, "tier_id", &state_id)
+                match k2so_core::workspace::settings::update_project_setting(&p, "tier_id", &state_id)
                 {
                     Ok(()) => {
                         k2so_core::agent_hooks::emit(
@@ -1303,7 +1303,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         // (next Tauri launch picks up the staged PROJECT.md).
         "/cli/onboarding/scan" => match need_project(params) {
             Ok(p) => respond(Ok::<_, String>(
-                k2so_core::agents::onboarding::scan_harness_files(&p),
+                k2so_core::workspace::onboarding::scan_harness_files(&p),
             )),
             Err(r) => r,
         },
@@ -1313,7 +1313,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                 if source.is_empty() {
                     CliResponse::bad_request("Missing source parameter")
                 } else {
-                    match k2so_core::agents::onboarding::adopt_harness_as_project_md(
+                    match k2so_core::workspace::onboarding::adopt_harness_as_project_md(
                         &p,
                         std::path::Path::new(&source),
                     ) {
@@ -1330,12 +1330,12 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
         "/cli/onboarding/skip" => match need_project(params) {
-            Ok(p) => respond_unit(k2so_core::agents::onboarding::skip_harness_management(&p)),
+            Ok(p) => respond_unit(k2so_core::workspace::onboarding::skip_harness_management(&p)),
             Err(r) => r,
         },
         "/cli/onboarding/start-fresh" => match need_project(params) {
             Ok(p) => {
-                if let Err(e) = k2so_core::agents::onboarding::unskip_harness_management(&p) {
+                if let Err(e) = k2so_core::workspace::onboarding::unskip_harness_management(&p) {
                     return CliResponse::bad_request(e);
                 }
                 // Unit 7c: regen directly (bridge retired — body in core).

@@ -68,7 +68,7 @@
 //!   call this helper rather than duplicating the spawn-and-register
 //!   logic. Wake and proactive ensure converge on the same code.
 
-use k2so_core::agents::launch_profile::{load_launch_profile, resolve_cwd, LaunchProfile};
+use k2so_core::workspace::launch_profile::{load_launch_profile, resolve_cwd, LaunchProfile};
 use k2so_core::log_debug;
 
 use crate::session_lookup;
@@ -172,7 +172,7 @@ pub fn ensure_canonical_session(project_path: &str) -> Result<EnsureOutcome, Str
     // 5. Persist workspace_sessions row. Best-effort — the PTY is
     //    alive regardless. Mirrors what `try_auto_launch` and the
     //    `/cli/agents/launch` handler do.
-    let _ = k2so_core::agents::session::k2so_agents_lock(
+    let _ = k2so_core::workspace::session::k2so_agents_lock(
         project_path.to_string(),
         agent_name.clone(),
         Some(outcome.session_id.to_string()),

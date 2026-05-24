@@ -30,7 +30,8 @@
 
 use std::path::Path;
 
-use k2so_core::agents::{find_primary_agent, resolve_project_id, wake};
+use k2so_core::workspace::agent_identity::{find_primary_agent, resolve_project_id};
+use k2so_core::workspace::wake_prompts as wake;
 use k2so_core::db::schema::{AgentHeartbeat, HeartbeatFire};
 use k2so_core::session::SessionId;
 

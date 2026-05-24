@@ -1999,7 +1999,7 @@ fn handle_cli_heartbeat(
     project_path: &str,
     params: &std::collections::HashMap<String, String>,
 ) -> Result<String, String> {
-    use k2so_core::agents::heartbeat as hb;
+    use k2so_core::heartbeats as hb;
 
     match path {
         "/cli/heartbeat/add" => {
@@ -2409,7 +2409,7 @@ async fn read_post_body(stream: &mut TcpStream, buf: &mut [u8]) -> Vec<u8> {
 /// Failures are logged and skipped — a single bad workspace must not
 /// keep the daemon from booting and serving healthy ones.
 fn run_workspace_unification_sweep() {
-    use k2so_core::agents::unification;
+    use k2so_core::migrations::unification_0_37_0 as unification;
 
     let projects = {
         let db = k2so_core::db::shared();

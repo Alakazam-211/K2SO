@@ -36,7 +36,9 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio::task::{spawn_blocking, JoinSet};
 
-use k2so_core::agents::{agent_type_for, heartbeat, scheduler, settings, triage_summary, wake};
+use k2so_core::heartbeats as heartbeat;
+use k2so_core::workspace::agent_identity::agent_type_for;
+use k2so_core::workspace::{scheduler, settings, triage as triage_summary, wake_prompts as wake};
 use k2so_core::db::shared as shared_db;
 
 /// Cap on parallel heartbeat spawns per scheduler tick. Six is a

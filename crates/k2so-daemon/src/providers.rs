@@ -10,7 +10,7 @@
 //!
 //! Registered at daemon startup via `register_all()`.
 
-use k2so_core::agents::launch_profile::{load_launch_profile, resolve_cwd, LaunchProfile};
+use k2so_core::workspace::launch_profile::{load_launch_profile, resolve_cwd, LaunchProfile};
 use k2so_core::awareness::{AgentAddress, AgentSignal, InjectProvider, WakeProvider};
 use k2so_core::log_debug;
 
@@ -227,7 +227,7 @@ fn try_auto_launch(agent: &str, signal: &AgentSignal) -> Result<(), String> {
     // Mirrors `agents_routes::handle_agents_launch`'s post-spawn
     // k2so_agents_lock call. Best-effort: failure logs but doesn't
     // unwind the spawn (the PTY is alive regardless).
-    let _ = k2so_core::agents::session::k2so_agents_lock(
+    let _ = k2so_core::workspace::session::k2so_agents_lock(
         project_path.to_string(),
         agent.to_string(),
         Some(outcome.session_id.to_string()),

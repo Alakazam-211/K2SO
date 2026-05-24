@@ -200,7 +200,7 @@ pub fn spawn_wake_headless(
     // unconditionally and was the second contributor to the lane
     // collapse (along with the canonical_key collision).
     if heartbeat_name.is_none() {
-        let _ = k2so_core::agents::session::k2so_agents_lock(
+        let _ = k2so_core::workspace::session::k2so_agents_lock(
             project_path.to_string(),
             agent_name.to_string(),
             Some(terminal_id.clone()),
@@ -269,7 +269,7 @@ pub fn spawn_wake_headless(
             if session_id.is_empty() {
                 return;
             }
-            match k2so_core::agents::session::k2so_agents_save_session_id(
+            match k2so_core::workspace::session::k2so_agents_save_session_id(
                 project_path_owned.clone(),
                 agent_name_owned.clone(),
                 session_id.clone(),

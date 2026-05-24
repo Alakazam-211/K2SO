@@ -11,10 +11,10 @@
 //!
 //! The heavy lifting (decision tree for launch, worktree + task
 //! CLAUDE.md for delegate) is already in k2so-core:
-//! - `k2so_core::agents::build_launch::k2so_agents_build_launch`
+//! - `k2so_core::workspace::agent_launch::k2so_agents_build_launch`
 //!   walks the three wake branches (resume active / delegate from
 //!   inbox / fresh launch) and returns the launch JSON.
-//! - `k2so_core::agents::delegate::k2so_agents_delegate` creates
+//! - `k2so_core::deprecated::delegate::k2so_agents_delegate` creates
 //!   the worktree + moves the inbox item + writes CLAUDE.md and
 //!   returns the launch JSON.
 //!
@@ -101,7 +101,7 @@ pub fn spawn_wake_via_session_stream(
         canonical_key: None,
     })?;
 
-    let _ = k2so_core::agents::session::k2so_agents_lock(
+    let _ = k2so_core::workspace::session::k2so_agents_lock(
         project_path.to_string(),
         agent_name.to_string(),
         Some(outcome.session_id.to_string()),
@@ -174,7 +174,7 @@ pub fn handle_agents_launch(
     }
     let cli_command = params.get("command").cloned().filter(|s| !s.is_empty());
 
-    let launch_info = match k2so_core::agents::build_launch::k2so_agents_build_launch(
+    let launch_info = match k2so_core::workspace::agent_launch::k2so_agents_build_launch(
         project_path.to_string(),
         agent.clone(),
         cli_command,
@@ -213,7 +213,7 @@ pub fn handle_agents_launch(
     // scheduler skips the agent on subsequent ticks. Best-effort —
     // the PTY is already live and will keep running if the DB
     // write fails.
-    let _ = k2so_core::agents::session::k2so_agents_lock(
+    let _ = k2so_core::workspace::session::k2so_agents_lock(
         project_path.to_string(),
         agent.clone(),
         Some(outcome.session_id.to_string()),
@@ -267,7 +267,7 @@ pub fn handle_agents_delegate(
         return CliResponse::bad_request("missing file param");
     }
 
-    let launch_info = match k2so_core::agents::delegate::k2so_agents_delegate(
+    let launch_info = match k2so_core::deprecated::delegate::k2so_agents_delegate(
         project_path.to_string(),
         target.clone(),
         file.clone(),
@@ -300,7 +300,7 @@ pub fn handle_agents_delegate(
         Err(e) => return CliResponse::bad_request(format!("spawn failed: {e}")),
     };
 
-    let _ = k2so_core::agents::session::k2so_agents_lock(
+    let _ = k2so_core::workspace::session::k2so_agents_lock(
         project_path.to_string(),
         agent_name.clone(),
         Some(outcome.session_id.to_string()),

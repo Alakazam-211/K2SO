@@ -496,7 +496,7 @@ fn spawn_and_inject(
     // history: see git log for `0.37.5 Phase D` if you want the
     // archaeology.
     let canonical_terminal_id = format!("agent-chat:{project_id}");
-    let _ = k2so_core::agents::session::k2so_agents_lock(
+    let _ = k2so_core::workspace::session::k2so_agents_lock(
         project_path.to_string(),
         agent_name.to_string(),
         Some(canonical_terminal_id),

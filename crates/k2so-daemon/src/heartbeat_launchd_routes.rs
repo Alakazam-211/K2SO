@@ -20,7 +20,7 @@
 //!     "wake_system": <bool>}`. Routes to the matching install/uninstall.
 //!
 //! The actual install/uninstall logic lives in
-//! `k2so_core::agents::heartbeat_install` so headless callers (CLI,
+//! `k2so_core::heartbeats::install` so headless callers (CLI,
 //! daemon boot, future CLI verb) share one implementation. These
 //! handlers parse the JSON body, dispatch, and return a uniform
 //! response shape:
@@ -35,7 +35,7 @@
 
 use serde::Deserialize;
 
-use k2so_core::agents::heartbeat_install;
+use k2so_core::heartbeats::install as heartbeat_install;
 
 use crate::cli_response::CliResponse;
 

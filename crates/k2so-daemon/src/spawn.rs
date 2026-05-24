@@ -194,7 +194,7 @@ pub fn spawn_agent_session_v2_blocking(
     let label_seed = if let Some(pid) = req.project_id.as_deref() {
         if !pid.is_empty() {
             project_path_for_id(pid)
-                .map(|p| k2so_core::agents::display::agent_display_name(&p))
+                .map(|p| k2so_core::workspace::display::agent_display_name(&p))
                 .unwrap_or_else(|| req.agent_name.clone())
         } else {
             req.agent_name.clone()
