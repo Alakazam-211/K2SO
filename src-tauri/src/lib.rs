@@ -46,7 +46,12 @@ mod menu;
 // `crate::perf_timer!` / `crate::perf_hist!` / `crate::perf::*` call sites
 // keep working unchanged. See crates/k2so-core/src/perf.rs.
 pub use k2so_core::{perf, perf_hist, perf_timer};
-mod state;
+// Phase 2 close-out (2026-05-23): `mod state` deleted. After Units 1-4
+// reduced `AppState` to a single `watchers` field, the struct + the
+// `.manage()` registration were pure ceremony around one
+// `HashMap<String, RecommendedWatcher>`. Inlined into `watcher.rs`
+// as a `LazyLock<Mutex<_>>` static so the only host-side process state
+// lives next to the only consumer.
 // Tauri-side HTTP client for the k2so-daemon. Routes state-mutating
 // commands through the daemon's loopback HTTP instead of running them
 // in-process. Small for now (ping + status); grows as daemon handlers
@@ -78,9 +83,6 @@ pub use k2so_core::terminal;
 mod watcher;
 mod window;
 
-use state::AppState;
-use std::collections::HashMap;
-use parking_lot::Mutex;
 use tauri::{Emitter, Manager};
 
 /// H7: sync `k2so_core::hook_config` with the daemon's port + token so
@@ -235,15 +237,13 @@ pub fn run() {
         }
     });
 
-    // Phase 2 Unit 4: AppState shrunk to the `watchers` field only —
-    // every other piece of process-wide state (LLM in Unit 2, terminal
-    // manager in Unit 3, DB connection in Unit 4) moved into the
-    // daemon. The handle is kept solely so `watcher.rs::fs_watch_dir`
-    // / `fs_unwatch_dir` can register + tear down notify watchers
-    // through Tauri's `State<>` injection.
-    let app_state = AppState {
-        watchers: Mutex::new(HashMap::new()),
-    };
+    // Phase 2 close-out (2026-05-23): `AppState` deleted entirely.
+    // Units 1-4 had already moved every other field (companion, LLM,
+    // terminal manager, DB connection) into the daemon; this commit
+    // moves the last surviving field — `watchers` — into a
+    // module-level `LazyLock<Mutex<_>>` static inside `watcher.rs`.
+    // No `.manage()` registration needed; the filesystem watcher
+    // commands read the static directly.
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -255,7 +255,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .manage(app_state)
         .menu(|handle| menu::create_menu(handle))
         .on_menu_event(menu::handle_menu_event)
         .setup(|app| {
@@ -336,13 +335,13 @@ pub fn run() {
                     let paths: Vec<String> = {
                         let db_arc = crate::db::shared();
                         let db = db_arc.lock();
-                        let mut p = Vec::new();
-                        if let Ok(mut stmt) = db.prepare("SELECT path FROM projects") {
-                            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
-                                for row in rows.flatten() { p.push(row); }
-                            }
-                        }
-                        p
+                        // Phase 2 close-out: use the schema helper
+                        // instead of a raw `db.prepare()` so this file
+                        // stays SQL-free. `Project::list` returns rows
+                        // ordered by `tab_order`; we only need paths.
+                        k2so_core::db::schema::Project::list(&db)
+                            .map(|rows| rows.into_iter().map(|p| p.path).collect())
+                            .unwrap_or_default()
                     };
                     let mut rewritten_count = 0usize;
                     for path in &paths {

@@ -12,11 +12,10 @@
 
 use k2so_core::db::schema::Project;
 use serde_json::json;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::daemon_client::DaemonClient;
 use crate::editors::EditorInfo;
-use crate::state::AppState;
 
 // ── Re-exported types ──────────────────────────────────────────────────
 
@@ -316,7 +315,6 @@ pub fn projects_refresh_editors() -> Result<Vec<EditorInfo>, String> {
 #[tauri::command]
 pub async fn projects_open_focus_window(
     app: tauri::AppHandle,
-    _state: State<'_, AppState>,
     project_id: String,
 ) -> Result<serde_json::Value, String> {
     use tauri::WebviewWindowBuilder;

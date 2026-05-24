@@ -1,11 +1,27 @@
-use crate::state::AppState;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use parking_lot::Mutex;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::mpsc;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
+
+/// Phase 2 close-out (2026-05-23): the watcher set used to live on
+/// `AppState.watchers` and was injected via `tauri::State<AppState>`.
+/// Once Units 1-4 emptied every other field out of `AppState`, owning
+/// a struct + Tauri `.manage()` registration just for this one map was
+/// pure ceremony. Inlined here as a `LazyLock<Mutex<HashMap<_, _>>>`
+/// so `state.rs` could be deleted entirely and the surface stays
+/// SQL-free / DB-free / LLM-free / terminal-free.
+///
+/// `parking_lot::Mutex` (matches the rest of the codebase — see
+/// `k2so_core::db::shared`) is used so we keep the no-poison API
+/// invariant. `LazyLock` lets us skip a `.manage()` boot step entirely;
+/// the first `fs_watch_dir` / `fs_unwatch_dir` call constructs the map.
+static WATCHERS: LazyLock<Mutex<HashMap<String, RecommendedWatcher>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, Serialize)]
 struct FsChangePayload {
@@ -24,8 +40,7 @@ fn event_kind_label(kind: &EventKind) -> &'static str {
 
 #[tauri::command]
 pub fn fs_watch_dir(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let mut watchers = state.watchers.lock();
+    let mut watchers = WATCHERS.lock();
 
     // Already watching this path
     if watchers.contains_key(&path) {
@@ -125,9 +140,8 @@ pub fn fs_watch_dir(app: tauri::AppHandle, path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn fs_unwatch_dir(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let mut watchers = state.watchers.lock();
+pub fn fs_unwatch_dir(_app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let mut watchers = WATCHERS.lock();
 
     // Removing the watcher drops it, which stops watching and disconnects the channel
     watchers.remove(&path);

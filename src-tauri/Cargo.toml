@@ -32,7 +32,12 @@ tauri-plugin-process = "2"
 objc = "0.2"
 cocoa = "0.26"
 portable-pty = "0.8"
-rusqlite = { version = "0.31", features = ["bundled"] }
+# Phase 2 close-out (2026-05-23): rusqlite removed as a direct
+# dependency. src-tauri no longer issues any SQL; every reader/writer
+# went through k2so-core helpers (which still depend on rusqlite
+# transitively) or hits the daemon's `/cli/*` HTTP surface. The crate
+# still appears in `cargo tree` via k2so-core, but k2so itself no
+# longer pulls it as a direct edge.
 git2 = { version = "0.19", features = ["vendored-openssl"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

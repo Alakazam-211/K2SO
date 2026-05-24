@@ -493,6 +493,122 @@ pub fn k2so_heartbeat_fires_list(
         .map_err(|e| e.to_string())
 }
 
+/// 0.38.3 — most recent heartbeat fire records across ALL projects,
+/// joined with the project name. Powers the universal audit log on
+/// the system-wide Heartbeats settings page (`WakeSchedulerSection`).
+/// Default limit 100 fires; bump for deeper investigation.
+///
+/// Hand-builds the JSON in `camelCase` to match the renderer's
+/// existing shape and tack on `projectName` for the join.
+pub fn k2so_heartbeat_fires_list_all(
+    limit: Option<i64>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let db = crate::db::shared();
+    let conn = db.lock();
+    let rows =
+        HeartbeatFire::list_all_recent_with_project(&conn, limit.unwrap_or(100))
+            .map_err(|e| format!("list_all_recent: {}", e))?;
+    let out: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(fire, project_name)| {
+            serde_json::json!({
+                "id": fire.id,
+                "projectId": fire.project_id,
+                "projectName": project_name,
+                "agentName": fire.agent_name,
+                "scheduleName": fire.schedule_name,
+                "firedAt": fire.fired_at,
+                "mode": fire.mode,
+                "decision": fire.decision,
+                "reason": fire.reason,
+                "inboxPriority": fire.inbox_priority,
+                "inboxCount": fire.inbox_count,
+                "durationMs": fire.duration_ms,
+            })
+        })
+        .collect();
+    Ok(out)
+}
+
+/// 0.38.3 — list every active (non-archived) heartbeat across ALL
+/// workspaces, with the parent project's name + path joined in. Used
+/// by the system-wide Heartbeats settings page (`WakeSchedulerSection`)
+/// so the operator can see and toggle every heartbeat from one place.
+///
+/// JSON is hand-built so the camelCase shape matches the per-workspace
+/// `k2so_heartbeat_list` payload the renderer already understands —
+/// plus two extra fields (`projectName`, `projectPath`) for the join.
+pub fn k2so_heartbeat_list_all() -> Result<Vec<serde_json::Value>, String> {
+    let db = crate::db::shared();
+    let conn = db.lock();
+    let rows = AgentHeartbeat::list_all_active_with_project(&conn)
+        .map_err(|e| format!("list_all_active: {}", e))?;
+    let out: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(hb, project_name, project_path)| {
+            serde_json::json!({
+                "id": hb.id,
+                "projectId": hb.project_id,
+                "name": hb.name,
+                "frequency": hb.frequency,
+                "specJson": hb.spec_json,
+                "wakeupPath": hb.wakeup_path,
+                "enabled": hb.enabled,
+                "lastFired": hb.last_fired,
+                "lastSessionId": hb.last_session_id,
+                "createdAt": hb.created_at,
+                "concurrencyPolicy": hb.concurrency_policy,
+                "startingDeadlineSecs": hb.starting_deadline_secs,
+                "activeDeadlineSecs": hb.active_deadline_secs,
+                "useWorkspaceSession": hb.use_workspace_session,
+                "projectName": project_name,
+                "projectPath": project_path,
+            })
+        })
+        .collect();
+    Ok(out)
+}
+
+/// Read the workspace's `show_heartbeat_sessions` flag.
+///
+/// `0` (default) = silent autonomous mode; heartbeat fires never open
+/// tabs. Audit via the sidebar Heartbeats panel on demand.
+/// `1` = each scheduled heartbeat fire opens a background tab in the
+/// Tauri window. Tab persists until the user closes it.
+pub fn k2so_workspace_get_show_heartbeat_sessions(
+    project_path: String,
+) -> Result<bool, String> {
+    let db = crate::db::shared();
+    let conn = db.lock();
+    let v: i64 = conn
+        .query_row(
+            "SELECT show_heartbeat_sessions FROM projects WHERE path = ?1",
+            rusqlite::params![project_path],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("workspace not found: {e}"))?;
+    Ok(v != 0)
+}
+
+/// Flip the workspace's `show_heartbeat_sessions` flag.
+pub fn k2so_workspace_set_show_heartbeat_sessions(
+    project_path: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let db = crate::db::shared();
+    let conn = db.lock();
+    let rows = conn
+        .execute(
+            "UPDATE projects SET show_heartbeat_sessions = ?1 WHERE path = ?2",
+            rusqlite::params![enabled as i64, project_path],
+        )
+        .map_err(|e| format!("workspace update failed: {e}"))?;
+    if rows == 0 {
+        return Err(format!("workspace not found: {project_path}"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     //! Behaviour lives in src-tauri's integration tests today —

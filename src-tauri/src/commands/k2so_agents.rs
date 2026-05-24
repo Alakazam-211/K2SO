@@ -392,33 +392,7 @@ pub fn k2so_heartbeat_list(project_path: String) -> Result<Vec<AgentHeartbeat>, 
 pub fn k2so_heartbeat_fires_list_all(
     limit: Option<i64>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let db = k2so_core::db::shared();
-    let conn = db.lock();
-    let rows = k2so_core::db::schema::HeartbeatFire::list_all_recent_with_project(
-        &conn,
-        limit.unwrap_or(100),
-    )
-    .map_err(|e| format!("list_all_recent: {}", e))?;
-    let out: Vec<serde_json::Value> = rows
-        .into_iter()
-        .map(|(fire, project_name)| {
-            serde_json::json!({
-                "id": fire.id,
-                "projectId": fire.project_id,
-                "projectName": project_name,
-                "agentName": fire.agent_name,
-                "scheduleName": fire.schedule_name,
-                "firedAt": fire.fired_at,
-                "mode": fire.mode,
-                "decision": fire.decision,
-                "reason": fire.reason,
-                "inboxPriority": fire.inbox_priority,
-                "inboxCount": fire.inbox_count,
-                "durationMs": fire.duration_ms,
-            })
-        })
-        .collect();
-    Ok(out)
+    k2so_core::agents::heartbeat::k2so_heartbeat_fires_list_all(limit)
 }
 
 /// 0.38.3 — list every active (non-archived) heartbeat across ALL
@@ -427,38 +401,7 @@ pub fn k2so_heartbeat_fires_list_all(
 /// so the operator can see and toggle every heartbeat from one place.
 #[tauri::command]
 pub fn k2so_heartbeat_list_all() -> Result<Vec<serde_json::Value>, String> {
-    let db = k2so_core::db::shared();
-    let conn = db.lock();
-    let rows = k2so_core::db::schema::AgentHeartbeat::list_all_active_with_project(&conn)
-        .map_err(|e| format!("list_all_active: {}", e))?;
-    let out: Vec<serde_json::Value> = rows
-        .into_iter()
-        .map(|(hb, project_name, project_path)| {
-            // Hand-build the JSON so we keep the same camelCase the
-            // existing `k2so_heartbeat_list` payload uses (the renderer
-            // already knows that shape) and just append two extra
-            // fields for the joined project info.
-            serde_json::json!({
-                "id": hb.id,
-                "projectId": hb.project_id,
-                "name": hb.name,
-                "frequency": hb.frequency,
-                "specJson": hb.spec_json,
-                "wakeupPath": hb.wakeup_path,
-                "enabled": hb.enabled,
-                "lastFired": hb.last_fired,
-                "lastSessionId": hb.last_session_id,
-                "createdAt": hb.created_at,
-                "concurrencyPolicy": hb.concurrency_policy,
-                "startingDeadlineSecs": hb.starting_deadline_secs,
-                "activeDeadlineSecs": hb.active_deadline_secs,
-                "useWorkspaceSession": hb.use_workspace_session,
-                "projectName": project_name,
-                "projectPath": project_path,
-            })
-        })
-        .collect();
-    Ok(out)
+    k2so_core::agents::heartbeat::k2so_heartbeat_list_all()
 }
 
 #[tauri::command]
@@ -499,16 +442,7 @@ pub fn k2so_heartbeat_remove(project_path: String, name: String) -> Result<(), S
 pub fn k2so_workspace_get_show_heartbeat_sessions(
     project_path: String,
 ) -> Result<bool, String> {
-    let db = crate::db::shared();
-    let conn = db.lock();
-    let v: i64 = conn
-        .query_row(
-            "SELECT show_heartbeat_sessions FROM projects WHERE path = ?1",
-            rusqlite::params![project_path],
-            |r| r.get(0),
-        )
-        .map_err(|e| format!("workspace not found: {e}"))?;
-    Ok(v != 0)
+    k2so_core::agents::heartbeat::k2so_workspace_get_show_heartbeat_sessions(project_path)
 }
 
 /// Flip the workspace's `show_heartbeat_sessions` flag.
@@ -517,18 +451,10 @@ pub fn k2so_workspace_set_show_heartbeat_sessions(
     project_path: String,
     enabled: bool,
 ) -> Result<(), String> {
-    let db = crate::db::shared();
-    let conn = db.lock();
-    let rows = conn
-        .execute(
-            "UPDATE projects SET show_heartbeat_sessions = ?1 WHERE path = ?2",
-            rusqlite::params![enabled as i64, project_path],
-        )
-        .map_err(|e| format!("workspace update failed: {e}"))?;
-    if rows == 0 {
-        return Err(format!("workspace not found: {project_path}"));
-    }
-    Ok(())
+    k2so_core::agents::heartbeat::k2so_workspace_set_show_heartbeat_sessions(
+        project_path,
+        enabled,
+    )
 }
 
 #[tauri::command]
@@ -1457,9 +1383,7 @@ pub fn k2so_agents_preview_schedule(
 /// the current `wake_scheduler` settings, generates `heartbeat.sh`,
 /// and loads the plist (macOS) or installs the crontab entry (Linux).
 #[tauri::command]
-pub fn k2so_agents_install_heartbeat(
-    _state: tauri::State<'_, crate::state::AppState>,
-) -> Result<(), String> {
+pub fn k2so_agents_install_heartbeat() -> Result<(), String> {
     let client = crate::daemon_client::DaemonClient::try_connect()?;
     let settings = k2so_core::app_settings::load();
     let cfg = &settings.wake_scheduler;
@@ -1510,9 +1434,7 @@ pub fn k2so_agents_uninstall_heartbeat() -> Result<(), String> {
 /// when `/cli/heartbeat/active-projects` started serving the live
 /// project list from `agent_heartbeats`.
 #[tauri::command]
-pub fn k2so_agents_update_heartbeat_projects(
-    _state: tauri::State<'_, crate::state::AppState>,
-) -> Result<(), String> {
+pub fn k2so_agents_update_heartbeat_projects() -> Result<(), String> {
     let _ = k2so_agents_apply_wake_scheduler();
     Ok(())
 }
@@ -1582,12 +1504,11 @@ pub fn k2so_agents_save_agent_md(
 // ── Workspace Session (DB-tracked) ───────────────────────────────────────
 
 /// Body lives in `k2so_core::agents::commands::workspace_session_get`
-/// (Phase 2 Unit 7d). The `state` arg is retained for ABI compatibility
-/// with the existing `invoke_handler!` registration; the lookup uses
-/// `db::shared()` directly (same in-process singleton).
+/// (Phase 2 Unit 7d). Phase 2 close-out dropped the `_state` parameter
+/// alongside the deletion of `AppState`; the renderer's `invoke()`
+/// payload never set it, so this is binary-compatible.
 #[tauri::command]
 pub fn workspace_session_get(
-    _state: tauri::State<'_, crate::state::AppState>,
     project_id: String,
 ) -> Result<Option<WorkspaceSession>, String> {
     k2so_core::agents::commands::workspace_session_get(project_id)
@@ -1618,11 +1539,10 @@ pub fn workspace_session_set_session_id(
 // ── Workspace Relations ─────────────────────────────────────────────────
 
 /// Bodies live in `k2so_core::agents::commands::workspace_relations_*`
-/// (Phase 2 Unit 7d). The `state` arg is retained on each #[tauri::command]
-/// for ABI compatibility; the lookup uses `db::shared()` directly.
+/// (Phase 2 Unit 7d). Phase 2 close-out dropped the `_state` arg
+/// alongside the deletion of `AppState`.
 #[tauri::command]
 pub fn workspace_relations_list(
-    _state: tauri::State<'_, crate::state::AppState>,
     project_id: String,
 ) -> Result<Vec<WorkspaceRelation>, String> {
     k2so_core::agents::commands::workspace_relations_list(project_id)
@@ -1630,7 +1550,6 @@ pub fn workspace_relations_list(
 
 #[tauri::command]
 pub fn workspace_relations_list_incoming(
-    _state: tauri::State<'_, crate::state::AppState>,
     project_id: String,
 ) -> Result<Vec<WorkspaceRelation>, String> {
     k2so_core::agents::commands::workspace_relations_list_incoming(project_id)
@@ -1638,7 +1557,6 @@ pub fn workspace_relations_list_incoming(
 
 #[tauri::command]
 pub fn workspace_relations_create(
-    _state: tauri::State<'_, crate::state::AppState>,
     source_project_id: String,
     target_project_id: String,
     relation_type: Option<String>,
@@ -1651,10 +1569,7 @@ pub fn workspace_relations_create(
 }
 
 #[tauri::command]
-pub fn workspace_relations_delete(
-    _state: tauri::State<'_, crate::state::AppState>,
-    id: String,
-) -> Result<(), String> {
+pub fn workspace_relations_delete(id: String) -> Result<(), String> {
     k2so_core::agents::commands::workspace_relations_delete(id)
 }
 
