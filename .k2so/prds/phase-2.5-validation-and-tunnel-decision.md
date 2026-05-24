@@ -1,6 +1,10 @@
 # Phase 2.5: Post-Phase-2 validation + tunnel-provider decision
 
-**Status**: Drafted 2026-05-23 while Phase 2.1 implementation runs in parallel. Launches after Phase 2.1 merges to main. Blocks Phase 3 entry (specifically Workstream B — TLS + auth upgrade — which depends on the tunnel-provider decision).
+**Status**: Drafted 2026-05-23 while Phase 2.1 implementation runs in parallel. Launches after Phase 2.1 merges to main.
+
+**Update (2026-05-23, post-research)**: Workstream D returned recommending Cloudflare Tunnel + K2SO-owned `k2.dev` for a narrower "tunnel for Companion API" scope. User then expanded the requirement to "expose any localhost port via `<sub>.k2.dev:3000`," which turns K2SO into a tunnel-as-a-service product (not just Companion-with-a-tunnel). Under the expanded scope, several of the research's conclusions need revisiting.
+
+**Workstream E (decision doc) has been moved to a dedicated [Phase 2.6](./phase-2.6-tunnel-decision.md)** to allow Phase 2.5 to close on Workstreams A, B, C (build+smoke, test migration, CI sweep) without blocking on the tunnel decision. Phase 3 Workstreams A, C, D, E, F, G can begin in parallel with Phase 2.6; only Phase 3 Workstream B (TLS + auth) blocks on Phase 2.6 close.
 **Internal version markers**: 0.39.0g (validation phase; no version bump expected).
 **Owner**: Rosson + pod-leader
 **Date**: 2026-05-23
