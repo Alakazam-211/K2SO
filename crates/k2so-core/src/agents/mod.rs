@@ -48,7 +48,9 @@ pub use crate::deprecated::delegate;
 /// Phase 2.5c: `display` relocated to [`crate::workspace::display`].
 /// Back-compat alias.
 pub use crate::workspace::display;
-pub mod events;
+/// Phase 2.5c: `events` (channel event queue) relocated to
+/// [`crate::workspace::events`]. Back-compat alias.
+pub use crate::workspace::events;
 /// Phase 2.5c: `heartbeat` relocated to top-level [`crate::heartbeats`].
 /// Back-compat alias for callers that still reference
 /// `agents::heartbeat::*`.
