@@ -6,7 +6,8 @@
 //! - [`k2so_agents_lock`] — record that an agent has an active session.
 //!   Writes both a DB row (`agent_sessions`) and a legacy `.lock` file.
 //!   Callers: forced-fire + heartbeat-fired + interactive launches.
-//!   The scheduler reads this via [`super::scheduler::is_agent_locked`]
+//!   The scheduler reads this via
+//!   [`crate::workspace::scheduler::is_agent_locked`]
 //!   to skip agents that are already running.
 //! - [`k2so_agents_unlock`] — mark the session `sleeping` + remove the
 //!   `.lock` file. Called at session-end by the TUI exit listener (and

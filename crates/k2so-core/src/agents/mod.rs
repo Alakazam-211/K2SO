@@ -59,7 +59,9 @@ pub mod reviews;
 /// Back-compat alias for callers that still reference
 /// `agents::scheduler::*`.
 pub use crate::workspace::scheduler;
-pub mod session;
+/// Phase 2.5c: `session` relocated to [`crate::workspace::session`].
+/// Back-compat alias.
+pub use crate::workspace::session;
 pub mod settings;
 /// Phase 2.5c: `skill` (versioning + upgrade protocol) relocated to
 /// [`crate::skills::version`]. Back-compat alias.
