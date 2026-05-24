@@ -5,7 +5,7 @@
 //!
 //! - `task`: first file in the agent's `work/active/` (structured).
 //! - `inbox.work`: all files in the agent's `work/inbox/` + the
-//!   workspace-level `.k2so/work/inbox/` (for manager roles).
+//!   workspace-level `.k2so/inbox/` (for manager roles).
 //! - `inbox.messages`: unread DB messages addressed to this agent.
 //!   Marked read on retrieval.
 //! - `peers`: `agent_sessions` rows for every connected workspace
@@ -14,8 +14,8 @@
 //! - `reservations`: the JSON map at `.k2so/reservations.json`.
 //! - `feed`: last 10 activity-feed entries for this project.
 //! - `wakeupInstructions`: the agent's wakeup.md body (or the
-//!   workspace-level wakeup for `__lead__`); `null` for
-//!   agent-template roles that don't use wake-up prompts.
+//!   workspace-level wakeup for manager-mode primaries); `null`
+//!   for agent-template roles that don't use wake-up prompts.
 //!
 //! Finally logs a `checkin` activity entry so peers can see the
 //! agent just checked in.
@@ -24,10 +24,10 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::agents::resolve_project_id;
-use crate::agents::wake::{compose_wake_prompt_for_agent, compose_wake_prompt_for_lead};
+use crate::agents::wake::{compose_wake_prompt_for_agent, compose_wake_prompt_for_workspace};
+use crate::agents::{agent_type_for, resolve_project_id};
 use crate::db::schema::{
     get_unread_messages, log_activity, mark_messages_read, ActivityFeedEntry, WorkspaceSession,
     WorkspaceRelation,
@@ -132,15 +132,16 @@ pub fn checkin(project_path: &str, agent: &str) -> Result<String, String> {
         vec![]
     };
 
-    let ws_inbox_dir = PathBuf::from(project_path).join(".k2so/work/inbox");
-    if ws_inbox_dir.is_dir() {
-        if let Ok(entries) = fs::read_dir(&ws_inbox_dir) {
-            for e in entries.flatten() {
-                let fname = e.file_name().to_string_lossy().to_string();
-                let content = fs::read_to_string(e.path()).unwrap_or_default();
-                work_items.push(parse_work_item(&fname, &content));
-            }
-        }
+    // Post-Phase-2.1: the workspace inbox is `.k2so/inbox/` (root-level
+    // items only — sub-foldered items have already been organized by
+    // the workspace agent). Use the unified `inbox` primitive instead
+    // of touching the filesystem directly so a single shape governs
+    // workspace inbox semantics across checkin / scheduler / triage.
+    let ws_inbox_items = crate::inbox::list_folder(Path::new(project_path), "");
+    for item in ws_inbox_items {
+        let content = crate::inbox::read_by_id(Path::new(project_path), &item.id)
+            .unwrap_or_default();
+        work_items.push(parse_work_item(&item.filename, &content));
     }
 
     // Messages (DB-indexed)
@@ -258,11 +259,14 @@ pub fn checkin(project_path: &str, agent: &str) -> Result<String, String> {
         None,
     );
 
-    // Wake-up instructions — __lead__ uses the workspace wake prompt
-    // composer; other agents use their own wakeup.md (or null for
-    // agent-template roles that don't use wake-up).
-    let wakeup_instructions: serde_json::Value = if agent == "__lead__" {
-        serde_json::Value::String(compose_wake_prompt_for_lead(project_path))
+    // Wake-up instructions — manager-mode primaries use the workspace
+    // wake prompt composer (sourced from the workspace `triage`
+    // heartbeat row); other agents use their own WAKEUP.md (or null
+    // for agent-template roles that don't use wake-up). Dispatch by
+    // agent type rather than agent name so we never special-case any
+    // particular routing string.
+    let wakeup_instructions: serde_json::Value = if agent_type_for(project_path, agent) == "manager" {
+        serde_json::Value::String(compose_wake_prompt_for_workspace(project_path))
     } else {
         match compose_wake_prompt_for_agent(project_path, agent) {
             Some(s) => serde_json::Value::String(s),

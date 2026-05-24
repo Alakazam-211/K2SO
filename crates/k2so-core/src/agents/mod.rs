@@ -251,11 +251,18 @@ pub fn find_primary_agent(project_path: &str) -> Option<String> {
                     }
                 }
             }
-            // Manager mode doesn't require a filesystem dir — __lead__
-            // lives at the project root. Return the sentinel.
-            if wanted == "manager" {
-                return Some("__lead__".to_string());
-            }
+            // 0.39.0f: dropped the pre-0.37.0 `__lead__` sentinel
+            // fallback. Post-unification the workspace's primary
+            // agent ALWAYS materializes as `.k2so/agent/AGENT.md`
+            // (handled by the unified probe above). If we reach
+            // here with `wanted == "manager"` it means the legacy
+            // `.k2so/agents/<n>/` scan didn't find a manager-type
+            // dir AND the unified file is missing — i.e., the
+            // workspace is in manager mode but its primary agent
+            // hasn't been scaffolded yet. Return None so callers
+            // can handle the missing-primary case (e.g., audit a
+            // `skipped_no_primary` decision) instead of routing to
+            // a sentinel name no consumer would recognize.
         }
     }
 

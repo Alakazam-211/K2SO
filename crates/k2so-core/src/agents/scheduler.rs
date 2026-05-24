@@ -8,8 +8,9 @@
 //!
 //! Differentiates between:
 //!
-//! - The workspace-level `__lead__` agent (fires when `.k2so/inbox/`
-//!   has items at the root level — untriaged arrivals).
+//! - The workspace-level primary agent (resolved via
+//!   [`crate::agents::find_primary_agent`]) — fires when `.k2so/inbox/`
+//!   has items at the root level (untriaged arrivals).
 //! - Top-tier agents with type `manager`/`custom`/`k2so` under
 //!   `.k2so/agents/<name>/` (fires when that agent's inbox has items OR
 //!   its custom-timing `next_wake` has elapsed).
@@ -27,7 +28,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::agents::{
-    agent_dir, agents_dir, parse_frontmatter, resolve_project_id,
+    agent_dir, agents_dir, find_primary_agent, parse_frontmatter, resolve_project_id,
 };
 use crate::db::schema::{WorkspaceSession, HeartbeatFire, WorkspaceState};
 use crate::fs_atomic::atomic_write_str;
@@ -35,28 +36,11 @@ use crate::scheduler::should_project_fire;
 
 // ── Path helpers private to the scheduler path ──────────────────────────
 
-/// **LEGACY — `.k2so/work/inbox/` (pre-Phase-2.1).**
-///
-/// Returns the path to the now-retired `.k2so/work/inbox/` directory.
-/// Phase 2.1 moved workspace-level work items into the unified
-/// `.k2so/inbox/` primitive (`k2so_core::inbox::*`); the first-boot
-/// migration hook (`migrate_work_to_inbox`) moves any straggler `.md`
-/// files into the new location and trashes `.k2so/work/`.
-///
-/// This function is kept alive only because [`crate::agents::checkin`]
-/// still references it pending the `__lead__` agent obsolescence
-/// decision (a separate workstream). Once `__lead__` retires, this
-/// helper and its remaining caller go away in lockstep.
-///
-/// **Do NOT add new callers.** Read the workspace inbox via
-/// `k2so_core::inbox::list_folder(workspace, "")` instead.
-#[deprecated(note = "Pre-Phase-2.1 path. Use `k2so_core::inbox::list_folder` for reads.")]
-pub fn workspace_inbox_dir(project_path: &str) -> PathBuf {
-    PathBuf::from(project_path)
-        .join(".k2so")
-        .join("work")
-        .join("inbox")
-}
+// `workspace_inbox_dir` removed in 0.39.0f Phase 2.1 final-final. The
+// pre-Phase-2.1 `.k2so/work/inbox/` layout is gone; every workspace
+// inbox read flows through `k2so_core::inbox::list_folder(ws, "")`.
+// The first-boot `migrate_work_to_inbox` hook handles any straggler
+// `.md` files left on legacy workspaces.
 
 /// `<project>/.k2so/agents/<agent>/work/<folder>/`.
 pub fn agent_work_dir(project_path: &str, agent_name: &str, folder: &str) -> PathBuf {
@@ -460,33 +444,52 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
     // for the custom-agent legacy timing loop's `next_wake`
     // comparisons. The loop was retired in 0.39.0d.)
 
-    // Step 1: workspace inbox → __lead__
+    // Step 1: workspace inbox → workspace primary agent.
     //
     // Post-Phase-2.1: the workspace inbox is `.k2so/inbox/` and items at
     // the root level (`folder == ""`) are untriaged arrivals. We count
     // only root-level items here — sub-foldered items have already been
-    // organized by the workspace agent and shouldn't re-wake __lead__.
+    // organized by the workspace agent and shouldn't re-wake.
+    //
+    // Post-0.39.0f: the routing key is the workspace's primary agent
+    // name (`find_primary_agent`), not the legacy `__lead__` sentinel.
+    // Workspaces with no primary agent (mode `off`, or unconfigured)
+    // skip this branch — the workspace inbox doesn't wake anything if
+    // there's no agent to wake. Downstream `compose_wake_prompt_*`
+    // dispatches on the resolved agent's `agent_type_for` value, so
+    // any manager-mode primary still gets the workspace wake composer.
     let ws_inbox_count =
         crate::inbox::list_folder(Path::new(&project_path), "").len() as i64;
     let has_workspace_inbox = ws_inbox_count > 0;
 
     if has_workspace_inbox {
-        if is_agent_locked(&project_path, "__lead__") {
-            audit(
-                Some("__lead__"),
-                &mode_str,
-                "skipped_locked",
-                Some("lead already running"),
-                None,
-                Some(ws_inbox_count),
-            );
+        if let Some(primary) = find_primary_agent(&project_path) {
+            if is_agent_locked(&project_path, &primary) {
+                audit(
+                    Some(&primary),
+                    &mode_str,
+                    "skipped_locked",
+                    Some("workspace primary agent already running"),
+                    None,
+                    Some(ws_inbox_count),
+                );
+            } else {
+                audit(
+                    Some(&primary),
+                    &mode_str,
+                    "fired",
+                    Some("workspace inbox has items"),
+                    None,
+                    Some(ws_inbox_count),
+                );
+                launchable.push(primary);
+            }
         } else {
-            launchable.push("__lead__".to_string());
             audit(
-                Some("__lead__"),
+                None,
                 &mode_str,
-                "fired",
-                Some("workspace inbox has items"),
+                "skipped_no_primary",
+                Some("workspace inbox has items but no primary agent configured"),
                 None,
                 Some(ws_inbox_count),
             );
@@ -619,13 +622,19 @@ pub fn k2so_agents_scheduler_tick(project_path: String) -> Result<Vec<String>, S
     }
 
     // Sort by highest-priority inbox item (critical > high > normal > low).
-    // __lead__ always sorts first if present.
+    // The workspace primary agent always sorts first if present — the
+    // workspace inbox (untriaged arrivals) takes precedence over any
+    // sub-agent inbox even on equal priority. Resolved once outside the
+    // sort closure so we don't re-read AGENT.md for every comparison.
+    let primary_name = find_primary_agent(&project_path);
     launchable.sort_by(|a, b| {
-        if a == "__lead__" {
-            return std::cmp::Ordering::Less;
-        }
-        if b == "__lead__" {
-            return std::cmp::Ordering::Greater;
+        if let Some(ref primary) = primary_name {
+            if a == primary {
+                return std::cmp::Ordering::Less;
+            }
+            if b == primary {
+                return std::cmp::Ordering::Greater;
+            }
         }
         let prio_a = get_highest_inbox_priority(&project_path, a);
         let prio_b = get_highest_inbox_priority(&project_path, b);

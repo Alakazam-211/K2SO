@@ -354,11 +354,14 @@ else
     fail "wakeup: type exclusion" "wakeup_template_for signature missing or doesn't fall through to None"
 fi
 
-# Compose helpers exist
-if grep -q 'pub fn compose_wake_prompt_for_lead' "$AGENTS_SRC"; then
-    pass "wakeup: compose_wake_prompt_for_lead exists"
+# Compose helpers exist. Renamed in 0.39.0f Phase 2.1 final-final from
+# `compose_wake_prompt_for_lead` (the pre-unification `__lead__`-named
+# helper) to `compose_wake_prompt_for_workspace` (composer keyed on
+# workspace identity, not on a hardcoded agent-name sentinel).
+if grep -q 'pub fn compose_wake_prompt_for_workspace' "$AGENTS_SRC"; then
+    pass "wakeup: compose_wake_prompt_for_workspace exists"
 else
-    fail "wakeup: compose_wake_prompt_for_lead missing" "Helper not found"
+    fail "wakeup: compose_wake_prompt_for_workspace missing" "Helper not found"
 fi
 
 if grep -q 'pub fn compose_wake_prompt_for_agent' "$AGENTS_SRC"; then

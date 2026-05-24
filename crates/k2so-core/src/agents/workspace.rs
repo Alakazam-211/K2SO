@@ -556,8 +556,8 @@ fn case_rename(from: &std::path::Path, to: &std::path::Path) {
     }
 }
 
-/// Idempotent: bails immediately if `__lead__` already has any
-/// heartbeat row, or if the project isn't in manager mode.
+/// Idempotent: bails immediately if the workspace's primary already
+/// has any heartbeat row, or if the project isn't in manager mode.
 pub fn migrate_or_scaffold_lead_heartbeat(project_path: &str) {
     let db = crate::db::shared();
     let conn = db.lock();
@@ -2061,7 +2061,7 @@ k2so heartbeat wake                     # THE RIGHT WAY: resumes manager session
 ```
 **IMPORTANT:** Always use `k2so heartbeat wake` to wake the workspace manager, NOT `k2so heartbeat`.
 - `heartbeat wake` → resumes the manager's previous session, detects inbox work, sends delegation instructions
-- `heartbeat` (without "wake") → raw triage that launches `__lead__`, does NOT resume sessions or send messages
+- `heartbeat` (without "wake") → raw triage that launches the workspace's primary agent, does NOT resume sessions or send messages
 
 ### Workspace Setup
 ```

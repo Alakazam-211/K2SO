@@ -61,7 +61,7 @@ pub fn agent_wakeup_path(project_path: &str, agent_name: &str) -> PathBuf {
 }
 
 /// Canonical location of the workspace-level WAKEUP.md (used by the
-/// `__lead__` Workspace Manager).
+/// workspace's manager-mode primary agent).
 pub fn workspace_wakeup_path(project_path: &str) -> PathBuf {
     PathBuf::from(project_path).join(".k2so").join("WAKEUP.md")
 }
@@ -94,16 +94,14 @@ pub fn strip_frontmatter(content: &str) -> String {
     content.trim().to_string()
 }
 
-/// Absolute path of the primary heartbeat's `WAKEUP.md` for an agent.
+/// Absolute path of the workspace's primary heartbeat `WAKEUP.md`.
 /// Prefers a row named `"triage"` (the one
 /// `migrate_or_scaffold_lead_heartbeat` creates for manager mode);
-/// falls back to the first enabled row. `None` when the agent has no
-/// heartbeats configured — callers should fall back to the shipped
-/// template in that case.
-pub fn default_heartbeat_wakeup_abs(
-    project_path: &str,
-    _agent_name: &str,
-) -> Option<String> {
+/// falls back to the first enabled row. `None` when the workspace has
+/// no heartbeats configured — callers should fall back to the shipped
+/// template in that case. Heartbeats are workspace-scoped, so no
+/// agent-name parameter is needed.
+pub fn default_heartbeat_wakeup_abs(project_path: &str) -> Option<String> {
     let db = crate::db::shared();
     let conn = db.lock();
     let project_id = resolve_project_id(&conn, project_path)?;
@@ -125,11 +123,15 @@ pub fn compose_manager_wake_from_body(raw_body: Option<&str>) -> String {
         .unwrap_or_else(|| WAKEUP_TEMPLATE_WORKSPACE.trim().to_string())
 }
 
-/// Compose the `--append-system-prompt` text for `__lead__` at wake
-/// time. Reads the wakeup body from the default heartbeat row and
-/// falls back to the shipped template if no row exists yet.
-pub fn compose_wake_prompt_for_lead(project_path: &str) -> String {
-    let raw = default_heartbeat_wakeup_abs(project_path, "__lead__")
+/// Compose the `--append-system-prompt` text for the workspace's
+/// manager-mode primary agent at wake time. Reads the wakeup body
+/// from the workspace's default heartbeat row and falls back to the
+/// shipped template if no row exists yet. The composition is keyed
+/// on workspace identity — manager wakes don't need an agent name
+/// parameter because the workspace has at most one manager-mode
+/// primary by design.
+pub fn compose_wake_prompt_for_workspace(project_path: &str) -> String {
+    let raw = default_heartbeat_wakeup_abs(project_path)
         .and_then(|p| fs::read_to_string(&p).ok());
     compose_manager_wake_from_body(raw.as_deref())
 }

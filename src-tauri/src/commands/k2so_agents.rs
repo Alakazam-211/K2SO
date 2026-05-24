@@ -273,9 +273,9 @@ pub fn k2so_agents_update_profile(
 // lives in k2so_core::agents::scheduler alongside the rest of the
 // heartbeat-fire dependency closure.
 //
-// `workspace_inbox_dir` (legacy `.k2so/work/inbox/`) is no longer
-// re-exported — the function is deprecated and the workspace inbox
-// now lives at `.k2so/inbox/` via `k2so_core::inbox::*`.
+// `workspace_inbox_dir` (legacy `.k2so/work/inbox/`) was deleted in
+// 0.39.0f Phase 2.1 final-final. The workspace inbox lives at
+// `.k2so/inbox/` and reads flow through `k2so_core::inbox::*`.
 
 // ── Wake-up templates ──────────────────────────────────────────────────
 //
@@ -284,10 +284,11 @@ pub fn k2so_agents_update_profile(
 // `.k2so/agents/<name>/wakeup.md` with its `<!-- DEFAULT TEMPLATE -->`
 // header intact so users can see the scaffolded defaults and edit them.
 //
-// The workspace-level template lives at `.k2so/wakeup.md` for
-// `__lead__`. Agent-templates (the `agent-template` type) are
-// intentionally excluded — they're dispatched with explicit orders by
-// their manager and never wake autonomously.
+// The workspace-level template lives at `.k2so/wakeup.md` for the
+// workspace's manager-mode primary agent. Agent-templates (the
+// `agent-template` type) are intentionally excluded — they're
+// dispatched with explicit orders by their manager and never wake
+// autonomously.
 
 // Wakeup templates + resolvers + composers moved to
 // k2so_core::agents::wake. The re-exports below keep the historical
@@ -297,7 +298,7 @@ pub fn k2so_agents_update_profile(
 // `default_heartbeat_wakeup_abs` all resolve to the core versions.
 pub use k2so_core::agents::wake::{
     agent_wakeup_path, compose_agent_wake_from_body, compose_manager_wake_from_body,
-    compose_wake_prompt_for_agent, compose_wake_prompt_for_lead,
+    compose_wake_prompt_for_agent, compose_wake_prompt_for_workspace,
     compose_wake_prompt_from_path, default_heartbeat_wakeup_abs, read_agent_wakeup,
     strip_frontmatter, wakeup_template_for, workspace_wakeup_path,
     WAKEUP_TEMPLATE_CUSTOM, WAKEUP_TEMPLATE_K2SO, WAKEUP_TEMPLATE_MANAGER,
@@ -518,21 +519,21 @@ pub fn promote_legacy_heartbeat(project_path: &str) {
 /// Scaffold the wakeup files for a single workspace — one for each
 /// existing agent that supports wake-up. Safe to call repeatedly;
 /// never overwrites an existing file. Used by the app-launch migration
-/// pass. Workspace-level `.k2so/wakeup.md` is no longer scaffolded here
-/// — `migrate_or_scaffold_lead_heartbeat` handles the __lead__ case
-/// via the multi-heartbeat system.
+/// pass. Workspace-level `.k2so/wakeup.md` is no longer scaffolded
+/// here — `migrate_or_scaffold_lead_heartbeat` handles the workspace
+/// manager case via the multi-heartbeat system.
 pub fn ensure_workspace_wakeups(project_path: &str) {
     k2so_core::agents::workspace::ensure_workspace_wakeups(project_path)
 }
 
-/// For Workspace Manager projects, make sure `__lead__` has at least
-/// one heartbeat row. Two paths:
+/// For Workspace Manager projects, make sure the workspace's primary
+/// agent has at least one heartbeat row. Two paths:
 ///
 /// 1. **Migrate existing `.k2so/wakeup.md`** (users who configured the
-///    retired Workspace Wake-up). Copy its content into
-///    `.k2so/agents/__lead__/heartbeats/default/wakeup.md`, insert a
-///    matching `agent_heartbeats` row (hourly default), rename the old
-///    file to `.k2so/wakeup.md.migrated` so nothing else picks it up.
+///    retired Workspace Wake-up). Copy its content into the workspace
+///    primary's `heartbeats/default/wakeup.md`, insert a matching
+///    `agent_heartbeats` row (hourly default), rename the old file to
+///    `.k2so/wakeup.md.migrated` so nothing else picks it up.
 ///
 /// 2. **Scaffold a lean default** for fresh manager workspaces. The
 ///    SKILL.md layers (Standing Orders / Delegation + Review / etc.)
@@ -559,8 +560,8 @@ pub fn migrate_filenames_to_uppercase(project_path: &str) {
     k2so_core::agents::workspace::migrate_filenames_to_uppercase(project_path)
 }
 
-/// Idempotent: bails immediately if `__lead__` already has any
-/// heartbeat row, or if the project isn't in manager mode.
+/// Idempotent: bails immediately if the workspace's primary already
+/// has any heartbeat row, or if the project isn't in manager mode.
 pub fn migrate_or_scaffold_lead_heartbeat(project_path: &str) {
     k2so_core::agents::workspace::migrate_or_scaffold_lead_heartbeat(project_path)
 }
@@ -984,7 +985,7 @@ k2so heartbeat wake                     # THE RIGHT WAY: resumes manager session
 ```
 **IMPORTANT:** Always use `k2so heartbeat wake` to wake the workspace manager, NOT `k2so heartbeat`.
 - `heartbeat wake` → resumes the manager's previous session, detects inbox work, sends delegation instructions
-- `heartbeat` (without "wake") → raw triage that launches `__lead__`, does NOT resume sessions or send messages
+- `heartbeat` (without "wake") → raw triage that launches the workspace's primary agent, does NOT resume sessions or send messages
 
 ### Workspace Setup
 ```
@@ -1027,44 +1028,10 @@ k2so agent complete --agent <n> --file <f>  # Complete work (auto-merge or submi
 
 "#;
 
-const WORKFLOW_DOCS: &str = r#"## Workflow
-
-### If you are the Lead Agent (orchestrator):
-1. Check for work: `k2so inbox` (workspace-implicit; pass `--workspace <path>` to target another)
-2. Read each request and decide which agent should handle it
-3. Assign work with a single command — K2SO handles everything else:
-   ```
-   k2so delegate backend-eng .k2so/inbox/add-oauth-support.md
-   ```
-   This creates a worktree, writes a CLAUDE.md, and launches the agent automatically.
-4. To break a large request into sub-tasks first:
-   ```
-   k2so inbox compose --title "Build API endpoints" --body "..."
-   k2so inbox compose --title "Build login UI" --body "..."
-   ```
-   Then delegate each: `k2so delegate backend-eng .k2so/inbox/build-api-endpoints.md`
-5. If a request is blocked or needs user input, leave it in the workspace inbox
-6. You orchestrate — you do NOT implement code yourself
-
-### If you are a Sub-Agent (executor):
-You are launched into a dedicated worktree with your task already set up.
-1. Read your task file (path is in your launch prompt)
-2. Implement the changes — all work happens in your worktree
-3. Commit to your branch as you go
-4. When done: `k2so work move --agent <your-name> --file <task>.md --from active --to done`
-5. Your work appears in the review queue — the user will approve, reject, or request changes
-
-### Review lifecycle (handled by user or lead agent):
-- **Approve**: `k2so review approve <agent> <branch>` — merges to main, cleans up worktree
-- **Reject**: `k2so review reject <agent> --reason "..."` — cleans up worktree, puts task back in inbox with feedback, agent retries with a fresh worktree on next launch
-- **Feedback**: `k2so review feedback <agent> -m "..."` — sends feedback without rejecting
-
-## Important Rules
-- Each agent works in its own worktree — never edit main directly
-- K2SO creates worktrees, branches, and CLAUDE.md files for you automatically
-- Commit often with clear messages referencing your task
-- If blocked, move your task back to inbox and document the blocker
-"#;
+// `WORKFLOW_DOCS` removed in 0.39.0f. The constant was a stale duplicate
+// of `k2so_core::agents::workspace::WORKFLOW_DOCS`; it had zero callers
+// in this crate (Phase 2.1 final audit). The core version is the
+// authoritative source consumed by the SKILL.md generator.
 
 // (duplicate of k2so_core helpers — removed during skill_content migration)
 
@@ -1151,7 +1118,8 @@ pub fn k2so_agents_triage_summary(project_path: String) -> Result<String, String
 /// worktrees simultaneously. Each inbox item gets its own worktree when delegated.
 ///
 /// Triage order:
-/// 1. Workspace inbox has items → wake lead agent ("__lead__")
+/// 1. Workspace inbox has items → wake the workspace's primary agent
+///    (resolved via `find_primary_agent`).
 /// 2. Sub-agent inboxes have items → wake those agents (one launch per inbox item)
 ///
 /// **DEPRECATED — `legacy-per-agent-heartbeat` chokepoint.**

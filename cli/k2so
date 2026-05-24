@@ -3673,7 +3673,12 @@ cmd_workspace_update() {
 try: print(json.load(sys.stdin).get("display_name",""))
 except: pass' 2>/dev/null)
     if [[ -z "$agent_name" ]]; then
-        agent_name="__lead__"
+        # 0.39.0f: workspace folder basename is the canonical fallback
+        # for the workspace's primary agent name (matches the post-
+        # unification invariant: workspace == agent). Replaces the
+        # pre-unification `__lead__` sentinel that the daemon no
+        # longer recognizes as a routing key.
+        agent_name="$(basename "$PROJECT")"
     fi
     cli_request "/cli/agent/update" \
         "agent=$(urlencode "$agent_name")" \

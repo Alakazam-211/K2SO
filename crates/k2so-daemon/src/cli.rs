@@ -183,8 +183,18 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         // ── Agent-hook channel events ───────────────────────────────
         "/cli/events" => match need_project(params) {
             Ok(p) => {
-                let agent =
-                    opt_param(params, "agent").unwrap_or_else(|| "__lead__".to_string());
+                // 0.39.0f: default the `agent` query param to the
+                // workspace's primary agent name (resolved via
+                // `find_primary_agent`) instead of the pre-unification
+                // `__lead__` sentinel. The display-name fallback
+                // catches workspaces where the primary hasn't been
+                // fully scaffolded yet — `agent_display_name` is
+                // total (always returns a string) so callers without
+                // an explicit agent still get a routable identity.
+                let agent = opt_param(params, "agent").unwrap_or_else(|| {
+                    k2so_core::agents::find_primary_agent(&p)
+                        .unwrap_or_else(|| k2so_core::agents::display::agent_display_name(&p))
+                });
                 let events = k2so_core::agents::events::drain_agent_events(&p, &agent);
                 CliResponse::ok_json(
                     serde_json::to_string(&events).unwrap_or_else(|_| "[]".to_string()),

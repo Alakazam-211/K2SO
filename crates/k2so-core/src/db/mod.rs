@@ -384,6 +384,7 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
         ("0046_prune_legacy_layout_tables", include_str!("../../drizzle_sql/0046_prune_legacy_layout_tables.sql")),
         ("0047_drop_agent_sessions_archive", include_str!("../../drizzle_sql/0047_drop_agent_sessions_archive.sql")),
         ("0048_prune_index_artifacts", include_str!("../../drizzle_sql/0048_prune_index_artifacts.sql")),
+        ("0049_drop_lead_sentinel_in_activity_feed", include_str!("../../drizzle_sql/0049_drop_lead_sentinel_in_activity_feed.sql")),
     ];
 
     for (name, sql) in migrations {
@@ -985,6 +986,102 @@ mod tests {
                 .unwrap();
             assert_eq!(exists, 1, "isolated connection missing table: {}", table);
         }
+    }
+
+    // ── Migration 0049: __lead__ sentinel rewrite ─────────────────
+    #[test]
+    fn migration_0049_rewrites_lead_sentinel_for_manager_workspaces() {
+        // Build a DB at migration 0048 (the state before 0049 ships),
+        // seed `activity_feed` with rows addressed to the pre-
+        // unification `__lead__` routing sentinel for two workspaces
+        // (one in manager mode, one in custom mode), run the full
+        // migration sequence (which includes 0049), and assert each
+        // row landed on the correct post-cleanup `to_workspace`:
+        //
+        //   - manager-mode workspace → `to_workspace = projects.name`
+        //   - custom-mode workspace  → `to_workspace = NULL`
+        let conn = fresh_memory();
+        run_migrations(&conn).unwrap();
+
+        // Two workspaces.
+        conn.execute(
+            "INSERT INTO projects (id, name, path, agent_mode) VALUES \
+             ('proj-mgr', 'manager-ws', '/tmp/mgr', 'manager'), \
+             ('proj-cus', 'custom-ws',  '/tmp/cus', 'custom')",
+            [],
+        )
+        .unwrap();
+
+        // Backdate the migration row + clear it so we can re-run 0049
+        // on legacy data.
+        conn.execute(
+            "DELETE FROM _migrations WHERE name = '0049_drop_lead_sentinel_in_activity_feed'",
+            [],
+        )
+        .unwrap();
+
+        // Seed pre-0.39.0f rows in both workspaces, plus a control
+        // row that's already addressed correctly (must be untouched).
+        conn.execute(
+            "INSERT INTO activity_feed \
+             (project_id, actor, event_type, from_workspace, to_workspace, summary) VALUES \
+             ('proj-mgr', 'sender', 'message.sent', 'sender', '__lead__', 'mgr msg'), \
+             ('proj-cus', 'sender', 'message.sent', 'sender', '__lead__', 'cus msg'), \
+             ('proj-mgr', 'sender', 'message.sent', 'sender', 'manager-ws', 'already correct')",
+            [],
+        )
+        .unwrap();
+
+        // Re-run migrations — 0049 fires.
+        run_migrations(&conn).unwrap();
+
+        // Manager workspace's sentinel row → projects.name.
+        let mgr_target: Option<String> = conn
+            .query_row(
+                "SELECT to_workspace FROM activity_feed WHERE summary = 'mgr msg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            mgr_target.as_deref(),
+            Some("manager-ws"),
+            "manager workspace's __lead__ row should rewrite to projects.name"
+        );
+
+        // Custom workspace's sentinel row → NULL (no primary to route to).
+        let cus_target: Option<String> = conn
+            .query_row(
+                "SELECT to_workspace FROM activity_feed WHERE summary = 'cus msg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            cus_target.is_none(),
+            "non-manager workspace's __lead__ row should null out, got: {:?}",
+            cus_target
+        );
+
+        // Control row untouched.
+        let control: Option<String> = conn
+            .query_row(
+                "SELECT to_workspace FROM activity_feed WHERE summary = 'already correct'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(control.as_deref(), Some("manager-ws"));
+
+        // Sanity: no row anywhere still says `'__lead__'`.
+        let leftover: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM activity_feed WHERE to_workspace = '__lead__'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leftover, 0, "no row should retain the __lead__ sentinel");
     }
 
     // ── Migration 0033 tests deleted in 0.37.0 ────────────────────

@@ -2060,6 +2060,17 @@ pub fn log_activity(
 }
 
 /// Get unread messages addressed to a workspace identifier.
+///
+/// Match condition: a row belongs to this workspace's inbox when its
+/// `to_workspace` equals the caller-supplied target (typically the
+/// workspace's primary agent name resolved via `find_primary_agent`)
+/// AND either `project_id` or `to_project_id` matches the workspace.
+///
+/// 0.39.0f: the pre-unification fallback that treated
+/// `to_workspace IS NULL` as a synonym for `'__lead__'` is gone —
+/// migration 0049 rewrote every `'__lead__'` row to the workspace's
+/// primary agent name (or NULL for orphans), so the SQL no longer
+/// needs to special-case the legacy routing sentinel.
 pub fn get_unread_messages(
     conn: &Connection,
     project_id: &str,
@@ -2068,7 +2079,7 @@ pub fn get_unread_messages(
     let mut stmt = conn.prepare(
         "SELECT id, project_id, actor, event_type, from_workspace, to_workspace, to_project_id, summary, metadata, created_at \
          FROM activity_feed \
-         WHERE (to_workspace = ?1 OR (to_workspace IS NULL AND ?1 = '__lead__')) \
+         WHERE to_workspace = ?1 \
          AND (project_id = ?2 OR to_project_id = ?2) \
          AND event_type IN ('message.sent', 'message.delivered') \
          AND read = 0 \
@@ -2092,6 +2103,10 @@ pub fn get_unread_messages(
 }
 
 /// Mark messages addressed to a workspace target as read.
+///
+/// 0.39.0f: dropped the `to_workspace IS NULL AND ?1 = '__lead__'`
+/// fallback for the same reason as `get_unread_messages` above —
+/// migration 0049 rewrote any pre-unification rows.
 pub fn mark_messages_read(
     conn: &Connection,
     project_id: &str,
@@ -2099,7 +2114,7 @@ pub fn mark_messages_read(
 ) -> Result<usize> {
     conn.execute(
         "UPDATE activity_feed SET read = 1 \
-         WHERE (to_workspace = ?1 OR (to_workspace IS NULL AND ?1 = '__lead__')) \
+         WHERE to_workspace = ?1 \
          AND (project_id = ?2 OR to_project_id = ?2) \
          AND event_type IN ('message.sent', 'message.delivered') \
          AND read = 0",

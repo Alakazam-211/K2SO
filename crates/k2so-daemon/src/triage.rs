@@ -36,7 +36,7 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio::task::{spawn_blocking, JoinSet};
 
-use k2so_core::agents::{heartbeat, scheduler, settings, triage_summary, wake};
+use k2so_core::agents::{agent_type_for, heartbeat, scheduler, settings, triage_summary, wake};
 use k2so_core::db::shared as shared_db;
 
 /// Cap on parallel heartbeat spawns per scheduler tick. Six is a
@@ -129,8 +129,11 @@ pub fn handle_scheduler_fire(project_path: &str) -> String {
     // to drop in a follow-up SQL cleanup.
     let mut launched: Vec<String> = Vec::new();
     for agent_name in &launchable {
-        let prompt = if agent_name == "__lead__" {
-            wake::compose_wake_prompt_for_lead(project_path)
+        // Dispatch by agent type, not by name: manager-mode primaries
+        // use the workspace wake composer (heartbeat row at the
+        // workspace level); other agents use per-agent WAKEUP.md.
+        let prompt = if agent_type_for(project_path, agent_name) == "manager" {
+            wake::compose_wake_prompt_for_workspace(project_path)
         } else {
             match wake::compose_wake_prompt_for_agent(project_path, agent_name) {
                 Some(p) => p,

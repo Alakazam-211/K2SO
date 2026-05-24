@@ -30,7 +30,7 @@ use crate::agents::scheduler::{
     agent_work_dir, get_workspace_state, is_agent_locked,
 };
 use crate::agents::work_item::{read_work_item, WorkItem};
-use crate::agents::{agents_dir, parse_frontmatter};
+use crate::agents::{agents_dir, find_primary_agent, parse_frontmatter};
 use crate::inbox::{list_folder as inbox_list_folder, InboxItem};
 
 /// Plain-text triage summary. Walks `.k2so/agents/*/work/inbox` +
@@ -154,12 +154,18 @@ pub fn triage_summary(project_path: &str) -> Result<String, String> {
 
     // Post-Phase-2.1: workspace inbox is `.k2so/inbox/`. Root-level
     // items (`folder == ""`) are untriaged arrivals that still need a
-    // home — they're the items __lead__ would triage.
+    // home — they're the items the workspace's primary agent (the
+    // "Coordinator" in human terms) would triage.
     let ws_items: Vec<InboxItem> = inbox_list_folder(Path::new(project_path), "");
     if !ws_items.is_empty() {
-        let lead_locked = is_agent_locked(project_path, "__lead__");
+        // Resolve the primary agent to check the lock; the display
+        // label remains "Coordinator" (human-facing presentation, not
+        // a routing key).
+        let coordinator_locked = find_primary_agent(project_path)
+            .map(|primary| is_agent_locked(project_path, &primary))
+            .unwrap_or(false);
         summary.push_str("Workspace Inbox (unassigned — needs Coordinator):\n");
-        if lead_locked {
+        if coordinator_locked {
             summary.push_str("  Coordinator: LOCKED (active session running)\n");
         }
         for item in &ws_items {
@@ -200,7 +206,8 @@ pub fn triage_summary(project_path: &str) -> Result<String, String> {
 /// worktree when delegated.
 ///
 /// Triage order:
-/// 1. Workspace inbox has items → wake lead agent ("__lead__")
+/// 1. Workspace inbox has items → wake the workspace's primary agent
+///    (resolved via `find_primary_agent`).
 /// 2. Sub-agent inboxes have items → wake those agents (one launch per inbox item)
 ///
 /// **DEPRECATED — `legacy-per-agent-heartbeat` chokepoint.**
@@ -241,12 +248,16 @@ pub fn triage_decide(project_path: &str) -> Result<Vec<String>, String> {
     let mut launchable = Vec::new();
 
     // Step 1: Check workspace inbox (post-Phase-2.1: `.k2so/inbox/`
-    // root-level items are the untriaged arrivals that wake __lead__).
+    // root-level items are the untriaged arrivals that wake the
+    // workspace's primary agent — resolved via `find_primary_agent`
+    // rather than a hardcoded routing sentinel).
     let has_workspace_inbox =
         !inbox_list_folder(Path::new(project_path), "").is_empty();
 
     if has_workspace_inbox {
-        launchable.push("__lead__".to_string());
+        if let Some(primary) = find_primary_agent(project_path) {
+            launchable.push(primary);
+        }
     }
 
     // Step 2: Check sub-agent inboxes
@@ -295,6 +306,10 @@ mod tests {
     use std::fs;
     use uuid::Uuid;
 
+    /// Minimal workspace: empty `.k2so/agents/` + `.k2so/inbox/`.
+    /// No primary agent. Use [`fixture_with_primary`] when the test
+    /// needs `find_primary_agent` to resolve (e.g., the workspace-inbox
+    /// → primary-agent routing test).
     fn fixture() -> std::path::PathBuf {
         let dir = std::env::temp_dir()
             .join(format!("k2so-triage-decide-{}", Uuid::new_v4()));
@@ -309,6 +324,28 @@ mod tests {
         // Post-Phase-2.1: workspace inbox is `.k2so/inbox/`, not
         // `.k2so/work/inbox/`.
         fs::create_dir_all(dir.join(".k2so").join("inbox")).unwrap();
+        dir
+    }
+
+    /// Like [`fixture`] but also scaffolds `.k2so/agent/AGENT.md` so
+    /// `find_primary_agent` resolves to `workspace-primary` (manager
+    /// type). Required by the workspace-inbox test because the
+    /// post-0.39.0f scheduler routes workspace inbox wakes through
+    /// the resolved primary instead of a hardcoded sentinel.
+    ///
+    /// Tests that exercise sub-agent inbox routing (under
+    /// `.k2so/agents/<name>/`) must NOT call this — `agent_dir`
+    /// short-circuits to the unified path whenever
+    /// `.k2so/agent/AGENT.md` exists, which would silently redirect
+    /// every sub-agent's work-dir lookup to the workspace primary.
+    fn fixture_with_primary() -> std::path::PathBuf {
+        let dir = fixture();
+        fs::create_dir_all(dir.join(".k2so").join("agent")).unwrap();
+        fs::write(
+            dir.join(".k2so").join("agent").join("AGENT.md"),
+            "---\nname: workspace-primary\ntype: manager\n---\n# primary\n",
+        )
+        .unwrap();
         dir
     }
 
@@ -333,7 +370,7 @@ mod tests {
     #[test]
     #[allow(deprecated)]
     fn triage_decide_picks_up_workspace_inbox() {
-        let dir = fixture();
+        let dir = fixture_with_primary();
         // Post-Phase-2.1 path.
         fs::write(
             dir.join(".k2so").join("inbox").join("task.md"),
@@ -341,9 +378,38 @@ mod tests {
         )
         .unwrap();
         let launchable = triage_decide(&dir.to_string_lossy()).unwrap();
+        // Post-0.39.0f: the workspace inbox routes to the workspace's
+        // primary agent (resolved from `.k2so/agent/AGENT.md` —
+        // `name: workspace-primary` per the fixture). No more `__lead__`
+        // sentinel.
         assert!(
-            launchable.contains(&"__lead__".to_string()),
-            "workspace inbox triggers __lead__: {:?}",
+            launchable.contains(&"workspace-primary".to_string()),
+            "workspace inbox triggers workspace primary agent: {:?}",
+            launchable
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn triage_decide_workspace_inbox_without_primary_is_silent() {
+        // Edge case unique to post-0.39.0f routing: the workspace has
+        // root-level inbox items but no primary agent on disk (mode
+        // `off`, or unconfigured). The old `__lead__` sentinel would
+        // fire blindly — the new routing skips the wake instead, since
+        // there's no agent to route to. The audit row records
+        // `skipped_no_primary` in production; here we just verify the
+        // launchable list stays empty.
+        let dir = fixture();
+        fs::write(
+            dir.join(".k2so").join("inbox").join("task.md"),
+            "---\ntitle: Orphan\n---\nbody",
+        )
+        .unwrap();
+        let launchable = triage_decide(&dir.to_string_lossy()).unwrap();
+        assert!(
+            launchable.is_empty(),
+            "workspace inbox without primary agent is a no-op (was: {:?})",
             launchable
         );
         cleanup(&dir);

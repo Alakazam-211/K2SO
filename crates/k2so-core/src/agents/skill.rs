@@ -16,7 +16,7 @@
 //!
 //! Four-tier system matching the Agent Skills Settings UI:
 //!
-//! - [`SKILL_VERSION_MANAGER`] — Workspace Manager (`__lead__`).
+//! - [`SKILL_VERSION_MANAGER`] — Workspace Manager (workspace's manager-mode primary agent).
 //! - [`SKILL_VERSION_K2SO_AGENT`] — K2SO planner agent (PRDs, etc.).
 //! - [`SKILL_VERSION_CUSTOM_AGENT`] — Custom mode single-agent.
 //! - [`SKILL_VERSION_TEMPLATE`] — Sub-agent template delegated to by

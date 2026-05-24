@@ -1,4 +1,4 @@
-<!-- DEFAULT TEMPLATE — K2SO scaffolded this for the workspace manager (`__lead__`).
+<!-- DEFAULT TEMPLATE — K2SO scaffolded this for the workspace's manager-mode primary agent.
      Edit below to customize what the manager does when the heartbeat wakes it.
      Delete this comment once you've made it your own. -->
 
