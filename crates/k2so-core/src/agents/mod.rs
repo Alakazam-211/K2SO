@@ -46,7 +46,9 @@ pub use crate::heartbeats as heartbeat;
 /// Phase 2.5c: `heartbeat_install` relocated to
 /// [`crate::heartbeats::install`]. Back-compat alias.
 pub use crate::heartbeats::install as heartbeat_install;
-pub mod launch_profile;
+/// Phase 2.5c: `launch_profile` relocated to
+/// [`crate::workspace::launch_profile`]. Back-compat alias.
+pub use crate::workspace::launch_profile;
 /// Phase 2.5c: `onboarding` relocated to [`crate::workspace::onboarding`].
 pub use crate::workspace::onboarding;
 pub mod resume_chat;
