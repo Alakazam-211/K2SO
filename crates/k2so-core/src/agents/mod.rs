@@ -34,7 +34,9 @@ pub mod events;
 /// Back-compat alias for callers that still reference
 /// `agents::heartbeat::*`.
 pub use crate::heartbeats as heartbeat;
-pub mod heartbeat_install;
+/// Phase 2.5c: `heartbeat_install` relocated to
+/// [`crate::heartbeats::install`]. Back-compat alias.
+pub use crate::heartbeats::install as heartbeat_install;
 pub mod launch_profile;
 pub mod onboarding;
 pub mod resume_chat;
