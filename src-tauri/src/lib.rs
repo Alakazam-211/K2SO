@@ -879,6 +879,15 @@ pub fn run() {
             // CLAUDE.md as Markdown). Path-canonicalized + traversal-
             // rejecting so it's safe to expose to the renderer.
             commands::worktree::read_worktree_file,
+            // Phase 2.5b follow-up — Skills CRUD Tauri verbs. The
+            // workspace settings "Skills" panel uses these to read /
+            // write `.k2so/skills/<name>/SKILL.md` directly without
+            // routing through the daemon HTTP surface. Thin forwards
+            // to `k2so_core::skills::crud::*`.
+            commands::skills::k2so_skills_list,
+            commands::skills::k2so_skills_profile,
+            commands::skills::k2so_skills_create,
+            commands::skills::k2so_skills_remove,
             // Legacy `k2so_agents_work_list` removed — its renderer
             // callers now use `k2so_inbox_list` above. The per-agent
             // work-queue surface is itself being retired with the

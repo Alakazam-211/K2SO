@@ -41,3 +41,6 @@
 //!   recoverable for ~30 days if a user needs the originals back.
 
 pub mod consolidation;
+pub mod crud;
+
+pub use crud::SkillSummary;

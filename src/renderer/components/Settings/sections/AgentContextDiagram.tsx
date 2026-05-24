@@ -77,22 +77,30 @@ interface TierSpec {
   deliveries: DeliveryChannel[]
 }
 
+// Path labels reflect the post-Phase-2.5b layout: every documentation
+// profile (skill) lives at `.k2so/skills/<name>/SKILL.md`, and
+// heartbeats are workspace-level at `.k2so/heartbeats/<name>-<sched>/`
+// (the skill name + schedule are joined with a hyphen during the
+// consolidation migration). The legacy `.k2so/agents/<name>/AGENT.md`
+// + `.k2so/agents/<name>/heartbeats/<sched>/` paths are gone on every
+// migrated workspace; these strings are user-facing docs only, so
+// keeping them accurate matters more than parameterizing them.
 const MANAGER_SPEC: TierSpec = {
   sources: [
     { label: 'PROJECT.md', path: '.k2so/PROJECT.md', hint: 'Codebase knowledge shared by every agent in this workspace.', flowsTo: 'skill_md' },
-    { label: 'AGENT.md (manager)', path: '.k2so/agents/<manager>/AGENT.md', hint: 'Manager persona — workspace-global, embedded in SKILL.md.', flowsTo: 'skill_md' },
-    { label: 'AGENT.md (sub-agent)', path: '.k2so/agents/<sub-agent>/AGENT.md', hint: 'Sub-agent personas stay per-launch — argv-injected when the specific agent spawns.', flowsTo: 'argv' },
-    { label: 'WAKEUP.md (triage)', path: '.k2so/agents/<manager>/heartbeats/triage/WAKEUP.md', hint: 'Fires on the manager heartbeat schedule — delivered as the first user message.', flowsTo: 'argv' },
+    { label: 'SKILL.md (manager)', path: '.k2so/skills/<manager>/SKILL.md', hint: 'Manager persona — workspace-global, embedded in the canonical SKILL.md.', flowsTo: 'skill_md' },
+    { label: 'SKILL.md (sub-agent)', path: '.k2so/skills/<sub-agent>/SKILL.md', hint: 'Sub-agent personas stay per-launch — argv-injected when the specific agent spawns.', flowsTo: 'argv' },
+    { label: 'WAKEUP.md (triage)', path: '.k2so/heartbeats/<manager>-triage/WAKEUP.md', hint: 'Fires on the manager heartbeat schedule — delivered as the first user message.', flowsTo: 'argv' },
   ],
-  canonical: 'Manager workspaces: SKILL.md carries PROJECT.md + manager AGENT.md + K2SO-managed layers. Sub-agent personas never live here — they would collide if 5 sub-agents stacked their AGENT.md bodies into one file.',
+  canonical: 'Manager workspaces: SKILL.md carries PROJECT.md + manager skill + K2SO-managed layers. Sub-agent personas never live here — they would collide if 5 sub-agents stacked their SKILL.md bodies into one file.',
   deliveries: [FILE_DISCOVERY, ARGV_INJECTION_AGENT],
 }
 
 const K2SO_AGENT_SPEC: TierSpec = {
   sources: [
     { label: 'PROJECT.md', path: '.k2so/PROJECT.md', hint: 'Workspace-scope codebase context.', flowsTo: 'skill_md' },
-    { label: 'AGENT.md', path: '.k2so/agents/<k2so-agent>/AGENT.md', hint: 'Sole agent persona — embedded in SKILL.md since this is a single-agent workspace.', flowsTo: 'skill_md' },
-    { label: 'WAKEUP.md (each heartbeat)', path: '.k2so/agents/<k2so-agent>/heartbeats/<sched>/WAKEUP.md', hint: 'Per-schedule wake trigger — delivered as the first user message on fire.', flowsTo: 'argv' },
+    { label: 'SKILL.md', path: '.k2so/skills/<k2so-agent>/SKILL.md', hint: 'Sole agent persona — embedded in the canonical SKILL.md since this is a single-agent workspace.', flowsTo: 'skill_md' },
+    { label: 'WAKEUP.md (each heartbeat)', path: '.k2so/heartbeats/<k2so-agent>-<sched>/WAKEUP.md', hint: 'Per-schedule wake trigger — delivered as the first user message on fire.', flowsTo: 'argv' },
   ],
   canonical: 'K2SO Agent workspaces: SKILL.md carries the sole agent\'s persona + PROJECT.md + the K2SO planning surface (PRDs, milestones, cross-workspace messaging).',
   deliveries: [FILE_DISCOVERY, ARGV_INJECTION_AGENT],
@@ -101,8 +109,8 @@ const K2SO_AGENT_SPEC: TierSpec = {
 const CUSTOM_AGENT_SPEC: TierSpec = {
   sources: [
     { label: 'PROJECT.md', path: '.k2so/PROJECT.md', hint: 'Codebase knowledge (if the custom agent is codebase-scoped).', flowsTo: 'skill_md' },
-    { label: 'AGENT.md', path: '.k2so/agents/<custom>/AGENT.md', hint: 'User-defined agent persona — embedded in SKILL.md for single-agent workspaces.', flowsTo: 'skill_md' },
-    { label: 'WAKEUP.md (each heartbeat)', path: '.k2so/agents/<custom>/heartbeats/<sched>/WAKEUP.md', hint: 'Per-schedule wake trigger.', flowsTo: 'argv' },
+    { label: 'SKILL.md', path: '.k2so/skills/<custom>/SKILL.md', hint: 'User-defined agent persona — embedded in the canonical SKILL.md for single-agent workspaces.', flowsTo: 'skill_md' },
+    { label: 'WAKEUP.md (each heartbeat)', path: '.k2so/heartbeats/<custom>-<sched>/WAKEUP.md', hint: 'Per-schedule wake trigger.', flowsTo: 'argv' },
   ],
   canonical: 'Custom Agent workspaces: SKILL.md carries the custom persona + optional PROJECT.md. Single-agent workspace, so the sole agent is the workspace-level context.',
   deliveries: [FILE_DISCOVERY, ARGV_INJECTION_AGENT],
@@ -111,8 +119,8 @@ const CUSTOM_AGENT_SPEC: TierSpec = {
 const AGENT_TEMPLATE_SPEC: TierSpec = {
   sources: [
     { label: 'PROJECT.md', path: '.k2so/PROJECT.md', hint: 'Templates inherit the workspace PROJECT.md via the file-discovery symlink walk-up.', flowsTo: 'skill_md' },
-    { label: 'AGENT.md', path: '.k2so/agents/<template>/AGENT.md', hint: 'Template persona — argv-injected per delegation so each worktree launch carries it fresh.', flowsTo: 'argv' },
-    { label: 'Task file', path: '.k2so/agents/<template>/work/active/<task>.md', hint: 'When `k2so delegate` fires, the task file becomes the launch kickoff.', flowsTo: 'argv' },
+    { label: 'SKILL.md', path: '.k2so/skills/<template>/SKILL.md', hint: 'Template persona — argv-injected per delegation so each worktree launch carries it fresh.', flowsTo: 'argv' },
+    { label: 'Task file', path: '.k2so/inbox/<task>.md', hint: 'When `k2so delegate` fires, the workspace inbox task becomes the launch kickoff.', flowsTo: 'argv' },
   ],
   canonical: 'Agent Templates: SKILL.md ships workspace-level context (PROJECT.md + K2SO-managed layers) so the template sees the codebase. The template\'s own persona is argv-only — each delegated worktree gets it via --append-system-prompt.',
   deliveries: [FILE_DISCOVERY, ARGV_INJECTION_TEMPLATE],
@@ -232,7 +240,7 @@ export function AgentContextDiagram({ tier }: Props): React.JSX.Element {
       {/* Footer: summary of the authoring contract */}
       <div className="mt-3 pt-2 border-t border-[var(--color-border)] text-[9px] text-[var(--color-text-muted)] leading-snug">
         <span className="text-[var(--color-text-secondary)] font-medium">You edit 3 file types</span>
-        {' '}(AGENT.md, PROJECT.md, WAKEUP.md).{' '}
+        {' '}(per-skill SKILL.md, workspace PROJECT.md, per-heartbeat WAKEUP.md).{' '}
         <span className="text-[var(--color-text-secondary)] font-medium">K2SO composes 1 canonical file</span>
         {' '}(SKILL.md) and fans it out to every harness —{' '}
         <span className="font-mono text-[var(--color-text-secondary)]">./CLAUDE.md</span>,

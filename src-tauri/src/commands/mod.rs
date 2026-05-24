@@ -54,3 +54,6 @@ pub mod inbox;
 // worktree detail pane's Task tab (renders the worktree's CLAUDE.md);
 // reusable for any future "show a file from inside a worktree" surface.
 pub mod worktree;
+// Phase 2.5b follow-up — Tauri verbs for the workspace settings
+// "Skills" panel. Thin forwards to `k2so_core::skills::crud::*`.
+pub mod skills;
