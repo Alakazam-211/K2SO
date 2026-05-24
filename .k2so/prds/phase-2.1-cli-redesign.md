@@ -489,13 +489,13 @@ Static text listing every retired or hidden-by-default verb + its new equivalent
 
 ---
 
-## A6 — Proposed final verb taxonomy
+## A6 — Proposed final verb taxonomy (REVISED post-synthesis)
 
-**Daily verbs (15 top-level):**
-`msg`, `work`, `checkin`, `done` (alias), `delegate`, `reviews`, `review`, `workspace`, `workspaces`, `who`, `activity`, `connections`, `commit`, `whats-new`, `help`, `version`
+**Daily verbs (13 top-level):**
+`msg`, `work`, `checkin`, `done` (alias), `reviews`, `review`, `workspace`, `who`, `activity`, `connections`, `commit`, `whats-new`, `help`, `version`
 
-**Power-user (5 top-level):**
-`heartbeat`, `daemon`, `settings` (subsumes `mode`/`state`/`agentic`/`companion`), `update` (subsumes `app-update`), `onboarding`
+**Power-user (6 top-level):**
+`heartbeat`, `daemon`, `settings` (subsumes `mode`/`state`/`agentic`/`companion`), `update` (subsumes `app-update`), `onboarding`, `delegate` (moved from daily per A16 — legacy multi-agent workflow; prefer cross-workspace `msg --inbox` for new work)
 
 **Internal (4 top-level):**
 `terminal`, `sessions`, `agent` (single-item subcommands), `hooks`
@@ -503,7 +503,740 @@ Static text listing every retired or hidden-by-default verb + its new equivalent
 **Hard-deprecated (removed; error message → `help-deprecated`):**
 `agents create`, `agents delete`, `agentic`, `state`, `mode`, `app-update`, `commit-merge`, `companion`, `whatsnew`, `roster`, `feed`, `signal` (top-level; `msg --signal` is the new form), `work send` (top-level; `msg --inbox` is the new form), `status` (`checkin --status` is the new form)
 
-**Net change**: 37 top-level verbs → ~24 (15 daily + 5 power + 4 internal). Plus the corresponding flag additions on the surviving verbs.
+**Net change**: 37 top-level verbs → ~23 (14 daily + 5 power + 4 internal). Plus the corresponding flag additions on the surviving verbs.
+
+### A6.1 — Workspace singular, not plural (synthesis change)
+
+The original Appendix A had `workspace` (singular, item ops) AND `workspaces` (plural, list ops). The cross-reference review flagged this as an LLM-failure mode: the plural/singular distinction is invisible in help text, and an LLM agent will try `workspace list` (singular), fail, and need to retry.
+
+**Revised**: single `workspace` noun for everything. Sub-verbs distinguish operations:
+
+```
+workspace list                              # yellow pages (was workspaces list)
+workspace list --running                    # filter to live agents (was workspaces running)
+workspace launch [<path>]                   # smart cascade (attach|wake|spawn)
+workspace profile [<path>]                  # read agent AGENT.md
+workspace update --field <f> --value <v>    # edit agent profile
+workspace create <path>                     # create new (existing)
+workspace open <path>                       # register existing (existing)
+workspace remove <path>                     # deregister (existing)
+```
+
+Matches `docker container ls / create / start / rm` and `git branch list / branch create / branch -D` patterns LLMs already know. One noun, sub-verbs carry the action.
+
+---
+
+## A10 — Glossary (NEW from synthesis)
+
+**Problem**: K2SO uses domain-specific terms in verb names + flags that LLMs without context can't decode: `workspace`, `heartbeat`, `signal`, `agentic`, `companion`, `onboarding`, `hooks`, `harness`. Phase 2.1's tier-based help hides these from the daily view but doesn't explain them. The fresh-eyes UX review's #1 issue was "unexplained jargon blocks entry."
+
+**Solution**: a `k2so glossary [<term>]` verb that prints 1-2 sentence definitions. Also exposed as `k2so help --glossary` for discoverability symmetry.
+
+### Implementation
+
+```
+k2so glossary                       # list all defined terms
+k2so glossary heartbeat             # one-term definition
+k2so glossary --json                # machine-readable
+```
+
+### Initial glossary entries (alphabetical)
+
+```
+activity        Append-only audit log of every workspace event (agent
+                spawn, message, heartbeat fire, etc.). View with
+                `k2so activity`. Persisted in the `activity_feed`
+                table; survives daemon restart.
+
+agent           **The configurable assistant for a workspace.** K2SO
+                enforces a 1:1 invariant: each workspace has exactly
+                one primary agent. There is no meaningful distinction
+                between "the workspace" and "the workspace's agent" —
+                they're two names for the same thing in the new model.
+                Use `k2so workspace profile` to read agent metadata.
+
+                Legacy: pre-0.37 K2SO supported multiple sub-agents
+                per workspace (`.k2so/agents/<sub-agent>/`), managed
+                via `k2so delegate` and `k2so agents *` verbs. That
+                model is in transition — long-term replacement is
+                cross-workspace coordination via `k2so msg --inbox`
+                (each agent gets its own workspace; workspaces talk
+                to each other). The legacy multi-agent surface still
+                works during the transition; see Phase 3 deferred
+                cleanup.
+
+agentic         Global toggle for K2SO's agentic systems (heartbeats,
+                scheduled launches, autonomous wake). When off, K2SO
+                acts as a plain workspace manager with no background
+                activity. Configure via `k2so settings --agentic`.
+
+companion       The local server K2SO exposes via ngrok for Mobile
+                Companion + K2SO Connect remote access. Daemon-owned
+                (post-Phase-2). Configure via `k2so daemon companion`.
+
+delegate        Assign work to an agent. Creates a git worktree on
+                a new branch, writes the agent's CLAUDE.md, and
+                launches the agent's CLI session. See `k2so help
+                delegate`.
+
+harness         The IDE/agent integration layer K2SO writes into a
+                workspace (Claude Code settings, Cursor hooks, etc.).
+                Managed by `k2so onboarding adopt` on first registration.
+
+heartbeat       A per-workspace scheduled wake (cron-like) that
+                triggers the workspace's agent to triage its inbox.
+                See `k2so heartbeat help` for the full scheduling
+                surface.
+
+hooks           K2SO's CLI-tool integration hooks (Claude Code
+                channels, Cursor file hooks). Not the same as git
+                hooks. `k2so daemon hooks` shows pipeline state.
+
+inbox           A workspace's queue of pending work items (tasks,
+                messages, deferrals). Read with `k2so work inbox`.
+                Write to another workspace's inbox with
+                `k2so msg <ws> --inbox`.
+
+onboarding      First-launch flow for registering a new workspace
+                or adopting an existing project. See
+                `k2so onboarding --help`.
+
+reservation     A short-term lock on a file path so two agents don't
+                edit the same file concurrently. Acquire with
+                `k2so reserve`, release with `k2so release`.
+
+signal          A typed event K2SO sends between workspaces (msg,
+                status, presence, reservation, task-lifecycle, custom).
+                Sent via `k2so msg --signal <kind>`. The default
+                `k2so msg <ws> "text"` is sugar for `--signal msg`.
+
+skill           A workspace-scoped capability or instruction layer.
+                K2SO maintains a workspace SKILL.md that the agent
+                reads on every wake. Manage via `k2so workspace skills`.
+
+state           A workspace's capability tier (build / managed /
+                maintenance / locked) that gates which actions the
+                agent can take autonomously. Configure via
+                `k2so settings --state <id>`.
+
+workspace       A project folder that K2SO knows about. Has at most
+                one primary agent, plus heartbeats, settings, and
+                inbox. List all with `k2so workspace list`.
+```
+
+(Pull final list from k2so-core constants — `K2SO_GLOSSARY_TERMS` static — so glossary stays in sync with the actual schema.)
+
+### Tests
+
+- `tests/cli/glossary_lists_all_terms.sh` — `k2so glossary` returns at least 12 terms
+- `tests/cli/glossary_individual_term.sh` — `k2so glossary heartbeat` returns the heartbeat definition
+- `tests/cli/glossary_json_format.sh` — `k2so glossary --json` returns parseable JSON
+- `tests/cli/help_glossary_alias.sh` — `k2so help --glossary` returns same output as `k2so glossary`
+
+**LoC**: ~80 (verb + 12-term static table + tests). Trivial to maintain — new terms get added when new verbs introduce them.
+
+---
+
+## A11 — Heartbeat sub-namespace reorganization (NEW from synthesis)
+
+**Problem**: `heartbeat` has 15+ flat subcommands. The fresh-eyes review's #3 issue: "Heartbeat is a bloated sub-tool — rivals a standalone tool." Original Appendix A moved heartbeat to `--advanced` (hidden) but didn't simplify the namespace. The cross-reference reviewer flagged this as a missed opportunity.
+
+**Solution**: regroup 15+ subcommands into 3 conceptually-coherent families. Same daemon routes; just CLI reshape.
+
+### Before (15+ flat subcommands)
+
+```
+heartbeat add, remove, list, list-archived, archive, unarchive,
+heartbeat fire, wake, wakeup, edit, rename, show, status, log,
+heartbeat enable, disable, use-pinned-session, schedule, noop, action
+```
+
+### After (3 families, ~11 subcommands across logical groupings)
+
+```
+SCHEDULE MANAGEMENT — CRUD on schedule definitions
+  heartbeat schedule add --name <n> <spec>      Create a new heartbeat
+  heartbeat schedule list                        Active heartbeats
+  heartbeat schedule list --archived             Archived heartbeats
+  heartbeat schedule remove <n> [--purge]        Soft-archive (default) or hard-delete
+  heartbeat schedule unarchive <n>               Restore from archive
+  heartbeat schedule edit <n> <spec>             Change schedule spec
+  heartbeat schedule rename <old> <new>          Rename
+  heartbeat schedule enable <n> [--off]          Resume/pause (collapses enable/disable)
+
+SIGNAL ACTIONS — immediate one-shot triggers
+  heartbeat signal fire <n>                      Fire one heartbeat now
+  heartbeat signal wakeup <n>                    Open the WAKEUP.md
+  heartbeat signal wake                          Auto-wake (no name needed)
+
+INSPECTION — read-only state
+  heartbeat show <n> [--json]                    Single heartbeat details
+  heartbeat status <n> [-n N]                    Recent fire history
+  heartbeat log [-n N]                           Scheduler decisions
+```
+
+Per-agent adaptive flags (`heartbeat noop`, `heartbeat action`, `heartbeat use-pinned-session`) move under `heartbeat schedule edit <n> --noop / --action / --pinned-session [on/off]` — they're really schedule configuration, not standalone verbs. This drops 3 more verbs.
+
+### Net change
+
+- 18 flat subcommands → 14 across 3 named families
+- LLMs reading `k2so heartbeat help` see 3 short groups instead of one wall of 18 verbs
+- Backwards-compat: keep `k2so heartbeat add` as a deprecation-warned alias of `k2so heartbeat schedule add` for one release cycle
+
+### Tests
+
+- `tests/cli/heartbeat_schedule_add_subsumes_add.sh` — old form + new form produce identical DB row
+- `tests/cli/heartbeat_signal_fire_subsumes_fire.sh` — same parity test
+- `tests/cli/heartbeat_help_three_families.sh` — `k2so heartbeat help` shows SCHEDULE / SIGNAL / INSPECTION sections
+
+---
+
+## A12 — Help text templates for new/modified verbs (NEW from synthesis)
+
+**Problem**: Appendix A introduces new flags (`msg --signal <kind>`, `checkin --done [--blocked]`, `workspace launch`) without spec'ing the help text. Cross-reference reviewer flagged `--signal <kind>` specifically: "Is this LLM-discoverable from `msg --help`?" — no, not without a kind enumeration.
+
+**Solution**: spec `<verb> --help` output for every new or modified surface. The Phase 2.1 subagent implements these verbatim.
+
+### `k2so msg --help`
+
+```
+k2so msg <workspace> "text" [options]
+
+Deliver text to another workspace's agent. Three delivery modes via flags:
+
+DELIVERY MODES
+  (default)                 Live delivery — spawns the recipient's agent
+                            if not running, blocks until the message lands
+                            in their session. Use for synchronous comms.
+  --inbox                   Queue to the recipient's inbox. Recipient
+                            reads when they next checkin. Async; doesn't
+                            spawn anything. Use for non-urgent work.
+  --signal <kind>           Emit a typed signal. <kind> is one of:
+                              msg            Plain message (= default)
+                              status         Status update (telemetry)
+                              presence       Online/away/offline state
+                              reservation    File path lock event
+                              task-lifecycle Task started/done/blocked
+                              custom         Escape hatch (with --payload)
+
+ARGUMENTS
+  <workspace>               Workspace name (preferred — see `k2so workspace list`).
+                            Absolute path or project UUID also accepted.
+  "text"                    Message body. Wrap in quotes if it has spaces.
+                            Not required when --signal <kind> needs structured payload.
+
+OPTIONS
+  --from <name>             Sender identity (default: K2SO_AGENT_NAME or "cli")
+  --title "..."             Inbox title (--inbox only)
+  --body "..."              Inbox body (--inbox only)
+  --priority H|N|L          Inbox priority (--inbox only; default N)
+  --payload <json>          Custom signal payload (--signal custom only)
+
+EXAMPLES
+  k2so msg scout_v3 "ready when you are"
+  k2so msg scout_v3 "ping" --from sms-bridge
+  k2so msg scout_v3 --inbox --title "deploy ready" --body "..."
+  k2so msg scout_v3 --signal status --payload '{"text":"deploying..."}'
+```
+
+### `k2so checkin --help`
+
+```
+k2so checkin [options]
+
+Agent self-report. Sends a heartbeat ping, status update, or
+done/blocked report.
+
+DEFAULT
+  (no flags)                Plain heartbeat ping — "I'm alive, no action".
+
+OPTIONS
+  --status "message"        Report a status update visible in the workspace
+                            activity feed. Doesn't change agent state.
+  --done                    Report task completion. Marks the current
+                            work item as done.
+  --done --blocked "reason" Report blocked state. Stops the work item;
+                            requires human or peer-agent unblock.
+
+EXAMPLES
+  k2so checkin
+  k2so checkin --status "still on the OAuth migration"
+  k2so checkin --done
+  k2so checkin --done --blocked "waiting on Stripe API access"
+```
+
+### `k2so workspace launch --help`
+
+```
+k2so workspace launch [<path>]
+
+Smart cascade — get the workspace's agent into a running state:
+  * If the agent is alive (live session exists): attach to it
+  * If the agent is sleeping (registered, no session): wake it
+  * If the agent is cold (no registered session): spawn fresh
+
+Returns the agent's session id on success.
+
+ARGUMENTS
+  <path>                    Workspace path (default: $K2SO_PROJECT_PATH or PWD)
+
+OPTIONS
+  --json                    Return session metadata as JSON
+  --no-attach               Spawn/wake but don't attach the current shell
+                            (useful for scripting)
+
+EXAMPLES
+  k2so workspace launch
+  k2so workspace launch /Users/me/Projects/k2so
+  k2so workspace launch --json
+```
+
+### `k2so settings --help`
+
+```
+k2so settings [options]
+
+Show or modify workspace settings. Without flags: prints current settings.
+
+WORKSPACE MODE — replaces the old `k2so mode` verb
+  --mode <off|agent|manager>
+                            off: K2SO ignores this workspace
+                            agent: workspace has a primary agent
+                            manager: workspace is a manager of other workspaces
+
+WORKSPACE STATE — capability tier (replaces old `k2so state`)
+  --state <build|managed|maintenance|locked>
+                            Drives which actions the agent can take
+                            autonomously. See `k2so glossary state` for
+                            full capability matrix.
+
+GLOBAL TOGGLES (apply across all workspaces)
+  --agentic <on|off>        Enable/disable all background agent systems
+                            (heartbeats, autonomous wakes, scheduled work).
+                            When off, K2SO is a passive workspace tool.
+
+UPDATE COMPANION
+  --companion <on|off>      Enable/disable the daemon's companion server
+                            (mobile + remote-desktop access via ngrok)
+  --companion-password "<pw>" Set the companion auth password
+
+EXAMPLES
+  k2so settings
+  k2so settings --mode manager
+  k2so settings --state managed
+  k2so settings --agentic off
+  k2so settings --companion on
+```
+
+### Tests
+
+- `tests/cli/help_text_no_undefined_jargon.sh` — for every term in `k2so glossary`, verify it appears in at least one verb's `--help` output with context (catches: jargon introduced in help text without a glossary entry)
+- `tests/cli/help_text_signal_kind_enum.sh` — `k2so msg --help` lists all 6 SignalKind values
+- `tests/cli/help_text_smart_cascade_explanation.sh` — `k2so workspace launch --help` contains the words "attach", "wake", "spawn"
+
+---
+
+## A13 — Sessions / terminal / workspace-running overlap (NEW from synthesis)
+
+**Problem**: Three verb clusters show "what's currently active":
+- `workspace list --running` (daily tier, post-A6.1)
+- `sessions list` (internal tier — PTY sessions)
+- `daemon status` (power-user tier — daemon-process state)
+Plus the old `agents running` which collapses into `workspace list --running`.
+
+Each shows a different scope, but an LLM reading help won't realize they exist in parallel. Original Appendix A tiered them but didn't cross-reference.
+
+**Solution**: add cross-reference breadcrumbs in each tier's help text. No new verb; just discoverability glue.
+
+### In daily help under `workspace list`
+
+```
+workspace list [--running]                Yellow pages (all workspaces).
+                                          --running filters to live agents.
+                                          For raw PTY sessions, see
+                                          `k2so help --internal sessions`.
+                                          For daemon health, see
+                                          `k2so daemon status`.
+```
+
+### In `--internal` help under `sessions`
+
+```
+sessions list [--json]                    Raw PTY sessions (low-level).
+                                          For workspace-level "what's running",
+                                          use `k2so workspace list --running`.
+```
+
+### In `--advanced` help under `daemon`
+
+```
+daemon status [--json]                    Daemon process state (PID, port,
+                                          uptime). For workspace-level
+                                          "what's running", use
+                                          `k2so workspace list --running`.
+```
+
+### Optional future consolidation (out of scope for Phase 2.1)
+
+A `k2so running [--type workspaces|sessions|daemon]` unified verb would solve the discoverability problem structurally. The cross-reference reviewer suggested this. Phase 3 could add it; Phase 2.1 just adds breadcrumbs.
+
+---
+
+## A14 — Deferred to Phase 3 (NEW from synthesis)
+
+The fresh-eyes UX review flagged capabilities a user would expect but the CLI doesn't have. Honest about gaps:
+
+| Capability | Today | Phase 2.1 verdict | Phase 3 home |
+|---|---|---|---|
+| **Undo last action** | None | Out of scope | Phase 3 Workstream G (observability) — needs an event-sourced undo log first |
+| **Export everything** | None | Out of scope | Phase 3 Workstream C (OpenAPI) — `k2so export --format json` would dump every `/cli/*` GET endpoint's response |
+| **Per-agent pause** (not just heartbeat-disable) | None | Out of scope | Phase 3 — needs a daemon-side "paused" state machine, not just a heartbeat flag |
+| **Manual retry of failed task** | None | Out of scope | Phase 3 — needs a failed-work-queue in the daemon |
+| **Workspace/agent-level logs** (vs `daemon log` only) | Partial — daemon log only | Out of scope | Phase 3 — daemon needs to tag log lines with workspace context |
+| **In-CLI git diff review** | None — must use `git diff` | Out of scope; arguably never K2SO's job | n/a |
+| **`k2so search <intent>` semantic CLI search** | None | Out of scope | Phase 3 with OpenAPI codegen — generated client could include keyword/intent search |
+
+**Recommendation**: each of these gets a one-line entry in Phase 3 PRD (`.k2so/prds/phase-3-contract-hardening.md`) under a new "Deferred CLI features" appendix. Phase 2.1 doesn't add them; just acknowledges the gap so future work has a clear pointer.
+
+---
+
+## A15 — Summary of synthesis changes from cross-reference review
+
+The cross-reference review (read by an independent Explore agent, scored against the fresh-eyes UX review's findings) drove these changes from the original Appendix A:
+
+| Synthesis change | Source finding | Impact |
+|---|---|---|
+| A6.1 — drop `workspaces` plural; `workspace` singular for everything | LLM-lens "plural/singular invisible" footgun | 1 fewer top-level verb; matches docker/git conventions |
+| A10 — Glossary verb | Fresh-eyes #1 "unexplained jargon blocks entry" | Each K2SO-specific term gets a 1-2 sentence inline definition |
+| A11 — Heartbeat sub-namespace into 3 families | Fresh-eyes #3 "heartbeat is a bloated mini-tool" | 18 flat subcommands → 14 across 3 logical groupings |
+| A12 — Help text templates for new flags | Cross-ref Task 5 "Appendix A's own jargon" — `--signal <kind>` undefined | Every new flag has a spec'd `--help` with examples |
+| A13 — Cross-reference breadcrumbs for overlapping verbs | Fresh-eyes #10 "sessions/terminal/agents-running overlap" | Discoverability glue; no new verbs |
+| A14 — Deferred-to-Phase-3 capabilities | Fresh-eyes #7 "missing capabilities" | Honest about gaps; clear handoff to Phase 3 |
+
+**LLM-friendliness score estimate** (per cross-reference Task 2 methodology):
+- Original Appendix A: 15/24 verbs LLM-friendly
+- Post-synthesis Appendix A: estimated 20/23 verbs LLM-friendly (1 fewer verb after `workspaces` collapse; jargon now glossary-discoverable; smart-cascade explained; signal-kind enumerated)
+
+**Updated cli/k2so LoC estimate**: 3,854 → ~2,500 (slightly higher than A7's 2,400 due to A10 glossary table + A11 heartbeat family aliases).
+
+---
+
+## A16 — Workspace-Agent invariant: Phase 2.1's organizing principle (NEW from synthesis)
+
+**Why this exists**: the user flagged that the original Appendix A reflected the workspace-agent invariant (1 workspace = 1 primary agent) in *places* but not consistently — and that the inconsistency could skew LLM agent exploration. Investigation confirmed two architectural realities coexist today:
+
+1. **New model**: `.k2so/agent/` (singular) — one primary agent per workspace, managed via `workspace launch / profile / update`. This is the long-term shape.
+2. **Legacy model**: `.k2so/agents/<sub-agent>/` (plural) — multiple sub-agents per workspace, managed via `delegate`, `agents create`, `agents work <name>`. K2SO itself still uses this internally (the pod-leader → backend-eng/frontend-eng/etc. pattern).
+
+The new model wants to eat the old model. **The long-term replacement for within-workspace multi-agent is cross-workspace coordination**: each agent gets its own workspace, and workspaces talk via `k2so msg --inbox`. Until that transition completes (post-Mobile-Companion + K2SO Connect), the legacy multi-agent surface stays but is clearly labeled deprecated.
+
+### The principle
+
+**Verbs should default to workspace-keyed semantics. The "agent" concept is sugar for "the workspace's primary agent." Multi-agent (sub-agent) verbs are legacy and tier-3-deprecated.**
+
+### Concrete cleanup driven by this principle
+
+#### A16.1 — Hard-deprecate `agents` (plural) verbs that assume sub-agents
+
+These verbs presuppose the multi-agent model. In the workspace-keyed world, they have no meaning:
+
+| Today | Phase 2.1 verdict | Replacement |
+|---|---|---|
+| `agents create <name>` | **Hard-deprecate** | `workspace launch [path]` — create the workspace if needed, agent comes along with it |
+| `agents delete <name>` | **Hard-deprecate** | `workspace remove [path]` — removes the workspace + its agent |
+| `agents triage` | **Hard-deprecate** | `workspace activity --triage` or just `activity --triage` |
+| `agents reap` | **Hard-deprecate** | `daemon reap` — it's a daemon-level garbage collect, not an agent op |
+| `agents lock <name>` | **Hard-deprecate** | `workspace --lock` flag, or just remove (was diagnostic) |
+| `agents unlock <name>` | **Hard-deprecate** | `workspace --unlock` flag, or just remove |
+| `agents launch <name>` | **Hard-deprecate** | `workspace launch [path]` |
+| `agents list` | **Soft-deprecate** (already aliased) | `workspace list` — same data, workspace-keyed |
+| `agents work <name>` | **Hard-deprecate** | `work inbox` (workspace-implicit) or `work inbox --workspace <path>` |
+| `agents status <name>` | **Hard-deprecate** | `workspace status` or `checkin --status` |
+| `agents profile <name>` | **Hard-deprecate** | `workspace profile [path]` |
+| `agents generate-md <name>` | **Hide** (internal) | `workspace regen-skill [path]` or daemon-side automatic |
+| `agents running` | **Soft-deprecate** | `workspace list --running` |
+
+Each hard-deprecated verb's error message points at the workspace-keyed replacement + `help-deprecated` for the full map.
+
+#### A16.2 — Keep `agent` (singular) in `--internal` tier as a bridging concept
+
+Some operations are conceptually agent-level even though they target the workspace's primary agent. Keep these in the `--internal` tier with crystal-clear help text:
+
+| Verb | Help text spec |
+|---|---|
+| `agent profile [<path>]` | "Read the workspace's primary agent's AGENT.md. Equivalent to `workspace profile`." (provide both for muscle-memory) |
+| `agent update --field <f> --value <v>` | "Update a field in the workspace's primary agent's AGENT.md. Equivalent to `workspace update`." |
+| `agent complete --file <f>` | "Mark a work item as complete. Workspace-implicit." |
+
+These exist to reduce friction for agents that mentally model the world as "I am an agent, I do things." But they're tier-3 internal; daily verbs are workspace-keyed.
+
+#### A16.3 — Audit every `--agent <name>` flag → `--workspace <path>`
+
+Every verb that currently takes `--agent <name>` (often as a workspace selector) should accept `--workspace <path>` as the canonical form. `--agent` becomes a soft-deprecated alias for one release cycle.
+
+Verbs to audit:
+- `work create --agent <name>` → `work create [--workspace <path>]` (workspace-implicit defaults to PWD)
+- `work move --agent <name>` → `work move [--workspace <path>]`
+- `heartbeat * --agent <name>` → `heartbeat * [--workspace <path>]` (covered by A11's workspace-implicit semantics)
+- `feed --agent <name>` (now `activity --agent <name>`) → `activity [--workspace <path>]`
+- `status "msg" --agent <name>` (now `checkin --status "msg" --agent <name>`) → `checkin --status "msg"` (workspace-implicit)
+- `agent update --name <n>` → `workspace update [--workspace <path>] --field <f> --value <v>`
+- `agent complete --agent <n>` → `agent complete [--workspace <path>]` (note: keeps `agent` namespace per A16.2)
+
+Implementation pattern: each affected `cmd_*` function checks `--workspace` first, then falls back to `--agent` with a one-time deprecation warning per shell session, then to `K2SO_PROJECT_PATH` / PWD.
+
+#### A16.4 — `delegate` moves to `--advanced` with legacy warning
+
+`k2so delegate <agent> <file>` is the keystone verb for the legacy multi-agent workflow. It's not removed (K2SO itself uses it; many active users likely do too), but:
+
+- **Tier**: moves from daily (per original Appendix A) to `--advanced`
+- **Help text**: "Legacy multi-agent workflow: creates a worktree + writes CLAUDE.md + launches a sub-agent's Claude session. Each sub-agent lives under `.k2so/agents/<name>/`. **Prefer the workspace-centric pattern** for new work: register each agent as its own workspace via `k2so workspace create`, then coordinate via `k2so msg --inbox`. See Phase 3 PRD for the planned full retirement of the multi-agent surface."
+- **Deprecation timeline**: not removed in Phase 2.1. Reviewed for full retirement after Mobile Companion + K2SO Connect ship and the cross-workspace coordination pattern proves out (see A17).
+
+### LLM-agent benefit
+
+After A16, an LLM agent reading `k2so help` sees **one clear path**: workspace-keyed verbs. The `agent` singular namespace in `--internal` is bridging sugar; the `agents` plural namespace is gone (errors with helpful pointers). No more "which of these three concepts am I supposed to use?"
+
+### A16 tests
+
+- `tests/cli/agents_create_hard_deprecated.sh` — exits non-zero with `workspace launch` pointer
+- `tests/cli/agents_delete_hard_deprecated.sh` — exits non-zero with `workspace remove` pointer
+- `tests/cli/agents_running_soft_deprecated.sh` — works but emits deprecation warning pointing at `workspace list --running`
+- `tests/cli/agent_flag_accepts_workspace_alias.sh` — verify every audited verb accepts both `--agent` (deprecated) and `--workspace` (canonical)
+- `tests/cli/delegate_advanced_tier_legacy_warning.sh` — `delegate --help` text mentions "legacy multi-agent workflow"
+
+---
+
+## A17 — Deferred to Phase 3: `.k2so/agents/` retirement audit (NEW from synthesis)
+
+After Mobile Companion + K2SO Connect ship and the cross-workspace coordination pattern proves out, audit:
+
+- **Does anyone still use `.k2so/agents/<sub-agent>/` outside of K2SO itself?** Survey production users (K2SO Connect installations) to see whether the multi-agent surface has any third-party adoption.
+- **Can K2SO migrate its own pod model to multi-workspace coordination?** Today K2SO uses `.k2so/agents/pod-leader/` + delegated sub-agents. The dogfood test: can pod-leader be its own workspace, and can each sub-agent (backend-eng, frontend-eng, qa-eng) be its own workspace too? Cross-workspace `msg --inbox` replaces in-workspace delegation.
+- **If yes to both**: hard-remove the multi-agent surface. Delete `cmd_delegate`, delete `.k2so/agents/` from new installations, remove `commands::k2so_agents::archive_orphan_*` migration paths. Estimated cleanup: ~500 LoC across `cli/k2so` + `crates/k2so-core/src/agents/*`.
+- **If no**: defer further; keep the multi-agent surface as a supported-but-not-recommended pattern.
+
+**Phase 3 PRD home**: add a section "Deferred CLI features and legacy retirement" under Phase 3's "Open questions" section, with bullets for this audit and the A14 capability gaps (undo, export, retry, etc.).
+
+---
+
+## A18 — Final summary: what Phase 2.1 actually ships
+
+After all the synthesis additions, Phase 2.1's subagent brief boils down to:
+
+1. **A6 final taxonomy**: 23 top-level verbs (13 daily + 6 power + 4 internal); workspace-singular for everything; `delegate` in power-user tier
+2. **A10 glossary**: `k2so glossary [term]` verb + 12-term initial table
+3. **A11 heartbeat reorganization**: 18 flat subcommands → 14 across 3 named families (schedule / signal / inspection)
+4. **A12 help text templates**: spec'd `--help` for msg, checkin, workspace launch, settings (+ any others touched)
+5. **A13 breadcrumbs**: cross-references in help text for sessions/terminal/workspace-running overlap
+6. **A14 deferred to Phase 3**: explicit list of missing capabilities
+7. **A16 invariant propagation**: hard-deprecate `agents` plural verbs; bridge `agent` singular in --internal; audit `--agent` → `--workspace`; `delegate` to --advanced with legacy label
+8. **A17 deferred audit**: `.k2so/agents/` retirement timing tied to Mobile Companion + K2SO Connect proof-out
+
+**Subagent time estimate**: 90-120 min (up from A9's 60-90 min — Appendix A grew substantially through synthesis).
+
+**Final cli/k2so LoC**: 3,854 → ~2,500 (A16's hard deprecations delete more than A10/A11 add).
+
+**LLM-friendliness target**: ≥20/23 verbs an LLM agent can confidently pick on first read.
+
+---
+
+## A19 — Skill reframe: "many agents per workspace" is dead, long live skills (NEW from synthesis)
+
+**The user's reframe (2026-05-23, mid-Phase-2.1-spec)**:
+
+> "Ultimately the 'many agents in a single workspace' concept is dead. In the future it will become unique skills and a documentation map. This is also why heartbeats were moved to the workspace itself `.k2so/heartbeats/` — so lets keep moving in that direction."
+
+This is the architectural direction A16 was groping toward but didn't fully name. A16 said "deprecate the multi-agent surface." A19 says: **what we called sub-agents were never agents — they're skills.** Each `.k2so/agents/<name>/` folder literally contains a SKILL.md plus heartbeats. The folder's name lies about what's inside.
+
+### The reframed model
+
+- **Workspace** = the project folder K2SO knows about
+- **Agent** = the workspace's one primary assistant (1:1, enforced)
+- **Skill** = a documented capability profile the agent can apply to specific work
+  - Master definitions: `.k2so/agent-templates/<role>/` (rename to `.k2so/skill-templates/<role>/` in A19.2)
+  - Instantiated skills: `.k2so/agents/<name>/` (rename to `.k2so/skills/<name>/` in A19.2)
+- **Documentation map** = the SKILL.md / AGENT.md / CLAUDE.md hierarchy that gives the agent context
+- **Heartbeat** = a workspace-owned scheduled wake (`.k2so/heartbeats/` — already in this shape)
+- **Delegate** = "apply skill X to work item Y" (not "spawn agent X"). **Recovers as a daily-tier verb.**
+
+### A19.1 — CLI verb renames (Phase 2.1 scope)
+
+Rename `agents *` → `skills *`. Each old verb gets a deprecation-warned alias for one release cycle. The existing `cmd_skills` (which today only does `regenerate`) expands to cover the full surface.
+
+| Old verb | New verb | Notes |
+|---|---|---|
+| `agents create <name>` | `skills create <name>` | Instantiate a skill (from a template if provided via `--template <role>`) |
+| `agents delete <name>` | `skills remove <name>` | Match `workspace remove` / `heartbeat remove` convention |
+| `agents list` | `skills list` | Lists skills (instantiated) in the workspace |
+| `agents work <name>` | `skills work <name>` | Read a skill's work queue |
+| `agents triage` | `workspace triage` | This was workspace-scoped, not skill-scoped — fix the misattribution |
+| `agents reap` | `daemon reap` | Daemon-level GC, not skill-level |
+| `agents lock <name>` | `skills lock <name>` | Lock a skill's session (debugging) |
+| `agents unlock <name>` | `skills unlock <name>` | (Or collapse per A2.4 to `skills lock <n> --release`) |
+| `agents launch <name>` | `skills launch <name>` | Spawn a Claude session pre-loaded with the named skill |
+| `agents profile <name>` | `skills profile <name>` | Read the skill's SKILL.md/AGENT.md |
+| `agents generate-md <name>` | `skills regenerate <name>` | Already exists as `skills regenerate` (today regenerates all; add per-skill variant) |
+| `agents running` | `workspace list --running` (A6.1) | Workspace-keyed via existing rename |
+| `agents status <name>` | `skills status <name>` | Read skill state (alive/sleeping/cold) |
+
+**Hard-deprecate** the misnomers that don't map cleanly to skills: `agents reap`, `agents triage` (both move to other namespaces per table above).
+
+**Soft-deprecate** the verbs that do map (with `skills *` as the canonical form): `agents create/delete/list/work/lock/unlock/launch/profile/status`. Old verbs print a one-line deprecation warning to stderr, pointing at the `skills *` equivalent, then run.
+
+### A19.2 — Filesystem rename (DEFERRED to Phase 3)
+
+Renaming `.k2so/agents/<name>/` → `.k2so/skills/<name>/` is heavier than Phase 2.1 can absorb:
+
+- **Naming collision**: `.k2so/skills/` already exists for a different concept (k2so-core's `skill_layers` system from Unit 6 — per-workspace skill layer files). Renaming the multi-agent dir to `.k2so/skills/` would collide.
+- **Migration risk**: requires moving live data on every existing K2SO installation. A botched migration loses user state.
+- **Backwards-compat surface**: the daemon currently writes to and reads from `.k2so/agents/<name>/`. Renaming requires daemon code changes + a migration path.
+
+**Resolution proposal for Phase 3 (or its own dedicated unit)**:
+- Rename existing `.k2so/skills/` (the skill-layer system) → `.k2so/skill-layers/` to match the k2so-core module name and free the cleaner `.k2so/skills/` namespace
+- Rename `.k2so/agent-templates/<role>/` → `.k2so/skill-templates/<role>/`
+- Rename `.k2so/agents/<name>/` → `.k2so/skills/<name>/`
+- Daemon migration: on first boot after upgrade, detect old directories and move them atomically (tmp+rename pattern from `fs_atomic`); leave a `.k2so/.skills-migration-<version>-done` marker
+
+For Phase 2.1: **filesystem stays as-is.** Glossary + help text explain the rename direction. CLI verbs use the new names with old as aliases.
+
+### A19.3 — `delegate` recovers as daily-tier verb (REVISES A6 + A16.4)
+
+A16.4 demoted `delegate` to `--advanced` with a "legacy multi-agent workflow" label. **A19 undoes this**: `delegate` is the canonical verb for "apply skill X to work item Y." It's not legacy; it's the primary mechanism for routing specialized work to the right capability profile.
+
+| Where | Status |
+|---|---|
+| **Daily tier** | `delegate <skill> <file>` — apply a skill to a work item |
+| Help text | "Apply the named skill to the work item. Creates a git worktree, writes a CLAUDE.md pre-loaded with the skill's role + persona, and launches a Claude session. Skills live under `.k2so/skills/<name>/` (currently `.k2so/agents/<name>/` — being renamed; see `k2so glossary skill`)." |
+| Long-term shape | Each skill can also be a standalone workspace (advanced users), but the primary pattern is in-workspace skill application via `delegate`. |
+
+### A19.4 — Glossary additions (REVISES A10)
+
+Add:
+
+```
+skill           A documented capability profile the workspace's agent
+                can apply to specific work. Includes a SKILL.md (role
+                + persona + instructions), heartbeats (the skill's
+                wake schedule), and a work queue. List skills with
+                `k2so skills list`. Apply to a work item with
+                `k2so delegate <skill> <file>`.
+
+                Filesystem: skills currently live at `.k2so/agents/<name>/`
+                (historical naming from when they were called sub-agents).
+                Templates at `.k2so/agent-templates/<role>/`. Rename
+                to `.k2so/skills/` is planned for Phase 3.
+
+skill-template  A master definition for a skill that can be
+                instantiated multiple times. Lives at
+                `.k2so/agent-templates/<role>/` (current naming;
+                rename to `.k2so/skill-templates/` is Phase 3 work).
+                Create new skills from a template via
+                `k2so skills create <name> --template <role>`.
+```
+
+Update the existing `agent` glossary entry to drop the "legacy multi-agent" language (since the multi-agent surface IS skills, not legacy):
+
+```
+agent           **The configurable assistant for a workspace.** K2SO
+                enforces a 1:1 invariant: each workspace has exactly
+                one primary agent. There is no meaningful distinction
+                between "the workspace" and "the workspace's agent" —
+                they're two names for the same thing in the new model.
+                Use `k2so workspace profile` to read agent metadata.
+
+                The agent can apply one or more skills to specific
+                work via `k2so delegate <skill> <file>`. See `k2so
+                glossary skill` for the skill/agent distinction.
+
+                Historical: pre-0.37 K2SO modeled sub-agents under
+                `.k2so/agents/<name>/`. What was called "sub-agents"
+                is actually the skill system; rename in progress
+                (Phase 3 — see A19).
+```
+
+### A19.5 — Implementation order (updates A9)
+
+Insert into A9's implementation order **after step 1 (add new daemon routes)** and **before step 2 (add new CLI verbs)**:
+
+> **Step 1.5 — Add `skills *` CLI surface**:
+> Expand `cmd_skills` from its current single subcommand (`regenerate`) into the full surface: `create / remove / list / work / lock / unlock / launch / profile / status / regenerate`. Each delegates to the existing daemon routes (no new daemon routes needed — the routes already exist, they're just named `/cli/agents/*` today; either reuse-as-is or alias via new `/cli/skills/*` routes that forward).
+
+Add **new step 6.5** between steps 6 (hard-deprecate) and 7 (rename feed/roster):
+
+> **Step 6.5 — `agents *` verb deprecation**:
+> Per A19.1's mapping table, replace each `agents *` verb body with: (a) one-line deprecation warning to stderr, (b) forward to the `skills *` equivalent. The few that don't map cleanly (`agents reap`, `agents triage`) get hard-deprecation messages pointing at the new home (`daemon reap`, `workspace triage`).
+
+### A19.6 — Why this matters for LLM-agent UX
+
+Under A19, an LLM agent reading `k2so help` sees:
+- **Daily**: workspace ops + msg + checkin + delegate (apply skill to work)
+- **Power**: heartbeat (workspace-scoped) + skills (capability profiles)
+- **Internal**: agent singular ops (bridging sugar for workspace's primary agent)
+
+Three concepts, three clear roles. No "is this an agent or a workspace or a sub-agent?" confusion. The skill concept names what was always there but was hiding under a misleading "agent" label.
+
+### A19.7 — Updated taxonomy (REVISES A6)
+
+**Daily verbs (14 top-level):**
+`msg`, `work`, `checkin`, `done` (alias), `delegate`, `reviews`, `review`, `workspace`, `who`, `activity`, `connections`, `commit`, `whats-new`, `help`, `version`
+
+(Adds `delegate` back to daily per A19.3; verb count goes from 13 → 14)
+
+**Power-user (6 top-level):**
+`heartbeat`, `daemon`, `settings`, `update`, `onboarding`, `skills`
+
+(Adds `skills` per A19.1; verb count goes from 5 → 6)
+
+**Internal (4 top-level):**
+`terminal`, `sessions`, `agent`, `hooks`
+
+(Unchanged)
+
+**Hard-deprecated**: same as A6 + `agents` plural verbs soft-deprecate to their `skills *` equivalents (per A19.1).
+
+**Net change**: 37 top-level verbs → 24 (14 daily + 6 power + 4 internal). One more than the previous A6 estimate because `delegate` returns to daily + `skills` enters power-user.
+
+### A19.8 — Tests
+
+- `tests/cli/skills_create_subsumes_agents_create.sh` — `k2so skills create foo` and `k2so agents create foo` produce identical filesystem state, with `agents create` emitting a deprecation warning to stderr
+- `tests/cli/delegate_applies_skill_not_spawns_agent.sh` — verify `delegate` help text says "apply" not "spawn"; verify created worktree's CLAUDE.md includes the skill's role + persona
+- `tests/cli/agents_triage_hard_deprecated_to_workspace_triage.sh` — exits non-zero with `workspace triage` pointer
+- `tests/cli/agents_reap_hard_deprecated_to_daemon_reap.sh` — exits non-zero with `daemon reap` pointer
+- `tests/cli/glossary_skill_term.sh` — `k2so glossary skill` returns the A19.4 definition
+
+---
+
+## A20 — Phase 3 deferred: `.k2so/agents/` → `.k2so/skills/` filesystem rename
+
+Add to Phase 3 PRD (`.k2so/prds/phase-3-contract-hardening.md`) as a deferred item:
+
+**Filesystem rename plan** (post-Mobile-Companion + K2SO-Connect ship):
+
+1. Rename `.k2so/skills/` (k2so-core skill_layers system) → `.k2so/skill-layers/` to free the `skills/` namespace
+2. Rename `.k2so/agent-templates/<role>/` → `.k2so/skill-templates/<role>/`
+3. Rename `.k2so/agents/<name>/` → `.k2so/skills/<name>/`
+4. Daemon first-boot migration: detect old dirs, atomic rename (tmp + rename), write `.k2so/.skills-rename-v1-done` marker
+5. Update all daemon code to use new paths; backwards-compat shim that reads from either path during the transition window (1 release)
+6. Update `.k2so/CLAUDE.md.generated` + `.k2so/CLAUDE.md.migrated` templates to reflect new naming
+7. Update agent-templates (or whatever they're called by then) so newly-created workspaces use the new naming from day one
+
+Estimated effort: ~400 LoC of daemon migration + ~50 LoC of CLI path updates + extensive testing. **One dedicated unit, post-Phase-3 contract hardening.**
+
+---
+
+## A21 — Final consolidated taxonomy after A19
+
+| Tier | Verbs | Count |
+|---|---|---|
+| **Daily** | `msg`, `work`, `checkin`, `done` (alias), `delegate`, `reviews`, `review`, `workspace`, `who`, `activity`, `connections`, `commit`, `whats-new`, `help`, `version` | 14 |
+| **Power-user** (`help --advanced`) | `heartbeat`, `daemon`, `settings`, `update`, `onboarding`, `skills` | 6 |
+| **Internal** (`help --internal`) | `terminal`, `sessions`, `agent`, `hooks` | 4 |
+| **Total** | | **24** |
+| **Hard-deprecated** (error + `help-deprecated` pointer) | `agentic`, `state`, `mode`, `app-update`, `commit-merge`, `companion`, `whatsnew`, `roster`, `feed`, `signal`, `work send`, `status`, `agents reap`, `agents triage` | 14 |
+| **Soft-deprecated** (warning + forward) | `agents create/delete/list/work/lock/unlock/launch/profile/status/running`, `whatsnew`, agent-keyed `--agent` flags | ~13 |
+
+**Phase 2.1 ship target**: 37 top-level verbs → 24, with clear daily/power/internal tiering and a skill-centric mental model that an LLM agent can navigate on first read.
 
 ---
 
