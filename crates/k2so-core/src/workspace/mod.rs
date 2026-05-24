@@ -17,6 +17,7 @@ pub mod onboarding;
 pub mod scheduler;
 pub mod session;
 pub mod settings;
+pub mod terminal_id;
 pub mod triage;
 pub mod wake_prompts;
 

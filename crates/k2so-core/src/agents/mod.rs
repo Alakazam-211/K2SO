@@ -76,7 +76,9 @@ pub use crate::skills::content as skill_content;
 /// Back-compat alias for callers that still reference
 /// `agents::skill_writer::*`.
 pub use crate::skills::writer as skill_writer;
-pub mod terminal_id;
+/// Phase 2.5c: `terminal_id` relocated to
+/// [`crate::workspace::terminal_id`]. Back-compat alias.
+pub use crate::workspace::terminal_id;
 /// Phase 2.5c: `triage_summary` relocated to [`crate::workspace::triage`].
 pub use crate::workspace::triage as triage_summary;
 /// Phase 2.5c: `unification` relocated to
