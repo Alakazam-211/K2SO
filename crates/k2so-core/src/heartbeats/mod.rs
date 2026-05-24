@@ -24,6 +24,8 @@ use crate::db::schema::{AgentHeartbeat, HeartbeatFire};
 use crate::log_debug;
 use crate::scheduler::should_project_fire;
 
+// Phase 2.5c: cron schedule parsing + next-fire computation.
+pub mod cron;
 // Phase 2.5c: launchd plist scaffolding + crontab installer.
 pub mod install;
 

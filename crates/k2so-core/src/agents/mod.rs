@@ -31,7 +31,9 @@ pub mod channel;
 pub use crate::workspace::checkin;
 pub mod commands;
 pub mod connections;
-pub mod cron_schedule;
+/// Phase 2.5c: `cron_schedule` relocated to
+/// [`crate::heartbeats::cron`]. Back-compat alias.
+pub use crate::heartbeats::cron as cron_schedule;
 /// Phase 2.5c: `delegate` relocated to [`crate::deprecated::delegate`]
 /// with `#[deprecated]` annotations on public functions. Back-compat
 /// alias keeps `agents::delegate::*` resolving for existing callers
