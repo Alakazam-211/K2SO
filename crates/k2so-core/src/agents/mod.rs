@@ -94,7 +94,9 @@ pub use crate::migrations::unification_0_37_0 as unification;
 /// (renamed to avoid collision with the top-level `crate::wake` module).
 /// Back-compat alias keeps `agents::wake::*` resolving.
 pub use crate::workspace::wake_prompts as wake;
-pub mod work_item;
+/// Phase 2.5c: `work_item` relocated to
+/// [`crate::workspace::work_item`]. Back-compat alias.
+pub use crate::workspace::work_item;
 pub mod workspace;
 pub mod workspaces;
 

@@ -21,4 +21,5 @@ pub mod settings;
 pub mod terminal_id;
 pub mod triage;
 pub mod wake_prompts;
+pub mod work_item;
 
