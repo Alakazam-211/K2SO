@@ -13,6 +13,7 @@
 pub mod agent_identity;
 pub mod agent_launch;
 pub mod checkin;
+pub mod display;
 pub mod launch_profile;
 pub mod onboarding;
 pub mod scheduler;

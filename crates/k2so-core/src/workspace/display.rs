@@ -34,7 +34,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
-use super::{parse_frontmatter, workspace_agent_md_path};
+use crate::workspace::agent_identity::{parse_frontmatter, workspace_agent_md_path};
 
 /// Cache entry: the resolved display name + the AGENT.md mtime it was
 /// derived from. A `None` mtime means AGENT.md was missing at read

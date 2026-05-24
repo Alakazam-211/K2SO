@@ -45,7 +45,9 @@ pub use crate::heartbeats::cron as cron_schedule;
 /// alias keeps `agents::delegate::*` resolving for existing callers
 /// during the deprecation window.
 pub use crate::deprecated::delegate;
-pub mod display;
+/// Phase 2.5c: `display` relocated to [`crate::workspace::display`].
+/// Back-compat alias.
+pub use crate::workspace::display;
 pub mod events;
 /// Phase 2.5c: `heartbeat` relocated to top-level [`crate::heartbeats`].
 /// Back-compat alias for callers that still reference
