@@ -40,6 +40,10 @@ pub mod fs_abstract;
 pub mod fs_atomic;
 pub mod fs_commands;
 pub mod git;
+// Phase 2.5c: workspace heartbeat schedules + launchd + cron live here
+// post-refactor. Was [`agents::heartbeat`]; the `agents/` back-compat
+// alias remains for one release cycle.
+pub mod heartbeats;
 pub mod hook_config;
 pub mod inbox;
 pub mod llm;

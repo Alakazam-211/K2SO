@@ -30,7 +30,10 @@ pub mod cron_schedule;
 pub mod delegate;
 pub mod display;
 pub mod events;
-pub mod heartbeat;
+/// Phase 2.5c: `heartbeat` relocated to top-level [`crate::heartbeats`].
+/// Back-compat alias for callers that still reference
+/// `agents::heartbeat::*`.
+pub use crate::heartbeats as heartbeat;
 pub mod heartbeat_install;
 pub mod launch_profile;
 pub mod onboarding;
