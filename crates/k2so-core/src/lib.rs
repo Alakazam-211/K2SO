@@ -50,6 +50,8 @@ pub mod heartbeats;
 pub mod workspace;
 pub mod hook_config;
 pub mod inbox;
+// Phase 2.5c: historical migration helpers (one-shot, sentinel-gated).
+pub mod migrations;
 pub mod llm;
 pub mod perf;
 pub mod project_config;

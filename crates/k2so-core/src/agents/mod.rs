@@ -65,7 +65,9 @@ pub use crate::skills::writer as skill_writer;
 pub mod terminal_id;
 /// Phase 2.5c: `triage_summary` relocated to [`crate::workspace::triage`].
 pub use crate::workspace::triage as triage_summary;
-pub mod unification;
+/// Phase 2.5c: `unification` relocated to
+/// [`crate::migrations::unification_0_37_0`]. Back-compat alias.
+pub use crate::migrations::unification_0_37_0 as unification;
 /// Phase 2.5c: `wake` relocated to [`crate::workspace::wake_prompts`]
 /// (renamed to avoid collision with the top-level `crate::wake` module).
 /// Back-compat alias keeps `agents::wake::*` resolving.
