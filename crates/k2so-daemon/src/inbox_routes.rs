@@ -289,12 +289,12 @@ const GLOSSARY: &[GlossaryEntry] = &[
     GlossaryEntry {
         term: "skill",
         summary: "Documentation profile for a role/capability",
-        definition: "A documentation profile describing a role, persona, and instructions. Skills are *not* spawnable entities — they're markdown files (SKILL.md) that your harness (Claude Code, Cursor) loads when you want to apply that role to specific work.\n\nK2SO manages skill files (list, create, remove, profile, regenerate). Spawning a session pre-loaded with a skill is your harness's job (sub-agent spawning in Claude Code, etc.) — K2SO no longer provides a `delegate` verb for this.\n\nFilesystem: skills currently live at `.k2so/agents/<name>/` (historical naming from when they were called sub-agents). Templates at `.k2so/agent-templates/<role>/`. Rename to `.k2so/skills/` is planned for Phase 3.\n\nSee also: `k2so skills --help`, `k2so glossary agent`.",
+        definition: "A documentation profile describing a role, persona, and instructions. Skills are *not* spawnable entities — they're markdown files (SKILL.md) that your harness (Claude Code, Cursor) loads when you want to apply that role to specific work.\n\nK2SO manages skill files (list, create, remove, profile, regenerate). Spawning a session pre-loaded with a skill is your harness's job (sub-agent spawning in Claude Code, etc.) — K2SO no longer provides a `delegate` verb for this.\n\nFilesystem: skills live at `.k2so/skills/<name>/SKILL.md` (unified home as of Phase 2.5b). The legacy `.k2so/agents/` and `.k2so/agent-templates/` folders are consolidated into here at first daemon boot per upgraded workspace; originals go to the macOS Recycle Bin.\n\nSee also: `k2so skills --help`, `k2so glossary agent`.",
     },
     GlossaryEntry {
         term: "skill-template",
         summary: "Master skill definition that can be instantiated",
-        definition: "A master definition for a skill that can be instantiated multiple times. Lives at `.k2so/agent-templates/<role>/` (current naming; rename to `.k2so/skill-templates/` is Phase 3 work). Create new skills from a template via `k2so skills create <name> --template <role>`.",
+        definition: "Post-Phase-2.5b: any existing skill at `.k2so/skills/<name>/` can serve as a template for a new one. The former `.k2so/agent-templates/<role>/` namespace was consolidated into the unified `.k2so/skills/` home at first daemon boot. Create new skills from a seed via `k2so skills create <name> --template <existing-skill>`.",
     },
     GlossaryEntry {
         term: "state",

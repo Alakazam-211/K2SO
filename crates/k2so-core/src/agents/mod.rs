@@ -105,6 +105,22 @@ pub fn workspace_heartbeats_dir(project_path: &str) -> PathBuf {
     PathBuf::from(project_path).join(".k2so").join("heartbeats")
 }
 
+/// Post-Phase-2.5b: `<project>/.k2so/skills/` — the unified home for
+/// every documentation profile (skill) in the workspace. Replaces the
+/// pre-2.5b split across `.k2so/agents/<name>/` (instances) and
+/// `.k2so/agent-templates/<role>/` (master templates). Migration runs
+/// at daemon boot per upgraded workspace; see
+/// [`crate::skills::consolidation::consolidate_skills_v1`].
+pub fn skills_dir(project_path: &str) -> PathBuf {
+    PathBuf::from(project_path).join(".k2so").join("skills")
+}
+
+/// Post-Phase-2.5b: `<project>/.k2so/skills/<skill_name>/` — a single
+/// skill's directory. Each skill's body lives at `<this>/SKILL.md`.
+pub fn skill_dir(project_path: &str, skill_name: &str) -> PathBuf {
+    skills_dir(project_path).join(skill_name)
+}
+
 /// Resolve the on-disk directory for an agent name within a workspace.
 ///
 /// **Layout-aware.** Probes in this order:
@@ -123,15 +139,30 @@ pub fn workspace_heartbeats_dir(project_path: &str) -> PathBuf {
 ///    `.k2so/agents/<name>/AGENT.md` to determine the primary.
 ///    Gating the probe on the populated state avoids a
 ///    chicken-and-egg failure during migration.
-/// 2. `<project>/.k2so/agent-templates/<agent_name>/AGENT.md`
-///    exists — a template (for delegate/worktree spawn).
-/// 3. Legacy `<project>/.k2so/agents/<agent_name>/` — pre-0.37.0
+/// 2. `<project>/.k2so/skills/<agent_name>/` exists with either
+///    SKILL.md or AGENT.md — post-Phase-2.5b unified home. Probed
+///    AFTER the workspace primary so a sub-agent named the same as
+///    the primary doesn't accidentally shadow the workspace persona.
+/// 3. `<project>/.k2so/agent-templates/<agent_name>/AGENT.md`
+///    exists — legacy template path. Pre-Phase-2.5b workspaces that
+///    haven't been first-boot-migrated yet still answer here; on
+///    upgraded workspaces this dir was trashed by
+///    `consolidate_skills_v1` and the probe returns false.
+/// 4. Legacy `<project>/.k2so/agents/<agent_name>/` — pre-0.37.0
 ///    workspaces that haven't been migrated yet (rare; the daemon's
 ///    boot sweep migrates every registered workspace).
 pub fn agent_dir(project_path: &str, agent_name: &str) -> PathBuf {
     let primary = workspace_agent_path(project_path);
     if primary.join("AGENT.md").exists() {
         return primary;
+    }
+    // Phase 2.5b: probe the consolidated `.k2so/skills/<name>/` home
+    // before the legacy `.k2so/agent-templates/` / `.k2so/agents/`
+    // paths. The probe checks for either SKILL.md (new shape) or
+    // AGENT.md (transitional shape for workspaces caught mid-migration).
+    let skill = skill_dir(project_path, agent_name);
+    if skill.join("SKILL.md").exists() || skill.join("AGENT.md").exists() {
+        return skill;
     }
     let template = agent_template_dir(project_path, agent_name);
     if template.join("AGENT.md").exists() {

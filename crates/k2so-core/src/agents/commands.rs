@@ -117,11 +117,25 @@ pub fn cleanup_agent_backups(backup_dir: &Path, keep: usize) {
 
 // ── Agent CRUD ────────────────────────────────────────────────────────
 
-/// List every agent directory in `.k2so/agents/` with summary counts
+/// List every skill directory in the workspace with summary counts
 /// (inbox / active / done item counts + manager flag + canonical
 /// type). Alphabetical.
+///
+/// Post-Phase-2.5b: reads from `.k2so/skills/<name>/` (the unified
+/// home for documentation profiles). Pre-migration workspaces fall
+/// back to enumerating the legacy `.k2so/agents/` tree so the call
+/// keeps returning useful data during the boot-cycle window where
+/// the daemon hasn't run `consolidate_skills_v1` yet.
 pub fn list(project_path: String) -> Result<Vec<K2soAgentInfo>, String> {
-    let dir = agents_dir(&project_path);
+    let new_home = crate::agents::skills_dir(&project_path);
+    let dir = if new_home.exists() {
+        new_home
+    } else {
+        // Pre-Phase-2.5b workspaces still answer from the legacy tree.
+        // The daemon's first-boot sweep migrates this away; after that
+        // `.k2so/skills/` exists and the branch above is taken.
+        agents_dir(&project_path)
+    };
     if !dir.exists() {
         return Ok(vec![]);
     }
@@ -144,10 +158,15 @@ pub fn list(project_path: String) -> Result<Vec<K2soAgentInfo>, String> {
         if name.starts_with('.') {
             continue;
         }
+        // Post-Phase-2.5b skills carry SKILL.md; pre-migration
+        // workspaces carry AGENT.md. Read whichever exists — the
+        // frontmatter shape is identical.
+        let skill_md = entry.path().join("SKILL.md");
         let agent_md = entry.path().join("AGENT.md");
+        let profile_md = if skill_md.exists() { skill_md } else { agent_md.clone() };
 
-        let (role, is_manager, agent_type) = if agent_md.exists() {
-            let content = fs::read_to_string(&agent_md).unwrap_or_default();
+        let (role, is_manager, agent_type) = if profile_md.exists() {
+            let content = fs::read_to_string(&profile_md).unwrap_or_default();
             let fm = parse_frontmatter(&content);
             let role = fm.get("role").cloned().unwrap_or_default();
             // Support old (pod_leader/coordinator) and new (manager) keys.

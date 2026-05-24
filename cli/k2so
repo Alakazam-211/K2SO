@@ -2330,8 +2330,105 @@ except: pass
 # `daemon` dispatch by Phase 2.1c (see cmd_daemon_companion above).
 
 cmd_skills() {
-    local subcmd="${1:-regenerate}"
+    local subcmd="${1:-list}"
+    shift || true
     case "$subcmd" in
+        list)
+            # Skills live at `.k2so/skills/<name>/SKILL.md` post-Phase-2.5b.
+            # The daemon's `/cli/agents/list` route enumerates the same
+            # folder (the legacy `.k2so/agents/` tree is consolidated
+            # into `.k2so/skills/` at first boot — see
+            # `consolidate_skills_v1`). Rename of the route to
+            # `/cli/skills/list` is deferred until the daemon-side route
+            # split lands; for now the renderer is one HTTP call away.
+            cli_request "/cli/agents/list" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    if isinstance(d, dict) and 'error' in d:
+        sys.stderr.write('Error: %s\n' % d['error']); sys.exit(1)
+    items = d if isinstance(d, list) else d.get('agents', [])
+    if not items:
+        print('No skills in this workspace.'); sys.exit(0)
+    name_w = max(len(s.get('name','')) for s in items)
+    for s in items:
+        nm = s.get('name','')
+        role = s.get('role','')
+        atype = s.get('agentType') or s.get('agent_type') or 'skill'
+        print(f'  {nm:<{name_w}}  [{atype}]  {role}')
+except Exception as e:
+    sys.stderr.write('Error: %s\n' % e); sys.exit(1)
+" 2>/dev/null
+            ;;
+        create)
+            local name="" source_skill="" role=""
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --template|--from) source_skill="$2"; shift 2 ;;
+                    --role) role="$2"; shift 2 ;;
+                    --*) shift ;;
+                    *) [ -z "$name" ] && name="$1"; shift ;;
+                esac
+            done
+            if [ -z "$name" ]; then
+                echo "Usage: k2so skills create <name> [--template <existing-skill>] [--role \"...\"]" >&2
+                echo "  --template <name>   Copy an existing skill as the starting point. Any" >&2
+                echo "                      skill in this workspace can seed any other; templates" >&2
+                echo "                      aren't a separate kind post-Phase-2.5b." >&2
+                echo "  --role \"...\"        Frontmatter role/description for the new skill." >&2
+                exit 1
+            fi
+            local params="agent=$(urlencode "$name")"
+            [ -n "$role" ] && params="$params&role=$(urlencode "$role")"
+            [ -n "$source_skill" ] && params="$params&template=$(urlencode "$source_skill")"
+            cli_request "/cli/agents/create" "$params" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    if isinstance(d, dict) and 'error' in d:
+        sys.stderr.write('Error: %s\n' % d['error']); sys.exit(1)
+    nm = d.get('name','?')
+    print(f'Created skill: {nm}')
+    print(f'  Edit: .k2so/skills/{nm}/SKILL.md')
+except Exception as e:
+    sys.stderr.write('Error: %s\n' % e); sys.exit(1)
+" 2>/dev/null
+            ;;
+        profile)
+            local name="${1:-}"
+            if [ -z "$name" ]; then
+                echo "Usage: k2so skills profile <name>" >&2
+                exit 1
+            fi
+            cli_request "/cli/agents/profile" "agent=$(urlencode "$name")" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    if isinstance(d, dict) and 'error' in d:
+        sys.stderr.write('Error: %s\n' % d['error']); sys.exit(1)
+    body = d.get('profile') if isinstance(d, dict) else d
+    print(body if isinstance(body, str) else json.dumps(d, indent=2))
+except Exception as e:
+    sys.stderr.write('Error: %s\n' % e); sys.exit(1)
+" 2>/dev/null
+            ;;
+        remove|delete)
+            local name="${1:-}"
+            if [ -z "$name" ]; then
+                echo "Usage: k2so skills remove <name>" >&2
+                exit 1
+            fi
+            cli_request "/cli/agents/delete" "agent=$(urlencode "$name")" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    if isinstance(d, dict) and 'error' in d:
+        sys.stderr.write('Error: %s\n' % d['error']); sys.exit(1)
+    print('Removed skill (sent to recycle bin).')
+except Exception as e:
+    sys.stderr.write('Error: %s\n' % e); sys.exit(1)
+" 2>/dev/null
+            ;;
         regenerate)
             cli_request "/cli/skills/regenerate" | python3 -c "
 import json, sys
@@ -2341,14 +2438,19 @@ try:
         sys.stderr.write('Error: %s\n' % d['error'])
         sys.exit(1)
     count = d.get('updated', 0)
-    print('Regenerated SKILL.md for %d agent(s).' % count)
+    print('Regenerated SKILL.md for %d skill(s).' % count)
 except Exception as e:
     sys.stderr.write('Error: %s\n' % e)
 " 2>/dev/null
             ;;
         *)
-            echo "Usage: k2so skills [regenerate]" >&2
-            echo "  regenerate    Regenerate SKILL.md for all agents in this workspace" >&2
+            echo "Usage: k2so skills <list|create|profile|remove|regenerate> [options]" >&2
+            echo "  list                              Skill profiles in this workspace" >&2
+            echo "  create <name> [--template <src>]  Create a new skill profile" >&2
+            echo "                                    (optionally seeded from another skill)" >&2
+            echo "  profile <name>                    Print the skill's SKILL.md body" >&2
+            echo "  remove <name>                     Trash the skill profile" >&2
+            echo "  regenerate                        Refresh every skill's SKILL.md" >&2
             exit 1
             ;;
     esac
@@ -3385,10 +3487,11 @@ markdown files (SKILL.md) describing roles, personas, and instructions
 your harness loads when spawning sub-agents.
 
   list                              Skill profiles in this workspace
-  create <name> [--template <role>] Create a new skill profile
-  remove <name>                     Delete a skill profile
-  profile <name>                    Read the skill's SKILL.md/AGENT.md
-  regenerate [<name>]               Refresh SKILL.md files
+  create <name> [--template <src>]  Create a new skill profile
+                                    (optionally seeded from another skill)
+  remove <name>                     Delete a skill profile (sent to Trash)
+  profile <name>                    Read the skill's SKILL.md
+  regenerate                        Refresh every skill's SKILL.md
 
 SKILLS vs AGENT
   An agent IS a workspace (1:1). A skill is a documentation profile
@@ -3399,9 +3502,16 @@ SKILLS vs AGENT
   (Claude Code's sub-agent spawning, Cursor's worktree management).
   K2SO no longer provides a `delegate` verb — see `k2so help-deprecated`.
 
-  Templates (master definitions) live under `.k2so/agent-templates/<role>/`.
-  Instantiated skills live under `.k2so/agents/<name>/` (historical naming;
-  rename to `.k2so/skills/` planned for Phase 3).
+  Skills live at `.k2so/skills/<name>/SKILL.md` (consolidated home as of
+  Phase 2.5b). The legacy `.k2so/agents/` and `.k2so/agent-templates/`
+  folders are migrated into here on first daemon boot per upgraded
+  workspace. Originals go to the macOS Recycle Bin (recoverable).
+
+TEMPLATING (post-Phase-2.5b)
+  Any existing skill can seed a new one — there is no separate
+  "template" namespace. `--template <name>` means "copy this skill as
+  the starting point for the new skill." Edit the new file freely from
+  there; the seed is unaffected.
 
 EXAMPLES
   k2so skills list

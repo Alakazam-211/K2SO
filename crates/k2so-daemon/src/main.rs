@@ -2530,9 +2530,18 @@ fn run_workspace_unification_sweep() {
 ///  10. `migrate_work_to_inbox`           — 0.39.0f Phase 2.1b: relocate
 ///      `.k2so/work/{inbox,active,done}/*.md` → `.k2so/inbox/{,active,done}/*.md`
 ///      then send `.k2so/work/` to the macOS Recycle Bin. Marker-gated so
-///      re-running is a no-op. Runs LAST so the other sweeps see their
-///      original paths during this boot, then the next boot sees the new
-///      inbox-first layout.
+///      re-running is a no-op.
+///  11. `consolidate_skills_v1`           — 0.39.0g Phase 2.5b: collapse
+///      `.k2so/agents/<x>/` + `.k2so/agent-templates/<x>/` + bare-md
+///      `.k2so/skills/<x>.md` into a single home at
+///      `.k2so/skills/<x>/SKILL.md`. Collision priority: instance >
+///      template > layer; template suffix `-template01..N` on conflict.
+///      Renames legacy AGENT.md → SKILL.md, migrates per-skill heartbeats
+///      to the workspace-level `.k2so/heartbeats/` with skill-name prefix,
+///      sends both source roots to the macOS Recycle Bin. Marker-gated.
+///      Runs AFTER work→inbox so this boot still sees the legacy skill
+///      layout in the sweeps above (they exit early if missing anyway,
+///      but the ordering keeps the per-boot semantics predictable).
 ///
 /// Every helper is idempotent and gated on its own sentinel / row check;
 /// the sweep is cheap on a clean boot (no work to do) and resilient if a
@@ -2559,6 +2568,7 @@ fn run_workspace_legacy_migrations_sweep() {
 
     let total = projects.len();
     let mut work_to_inbox_runs = 0usize;
+    let mut skills_consolidation_runs = 0usize;
     for project in &projects {
         // Skip the audit-bucket sentinel rows seeded by
         // `db::seed_audit_sentinels`. Their "path" is a bare token,
@@ -2604,9 +2614,37 @@ fn run_workspace_legacy_migrations_sweep() {
                 log_debug!("[daemon/migrations]   work→inbox err: {err}");
             }
         }
+
+        // 0.39.0g Phase 2.5b: collapse the three legacy skill folders
+        // into `.k2so/skills/<x>/SKILL.md`. Marker-gated; first boot
+        // per workspace is the only path that does real work. Per-step
+        // errors are logged but never abort the sweep.
+        let skill_outcome = k2so_core::skills::consolidation::consolidate_skills_v1(
+            project_path,
+        );
+        if !skill_outcome.already_migrated {
+            skills_consolidation_runs += 1;
+            log_debug!(
+                "[daemon/migrations] consolidate_skills_v1({}): bare={} inst={} tmpl={} suffixed={} agent_md_renamed={} agent_md_discarded={} hb={} trashed_agents={} trashed_templates={} errors={}",
+                project.path,
+                skill_outcome.bare_md_normalized,
+                skill_outcome.instances_moved,
+                skill_outcome.templates_moved,
+                skill_outcome.templates_suffixed,
+                skill_outcome.agent_md_renamed,
+                skill_outcome.agent_md_discarded,
+                skill_outcome.heartbeats_migrated,
+                skill_outcome.trashed_agents,
+                skill_outcome.trashed_agent_templates,
+                skill_outcome.errors.len(),
+            );
+            for err in &skill_outcome.errors {
+                log_debug!("[daemon/migrations]   skills-consolidation err: {err}");
+            }
+        }
     }
     log_debug!(
-        "[daemon/migrations] swept {total} workspace(s) for legacy heartbeat + SKILL migrations; work→inbox ran on {work_to_inbox_runs}"
+        "[daemon/migrations] swept {total} workspace(s) for legacy heartbeat + SKILL migrations; work→inbox ran on {work_to_inbox_runs}; skills-consolidation ran on {skills_consolidation_runs}"
     );
 }
 

@@ -51,6 +51,11 @@ pub mod review_checklist;
 pub mod safe_delete;
 pub mod scheduler;
 pub mod skill_layers;
+// Phase 2.5b — unified home for documentation profiles. Consolidates
+// the three legacy folders (`.k2so/agents/`, `.k2so/agent-templates/`,
+// bare-md `.k2so/skills/*.md`) into `.k2so/skills/<name>/SKILL.md`
+// via a first-boot daemon migration. See [`skills`] module docs.
+pub mod skills;
 pub mod terminal;
 pub mod themes;
 pub mod wake;
