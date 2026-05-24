@@ -2527,6 +2527,12 @@ fn run_workspace_unification_sweep() {
 ///   7. `repair_mismigrated_heartbeats`   — fix wakeup_path pointing at wrong agent.
 ///   8. `archive_orphan_top_tier_agents`  — sweep orphan agent dirs.
 ///   9. `ensure_all_skills_up_to_date`    — universal SKILL.md refresh.
+///  10. `migrate_work_to_inbox`           — 0.39.0f Phase 2.1b: relocate
+///      `.k2so/work/{inbox,active,done}/*.md` → `.k2so/inbox/{,active,done}/*.md`
+///      then send `.k2so/work/` to the macOS Recycle Bin. Marker-gated so
+///      re-running is a no-op. Runs LAST so the other sweeps see their
+///      original paths during this boot, then the next boot sees the new
+///      inbox-first layout.
 ///
 /// Every helper is idempotent and gated on its own sentinel / row check;
 /// the sweep is cheap on a clean boot (no work to do) and resilient if a
@@ -2552,6 +2558,7 @@ fn run_workspace_legacy_migrations_sweep() {
     }
 
     let total = projects.len();
+    let mut work_to_inbox_runs = 0usize;
     for project in &projects {
         // Skip the audit-bucket sentinel rows seeded by
         // `db::seed_audit_sentinels`. Their "path" is a bare token,
@@ -2561,7 +2568,8 @@ fn run_workspace_legacy_migrations_sweep() {
         if project.id == "_orphan" || project.id == "_broadcast" {
             continue;
         }
-        if !std::path::Path::new(&project.path).exists() {
+        let project_path = std::path::Path::new(&project.path);
+        if !project_path.exists() {
             continue;
         }
 
@@ -2574,9 +2582,31 @@ fn run_workspace_legacy_migrations_sweep() {
         workspace::repair_mismigrated_heartbeats(&project.path);
         let _ = workspace::archive_orphan_top_tier_agents(&project.path);
         workspace::ensure_all_skills_up_to_date(&project.path);
+
+        // 0.39.0f Phase 2.1b: relocate .k2so/work → .k2so/inbox. Marker
+        // file (`.k2so/.work-to-inbox-migration-v1-done`) gates re-runs;
+        // first-boot per upgraded workspace is the only path that does
+        // real work. Per-file errors are logged but don't halt the sweep
+        // — the report's `errors` vec carries them for debugging.
+        let report = k2so_core::inbox::migrate_work_to_inbox(project_path);
+        if !report.already_migrated {
+            work_to_inbox_runs += 1;
+            log_debug!(
+                "[daemon/migrations] migrate_work_to_inbox({}): top={} active={} done={} trashed_root={} errors={}",
+                project.path,
+                report.moved_top_level,
+                report.moved_active,
+                report.moved_done,
+                report.trashed_work_root,
+                report.errors.len(),
+            );
+            for err in &report.errors {
+                log_debug!("[daemon/migrations]   work→inbox err: {err}");
+            }
+        }
     }
     log_debug!(
-        "[daemon/migrations] swept {total} workspace(s) for legacy heartbeat + SKILL migrations"
+        "[daemon/migrations] swept {total} workspace(s) for legacy heartbeat + SKILL migrations; work→inbox ran on {work_to_inbox_runs}"
     );
 }
 

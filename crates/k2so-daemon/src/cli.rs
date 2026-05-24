@@ -102,18 +102,14 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             }
             Err(r) => r,
         },
-        "/cli/agents/work" => match need_project(params) {
-            Ok(p) => {
-                let agent = str_param(params, "agent");
-                let folder = opt_param(params, "folder");
-                respond(k2so_core::agents::commands::work_list(p, agent, folder))
-            }
-            Err(r) => r,
-        },
-        "/cli/work/inbox" => match need_project(params) {
-            Ok(p) => respond(k2so_core::agents::commands::workspace_inbox_list(p)),
-            Err(r) => r,
-        },
+        // 0.39.0f Phase 2.1b: `/cli/agents/work` retired → `/cli/inbox/list`.
+        "/cli/agents/work" => CliResponse::gone(
+            "agents/work route deprecated in Phase 2.1; use /cli/inbox/list — see `k2so help-deprecated`",
+        ),
+        // 0.39.0f Phase 2.1b: `/cli/work/inbox` retired → `/cli/inbox/list`.
+        "/cli/work/inbox" => CliResponse::gone(
+            "work/* routes deprecated in Phase 2.1; use /cli/inbox/* — see `k2so help-deprecated`",
+        ),
 
         // ── State-mutating: agent CRUD ──────────────────────────────
         "/cli/agents/create" => match need_project(params) {
@@ -145,28 +141,16 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         },
 
         // ── State-mutating: work queue ──────────────────────────────
-        "/cli/agents/work/create" => match need_project(params) {
-            Ok(p) => respond(k2so_core::agents::commands::work_create(
-                p,
-                opt_param(params, "agent"),
-                str_param(params, "title"),
-                str_param(params, "body"),
-                opt_param(params, "priority"),
-                opt_param(params, "type"),
-                opt_param(params, "source"),
-            )),
-            Err(r) => r,
-        },
-        "/cli/agents/work/move" => match need_project(params) {
-            Ok(p) => respond_unit(k2so_core::agents::commands::work_move(
-                p,
-                str_param(params, "agent"),
-                str_param(params, "filename"),
-                str_param(params, "from"),
-                str_param(params, "to"),
-            )),
-            Err(r) => r,
-        },
+        // 0.39.0f Phase 2.1b: `/cli/agents/work/*` retired → `/cli/inbox/*`.
+        // Route entries kept so external callers get a clear HTTP-410 signal
+        // (rather than a silent 404 from the catch-all). The body points
+        // them at the new endpoint and `help-deprecated`.
+        "/cli/agents/work/create" => CliResponse::gone(
+            "work/* routes deprecated in Phase 2.1; use /cli/inbox/compose — see `k2so help-deprecated`",
+        ),
+        "/cli/agents/work/move" => CliResponse::gone(
+            "work/* routes deprecated in Phase 2.1; use /cli/inbox/move — see `k2so help-deprecated`",
+        ),
         "/cli/work/inbox/create" => {
             // workspace path may override `project` for cross-workspace
             // delegation — matches the Tauri-side behavior.

@@ -90,94 +90,15 @@ urlencode() {
     python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1" 2>/dev/null || echo "$1"
 }
 
-# Format JSON output for terminal
-format_agents() {
-    python3 -c "
-import json, sys
-data = json.loads(sys.stdin.read())
-if not data:
-    print('No agents found.')
-    sys.exit(0)
-for a in data:
-    inbox = a.get('inboxCount', 0)
-    active = a.get('activeCount', 0)
-    done = a.get('doneCount', 0)
-    role = a.get('role', '')
-    name = a.get('name', '')
-    status = f'inbox:{inbox} active:{active} done:{done}'
-    print(f'  {name:<20} {role:<30} [{status}]')
-" 2>/dev/null || cat
-}
-
-format_work() {
-    python3 -c "
-import json, sys
-data = json.loads(sys.stdin.read())
-if not data:
-    print('No work items found.')
-    sys.exit(0)
-for item in data:
-    folder = item.get('folder', '?')
-    priority = item.get('priority', 'normal')
-    title = item.get('title', item.get('filename', ''))
-    prio_mark = {'high': '!', 'critical': '!!', 'normal': ' ', 'low': '.'}
-    mark = prio_mark.get(priority, ' ')
-    print(f'  [{folder:<6}] {mark} {title}')
-" 2>/dev/null || cat
-}
+# 0.39.0f Phase 2.1b: format_agents / format_work removed. Their
+# only callers (cmd_agents_list / cmd_agents_work / cmd_work_inbox)
+# are also gone; the inbox surface uses format_inbox instead.
 
 # ── Commands ─────────────────────────────────────────────────────────
 
-cmd_agents_list() {
-    cli_request "/cli/agents/list" | format_agents
-}
-
-cmd_agents_work() {
-    local agent="${1:-}"
-    if [ -z "$agent" ]; then
-        echo "Usage: k2so agents work <agent-name> [--folder inbox|active|done]" >&2
-        exit 1
-    fi
-    shift
-    local folder=""
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --folder) folder="$2"; shift 2 ;;
-            *) shift ;;
-        esac
-    done
-    local params="agent=$(urlencode "$agent")"
-    [ -n "$folder" ] && params="${params}&folder=$(urlencode "$folder")"
-    cli_request "/cli/agents/work" "$params" | format_work
-}
-
-cmd_agents_status() {
-    local agent="${1:-}"
-    if [ -z "$agent" ]; then
-        echo "Usage: k2so agents status <agent-name>" >&2
-        exit 1
-    fi
-    cli_request "/cli/agents/work" "agent=$(urlencode "$agent")"
-}
-
-cmd_agents_create() {
-    local name="" role="" prompt=""
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --name) name="$2"; shift 2 ;;
-            --role) role="$2"; shift 2 ;;
-            --prompt) prompt="$2"; shift 2 ;;
-            *) [ -z "$name" ] && name="$1"; shift ;;
-        esac
-    done
-    if [ -z "$name" ]; then
-        echo "Usage: k2so agents create <name> --role \"...\" [--prompt \"...\"]" >&2
-        exit 1
-    fi
-    local params="name=$(urlencode "$name")&role=$(urlencode "$role")"
-    [ -n "$prompt" ] && params="${params}&prompt=$(urlencode "$prompt")"
-    cli_request "/cli/agents/create" "$params"
-}
+# 0.39.0f Phase 2.1b: cmd_agents_list / cmd_agents_work /
+# cmd_agents_status / cmd_agents_create removed. The dispatch arms
+# now route to fail_deprecated; the function bodies are gone for good.
 
 cmd_agent_update() {
     local name="" field="" value=""
@@ -271,228 +192,14 @@ cmd_terminal_spawn() {
     echo "Terminal spawned: ${title:-$command}"
 }
 
-cmd_work_create() {
-    local agent="" title="" body="" priority="" item_type="" source="" body_file=""
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --agent) agent="$2"; shift 2 ;;
-            --title) title="$2"; shift 2 ;;
-            --body) body="$2"; shift 2 ;;
-            --body-file) body_file="$2"; shift 2 ;;
-            --priority) priority="$2"; shift 2 ;;
-            --type) item_type="$2"; shift 2 ;;
-            --source) source="$2"; shift 2 ;;
-            *) shift ;;
-        esac
-    done
-    # --body-file reads body from a file (avoids shell quoting issues with special chars)
-    if [ -n "$body_file" ]; then
-        if [ ! -f "$body_file" ]; then
-            echo "Error: body file not found: $body_file" >&2
-            exit 1
-        fi
-        body=$(cat "$body_file")
-    fi
-    if [ -z "$title" ]; then
-        echo "Usage: k2so work create --title \"...\" [--body \"...\"|--body-file <path>] [--agent <name>] [--priority high|normal|low]" >&2
-        exit 1
-    fi
-    local params="title=$(urlencode "$title")&body=$(urlencode "$body")"
-    [ -n "$agent" ] && params="${params}&agent=$(urlencode "$agent")"
-    [ -n "$priority" ] && params="${params}&priority=$(urlencode "$priority")"
-    [ -n "$item_type" ] && params="${params}&type=$(urlencode "$item_type")"
-    [ -n "$source" ] && params="${params}&source=$(urlencode "$source")"
-    cli_request "/cli/agents/work/create" "$params"
-}
+# 0.39.0f Phase 2.1b: cmd_work_create removed; dispatch arm now
+# routes `work create` straight to fail_deprecated.
 
-cmd_agentic() {
-    local action="${1:-}"
-    case "$action" in
-        on|enable|1|true)
-            cli_request "/cli/agentic" "enable=on"
-            echo "Agentic Systems enabled."
-            ;;
-        off|disable|0|false)
-            cli_request "/cli/agentic" "enable=off"
-            echo "Agentic Systems disabled."
-            ;;
-        *)
-            cli_request "/cli/agentic" | python3 -c "
-import json, sys
-d = json.loads(sys.stdin.read())
-enabled = d.get('agenticEnabled', False)
-print(f'Agentic Systems: {\"on\" if enabled else \"off\"}')
-" 2>/dev/null
-            ;;
-    esac
-}
-
-cmd_state() {
-    local subcmd="${1:-}"
-    case "$subcmd" in
-        list)
-            cli_request "/cli/states/list" | python3 -c "
-import json, sys
-states = json.loads(sys.stdin.read())
-if not states:
-    print('No workspace states defined.')
-    sys.exit(0)
-for s in states:
-    built_in = ' [DEFAULT]' if s.get('isBuiltIn') else ''
-    hb = 'on' if s.get('heartbeat') else 'off'
-    print(f\"  {s['name']}{built_in} (heartbeat: {hb})\")
-    caps = []
-    for k, label in [('capFeatures','Features'),('capIssues','Issues'),('capCrashes','Crashes'),('capSecurity','Security'),('capAudits','Audits')]:
-        caps.append(f'{label}:{s.get(k,\"off\")}')
-    print(f'    {\"  \".join(caps)}')
-    if s.get('description'):
-        print(f'    {s[\"description\"]}')
-" 2>/dev/null
-            ;;
-        get)
-            shift
-            local id="${1:-}"
-            if [ -z "$id" ]; then
-                echo "Usage: k2so state get <state-id>" >&2
-                exit 1
-            fi
-            cli_request "/cli/states/get" "id=$(urlencode "$id")"
-            ;;
-        set)
-            shift
-            local state_id=""
-            while [ $# -gt 0 ]; do
-                case "$1" in
-                    --state) state_id="$2"; shift 2 ;;
-                    *) [ -z "$state_id" ] && state_id="$1"; shift ;;
-                esac
-            done
-            if [ -z "$state_id" ]; then
-                echo "Usage: k2so state set <state-id>" >&2
-                echo "  Assign a workspace state to the current project." >&2
-                echo "  Use 'k2so state list' to see available states." >&2
-                exit 1
-            fi
-            cli_request "/cli/states/set" "state_id=$(urlencode "$state_id")"
-            echo "Workspace state set to: $state_id"
-            ;;
-        *)
-            echo "Usage: k2so state <list|get|set>" >&2
-            exit 1
-            ;;
-    esac
-}
-
-cmd_agents_launch() {
-    local agent="${1:-}"
-    if [ -z "$agent" ]; then
-        echo "Usage: k2so agents launch <agent-name> [--command claude]" >&2
-        exit 1
-    fi
-    shift
-    local cmd=""
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --command) cmd="$2"; shift 2 ;;
-            *) shift ;;
-        esac
-    done
-    local params="agent=$(urlencode "$agent")"
-    [ -n "$cmd" ] && params="${params}&command=$(urlencode "$cmd")"
-    echo "Launching agent: $agent"
-    cli_request "/cli/agents/launch" "$params"
-}
-
-cmd_agents_generate_md() {
-    local agent="${1:-}"
-    if [ -z "$agent" ]; then
-        echo "Usage: k2so agents generate-md <agent-name>" >&2
-        exit 1
-    fi
-    cli_request "/cli/agents/generate-claude-md" "agent=$(urlencode "$agent")"
-}
-
-cmd_work_inbox() {
-    cli_request "/cli/work/inbox" | format_work
-}
-
-cmd_work_send() {
-    local workspace="" title="" body="" priority="" item_type="" body_file=""
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --workspace) workspace="$2"; shift 2 ;;
-            --title) title="$2"; shift 2 ;;
-            --body) body="$2"; shift 2 ;;
-            --body-file) body_file="$2"; shift 2 ;;
-            --priority) priority="$2"; shift 2 ;;
-            --type) item_type="$2"; shift 2 ;;
-            *) shift ;;
-        esac
-    done
-    if [ -n "$body_file" ]; then
-        if [ ! -f "$body_file" ]; then
-            echo "Error: body file not found: $body_file" >&2
-            exit 1
-        fi
-        body=$(cat "$body_file")
-    fi
-    # 0.37.10 — both --workspace and --title are required. Pre-fix
-    # the CLI only validated --title; if the user omitted --workspace
-    # the daemon silently fell back to the source workspace's
-    # project path, so the item landed in the SOURCE's local inbox
-    # with a success-shaped JSON response — the "k2so work send
-    # silently misroutes to local inbox" symptom. If the user
-    # actually meant to write to their own inbox, they should use
-    # `k2so work create` instead — that verb owns the local path.
-    if [ -z "$workspace" ]; then
-        echo "Error: --workspace is required for 'work send' (it targets another workspace)." >&2
-        echo "" >&2
-        echo "Usage: k2so work send --workspace <path-or-name> --title \"...\" [--body \"...\"|--body-file <path>]" >&2
-        echo "" >&2
-        echo "To add work to YOUR OWN workspace's inbox, use:" >&2
-        echo "  k2so work create --title \"...\" --body \"...\"" >&2
-        exit 1
-    fi
-    if [ -z "$title" ]; then
-        echo "Usage: k2so work send --workspace <path-or-name> --title \"...\" [--body \"...\"|--body-file <path>]" >&2
-        exit 1
-    fi
-    local params="title=$(urlencode "$title")&body=$(urlencode "$body")"
-    params="${params}&workspace=$(urlencode "$workspace")"
-    [ -n "$priority" ] && params="${params}&priority=$(urlencode "$priority")"
-    [ -n "$item_type" ] && params="${params}&type=$(urlencode "$item_type")"
-    cli_request "/cli/work/inbox/create" "$params"
-}
-
-cmd_delegate() {
-    local target="${1:-}" file="${2:-}"
-    if [ -z "$target" ] || [ -z "$file" ]; then
-        echo "Usage: k2so delegate <target-agent> <work-file-path>" >&2
-        echo "" >&2
-        echo "This single command does everything:" >&2
-        echo "  - Creates a git worktree for the agent" >&2
-        echo "  - Writes a CLAUDE.md with task context" >&2
-        echo "  - Moves the work item to active/" >&2
-        echo "  - Launches the agent's Claude session" >&2
-        exit 1
-    fi
-    # Resolve relative paths to absolute
-    if [ "${file:0:1}" != "/" ]; then
-        file="$(cd "$(dirname "$file")" && pwd)/$(basename "$file")"
-    fi
-    echo "Delegating to $target..."
-    RESULT=$(cli_request "/cli/agents/delegate" "target=$(urlencode "$target")&file=$(urlencode "$file")")
-    BRANCH=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('branch',''))" 2>/dev/null)
-    WT=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('worktreePath',''))" 2>/dev/null)
-    if [ -n "$BRANCH" ]; then
-        echo "  Agent: $target"
-        echo "  Branch: $BRANCH"
-        echo "  Worktree: $WT"
-        echo "  Claude session launching..."
-    else
-        echo "$RESULT"
-    fi
-}
+# 0.39.0f Phase 2.1b: cmd_agentic / cmd_state / cmd_delegate removed.
+# The dispatch arms for `agentic`, `state`, `delegate` already
+# fail_deprecated; the function bodies were dead code carried over
+# from 2.1a. The settings surface (`k2so settings --agentic`,
+# `k2so settings --state`) owns these knobs now.
 
 cmd_commit() {
     local message=""
@@ -522,75 +229,14 @@ cmd_commit_merge() {
     cli_request "/cli/commit-merge" "$params"
 }
 
-cmd_agents_delete() {
-    local agent="" force=""
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --force|-f) force="1"; shift ;;
-            *) [ -z "$agent" ] && agent="$1"; shift ;;
-        esac
-    done
-    if [ -z "$agent" ]; then
-        echo "Usage: k2so agents delete <name> [--force]" >&2
-        echo "  Removes agent and all its work directories." >&2
-        echo "  --force  Skip safety checks (active work, manager)" >&2
-        exit 1
-    fi
-    local params="agent=$(urlencode "$agent")"
-    [ -n "$force" ] && params="${params}&force=1"
-    RESULT=$(cli_request "/cli/agents/delete" "$params")
-    if echo "$RESULT" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('success') else 1)" 2>/dev/null; then
-        echo "Agent '$agent' deleted."
-    else
-        echo "$RESULT" >&2
-        exit 1
-    fi
-}
+# 0.39.0f Phase 2.1b: cmd_agents_delete / cmd_agents_lock /
+# cmd_agents_unlock / cmd_agents_triage / cmd_agents_profile /
+# cmd_work_move removed. Every dispatch arm exits via
+# fail_deprecated; route handlers in the daemon also return HTTP 410.
 
-cmd_agents_lock() {
-    local agent="${1:-}"
-    [ -z "$agent" ] && { echo "Usage: k2so agents lock <name>" >&2; exit 1; }
-    cli_request "/cli/agents/lock" "agent=$(urlencode "$agent")"
-}
-
-cmd_agents_unlock() {
-    local agent="${1:-}"
-    [ -z "$agent" ] && { echo "Usage: k2so agents unlock <name>" >&2; exit 1; }
-    cli_request "/cli/agents/unlock" "agent=$(urlencode "$agent")"
-}
-
-cmd_agents_triage() {
-    cli_request "/cli/agents/triage"
-}
-
-cmd_agents_profile() {
-    local agent="${1:-}"
-    [ -z "$agent" ] && { echo "Usage: k2so agents profile <name>" >&2; exit 1; }
-    cli_request "/cli/agents/profile" "agent=$(urlencode "$agent")"
-}
-
-cmd_work_move() {
-    local agent="" filename="" from="" to=""
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --agent) agent="$2"; shift 2 ;;
-            --file) filename="$2"; shift 2 ;;
-            --from) from="$2"; shift 2 ;;
-            --to) to="$2"; shift 2 ;;
-            *) shift ;;
-        esac
-    done
-    if [ -z "$agent" ] || [ -z "$filename" ] || [ -z "$from" ] || [ -z "$to" ]; then
-        echo "Usage: k2so work move --agent <name> --file <filename> --from inbox --to active" >&2
-        exit 1
-    fi
-    cli_request "/cli/agents/work/move" "agent=$(urlencode "$agent")&filename=$(urlencode "$filename")&from=$(urlencode "$from")&to=$(urlencode "$to")"
-}
-
-cmd_heartbeat() {
-    echo "Triggering heartbeat triage..."
-    cli_request "/cli/heartbeat"
-}
+# 0.39.0f Phase 2.1b: cmd_heartbeat orphan removed. The `heartbeat`
+# dispatch arm's fallback is cmd_heartbeat_toggle (on/off the global
+# heartbeat); the bare cmd_heartbeat triage trigger had no caller.
 
 # ── Multi-heartbeat (agent_heartbeats) CRUD ────────────────────────────
 # Parse frequency/day/time flags into spec JSON that matches the scheduler
@@ -1337,34 +983,8 @@ cmd_review_feedback() {
     cli_request "/cli/review/feedback" "agent=$(urlencode "$agent")&feedback=$(urlencode "$feedback")"
 }
 
-cmd_agents_running() {
-    cli_request "/cli/agents/running" | python3 -c "
-import json, sys
-data = json.loads(sys.stdin.read())
-if not data:
-    print('No running agents.')
-    sys.exit(0)
-for a in data:
-    cmd = a.get('command') or 'shell'
-    tid = a.get('terminalId', '?')
-    cwd = a.get('cwd', '')
-    print(f'  {cmd:<12} {tid}  {cwd}')
-" 2>/dev/null || cli_request "/cli/agents/running"
-}
-
-cmd_agents_reap() {
-    cli_request "/cli/agents/reap" | python3 -c "
-import json, sys
-data = json.loads(sys.stdin.read())
-n = data.get('reapedCount', 0)
-if n == 0:
-    print('No stale sessions to reap.')
-    sys.exit(0)
-print(f'Reaped {n} stale session(s):')
-for name in data.get('reaped', []):
-    print(f'  {name}')
-" 2>/dev/null || cli_request "/cli/agents/reap"
-}
+# 0.39.0f Phase 2.1b: cmd_agents_running / cmd_agents_reap removed.
+# Use `k2so workspace list --running` / `k2so daemon reap` instead.
 
 cmd_terminal_write() {
     local terminal_id="${1:-}"
@@ -1893,10 +1513,9 @@ cmd_msg() {
                 # Deprecated — msg always tries live now.
                 saw_wake="true"; shift ;;
             --agent)
-                # Deprecated agent-keyed flow. Accept for backward
-                # compat, but the legacy routing path is gone.
-                echo "warning: '--agent' is deprecated for 'k2so msg'; use 'k2so msg <workspace>' instead." >&2
-                shift 2 ;;
+                # 0.39.0f Phase 2.1b: hard-deprecated. The agent-keyed
+                # routing path is gone; `msg` is workspace-implicit.
+                fail_deprecated "k2so msg --agent <name>" "k2so msg <workspace> \"text\"  (workspace-implicit; pass a workspace name/path)" ;;
             -*)
                 echo "Error: unknown flag '$1' (try 'k2so msg --help')" >&2
                 exit 1 ;;
@@ -2619,82 +2238,10 @@ except: pass
     esac
 }
 
-cmd_companion() {
-    local subcmd="${1:-status}"
-    shift 2>/dev/null || true
-    case "$subcmd" in
-        start|on)
-            local result
-            result=$(cli_request "/cli/companion/start" 2>&1)
-            if echo "$result" | python3 -c "
-import json, sys
-try:
-    d = json.loads(sys.stdin.read())
-    if d.get('ok'):
-        print('Companion started: %s' % d.get('url', '?'))
-    elif 'error' in d:
-        print('Error: %s' % d['error'], file=sys.stderr)
-        sys.exit(1)
-    else:
-        print(d)
-except Exception as e:
-    print('Error: %s' % e, file=sys.stderr)
-    sys.exit(1)
-" 2>&1; then true; else
-                echo "Failed to start companion" >&2
-            fi
-            ;;
-        stop|off)
-            local result
-            result=$(cli_request "/cli/companion/stop" 2>&1)
-            if echo "$result" | python3 -c "
-import json, sys
-try:
-    d = json.loads(sys.stdin.read())
-    if d.get('ok'):
-        print('Companion stopped.')
-    elif 'error' in d:
-        print('Error: %s' % d['error'], file=sys.stderr)
-        sys.exit(1)
-    else:
-        print(d)
-except Exception as e:
-    print('Error: %s' % e, file=sys.stderr)
-    sys.exit(1)
-" 2>&1; then true; else
-                echo "Failed to stop companion" >&2
-            fi
-            ;;
-        status)
-            cli_request "/cli/companion/status" | python3 -c "
-import json, sys
-try:
-    d = json.loads(sys.stdin.read())
-    running = d.get('running', False)
-    url = d.get('tunnelUrl', '')
-    clients = d.get('connectedClients', 0)
-    sessions = d.get('sessions', [])
-    if running:
-        print('Companion: running')
-        print('  URL: %s' % url)
-        print('  Clients: %d' % clients)
-        for s in sessions:
-            print('  Session: %s (%s)' % (s.get('remoteAddr','?'), s.get('token','?')))
-    else:
-        print('Companion: stopped')
-except Exception as e:
-    print('Error: %s' % e, file=sys.stderr)
-" 2>/dev/null
-            ;;
-        *)
-            echo "Usage: k2so companion [start|stop|status]" >&2
-            echo "  start (on)    Start the companion tunnel" >&2
-            echo "  stop (off)    Stop the companion tunnel" >&2
-            echo "  status        Show companion status" >&2
-            exit 1
-            ;;
-    esac
-}
+# 0.39.0f Phase 2.1b: cmd_companion orphan removed. The `companion`
+# top-level verb is hard-deprecated at dispatch; the future home is
+# `k2so daemon companion <start|stop|status>` (not yet wired into
+# the `daemon` dispatch — see Phase 2.5).
 
 cmd_skills() {
     local subcmd="${1:-regenerate}"
@@ -2869,22 +2416,9 @@ cmd_workspace_open() {
     cli_request "/cli/workspace/open" "path=$(urlencode "$target_path")"
 }
 
-cmd_mode() {
-    local new_mode="${1:-}"
-    if [ -z "$new_mode" ]; then
-        # Get current mode + all settings
-        cli_request "/cli/mode" | python3 -c "
-import json, sys
-d = json.loads(sys.stdin.read())
-print(f\"  Mode:      {d.get('mode', '?')}\")
-print(f\"  Heartbeat: {'on' if d.get('heartbeatEnabled') else 'off'}\")
-print(f\"  Pinned:    {'yes' if d.get('pinned') else 'no'}\")
-" 2>/dev/null || cli_request "/cli/mode"
-    else
-        # Set mode
-        cli_request "/cli/mode" "set=$(urlencode "$new_mode")"
-    fi
-}
+# 0.39.0f Phase 2.1b: cmd_mode orphan removed. `k2so mode` is
+# hard-deprecated at dispatch; `k2so settings --mode <value>` owns
+# this now.
 
 cmd_heartbeat_toggle() {
     local action="${1:-}"
@@ -3201,250 +2735,10 @@ EXAMPLES
 EOF
 }
 
-cmd_help_general() {
-    cat <<'EOF'
-K2SO CLI — Agent interface to K2SO workspace orchestration
-
-COMMUNICATION
-  msg <workspace> "text" [--from <n>]  Deliver live to the workspace's agent
-                                       (live-or-fail; see `k2so help msg`)
-                                       <workspace> = name | absolute path | UUID
-  work send <workspace> --title --body Queue a task in the recipient's inbox
-  signal <target> <kind> <payload>     Low-level signal emission [--inbox --from <sender>]
-  roster                               Who's online (live sessions + inbox-reachable agents)
-  feed [--agent <n>] [--limit N]       View activity feed
-  connections list                     Workspaces connected to this one
-  connections add|remove <path>        Manage workspace connections
-
-YOUR WORK
-  work create --title "..." --body "..." [--priority H|N|L] [--agent <n>]
-  work inbox                         Show workspace inbox
-  work send <workspace> --title "..." --body "..."
-                                     Queue a task to another workspace's inbox
-                                     (recipient reads on their schedule)
-  checkin                            Agent check-in (heartbeat ping)
-  status "message" [--agent <n>]     Report an agent status update
-  done [--blocked "reason"]          Signal task completion (or blocked)
-
-AGENT SURFACE (read-only)
-  agents list                        List all agents with work counts
-  agents work <name>                 Show one agent's work items
-  agents triage                      Plain-text summary of what needs work
-  agents running                     List all active CLI LLM sessions
-
-DELEGATION + REVIEW (managers)
-  delegate <agent> <file>            Assign work: creates worktree + launches agent
-  reviews                            List all pending reviews
-  review approve <agent> <branch>    Merge + clean up worktree
-  review reject <agent> [--reason]   Discard worktree + move work back to inbox
-  review feedback <agent> --message  Request changes without rejecting
-
-INFO
-  help                               This help
-  help --advanced                    Full CLI reference (daemon lifecycle,
-                                     PTY plumbing, heartbeat CRUD, diagnostics)
-  version                            Show installed CLI version
-
-ENVIRONMENT
-  K2SO_PROJECT_PATH   Project root (defaults to $PWD)
-  K2SO_AGENT_NAME     Default agent name when --agent is omitted
-
-Run `k2so help --advanced` for the full verb surface — every
-heartbeat schedule option, daemon lifecycle, session/terminal
-plumbing, hook diagnostics, and developer aids.
-EOF
-}
-
-cmd_help_advanced() {
-    cat <<'EOF'
-K2SO CLI — Full surface reference
-
-Grouped by audience. The general-use subset is duplicated here
-for completeness. See `k2so help` for the curated general list.
-
-════════════════════════════════════════════════════════════════
-  COMMUNICATION
-════════════════════════════════════════════════════════════════
-  msg <workspace> "text" [--from <n>]    Live-or-loudly-fail delivery
-                                         to the workspace's running
-                                         agent (spawns if needed).
-                                         See `k2so help msg`.
-  work send <workspace> --title --body   Queue a task — recipient
-                                         reads on their own schedule.
-  terminal write <id> "text"             Raw bytes to any PTY by id
-                                         (escape hatch when `msg`'s
-                                         workspace-keyed routing
-                                         isn't what you want; the
-                                         `target_session_id` returned
-                                         by `msg` is a valid <id>).
-  signal <target> <kind> <payload>       Emit a raw AgentSignal.
-    [--inbox]                              Delivery::Inbox (async).
-    [--from <sender>]                      Sender identity; default $K2SO_AGENT_NAME|"cli".
-  roster                                 Who's online + inbox-reachable.
-  feed [--agent <n>] [--limit N]         View activity feed.
-  connections list|add|remove <path>     Cross-workspace link management.
-
-════════════════════════════════════════════════════════════════
-  WORK ITEMS
-════════════════════════════════════════════════════════════════
-  work create --title "..." --body "..." [--agent <n>] [--priority H|N|L]
-              [--type prd|milestone|task] [--source feature|issue|crash|security|audit|manual]
-  work inbox                             Workspace-level inbox.
-  work send --workspace <path> --title "..." --body "..."
-                                         Send work to another workspace's inbox.
-  work move --agent <n> --file <f> --from inbox --to active
-
-════════════════════════════════════════════════════════════════
-  AGENT MANAGEMENT
-════════════════════════════════════════════════════════════════
-  agent create <name> --role "..."       Create agent (both `agent` and
-                                         `agents` are accepted).
-  agent update --name <n> --field <f> --value "..."
-                                         Update frontmatter or ## section.
-  agent delete <name> [--force]          Delete agent + work dirs.
-  agent complete --agent <n> --file <f>  Auto-merge or submit for review
-                                         based on state capability mode.
-  agent list|profile <name>              Read agent metadata.
-
-  agents list|work <n>|status <n>|profile <n>
-  agents create|delete (aliases of `agent *`)
-  agents launch <n>                      Launch agent's Claude session.
-  agents generate-md <n>                 Generate agent's CLAUDE.md.
-  agents lock <n>|unlock <n>             Manual session-lock manipulation.
-  agents triage                          Read-only pending-work summary.
-  agents running                         Active CLI LLM sessions.
-
-════════════════════════════════════════════════════════════════
-  DELEGATION + REVIEW
-════════════════════════════════════════════════════════════════
-  delegate <agent> <file>                Creates worktree + launches agent.
-  reviews                                Pending reviews.
-  review approve <agent> <branch>        Merge + clean up worktree.
-  review reject <agent> [--reason "..."] Discard worktree + requeue.
-  review feedback <agent> --message "."  Request changes without rejecting.
-
-════════════════════════════════════════════════════════════════
-  COMMITS (AI-assisted)
-════════════════════════════════════════════════════════════════
-  commit [-m "message"]                  Launch Claude to review & commit.
-  commit-merge [-m "message"]            Commit then merge into main.
-
-════════════════════════════════════════════════════════════════
-  WORKSPACE LIFECYCLE
-════════════════════════════════════════════════════════════════
-  workspace create <path>                Create folder + register.
-  workspace open <path>                  Register existing folder.
-  workspace remove <path>                Deregister (files stay).
-  workspace preview <path>                Preview before register.
-  workspace cleanup                      Remove stale worktree records.
-  workspace agent-name <ws>              Show the workspace agent's display name.
-  workspace set-agent-name <ws> <name>   Rename the workspace agent's display label (no infra change).
-
-  mode                                   Show current workspace mode.
-  mode <off|agent|manager>               Set mode.
-  state list|get <id>|set <id>           Workspace state (drives capability gates).
-  agentic [on|off]                       Global agentic-systems toggle.
-  settings                               Show all workspace settings.
-
-════════════════════════════════════════════════════════════════
-  HEARTBEATS — per-agent adaptive
-════════════════════════════════════════════════════════════════
-  heartbeat                              Manually trigger triage.
-  heartbeat wake                         Auto-wake Workspace Manager if inbox.
-  heartbeat <on|off>                     Enable/disable automatic heartbeat.
-  heartbeat log [-n N]                   Recent scheduler decisions.
-  heartbeat set --agent <n> [--interval N] [--phase "..."] [--mode heartbeat|persistent]
-  heartbeat get --agent <n>              Read config.
-  heartbeat force --agent <n>            Force immediate wake.
-  heartbeat noop --agent <n>             Report no work (triggers backoff).
-  heartbeat action --agent <n>           Report action (resets backoff).
-
-════════════════════════════════════════════════════════════════
-  HEARTBEATS — per-project schedule
-════════════════════════════════════════════════════════════════
-  heartbeat schedule                     Show current project schedule.
-  heartbeat schedule off                 Disable.
-  heartbeat schedule hourly --start 09:00 --end 17:00 --every 30 --unit minutes
-  heartbeat schedule daily   --time 09:00
-  heartbeat schedule weekly  --days mon,wed,fri --time 09:00
-  heartbeat schedule monthly --days 1,15 --time 09:00
-  heartbeat schedule yearly  --months jan,jul --time 09:00
-
-════════════════════════════════════════════════════════════════
-  HEARTBEATS — named multi-schedule CRUD
-════════════════════════════════════════════════════════════════
-  heartbeat add --name <n> <spec>        Create a named heartbeat
-    --daily|--weekly|--monthly|--yearly|--hourly plus --time, --days, etc.
-  heartbeat list                         Table of active heartbeats.
-  heartbeat list-archived                Soft-archived rows (chat history kept).
-  heartbeat show <n>                     Single heartbeat details [--json].
-  heartbeat edit <n> <spec>              Change schedule.
-  heartbeat fire <n>                     Manually fire one heartbeat now.
-                                         Skips schedule window; respects agent lock.
-  heartbeat archive <n>                  Soft-archive (alias of remove without --purge).
-                                         Stops firing; chat stays auditable.
-  heartbeat unarchive <n>                Restore from archive.
-  heartbeat remove <n> [--purge]         Soft-archive (default) or hard-delete (--purge).
-                                         --purge removes the row + WAKEUP.md folder.
-  heartbeat rename <old> <new>           Rename folder + DB row.
-  heartbeat enable <n>|disable <n>       Resume/pause scheduling.
-  heartbeat status <n> [-n N]            Recent fire history.
-  heartbeat wakeup <n> [--path-only] [--edit]
-                                         Print/edit the WAKEUP.md.
-
-════════════════════════════════════════════════════════════════
-  TERMINAL / SESSION PLUMBING
-════════════════════════════════════════════════════════════════
-  terminal spawn --command "..."         Spawn a sub-terminal.
-  terminal write <id> "message"          Virtual input (paste + Enter).
-  terminal read <id> [--lines N]         Last N lines from buffer.
-
-  sessions spawn --agent <n> [--command <cmd>] [--cwd <path>]
-                                         0.34.0 Session Stream spawn.
-  sessions list [--json]                 List known sessions on disk.
-  sessions compact                       Compact the archive ring.
-
-════════════════════════════════════════════════════════════════
-  DIAGNOSTICS
-════════════════════════════════════════════════════════════════
-  hooks status [--limit N] [--json]      Hook pipeline state
-                                         (claude/cursor/gemini injection +
-                                         recent /hook/complete events).
-  reserve <paths...>                     Reserve file paths for exclusive editing.
-  release [paths...]                     Release reservations.
-
-════════════════════════════════════════════════════════════════
-  DAEMON LIFECYCLE
-════════════════════════════════════════════════════════════════
-  daemon status [--json]                 PID, port, uptime.
-  daemon start|stop|restart              launchctl bootstrap/bootout.
-  daemon log [--lines N]                 Tail stdout/stderr logs.
-  daemon uninstall                       Remove plist entirely.
-
-════════════════════════════════════════════════════════════════
-  SKILLS + COMPANION
-════════════════════════════════════════════════════════════════
-  skills                                 Skill management (see subcommands).
-  companion                              Companion API server (start/stop/config).
-
-════════════════════════════════════════════════════════════════
-  UPDATES
-════════════════════════════════════════════════════════════════
-  app-update                             Check for app updates.
-  app-update --list                      List releases.
-  app-update <version>                   Download a version.
-  update                                 Update the CLI script.
-  update --check                         Check for CLI updates.
-
-════════════════════════════════════════════════════════════════
-  ENVIRONMENT
-════════════════════════════════════════════════════════════════
-  K2SO_PORT           Daemon port (auto-discovered from ~/.k2so/heartbeat.port).
-  K2SO_HOOK_TOKEN     Auth token (auto-discovered from ~/.k2so/heartbeat.token).
-  K2SO_PROJECT_PATH   Project root (defaults to $PWD).
-  K2SO_AGENT_NAME     Default agent name when --agent is omitted.
-EOF
-}
+# 0.39.0f Phase 2.1b: cmd_help_general / cmd_help_advanced (the old
+# pre-2.1a help screens) removed. The 3-tier help system
+# (cmd_help_v2_daily / cmd_help_v2_advanced / cmd_help_internal +
+# cmd_help_msg / cmd_help_inbox) owns all help text now.
 
 # ── Self-Update ──────────────────────────────────────────────────────
 
@@ -4127,7 +3421,6 @@ HARD-DEPRECATED (verb removed; commands exit non-zero with pointer)
   roster                          → who
   feed                            → activity
   signal <target> <kind> <payload> → msg <workspace> --signal <kind> [...]
-  work send <ws> --title --body   → msg <ws> --inbox --title "..." --body "..."
   status "msg"                    → checkin --status "msg"
   agents reap                     → daemon reap
   agents triage                   → workspace triage
@@ -4138,26 +3431,34 @@ HARD-DEPRECATED (verb removed; commands exit non-zero with pointer)
                                      content, use `k2so skills profile <name>`
                                      and load it into your harness.
 
-SOFT-DEPRECATED (verb still works; emits warning to stderr, forwards to new form)
+  # 0.39.0f Phase 2.1b — these were soft-deprecated in 2.1a (warn +
+  # forward) and hard-cut in 2.1b. No transition window remains; every
+  # arm exits non-zero.
 
-  agents create                   → skills create
-  agents delete                   → skills remove
-  agents list                     → skills list (or `workspace list` for all)
-  agents work <n>                 → inbox list <skill-name> (now inbox-keyed)
-  agents lock <n>                 → (removed; skills are docs, not sessions)
-  agents unlock <n>               → (removed; same reason)
-  agents launch <n>               → Your harness's sub-agent spawn
-  agents profile <n>              → skills profile <n>
-  agents status <n>               → (removed; skills are docs, not sessions)
+  agents create                   → skills create <name>
+  agents delete                   → skills remove <name> (or `workspace remove`)
+  agents list                     → workspace list (yellow pages)
+                                       or `skills list` (skill profiles)
+  agents work <n>                 → inbox  (workspace-implicit; pass
+                                       --workspace <path> to target another)
+  agents lock <n>                 → skills lock <name> (debugging only)
+  agents unlock <n>               → skills lock <name> --release
+  agents launch <n>               → your IDE/harness's session-start
+                                       feature; K2SO no longer manages spawn
+  agents profile <n>              → skills profile <name>
+                                       (or `workspace profile`)
+  agents status <n>               → workspace status (or `checkin --status`)
+  agents generate-md              → skills regenerate [<name>]
   agents running                  → workspace list --running
 
-  work create --title --body      → inbox compose --title --body
-  work inbox                      → inbox (default action)
+  work create --title --body      → inbox compose --title "..." --body "..."
+  work inbox                      → inbox (default verb shows new arrivals)
   work move --from <a> --to <b>   → inbox move <id> <folder>
   work done                       → inbox archive <id>
+  work send <ws> --title --body   → msg <ws> --inbox --title "..." --body "..."
 
-  --agent <name> flag             → --workspace <path>   (everywhere)
-                                    Old flag still works for one release.
+  --agent <name> flag             → --workspace <path>  (everywhere)
+                                       Hard-removed; pass workspace explicitly.
 
 EXAMPLES OF MIGRATION
 
@@ -4340,9 +3641,10 @@ else:
 }
 
 cmd_workspace_triage() {
-    # Plain-text summary of pending work — re-uses the existing
-    # /cli/agents/work endpoint which lists this workspace's items.
-    cli_request "/cli/work/inbox" | format_work
+    # 0.39.0f Phase 2.1b: /cli/work/inbox is HTTP 410 now. Use the
+    # inbox-first endpoint and the inbox formatter so the output
+    # matches the rest of the inbox surface.
+    cli_request "/cli/inbox/list" | format_inbox
 }
 
 # ── Phase 2.1: 3-tier help (verbatim mock text) ───────────────────────
@@ -4658,84 +3960,76 @@ cmd_update_v2() {
 
 case "${1:-help}" in
     agent)
+        # 0.39.0f Phase 2.1b: singular `agent` keeps only the documented
+        # internal-tier subverbs (`update`, `complete`). Undocumented
+        # `create` / `delete` / `list` / `profile` arms previously chained
+        # to legacy `cmd_agents_*` bodies; with those bodies removed in
+        # 2.1b, the arms hard-deprecate. `profile` routes to the
+        # workspace-level verb per `cmd_help_internal`.
         case "${2:-}" in
-            create) shift 2; cmd_agents_create "$@" ;;
-            delete|remove) shift 2; cmd_agents_delete "$@" ;;
             update) shift 2; cmd_agent_update "$@" ;;
             complete) shift 2; cmd_agent_complete "$@" ;;
-            list)   cmd_agents_list ;;
-            profile) shift 2; cmd_agents_profile "$@" ;;
+            profile) shift 2; cmd_workspace_profile "$@" ;;
+            create)
+                fail_deprecated "agent create" "k2so skills create <name>" ;;
+            delete|remove)
+                fail_deprecated "agent delete" "k2so skills remove <name>" ;;
+            list)
+                fail_deprecated "agent list" "k2so workspace list (or k2so skills list)" ;;
             *)      echo "Unknown agent subcommand: ${2:-}" >&2; cmd_help; exit 1 ;;
         esac
         ;;
     agents)
-        # Phase 2.1 A19/A23: `agents *` soft-deprecates to `skills *`.
-        # `agents reap` and `agents triage` hard-deprecate (different homes).
+        # 0.39.0f Phase 2.1b: all `agents *` subverbs hard-deprecate.
+        # Phase 2.1a kept warn+forward for one release; 2.1b cuts the
+        # transition window entirely per user directive ("I'm done with
+        # the old CLI tools"). Every subverb exits non-zero with a
+        # pointer to the new equivalent.
         case "${2:-list}" in
             list)
-                warn_deprecated "agents list" "k2so skills list (or k2so workspace list)"
-                cmd_agents_list ;;
+                fail_deprecated "agents list" "k2so workspace list (yellow pages) or k2so skills list (skill profiles)" ;;
             work)
-                warn_deprecated "agents work" "k2so inbox list <skill-name>"
-                shift 2; cmd_agents_work "$@" ;;
+                fail_deprecated "agents work" "k2so inbox (workspace-implicit; pass --workspace <path> to target another)" ;;
             status)
-                warn_deprecated "agents status" "(skills are documents, not sessions; removed)"
-                shift 2; cmd_agents_status "$@" ;;
+                fail_deprecated "agents status" "k2so workspace status or k2so checkin --status" ;;
             create)
-                warn_deprecated "agents create" "k2so skills create"
-                shift 2; cmd_agents_create "$@" ;;
+                fail_deprecated "agents create" "k2so skills create <name> (or register a new workspace via your IDE/harness)" ;;
             delete|remove)
-                warn_deprecated "agents delete" "k2so skills remove"
-                shift 2; cmd_agents_delete "$@" ;;
+                fail_deprecated "agents delete" "k2so skills remove <name> or k2so workspace remove <path>" ;;
             launch)
-                warn_deprecated "agents launch" "your harness's sub-agent spawn (delegate is deprecated)"
-                shift 2; cmd_agents_launch "$@" ;;
+                fail_deprecated "agents launch" "your IDE/harness's session-start feature; K2SO no longer manages session spawn" ;;
             generate-md)
-                warn_deprecated "agents generate-md" "k2so skills regenerate"
-                shift 2; cmd_agents_generate_md "$@" ;;
+                fail_deprecated "agents generate-md" "k2so skills regenerate [<name>]" ;;
             profile)
-                warn_deprecated "agents profile" "k2so skills profile"
-                shift 2; cmd_agents_profile "$@" ;;
+                fail_deprecated "agents profile" "k2so skills profile <name> or k2so workspace profile" ;;
             lock)
-                warn_deprecated "agents lock" "(removed; skills are docs, not sessions)"
-                shift 2; cmd_agents_lock "$@" ;;
+                fail_deprecated "agents lock" "k2so skills lock <name> (debugging only; rarely needed)" ;;
             unlock)
-                warn_deprecated "agents unlock" "(removed; same reason)"
-                shift 2; cmd_agents_unlock "$@" ;;
+                fail_deprecated "agents unlock" "k2so skills lock <name> --release" ;;
             triage)
                 fail_deprecated "agents triage" "k2so workspace triage" ;;
             running)
-                warn_deprecated "agents running" "k2so workspace list --running"
-                cmd_agents_running ;;
+                fail_deprecated "agents running" "k2so workspace list --running" ;;
             reap)
                 fail_deprecated "agents reap" "k2so daemon reap" ;;
             *)      echo "Unknown agents subcommand: $2" >&2; cmd_help; exit 1 ;;
         esac
         ;;
     work)
-        # Phase 2.1 A22 / A24: `work *` soft-deprecates to `inbox *`.
-        # Each subverb warns + forwards. `work send` becomes `msg --inbox`.
+        # 0.39.0f Phase 2.1b: all `work *` subverbs hard-deprecate. No
+        # transition window — fail loudly with a pointer to the
+        # inbox-as-email replacement (PRD A22 / A24).
         case "${2:-}" in
             create)
-                warn_deprecated "work create" "k2so inbox compose"
-                shift 2; cmd_inbox_compose "$@" ;;
+                fail_deprecated "work create" "k2so inbox compose --title \"...\" --body \"...\"" ;;
             inbox)
-                warn_deprecated "work inbox" "k2so inbox"
-                shift 2; cmd_inbox_list "$@" ;;
+                fail_deprecated "work inbox" "k2so inbox (default verb shows new arrivals)" ;;
             send)
-                # work send <ws> --title --body  →  msg <ws> --inbox --title --body
-                warn_deprecated "work send" "k2so msg <ws> --inbox --title \"...\" --body \"...\""
-                shift 2
-                local _ws="${1:-}"
-                shift 2>/dev/null || true
-                cmd_msg_inbox_form "$_ws" "$@" ;;
+                fail_deprecated "work send" "k2so msg <workspace> --inbox --title \"...\" --body \"...\"" ;;
             move)
-                warn_deprecated "work move" "k2so inbox move <id> <folder>"
-                shift 2; cmd_work_move "$@" ;;
+                fail_deprecated "work move" "k2so inbox move <id> <folder>" ;;
             done)
-                # work done → inbox archive (per help-deprecated map)
-                warn_deprecated "work done" "k2so inbox archive <id>"
-                shift 2; cmd_inbox_archive "$@" ;;
+                fail_deprecated "work done" "k2so inbox archive <id>" ;;
             *)      echo "Unknown work subcommand: ${2:-}" >&2; cmd_help; exit 1 ;;
         esac
         ;;

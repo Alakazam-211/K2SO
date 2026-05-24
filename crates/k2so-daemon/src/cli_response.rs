@@ -59,4 +59,15 @@ impl CliResponse {
             body: r#"{"error":"Invalid or missing auth token"}"#.to_string(),
         }
     }
+    /// 0.39.0f Phase 2.1b: `/cli/work/*` routes are retired but the
+    /// route entries remain so external callers get a clear HTTP-410
+    /// signal (rather than a silent 404 on the catch-all). The body
+    /// must point them at the replacement and `help-deprecated`.
+    pub fn gone(err: impl std::fmt::Display) -> Self {
+        Self {
+            status: "410 Gone",
+            content_type: "application/json",
+            body: serde_json::json!({ "error": err.to_string() }).to_string(),
+        }
+    }
 }
