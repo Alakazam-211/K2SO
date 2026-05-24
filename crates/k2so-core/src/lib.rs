@@ -44,6 +44,10 @@ pub mod git;
 // post-refactor. Was [`agents::heartbeat`]; the `agents/` back-compat
 // alias remains for one release cycle.
 pub mod heartbeats;
+// Phase 2.5c: workspace lifecycle + state + identity + launch helpers.
+// Post-Phase-2.1 "workspace == agent" 1:1 means these are
+// workspace-scoped concerns; was scattered under `agents/`.
+pub mod workspace;
 pub mod hook_config;
 pub mod inbox;
 pub mod llm;

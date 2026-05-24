@@ -41,7 +41,10 @@ pub mod launch_profile;
 pub mod onboarding;
 pub mod resume_chat;
 pub mod reviews;
-pub mod scheduler;
+/// Phase 2.5c: `scheduler` relocated to [`crate::workspace::scheduler`].
+/// Back-compat alias for callers that still reference
+/// `agents::scheduler::*`.
+pub use crate::workspace::scheduler;
 pub mod session;
 pub mod settings;
 pub mod skill;
