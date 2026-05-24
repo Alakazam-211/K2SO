@@ -6,6 +6,9 @@ import {
 } from '../../shared/constants'
 // Phase 2 Unit 7a — settings live in the daemon.
 import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
+// Phase 2.5 fix (finding #547) — retry the initial load when the
+// daemon comes online after a slow boot or restart.
+import { onDaemonConnected } from '@/lib/daemon-reconnect'
 
 type PanelTab = 'files' | 'changes' | 'history' | 'workspace'
 
@@ -48,6 +51,35 @@ interface PanelsState {
 
 let panelsInitialized = false
 
+/** Phase 2.5 fix (finding #547) — `hasLoadedFromDaemon` defense-in-
+ *  depth gate. Until the daemon hands back a real settings snapshot,
+ *  every `settingsUpdate(...)` call from this store is a no-op (the
+ *  UI still updates locally — interactions stay responsive — but we
+ *  refuse to clobber settings.json with hard-coded defaults). Sub-fix
+ *  A's port stability + Sub-fix C's reconnect retry should make this
+ *  gate non-triggering in steady state; it exists for the edge case
+ *  where the user clicks a panel toggle in the window between app
+ *  boot and the first successful `initFromSettings`. */
+let hasLoadedFromDaemon = false
+
+/** Test-only — reset both gates so tests don't leak state. */
+export function __resetPanelsLoadGateForTests(): void {
+  panelsInitialized = false
+  hasLoadedFromDaemon = false
+}
+
+/** Suppress a settings write when we haven't yet confirmed the
+ *  daemon's baseline. Returns `true` to indicate the caller should
+ *  skip the actual `settingsUpdate(...)`. */
+function shouldSuppressPersist(): boolean {
+  if (hasLoadedFromDaemon) return false
+  console.warn(
+    '[panels] persist suppressed: settings not yet loaded from daemon ' +
+    '(early-boot click before initFromSettings completed; UI state stays local)'
+  )
+  return true
+}
+
 export const usePanelsStore = create<PanelsState>((set, get) => ({
   leftPanelOpen: true,
   leftPanelWidth: SIDEBAR_DEFAULT_WIDTH,
@@ -64,11 +96,13 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
   toggleLeftPanel: () => {
     const next = !get().leftPanelOpen
     set({ leftPanelOpen: next })
+    if (shouldSuppressPersist()) return
     settingsUpdate({ leftPanelOpen: next }).catch((e: unknown) => console.error('[panels]', e))
   },
   toggleRightPanel: () => {
     const next = !get().rightPanelOpen
     set({ rightPanelOpen: next })
+    if (shouldSuppressPersist()) return
     settingsUpdate({ rightPanelOpen: next }).catch((e: unknown) => console.error('[panels]', e))
   },
 
@@ -79,10 +113,12 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
 
   setLeftPanelActiveTab: (tab) => {
     set({ leftPanelActiveTab: tab })
+    if (shouldSuppressPersist()) return
     settingsUpdate({ leftPanelActiveTab: tab }).catch((e: unknown) => console.error('[panels]', e))
   },
   setRightPanelActiveTab: (tab) => {
     set({ rightPanelActiveTab: tab })
+    if (shouldSuppressPersist()) return
     settingsUpdate({ rightPanelActiveTab: tab }).catch((e: unknown) => console.error('[panels]', e))
   },
 
@@ -96,6 +132,7 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
           ? s.rightPanelTabs.find((t) => t !== tab) ?? s.rightPanelActiveTab
           : s.rightPanelActiveTab
     }))
+    if (shouldSuppressPersist()) return
     const s = get()
     settingsUpdate({
       leftPanelTabs: s.leftPanelTabs,
@@ -117,6 +154,7 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
           ? s.leftPanelTabs.find((t) => t !== tab) ?? s.leftPanelActiveTab
           : s.leftPanelActiveTab
     }))
+    if (shouldSuppressPersist()) return
     const s = get()
     settingsUpdate({
       leftPanelTabs: s.leftPanelTabs,
@@ -204,6 +242,13 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
         rightPanelTabs: rightTabs,
       })
 
+      // CRITICAL: flip the persist gate ONLY on success. A
+      // catch-and-default branch (below) leaves it false, so a
+      // user click that fires before the daemon comes online stays
+      // in-memory and doesn't clobber settings.json with defaults.
+      // Phase 2.5 fix (finding #547).
+      hasLoadedFromDaemon = true
+
       // Only persist on first init to avoid sync:settings → initFromSettings → settings_update loop
       if (!panelsInitialized) {
         panelsInitialized = true
@@ -217,10 +262,25 @@ export const usePanelsStore = create<PanelsState>((set, get) => ({
         }, 2000)
       }
     } catch {
-      // ignore — use defaults
+      // ignore — use defaults; `hasLoadedFromDaemon` stays false.
+      // The daemon-reconnect listener (registered below) will retry
+      // this fn once the daemon-events WS connects.
     }
   }
 }))
 
 // Initialize on import
 usePanelsStore.getState().initFromSettings()
+
+// Phase 2.5 fix (finding #547): if the initial fetch above raced
+// the daemon's HTTP listener and lost (heavy first-boot migrations
+// can keep the daemon busy for 5+ seconds), the reconnect-bus fires
+// `daemon:connected` once the WS handshakes. Re-running
+// `initFromSettings` is cheap (one HTTP GET) and idempotent (sets
+// the same state again on success). The gate stays false until a
+// successful load, so any user interaction in the meantime stays
+// ephemeral instead of persisting defaults.
+onDaemonConnected(() => {
+  if (hasLoadedFromDaemon) return
+  usePanelsStore.getState().initFromSettings()
+})

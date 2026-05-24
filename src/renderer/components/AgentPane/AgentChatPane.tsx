@@ -7,6 +7,7 @@ import { useTabsStore } from '@/stores/tabs'
 import { TerminalPane } from '@/terminal-v2/TerminalPane'
 import { agentChatId } from '@/lib/terminal-id'
 import { getDaemonWs } from '@/kessel/daemon-ws'
+import { daemonCliGet } from '@/lib/daemon-cli'
 
 interface AgentChatPaneProps {
   agentName: string
@@ -209,17 +210,25 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
   // message — claude assigns titles dynamically based on
   // conversation content), and when the popover opens (cheap
   // re-fetch to catch any new sessions created via heartbeat fires
-  // or other paths). Daemon owns chat_history_list_for_project;
-  // Tauri is just the IPC bridge.
+  // or other paths).
+  //
+  // Phase 2.5 fix (finding #548): switched from the deleted Tauri
+  // `chat_history_list_for_project` command to the daemon's
+  // `/cli/chat/list` route. The Tauri shim was retired in Phase 2
+  // Unit 6 (`src-tauri/src/commands/mod.rs`); this pane was the
+  // last caller still routing through `invoke()` and was logging
+  // "Command chat_history_list_for_project not found" on every
+  // mount. Sibling pickers (ChatHistory, ReviewPanel) already
+  // call `daemonCliGet('chat/list', ...)` — this matches.
   useEffect(() => {
     let cancelled = false
-    void invoke<Array<{
+    void daemonCliGet<Array<{
       sessionId: string
       title: string
       timestamp: number
       messageCount: number
       provider: string
-    }>>('chat_history_list_for_project', { projectPath })
+    }>>('chat/list', { project_path: projectPath })
       .then((rows) => {
         if (cancelled) return
         // Sort by recency desc; show claude sessions only — other
@@ -230,7 +239,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
         setHistorySessions(claudeOnly)
       })
       .catch((err) => {
-        console.warn('[AgentChatPane] chat_history_list_for_project failed:', err)
+        console.warn('[AgentChatPane] chat/list failed:', err)
       })
     return () => { cancelled = true }
   }, [projectPath, currentSessionId, historyOpen])

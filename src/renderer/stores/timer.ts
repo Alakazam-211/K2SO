@@ -5,6 +5,11 @@ import { useToastStore } from '@/stores/toast'
 // Phase 2 Unit 7a — settings live in the daemon. timer_* invokes
 // (DB-backed time entries) remain Tauri-side until Unit 4.
 import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
+// Phase 2.5 fix (finding #547) — daemon-reconnect retry bus.
+import { onDaemonConnected } from '@/lib/daemon-reconnect'
+
+/** Phase 2.5 fix (finding #547) — persist gate. See panels.ts. */
+let hasLoadedFromDaemon = false
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -214,6 +219,10 @@ export const useTimerStore = create<TimerState>((set, get) => ({
         timezone: timer.timezone ?? '',
         customThemes: (timer.customThemes ?? []) as unknown as CountdownThemeConfig[],
       })
+      // Phase 2.5 fix (finding #547): flip the persist gate only
+      // on success. Catch branches do NOT flip it — that's the
+      // whole point of the gate.
+      hasLoadedFromDaemon = true
     } catch (err) {
       console.error('[timer] Failed to load settings:', err)
     }
@@ -461,8 +470,15 @@ export const useTimerStore = create<TimerState>((set, get) => ({
   },
 
   updateTimerSetting: async (key: string, value: any) => {
-    // Optimistic update locally
+    // Optimistic update locally — happens even when persist is gated
+    // off so the UI stays responsive in the pre-daemon-load window.
     set({ [key]: value } as any)
+    if (!hasLoadedFromDaemon) {
+      console.warn(
+        '[timer] persist suppressed: settings not yet loaded from daemon'
+      )
+      return
+    }
     try {
       const currentSettings = await settingsGet()
       const timer = { ...(currentSettings.timer ?? {}), [key]: value }
@@ -490,3 +506,11 @@ export const useTimerStore = create<TimerState>((set, get) => ({
 
 // Initialize on import
 useTimerStore.getState().initFromSettings()
+
+// Phase 2.5 fix (finding #547): retry the load when the daemon
+// (re)connects, if the initial fetch on import failed. Steady-state
+// no-op once the baseline is loaded.
+onDaemonConnected(() => {
+  if (hasLoadedFromDaemon) return
+  useTimerStore.getState().initFromSettings()
+})

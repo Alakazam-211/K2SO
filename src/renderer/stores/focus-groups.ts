@@ -4,8 +4,25 @@ import { invoke } from '@tauri-apps/api/core'
 // invokes still exist (Unit 4 territory); only the settings invokes
 // move here.
 import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
+// Phase 2.5 fix (finding #547) — daemon-reconnect retry bus.
+import { onDaemonConnected } from '@/lib/daemon-reconnect'
 import { useToastStore } from './toast'
 import { useProjectsStore } from './projects'
+
+/** Phase 2.5 fix (finding #547) — `hasLoadedFromDaemon` gate. See
+ *  panels.ts for the rationale. Until the first successful
+ *  `settingsGet()` returns, every persist call from this store is
+ *  suppressed so the UI's optimistic defaults don't overwrite real
+ *  settings during a brief boot-time daemon outage. */
+let hasLoadedFromDaemon = false
+
+function shouldSuppressPersist(): boolean {
+  if (hasLoadedFromDaemon) return false
+  console.warn(
+    '[focus-groups] persist suppressed: settings not yet loaded from daemon'
+  )
+  return true
+}
 
 export interface FocusGroup {
   id: string
@@ -50,7 +67,9 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
     set({ activeFocusGroupId: id })
     // Persist to settings so it restores on next launch
     if (id !== null) {
-      settingsUpdate({ activeFocusGroupId: id }).catch((e) => console.warn('[focus-groups] settings_update failed:', e))
+      if (!shouldSuppressPersist()) {
+        settingsUpdate({ activeFocusGroupId: id }).catch((e) => console.warn('[focus-groups] settings_update failed:', e))
+      }
 
       // Auto-activate the first workspace in the new focus group
       const projectsState = useProjectsStore.getState()
@@ -83,7 +102,7 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
         const remaining = state.focusGroups.filter((g) => g.id !== id)
         const nextId = remaining.length > 0 ? remaining[0].id : null
         set({ activeFocusGroupId: nextId })
-        if (nextId) {
+        if (nextId && !shouldSuppressPersist()) {
           settingsUpdate({ activeFocusGroupId: nextId }).catch((e) => console.warn('[focus-groups] settings_update failed:', e))
         }
       }
@@ -140,11 +159,14 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
         if (groups.length > 0 && !get().activeFocusGroupId) {
           const firstId = groups[0].id
           set({ activeFocusGroupId: firstId })
-          settingsUpdate({ activeFocusGroupId: firstId }).catch((e) => console.warn('[focus-groups] settings_update failed:', e))
+          if (!shouldSuppressPersist()) {
+            settingsUpdate({ activeFocusGroupId: firstId }).catch((e) => console.warn('[focus-groups] settings_update failed:', e))
+          }
         }
       } else {
         set({ activeFocusGroupId: null })
       }
+      if (shouldSuppressPersist()) return
       await settingsUpdate({ focusGroupsEnabled: enabled })
     } catch (err) {
       console.error('[focus-groups] setFocusGroupsEnabled failed:', err)
@@ -168,6 +190,9 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
           set({ activeFocusGroupId: groups[0].id })
         }
       }
+      // Phase 2.5 fix (finding #547): flip the persist gate ONLY
+      // on a successful baseline fetch — never inside the catch.
+      hasLoadedFromDaemon = true
     } catch (err) {
       console.error('[focus-groups] initFromSettings failed:', err)
     }
@@ -176,3 +201,10 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
 
 // Initialize on import
 useFocusGroupsStore.getState().initFromSettings()
+
+// Phase 2.5 fix (finding #547): retry on daemon (re)connect when
+// the initial load hasn't yet succeeded. Steady-state no-op.
+onDaemonConnected(() => {
+  if (hasLoadedFromDaemon) return
+  useFocusGroupsStore.getState().initFromSettings()
+})

@@ -14,47 +14,109 @@
 // existing `try/catch` blocks around the old `invoke(...)` calls keep
 // working unchanged.
 
-import { getDaemonWs } from '@/kessel/daemon-ws'
+import { getDaemonWs, invalidateDaemonWs } from '@/kessel/daemon-ws'
 
 /**
  * GET /cli/<route>?<params>&token=<token>.
  * `route` should be the part AFTER `/cli/`, e.g. `fs/read-dir`.
  * Returns the parsed JSON body. Throws on non-2xx.
+ *
+ * Phase 2.5 fix (finding #547): on a network-level failure
+ * (`fetch` throws — ECONNREFUSED, ENOTFOUND, …) we invalidate the
+ * cached creds and retry once. The renderer caches `daemon_ws_url`
+ * for the lifetime of the app process, so a daemon restart that
+ * mints a new port would otherwise be silently routed to a dead
+ * socket for the duration of the session. Invalidation forces the
+ * next call to re-read `~/.k2so/daemon.{port,token}` from disk.
  */
 export async function daemonCliGet<T = unknown>(
   route: string,
   params?: Record<string, string | number | boolean | undefined | null>,
 ): Promise<T> {
-  const { port, token } = await getDaemonWs()
-  const search = new URLSearchParams()
-  if (params) {
-    for (const [k, v] of Object.entries(params)) {
-      if (v !== undefined && v !== null) search.set(k, String(v))
+  return withConnRetry(async () => {
+    const { port, token } = await getDaemonWs()
+    const search = new URLSearchParams()
+    if (params) {
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== null) search.set(k, String(v))
+      }
     }
-  }
-  search.set('token', token)
-  const url = `http://127.0.0.1:${port}/cli/${route}?${search.toString()}`
-  const res = await fetch(url, { method: 'GET' })
-  return parseDaemonResponse<T>(res)
+    search.set('token', token)
+    const url = `http://127.0.0.1:${port}/cli/${route}?${search.toString()}`
+    const res = await fetch(url, { method: 'GET' })
+    return parseDaemonResponse<T>(res)
+  })
 }
 
 /**
  * POST /cli/<route>?token=<token> with `body` JSON-encoded. `body`
  * fields go in the body, NOT the query string — passwords and large
  * payloads (file contents) belong out of URL-logging path.
+ *
+ * Same connection-retry semantics as `daemonCliGet`.
  */
 export async function daemonCliPost<T = unknown>(
   route: string,
   body?: unknown,
 ): Promise<T> {
-  const { port, token } = await getDaemonWs()
-  const url = `http://127.0.0.1:${port}/cli/${route}?token=${token}`
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+  return withConnRetry(async () => {
+    const { port, token } = await getDaemonWs()
+    const url = `http://127.0.0.1:${port}/cli/${route}?token=${token}`
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    })
+    return parseDaemonResponse<T>(res)
   })
-  return parseDaemonResponse<T>(res)
+}
+
+/**
+ * Run `op` once. If it throws a connection-level error (caught
+ * `fetch` failure — distinct from a non-2xx response), invalidate
+ * the cached daemon creds and try a second time. A successful
+ * second attempt returns the value; a second failure throws.
+ *
+ * Non-2xx responses are NOT retried — those are application errors
+ * the route handler explicitly returned, not stale-creds issues.
+ *
+ * Kept distinct from `parseDaemonResponse` so HTTP errors continue
+ * to throw verbatim — the retry only protects against the kernel
+ * refusing the connection (the symptom of finding #547).
+ */
+async function withConnRetry<T>(op: () => Promise<T>): Promise<T> {
+  try {
+    return await op()
+  } catch (err) {
+    if (!isConnectionLevelError(err)) throw err
+    // Daemon may have rebooted and rotated its port; force a re-read.
+    invalidateDaemonWs()
+    return await op()
+  }
+}
+
+/** Detect connection-level errors (kernel refused the connection,
+ *  DNS failure, network down). These are the failure modes a
+ *  port-mismatch produces — distinct from HTTP-level errors which
+ *  `parseDaemonResponse` already throws. Browser `fetch` throws a
+ *  `TypeError` with message starting "Failed to fetch" / "Load
+ *  failed" / "NetworkError" depending on engine; Tauri's webview
+ *  uses WKWebView (Safari) and surfaces "Load failed". */
+function isConnectionLevelError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  const m = err.message.toLowerCase()
+  return (
+    m.includes('failed to fetch') ||
+    m.includes('load failed') ||
+    m.includes('networkerror') ||
+    m.includes('connection refused') ||
+    m.includes('ecconnrefused') ||
+    m.includes('econnrefused') ||
+    // `getDaemonWs` rejects with this prefix when the daemon hasn't
+    // published creds yet — same recovery path.
+    m.includes('daemon_ws_url invoke failed') ||
+    m.includes('daemon not reachable')
+  )
 }
 
 async function parseDaemonResponse<T>(res: Response): Promise<T> {

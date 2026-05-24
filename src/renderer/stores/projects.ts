@@ -2,6 +2,8 @@ import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 // Phase 2 Unit 7a — settings live in the daemon.
 import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
+// Phase 2.5 fix (finding #547) — daemon-reconnect retry bus.
+import { onDaemonConnected } from '@/lib/daemon-reconnect'
 import { useGitInitDialogStore } from './git-init-dialog'
 import { useToastStore } from './toast'
 import { useTabsStore, ensurePinnedAgentTabForMode } from './tabs'
@@ -11,6 +13,13 @@ import { useSettingsStore } from './settings'
 // Debounce touchInteraction to avoid excessive DB writes (5 min per project)
 const TOUCH_DEBOUNCE_MS = 5 * 60 * 1000
 const _lastTouchMap = new Map<string, number>()
+
+/** Phase 2.5 fix (finding #547) — flips on the first successful
+ *  `fetchProjects` call. Gates `lastActiveProjectId` /
+ *  `lastActiveWorkspaceId` writes so an early-boot workspace
+ *  switch can't overwrite real values with the user's pre-restore
+ *  selection. See panels.ts for the longer rationale. */
+let hasLoadedFromDaemon = false
 
 interface Workspace {
   id: string
@@ -189,6 +198,11 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
           useTabsStore.getState().loadLayoutForWorkspace(restoredProject.id, restoredWorkspaceId, cwd)
         }
       }
+      // Phase 2.5 fix (finding #547): flip the persist gate ONLY
+      // after a successful projects fetch. Subsequent
+      // setActiveProject/setActiveWorkspace calls (the writers below)
+      // now allow their `settingsUpdate` calls.
+      hasLoadedFromDaemon = true
     } catch (err) {
       console.error('[projects] fetchProjects failed:', err)
     }
@@ -346,8 +360,13 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
         activeWorkspaceId: newWorkspaceId
       })
 
-      // Persist for session restore
-      settingsUpdate({ lastActiveProjectId: id, lastActiveWorkspaceId: newWorkspaceId }).catch(() => {})
+      // Persist for session restore (Phase 2.5 fix #547: gated so a
+      // pre-load click doesn't clobber the real last-active values).
+      if (hasLoadedFromDaemon) {
+        settingsUpdate({ lastActiveProjectId: id, lastActiveWorkspaceId: newWorkspaceId }).catch(() => {})
+      } else {
+        console.warn('[projects] persist suppressed: projects not yet loaded from daemon')
+      }
 
       if (newWorkspaceId) {
         const cwd = project.workspaces[0]?.worktreePath ?? project.path ?? '~'
@@ -378,8 +397,12 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
       activeWorkspaceId: workspaceId
     })
 
-    // Persist for session restore
-    settingsUpdate({ lastActiveProjectId: projectId, lastActiveWorkspaceId: workspaceId }).catch(() => {})
+    // Persist for session restore (Phase 2.5 fix #547: gated).
+    if (hasLoadedFromDaemon) {
+      settingsUpdate({ lastActiveProjectId: projectId, lastActiveWorkspaceId: workspaceId }).catch(() => {})
+    } else {
+      console.warn('[projects] persist suppressed: projects not yet loaded from daemon')
+    }
 
     // 24h Active Bar persistence — bumping lastInteractionAt on every
     // workspace activation means a workspace stays in the Active Bar
@@ -492,3 +515,17 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
 // Initialize on import
 useProjectsStore.getState().fetchProjects()
+
+// Phase 2.5 fix (finding #547): retry the load if the daemon
+// (re)connects after a failed initial fetch. Projects-list goes
+// through Tauri's `projects_list` invoke (which talks to the
+// shared SQLite DB, not the daemon HTTP surface), but the
+// last-active-session restore inside fetchProjects calls
+// `settingsGet()` — and a failure there causes the catch-all
+// `[projects] fetchProjects failed` log seen in the original
+// finding #547 repro. Re-running once the daemon's WS comes up
+// gets the user a real restore instead of "first project".
+onDaemonConnected(() => {
+  if (hasLoadedFromDaemon) return
+  useProjectsStore.getState().fetchProjects()
+})

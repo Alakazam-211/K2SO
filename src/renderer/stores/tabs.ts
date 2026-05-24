@@ -8,12 +8,24 @@ import { useSettingsStore } from '@/stores/settings'
 import { useTerminalSettingsStore, type TerminalRenderer } from '@/stores/terminal-settings'
 import { getDaemonWs } from '@/kessel/daemon-ws'
 import { useHeartbeatSessionsStore } from '@/stores/heartbeat-sessions'
+// Phase 2.5 fix (finding #547) — retry the workspace-layouts load
+// when the daemon comes online after a slow boot.
+import { onDaemonConnected } from '@/lib/daemon-reconnect'
 import {
   subscribeToWorkspaceSessionEvents,
   type SessionAddedEvent,
   type SessionRemovedEvent,
   type UnsubscribeFn,
 } from '@/stores/session-events'
+
+/** Phase 2.5 fix (finding #547) — gate for `loadWorkspaceSessionsFromDb`.
+ *  Flips to true on the first successful load (regardless of whether the
+ *  user has any saved layouts — empty list is still a successful load).
+ *  Used only to suppress the reconnect-driven retry once the baseline
+ *  is established; tabs.ts doesn't gate writes the way panels/timer/
+ *  focus-groups/projects do because workspace layout writes are user-
+ *  driven (tab open/close/move) rather than side-effects of UI mount. */
+let hasLoadedWorkspaceSessions = false
 
 // Lazy reference to presets store — avoids circular dependency (presets → tabs → presets).
 // Set by presets.ts on init via registerPresetsStore().
@@ -2824,6 +2836,9 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         } catch { /* skip corrupt entries */ }
       }
       set({ workspaceLayouts: layouts })
+      // Phase 2.5 fix (finding #547): mark the baseline as loaded so
+      // the reconnect-bus retry stops firing. Empty list is success.
+      hasLoadedWorkspaceSessions = true
     } catch (err) {
       console.error('[tabs] Failed to load workspace sessions from DB:', err)
     }
@@ -3928,6 +3943,17 @@ initWorkspaceOpsListeners()
 
 // Load persisted workspace sessions from DB on import
 useTabsStore.getState().loadWorkspaceSessionsFromDb()
+
+// Phase 2.5 fix (finding #547): retry the layouts load on daemon
+// (re)connect when the import-time fetch lost a race with the
+// daemon's startup. Without this, an early-boot failure left
+// `workspaceLayouts` empty for the session, and the next workspace
+// activation built a fresh default layout that auto-save then
+// persisted over the real one.
+onDaemonConnected(() => {
+  if (hasLoadedWorkspaceSessions) return
+  useTabsStore.getState().loadWorkspaceSessionsFromDb()
+})
 
 // Auto-save: subscribe to tab structure changes and persist to DB (debounced).
 // This provides crash resilience — lose at most ~1 second of tab changes.

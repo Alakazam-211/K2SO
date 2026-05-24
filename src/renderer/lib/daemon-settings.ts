@@ -20,7 +20,7 @@
 // callers can update local store state from the response without a
 // follow-up read.
 
-import { getDaemonWs } from '@/kessel/daemon-ws'
+import { getDaemonWs, invalidateDaemonWs } from '@/kessel/daemon-ws'
 import type { AppSettingsResponse } from '@shared/types'
 
 async function daemonUrl(path: string): Promise<string> {
@@ -28,15 +28,27 @@ async function daemonUrl(path: string): Promise<string> {
   return `http://127.0.0.1:${port}${path}?token=${token}`
 }
 
-/** GET `/cli/settings/get` — full settings snapshot. */
+/** GET `/cli/settings/get` — full settings snapshot.
+ *
+ *  Phase 2.5 fix (finding #547): retries once on a connection-level
+ *  failure after invalidating the cached daemon creds. The renderer
+ *  caches the daemon's port + token for the lifetime of the app
+ *  process; if the daemon restarts and (pre-Sub-fix-A) rotates its
+ *  port, the next call would otherwise route to a dead socket and
+ *  the calling store would fall back to defaults — which the user's
+ *  next interaction then persists, overwriting real settings.
+ *  See `daemon-cli.ts` for the same pattern.
+ */
 export async function settingsGet(): Promise<AppSettingsResponse> {
-  const url = await daemonUrl('/cli/settings/get')
-  const res = await fetch(url, { method: 'GET' })
-  if (!res.ok) {
-    const body = await res.text().catch(() => '')
-    throw new Error(`settings_get ${res.status}: ${body}`)
-  }
-  return (await res.json()) as AppSettingsResponse
+  return withConnRetry(async () => {
+    const url = await daemonUrl('/cli/settings/get')
+    const res = await fetch(url, { method: 'GET' })
+    if (!res.ok) {
+      const body = await res.text().catch(() => '')
+      throw new Error(`settings_get ${res.status}: ${body}`)
+    }
+    return (await res.json()) as AppSettingsResponse
+  })
 }
 
 /** POST `/cli/settings/update` — deep-merges `updates` into settings.
@@ -46,31 +58,62 @@ export async function settingsGet(): Promise<AppSettingsResponse> {
 export async function settingsUpdate(
   updates: Record<string, unknown>,
 ): Promise<AppSettingsResponse> {
-  const url = await daemonUrl('/cli/settings/update')
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(updates),
+  return withConnRetry(async () => {
+    const url = await daemonUrl('/cli/settings/update')
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    })
+    if (!res.ok) {
+      const body = await res.text().catch(() => '')
+      throw new Error(`settings_update ${res.status}: ${body}`)
+    }
+    return (await res.json()) as AppSettingsResponse
   })
-  if (!res.ok) {
-    const body = await res.text().catch(() => '')
-    throw new Error(`settings_update ${res.status}: ${body}`)
-  }
-  return (await res.json()) as AppSettingsResponse
 }
 
 /** POST `/cli/settings/reset` — restores defaults, deletes the Keychain
  *  companion password, invalidates every live companion session. */
 export async function settingsReset(): Promise<AppSettingsResponse> {
-  const url = await daemonUrl('/cli/settings/reset')
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: '{}',
+  return withConnRetry(async () => {
+    const url = await daemonUrl('/cli/settings/reset')
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    if (!res.ok) {
+      const body = await res.text().catch(() => '')
+      throw new Error(`settings_reset ${res.status}: ${body}`)
+    }
+    return (await res.json()) as AppSettingsResponse
   })
-  if (!res.ok) {
-    const body = await res.text().catch(() => '')
-    throw new Error(`settings_reset ${res.status}: ${body}`)
+}
+
+/** See `daemon-cli.ts::withConnRetry` for the rationale. Kept as a
+ *  local copy rather than imported because both modules need to be
+ *  safe to load before each other. */
+async function withConnRetry<T>(op: () => Promise<T>): Promise<T> {
+  try {
+    return await op()
+  } catch (err) {
+    if (!isConnectionLevelError(err)) throw err
+    invalidateDaemonWs()
+    return await op()
   }
-  return (await res.json()) as AppSettingsResponse
+}
+
+function isConnectionLevelError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  const m = err.message.toLowerCase()
+  return (
+    m.includes('failed to fetch') ||
+    m.includes('load failed') ||
+    m.includes('networkerror') ||
+    m.includes('connection refused') ||
+    m.includes('econnrefused') ||
+    m.includes('daemon_ws_url invoke failed') ||
+    m.includes('daemon not reachable')
+  )
 }

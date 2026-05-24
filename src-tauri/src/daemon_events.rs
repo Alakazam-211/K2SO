@@ -117,6 +117,18 @@ fn connect_once(app_handle: &AppHandle) -> ConnectOutcome {
     };
     log_debug!("[daemon-events] subscribed to daemon on port {port}");
 
+    // Phase 2.5 fix (finding #547): broadcast a connected event so
+    // renderer stores that failed their initial `settingsGet()` /
+    // `daemonCliGet()` calls can re-run them. Without this signal,
+    // an early-boot HTTP failure left every Zustand baseline at its
+    // hard-coded defaults until the user closed and reopened the
+    // app — and any UI write in the meantime would persist those
+    // defaults, overwriting real settings. Empty payload — the
+    // event itself is the signal; consumers re-fetch fresh state.
+    if let Err(e) = app_handle.emit("daemon:connected", serde_json::Value::Null) {
+        log_debug!("[daemon-events] emit daemon:connected failed: {e}");
+    }
+
     loop {
         match ws.read() {
             Ok(Message::Text(txt)) => {

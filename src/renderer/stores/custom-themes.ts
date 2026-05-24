@@ -2,6 +2,14 @@ import { create } from 'zustand'
 import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { parseCustomThemeJson, type ThemeColors } from '@/lib/editor-themes'
 import type { HighlightStyle } from '@codemirror/language'
+// Phase 2.5 fix (finding #547) — daemon-reconnect retry bus.
+import { onDaemonConnected } from '@/lib/daemon-reconnect'
+
+/** Phase 2.5 fix (finding #547) — flips to true once `loadCustomThemes`
+ *  successfully fetches a theme list from the daemon. Used purely for
+ *  the reconnect retry guard below (this store has no destructive
+ *  write-on-default code paths, so no persist gate is needed). */
+let hasLoadedFromDaemon = false
 
 interface CustomTheme {
   id: string       // e.g. "custom:my-custom-theme"
@@ -56,6 +64,10 @@ export const useCustomThemesStore = create<CustomThemesStore>((set, get) => ({
       }
 
       set({ customThemes: themes })
+      // Phase 2.5 fix (finding #547): only flip after a successful
+      // top-level fetch. Per-entry parse failures stay tolerated
+      // because they aren't a daemon-availability signal.
+      hasLoadedFromDaemon = true
     } catch (err) {
       console.warn('[custom-themes] Failed to load:', err)
     }
@@ -96,3 +108,14 @@ export const useCustomThemesStore = create<CustomThemesStore>((set, get) => ({
     return get().customThemes.find((t) => t.id === id)
   },
 }))
+
+// Phase 2.5 fix (finding #547): retry the load when the daemon
+// (re)connects, if the initial fetch (kicked off from settings.ts'
+// dynamic import) failed because the daemon's HTTP listener
+// wasn't bound yet. The store doesn't write-on-default so the
+// only risk pre-fix was "no custom themes appear in the picker
+// until the user reloads the app."
+onDaemonConnected(() => {
+  if (hasLoadedFromDaemon) return
+  useCustomThemesStore.getState().loadCustomThemes()
+})

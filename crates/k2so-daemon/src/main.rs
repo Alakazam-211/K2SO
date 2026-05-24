@@ -278,17 +278,39 @@ async fn async_main() {
     // daemon (K2SO Connect) picks it up without Tauri being present.
     k2so_core::db_ops::migrate_workspace_layouts_to_db();
 
-    let listener = match TcpListener::bind("127.0.0.1:0").await {
-        Ok(l) => l,
-        Err(e) => {
-            log_debug!("[daemon] FATAL: bind 127.0.0.1:0: {e}");
+    // Phase 2.5 follow-up: prefer the port stored in `~/.k2so/daemon.port`
+    // from the previous boot so the renderer's `daemon_ws_url` cache + the
+    // CLI's port-file readers don't get stale-port traffic on daemon
+    // restart. Algorithm + tests in `k2so_core::port_claim`.
+    let daemon_port_path = k2so_dir.join("daemon.port");
+    let claimed = match k2so_core::port_claim::claim_port(&daemon_port_path) {
+        Some(c) => c,
+        None => {
+            log_debug!("[daemon] FATAL: failed to bind any loopback port");
             std::process::exit(2);
         }
     };
-    let port = match listener.local_addr() {
-        Ok(a) => a.port(),
+    let port = claimed.port;
+    if claimed.reused {
+        log_debug!(
+            "[daemon] reused previously-published port {} (stable across restarts)",
+            port
+        );
+    } else {
+        log_debug!(
+            "[daemon] bound new ephemeral port {} (no prior port or port taken)",
+            port
+        );
+    }
+    // The std listener has to be set non-blocking before tokio can adopt it.
+    if let Err(e) = claimed.listener.set_nonblocking(true) {
+        log_debug!("[daemon] FATAL: set_nonblocking on claimed listener: {e}");
+        std::process::exit(2);
+    }
+    let listener = match TcpListener::from_std(claimed.listener) {
+        Ok(l) => l,
         Err(e) => {
-            log_debug!("[daemon] FATAL: local_addr: {e}");
+            log_debug!("[daemon] FATAL: tokio adopt claimed listener: {e}");
             std::process::exit(2);
         }
     };

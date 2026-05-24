@@ -57,6 +57,8 @@ pub mod inbox;
 pub mod migrations;
 pub mod llm;
 pub mod perf;
+// Phase 2.5 follow-up — daemon port stability (sub-fix A of finding #547).
+pub mod port_claim;
 pub mod project_config;
 pub mod projects_ops;
 pub mod push;
