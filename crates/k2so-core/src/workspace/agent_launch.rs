@@ -12,7 +12,7 @@
 //!    resume-context system prompt.
 //! 2. **Delegate from inbox.** Agent has work waiting in `inbox/` but
 //!    no active worktree → call
-//!    [`super::delegate::k2so_agents_delegate`] on the highest-
+//!    [`crate::agents::delegate::k2so_agents_delegate`] on the highest-
 //!    priority item, which creates a worktree + moves inbox → active
 //!    in one step.
 //! 3. **Fresh launch.** No active worktree, no inbox → launch in the
@@ -21,7 +21,7 @@
 //!    checksum-derived resume session ID if one is on file.
 //!
 //! The daemon's lid-closed wake path uses a much simpler variant
-//! (`super::wake::spawn_wake_headless`) that doesn't branch on work
+//! (`crate::agents::wake::spawn_wake_headless`) that doesn't branch on work
 //! queue state — lid-closed fires just want to hand the agent its
 //! wakeup.md. This function is the supervised-launch surface that
 //! needs the full decision tree.
@@ -129,7 +129,7 @@ pub fn k2so_agents_build_launch(
 
         if let Some((top_path, _)) = items.into_iter().next() {
             let source_file = top_path.to_string_lossy().to_string();
-            return super::delegate::k2so_agents_delegate(
+            return crate::agents::delegate::k2so_agents_delegate(
                 project_path,
                 agent_name,
                 source_file,
@@ -152,7 +152,7 @@ pub fn k2so_agents_build_launch(
     // WorkspaceRegenProvider bridge that used to forward this call
     // back to src-tauri is no longer needed. Both daemon and Tauri
     // contexts hit the same body now.
-    super::workspace::write_workspace_skill_file(&project_path);
+    crate::agents::workspace::write_workspace_skill_file(&project_path);
 
     // Check for previous session to resume. Lookup order:
     //   1. Heartbeat-scoped: agent_heartbeats.last_session_id (only when
