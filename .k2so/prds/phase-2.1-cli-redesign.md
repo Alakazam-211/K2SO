@@ -1238,6 +1238,312 @@ Estimated effort: ~400 LoC of daemon migration + ~50 LoC of CLI path updates + e
 
 **Phase 2.1 ship target**: 37 top-level verbs → 24, with clear daily/power/internal tiering and a skill-centric mental model that an LLM agent can navigate on first read.
 
+**(Note: A21 superseded by A22–A25 below; see A25 for the truly final taxonomy.)**
+
+---
+
+## A22 — Inbox as email primitive (NEW from final synthesis)
+
+**The reframe**: workspace inbox = email. Non-aggro, non-time-sensitive, agent-organized. There's no `--as <kind>` taxonomy imposed by the system — the agent organizes its own folders the way humans organize email (Projects, Reference, Issues, FYI — whatever fits the workspace).
+
+This **replaces the `work` verb entirely**. Tasks the agent creates for itself are inbox items the agent files into a folder of its own choosing. "Done" is `inbox archive`. "Active" is "in the folder I created for active work." No separate task / message distinction at the entry point — both flow through one channel.
+
+### A22.1 — The inbox verb surface
+
+```
+INBOX (everything the workspace receives or writes for itself)
+  inbox                                # show inbox (default: top-level)
+  inbox list [<folder>]                # list items in inbox or a folder
+  inbox read <id>                      # full text of one item
+  inbox compose --title "..." --body   # write your own item (was: work create)
+  inbox respond <id> "text"            # reply (back to sender)
+  inbox move <id> <folder>             # file into a folder (creates if doesn't exist)
+  inbox archive <id>                   # standard archive (preserved + searchable)
+  inbox delete <id>                    # standard delete (gone)
+  inbox search "query"                 # search across inbox + folders
+  inbox folders                        # list folders this workspace has created
+```
+
+10 subcommands, all standard email vocabulary. LLM agents have seen email primitives a billion times in training; this surface should test as the most LLM-friendly verb namespace in the CLI.
+
+### A22.2 — Send-side / receive-side metaphor consistency
+
+The `msg` verb already has the right shape under this model:
+
+| Verb | Email analog |
+|---|---|
+| `k2so msg <ws> "text"` | Phone call / IM — live, blocks until received, urgent |
+| `k2so msg <ws> --inbox "text"` | Email — drops in their inbox, they read at leisure |
+
+Recipient reads via `k2so inbox` and triages. **One mental model end-to-end: workspaces have an email inbox; you can call them or email them.**
+
+### A22.3 — Agent self-organizes folders (no system taxonomy)
+
+The original synthesis proposed `inbox triage <id> --as task|knowledge|issue|fyi|discard`. **Removed.** Agents organize their inbox the way humans organize email: by creating folders that fit their context.
+
+Examples of folders a workspace's agent might create:
+- `inbox/projects/` for active work
+- `inbox/reference/` for things to remember
+- `inbox/issues/` for problems to address
+- `inbox/discussions/` for ongoing threads
+- `inbox/done/` for completed
+- `inbox/from-pod-leader/` for messages from a specific peer
+- Or whatever taxonomy fits
+
+`inbox move <id> projects/` creates the folder on first use. `inbox folders` lists what exists. The agent's organizational system emerges from use.
+
+### A22.4 — Map from old work verbs to new inbox verbs
+
+| Old | New |
+|---|---|
+| `work create --title "..." --body "..."` | `inbox compose --title "..." --body "..."` |
+| `work inbox` | `inbox` (default action) |
+| `work move --from inbox --to active` | `inbox move <id> active` (agent's chosen folder) |
+| `work done` (no separate verb) | `inbox archive <id>` |
+| `work send <ws> --title --body` | `msg <ws> --inbox --title "..." --body "..."` (per A2.1) |
+
+### A22.5 — Verb count impact
+
+Daily verbs: 14 → 13 (`work` → `inbox`, count preserved when adding `glossary` per A10; minus 1 from delegate deprecation per A23). Actually: removed `work`, added `inbox` (net 0), removed `delegate` (net -1) → 13.
+
+---
+
+## A23 — `delegate` deprecation: harnesses handle worktree+spawn natively (NEW from final synthesis)
+
+**The reframe**: in 2026, Claude Code, Cursor, and every modern agent-runtime harness creates worktrees + assigns agents to work inside them as a native capability. K2SO doesn't need its own `delegate` verb anymore — that workflow is handled by the harness the user is already in.
+
+### A23.1 — Hard-deprecate `delegate`
+
+Remove from daily tier (it was added back per A19.3; A23 removes it permanently).
+
+`k2so delegate` exits non-zero with the message:
+
+> `delegate` is deprecated. Modern harnesses (Claude Code, Cursor, etc.) create worktrees and spawn agents natively — use your IDE's sub-agent / worktree feature instead. K2SO no longer manages the spawn lifecycle.
+>
+> For applying a skill profile to specific work without a fresh worktree, see `k2so skills profile <name>` for the SKILL.md content; load it into your harness's context.
+
+### A23.2 — Skills surface simplifies
+
+Skills become **just documentation profiles** — markdown files describing roles, personas, capabilities. The harness loads them; K2SO no longer "spawns" them.
+
+**Keep** (skills as documentation):
+- `skills list` — what skill profiles exist in this workspace
+- `skills create <name> [--template <role>]` — create a new skill profile
+- `skills remove <name>` — delete a skill profile
+- `skills profile <name>` — read a skill's SKILL.md / AGENT.md content
+- `skills regenerate [<name>]` — refresh SKILL.md files from templates
+
+**Drop** (all tied to the now-deprecated delegate-spawn model):
+- `skills launch <name>` — harness does this
+- `skills status <name>` — skills aren't "alive"; they're documents
+- `skills lock <name>` / `skills unlock <name>` — locking pertained to sessions, not docs
+- `skills work <name>` — work items are inbox items now, scoped per-workspace not per-skill
+
+### A23.3 — Reviews reframe
+
+`reviews` and `review approve/reject/feedback` survive but get reframed in help text:
+
+> Tracks pending merge reviews for worktrees this workspace has produced — regardless of who created the worktree (harness sub-agent spawn, human, integration). The review lifecycle is the same: read the diff, approve to merge, reject to discard, or send feedback to request changes.
+
+The verbs no longer presuppose K2SO created the worktree. The harness might create it; the human might create it; K2SO's job is review tracking + the merge action.
+
+### A23.4 — `commands/k2so_agents.rs` further shrinks
+
+Already a proxy-only sheet after Phase 2 close-out. A23 removes the `delegate` route + the `agents create/launch/lock/etc.` routes (most already soft-deprecated via A19 skills rename). The file's `#[tauri::command]` count drops further. Final shape: just the routes the harness uses + skill-profile management routes.
+
+---
+
+## A24 — Filesystem migration plan: `.k2so/work/` → `.k2so/inbox/` (REVISED — one-shot rename + move)
+
+**Decision (user direction 2026-05-23)**: direct 1:1 rename of the existing folder structure, with daemon-driven physical file migration on first boot. Simpler than dual-read; cleaner end-state.
+
+### A24.1 — Rename map
+
+| Old | New |
+|---|---|
+| `.k2so/work/inbox/` | `.k2so/inbox/` (top-level new arrivals) |
+| `.k2so/work/active/` | `.k2so/inbox/active/` |
+| `.k2so/work/done/` | `.k2so/inbox/done/` |
+
+After migration: `.k2so/work/` is empty and removed.
+
+### A24.2 — Standard folders + agent-created custom folders
+
+Under the new structure, `.k2so/inbox/` has:
+
+**Standard folders** (always exist by convention):
+- `.k2so/inbox/` itself = top-level new arrivals (untriaged)
+- `.k2so/inbox/active/` = items the agent is currently working on
+- `.k2so/inbox/done/` = items the agent has completed (archive target)
+
+**Custom folders** (agent-created on demand via `inbox move <id> <folder>`):
+- e.g., `.k2so/inbox/projects/`, `.k2so/inbox/reference/`, `.k2so/inbox/issues/`, `.k2so/inbox/from-pod-leader/`
+- Created on first `inbox move <id> <custom-folder>`; named freely by the agent
+
+So agents inherit a sensible default workflow (inbox → active → done) AND can organize richer custom structure on top (projects, reference, etc.).
+
+### A24.3 — Verb-to-filesystem mapping
+
+| Verb | Filesystem effect |
+|---|---|
+| `inbox` (default) | List items in `.k2so/inbox/` top-level (new arrivals) |
+| `inbox list` | Same as above |
+| `inbox list active` | List items in `.k2so/inbox/active/` |
+| `inbox list <custom-folder>` | List items in `.k2so/inbox/<custom-folder>/` |
+| `inbox move <id> active` | Move file to `.k2so/inbox/active/<id>.md` |
+| `inbox move <id> projects` | Move to `.k2so/inbox/projects/<id>.md` (creates folder if needed) |
+| `inbox archive <id>` | Move to `.k2so/inbox/done/<id>.md` (archive = done by convention) |
+| `inbox delete <id>` | Trash file (via `safe_delete::trash` for recoverability) |
+| `inbox folders` | List `find .k2so/inbox/ -type d -maxdepth 1` (excluding root) |
+| `inbox compose ...` | Create new file at `.k2so/inbox/<new-id>.md` (top-level new) |
+
+### A24.4 — Daemon-driven one-shot migration
+
+On the first boot after Phase 2.1 ships, the daemon runs an idempotent migration:
+
+```rust
+// crates/k2so-daemon/src/main.rs first-boot hook
+fn migrate_work_to_inbox(workspace: &Path) {
+    let old_root = workspace.join(".k2so/work");
+    let new_root = workspace.join(".k2so/inbox");
+    if !old_root.exists() { return; } // already migrated, or fresh install
+
+    // Step 1: atomic-rename each .md file to its new location.
+    // .k2so/work/inbox/* → .k2so/inbox/*
+    move_files(&old_root.join("inbox"), &new_root)?;
+    // .k2so/work/active/* → .k2so/inbox/active/*
+    move_files(&old_root.join("active"), &new_root.join("active"))?;
+    // .k2so/work/done/* → .k2so/inbox/done/*
+    move_files(&old_root.join("done"), &new_root.join("done"))?;
+
+    // Step 2: send the now-empty (or unexpected-content) .k2so/work/
+    // folder to the macOS Recycle Bin via safe_delete::trash. Matches
+    // K2SO's "all deletions go to Trash, never permanent" convention
+    // from 0.37.6 (task #443). If the user finds .k2so/work/ had
+    // content they wanted, they recover from Trash.
+    k2so_core::safe_delete::trash(&old_root)?;
+
+    // Step 3: marker so we don't re-scan on every boot.
+    std::fs::write(workspace.join(".k2so/.work-to-inbox-migration-v1-done"), "v1")?;
+}
+```
+
+Migration runs per-workspace on the daemon's first-boot sweep (same pattern as Unit 7b's `run_workspace_legacy_migrations_sweep`). Idempotent via the marker file. **No dual-read complexity** — after migration, only `.k2so/inbox/` is read.
+
+**Why trash-the-folder vs leave-in-place** (revised from earlier draft): even if `.k2so/work/` had unexpected user content (custom files the user dropped there outside the standard inbox/active/done structure), sending the whole folder to Trash is safer than leaving it dangling — the user has macOS Trash as a recovery surface, and the workspace's `.k2so/` tree stays clean.
+
+### A24.5 — Daemon routes
+
+- **NEW**: `/cli/inbox/*` (10 routes per A22.1: list, read, compose, respond, move, archive, delete, search, folders)
+- **DEPRECATED**: `/cli/work/*` routes return 410 Gone with body `{"error":"work/* routes deprecated in Phase 2.1; use /cli/inbox/* — see k2so help-deprecated"}`. Hard-deprecate in Phase 2.1 (not just soft) because the file migration moved the underlying data; the old routes have nothing to read from anyway.
+
+### A24.6 — User-facing impact
+
+- **First app launch after Phase 2.1 install**: daemon migrates the workspace's work items into inbox. Should be invisible to users — items appear at the same workflow stage (active → active, done → done, inbox top-level → inbox top-level).
+- **Backup recommended** but not required — the migration uses atomic rename (same filesystem; no copy + delete races).
+- **Marker file** (`.k2so/.work-to-inbox-migration-done`) prevents re-run. Users who want to manually re-run can delete the marker.
+
+### A24.7 — Cleanup of `.k2so/work/` itself
+
+Per A24.4 step 2: after all `.md` files migrate, the entire `.k2so/work/` folder goes to the macOS Recycle Bin via `safe_delete::trash`. Recoverable for the standard macOS retention period (usually 30 days). User can recover any unexpected content from Trash.
+
+### A24.9 — Email-metaphor consistency for delete operations
+
+Standard email Trash semantics:
+- Delete an item → goes to Trash folder (recoverable)
+- Empty Trash → permanently gone
+
+K2SO maps this onto macOS Recycle Bin (rather than maintaining its own `.k2so/inbox/trash/` folder):
+- `inbox delete <id>` → `safe_delete::trash(.k2so/inbox/<id>.md)` → goes to macOS Recycle Bin
+- Recovery: user manually restores from Finder's Trash
+- "Empty trash": user empties macOS Recycle Bin via Finder
+
+This keeps K2SO's filesystem clean (no per-workspace trash folder accumulating) and reuses the OS's existing recovery surface. Aligned with K2SO's general "all deletions go to Trash" pattern (memory `feedback_recycle_bin_tests`).
+
+**Known test caveat**: trash operations on macOS can trigger Touch ID prompts during `cargo test` (per the recycle-bin tests memory). The migration code itself is tested with mocked `safe_delete::trash` in unit tests; integration tests run interactively if a real `.k2so/work/` exists.
+
+### A24.8 — Phase 3 work (now smaller)
+
+Without dual-read transition complexity, Phase 3 just needs to remove the migration code itself (one-shot helper that's no longer needed once all installations are migrated). No additional `inbox migrate-legacy` verb needed — the daemon already did it.
+
+---
+
+## A25 — Final final consolidated taxonomy (REVISES A6 / A21)
+
+Replacing A21:
+
+| Tier | Verbs | Count |
+|---|---|---|
+| **Daily** | `msg`, `inbox`, `checkin`, `done` (alias), `reviews`, `review`, `workspace`, `who`, `connections`, `commit`, `whats-new`, `help`, `version`, `glossary` | **14** |
+| **Power-user** (`help --advanced`) | `heartbeat`, `daemon`, `settings`, `update`, `onboarding`, `skills` (simplified per A23.2) | 6 |
+| **Internal** (`help --internal`) | `terminal`, `sessions`, `agent` (singular bridging), `hooks` | 4 |
+| **Total** | | **24** |
+
+**Removed from prior versions:**
+- `work` (replaced by `inbox` per A22)
+- `delegate` (deprecated per A23)
+- `agentic`, `state`, `mode`, `app-update`, `commit-merge`, `companion`, `whatsnew`, `roster`, `feed`, `signal` (top-level), `work send` (top-level), `status` (top-level) — per A1-A5
+
+**Soft-deprecated (warning + forward):**
+- `whatsnew`, `agents create/delete/list/work/lock/unlock/launch/profile/status/running` (per A19.1), `work *` (forward to `inbox *` per A22.4), `--agent <name>` flags (per A16.3), `delegate` (per A23.1)
+
+**Hard-deprecated (error + `help-deprecated` pointer):**
+- `agentic`, `state`, `mode`, `app-update`, `commit-merge`, `companion`, `roster`, `feed`, `signal` (top-level), `work send` (top-level), `status` (top-level), `agents reap`, `agents triage`, `delegate` (per A23.1; hard not soft because harness replaces it entirely), `work create/inbox/move/done` (top-level — forwards to `inbox` per A22.4)
+
+### Mental model an LLM agent gets
+
+1. **Inbox**: things arrive (from other workspaces or self), agent triages by filing into folders it creates organically. `inbox` to see; `inbox compose` to write own item; `inbox move <id> <folder>` to file.
+2. **Msg**: send urgent (`msg <ws> "text"` — live) or async (`msg <ws> --inbox "text"` — email).
+3. **Checkin**: report status (`checkin`, `checkin --status`, `checkin --done`).
+4. **Workspace**: manage workspaces (`workspace list/launch/profile/update`).
+5. **Reviews**: track + act on pending merge reviews from worktrees.
+6. **Skills** (power-user): manage workspace's skill documentation profiles (no spawn lifecycle — harness handles that).
+7. **Heartbeat** (power-user): schedule wakes.
+8. **Glossary**: define K2SO-specific terms inline.
+
+**LLM-friendliness target after A22-A25**: ≥21/24 verbs (estimated 88% confident-pick rate). Email-as-primitive, workspace ops as standard CLI patterns, and the absence of K2SO-specific spawning verbs (`delegate` gone, `skills launch` gone) means agents are reading verbs they've seen in countless other CLIs.
+
+---
+
+## A26 — Implementation order (REVISES A9 + A19.5)
+
+Phase 2.1 subagent steps (replaces previous A9 order):
+
+1. **Add new daemon routes**: `/cli/inbox/*` (10 routes), `/cli/skills/*` (5 routes — simplified per A23.2), `/cli/workspaces/*` (per A6.1; partially exists from Unit 4)
+2. **Add `inbox` CLI verb surface** (per A22.1; 10 subcommands)
+3. **Add `skills` CLI verb surface** (per A23.2; 5 subcommands — much simpler than original A19.1's 10)
+4. **Add new workspace-keyed verbs** (per A6: `workspace list/launch/profile/update`)
+5. **Add flag handlers to existing verbs** (per A2: `msg --inbox/--signal`, `checkin --status/--done`, `commit --merge`)
+6. **Add deprecation wrappers**:
+   - `work *` → forward to `inbox *` with deprecation warning (per A22.4 + A24)
+   - `signal` → `msg --signal`
+   - `done` (top-level) → `checkin --done`
+   - `agents *` → `skills *` (soft-dep) or hard-dep per A19/A23
+7. **Add `help-deprecated` + reorganize `cmd_help`** into 3-tier per A4
+8. **Hard-deprecate** verbs per A25: `agentic`, `state`, `mode`, `app-update`, `commit-merge`, `companion`, `roster`, `feed`, `signal` top-level, `work send` top-level, `status` top-level, `agents reap`, `agents triage`, **`delegate`** (new in A23)
+9. **Rename**: `feed` → `activity` (verb body becomes activity), `roster` → `who`, `onboarding later/fresh` → `defer/start-fresh`
+10. **Glossary**: implement `k2so glossary [term]` per A10
+11. **Heartbeat reorganization** per A11 (schedule / signal / inspection families)
+12. **Filesystem**: daemon writes new inbox items to `.k2so/inbox/`; legacy `.k2so/work/` stays readable per A24.2
+13. **Run the test suite** (existing + new from A8 + A22.5 + A23 + A24 parity tests)
+14. **K2SO Connect smoke** (`K2SO_DAEMON_URL=<remote>` against a foreground daemon on different port)
+
+**Subagent time estimate**: 120-150 min (up from prior ~90-120 because A22 + A23 + A24 added scope).
+
+**Updated cli/k2so LoC**: 3,854 → **~2,200** (A23's `delegate` + skills-surface deletion + A22's `work` cluster removal net-delete more than A22's inbox surface adds).
+
+---
+
+## A27 — Tests added by A22-A25
+
+- `tests/cli/inbox_compose_subsumes_work_create.sh` — verify `inbox compose` and legacy `work create` produce the same filesystem state in their respective locations
+- `tests/cli/inbox_move_creates_folder.sh` — verify `inbox move <id> projects/` creates `.k2so/inbox/projects/` on first use
+- `tests/cli/inbox_lists_legacy_work_items.sh` — verify `inbox list` shows items from both `.k2so/inbox/` and `.k2so/work/{inbox,active,done}/` with `[legacy]` tag
+- `tests/cli/msg_inbox_lands_in_recipient_inbox.sh` — verify `msg <ws> --inbox` writes to recipient's `.k2so/inbox/`
+- `tests/cli/delegate_hard_deprecated_with_harness_pointer.sh` — verify `delegate` exits with the harness-handoff message
+- `tests/cli/skills_launch_hard_deprecated.sh` — verify `skills launch` is hard-deprecated (harness handles spawn)
+- `tests/cli/skills_list_returns_profiles.sh` — verify simplified skills surface still returns skill documents
+
 ---
 
 ## A7 — Updated cli/k2so LoC estimate
