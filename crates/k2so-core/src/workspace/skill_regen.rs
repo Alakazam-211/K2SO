@@ -821,7 +821,7 @@ pub fn regenerate_workspace_skill(project_path: String) -> Result<String, String
         // (the unified `k2so_core::inbox::*` primitive) post-Phase-2.1.
         // The legacy per-agent `<dir>/work/{inbox,active,done}/` layout
         // was retired in 0.37.0 unification — don't recreate it.
-        let manager_role = "Workspace Manager — delegates work to agents, reviews completed branches, drives milestones";
+        let manager_role = "Workspace Manager — coordinates with connected workspace-agents, reviews their branches, drives milestones";
         let manager_body =
             generate_default_agent_body("manager", "manager", manager_role, &project_path);
         let manager_md = format!(
@@ -901,11 +901,26 @@ pub fn regenerate_workspace_skill(project_path: String) -> Result<String, String
             Some("manager") | Some("coordinator") | Some("pod") => true,
             Some("agent") => false,
             _ => {
-                // Fallback: if either the post-2.5b skills dir or the
-                // legacy agents dir has sub-agents, assume manager mode.
-                // (Walks BOTH locations because partially-migrated
-                // workspaces during the consolidation window can have
-                // entries in either tree.)
+                // Fallback heuristic when the DB doesn't carry an
+                // explicit `agent_mode`: presence of skill/role
+                // directories suggests this workspace acts as a
+                // manager.
+                //
+                // **Dual-probe is intentional, not legacy cruft.**
+                // We check BOTH `.k2so/skills/` (post-Phase-2.5b
+                // unified home for skill profiles) AND
+                // `.k2so/agents/` (pre-2.5b per-agent directory tree)
+                // because workspaces caught mid-migration during the
+                // Phase 2.5b consolidation window can have entries in
+                // either tree (the migration sweep runs on daemon
+                // boot per workspace; a workspace that hasn't been
+                // touched since the daemon last booted may still
+                // expose only the legacy shape). Once every
+                // registered workspace has booted under a post-2.5b
+                // daemon, the `agents_dir` arm becomes dead code —
+                // but until then, removing it would flip false
+                // negatives on unmigrated workspaces. Leave both
+                // probes in place during the migration window.
                 let has_subagents = |root: &PathBuf| -> bool {
                     root.exists()
                         && fs::read_dir(root)
@@ -916,8 +931,9 @@ pub fn regenerate_workspace_skill(project_path: String) -> Result<String, String
                                         return false;
                                     }
                                     let name = e.file_name().to_string_lossy().to_string();
-                                    // The workspace skill itself isn't a sub-agent;
-                                    // its presence shouldn't flip manager-mode on.
+                                    // The workspace's own primary skill (`k2so`)
+                                    // isn't a peer agent; its presence shouldn't
+                                    // flip manager-mode on.
                                     !name.starts_with('.') && name != "k2so"
                                 })
                             })
