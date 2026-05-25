@@ -1,16 +1,25 @@
-# 0.39.0 Public Release Roadmap
+# Secure Tunnel Monetization Roadmap
 
 **Status**: Living document — update on phase transitions.
 **Last updated**: 2026-05-25
 **Owner**: Rosson + pod-leader
-**Target milestone**: Public 0.39.0 release (sign+notarize+DMG ship)
-**Estimated wall time remaining**: 1-2 months of focused work
+**Strategic goal**: launch the K2SO Hosted middle-tier ($2-?/mo `<sub>.k2.dev`) — the secure tunnel monetization product.
+**Intermediate milestone**: Public 0.39.0 release (sign+notarize+DMG ship) — unblocks the audience that will subscribe.
+**Estimated wall time remaining**: 1-2 months to public release + further weeks to monetization launch.
 
 ---
 
 ## tl;dr
 
-K2SO completed a massive architectural cleanup in Phase 2 (daemon-headless migration, ~18.8k LoC moved out of src-tauri) and Phase 2.1 (workspace==agent invariant, inbox-as-email primitive, `__lead__` sentinel removal). Phase 2.5* is the validation + cleanup gauntlet bridging that work to Phase 3 (contract hardening). Phase 3 produces the public 0.39.0 release. Phase 4 (post-launch) builds the monetization tier on K2SO-owned `k2.dev` infrastructure.
+K2SO's monetization play is the **K2SO Hosted secure-tunnel tier**: users pay ~$2/mo for a stable `<sub>.k2.dev` subdomain that exposes their local services (Mobile Companion daemon, demo on `localhost:3000`, etc.) to the internet without DIY networking. The free tier (Tailscale Funnel) and BYO tier (ngrok / LocalXpose affiliate) serve users who don't want to subscribe.
+
+Getting there has three engineering layers:
+
+1. **Public 0.39.0 release** (Phase 3) — ship the rebuilt daemon-headless architecture to the existing user base. This is the audience that will eventually subscribe.
+2. **Tunnel-provider decision** (Phase 2.6) — pick the backbone for the K2SO Hosted tier (CF Tunnel / Pangolin / FRP / etc.). Blocks Phase 3's TLS+auth workstream.
+3. **K2SO Hosted infrastructure** (Phase 4) — build the actual control plane: per-user subdomain provisioning, Stripe billing, admin UI. Post-launch work.
+
+Phase 2 + 2.1 (architectural cleanup) and Phase 2.5* (validation + refactor) are prerequisites. They're either done or in flight.
 
 This document tracks remaining decisions, blocks, and sequencing. Each phase has its own detailed PRD; this is the index + status board.
 
