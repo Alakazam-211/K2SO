@@ -1031,7 +1031,26 @@ pub fn parse_cursor_ide_sessions(project_filter: Option<&str>) -> Result<Vec<Cha
             });
         }
     }
-    Ok(results)
+    // Dedupe by composer_id: a single Cursor IDE composer can appear in
+    // multiple workspaceStorage directories (e.g. when a user opens the
+    // same project from two folder URIs, or when Cursor migrates state
+    // between workspace IDs). Without dedup the history list shows the
+    // same logical chat twice with identical session_ids → duplicate
+    // React keys downstream. Mirrors the dedup in `parse_cursor_sessions`
+    // and #550's fix in `parse_gemini_sessions`. Keep the entry with
+    // the most recent `lastUpdatedAt` since that's the workspace the
+    // user touched last.
+    use std::collections::HashMap;
+    let mut by_id: HashMap<String, ChatSession> = HashMap::new();
+    for s in results {
+        match by_id.get(&s.session_id) {
+            Some(existing) if existing.timestamp >= s.timestamp => {}
+            _ => {
+                by_id.insert(s.session_id.clone(), s);
+            }
+        }
+    }
+    Ok(by_id.into_values().collect())
 }
 
 // ── Gemini chat parsing ─────────────────────────────────────────────────
@@ -1367,7 +1386,25 @@ pub fn parse_pi_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSession
             });
         }
     }
-    Ok(results)
+    // Dedupe by session_id: Pi's CLI checkpoints a resumed session into
+    // multiple .jsonl files under different slug directories, but every
+    // file carries the SAME `id` in its session header. Without this
+    // pass we'd hand the same logical chat back multiple times and
+    // surface duplicate React keys in the history list. Same fix
+    // shape as parse_gemini_sessions (#550) and parse_cursor_sessions.
+    // Keep the entry with the latest timestamp (most recent checkpoint
+    // also tends to carry the highest message_count).
+    use std::collections::HashMap;
+    let mut by_id: HashMap<String, ChatSession> = HashMap::new();
+    for s in results {
+        match by_id.get(&s.session_id) {
+            Some(existing) if existing.timestamp >= s.timestamp => {}
+            _ => {
+                by_id.insert(s.session_id.clone(), s);
+            }
+        }
+    }
+    Ok(by_id.into_values().collect())
 }
 
 // ── Codex chat parsing ──────────────────────────────────────────────────
@@ -1531,7 +1568,25 @@ pub fn parse_codex_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSess
             }
         }
     }
-    Ok(results)
+    // Dedupe by session_id: Codex writes one .jsonl per resumed slice
+    // of the same logical session, each with a fresh
+    // `~/.codex/sessions/YYYY/MM/DD/...` path but the SAME `payload.id`
+    // in its session_meta header. Without this pass we surface every
+    // resume as a separate row in the history list (duplicate React
+    // keys, inflated "session count"). Mirrors the fix in
+    // parse_gemini_sessions (#550). Keep the entry with the latest
+    // timestamp (last-modified file = most recent resume).
+    use std::collections::HashMap;
+    let mut by_id: HashMap<String, ChatSession> = HashMap::new();
+    for s in results {
+        match by_id.get(&s.session_id) {
+            Some(existing) if existing.timestamp >= s.timestamp => {}
+            _ => {
+                by_id.insert(s.session_id.clone(), s);
+            }
+        }
+    }
+    Ok(by_id.into_values().collect())
 }
 
 // ── Aggregate list (claude + cursor + gemini + pi + codex) ────────────
@@ -2780,10 +2835,12 @@ mod tests {
     // test exercises that path with the same chat_id appearing under
     // two different project-hash directories.
     //
-    // Pi + Codex parsers DO NOT currently dedupe — see findings noted
-    // in the Tier 1 sub-agent report. Tests for those parsers are
-    // deliberately omitted here: writing them would either lock in
-    // the broken behavior or fail the suite without a paired fix.
+    // 0.39.0 follow-up: Pi, Codex, and Cursor IDE parsers all received
+    // the same `HashMap<session_id, ChatSession>` dedup tail. Each
+    // provider has its own quirk that produces dupes — Pi/Codex
+    // checkpoint resumed sessions into multiple files, Cursor IDE can
+    // mirror a composer across workspaceStorage dirs. Tests below cover
+    // all three.
 
     #[test]
     fn parse_cursor_sessions_dedupes_chat_id_across_hash_dirs() {
@@ -2818,5 +2875,169 @@ mod tests {
             "expected dedup by chat_id; got: {sessions:?}"
         );
         assert_eq!(matching[0].provider, "cursor");
+    }
+
+    #[test]
+    fn parse_pi_sessions_dedupes_session_id_across_slug_dirs() {
+        // Pi checkpoints a resumed session into a fresh .jsonl under a
+        // (potentially) different slug directory, but the header `id`
+        // is the same logical session. Without dedup we'd surface the
+        // same session twice. Build two slug dirs each containing a
+        // .jsonl with the same session id and an early vs. late
+        // timestamp — the late one must win.
+        let _g = UNIT6_HOME_LOCK.lock();
+        let _h = U6HomeGuard::new("pi-dedup");
+        let sessions_root = dirs::home_dir()
+            .unwrap()
+            .join(".pi")
+            .join("agent")
+            .join("sessions");
+        let slug_a = sessions_root.join("slug-a");
+        let slug_b = sessions_root.join("slug-b");
+        std::fs::create_dir_all(&slug_a).unwrap();
+        std::fs::create_dir_all(&slug_b).unwrap();
+
+        let session_id = "pi-shared-session-zzz";
+        // Earlier checkpoint under slug-a (timestamp 2026-01-01).
+        let early = format!(
+            "{{\"type\":\"session\",\"id\":\"{session_id}\",\"cwd\":\"/repo\",\"timestamp\":\"2026-01-01T00:00:00Z\"}}\n\
+             {{\"type\":\"message\",\"timestamp\":\"2026-01-01T00:00:01Z\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"first\"}}]}}}}\n"
+        );
+        std::fs::write(slug_a.join("checkpoint-1.jsonl"), early).unwrap();
+
+        // Later checkpoint under slug-b (timestamp 2026-05-01).
+        let late = format!(
+            "{{\"type\":\"session\",\"id\":\"{session_id}\",\"cwd\":\"/repo\",\"timestamp\":\"2026-05-01T00:00:00Z\"}}\n\
+             {{\"type\":\"message\",\"timestamp\":\"2026-05-01T00:00:01Z\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"second resume\"}}]}}}}\n"
+        );
+        std::fs::write(slug_b.join("checkpoint-2.jsonl"), late).unwrap();
+
+        let sessions = parse_pi_sessions(None).expect("parse");
+        let matching: Vec<_> = sessions
+            .iter()
+            .filter(|s| s.session_id == session_id)
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "expected dedup by session_id across slug dirs; got: {sessions:?}",
+        );
+        assert_eq!(matching[0].provider, "pi");
+        // Latest checkpoint wins → its title is "second resume".
+        assert_eq!(
+            matching[0].title, "second resume",
+            "latest-timestamp entry must win",
+        );
+    }
+
+    #[test]
+    fn parse_codex_sessions_dedupes_session_id_across_day_dirs() {
+        // Codex stores each resume slice under a fresh
+        // YYYY/MM/DD/...jsonl path, but the session_meta header carries
+        // the SAME `payload.id`. Without dedup the history list shows
+        // one row per resume.
+        let _g = UNIT6_HOME_LOCK.lock();
+        let _h = U6HomeGuard::new("codex-dedup");
+        let sessions_root = dirs::home_dir().unwrap().join(".codex").join("sessions");
+        let day_a = sessions_root.join("2026").join("01").join("01");
+        let day_b = sessions_root.join("2026").join("05").join("01");
+        std::fs::create_dir_all(&day_a).unwrap();
+        std::fs::create_dir_all(&day_b).unwrap();
+
+        let session_id = "codex-shared-session-abc12345";
+        let header_early = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"/repo\",\"timestamp\":\"2026-01-01T00:00:00Z\"}}}}\n"
+        );
+        let header_late = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"/repo\",\"timestamp\":\"2026-05-01T00:00:00Z\"}}}}\n"
+        );
+
+        // Write the two .jsonl files with naturally-staggered mtimes —
+        // the parser keys `timestamp` on file mtime when present, so as
+        // long as `late.mtime > early.mtime` the dedup tail keeps the
+        // later one. Sleeping between writes is enough on every filesystem
+        // we ship to (APFS / ext4 / btrfs all carry sub-second mtime).
+        let path_early = day_a.join("rollout-early.jsonl");
+        let path_late = day_b.join("rollout-late.jsonl");
+        std::fs::write(&path_early, header_early).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path_late, header_late).unwrap();
+
+        let sessions = parse_codex_sessions(None).expect("parse");
+        let matching: Vec<_> = sessions
+            .iter()
+            .filter(|s| s.session_id == session_id)
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "expected dedup by session_id across day dirs; got: {sessions:?}",
+        );
+        assert_eq!(matching[0].provider, "codex");
+    }
+
+    #[test]
+    fn parse_cursor_ide_sessions_dedupes_composer_id_across_workspaces() {
+        // A single Cursor IDE composer can appear in multiple
+        // workspaceStorage directories — e.g. when Cursor migrates
+        // state between workspace IDs or the user opens the same
+        // project from two different folder URIs. The state.vscdb
+        // SQLite blob is the source of truth; we build two minimal
+        // ones with the same composerId but different lastUpdatedAt
+        // values to confirm dedup keeps the latest.
+        let _g = UNIT6_HOME_LOCK.lock();
+        let _h = U6HomeGuard::new("cursor-ide-dedup");
+        let workspace_dir = dirs::home_dir()
+            .unwrap()
+            .join("Library/Application Support/Cursor/User/workspaceStorage");
+        let ws_a = workspace_dir.join("ws-a");
+        let ws_b = workspace_dir.join("ws-b");
+        std::fs::create_dir_all(&ws_a).unwrap();
+        std::fs::create_dir_all(&ws_b).unwrap();
+
+        // Both workspaces point at the same folder URI so neither
+        // gets filtered (filter is None anyway, but we still need
+        // valid JSON for the parser to read past workspace.json).
+        let ws_json = r#"{"folder":"file:///repo"}"#;
+        std::fs::write(ws_a.join("workspace.json"), ws_json).unwrap();
+        std::fs::write(ws_b.join("workspace.json"), ws_json).unwrap();
+
+        let composer_id = "ide-shared-composer-xyz";
+        // Helper: build a state.vscdb with one composer row.
+        let seed_db = |path: &std::path::Path, name: &str, last_updated: i64| {
+            let conn = rusqlite::Connection::open(path).expect("open state.vscdb");
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value TEXT);",
+            )
+            .expect("create ItemTable");
+            let composer_json = format!(
+                r#"{{"allComposers":[{{"composerId":"{composer_id}","name":"{name}","lastUpdatedAt":{last_updated},"createdAt":1000}}]}}"#
+            );
+            conn.execute(
+                "INSERT INTO ItemTable (key, value) VALUES ('composer.composerData', ?1)",
+                rusqlite::params![composer_json],
+            )
+            .expect("insert composer row");
+        };
+
+        seed_db(&ws_a.join("state.vscdb"), "Older Name", 1_000_000);
+        seed_db(&ws_b.join("state.vscdb"), "Newer Name", 2_000_000);
+
+        let sessions = parse_cursor_ide_sessions(None).expect("parse");
+        let matching: Vec<_> = sessions
+            .iter()
+            .filter(|s| s.session_id == composer_id)
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "expected dedup by composer_id; got: {sessions:?}",
+        );
+        assert_eq!(matching[0].provider, "cursor");
+        // Latest lastUpdatedAt wins → its name was "Newer Name".
+        assert_eq!(
+            matching[0].title, "Newer Name",
+            "latest-lastUpdatedAt entry must win",
+        );
     }
 }
