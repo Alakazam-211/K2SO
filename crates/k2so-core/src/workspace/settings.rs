@@ -101,64 +101,54 @@ pub fn get_project_settings(project_path: &str) -> Result<serde_json::Value, Str
     .map_err(|e| format!("Project not found: {}", e))
 }
 
-/// Read the global agentic-systems toggle from the `app_settings`
-/// key/value table. Defaults to `false` if the row isn't present.
+/// Read the global agentic-systems toggle from
+/// `~/.k2so/settings.json` via [`crate::app_settings`]. Defaults to
+/// `false` when the field is missing — the AppSettings serde default
+/// for `agentic_systems_enabled`.
+///
+/// **0.39.0 migration:** these accessors used to read the SQLite
+/// `app_settings (key, value)` table created by migration 0050. That
+/// table is now dead-but-inert (kept in the migration ladder for
+/// rollback safety only); the canonical store is the JSON file, which
+/// shares the same writer lock (`SETTINGS_LOCK`) as every other
+/// daemon-side setting and so closes the F3 two-writers race for this
+/// toggle too.
 pub fn get_agentic_enabled() -> bool {
-    let db = crate::db::shared();
-    let conn = db.lock();
-    conn.query_row(
-        "SELECT value FROM app_settings WHERE key = 'agentic_systems_enabled'",
-        [],
-        |row| row.get::<_, String>(0),
-    )
-    .map(|v| v == "1")
-    .unwrap_or(false)
+    crate::app_settings::load().agentic_systems_enabled
 }
 
-/// Set the global agentic-systems toggle. UPSERTs the
-/// `agentic_systems_enabled` key in `app_settings`.
+/// Set the global agentic-systems toggle in `~/.k2so/settings.json`
+/// via [`crate::app_settings::update`]. The update is atomic across
+/// concurrent callers (the `SETTINGS_LOCK` mutex serializes the
+/// load+merge+save critical section).
 pub fn set_agentic_enabled(enabled: bool) -> Result<(), String> {
-    let db = crate::db::shared();
-    let conn = db.lock();
-    let value = if enabled { "1" } else { "0" };
-    conn.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('agentic_systems_enabled', ?1)",
-        rusqlite::params![value],
-    )
+    crate::app_settings::update(serde_json::json!({
+        "agenticSystemsEnabled": enabled,
+    }))
     .map(|_| ())
-    .map_err(|e| format!("DB update failed: {}", e))
 }
 
 /// Read the "keep daemon running when K2SO quits" preference from
-/// `app_settings`. Defaults to `true` — matches the persistent-agents
-/// flagship: if the user installed K2SO and opted into heartbeats,
-/// they presumably want them to keep firing when the window closes.
-/// The menubar icon provides visibility into what's running, so
-/// defaulting ON doesn't leave the user wondering.
+/// `~/.k2so/settings.json`. Defaults to `true` — matches the
+/// persistent-agents flagship: if the user installed K2SO and opted
+/// into heartbeats, they presumably want them to keep firing when the
+/// window closes. The menubar icon provides visibility into what's
+/// running, so defaulting ON doesn't leave the user wondering.
+///
+/// **0.39.0 migration:** see [`get_agentic_enabled`] — same story.
+/// Migration 0050's `app_settings (key, value)` table is no longer
+/// the source of truth; `AppSettings::keep_daemon_on_quit` is.
 pub fn get_keep_daemon_on_quit() -> bool {
-    let db = crate::db::shared();
-    let conn = db.lock();
-    conn.query_row(
-        "SELECT value FROM app_settings WHERE key = 'keep_daemon_on_quit'",
-        [],
-        |row| row.get::<_, String>(0),
-    )
-    .map(|v| v == "1")
-    .unwrap_or(true) // default ON
+    crate::app_settings::load().keep_daemon_on_quit
 }
 
-/// Set the "keep daemon running when K2SO quits" preference. UPSERTs
-/// the `keep_daemon_on_quit` key in `app_settings`.
+/// Set the "keep daemon running when K2SO quits" preference in
+/// `~/.k2so/settings.json`. Atomic via [`crate::app_settings::update`].
 pub fn set_keep_daemon_on_quit(keep: bool) -> Result<(), String> {
-    let db = crate::db::shared();
-    let conn = db.lock();
-    let value = if keep { "1" } else { "0" };
-    conn.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('keep_daemon_on_quit', ?1)",
-        rusqlite::params![value],
-    )
+    crate::app_settings::update(serde_json::json!({
+        "keepDaemonOnQuit": keep,
+    }))
     .map(|_| ())
-    .map_err(|e| format!("DB update failed: {}", e))
 }
 
 /// Return `true` if the given project has opted into the 0.34.0
@@ -293,74 +283,100 @@ mod tests {
         assert!(!get_use_session_stream(&path));
     }
 
-    // ── app_settings key/value accessors ───────────────────────────
+    // ── app_settings JSON accessors ────────────────────────────────
     //
-    // Migration 0050 finally creates the `app_settings` table that
-    // the four global toggles below reference. Pre-0050 the SET side
-    // silently failed with "no such table: app_settings" and the GET
-    // side defaulted via `.unwrap_or(...)`, so production /cli/agentic
-    // returned HTTP 400 and the menubar's keep-daemon-on-quit preference
-    // never persisted across restarts. These tests cover the round-trip
-    // explicitly so we never regress that table out from under the
-    // accessors again.
+    // 0.39.0 moved the four global toggles (agentic_systems_enabled,
+    // keep_daemon_on_quit) off of the SQLite `app_settings (key, value)`
+    // table and onto `~/.k2so/settings.json`. These tests pin the
+    // round-trip through the JSON store so we never regress that
+    // canonicalization.
     //
-    // Both keys share the same shared in-memory DB handle as the
-    // sibling tests above. The keys are namespaced by name ("agentic_
-    // systems_enabled", "keep_daemon_on_quit"), so the two test groups
-    // can run in parallel — but they MUST be isolated from each other
-    // via a dedicated mutex because there's only one global row per
-    // key. `parking_lot::Mutex` keeps the lock small and panic-safe.
+    // The previous SQLite tests (commit df244efe) shared a per-process
+    // mutex over the global row — fine for that backend because the
+    // shared in-memory DB is process-wide. The new JSON backend reads
+    // `$HOME/.k2so/settings.json`, so each test instead points `$HOME`
+    // at a fresh tempdir (matching the pattern in `app_settings::tests`).
+    // We share the crate-wide `themes::HOME_LOCK` mutex with the other
+    // HOME-mutating test modules so two of them don't race on `$HOME`
+    // at once — see the long comment in `app_settings::tests` for why
+    // a single shared lock matters.
+    use crate::themes::HOME_LOCK as HOME_TEST_LOCK;
 
-    static APP_SETTINGS_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    /// Point `$HOME` at a freshly-created tempdir for the lifetime of
+    /// the guard. Mirrors the pattern in `app_settings::tests` —
+    /// kept local here rather than re-exported so workspace/settings
+    /// tests don't depend on the private `tempdir_lite` module in
+    /// `app_settings::tests`.
+    struct HomeGuard {
+        original: Option<std::ffi::OsString>,
+        path: std::path::PathBuf,
+    }
 
-    /// Reset the row for a given key so a test starts from a known
-    /// state (absence). Uses DELETE rather than dropping the table so
-    /// migration 0050 stays applied for the rest of the test binary.
-    fn clear_app_setting(key: &str) {
-        let db = crate::db::shared();
-        let conn = db.lock();
-        conn.execute(
-            "DELETE FROM app_settings WHERE key = ?1",
-            rusqlite::params![key],
-        )
-        .expect("delete app_settings row");
+    impl HomeGuard {
+        fn new() -> Self {
+            let pid = std::process::id();
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir()
+                .join(format!("k2so-workspace-settings-test-{pid}-{nanos}"));
+            std::fs::create_dir_all(&path).expect("create tempdir for HOME");
+            let original = std::env::var_os("HOME");
+            std::env::set_var("HOME", &path);
+            Self { original, path }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.original.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
     }
 
     #[test]
     fn agentic_enabled_round_trips_through_app_settings() {
-        let _g = APP_SETTINGS_LOCK.lock();
-        clear_app_setting("agentic_systems_enabled");
+        let _g = HOME_TEST_LOCK.lock();
+        let _home = HomeGuard::new();
 
-        // Default when the row is absent is `false` — and (crucially,
-        // post-0050) this read no longer hides a "no such table" error;
-        // it returns the documented default.
+        // Default when the JSON file is absent is `false` — the
+        // `AppSettings::default()` value for `agentic_systems_enabled`.
         assert!(
             !get_agentic_enabled(),
-            "fresh DB → agentic_systems_enabled defaults to false",
+            "fresh ~/.k2so/settings.json → agentic_systems_enabled defaults to false",
         );
 
         // Set true → read true.
         set_agentic_enabled(true).expect("set true");
         assert!(get_agentic_enabled(), "after set(true), read must be true");
 
-        // Set false → read false (UPSERT replaces the existing row).
+        // Set false → read false (update() rewrites the JSON in place).
         set_agentic_enabled(false).expect("set false");
         assert!(
             !get_agentic_enabled(),
             "after set(false), read must be false",
         );
+
+        // And confirm a fresh `app_settings::load()` (the canonical
+        // round-trip path) sees the same value — guards against the
+        // accessor accidentally caching in-process.
+        assert!(!crate::app_settings::load().agentic_systems_enabled);
     }
 
     #[test]
     fn keep_daemon_on_quit_round_trips_through_app_settings() {
-        let _g = APP_SETTINGS_LOCK.lock();
-        clear_app_setting("keep_daemon_on_quit");
+        let _g = HOME_TEST_LOCK.lock();
+        let _home = HomeGuard::new();
 
-        // Default when the row is absent is `true` — see the doc
+        // Default when the JSON file is absent is `true` — see the doc
         // comment on `get_keep_daemon_on_quit` for the rationale.
         assert!(
             get_keep_daemon_on_quit(),
-            "fresh DB → keep_daemon_on_quit defaults to true",
+            "fresh ~/.k2so/settings.json → keep_daemon_on_quit defaults to true",
         );
 
         set_keep_daemon_on_quit(false).expect("set false");
@@ -374,18 +390,30 @@ mod tests {
             get_keep_daemon_on_quit(),
             "after set(true), read must be true",
         );
+
+        // Fresh load sees the persisted value.
+        assert!(crate::app_settings::load().keep_daemon_on_quit);
     }
 
     #[test]
     fn set_agentic_enabled_is_idempotent_under_repeated_writes() {
-        // Regression guard for the "INSERT OR REPLACE" path — calling
-        // set twice with the same value must leave the row in the
-        // expected state, not error on a UNIQUE violation.
-        let _g = APP_SETTINGS_LOCK.lock();
-        clear_app_setting("agentic_systems_enabled");
+        // Regression guard for the deep-merge path — calling set twice
+        // with the same value must leave the JSON in the expected
+        // state and not corrupt or duplicate the field.
+        let _g = HOME_TEST_LOCK.lock();
+        let _home = HomeGuard::new();
 
         set_agentic_enabled(true).expect("first set");
         set_agentic_enabled(true).expect("second set — must not error");
         assert!(get_agentic_enabled());
+
+        // Sibling fields must not be perturbed by the partial update —
+        // deep_merge in `app_settings` should only touch the one key
+        // we passed in.
+        let loaded = crate::app_settings::load();
+        assert!(
+            loaded.keep_daemon_on_quit,
+            "agentic toggle must not clobber keep_daemon_on_quit default",
+        );
     }
 }

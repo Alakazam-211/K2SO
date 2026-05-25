@@ -385,6 +385,7 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
         ("0047_drop_agent_sessions_archive", include_str!("../../drizzle_sql/0047_drop_agent_sessions_archive.sql")),
         ("0048_prune_index_artifacts", include_str!("../../drizzle_sql/0048_prune_index_artifacts.sql")),
         ("0049_drop_lead_sentinel_in_activity_feed", include_str!("../../drizzle_sql/0049_drop_lead_sentinel_in_activity_feed.sql")),
+        // 0050 (added in 0.39.0): app_settings table — superseded by ~/.k2so/settings.json in same release; kept for rollback safety, not read by current code.
         ("0050_app_settings", include_str!("../../drizzle_sql/0050_app_settings.sql")),
     ];
 
