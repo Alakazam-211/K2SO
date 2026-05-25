@@ -28,6 +28,9 @@ use crate::scheduler::should_project_fire;
 pub mod cron;
 // Phase 2.5c: launchd plist scaffolding + crontab installer.
 pub mod install;
+// Phase 2.5d: per-agent heartbeat control (ensure_agent_wakeup +
+// get/set + noop/action). Extracted from `agents/commands.rs`.
+pub mod control;
 
 /// Create a new heartbeat row + scaffold its `WAKEUP.md` file.
 ///

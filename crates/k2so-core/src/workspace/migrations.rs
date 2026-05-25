@@ -15,9 +15,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::agents::commands::ensure_agent_wakeup;
 use crate::db::schema::{AgentHeartbeat, WorkspaceSession};
 use crate::fs_atomic::{self, atomic_write_str, log_if_err, unique_archive_path};
+use crate::heartbeats::control::ensure_agent_wakeup;
 use crate::heartbeats::k2so_heartbeat_add;
 use crate::log_debug;
 use crate::workspace::agent_identity::{
