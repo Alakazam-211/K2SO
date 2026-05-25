@@ -910,3 +910,249 @@ pub fn generate_agent_claude_md_content(
 ) -> Result<String, String> {
     compose_agent_wake_context(project_path, agent_name, current_task)
 }
+
+#[cfg(test)]
+mod tests {
+    //! Phase 2 Tier 2.2 snapshot-style coverage for the 4 SKILL.md
+    //! content generators. These were rewritten in commit b2b24e7d to
+    //! match the Phase 2.1 A25 canonical CLI taxonomy. The tests pin:
+    //!
+    //!   1. Each generator returns non-empty content.
+    //!   2. Each generator's output references the right section headers
+    //!      for its tier (manager → "Workspace Manager"; k2so-agent →
+    //!      "planner"; etc.).
+    //!   3. Each generator's output does NOT contain any of the hard-
+    //!      deprecated verbs Phase 2.1 retired (`k2so delegate`,
+    //!      `k2so work create`, `k2so signal`, `k2so app-update`).
+    //!   4. Each generator references the canonical A25 verbs
+    //!      (`k2so inbox`, `k2so msg`, `k2so checkin`, `k2so workspace`).
+    //!
+    //! The Tier-2.2 PRD calls these "snapshot tests" — they're not
+    //! literal value-byte snapshots (those rot fast as templates evolve)
+    //! but structural assertions that catch the failure modes that
+    //! matter: deprecated verbs sneaking back in, or a template losing
+    //! its tier-identifying heading.
+    use super::*;
+    use uuid::Uuid;
+
+    /// Hard-deprecated verbs from Phase 2.1 A25. If a generator's
+    /// output contains any of these substrings, the template has
+    /// regressed.
+    ///
+    /// Substrings only — `k2so work create` matches anywhere the verb
+    /// appears as a command-line invocation. Whole `k2so work` is
+    /// allowed (e.g., the inbox primitive comments still reference it
+    /// historically); only the deprecated SUBCOMMANDS are blocklisted.
+    const DEPRECATED_VERBS: &[&str] = &[
+        "k2so delegate",
+        "k2so work create",
+        "k2so work send",
+        "k2so work move",
+        "k2so work inbox",
+        "k2so signal",
+        "k2so app-update",
+        // Phase 2.1 also retired `k2so agents create` / `k2so agents list`
+        // / `k2so agents delete` (the plural-noun verbs); but plural
+        // `agents` in narrative prose ("your agents") is fine.
+        "k2so agents create",
+        "k2so agents delete",
+        "k2so agents list",
+        "k2so agents running",
+        "k2so agents work",
+    ];
+
+    fn assert_no_deprecated_verbs(content: &str, generator: &str) {
+        let mut hits: Vec<&str> = Vec::new();
+        for verb in DEPRECATED_VERBS {
+            if content.contains(verb) {
+                hits.push(verb);
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "{generator} content must NOT contain hard-deprecated verbs; found {hits:?}\n\
+             Full content excerpt (first 400 chars):\n{}",
+            &content[..content.len().min(400)],
+        );
+    }
+
+    fn assert_contains_canonical_a25_verbs(content: &str, generator: &str, required: &[&str]) {
+        for verb in required {
+            assert!(
+                content.contains(verb),
+                "{generator} content must reference canonical A25 verb {verb:?}",
+            );
+        }
+    }
+
+    // ── generate_manager_skill_content ─────────────────────────────
+
+    #[test]
+    fn manager_skill_content_is_non_empty_and_includes_tier_headers() {
+        // generate_manager_skill_content hits the DB (workspace_states +
+        // workspace_relations); use a unique unregistered path so the
+        // DB lookups return None and the template falls through to its
+        // baseline body.
+        let project_path = format!("/tmp/manager-skill-{}", Uuid::new_v4());
+        let body = generate_manager_skill_content(&project_path, "TestWorkspace");
+
+        assert!(!body.is_empty(), "manager skill body must be non-empty");
+        assert!(
+            body.contains("Workspace Manager"),
+            "manager skill must include 'Workspace Manager' header"
+        );
+        assert!(
+            body.contains("TestWorkspace"),
+            "manager skill must mention the project_name"
+        );
+    }
+
+    #[test]
+    fn manager_skill_content_uses_canonical_a25_verbs_and_no_deprecated() {
+        let project_path = format!("/tmp/manager-verbs-{}", Uuid::new_v4());
+        let body = generate_manager_skill_content(&project_path, "Verbs");
+
+        assert_no_deprecated_verbs(&body, "generate_manager_skill_content");
+        assert_contains_canonical_a25_verbs(
+            &body,
+            "generate_manager_skill_content",
+            &["k2so inbox", "k2so checkin", "k2so reviews"],
+        );
+    }
+
+    // ── generate_custom_agent_skill_content ────────────────────────
+
+    #[test]
+    fn custom_agent_skill_content_is_non_empty_and_identifies_agent_name() {
+        let body = generate_custom_agent_skill_content("MyProject", "myagent");
+
+        assert!(!body.is_empty(), "custom-agent body must be non-empty");
+        assert!(body.contains("myagent"), "agent name must appear");
+        assert!(body.contains("MyProject"), "project name must appear");
+        assert!(
+            body.contains("K2SO Agent Skill"),
+            "custom-agent template must include 'K2SO Agent Skill' header (NOT the comprehensive variant)"
+        );
+    }
+
+    #[test]
+    fn custom_agent_skill_content_uses_canonical_a25_verbs_and_no_deprecated() {
+        let body = generate_custom_agent_skill_content("MyProject", "myagent");
+
+        assert_no_deprecated_verbs(&body, "generate_custom_agent_skill_content");
+        assert_contains_canonical_a25_verbs(
+            &body,
+            "generate_custom_agent_skill_content",
+            &["k2so inbox", "k2so checkin", "k2so msg"],
+        );
+    }
+
+    // ── generate_k2so_agent_skill_content ──────────────────────────
+
+    #[test]
+    fn k2so_agent_skill_content_is_comprehensive_and_planner_focused() {
+        let body = generate_k2so_agent_skill_content("PlanProject", "planner");
+
+        assert!(!body.is_empty(), "k2so-agent body must be non-empty");
+        assert!(
+            body.contains("Comprehensive"),
+            "k2so-agent template must signal Comprehensive variant in its title line"
+        );
+        assert!(
+            body.contains("planner"),
+            "k2so-agent body must mention the planner role"
+        );
+        assert!(body.contains("PlanProject"), "project name must appear");
+    }
+
+    #[test]
+    fn k2so_agent_skill_content_uses_canonical_a25_verbs_and_no_deprecated() {
+        let body = generate_k2so_agent_skill_content("PlanProject", "planner");
+
+        assert_no_deprecated_verbs(&body, "generate_k2so_agent_skill_content");
+        // The comprehensive variant gets the broader surface — verify
+        // it includes the connections/messaging + heartbeat verbs.
+        assert_contains_canonical_a25_verbs(
+            &body,
+            "generate_k2so_agent_skill_content",
+            &[
+                "k2so inbox",
+                "k2so checkin",
+                "k2so msg",
+                "k2so heartbeat",
+                "k2so connections",
+            ],
+        );
+    }
+
+    // ── generate_template_skill_content ────────────────────────────
+
+    #[test]
+    fn template_skill_content_is_non_empty_and_identifies_profile() {
+        let body = generate_template_skill_content("MyProject", "qa-eng");
+
+        assert!(!body.is_empty(), "template body must be non-empty");
+        assert!(
+            body.contains("Skill Profile"),
+            "template must include 'Skill Profile' label"
+        );
+        assert!(body.contains("qa-eng"), "agent name must appear");
+        assert!(body.contains("MyProject"), "project name must appear");
+    }
+
+    #[test]
+    fn template_skill_content_uses_canonical_a25_verbs_and_no_deprecated() {
+        let body = generate_template_skill_content("MyProject", "qa-eng");
+
+        assert_no_deprecated_verbs(&body, "generate_template_skill_content");
+        assert_contains_canonical_a25_verbs(
+            &body,
+            "generate_template_skill_content",
+            &["k2so checkin", "k2so inbox"],
+        );
+    }
+
+    // ── CUSTOM_AGENT_HEARTBEAT_DOCS const sanity ───────────────────
+
+    #[test]
+    fn custom_agent_heartbeat_docs_uses_canonical_a25_verbs_and_no_deprecated() {
+        // The CUSTOM_AGENT_HEARTBEAT_DOCS constant is appended to the
+        // composed wake-context for custom agents. Pin its verb set too.
+        assert_no_deprecated_verbs(CUSTOM_AGENT_HEARTBEAT_DOCS, "CUSTOM_AGENT_HEARTBEAT_DOCS");
+        assert_contains_canonical_a25_verbs(
+            CUSTOM_AGENT_HEARTBEAT_DOCS,
+            "CUSTOM_AGENT_HEARTBEAT_DOCS",
+            &["k2so heartbeat", "k2so checkin"],
+        );
+    }
+
+    // ── Cross-generator invariants ─────────────────────────────────
+
+    #[test]
+    fn all_four_generators_produce_distinct_bodies() {
+        // Sanity check: the four generators MUST produce different
+        // strings (regression guard against a refactor that
+        // accidentally aliases two generators to the same body).
+        let mgr_path = format!("/tmp/distinct-mgr-{}", Uuid::new_v4());
+        let manager = generate_manager_skill_content(&mgr_path, "Project");
+        let custom = generate_custom_agent_skill_content("Project", "agent");
+        let k2so_agent = generate_k2so_agent_skill_content("Project", "agent");
+        let template = generate_template_skill_content("Project", "agent");
+
+        let bodies = [
+            ("manager", &manager),
+            ("custom", &custom),
+            ("k2so_agent", &k2so_agent),
+            ("template", &template),
+        ];
+        for i in 0..bodies.len() {
+            for j in (i + 1)..bodies.len() {
+                assert_ne!(
+                    bodies[i].1, bodies[j].1,
+                    "{} and {} generators must produce distinct bodies",
+                    bodies[i].0, bodies[j].0,
+                );
+            }
+        }
+    }
+}
