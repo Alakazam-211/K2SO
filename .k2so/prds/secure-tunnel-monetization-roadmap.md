@@ -5,7 +5,8 @@
 **Owner**: Rosson + pod-leader
 **Strategic goal**: launch the K2SO Hosted middle-tier ($2-?/mo `<sub>.k2.dev`) — the secure tunnel monetization product.
 **Intermediate milestone**: Public 0.39.0 release (sign+notarize+DMG ship) — unblocks the audience that will subscribe.
-**Estimated wall time remaining**: 1-2 months to public release + further weeks to monetization launch.
+**Release strategy update (2026-05-25)**: ship **0.39.0 EARLY** — right after Phase 2.5d closes + one more smoke pass. Phase 2.6 (tunnel decision) and Phase 3 (contract hardening) become the **0.40.x cycle**, deferred to the workweek. Rationale: weekend over; Phase 2.6+ work is additive (doesn't change existing-user behavior); current users can start validating the new infrastructure during the workweek; workweek focus shifts to creature comforts users have been requesting.
+**Estimated wall time remaining**: ~1 day to 0.39.0 public release; further weeks to monetization launch (Phase 4).
 
 ---
 
@@ -32,12 +33,14 @@ This document tracks remaining decisions, blocks, and sequencing. Each phase has
 ✅ Phase 2.1 — CLI redesign + inbox primitive + __lead__ removal (DONE — 8 commits)
 ✅ Phase 2.5b — skills filesystem consolidation + UI rename (DONE)
 ✅ Phase 2.5c — k2so-core file/module rename (DONE — 25 commits)
-🔄 Phase 2.5d — agents/workspace.rs + commands.rs split (IN FLIGHT — audit running)
+🔄 Phase 2.5d — agents/workspace.rs + commands.rs split (IN FLIGHT)
 🔄 Phase 2.5 main — build+smoke validation (IN FLIGHT — dev launch testing user-driven)
-⏳ Phase 2.6 — tunnel-provider decision (PRD drafted; awaits re-spike)
-⏳ Phase 3 — contract hardening + Mobile Companion + K2SO Connect (7 workstreams; PRD drafted)
-🚀 Public 0.39.0 release — ships at Phase 3 close
-⏳ Phase 4 — K2SO Hosted middle tier infrastructure (no PRD yet; post-launch)
+🚀 PUBLIC 0.39.0 RELEASE — ships after Phase 2.5d + final smoke pass (EARLY RELEASE, 2026-05-25 decision)
+⏳ Workweek polish — creature comforts users have been requesting (0.39.x)
+⏳ Phase 2.6 — tunnel-provider decision (PRD drafted; runs in 0.40.x cycle)
+⏳ Phase 3 — contract hardening + Mobile Companion + K2SO Connect (7 workstreams; 0.40.x cycle)
+🚀 0.40.0 release — ships at Phase 3 close
+⏳ Phase 4 — K2SO Hosted middle tier infrastructure (no PRD yet; post-0.40.0)
 ```
 
 ---
