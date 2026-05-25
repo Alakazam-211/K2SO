@@ -180,3 +180,126 @@ pub fn get_use_session_stream(project_path: &str) -> bool {
     .map(|v| v.as_deref() == Some("on"))
     .unwrap_or(false)
 }
+
+#[cfg(test)]
+mod tests {
+    //! Phase 2 Tier 2.1 coverage for the workspace-settings DB wrappers.
+    //!
+    //! These tests use the shared in-memory test DB (initialized on
+    //! first call to `db::shared()` under `cfg(test)`), so each test
+    //! inserts its own unique project row (random UUID + unique path)
+    //! to avoid collisions with sibling tests sharing the same handle.
+    use super::*;
+    use uuid::Uuid;
+
+    fn insert_project(path: &str) -> String {
+        let db = crate::db::shared();
+        let conn = db.lock();
+        let id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)",
+            rusqlite::params![id, "settings-test", path],
+        )
+        .expect("insert project row");
+        id
+    }
+
+    fn unique_path(label: &str) -> String {
+        format!(
+            "/tmp/k2so-settings-test-{}-{}-{}",
+            label,
+            std::process::id(),
+            Uuid::new_v4(),
+        )
+    }
+
+    #[test]
+    fn update_project_setting_rejects_unknown_field() {
+        let path = unique_path("unknown-field");
+        let _pid = insert_project(&path);
+
+        let err = update_project_setting(&path, "not_a_real_field", "x")
+            .expect_err("unknown field must be rejected");
+        assert!(
+            err.contains("Unknown setting"),
+            "error should describe unknown setting, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn update_project_setting_roundtrips_agent_mode_and_syncs_agent_enabled() {
+        let path = unique_path("agent-mode-sync");
+        let _pid = insert_project(&path);
+
+        // Setting agent_mode to "off" should also flip agent_enabled to 0.
+        update_project_setting(&path, "agent_mode", "off").expect("set agent_mode off");
+        let settings = get_project_settings(&path).expect("read settings");
+        assert_eq!(settings["mode"], "off");
+        assert_eq!(settings["agentEnabled"], false);
+
+        // Setting agent_mode to any non-"off" value should flip agent_enabled to 1.
+        update_project_setting(&path, "agent_mode", "manager").expect("set agent_mode manager");
+        let settings = get_project_settings(&path).expect("read settings");
+        assert_eq!(settings["mode"], "manager");
+        assert_eq!(settings["agentEnabled"], true);
+    }
+
+    #[test]
+    fn update_project_setting_validates_use_session_stream_enum() {
+        let path = unique_path("uss-enum");
+        let _pid = insert_project(&path);
+
+        let err = update_project_setting(&path, "use_session_stream", "bogus")
+            .expect_err("invalid enum value must be rejected");
+        assert!(
+            err.contains("use_session_stream"),
+            "error should reference the field name, got {err:?}",
+        );
+
+        // Valid values pass and the read converts to bool.
+        update_project_setting(&path, "use_session_stream", "on").expect("set on");
+        let settings = get_project_settings(&path).expect("read");
+        assert_eq!(settings["useSessionStream"], true);
+        assert!(get_use_session_stream(&path), "convenience accessor agrees");
+
+        update_project_setting(&path, "use_session_stream", "off").expect("set off");
+        let settings = get_project_settings(&path).expect("read");
+        assert_eq!(settings["useSessionStream"], false);
+        assert!(!get_use_session_stream(&path));
+    }
+
+    #[test]
+    fn update_project_setting_fails_loudly_on_missing_project() {
+        // No insert — the path doesn't exist in `projects`.
+        let path = unique_path("missing");
+        let err = update_project_setting(&path, "agent_mode", "off")
+            .expect_err("missing project must error");
+        assert!(
+            err.contains("Project not found"),
+            "expected 'Project not found' diagnostic, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn get_project_settings_returns_default_use_session_stream_off_for_fresh_project() {
+        let path = unique_path("default-uss");
+        let _pid = insert_project(&path);
+        // Migration 0032's default backfills 'off' for existing rows; new
+        // INSERTs (without explicit column) should also read as Off via
+        // the unwrap_or in the row mapper. Sanity-check both the JSON
+        // shape and the convenience bool accessor.
+        let settings = get_project_settings(&path).expect("read");
+        assert_eq!(settings["useSessionStream"], false);
+        assert!(!get_use_session_stream(&path));
+    }
+
+    // NOTE: `get_agentic_enabled` / `set_agentic_enabled` /
+    // `get_keep_daemon_on_quit` / `set_keep_daemon_on_quit` reference an
+    // `app_settings` table that does NOT exist in any K2SO migration. The
+    // SET side silently fails with "no such table: app_settings"; the GET
+    // side swallows it via `.unwrap_or(default)` so callers never see the
+    // missing-table error. Tests for those four are intentionally
+    // omitted pending a real fix — adding them here would either require
+    // creating the table inline (masking the bug) or shipping known-
+    // failing tests. See follow-up FINDING in Tier 2 report.
+}
