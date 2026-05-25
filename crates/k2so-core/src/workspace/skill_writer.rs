@@ -1347,3 +1347,137 @@ Sub-agents use `k2so agent complete` which auto-merges or submits for review acc
     Ok(md)
 }
 
+#[cfg(test)]
+mod tests {
+    //! Phase 2 Tier 2.1 coverage for skill_writer entry points that the
+    //! migrations.rs::migration_safety_tests block doesn't already
+    //! exercise. The migration tests cover the safe-symlink contract,
+    //! the import-into-user-notes flow, and strip_workspace_skill_tail
+    //! happy paths; here we add a few gap-fillers:
+    //!
+    //! - strip_workspace_skill_tail returns None when no SKILL.md exists
+    //!   at all (vs the existing tests which assume the file exists)
+    //! - ensure_all_skills_up_to_date is a no-op for workspaces with no
+    //!   agents dir
+    //! - regenerate_workspace_skill scaffolds .k2so/inbox + .k2so/prds
+    //!   and returns the composed CLAUDE.md body
+    //! - append_workspace_source_regions writes the USER_NOTES sentinel
+    //!   + placeholder even when no preserved content is passed
+    use super::*;
+    use std::fs;
+    use uuid::Uuid;
+
+    fn scratch_project() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "k2so-skill-writer-test-{}-{}",
+            std::process::id(),
+            Uuid::new_v4(),
+        ));
+        fs::create_dir_all(dir.join(".k2so/skills/k2so")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn strip_workspace_skill_tail_returns_none_when_canonical_missing() {
+        let proj = scratch_project();
+        // Don't write a SKILL.md — the canonical doesn't exist.
+        let preserved = strip_workspace_skill_tail(proj.to_str().unwrap());
+        assert!(
+            preserved.is_none(),
+            "no canonical SKILL.md → no preserved freeform, got {preserved:?}",
+        );
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn append_workspace_source_regions_writes_user_notes_sentinel_for_clean_workspace() {
+        let proj = scratch_project();
+        let canonical = proj.join(".k2so/skills/k2so/SKILL.md");
+
+        // Seed a minimal canonical body (no SOURCE regions yet).
+        let seed = format!(
+            "---\nk2so_skill: workspace\n---\n\n{}\nManaged\n{}\n",
+            crate::agents::skill::SKILL_BEGIN_MARKER,
+            crate::agents::skill::SKILL_END_MARKER,
+        );
+        fs::write(&canonical, &seed).unwrap();
+
+        append_workspace_source_regions(proj.to_str().unwrap(), None);
+
+        let after = fs::read_to_string(&canonical).unwrap();
+        assert!(
+            after.contains(SKILL_USER_NOTES_SENTINEL),
+            "append must write the USER_NOTES sentinel; got: {after:?}",
+        );
+        assert!(
+            after.contains(USER_NOTES_PLACEHOLDER),
+            "append must write the placeholder comment under the sentinel",
+        );
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn append_workspace_source_regions_preserves_passed_freeform_below_sentinel() {
+        let proj = scratch_project();
+        let canonical = proj.join(".k2so/skills/k2so/SKILL.md");
+        let seed = format!(
+            "---\nk2so_skill: workspace\n---\n\n{}\nManaged\n{}\n",
+            crate::agents::skill::SKILL_BEGIN_MARKER,
+            crate::agents::skill::SKILL_END_MARKER,
+        );
+        fs::write(&canonical, &seed).unwrap();
+
+        append_workspace_source_regions(
+            proj.to_str().unwrap(),
+            Some("# my custom note\n\nThis is a private thought."),
+        );
+
+        let after = fs::read_to_string(&canonical).unwrap();
+        let sentinel_pos = after.find(SKILL_USER_NOTES_SENTINEL).unwrap();
+        let user_pos = after.find("This is a private thought.").unwrap();
+        assert!(
+            user_pos > sentinel_pos,
+            "user freeform must appear BELOW the USER_NOTES sentinel (sentinel at {sentinel_pos}, user at {user_pos})",
+        );
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn ensure_all_skills_up_to_date_handles_workspace_with_no_agents_dir() {
+        let proj = scratch_project();
+        // Don't create .k2so/agents/ — the function should write the
+        // workspace skill and return without panicking.
+        ensure_all_skills_up_to_date(proj.to_str().unwrap());
+
+        // Sanity: canonical SKILL.md exists post-call (write_workspace_skill_file ran).
+        assert!(
+            proj.join(".k2so/skills/k2so/SKILL.md").exists(),
+            "ensure_all_skills_up_to_date should still write the workspace skill",
+        );
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn regenerate_workspace_skill_scaffolds_inbox_dir_and_returns_body() {
+        let proj = scratch_project();
+        let path = proj.to_str().unwrap().to_string();
+
+        let body = regenerate_workspace_skill(path).expect("regen ok");
+
+        // Body must be non-empty and look like a project-scoped brief.
+        assert!(!body.is_empty(), "regen body should not be empty");
+
+        // Phase 2.1: .k2so/inbox/ (unified primitive) and .k2so/prds/
+        // must be scaffolded.
+        assert!(proj.join(".k2so/inbox").is_dir(), ".k2so/inbox/ should be scaffolded");
+        assert!(proj.join(".k2so/prds").is_dir(), ".k2so/prds/ should be scaffolded");
+
+        // Canonical SKILL.md must have landed.
+        assert!(
+            proj.join(".k2so/skills/k2so/SKILL.md").exists(),
+            "canonical SKILL.md should exist after regen",
+        );
+
+        fs::remove_dir_all(&proj).ok();
+    }
+}

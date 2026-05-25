@@ -297,3 +297,161 @@ pub fn k2so_agents_build_launch(
         "didCompact": should_compact,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    //! Phase 2 Tier 2.1 coverage for the wake-launch orchestrator. The
+    //! full happy-path traversal of all three cases (resume worktree /
+    //! delegate inbox / fresh launch) touches scheduler + delegate +
+    //! chat_history + DB + harness, so the unit-test surface here is
+    //! intentionally narrow: missing-agent graceful handling +
+    //! Case-3 cwd/command shape. Heavier integration coverage lives in
+    //! the daemon-side `tests/agents_routes_integration.rs`.
+    use super::*;
+    use std::fs;
+    use uuid::Uuid;
+
+    fn scratch_workspace_with_primary(agent_name: &str, persona_type: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "k2so-agent-launch-test-{}-{}-{}",
+            agent_name,
+            std::process::id(),
+            Uuid::new_v4(),
+        ));
+        // Unified-primary layout — the agent has an AGENT.md at
+        // `.k2so/agent/`, so compose_agent_wake_context can resolve it.
+        fs::create_dir_all(dir.join(".k2so/agent")).unwrap();
+        let body = format!(
+            "---\nname: {name}\ntype: {ptype}\nrole: test\n---\n\n# {name}\n\nTest body.\n",
+            name = agent_name,
+            ptype = persona_type,
+        );
+        fs::write(dir.join(".k2so/agent/AGENT.md"), body).unwrap();
+        dir
+    }
+
+    #[test]
+    fn build_launch_errors_when_no_agent_md_anywhere() {
+        // Fresh workspace, no agent on disk at all. The function should
+        // fall through to Case 3 (fresh launch) which calls
+        // compose_agent_wake_context — which errors with
+        // "Agent 'X' does not exist".
+        let dir = std::env::temp_dir().join(format!(
+            "k2so-launch-missing-{}-{}",
+            std::process::id(),
+            Uuid::new_v4(),
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.to_string_lossy().into_owned();
+
+        let result = k2so_agents_build_launch(
+            path,
+            "ghost".to_string(),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        match result {
+            Ok(v) => panic!("expected error for missing agent, got {v:?}"),
+            Err(e) => assert!(
+                e.contains("does not exist"),
+                "diagnostic should mention missing agent, got {e:?}",
+            ),
+        }
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn build_launch_case3_returns_fresh_launch_shape_for_workspace_with_no_work() {
+        // Unified-primary on disk, no inbox + no active worktree → fall
+        // through to Case 3 (fresh launch in project root with
+        // composed wake context).
+        let dir = scratch_workspace_with_primary("scout", "custom");
+        let path = dir.to_string_lossy().into_owned();
+
+        let result = k2so_agents_build_launch(
+            path.clone(),
+            "scout".to_string(),
+            Some("claude".to_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("fresh launch should succeed");
+
+        // Case 3 contract:
+        //   - command set to "claude"
+        //   - cwd is the project root (NOT a worktree path)
+        //   - worktreePath / branch are null
+        //   - args includes --dangerously-skip-permissions
+        assert_eq!(result["command"], "claude");
+        assert_eq!(result["cwd"], path, "cwd is the project root in Case 3");
+        assert!(
+            result["worktreePath"].is_null(),
+            "no worktree in fresh launch"
+        );
+        assert!(result["branch"].is_null(), "no branch in fresh launch");
+        assert_eq!(result["agentName"], "scout");
+
+        let args = result["args"].as_array().expect("args is array");
+        assert!(
+            args.iter().any(|v| v == "--dangerously-skip-permissions"),
+            "fresh launch must include --dangerously-skip-permissions; got {args:?}",
+        );
+        assert!(
+            args.iter().any(|v| v == "--append-system-prompt"),
+            "fresh launch must include --append-system-prompt",
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn build_launch_honors_custom_agent_cli_command() {
+        // Pass `agent_cli_command = Some("codex")` and verify it
+        // overrides the default "claude" in the launch JSON.
+        let dir = scratch_workspace_with_primary("scout", "custom");
+        let path = dir.to_string_lossy().into_owned();
+
+        let result = k2so_agents_build_launch(
+            path,
+            "scout".to_string(),
+            Some("codex".to_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("launch ok");
+        assert_eq!(
+            result["command"], "codex",
+            "agent_cli_command override should propagate to launch JSON"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn build_launch_command_defaults_to_claude_when_none_passed() {
+        let dir = scratch_workspace_with_primary("scout", "custom");
+        let path = dir.to_string_lossy().into_owned();
+
+        let result = k2so_agents_build_launch(
+            path,
+            "scout".to_string(),
+            None, // no override
+            None,
+            None,
+            None,
+        )
+        .expect("launch ok");
+        assert_eq!(
+            result["command"], "claude",
+            "None agent_cli_command must default to 'claude'"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+}
