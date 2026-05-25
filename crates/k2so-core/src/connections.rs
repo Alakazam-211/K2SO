@@ -166,11 +166,6 @@ pub fn connections(
                 )
                 .map_err(|_| format!("Workspace '{}' not found", target_name))?;
 
-            let id = uuid::Uuid::new_v4().to_string();
-            let rel_type = rel_type.unwrap_or("oversees");
-            WorkspaceRelation::create(&conn, &id, &project_id, &target_id, rel_type)
-                .map_err(|e| e.to_string())?;
-
             let target_display: String = conn
                 .query_row(
                     "SELECT name FROM projects WHERE id = ?1",
@@ -178,6 +173,48 @@ pub fn connections(
                     |row| row.get(0),
                 )
                 .unwrap_or_else(|_| target_name.to_string());
+
+            // Bidirectional-awareness guard (0.39.0): a connection
+            // between two workspaces implies BOTH-WAYS awareness
+            // regardless of which side initiated it (see [`list_peers`]
+            // and migration 0051). If the REVERSE pair already exists
+            // (target → this workspace), inserting a new (this →
+            // target) row would create the same kind of redundant pair
+            // migration 0051 just cleaned up. No-op so the dedup work
+            // isn't undone by future redundant adds.
+            //
+            // Reads the reverse row's (id, relation_type) so the
+            // response can tell the caller exactly what existing
+            // relation satisfied their request — no surprises if their
+            // intent was to confirm a connection, not to add a new one.
+            let existing_reverse: Option<(String, String)> = conn
+                .query_row(
+                    "SELECT id, relation_type FROM workspace_relations \
+                     WHERE source_project_id = ?1 AND target_project_id = ?2 \
+                     LIMIT 1",
+                    rusqlite::params![target_id, project_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .ok();
+
+            if let Some((existing_id, existing_type)) = existing_reverse {
+                return Ok(serde_json::json!({
+                    "success": true,
+                    "id": existing_id,
+                    "target": target_display,
+                    "noop": true,
+                    "message": format!(
+                        "already connected (existing relation: {} → this workspace, type: {})",
+                        target_display, existing_type
+                    ),
+                })
+                .to_string());
+            }
+
+            let id = uuid::Uuid::new_v4().to_string();
+            let rel_type = rel_type.unwrap_or("oversees");
+            WorkspaceRelation::create(&conn, &id, &project_id, &target_id, rel_type)
+                .map_err(|e| e.to_string())?;
 
             log_activity(
                 &conn,
@@ -379,6 +416,367 @@ mod tests {
             peer.relation_types,
             vec!["collaborator".to_string(), "oversees".to_string()],
             "bidirectional relation should expose both labels"
+        );
+    }
+
+    // ── add-side reverse-pair no-op guard (0.39.0) ───────────────
+    //
+    // Phase 2.5b workspace==agent insight: a connection between two
+    // workspaces implies BIDIRECTIONAL awareness regardless of who
+    // initiated it. `connections("add", ...)` therefore must NOT
+    // insert a (this→target) row when the reverse (target→this)
+    // already exists, or migration 0051's symmetric-dedup work would
+    // be silently undone by every future `k2so connections add`.
+
+    #[test]
+    fn add_creates_new_relation_when_no_existing() {
+        let (src_path, src_id) = make_project("add-new-src");
+        let (_tgt_path, tgt_id) = make_project("add-new-tgt");
+
+        // Baseline: no reverse exists; add should insert a fresh row.
+        let resp = connections(&src_path, "add", Some("add-new-tgt"), Some("oversees"))
+            .expect("add should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
+        assert_eq!(parsed["success"], serde_json::json!(true));
+        // No "noop" flag because this is a real insert.
+        assert!(
+            parsed.get("noop").is_none(),
+            "fresh add should NOT carry noop flag; got {parsed}"
+        );
+
+        let db = crate::db::shared();
+        let conn = db.lock();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM workspace_relations \
+                 WHERE source_project_id = ?1 AND target_project_id = ?2",
+                rusqlite::params![src_id, tgt_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "fresh add should create exactly 1 row");
+    }
+
+    #[test]
+    fn add_no_ops_when_reverse_pair_already_exists() {
+        let (src_path, src_id) = make_project("add-noop-src");
+        let (_tgt_path, tgt_id) = make_project("add-noop-tgt");
+
+        // Seed the REVERSE pair (target → source) FIRST. This is the
+        // "other side initiated the connection" case.
+        let db = crate::db::shared();
+        {
+            let conn = db.lock();
+            WorkspaceRelation::create(
+                &conn,
+                &Uuid::new_v4().to_string(),
+                &tgt_id,
+                &src_id,
+                "collaborator",
+            )
+            .unwrap();
+        }
+
+        // Now src side tries to add tgt — must no-op because the
+        // bidirectional-awareness contract says they're already
+        // connected.
+        let resp = connections(&src_path, "add", Some("add-noop-tgt"), Some("oversees"))
+            .expect("add should succeed (no-op)");
+        let parsed: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
+        assert_eq!(parsed["success"], serde_json::json!(true));
+        assert_eq!(
+            parsed["noop"],
+            serde_json::json!(true),
+            "reverse-pair-exists add must report noop:true; got {parsed}"
+        );
+
+        // Storage layer: still exactly 1 row total for this pair (the
+        // pre-existing reverse), zero in the forward direction. This
+        // is the invariant migration 0051 protects.
+        let conn = db.lock();
+        let forward: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM workspace_relations \
+                 WHERE source_project_id = ?1 AND target_project_id = ?2",
+                rusqlite::params![src_id, tgt_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let reverse: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM workspace_relations \
+                 WHERE source_project_id = ?1 AND target_project_id = ?2",
+                rusqlite::params![tgt_id, src_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            forward, 0,
+            "forward row must NOT be inserted when reverse exists"
+        );
+        assert_eq!(reverse, 1, "pre-existing reverse row must remain untouched");
+    }
+
+    #[test]
+    fn add_returns_helpful_message_when_no_op_due_to_reverse_existing() {
+        let (src_path, src_id) = make_project("add-msg-src");
+        let (_tgt_path, tgt_id) = make_project("add-msg-tgt");
+
+        // Reverse seeded with a distinctive type so the message can
+        // surface it.
+        let db = crate::db::shared();
+        {
+            let conn = db.lock();
+            WorkspaceRelation::create(
+                &conn,
+                &Uuid::new_v4().to_string(),
+                &tgt_id,
+                &src_id,
+                "peer",
+            )
+            .unwrap();
+        }
+        let _ = src_id;
+
+        let resp = connections(&src_path, "add", Some("add-msg-tgt"), Some("oversees"))
+            .expect("add should succeed (no-op)");
+        let parsed: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
+        let message = parsed["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("already connected"),
+            "noop message must announce 'already connected'; got {message:?}"
+        );
+        assert!(
+            message.contains("peer"),
+            "noop message must surface the existing relation type so the caller \
+             knows what's there; got {message:?}"
+        );
+    }
+
+    #[test]
+    fn list_peers_unaffected_by_add_no_op_guard() {
+        // Regression: confirm dedupe still works the same when the
+        // no-op guard turns redundant adds into no-ops. Before this
+        // test runs, the only row is the reverse (target→source);
+        // list_peers from either side should still surface the peer
+        // exactly once with the reverse-side relation_type.
+        let (src_path, src_id) = make_project("add-list-src");
+        let (tgt_path, tgt_id) = make_project("add-list-tgt");
+
+        let db = crate::db::shared();
+        {
+            let conn = db.lock();
+            WorkspaceRelation::create(
+                &conn,
+                &Uuid::new_v4().to_string(),
+                &tgt_id,
+                &src_id,
+                "collaborator",
+            )
+            .unwrap();
+        }
+
+        // src side: attempts add → no-op.
+        let _ = connections(&src_path, "add", Some("add-list-tgt"), Some("oversees"));
+
+        // list_peers from src side should see tgt exactly once.
+        let src_peers = list_peers(&src_path).expect("list_peers ok");
+        assert_eq!(
+            src_peers.len(),
+            1,
+            "src must see exactly 1 peer (incoming reverse); got {src_peers:?}"
+        );
+        assert_eq!(src_peers[0].project_id, tgt_id);
+
+        // list_peers from tgt side should see src exactly once.
+        let tgt_peers = list_peers(&tgt_path).expect("list_peers ok");
+        assert_eq!(
+            tgt_peers.len(),
+            1,
+            "tgt must see exactly 1 peer (its own outgoing); got {tgt_peers:?}"
+        );
+        assert_eq!(tgt_peers[0].project_id, src_id);
+    }
+
+    // ── Migration 0051 smoke test ────────────────────────────────
+    //
+    // Seeds symmetric (A→B + B→A) AND a solo pair (C→D) on a fresh
+    // isolated DB, runs migrations, asserts the symmetric pair
+    // collapsed to one row with both relation_types merged, and the
+    // solo pair remained untouched. Uses an isolated test connection
+    // so we can control migration ordering (the shared `init_for_tests`
+    // already ran migrations).
+
+    #[test]
+    fn migration_0051_dedupes_symmetric_pairs_and_merges_relation_types() {
+        use rusqlite::Connection;
+
+        // Fresh in-memory DB; manually run migrations up to (not
+        // including) 0051 so we can seed the legacy state, then run
+        // 0051 in isolation.
+        let conn = Connection::open(":memory:").unwrap();
+        conn.busy_timeout(std::time::Duration::from_millis(5000))
+            .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        crate::db::run_migrations(&conn).expect("run all migrations");
+
+        // Clear out everything seeded by other tests / migrations.
+        conn.execute("DELETE FROM workspace_relations", []).unwrap();
+
+        // Seed 4 projects: a, b for the symmetric pair; c, d for solo.
+        conn.execute(
+            "INSERT INTO projects (id, path, name) VALUES \
+             ('p-a', '/tmp/0051-a', 'a'), \
+             ('p-b', '/tmp/0051-b', 'b'), \
+             ('p-c', '/tmp/0051-c', 'c'), \
+             ('p-d', '/tmp/0051-d', 'd')",
+            [],
+        )
+        .unwrap();
+
+        // A→B as 'peer' at created_at=100.
+        // B→A as 'collaborator' at created_at=200.
+        // C→D as 'oversees' at created_at=150 (solo, must stay).
+        conn.execute(
+            "INSERT INTO workspace_relations \
+             (id, source_project_id, target_project_id, relation_type, created_at) VALUES \
+             ('rel-ab', 'p-a', 'p-b', 'peer',         100), \
+             ('rel-ba', 'p-b', 'p-a', 'collaborator', 200), \
+             ('rel-cd', 'p-c', 'p-d', 'oversees',     150)",
+            [],
+        )
+        .unwrap();
+
+        // Sanity: 3 rows before dedup.
+        let before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM workspace_relations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(before, 3, "test setup should produce 3 relation rows");
+
+        // Backdate the 0051 marker so we can replay it manually
+        // against the seeded state. Then re-run migrations — 0051
+        // fires on the symmetric pair.
+        conn.execute(
+            "DELETE FROM _migrations WHERE name = '0051_dedup_symmetric_workspace_relations'",
+            [],
+        )
+        .unwrap();
+        crate::db::run_migrations(&conn).expect("re-run with 0051");
+
+        // After dedup: 2 rows (one merged from A↔B + the solo C→D).
+        let after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM workspace_relations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            after, 2,
+            "expected 2 rows after dedup (1 merged symmetric + 1 solo); got {after}"
+        );
+
+        // Solo row untouched.
+        let solo_rt: String = conn
+            .query_row(
+                "SELECT relation_type FROM workspace_relations WHERE id = 'rel-cd'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("solo C→D row must survive");
+        assert_eq!(
+            solo_rt, "oversees",
+            "solo C→D row's relation_type must be untouched"
+        );
+
+        // Surviving merged row: the EARLIER created_at (A→B at 100)
+        // is the keeper; the LATER (B→A at 200) was deleted.
+        let keeper_id: String = conn
+            .query_row(
+                "SELECT id FROM workspace_relations \
+                 WHERE source_project_id = 'p-a' AND target_project_id = 'p-b'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("keeper A→B row must remain");
+        assert_eq!(keeper_id, "rel-ab", "earlier row must be the keeper");
+
+        // Reverse direction must be gone.
+        let reverse_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM workspace_relations \
+                 WHERE source_project_id = 'p-b' AND target_project_id = 'p-a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reverse_exists, 0, "later B→A row must be deleted");
+
+        // Merged relation_type contains both original labels (order
+        // doesn't matter — assert by substring presence on both).
+        let merged_rt: String = conn
+            .query_row(
+                "SELECT relation_type FROM workspace_relations WHERE id = 'rel-ab'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            merged_rt.contains("peer"),
+            "merged row must retain 'peer' label; got {merged_rt:?}"
+        );
+        assert!(
+            merged_rt.contains("collaborator"),
+            "merged row must retain 'collaborator' label; got {merged_rt:?}"
+        );
+        assert!(
+            merged_rt.contains(';'),
+            "merged row must use ';' as separator; got {merged_rt:?}"
+        );
+    }
+
+    #[test]
+    fn migration_0051_is_no_op_on_db_with_no_symmetric_pairs() {
+        // Fresh-workspace edge case: a DB whose `workspace_relations`
+        // either is empty or only carries unique directional rows
+        // should pass through 0051 unchanged. Both states are valid
+        // post-migration outcomes.
+        use rusqlite::Connection;
+        let conn = Connection::open(":memory:").unwrap();
+        conn.busy_timeout(std::time::Duration::from_millis(5000))
+            .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        crate::db::run_migrations(&conn).expect("run all migrations");
+
+        conn.execute("DELETE FROM workspace_relations", []).unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, path, name) VALUES \
+             ('p-x', '/tmp/0051-x', 'x'), \
+             ('p-y', '/tmp/0051-y', 'y'), \
+             ('p-z', '/tmp/0051-z', 'z')",
+            [],
+        )
+        .unwrap();
+        // Two solo (non-symmetric) rows. Must both survive.
+        conn.execute(
+            "INSERT INTO workspace_relations \
+             (id, source_project_id, target_project_id, relation_type, created_at) VALUES \
+             ('rel-xy', 'p-x', 'p-y', 'oversees', 100), \
+             ('rel-yz', 'p-y', 'p-z', 'peer',     200)",
+            [],
+        )
+        .unwrap();
+
+        // Re-run 0051 explicitly.
+        conn.execute(
+            "DELETE FROM _migrations WHERE name = '0051_dedup_symmetric_workspace_relations'",
+            [],
+        )
+        .unwrap();
+        crate::db::run_migrations(&conn).expect("re-run with 0051");
+
+        let after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM workspace_relations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            after, 2,
+            "non-symmetric rows must survive 0051 unchanged; got {after}"
         );
     }
 
