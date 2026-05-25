@@ -21,6 +21,10 @@ pub mod launch_profile;
 pub mod migrations;
 pub mod onboarding;
 pub mod scheduler;
+// Phase 2.5d: SKILL.md regen + scaffolding (write_workspace_skill_file*
+// + regenerate_workspace_skill cluster). Extracted from
+// `agents/workspace.rs`.
+pub mod skill_writer;
 pub mod session;
 pub mod settings;
 pub mod terminal_id;
