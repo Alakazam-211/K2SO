@@ -3050,6 +3050,7 @@ dependencies = [
  "git2",
  "ignore",
  "image",
+ "k2so-core",
  "libc",
  "llama-cpp-2",
  "mio",

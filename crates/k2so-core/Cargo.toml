@@ -16,6 +16,17 @@ path = "src/lib.rs"
 # Enable in src-tauri's [dev-dependencies] entry; NOT a runtime feature.
 test-util = []
 
+# k2so-core's OWN integration tests (under `crates/k2so-core/tests/`) are
+# separate compilation units that don't see `cfg(test)` of the lib —
+# they only see features. Pull the lib back in as a dev-dependency with
+# `test-util` enabled so plain `cargo test -p k2so-core` (no manual
+# `--features test-util` flag) compiles integration tests that reach
+# for `init_for_tests` and the other test-util-gated helpers. Without
+# this, contributors and CI hit a confusing "no `init_for_tests` in
+# `db`" error and have to discover the `--features test-util` workaround.
+[dev-dependencies]
+k2so-core = { path = ".", features = ["test-util"] }
+
 [dependencies]
 # Shared primitive deps.
 parking_lot = "0.12"
