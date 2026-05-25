@@ -87,13 +87,13 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
     match path {
         // ── Read-only: agent metadata ────────────────────────────────
         "/cli/agents/list" => match need_project(params) {
-            Ok(p) => respond(k2so_core::agents::commands::list(p)),
+            Ok(p) => respond(k2so_core::workspace::agent::list(p)),
             Err(r) => r,
         },
         "/cli/agents/profile" => match need_project(params) {
             Ok(p) => {
                 let agent = str_param(params, "agent");
-                match k2so_core::agents::commands::get_profile(p, agent) {
+                match k2so_core::workspace::agent::get_profile(p, agent) {
                     Ok(content) => CliResponse::ok_json(
                         serde_json::json!({ "content": content }).to_string(),
                     ),
@@ -113,7 +113,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
 
         // ── State-mutating: agent CRUD ──────────────────────────────
         "/cli/agents/create" => match need_project(params) {
-            Ok(p) => respond(k2so_core::agents::commands::create(
+            Ok(p) => respond(k2so_core::workspace::agent::create(
                 p,
                 str_param(params, "name"),
                 str_param(params, "role"),
@@ -123,14 +123,14 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
         "/cli/agents/delete" => match need_project(params) {
-            Ok(p) => respond_unit(k2so_core::agents::commands::delete(
+            Ok(p) => respond_unit(k2so_core::workspace::agent::delete(
                 p,
                 str_param(params, "name"),
             )),
             Err(r) => r,
         },
         "/cli/agent/update" => match need_project(params) {
-            Ok(p) => respond(k2so_core::agents::commands::update_field(
+            Ok(p) => respond(k2so_core::workspace::agent::update_field(
                 p,
                 str_param(params, "agent"),
                 str_param(params, "field"),
@@ -239,7 +239,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                     } else {
                         None
                     };
-                    respond(k2so_core::agents::commands::set_heartbeat(
+                    respond(k2so_core::heartbeats::control::set_heartbeat(
                         p,
                         agent,
                         interval,
@@ -249,20 +249,20 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                         force_wake,
                     ))
                 } else {
-                    respond(k2so_core::agents::commands::get_heartbeat(p, agent))
+                    respond(k2so_core::heartbeats::control::get_heartbeat(p, agent))
                 }
             }
             Err(r) => r,
         },
         "/cli/agents/heartbeat/noop" => match need_project(params) {
-            Ok(p) => respond(k2so_core::agents::commands::heartbeat_noop(
+            Ok(p) => respond(k2so_core::heartbeats::control::heartbeat_noop(
                 p,
                 str_param(params, "agent"),
             )),
             Err(r) => r,
         },
         "/cli/agents/heartbeat/action" => match need_project(params) {
-            Ok(p) => respond(k2so_core::agents::commands::heartbeat_action(
+            Ok(p) => respond(k2so_core::heartbeats::control::heartbeat_action(
                 p,
                 str_param(params, "agent"),
             )),
@@ -1320,7 +1320,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                         Ok(outcome) => {
                             // Unit 7c: regen directly (workspace_regen
                             // bridge retired — body lives in k2so-core).
-                            k2so_core::agents::workspace::write_workspace_skill_file(&p);
+                            k2so_core::workspace::skill_writer::write_workspace_skill_file(&p);
                             respond(Ok::<_, String>(outcome))
                         }
                         Err(e) => CliResponse::bad_request(e),
@@ -1339,7 +1339,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                     return CliResponse::bad_request(e);
                 }
                 // Unit 7c: regen directly (bridge retired — body in core).
-                k2so_core::agents::workspace::write_workspace_skill_file(&p);
+                k2so_core::workspace::skill_writer::write_workspace_skill_file(&p);
                 CliResponse::ok_json(r#"{"success":true}"#.to_string())
             }
             Err(r) => r,

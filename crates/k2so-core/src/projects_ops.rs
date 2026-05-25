@@ -347,7 +347,7 @@ pub fn projects_update(
             .ok()
         };
         if let Some(path) = project_path_for_archive {
-            let _ = crate::agents::workspace::archive_orphan_top_tier_agents(&path);
+            let _ = crate::workspace::migrations::archive_orphan_top_tier_agents(&path);
         }
     }
 

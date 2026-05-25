@@ -152,7 +152,7 @@ pub fn k2so_agents_build_launch(
     // WorkspaceRegenProvider bridge that used to forward this call
     // back to src-tauri is no longer needed. Both daemon and Tauri
     // contexts hit the same body now.
-    crate::agents::workspace::write_workspace_skill_file(&project_path);
+    crate::workspace::skill_writer::write_workspace_skill_file(&project_path);
 
     // Check for previous session to resume. Lookup order:
     //   1. Heartbeat-scoped: agent_heartbeats.last_session_id (only when

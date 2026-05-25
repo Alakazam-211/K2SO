@@ -2570,7 +2570,12 @@ fn run_workspace_unification_sweep() {
 /// single workspace explodes — a failure on one path doesn't stop the
 /// daemon from booting and serving the rest.
 fn run_workspace_legacy_migrations_sweep() {
-    use k2so_core::agents::workspace;
+    // Phase 2.5d: agents::workspace.rs was split into four canonical
+    // homes. Pull in the migration helpers + the skill_writer entry
+    // point under short aliases that mirror the pre-split call sites
+    // below.
+    use k2so_core::workspace::migrations as workspace;
+    use k2so_core::workspace::skill_writer::ensure_all_skills_up_to_date;
 
     let projects = {
         let db = k2so_core::db::shared();
@@ -2613,7 +2618,7 @@ fn run_workspace_legacy_migrations_sweep() {
         workspace::promote_legacy_heartbeat(&project.path);
         workspace::repair_mismigrated_heartbeats(&project.path);
         let _ = workspace::archive_orphan_top_tier_agents(&project.path);
-        workspace::ensure_all_skills_up_to_date(&project.path);
+        ensure_all_skills_up_to_date(&project.path);
 
         // 0.39.0f Phase 2.1b: relocate .k2so/work → .k2so/inbox. Marker
         // file (`.k2so/.work-to-inbox-migration-v1-done`) gates re-runs;
@@ -2768,7 +2773,8 @@ fn write_restricted(path: &PathBuf, contents: &[u8]) -> std::io::Result<()> {
 
 /// Phase 2 Unit 7c — orphan top-tier agent sweep. Inlined handler
 /// (instead of a routes module) because the body is two lines of
-/// JSON parse + a direct call into `k2so_core::agents::workspace`.
+/// JSON parse + a direct call into `k2so_core::workspace::migrations`
+/// (canonical post-Phase-2.5d path; was `agents::workspace`).
 /// Returns `{"success":true,"archived":["<name>", ...]}`.
 fn handle_archive_orphans(body: &[u8]) -> cli::CliResponse {
     #[derive(serde::Deserialize)]
@@ -2779,7 +2785,7 @@ fn handle_archive_orphans(body: &[u8]) -> cli::CliResponse {
         Ok(r) => r,
         Err(e) => return cli::CliResponse::bad_request(format!("invalid body: {e}")),
     };
-    let archived = k2so_core::agents::workspace::archive_orphan_top_tier_agents(
+    let archived = k2so_core::workspace::migrations::archive_orphan_top_tier_agents(
         &req.project_path,
     );
     cli::CliResponse::ok_json(
