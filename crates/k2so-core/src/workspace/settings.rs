@@ -293,13 +293,99 @@ mod tests {
         assert!(!get_use_session_stream(&path));
     }
 
-    // NOTE: `get_agentic_enabled` / `set_agentic_enabled` /
-    // `get_keep_daemon_on_quit` / `set_keep_daemon_on_quit` reference an
-    // `app_settings` table that does NOT exist in any K2SO migration. The
-    // SET side silently fails with "no such table: app_settings"; the GET
-    // side swallows it via `.unwrap_or(default)` so callers never see the
-    // missing-table error. Tests for those four are intentionally
-    // omitted pending a real fix — adding them here would either require
-    // creating the table inline (masking the bug) or shipping known-
-    // failing tests. See follow-up FINDING in Tier 2 report.
+    // ── app_settings key/value accessors ───────────────────────────
+    //
+    // Migration 0050 finally creates the `app_settings` table that
+    // the four global toggles below reference. Pre-0050 the SET side
+    // silently failed with "no such table: app_settings" and the GET
+    // side defaulted via `.unwrap_or(...)`, so production /cli/agentic
+    // returned HTTP 400 and the menubar's keep-daemon-on-quit preference
+    // never persisted across restarts. These tests cover the round-trip
+    // explicitly so we never regress that table out from under the
+    // accessors again.
+    //
+    // Both keys share the same shared in-memory DB handle as the
+    // sibling tests above. The keys are namespaced by name ("agentic_
+    // systems_enabled", "keep_daemon_on_quit"), so the two test groups
+    // can run in parallel — but they MUST be isolated from each other
+    // via a dedicated mutex because there's only one global row per
+    // key. `parking_lot::Mutex` keeps the lock small and panic-safe.
+
+    static APP_SETTINGS_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    /// Reset the row for a given key so a test starts from a known
+    /// state (absence). Uses DELETE rather than dropping the table so
+    /// migration 0050 stays applied for the rest of the test binary.
+    fn clear_app_setting(key: &str) {
+        let db = crate::db::shared();
+        let conn = db.lock();
+        conn.execute(
+            "DELETE FROM app_settings WHERE key = ?1",
+            rusqlite::params![key],
+        )
+        .expect("delete app_settings row");
+    }
+
+    #[test]
+    fn agentic_enabled_round_trips_through_app_settings() {
+        let _g = APP_SETTINGS_LOCK.lock();
+        clear_app_setting("agentic_systems_enabled");
+
+        // Default when the row is absent is `false` — and (crucially,
+        // post-0050) this read no longer hides a "no such table" error;
+        // it returns the documented default.
+        assert!(
+            !get_agentic_enabled(),
+            "fresh DB → agentic_systems_enabled defaults to false",
+        );
+
+        // Set true → read true.
+        set_agentic_enabled(true).expect("set true");
+        assert!(get_agentic_enabled(), "after set(true), read must be true");
+
+        // Set false → read false (UPSERT replaces the existing row).
+        set_agentic_enabled(false).expect("set false");
+        assert!(
+            !get_agentic_enabled(),
+            "after set(false), read must be false",
+        );
+    }
+
+    #[test]
+    fn keep_daemon_on_quit_round_trips_through_app_settings() {
+        let _g = APP_SETTINGS_LOCK.lock();
+        clear_app_setting("keep_daemon_on_quit");
+
+        // Default when the row is absent is `true` — see the doc
+        // comment on `get_keep_daemon_on_quit` for the rationale.
+        assert!(
+            get_keep_daemon_on_quit(),
+            "fresh DB → keep_daemon_on_quit defaults to true",
+        );
+
+        set_keep_daemon_on_quit(false).expect("set false");
+        assert!(
+            !get_keep_daemon_on_quit(),
+            "after set(false), read must be false",
+        );
+
+        set_keep_daemon_on_quit(true).expect("set true");
+        assert!(
+            get_keep_daemon_on_quit(),
+            "after set(true), read must be true",
+        );
+    }
+
+    #[test]
+    fn set_agentic_enabled_is_idempotent_under_repeated_writes() {
+        // Regression guard for the "INSERT OR REPLACE" path — calling
+        // set twice with the same value must leave the row in the
+        // expected state, not error on a UNIQUE violation.
+        let _g = APP_SETTINGS_LOCK.lock();
+        clear_app_setting("agentic_systems_enabled");
+
+        set_agentic_enabled(true).expect("first set");
+        set_agentic_enabled(true).expect("second set — must not error");
+        assert!(get_agentic_enabled());
+    }
 }
