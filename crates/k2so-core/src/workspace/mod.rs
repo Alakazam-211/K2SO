@@ -25,6 +25,10 @@ pub mod scheduler;
 // + regenerate_workspace_skill cluster). Extracted from
 // `agents/workspace.rs`.
 pub mod skill_writer;
+// Phase 2.5d: workspace-root harness file-discovery cluster
+// (symlink/scaffold helpers + preview + ingest + disable). Extracted
+// from `agents/workspace.rs`.
+pub mod harness;
 pub mod session;
 pub mod settings;
 pub mod terminal_id;

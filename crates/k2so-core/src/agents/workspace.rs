@@ -24,21 +24,9 @@
 //! `WorkspaceRegenProvider` trait pattern wasn't needed.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use crate::agents::skill_writer::force_symlink;
-use crate::agents::wake::strip_frontmatter;
 use crate::fs_atomic::{atomic_write_str, log_if_err};
-// Phase 2.5d: archive utilities live in `crate::workspace::migrations`
-// (pub(crate)) after the split.
-use crate::workspace::migrations::{
-    archive_claude_md_file, inject_first_migration_banner,
-};
-// Phase 2.5d: SKILL.md regen cluster moved to
-// `crate::workspace::skill_writer`. The private helper
-// `import_claude_md_into_user_notes` is pub(crate) there so this module
-// (still hosting harness scaffolding through Tier A) can call it.
-use crate::workspace::skill_writer::import_claude_md_into_user_notes;
 // Phase 2.5d: back-compat re-exports. Migration helpers moved to
 // `crate::workspace::migrations`; existing call sites
 // (`k2so_daemon::main`, `projects_ops`, etc.) still spell the path
@@ -50,33 +38,19 @@ pub use crate::workspace::migrations::{
     migrate_or_scaffold_lead_heartbeat, promote_legacy_heartbeat, repair_mismigrated_heartbeats,
 };
 // Phase 2.5d: SKILL.md regen cluster re-exports. Same back-compat rule
-// as above. `disable_workspace_claude_md` stays in this file for now
-// (until Tier A.3 moves it into the harness cluster).
+// as above.
 pub use crate::workspace::skill_writer::{
     append_workspace_source_regions, ensure_all_skills_up_to_date, regenerate_workspace_skill,
     strip_workspace_skill_tail, write_workspace_skill_file,
     write_workspace_skill_file_with_body, SKILL_USER_NOTES_SENTINEL, USER_NOTES_PLACEHOLDER,
 };
+// Phase 2.5d: harness cluster re-exports. Same back-compat rule.
+pub use crate::workspace::harness::{
+    disable_workspace_claude_md, k2so_agents_preview_workspace_ingest,
+    k2so_agents_run_workspace_ingest, HARNESS_WORKSPACE_FILES, WorkspacePreviewEntry,
+};
 
 
-// ══════════════════════════════════════════════════════════════════════
-// Constants
-// ══════════════════════════════════════════════════════════════════════
-
-/// The six workspace-root files K2SO can take over via symlink / scaffold.
-/// On teardown we walk this list and either freeze the current SKILL.md
-/// body into each as a real file (keep_current mode), or restore the
-/// archive from `.k2so/migration/` (restore_original mode).
-pub const HARNESS_WORKSPACE_FILES: &[&str] = &[
-    "CLAUDE.md",
-    "GEMINI.md",
-    "AGENT.md",
-    ".goosehints",
-    "SKILL.md",
-    ".cursor/rules/k2so.mdc",
-    // NOT .aider.conf.yml — that's a config file with merged entries,
-    // handled separately below.
-];
 
 // ══════════════════════════════════════════════════════════════════════
 // Public types
@@ -112,197 +86,6 @@ pub enum TeardownMode {
     RestoreOriginal,
 }
 
-/// One entry in the Add-Workspace preview. Mirrors what the CLI's
-/// `k2so workspace preview` reports, but structured for the UI.
-#[derive(serde::Serialize, Debug)]
-pub struct WorkspacePreviewEntry {
-    pub path: String,
-    pub action: String, // "archive_and_import" | "refresh" | "create" | "marker_injected"
-    pub size_bytes: Option<u64>,
-    pub note: String,
-}
-
-// ══════════════════════════════════════════════════════════════════════
-// Extended harness file-discovery coverage
-// ══════════════════════════════════════════════════════════════════════
-
-/// Create a symlink for a workspace-root harness file with the contract:
-///   1. Archive the original to `.k2so/migration/` (never destroy).
-///   2. Import its body into SKILL.md's USER_NOTES so the new symlinked
-///      SKILL.md still surfaces the user's accumulated context.
-///   3. Replace the target with the symlink.
-fn safe_symlink_harness_file(
-    canonical: &Path,
-    target: &Path,
-    project_path: &str,
-    harness_display: &str,
-) {
-    match fs::symlink_metadata(target) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            force_symlink(canonical, target);
-        }
-        Ok(meta) if meta.file_type().is_file() => {
-            let content = fs::read_to_string(target).unwrap_or_default();
-            let filename = target
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(harness_display)
-                .to_string();
-            let archived = archive_claude_md_file(project_path, target, &filename);
-            if !content.trim().is_empty() {
-                let archive_display = archived
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "(archive unavailable)".to_string());
-                import_claude_md_into_user_notes(
-                    project_path,
-                    &content,
-                    &format!("pre-existing {}", harness_display),
-                    &archive_display,
-                );
-            }
-            force_symlink(canonical, target);
-            if let Some(p) = archived {
-                inject_first_migration_banner(project_path, &[p]);
-            }
-        }
-        _ => {
-            force_symlink(canonical, target);
-        }
-    }
-}
-
-/// Workspace-level harness file-discovery targets.
-///
-/// Phase 2.5d: `pub(crate)` so the sibling
-/// [`crate::workspace::skill_writer`] can invoke it from
-/// `write_workspace_skill_file_with_body` while harness cluster still
-/// lives in this file (moves out in Tier A.3).
-pub(crate) fn write_workspace_harness_discovery_targets(project_path: &str, canonical: &Path) {
-    let root = PathBuf::from(project_path);
-
-    safe_symlink_harness_file(canonical, &root.join("GEMINI.md"), project_path, "GEMINI.md");
-    safe_symlink_harness_file(canonical, &root.join("AGENT.md"), project_path, "AGENT.md");
-    safe_symlink_harness_file(canonical, &root.join(".goosehints"), project_path, ".goosehints");
-
-    write_cursor_rules_mdc(project_path, canonical);
-    scaffold_aider_conf(project_path);
-}
-
-/// Generate `./.cursor/rules/k2so.mdc` with MDC frontmatter + the
-/// canonical SKILL.md body.
-fn write_cursor_rules_mdc(project_path: &str, canonical: &Path) {
-    let Ok(raw) = fs::read_to_string(canonical) else { return };
-    let body = strip_frontmatter(&raw).trim().to_string();
-    if body.is_empty() {
-        return;
-    }
-
-    let dir = PathBuf::from(project_path).join(".cursor").join("rules");
-    if fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let target = dir.join("k2so.mdc");
-
-    const K2SO_MDC_SIGNATURE: &str = "k2so_generated: true";
-
-    if target.exists() {
-        if let Ok(existing) = fs::read_to_string(&target) {
-            let is_our_output = existing.contains(K2SO_MDC_SIGNATURE);
-            if !is_our_output {
-                let existing_body = strip_frontmatter(&existing).trim().to_string();
-                if !existing_body.is_empty() {
-                    let archived = archive_claude_md_file(
-                        project_path,
-                        &target,
-                        "cursor/rules/k2so.mdc",
-                    );
-                    let archive_display = archived
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "(archive unavailable)".to_string());
-                    import_claude_md_into_user_notes(
-                        project_path,
-                        &existing_body,
-                        "pre-existing .cursor/rules/k2so.mdc",
-                        &archive_display,
-                    );
-                }
-            }
-        }
-    }
-
-    let mdc = format!(
-        "---\n{signature}\ndescription: K2SO workspace context — CLI reference + project context + primary agent persona\nalwaysApply: true\n---\n\n{body}\n",
-        signature = K2SO_MDC_SIGNATURE,
-        body = body,
-    );
-    log_if_err(
-        "write_cursor_rules_mdc",
-        &target,
-        atomic_write_str(&target, &mdc),
-    );
-}
-
-/// Scaffold `./.aider.conf.yml` with `read: [SKILL.md]` so Aider pulls
-/// the workspace context on every session.
-fn scaffold_aider_conf(project_path: &str) {
-    let path = PathBuf::from(project_path).join(".aider.conf.yml");
-    if !path.exists() {
-        log_if_err(
-            "scaffold_aider_conf create",
-            &path,
-            atomic_write_str(
-                &path,
-                "# K2SO: ship workspace context to Aider on every session.\nread:\n  - SKILL.md\n",
-            ),
-        );
-        return;
-    }
-    let Ok(existing) = fs::read_to_string(&path) else { return };
-    if existing.contains("SKILL.md") {
-        return;
-    }
-
-    let _ = archive_claude_md_file(project_path, &path, ".aider.conf.yml");
-
-    let lines: Vec<&str> = existing.lines().collect();
-    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 4);
-    let mut injected = false;
-    let mut i = 0;
-    while i < lines.len() {
-        let line = lines[i];
-        let trimmed = line.trim_start();
-        if !injected && (trimmed == "read:" || trimmed.starts_with("read:")) {
-            out.push(line.to_string());
-            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
-            out.push(format!("{}  - SKILL.md", indent));
-            out.push(format!("{}  # ^ added by K2SO — workspace context", indent));
-            injected = true;
-            i += 1;
-            continue;
-        }
-        out.push(line.to_string());
-        i += 1;
-    }
-    if !injected {
-        if !out.last().map(|l| l.trim().is_empty()).unwrap_or(true) {
-            out.push(String::new());
-        }
-        out.push("# K2SO: ship workspace context on every session.".to_string());
-        out.push("read:".to_string());
-        out.push("  - SKILL.md".to_string());
-    }
-    let mut final_out = out.join("\n");
-    if !final_out.ends_with('\n') {
-        final_out.push('\n');
-    }
-    log_if_err(
-        "scaffold_aider_conf merge",
-        &path,
-        atomic_write_str(&path, &final_out),
-    );
-}
 
 // ══════════════════════════════════════════════════════════════════════
 // Workspace teardown (disconnect)
@@ -503,146 +286,6 @@ pub fn k2so_agents_teardown_workspace(
     Ok(teardown_workspace_harness_files(&project_path, m))
 }
 
-/// Inspect a workspace path WITHOUT mutating anything. Returns a list
-/// of entries describing what K2SO will do on add.
-pub fn k2so_agents_preview_workspace_ingest(
-    project_path: String,
-) -> Result<Vec<WorkspacePreviewEntry>, String> {
-    let root = PathBuf::from(&project_path);
-    let mut entries: Vec<WorkspacePreviewEntry> = Vec::new();
-
-    let collision_targets: &[(&str, &str)] = &[
-        ("CLAUDE.md", "Claude Code memory"),
-        ("GEMINI.md", "Gemini CLI instructions"),
-        ("AGENT.md", "agent.md spec file"),
-        (".goosehints", "Goose hints"),
-        (".cursor/rules/k2so.mdc", "Cursor rule"),
-    ];
-    for (rel, label) in collision_targets {
-        let path = root.join(rel);
-        match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                entries.push(WorkspacePreviewEntry {
-                    path: rel.to_string(),
-                    action: "refresh".to_string(),
-                    size_bytes: None,
-                    note: format!("{} — already symlinked to K2SO canonical (will refresh)", label),
-                });
-            }
-            Ok(meta) if meta.file_type().is_file() => {
-                let is_ours = fs::read_to_string(&path)
-                    .map(|s| s.contains("k2so_generated: true"))
-                    .unwrap_or(false);
-                if is_ours {
-                    entries.push(WorkspacePreviewEntry {
-                        path: rel.to_string(),
-                        action: "refresh".to_string(),
-                        size_bytes: Some(meta.len()),
-                        note: format!("{} — K2SO-generated, will refresh in place", label),
-                    });
-                } else {
-                    entries.push(WorkspacePreviewEntry {
-                        path: rel.to_string(),
-                        action: "archive_and_import".to_string(),
-                        size_bytes: Some(meta.len()),
-                        note: format!("{} — archive → import body into SKILL.md USER_NOTES → symlink", label),
-                    });
-                }
-            }
-            _ => {
-                entries.push(WorkspacePreviewEntry {
-                    path: rel.to_string(),
-                    action: "create".to_string(),
-                    size_bytes: None,
-                    note: format!("{} — no prior file, will create symlink", label),
-                });
-            }
-        }
-    }
-
-    let aider_path = root.join(".aider.conf.yml");
-    if aider_path.is_file() {
-        let already = fs::read_to_string(&aider_path)
-            .map(|s| s.contains("SKILL.md"))
-            .unwrap_or(false);
-        let size = fs::metadata(&aider_path).ok().map(|m| m.len());
-        if already {
-            entries.push(WorkspacePreviewEntry {
-                path: ".aider.conf.yml".to_string(),
-                action: "refresh".to_string(),
-                size_bytes: size,
-                note: "Aider config — already references SKILL.md, no change".to_string(),
-            });
-        } else {
-            entries.push(WorkspacePreviewEntry {
-                path: ".aider.conf.yml".to_string(),
-                action: "archive_and_import".to_string(),
-                size_bytes: size,
-                note: "Aider config — archive → merge SKILL.md into read: list (preserves other keys)".to_string(),
-            });
-        }
-    } else {
-        entries.push(WorkspacePreviewEntry {
-            path: ".aider.conf.yml".to_string(),
-            action: "create".to_string(),
-            size_bytes: None,
-            note: "Aider config — scaffold fresh with read: [SKILL.md]".to_string(),
-        });
-    }
-
-    let marker_targets: &[(&str, &str)] = &[
-        ("AGENTS.md", "Codex / OpenCode / Pi"),
-        (".github/copilot-instructions.md", "GitHub Copilot"),
-    ];
-    for (rel, label) in marker_targets {
-        let path = root.join(rel);
-        let size = fs::metadata(&path).ok().map(|m| m.len());
-        let action = if path.exists() { "marker_injected" } else { "create" };
-        let note = if path.exists() {
-            format!(
-                "{} — K2SO block inserted between markers, your content preserved",
-                label
-            )
-        } else {
-            format!("{} — will create with K2SO block only", label)
-        };
-        entries.push(WorkspacePreviewEntry {
-            path: rel.to_string(),
-            action: action.to_string(),
-            size_bytes: size,
-            note,
-        });
-    }
-
-    Ok(entries)
-}
-
-/// Trigger the workspace skill write for a single project on demand.
-pub fn k2so_agents_run_workspace_ingest(project_path: String) -> Result<(), String> {
-    harvest_per_agent_claude_md_files(&project_path);
-    write_workspace_skill_file(&project_path);
-    Ok(())
-}
-
-
-
-/// Remove or disable the workspace SKILL.md + CLAUDE.md symlink
-/// (when the Agent toggle is turned off).
-///
-/// Phase 2 Unit 7d: moved from
-/// `src-tauri/src/commands/k2so_agents.rs::k2so_agents_disable_workspace_claude_md`.
-pub fn disable_workspace_claude_md(project_path: String) -> Result<(), String> {
-    let claude_md = PathBuf::from(&project_path).join("CLAUDE.md");
-    let disabled = PathBuf::from(&project_path).join(".k2so").join("CLAUDE.md.disabled");
-
-    if claude_md.exists() {
-        // Move to .k2so/ rather than delete — preserves any user edits
-        fs::rename(&claude_md, &disabled)
-            .map_err(|e| format!("Failed to disable CLAUDE.md: {}", e))?;
-    }
-    Ok(())
-}
-
 // ══════════════════════════════════════════════════════════════════════
 // Migration-safety tests (Phase 7c/7d invariants)
 // ══════════════════════════════════════════════════════════════════════
@@ -658,7 +301,12 @@ pub fn disable_workspace_claude_md(project_path: String) -> Result<(), String> {
 #[cfg(test)]
 mod migration_safety_tests {
     use super::*;
-    use crate::workspace::skill_writer::{content_hash_of, mtime_secs, read_regen_hashes};
+    use std::path::Path;
+    use crate::workspace::migrations::{archive_claude_md_file, inject_first_migration_banner};
+    use crate::workspace::skill_writer::{
+        content_hash_of, import_claude_md_into_user_notes, mtime_secs, read_regen_hashes,
+    };
+    use crate::workspace::harness::{safe_symlink_harness_file, scaffold_aider_conf};
     use crate::agents::skill::{SKILL_BEGIN_MARKER, SKILL_END_MARKER};
     use std::path::PathBuf;
     use uuid::Uuid;

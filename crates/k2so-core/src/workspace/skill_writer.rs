@@ -275,7 +275,7 @@ pub fn write_workspace_skill_file_with_body(project_path: &str, base_body: Optio
         force_symlink(&canonical, &root_skill);
         let root_claude = PathBuf::from(project_path).join("CLAUDE.md");
         migrate_and_symlink_root_claude_md(&canonical, &root_claude, project_path);
-        crate::agents::workspace::write_workspace_harness_discovery_targets(project_path, &canonical);
+        crate::workspace::harness::write_workspace_harness_discovery_targets(project_path, &canonical);
     }
 
     // Step 8: Stamp last-regen hashes
