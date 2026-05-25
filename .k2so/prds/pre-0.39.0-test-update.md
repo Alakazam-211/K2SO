@@ -191,29 +191,23 @@ The following modules were extracted from `agents/workspace.rs` or `agents/comma
 
 ---
 
-## Tier 3 — Defer indefinitely (low priority)
+## Tier 3 — ALSO required for 0.39.0 ship (~2-5 hours; per user direction 2026-05-25)
+
+**Originally** scoped as defer-indefinitely. User direction pulled forward — principle: "We might as well get it all set up with the new foundation of the direction we're going in and all the refactoring so that we have a clean test environment."
 
 ### 3.1 `session_stream_setting.rs` pre-existing flake
 
-**Status**: Failed before refactor; root cause is DB initialization race in `init_for_tests()`. Not related to Phase 2 refactor.
+**Status**: Failed before refactor; pre-existing flake. NOT related to Phase 2 refactor itself, but blocks a fully-green baseline.
 
-**Action**: Defer to 0.40.x or 0.41.x cleanup pass.
-
----
-
-### 3.2 Untested daemon modules (auth.rs, routes.rs)
-
-**Status**: Heavily integration-tested in `tests/`; inline test gaps don't affect confidence.
-
-**Action**: Skip unless coverage metric matters.
+**Action**: Debug root cause + fix in Tier 3 subagent run.
 
 ---
 
-### 3.3 CI doctest check
+### 3.3 CI doctest check — SKIPPED
 
-**Action**: Add a CI step that runs `cargo test --doc -p k2so-core -p k2so-daemon` on every PR to catch doctest drift early.
+**Status**: No `.github/workflows/` exists in the repo as of 2026-05-25. Cannot add a CI step that doesn't exist.
 
-**Priority**: Useful but not urgent. Defer until 0.40.x infrastructure work.
+**Action**: Defer to Phase 3 / 0.40.0 when CI infrastructure is established. Track here as a known followup for the future CI setup conversation.
 
 ---
 
@@ -272,9 +266,14 @@ Pod-leader runs items 1-3 + 7 inline (~30 min), then briefs a subagent for items
 10. ✅ Tier 2.3 — `hasLoadedFromDaemon` vitest added
 11. ✅ Tier 2.4 — `inbox_heartbeat_interaction.sh` integration test added
 
-### For 0.39.x / 0.40.x cycles
+**Tier 3 (added per user direction 2026-05-25 — pulled forward from defer-indefinitely):**
+12. ✅ Tier 3.1 — `session_stream_setting.rs` pre-existing flake debugged + fixed
+13. ✅ Tier 3.2 — Inline unit tests added to `daemon/auth.rs` + `daemon/routes.rs`
+14. ⏭️ Tier 3.3 — SKIPPED (no CI workflows exist; defer to Phase 3)
 
-Only Tier 3 items remain post-release (pre-existing flakes, CI infrastructure improvements). Tier 2 is no longer deferred.
+### For 0.40.0 cycle
+
+Only item 3.3 remains (CI doctest check) — pending CI infrastructure setup.
 
 ---
 
