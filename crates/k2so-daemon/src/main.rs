@@ -2836,3 +2836,184 @@ fn generate_token() -> String {
     getrandom::getrandom(&mut buf).expect("getrandom failed");
     buf.iter().map(|b| format!("{:02x}", b)).collect()
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Inline unit tests — auth gate + route dispatch + parameter helpers
+// ─────────────────────────────────────────────────────────────────────
+//
+// These tests cover the pure-logic helpers that sit between the TCP
+// read loop and the per-domain `*_routes` modules. Each lives in
+// `main.rs` because they're private to the binary; the helpers were
+// previously only covered indirectly by the integration tests under
+// `crates/k2so-daemon/tests/`. Inline coverage gives a faster signal
+// when refactoring the dispatch shape and documents the contract.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── token_ok: auth gate ─────────────────────────────────────────
+
+    #[test]
+    fn token_ok_accepts_matching_token() {
+        assert!(token_ok("token=abc123", "abc123"));
+    }
+
+    #[test]
+    fn token_ok_rejects_mismatched_token() {
+        assert!(!token_ok("token=wrong", "abc123"));
+    }
+
+    #[test]
+    fn token_ok_rejects_missing_token_param() {
+        // Other params present but no `token=` key.
+        assert!(!token_ok("project_path=/tmp/foo&name=bar", "abc123"));
+    }
+
+    #[test]
+    fn token_ok_rejects_empty_query() {
+        assert!(!token_ok("", "abc123"));
+    }
+
+    #[test]
+    fn token_ok_rejects_empty_token_value_when_expected_nonempty() {
+        // `token=` with no value should not slip through against a
+        // non-empty expected token.
+        assert!(!token_ok("token=", "abc123"));
+    }
+
+    #[test]
+    fn token_ok_finds_token_among_multiple_params() {
+        // Token may appear anywhere in the query string — the loop
+        // must keep walking past earlier params.
+        let q = "project_path=/tmp/foo&name=bar&token=abc123&extra=baz";
+        assert!(token_ok(q, "abc123"));
+    }
+
+    #[test]
+    fn token_ok_first_token_value_wins_when_duplicated() {
+        // If `token=` appears twice (malformed query), the first
+        // value is what gates the request — that's the current
+        // behavior and the contract callers depend on.
+        assert!(token_ok("token=first&token=second", "first"));
+        assert!(!token_ok("token=first&token=second", "second"));
+    }
+
+    #[test]
+    fn token_ok_is_case_sensitive() {
+        // Tokens are random hex, but if the field name's case ever
+        // shifts the auth gate must fail closed (no match means no
+        // entry). `Token=` is not equivalent to `token=`.
+        assert!(!token_ok("Token=abc123", "abc123"));
+    }
+
+    // ── generate_token: token shape ─────────────────────────────────
+
+    #[test]
+    fn generate_token_is_32_hex_chars() {
+        let t = generate_token();
+        assert_eq!(t.len(), 32, "token should be 32 chars, got {t:?}");
+        assert!(
+            t.chars().all(|c| c.is_ascii_hexdigit()),
+            "token contains non-hex char: {t:?}",
+        );
+    }
+
+    #[test]
+    fn generate_token_produces_unique_values() {
+        // 16 random bytes → collision probability astronomically low.
+        // Two calls back-to-back must differ.
+        let a = generate_token();
+        let b = generate_token();
+        assert_ne!(a, b, "tokens should not collide: {a} vs {b}");
+    }
+
+    // ── project_param: project_path / project fallback ──────────────
+
+    #[test]
+    fn project_param_returns_project_path_when_set() {
+        let mut params = std::collections::HashMap::new();
+        params.insert("project_path".to_string(), "/tmp/work".to_string());
+        assert_eq!(project_param(&params), Some("/tmp/work".to_string()));
+    }
+
+    #[test]
+    fn project_param_falls_back_to_project_alias() {
+        let mut params = std::collections::HashMap::new();
+        params.insert("project".to_string(), "/tmp/alias".to_string());
+        assert_eq!(project_param(&params), Some("/tmp/alias".to_string()));
+    }
+
+    #[test]
+    fn project_param_prefers_project_path_over_alias() {
+        // Both set → primary key wins.
+        let mut params = std::collections::HashMap::new();
+        params.insert("project_path".to_string(), "/tmp/primary".to_string());
+        params.insert("project".to_string(), "/tmp/alias".to_string());
+        assert_eq!(project_param(&params), Some("/tmp/primary".to_string()));
+    }
+
+    #[test]
+    fn project_param_returns_none_when_neither_set() {
+        let params = std::collections::HashMap::new();
+        assert_eq!(project_param(&params), None);
+    }
+
+    #[test]
+    fn project_param_skips_empty_string_value() {
+        // An empty value must be treated as "unset" so the fallback
+        // alias key gets a chance. If `project_path=` is empty but
+        // `project=/tmp/x` is set, callers expect /tmp/x.
+        let mut params = std::collections::HashMap::new();
+        params.insert("project_path".to_string(), "".to_string());
+        params.insert("project".to_string(), "/tmp/x".to_string());
+        assert_eq!(project_param(&params), Some("/tmp/x".to_string()));
+    }
+
+    // ── parse_params: thin wrapper over core's query parser ─────────
+
+    #[test]
+    fn parse_params_extracts_keys_from_query_string() {
+        let params = parse_params("/cli/foo", "name=bar&token=xyz");
+        assert_eq!(params.get("name").map(String::as_str), Some("bar"));
+        assert_eq!(params.get("token").map(String::as_str), Some("xyz"));
+    }
+
+    #[test]
+    fn parse_params_empty_query_returns_empty_map() {
+        let params = parse_params("/cli/foo", "");
+        assert!(
+            params.is_empty(),
+            "expected empty params, got: {params:?}",
+        );
+    }
+
+    // ── dispatch_unit6_post: path matching ──────────────────────────
+
+    #[test]
+    fn dispatch_unit6_post_unknown_path_returns_404() {
+        let resp = dispatch_unit6_post("/cli/does-not-exist", b"{}");
+        assert_eq!(resp.status, "404 Not Found");
+        assert!(
+            resp.body.contains("route not found"),
+            "404 body should mention 'route not found': {}",
+            resp.body,
+        );
+    }
+
+    #[test]
+    fn dispatch_unit6_post_empty_path_returns_404() {
+        // A blank path should never match a real route.
+        let resp = dispatch_unit6_post("", b"{}");
+        assert_eq!(resp.status, "404 Not Found");
+    }
+
+    #[test]
+    fn dispatch_unit6_post_path_is_case_sensitive() {
+        // Exact match required — upper/lower-case variants must NOT
+        // route to the lowercase handler. Closing this avoids subtle
+        // routing collisions if a future handler uses mixed case.
+        let resp = dispatch_unit6_post("/CLI/FS/CREATE", b"{}");
+        assert_eq!(resp.status, "404 Not Found");
+    }
+}
