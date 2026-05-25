@@ -3,9 +3,13 @@
 //!
 //! Serves `/cli/checkin`. Composes:
 //!
-//! - `task`: first file in the agent's `work/active/` (structured).
-//! - `inbox.work`: all files in the agent's `work/inbox/` + the
-//!   workspace-level `.k2so/inbox/` (for manager roles).
+//! - `task`: first item in the workspace inbox's `active/` folder
+//!   (structured). Post-Phase-2.1 the workspace IS the agent, so
+//!   "the agent's current task" lives in `.k2so/inbox/active/`,
+//!   not the retired per-agent `.k2so/agents/<name>/work/active/`.
+//! - `inbox.work`: every item at the workspace inbox root
+//!   (`.k2so/inbox/*.md`) — the untriaged arrivals the workspace
+//!   agent needs to see on wake.
 //! - `inbox.messages`: unread DB messages addressed to this agent.
 //!   Marked read on retrieval.
 //! - `peers`: `agent_sessions` rows for every connected workspace
@@ -91,57 +95,30 @@ pub fn checkin(project_path: &str, agent: &str) -> Result<String, String> {
     let project_id = resolve_project_id(&conn, project_path)
         .ok_or_else(|| format!("Project not found: {}", project_path))?;
 
-    // Current task (first file in active/)
-    let active_dir = PathBuf::from(project_path)
-        .join(".k2so/agents")
-        .join(agent)
-        .join("work/active");
-    let task: serde_json::Value = if active_dir.is_dir() {
-        fs::read_dir(&active_dir)
-            .ok()
-            .and_then(|mut entries| entries.next())
-            .and_then(|e| e.ok())
-            .map(|e| {
-                let fname = e.file_name().to_string_lossy().to_string();
-                let content = fs::read_to_string(e.path()).unwrap_or_default();
-                parse_work_item(&fname, &content)
-            })
-            .unwrap_or(serde_json::Value::Null)
-    } else {
-        serde_json::Value::Null
+    // Current task: first item in the workspace inbox's standard
+    // `active/` folder. Post-Phase-2.1 the workspace IS the agent,
+    // so the agent's "in-flight" task lives at workspace level
+    // (`.k2so/inbox/active/`), not under a per-agent subtree.
+    // Touched via the unified `crate::inbox::*` primitive so the
+    // checkin / scheduler / triage call sites all share one shape.
+    let workspace_path = Path::new(project_path);
+    let active_items = crate::inbox::list_folder(workspace_path, "active");
+    let task: serde_json::Value = match active_items.into_iter().next() {
+        Some(item) => {
+            let content = crate::inbox::read_by_id(workspace_path, &item.id)
+                .unwrap_or_default();
+            parse_work_item(&item.filename, &content)
+        }
+        None => serde_json::Value::Null,
     };
 
-    // Agent inbox + workspace inbox (for manager roles)
-    let inbox_dir = PathBuf::from(project_path)
-        .join(".k2so/agents")
-        .join(agent)
-        .join("work/inbox");
-    let mut work_items: Vec<serde_json::Value> = if inbox_dir.is_dir() {
-        fs::read_dir(&inbox_dir)
-            .ok()
-            .map(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .map(|e| {
-                        let fname = e.file_name().to_string_lossy().to_string();
-                        let content = fs::read_to_string(e.path()).unwrap_or_default();
-                        parse_work_item(&fname, &content)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else {
-        vec![]
-    };
-
-    // Post-Phase-2.1: the workspace inbox is `.k2so/inbox/` (root-level
-    // items only — sub-foldered items have already been organized by
-    // the workspace agent). Use the unified `inbox` primitive instead
-    // of touching the filesystem directly so a single shape governs
-    // workspace inbox semantics across checkin / scheduler / triage.
-    let ws_inbox_items = crate::inbox::list_folder(Path::new(project_path), "");
+    // Workspace inbox: root-level items only (sub-foldered items have
+    // already been organized by the workspace agent and aren't part
+    // of the "untriaged arrivals" the agent needs to see on wake).
+    let mut work_items: Vec<serde_json::Value> = Vec::new();
+    let ws_inbox_items = crate::inbox::list_folder(workspace_path, "");
     for item in ws_inbox_items {
-        let content = crate::inbox::read_by_id(Path::new(project_path), &item.id)
+        let content = crate::inbox::read_by_id(workspace_path, &item.id)
             .unwrap_or_default();
         work_items.push(parse_work_item(&item.filename, &content));
     }
@@ -318,5 +295,95 @@ mod tests {
         let md = "---\ntitle: T\nassigned_by: reviewer\n---\n";
         let v = parse_work_item("t.md", md);
         assert_eq!(v.get("from").and_then(|t| t.as_str()), Some("reviewer"));
+    }
+
+    /// Phase 2.5b regression: `checkin()` must source the agent's
+    /// in-flight task + inbox from the unified workspace inbox
+    /// (`.k2so/inbox/`), not the retired per-agent
+    /// `.k2so/agents/<name>/work/` tree. Reproduces the shape of a
+    /// post-Phase-2.5b workspace where `.k2so/agents/` is absent
+    /// entirely. Pre-fix this test would observe a null task and an
+    /// empty work list because the legacy fs paths don't exist.
+    #[test]
+    fn checkin_reads_active_task_from_workspace_inbox_not_legacy_agents_dir() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let _ = crate::db::init_for_tests();
+
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let project_path = std::env::temp_dir().join(format!(
+            "k2so-checkin-regress-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            n
+        ));
+        let _ = fs::remove_dir_all(&project_path);
+        fs::create_dir_all(project_path.join(".k2so")).unwrap();
+
+        // Register project + a placeholder workspace_session so the
+        // checkin's downstream peer lookup doesn't panic on missing
+        // rows. Use a unique id to avoid cross-test interference on
+        // the shared in-memory DB.
+        let project_id = format!("proj-checkin-{}-{}", std::process::id(), n);
+        {
+            let db = crate::db::shared();
+            let conn = db.lock();
+            conn.execute(
+                "INSERT OR REPLACE INTO projects \
+                 (id, path, name, color, agent_mode, pinned, tab_order) \
+                 VALUES (?1, ?2, ?3, '#123456', 'manager', 0, 0)",
+                rusqlite::params![project_id, project_path.to_string_lossy(), "test"],
+            )
+            .unwrap();
+        }
+
+        // Set up the post-Phase-2.5b workspace shape:
+        //   .k2so/inbox/active/in-flight.md   ← current task
+        //   .k2so/inbox/new-arrival.md        ← untriaged inbox item
+        // and explicitly DO NOT create `.k2so/agents/`.
+        let inbox_root = project_path.join(".k2so").join("inbox");
+        fs::create_dir_all(inbox_root.join("active")).unwrap();
+        fs::write(
+            inbox_root.join("active").join("in-flight.md"),
+            "---\ntitle: Working on this\npriority: high\ntype: task\n---\n\nDetails.",
+        )
+        .unwrap();
+        fs::write(
+            inbox_root.join("new-arrival.md"),
+            "---\ntitle: New arrival\npriority: normal\ntype: task\n---\n\nBody.",
+        )
+        .unwrap();
+        assert!(
+            !project_path.join(".k2so").join("agents").exists(),
+            "legacy .k2so/agents/ must NOT exist for this regression",
+        );
+
+        let result = checkin(&project_path.to_string_lossy(), "any-agent").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        // `task` populated from `.k2so/inbox/active/`.
+        assert_eq!(
+            v.get("task").and_then(|t| t.get("title")).and_then(|t| t.as_str()),
+            Some("Working on this"),
+            "task should come from workspace inbox active folder; got: {v}",
+        );
+
+        // `inbox.work` populated from `.k2so/inbox/` root (not active/).
+        let work = v
+            .get("inbox")
+            .and_then(|i| i.get("work"))
+            .and_then(|w| w.as_array())
+            .expect("inbox.work array");
+        assert_eq!(work.len(), 1, "expected one root-level inbox item; got {work:?}");
+        assert_eq!(
+            work[0].get("title").and_then(|t| t.as_str()),
+            Some("New arrival"),
+        );
+
+        let _ = fs::remove_dir_all(&project_path);
     }
 }
