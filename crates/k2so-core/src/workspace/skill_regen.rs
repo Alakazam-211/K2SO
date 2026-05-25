@@ -787,31 +787,40 @@ pub fn regenerate_workspace_skill(project_path: String) -> Result<String, String
     // regression — it'd repopulate the directory tree the migration
     // just retired and re-create files at paths the runtime no longer
     // reads. Skip the legacy scaffold entirely when migrated.
+    //
+    // 0.39.0: when we DO scaffold, target the post-2.5b unified
+    // layout (`.k2so/skills/<name>/`) instead of the pre-2.5b
+    // `.k2so/agents/<name>/` tree. Pre-fix, this function created
+    // `.k2so/agents/manager/` + `.k2so/agents/k2so-agent/` on first
+    // call for a fresh workspace — a layout the runtime no longer
+    // reads after the consolidator runs at first boot.
     let unification_sentinel = k2so_dir.join(".unification-0.37.0-done");
     let unified_agent_dir = k2so_dir.join("agent");
     let post_unification = unification_sentinel.exists() || unified_agent_dir.exists();
     if post_unification {
-        // Don't recreate `.k2so/agents/` either — the post-migration
+        // Don't recreate `.k2so/skills/` either — the post-migration
         // layout uses `.k2so/agent/` (singular) and
         // `.k2so/agent-templates/<n>/`. Skip straight to PROJECT.md +
         // workspace SKILL writes below.
     } else {
-        let _ = fs::create_dir_all(k2so_dir.join("agents"));
+        let _ = fs::create_dir_all(k2so_dir.join("skills"));
     }
 
-    // Auto-create manager agent if it doesn't exist (pre-unification only).
+    // Auto-create manager skill if it doesn't exist (pre-unification only).
     // Check for old "pod-leader" and "coordinator" directory names as fallback.
-    let manager_dir = k2so_dir.join("agents").join("manager");
-    let legacy_coordinator_dir = k2so_dir.join("agents").join("coordinator");
-    let legacy_pod_leader_dir = k2so_dir.join("agents").join("pod-leader");
+    let manager_dir = k2so_dir.join("skills").join("manager");
+    let legacy_coordinator_dir = k2so_dir.join("skills").join("coordinator");
+    let legacy_pod_leader_dir = k2so_dir.join("skills").join("pod-leader");
     if !post_unification
         && !manager_dir.exists()
         && !legacy_coordinator_dir.exists()
         && !legacy_pod_leader_dir.exists()
     {
-        let _ = fs::create_dir_all(manager_dir.join("work").join("inbox"));
-        let _ = fs::create_dir_all(manager_dir.join("work").join("active"));
-        let _ = fs::create_dir_all(manager_dir.join("work").join("done"));
+        let _ = fs::create_dir_all(&manager_dir);
+        // 0.39.0: work/ subdirs are workspace-level under `.k2so/inbox/`
+        // (the unified `k2so_core::inbox::*` primitive) post-Phase-2.1.
+        // The legacy per-agent `<dir>/work/{inbox,active,done}/` layout
+        // was retired in 0.37.0 unification — don't recreate it.
         let manager_role = "Workspace Manager — delegates work to agents, reviews completed branches, drives milestones";
         let manager_body =
             generate_default_agent_body("manager", "manager", manager_role, &project_path);
@@ -830,12 +839,10 @@ pub fn regenerate_workspace_skill(project_path: String) -> Result<String, String
 
     // Auto-create K2SO agent if it doesn't exist (pre-unification only).
     // Post-0.37.0 the workspace agent lives at .k2so/agent/, not
-    // .k2so/agents/k2so-agent/.
-    let k2so_agent_dir = k2so_dir.join("agents").join("k2so-agent");
+    // .k2so/skills/k2so-agent/.
+    let k2so_agent_dir = k2so_dir.join("skills").join("k2so-agent");
     if !post_unification && !k2so_agent_dir.exists() {
-        let _ = fs::create_dir_all(k2so_agent_dir.join("work").join("inbox"));
-        let _ = fs::create_dir_all(k2so_agent_dir.join("work").join("active"));
-        let _ = fs::create_dir_all(k2so_agent_dir.join("work").join("done"));
+        let _ = fs::create_dir_all(&k2so_agent_dir);
         let k2so_role = "K2SO planner — builds PRDs, milestones, and technical plans";
         let k2so_body =
             generate_default_agent_body("k2so", "k2so-agent", k2so_role, &project_path);
@@ -894,15 +901,30 @@ pub fn regenerate_workspace_skill(project_path: String) -> Result<String, String
             Some("manager") | Some("coordinator") | Some("pod") => true,
             Some("agent") => false,
             _ => {
-                // Fallback: if agents dir has sub-agents, assume manager mode
-                let agents_root = agents_dir(&project_path);
-                agents_root.exists()
-                    && fs::read_dir(&agents_root)
-                        .map(|e| {
-                            e.flatten()
-                                .any(|e| e.file_type().map_or(false, |ft| ft.is_dir()))
-                        })
-                        .unwrap_or(false)
+                // Fallback: if either the post-2.5b skills dir or the
+                // legacy agents dir has sub-agents, assume manager mode.
+                // (Walks BOTH locations because partially-migrated
+                // workspaces during the consolidation window can have
+                // entries in either tree.)
+                let has_subagents = |root: &PathBuf| -> bool {
+                    root.exists()
+                        && fs::read_dir(root)
+                            .map(|e| {
+                                e.flatten().any(|e| {
+                                    let Ok(ft) = e.file_type() else { return false };
+                                    if !ft.is_dir() {
+                                        return false;
+                                    }
+                                    let name = e.file_name().to_string_lossy().to_string();
+                                    // The workspace skill itself isn't a sub-agent;
+                                    // its presence shouldn't flip manager-mode on.
+                                    !name.starts_with('.') && name != "k2so"
+                                })
+                            })
+                            .unwrap_or(false)
+                };
+                let skills_root = k2so_dir.join("skills");
+                has_subagents(&skills_root) || has_subagents(&agents_dir(&project_path))
             }
         }
     };
@@ -1162,6 +1184,44 @@ mod tests {
         assert!(
             proj.join(".k2so/skills/k2so/SKILL.md").exists(),
             "canonical SKILL.md should exist after regen",
+        );
+
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn regenerate_workspace_skill_auto_scaffold_targets_skills_not_agents() {
+        // 0.39.0: pre-fix, this function scaffolded `.k2so/agents/manager/`
+        // and `.k2so/agents/k2so-agent/` on first call for a fresh
+        // workspace — a layout the runtime no longer reads post-2.5b
+        // consolidation. The fix re-targets the unified
+        // `.k2so/skills/<name>/` home so the auto-scaffolded files
+        // actually feed downstream regen + discovery.
+        let proj = scratch_project();
+        let path = proj.to_str().unwrap().to_string();
+
+        let _ = regenerate_workspace_skill(path).expect("regen ok");
+
+        // The manager + k2so-agent auto-scaffold must land under the
+        // unified `.k2so/skills/` home.
+        assert!(
+            proj.join(".k2so/skills/manager/AGENT.md").exists(),
+            ".k2so/skills/manager/AGENT.md should be auto-scaffolded",
+        );
+        assert!(
+            proj.join(".k2so/skills/k2so-agent/AGENT.md").exists(),
+            ".k2so/skills/k2so-agent/AGENT.md should be auto-scaffolded",
+        );
+
+        // And critically: the pre-fix legacy `.k2so/agents/` path
+        // must NOT be re-created.
+        assert!(
+            !proj.join(".k2so/agents/manager").exists(),
+            "regen must NOT re-create the retired .k2so/agents/manager/ path",
+        );
+        assert!(
+            !proj.join(".k2so/agents/k2so-agent").exists(),
+            "regen must NOT re-create the retired .k2so/agents/k2so-agent/ path",
         );
 
         fs::remove_dir_all(&proj).ok();
