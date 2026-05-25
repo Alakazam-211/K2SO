@@ -387,6 +387,10 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
         ("0049_drop_lead_sentinel_in_activity_feed", include_str!("../../drizzle_sql/0049_drop_lead_sentinel_in_activity_feed.sql")),
         // 0050 (added in 0.39.0): app_settings table — superseded by ~/.k2so/settings.json in same release; kept for rollback safety, not read by current code.
         ("0050_app_settings", include_str!("../../drizzle_sql/0050_app_settings.sql")),
+        // 0051 (added in 0.39.0): dedupe symmetric workspace_relations rows. Phase 2.5b
+        // workspace==agent insight — a connection between two workspaces implies bidirectional
+        // awareness, so explicit A→B + B→A pairs collapse to one row with merged relation_type.
+        ("0051_dedup_symmetric_workspace_relations", include_str!("../../drizzle_sql/0051_dedup_symmetric_workspace_relations.sql")),
     ];
 
     for (name, sql) in migrations {
