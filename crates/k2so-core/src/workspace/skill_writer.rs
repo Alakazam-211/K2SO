@@ -59,7 +59,11 @@ pub const USER_NOTES_PLACEHOLDER: &str =
 // ══════════════════════════════════════════════════════════════════════
 
 /// Generate the workspace-level skill for users working directly with an LLM.
-/// Lightweight — just the commands a human user would need when working alongside K2SO agents.
+/// Lightweight — just the commands a human user would need when working
+/// alongside K2SO agents. All verbs here are pinned to the A25 canonical
+/// taxonomy (Phase 2.1); the deprecated-verb snapshot test in
+/// `skills/content.rs::tests::DEPRECATED_VERBS` guards against
+/// regressions.
 fn generate_workspace_skill_content(project_name: &str) -> String {
     format!(
 r#"# K2SO Skill
@@ -70,15 +74,18 @@ This workspace ({project_name}) is managed by K2SO. You can use these commands t
 
 Send a task to a workspace's manager for triage and execution:
 ```
-k2so msg <workspace-name>:inbox "description of work needed"
-k2so msg --wake <workspace-name>:inbox "urgent — wake the agent"
+k2so msg <workspace-name> "live chat — appears in the running session"
+k2so msg <workspace-name> --inbox --title "..." --body "..."   # queue (email-style)
 ```
+
+`msg` (live form) fails loudly when the recipient isn't running — use
+`--inbox` to queue a task the recipient reads on their own schedule.
 
 ## View Activity Feed
 
 See recent agent activity in this workspace:
 ```
-k2so feed
+k2so activity [--limit N] [--workspace <path>]
 ```
 
 ## View Connections
@@ -88,22 +95,24 @@ See which workspaces are connected:
 k2so connections list
 ```
 
-## Create a Work Item
+## Compose a Work Item
 
 Add work to this workspace's inbox for the manager to triage:
 ```
-k2so work create --title "Fix login bug" --body "Users can't log in after password reset" --source issue
+k2so inbox compose --title "Fix login bug" --body "Users can't log in after password reset"
 ```
 
 ## Heartbeats
 
 The agent in this workspace can have one or more scheduled wakeups. Manage them with:
 ```
-k2so heartbeat list                   # see configured schedules
-k2so heartbeat show <name>            # full details for one
-k2so heartbeat add --name <n> --daily --time HH:MM
-k2so heartbeat wakeup <name> --edit   # edit the prompt that fires
-k2so heartbeat wake                   # trigger a tick now
+k2so heartbeat                                       # default: list active schedules
+k2so heartbeat schedule list [--archived]            # full schedule listing
+k2so heartbeat show <name> [--json]                  # schedule + last fire details
+k2so heartbeat schedule add --name <n> --daily --time HH:MM
+k2so heartbeat signal wakeup <name>                  # print/edit the WAKEUP.md
+k2so heartbeat signal fire <name>                    # fire now (skip schedule window)
+k2so heartbeat signal wake                           # auto-wake (no name needed)
 ```
 
 Run `k2so heartbeat --help` for the full surface.
@@ -711,140 +720,20 @@ pub fn ensure_all_skills_up_to_date(project_path: &str) {
 
 // is unchanged.
 
-/// User-facing CLI command documentation injected into the manager and
-/// AI planner CLAUDE.md briefs. Kept as a single `const` so the two
-/// templates below stay in sync.
-const CLI_TOOLS_DOCS: &str = r#"## K2SO CLI Tools
-
-You are operating inside K2SO. The `k2so` command is available in your terminal.
-K2SO does the heavy lifting — each command is a single atomic operation.
-
-### Assign Work to an Agent (one step)
-```
-k2so delegate <agent> <work-file>
-```
-This single command does everything:
-- Creates a git worktree (branch: `agent/<name>/<task>`)
-- Writes a CLAUDE.md into the worktree with the agent's identity + task context
-- Moves the work item from inbox → active with worktree metadata
-- Opens a Claude terminal session in the worktree for the agent to start working
-
-### Create Work Items
-```
-k2so work create --title "..." --body "..." --agent <name> --priority high --type task
-k2so work create --title "..." --body "..."   # Goes to workspace inbox (no agent)
-```
-
-### Check Status
-```
-k2so agents list                     # All agents with inbox/active/done counts
-k2so agents work <name>              # Agent's work items
-k2so work inbox                      # Workspace-level inbox
-k2so reviews                         # Pending reviews (completed work)
-```
-
-### Reviews (one step each)
-```
-k2so review approve <agent> <branch>   # Merges branch + removes worktree + cleans up
-k2so review reject <agent>             # Removes worktree + moves work back to inbox
-k2so review reject <agent> --reason "..." # Same + creates feedback file
-k2so review feedback <agent> -m "..."  # Send feedback without rejecting
-```
-
-### Git
-```
-k2so commit                          # AI-assisted commit review
-k2so commit-merge                    # AI commit then merge into main
-```
-
-### Waking the Workspace Manager (USE THIS — not `k2so heartbeat`)
-```
-k2so heartbeat wake                     # THE RIGHT WAY: resumes manager session, sends triage message
-```
-**IMPORTANT:** Always use `k2so heartbeat wake` to wake the workspace manager, NOT `k2so heartbeat`.
-- `heartbeat wake` → resumes the manager's previous session, detects inbox work, sends delegation instructions
-- `heartbeat` (without "wake") → raw triage that launches the workspace's primary agent, does NOT resume sessions or send messages
-
-### Workspace Setup
-```
-k2so mode                               # Show current settings
-k2so mode <off|agent|manager>            # Set workspace agent mode
-k2so heartbeat <on|off>                 # Enable/disable automatic heartbeat
-k2so settings                           # Show all workspace settings
-```
-
-### Agent Management
-```
-k2so agent create <name> --role "..."   # Create a new agent
-k2so agent update --name <n> --field <f> --value "..."  # Update agent profile
-k2so agent list                         # List all agents with work counts
-k2so agent profile <name>              # Read agent's identity (agent.md)
-k2so agents work <name>                 # Show agent's work items
-k2so agents launch <name>              # Launch agent's Claude session
-```
-
-### Cross-Workspace (use K2SO_PROJECT_PATH, not cd)
-```
-K2SO_PROJECT_PATH=/path/to/workspace k2so work send --title "..." --body "..."
-K2SO_PROJECT_PATH=/path/to/workspace k2so heartbeat wake
-k2so work move --agent <name> --file <f> --from inbox --to active
-```
-**IMPORTANT:** When targeting a different workspace, use `K2SO_PROJECT_PATH=/path k2so ...`
-Do NOT use `cd /path && k2so ...` — the cd resets your shell and may cause path resolution issues.
-
-### Running Agents & Terminal I/O
-```
-k2so agents running                 # List all active CLI LLM sessions
-k2so terminal write <id> "message"  # Send text to a running terminal
-k2so terminal read <id> --lines 50  # Read last N lines from terminal buffer
-```
-
-### Completion
-```
-k2so agent complete --agent <n> --file <f>  # Complete work (auto-merge or submit for review)
-```
-
-"#;
-
-/// Manager-specific workflow guidance injected into the manager CLAUDE.md.
-const WORKFLOW_DOCS: &str = r#"## Workflow
-
-### If you are the Lead Agent (orchestrator):
-1. Check for work: `k2so inbox` (workspace-implicit; pass `--workspace <path>` to target another)
-2. Read each request and decide which agent should handle it
-3. Assign work with a single command — K2SO handles everything else:
-   ```
-   k2so delegate backend-eng .k2so/inbox/add-oauth-support.md
-   ```
-   This creates a worktree, writes a CLAUDE.md, and launches the agent automatically.
-4. To break a large request into sub-tasks first:
-   ```
-   k2so inbox compose --title "Build API endpoints" --body "..."
-   k2so inbox compose --title "Build login UI" --body "..."
-   ```
-   Then delegate each: `k2so delegate backend-eng .k2so/inbox/build-api-endpoints.md`
-5. If a request is blocked or needs user input, leave it in the workspace inbox
-6. You orchestrate — you do NOT implement code yourself
-
-### If you are a Sub-Agent (executor):
-You are launched into a dedicated worktree with your task already set up.
-1. Read your task file (path is in your launch prompt)
-2. Implement the changes — all work happens in your worktree
-3. Commit to your branch as you go
-4. When done: `k2so work move --agent <your-name> --file <task>.md --from active --to done`
-5. Your work appears in the review queue — the user will approve, reject, or request changes
-
-### Review lifecycle (handled by user or lead agent):
-- **Approve**: `k2so review approve <agent> <branch>` — merges to main, cleans up worktree
-- **Reject**: `k2so review reject <agent> --reason "..."` — cleans up worktree, puts task back in inbox with feedback, agent retries with a fresh worktree on next launch
-- **Feedback**: `k2so review feedback <agent> -m "..."` — sends feedback without rejecting
-
-## Important Rules
-- Each agent works in its own worktree — never edit main directly
-- K2SO creates worktrees, branches, and CLAUDE.md files for you automatically
-- Commit often with clear messages referencing your task
-- If blocked, move your task back to inbox and document the blocker
-"#;
+// ── Canonical-generator delegation (post-Phase-2.5d cleanup) ────────────
+//
+// The previous CLI_TOOLS_DOCS + WORKFLOW_DOCS constants + the inline
+// manager-mode / AI-planner CLAUDE.md templates that lived here baked
+// the pre-A25 verb taxonomy (`k2so delegate`, `k2so work create`,
+// `k2so agents create`, `k2so heartbeat wake`, `k2so agent complete`,
+// …) into every regenerated SKILL.md. Phase 2.1 retired those verbs
+// in favor of the A25 surface (`k2so skills *`, `k2so workspace *`,
+// `k2so inbox compose`, `k2so msg --inbox`, `k2so heartbeat signal
+// wake`). Phase 2.5d moved the canonical bodies into
+// `skills/content.rs` and pinned them with the Tier 2.2
+// `assert_no_deprecated_verbs` snapshot tests; the body of
+// `regenerate_workspace_skill` below now calls those generators
+// directly instead of re-implementing them inline.
 
 /// Regenerate the workspace-root SKILL.md — the lead agent's complete
 /// operating manual. Written to `<project-root>/SKILL.md` with a
@@ -864,7 +753,6 @@ You are launched into a dedicated worktree with your task already set up.
 /// canonical SKILL.md — the renderer's regen UIs use this for preview.
 pub fn regenerate_workspace_skill(project_path: String) -> Result<String, String> {
     use crate::skills::writer::{generate_default_agent_body, write_agent_skill_file};
-    use crate::workspace::work_item::read_work_item;
 
     let project_name = std::path::Path::new(&project_path)
         .file_name()
@@ -952,29 +840,11 @@ pub fn regenerate_workspace_skill(project_path: String) -> Result<String, String
         write_agent_skill_file(&project_path, "k2so-agent", "k2so");
     }
 
-    // List existing agents
-    let mut agent_list = String::new();
-    let agents_root = agents_dir(&project_path);
-    if agents_root.exists() {
-        if let Ok(entries) = fs::read_dir(&agents_root) {
-            for entry in entries.flatten() {
-                if entry.file_type().map_or(false, |ft| ft.is_dir()) {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    let agent_md = entry.path().join("AGENT.md");
-                    let role = if agent_md.exists() {
-                        let content = fs::read_to_string(&agent_md).unwrap_or_default();
-                        let fm = parse_frontmatter(&content);
-                        fm.get("role").cloned().unwrap_or_default()
-                    } else {
-                        String::new()
-                    };
-                    agent_list.push_str(&format!("- **{}** — {}\n", name, role));
-                }
-            }
-        }
-    }
-
-    // List workspace inbox items.
+    // List workspace inbox items for the per-regen "current context"
+    // header. The canonical generator (`generate_manager_skill_content`)
+    // walks `.k2so/agents/` to build the team roster + emits the full
+    // CLI surface; we only need the inbox snapshot here because that's
+    // the one piece of per-regen state the generator doesn't bake in.
     //
     // Post-Phase-2.1: workspace inbox lives at `.k2so/inbox/` (the
     // unified `k2so_core::inbox::*` primitive). Root-level items
@@ -1082,244 +952,48 @@ r#"# {project_name}
         }
     }
 
-    let md = if is_manager_mode {
-        // ── Workspace Manager CLAUDE.md ──────────────────────────────────────
-        format!(
-            r#"# K2SO Workspace Manager: {project_name}
-
-You are the **workspace manager** for the {project_name} workspace, operating inside K2SO.
-
-## Your Role
-
-You manage a team of AI agents that build this project. You:
-- **Read PRDs and milestones** in `.k2so/prds/` and `.k2so/milestones/` to understand the plan
-- **Delegate work** to sub-agents — K2SO automatically creates a worktree, writes a CLAUDE.md, and launches the agent
-- **Manage your team** — create new agents when you need new skills, assign multiple tasks to the same agent type across parallel worktrees
-- **Review completed work** — when agents finish, review their diffs and either approve (merge to main) or reject with feedback
-- **Drive milestones forward** — after merging one batch, assign the next batch of tasks
-
-**Important:** An agent is a role template, not a person. `backend-eng` can run in 5 worktrees simultaneously — each gets its own branch, its own CLAUDE.md, and its own Claude session. Don't wait for one task to finish before assigning the next.
-
-## Workspace Inbox
-
-{inbox_section}
-
-## Your Agents
-
-{agent_section}
-
-## Delegation (one command does everything)
-
-```bash
-# Create a task and assign it
-k2so work create --agent backend-eng --title "Build OAuth endpoints" \
-  --body "Implement /auth/login and /auth/callback. See PRD: .k2so/prds/auth.md" \
-  --priority high --type task
-
-# Delegate — creates worktree, writes CLAUDE.md, launches the agent:
-k2so delegate backend-eng .k2so/agents/backend-eng/work/inbox/build-oauth-endpoints.md
-```
-
-You can delegate multiple tasks to the same agent simultaneously:
-```bash
-k2so delegate backend-eng .k2so/agents/backend-eng/work/inbox/task-1.md
-k2so delegate backend-eng .k2so/agents/backend-eng/work/inbox/task-2.md
-k2so delegate backend-eng .k2so/agents/backend-eng/work/inbox/task-3.md
-```
-Each gets its own worktree and runs in parallel.
-
-## Reviewing and Merging
-
-When agents move their work to done/, it appears in the review queue:
-```bash
-k2so reviews                                    # See all pending reviews with diffs
-k2so review approve backend-eng <branch>        # Merge to main + cleanup worktree
-k2so review reject backend-eng --reason "..."   # Discard worktree + send back to inbox
-k2so review feedback backend-eng -m "..."       # Send feedback without rejecting
-```
-
-**Your review responsibility:** You are the first reviewer. Check the diff, verify it meets the task's acceptance criteria, and approve or reject. Only escalate to the user when a milestone is complete or if you're unsure about a design decision.
-
-## Creating New Agents
-
-When you need a skill your team doesn't have:
-```bash
-k2so agents create devops-eng --role "DevOps — CI/CD, Docker, deployment, infrastructure"
-k2so agents create docs-writer --role "Documentation — README, API docs, user guides"
-```
-
-## Communicating with Running Agents
-
-You can see and message any running agent session:
-```bash
-k2so agents running                            # List all active sessions with terminal IDs
-k2so terminal read <terminal-id> --lines 30    # See what an agent is doing
-k2so terminal write <terminal-id> "message"    # Send instructions to a running agent
-```
-
-**Auto-merge (Build state):** When all capabilities are "auto", tell the sub-agent to self-merge:
-```bash
-k2so terminal write <id> "Your work is approved. Run: k2so agent complete --agent <name> --file <filename>"
-```
-
-**Gated (Managed Service state):** The agent moves work to done and you review:
-```bash
-k2so reviews                                   # Check pending reviews
-k2so review approve <agent> <branch>           # Merge after reviewing
-```
-
-## Planning
-
-Store plans as markdown files:
-- `.k2so/prds/` — Product requirement documents
-- `.k2so/milestones/` — Milestone breakdowns with task lists
-- `.k2so/specs/` — Technical specifications
-
-{cli_section}
-
-{workflow_section}
-"#,
-            project_name = project_name,
-            inbox_section = if inbox_summary.is_empty() {
-                "*Workspace inbox is empty. Waiting for tasks from the AI Planner or user.*".to_string()
-            } else {
-                format!("### Current Inbox\n{}", inbox_summary)
-            },
-            agent_section = if agent_list.is_empty() {
-                "*No agents yet. Create agents based on the skills this project needs.*".to_string()
-            } else {
-                format!("{}\n\nRead each agent's profile at `.k2so/agents/<name>/agent.md` to understand their strengths before delegating. You can also update their profiles with `k2so agent update --name <name> --field role --value \"...\"`.", agent_list)
-            },
-            cli_section = CLI_TOOLS_DOCS,
-            workflow_section = WORKFLOW_DOCS,
-        )
+    // Build the per-regen inbox snapshot header. This is the only piece
+    // of per-call workspace state we prepend to the canonical body —
+    // the rest (CLI surface, team roster, standing orders, decision
+    // framework, …) lives in the canonical generators in
+    // `skills/content.rs`, which are pinned by the Tier 2.2 snapshot
+    // tests to use only A25 canonical verbs.
+    let inbox_section = if inbox_summary.is_empty() {
+        if is_manager_mode {
+            "*Workspace inbox is empty. Waiting for tasks from the AI Planner or user.*".to_string()
+        } else {
+            "No items in the workspace inbox.".to_string()
+        }
     } else {
-        // ── Agent 1: AI Planner CLAUDE.md ──────────────────────────────
-        format!(
-            r#"# K2SO AI Planner: {project_name}
-
-You are the **AI Planner** for the {project_name} workspace, operating inside K2SO.
-
-## Your Role
-
-You collaborate with the user to plan and orchestrate software projects. You:
-- **Talk with the user** to understand what they want to build
-- **Create PRDs** (product requirement documents), milestones, and technical specifications
-- **Set up workspaces** for each project — enable worktrees, manager mode, create agent teams
-- **Coordinate across workspaces** — send work to different projects, check on progress
-- **You do NOT write code** — you plan, then hand off execution to workspace managers and their agent teams
-
-## Setting Up a Project Workspace
-
-When the user has a project they want to build or maintain with agents:
-
-```bash
-# 1. Enable the workspace for autonomous work
-k2so mode manager                    # Enable multi-agent orchestration
-k2so heartbeat on                   # Agents wake up automatically on schedule
-
-# 2. Create the agent team based on the project's tech stack
-k2so agents create backend-eng --role "Backend engineer — APIs, databases, server logic"
-k2so agents create frontend-eng --role "Frontend engineer — React, UI, styling, UX"
-k2so agents create qa-tester --role "QA — testing, test automation, quality assurance"
-
-# 3. Verify setup
-k2so settings                       # Shows mode, worktrees, heartbeat status
-k2so agents list                    # Shows agents with work counts
-```
-
-## Planning Workflow
-
-1. **Discuss with the user** what they want built — goals, constraints, timeline
-2. **Create a PRD** that captures the full scope:
-   ```
-   mkdir -p .k2so/prds
-   # Write the PRD as a markdown file
-   ```
-3. **Break the PRD into milestones** — each milestone should be shippable
-4. **Break milestones into tasks** with clear acceptance criteria
-5. **Send tasks to the project workspace** for the workspace manager to execute:
-   ```bash
-   k2so work send --workspace /path/to/project \
-     --title "Milestone 1: User Authentication" \
-     --body "See PRD at .k2so/prds/auth.md. Tasks: ..."
-   ```
-   The workspace manager picks it up and delegates to its agents.
-
-## Cross-Workspace Coordination
-
-You can see and manage multiple workspaces:
-```bash
-# Send work to any workspace
-k2so work send --workspace /path/to/frontend-app --title "..." --body "..."
-k2so work send --workspace /path/to/api-server --title "..." --body "..."
-
-# Set up a new workspace from scratch
-K2SO_PROJECT_PATH="/path/to/new-project" k2so mode manager
-K2SO_PROJECT_PATH="/path/to/new-project" k2so heartbeat on
-K2SO_PROJECT_PATH="/path/to/new-project" k2so agents create backend-eng --role "..."
-
-# Register a new workspace via CLI
-k2so workspace create /path/to/new-project   # Create folder + register
-k2so workspace open /path/to/existing        # Register existing folder
-```
-
-## Testing Workspace Manager Workflows
-
-To wake the workspace manager and have it process inbox work:
-```bash
-# Add work to the workspace inbox
-k2so work create --title "..." --body "..." --priority high --type task --source feature
-
-# Wake the workspace manager (resumes previous session, sends triage message)
-k2so heartbeat wake
-```
-
-The workspace manager will check inbox, delegate to agents, and track progress.
-
-## Monitoring Running Agents
-
-```bash
-# See all active CLI LLM sessions across workspaces
-k2so agents running
-
-# Read what an agent is doing
-k2so terminal read <terminal-id> --lines 30
-
-# Send a message to a running agent
-k2so terminal write <terminal-id> "message"
-
-# Check agent work status
-k2so agents list
-k2so reviews                    # See pending reviews
-```
-
-## Workspace States
-
-Workspaces operate under states that control agent autonomy:
-- **Build** — agents auto-merge everything
-- **Managed Service** — features are gated (need human approval), bugs/security auto-merge
-- **Maintenance** — everything gated
-- **Locked** — no agent activity
-
-The workspace manager and sub-agents adapt their completion behavior based on the state.
-Sub-agents use `k2so agent complete` which auto-merges or submits for review accordingly.
-
-## Current Context
-
-{inbox_section}
-
-{cli_section}
-"#,
-            project_name = project_name,
-            inbox_section = if inbox_summary.is_empty() {
-                "No items in the workspace inbox.".to_string()
-            } else {
-                format!("### Workspace Inbox\n{}", inbox_summary)
-            },
-            cli_section = CLI_TOOLS_DOCS,
-        )
+        format!("### Current Inbox\n{}", inbox_summary)
     };
+
+    // Delegate to the canonical tier generator instead of inlining a
+    // duplicate template. Phase 2.1 retired the legacy verb taxonomy
+    // (`k2so delegate`, `k2so work create`, `k2so agents create`,
+    // `k2so heartbeat wake`, `k2so agent complete`, …); the canonical
+    // generators in `skills/content.rs` emit only A25 verbs.
+    let canonical_body = if is_manager_mode {
+        crate::skills::content::generate_manager_skill_content(&project_path, &project_name)
+    } else {
+        // Non-manager workspace = AI Planner role (the comprehensive
+        // top-tier autonomous variant). `generate_k2so_agent_skill_content`
+        // emits the planner-focused brief including PRD/milestone
+        // workflow, cross-workspace messaging, heartbeat scheduling,
+        // and review-queue triage.
+        let planner_name = find_primary_agent(&project_path)
+            .unwrap_or_else(|| "k2so-agent".to_string());
+        crate::skills::content::generate_k2so_agent_skill_content(&project_name, &planner_name)
+    };
+
+    // Prepend a per-regen "Workspace Inbox" header so the manager /
+    // planner has the live triage queue visible without having to
+    // re-run `k2so inbox`. The canonical body follows.
+    let md = format!(
+        "## Workspace Inbox\n\n{inbox_section}\n\n---\n\n{canonical_body}",
+        inbox_section = inbox_section,
+        canonical_body = canonical_body,
+    );
 
     // As of 0.32.7: the rich workspace-level content (manager brief or AI
     // planner brief + agent list + inbox summary + CLI tools docs) now
@@ -1397,8 +1071,8 @@ mod tests {
         // Seed a minimal canonical body (no SOURCE regions yet).
         let seed = format!(
             "---\nk2so_skill: workspace\n---\n\n{}\nManaged\n{}\n",
-            crate::agents::skill::SKILL_BEGIN_MARKER,
-            crate::agents::skill::SKILL_END_MARKER,
+            crate::skills::version::SKILL_BEGIN_MARKER,
+            crate::skills::version::SKILL_END_MARKER,
         );
         fs::write(&canonical, &seed).unwrap();
 
@@ -1422,8 +1096,8 @@ mod tests {
         let canonical = proj.join(".k2so/skills/k2so/SKILL.md");
         let seed = format!(
             "---\nk2so_skill: workspace\n---\n\n{}\nManaged\n{}\n",
-            crate::agents::skill::SKILL_BEGIN_MARKER,
-            crate::agents::skill::SKILL_END_MARKER,
+            crate::skills::version::SKILL_BEGIN_MARKER,
+            crate::skills::version::SKILL_END_MARKER,
         );
         fs::write(&canonical, &seed).unwrap();
 
@@ -1479,5 +1153,125 @@ mod tests {
         );
 
         fs::remove_dir_all(&proj).ok();
+    }
+
+    // ── Tier 2.5d cleanup: no deprecated verbs in regen output ─────
+    //
+    // The previous CLI_TOOLS_DOCS + inline manager/AI-planner templates
+    // baked pre-A25 verbs (`k2so delegate`, `k2so work create`,
+    // `k2so agents create`, `k2so heartbeat wake`, `k2so agent complete`,
+    // …) into every workspace SKILL.md K2SO emitted. The fix routes
+    // through `skills/content.rs` canonical generators — these tests
+    // pin the property end-to-end through `regenerate_workspace_skill`
+    // so a future inline-template regression breaks the build.
+    //
+    // Kept in lockstep with `skills::content::tests::DEPRECATED_VERBS`.
+
+    /// Hard-deprecated verbs from Phase 2.1 A25. Mirrors the list in
+    /// `skills::content::tests::DEPRECATED_VERBS` — kept here as a
+    /// local copy so this test module is self-contained (the upstream
+    /// list lives in a `cfg(test)` module and can't be referenced
+    /// across compilation units).
+    const DEPRECATED_REGEN_VERBS: &[&str] = &[
+        "k2so delegate",
+        "k2so work create",
+        "k2so work send",
+        "k2so work move",
+        "k2so work inbox",
+        "k2so signal",
+        "k2so app-update",
+        "k2so agents create",
+        "k2so agents delete",
+        "k2so agents list",
+        "k2so agents running",
+        "k2so agents work",
+    ];
+
+    fn assert_regen_body_has_no_deprecated_verbs(body: &str, context: &str) {
+        let mut hits: Vec<&str> = Vec::new();
+        for verb in DEPRECATED_REGEN_VERBS {
+            if body.contains(verb) {
+                hits.push(verb);
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "{context}: regen body must NOT contain hard-deprecated verbs; found {hits:?}\n\
+             Excerpt (first 400 chars):\n{}",
+            &body[..body.len().min(400)],
+        );
+    }
+
+    #[test]
+    fn regenerate_workspace_skill_emits_no_deprecated_verbs() {
+        // `regenerate_workspace_skill` auto-scaffolds `.k2so/agents/
+        // manager/` and `.k2so/agents/k2so-agent/` on its first call
+        // for a fresh workspace, so `is_manager_mode` resolves true
+        // via the filesystem fallback and the manager-tier canonical
+        // body is selected. This is the path users hit in practice
+        // when they enable manager mode for the first time.
+        let proj = scratch_project();
+        let path = proj.to_str().unwrap().to_string();
+
+        let body = regenerate_workspace_skill(path).expect("regen ok");
+        assert_regen_body_has_no_deprecated_verbs(&body, "manager-mode regen (auto-scaffold)");
+
+        // The manager-tier canonical generator emits the Workspace
+        // Manager header — confirm we routed through it (not a leftover
+        // inline template).
+        assert!(
+            body.contains("Workspace Manager"),
+            "manager-mode regen must include 'Workspace Manager' from the canonical generator",
+        );
+
+        // Sanity: at least one canonical A25 verb should appear so an
+        // accidental empty-body regression doesn't trivially pass.
+        assert!(
+            body.contains("k2so checkin")
+                && body.contains("k2so inbox"),
+            "regen body must reference canonical A25 verbs (k2so checkin, k2so inbox), got first 400 chars:\n{}",
+            &body[..body.len().min(400)],
+        );
+
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn regenerate_workspace_skill_emits_no_deprecated_verbs_with_pre_existing_template_agent() {
+        // Pre-seed a sub-agent dir so the manager-tier generator picks
+        // it up in its team-roster walk. Verifies that custom template
+        // agents present in `.k2so/agents/` don't reintroduce
+        // deprecated verbs via the canonical generator's roster output.
+        let proj = scratch_project();
+        let path = proj.to_str().unwrap().to_string();
+
+        fs::create_dir_all(proj.join(".k2so/agents/backend-eng")).unwrap();
+        fs::write(
+            proj.join(".k2so/agents/backend-eng/AGENT.md"),
+            "---\nname: backend-eng\nrole: Backend engineer\ntype: agent-template\n---\n",
+        )
+        .unwrap();
+
+        let body = regenerate_workspace_skill(path).expect("regen ok");
+        assert_regen_body_has_no_deprecated_verbs(&body, "manager-mode regen (with backend-eng)");
+
+        // The team-roster walk should surface the seeded agent.
+        assert!(
+            body.contains("backend-eng"),
+            "manager body should reference the seeded backend-eng agent",
+        );
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn workspace_skill_generate_content_emits_no_deprecated_verbs() {
+        // `generate_workspace_skill_content` is the lightweight user-
+        // facing template invoked when `write_workspace_skill_file` is
+        // called without a body override (e.g. from
+        // `workspace::agent_launch::launch_agent` when there is no
+        // current task). Pin its verb set too.
+        let body = generate_workspace_skill_content("TestWorkspace");
+        assert_regen_body_has_no_deprecated_verbs(&body, "generate_workspace_skill_content");
+        assert!(body.contains("TestWorkspace"), "project name must appear");
     }
 }
