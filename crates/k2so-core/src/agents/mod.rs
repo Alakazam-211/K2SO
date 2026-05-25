@@ -120,7 +120,10 @@ pub use crate::workspace::work_item;
 // skill_writer, harness, teardown). All downstream call sites updated
 // in step 13; the migration_safety_tests moved into
 // `workspace/migrations.rs` (their natural home).
-pub mod workspaces;
+/// Phase 2.5e: `workspaces` (plural) relocated to
+/// [`crate::workspace::lifecycle`]; renamed to disambiguate from the
+/// `workspace` module itself. Back-compat alias.
+pub use crate::workspace::lifecycle as workspaces;
 
 // Phase 2.5c: identity helpers extracted to
 // [`crate::workspace::agent_identity`]. The re-exports below preserve

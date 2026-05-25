@@ -21,6 +21,11 @@ pub mod checkin;
 pub mod display;
 pub mod events;
 pub mod launch_profile;
+// Phase 2.5e: workspace lifecycle DB ops (register / create / open /
+// cleanup / remove_db_only). Relocated from `agents/workspaces.rs`;
+// renamed to `lifecycle` to disambiguate from the `workspace` module
+// itself.
+pub mod lifecycle;
 // Phase 2.5d: boot-time idempotent migration helpers, extracted from
 // the monolithic `agents/workspace.rs`.
 pub mod migrations;
