@@ -289,7 +289,7 @@ pub fn run() {
             ));
 
             // Phase 2 Unit 7c — workspace regen bridge retired.
-            // `k2so_core::agents::build_launch` now calls
+            // `k2so_core::workspace::agent_launch` now calls
             // `workspace::write_workspace_skill_file` directly (the
             // SKILL scaffolding moved into k2so-core during Unit 7b),
             // so the WorkspaceRegenProvider trait + Tauri impl that
