@@ -22,8 +22,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use crate::agents::resolve_project_id;
 use crate::db::schema::{log_activity, WorkspaceSession};
+use crate::workspace::agent_identity::resolve_project_id;
 
 fn open_project(project_path: &str) -> Result<String, String> {
     let db = crate::db::shared();

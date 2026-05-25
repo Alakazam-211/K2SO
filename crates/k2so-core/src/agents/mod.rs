@@ -31,7 +31,10 @@
 /// [`crate::workspace::agent_launch`]. The rename clarifies that this
 /// composes a launch from workspace context, not a generic build step.
 pub use crate::workspace::agent_launch as build_launch;
-pub mod channel;
+/// Phase 2.5e: `channel` relocated to
+/// [`crate::workspace::agent_channel`] (renamed to disambiguate from
+/// `workspace::events`). Back-compat alias.
+pub use crate::workspace::agent_channel as channel;
 /// Phase 2.5c: `checkin` relocated to [`crate::workspace::checkin`].
 /// Back-compat alias.
 pub use crate::workspace::checkin;

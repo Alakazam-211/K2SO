@@ -10,6 +10,11 @@
 //! See `.k2so/prds/phase-2.5c-core-rename.md` for the relocation
 //! catalogue and rationale.
 
+// Phase 2.5e: per-agent CLI channel ops (status / done / reserve /
+// release). Relocated from `agents/channel.rs`; renamed to
+// `agent_channel` to disambiguate from `workspace::events` (the
+// "channel event queue" — different concept).
+pub mod agent_channel;
 pub mod agent_identity;
 pub mod agent_launch;
 pub mod checkin;
