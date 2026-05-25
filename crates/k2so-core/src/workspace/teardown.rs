@@ -15,7 +15,7 @@
 //! restore is a one-way reconnect-safe.
 //!
 //! Sibling [`crate::workspace::harness`] owns the symlink scaffolding,
-//! [`crate::workspace::skill_writer`] owns the canonical SKILL.md
+//! [`crate::workspace::skill_regen`] owns the canonical SKILL.md
 //! regen, and [`crate::workspace::migrations`] hosts the archive
 //! utilities all three call.
 

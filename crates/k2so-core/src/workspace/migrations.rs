@@ -663,12 +663,12 @@ pub fn harvest_per_agent_claude_md_files(project_path: &str) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// Archive utility helpers — shared with skill_writer + harness
+// Archive utility helpers — shared with skill_regen + harness
 // ══════════════════════════════════════════════════════════════════════
 //
 // These three helpers are migration-flavored ("archive user-authored
 // content before mutating, log the event, banner if first time") and
-// are used by the SKILL writer cluster (`workspace/skill_writer.rs`) and
+// are used by the SKILL regen cluster (`workspace/skill_regen.rs`) and
 // the harness file-discovery cluster (`workspace/harness.rs`) as well as
 // the migration helpers above. Kept `pub(crate)` so they only escape the
 // `workspace/` module family.
@@ -790,7 +790,7 @@ mod migration_safety_tests {
     use uuid::Uuid;
     use crate::skills::version::{SKILL_BEGIN_MARKER, SKILL_END_MARKER};
     use crate::workspace::harness::{safe_symlink_harness_file, scaffold_aider_conf, HARNESS_WORKSPACE_FILES};
-    use crate::workspace::skill_writer::{
+    use crate::workspace::skill_regen::{
         append_workspace_source_regions, content_hash_of, import_claude_md_into_user_notes,
         mtime_secs, read_regen_hashes, strip_workspace_skill_tail, write_workspace_skill_file_with_body,
         SKILL_USER_NOTES_SENTINEL, USER_NOTES_PLACEHOLDER,

@@ -2571,11 +2571,11 @@ fn run_workspace_unification_sweep() {
 /// daemon from booting and serving the rest.
 fn run_workspace_legacy_migrations_sweep() {
     // Phase 2.5d: agents::workspace.rs was split into four canonical
-    // homes. Pull in the migration helpers + the skill_writer entry
+    // homes. Pull in the migration helpers + the skill_regen entry
     // point under short aliases that mirror the pre-split call sites
-    // below.
+    // below. (Renamed from skill_writer in 0.39.0.)
     use k2so_core::workspace::migrations as workspace;
-    use k2so_core::workspace::skill_writer::ensure_all_skills_up_to_date;
+    use k2so_core::workspace::skill_regen::ensure_all_skills_up_to_date;
 
     let projects = {
         let db = k2so_core::db::shared();

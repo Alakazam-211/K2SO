@@ -13,7 +13,7 @@
 //! - **Skip** — drop a `.k2so/.skip-harness-management` flag file.
 //!   K2SO still writes its internal SKILL.md (so heartbeats and
 //!   agent launches keep working), but the harness fanout step in
-//!   `skill_writer::write_skill_to_all_harnesses` short-circuits,
+//!   `skills::writer::write_skill_to_all_harnesses` short-circuits,
 //!   leaving CLAUDE.md / GEMINI.md / .cursor/rules / etc. untouched.
 //!
 //! - **Start Fresh** — the existing default behavior. No-op here;
@@ -78,7 +78,7 @@ pub struct AdoptionOutcome {
 // ── Skip flag ──────────────────────────────────────────────────────
 
 /// Marker filename — written by `skip_harness_management` and
-/// checked by `skill_writer::write_skill_to_all_harnesses` (and
+/// checked by `skills::writer::write_skill_to_all_harnesses` (and
 /// the harness-discovery target writer in the workspace regen
 /// orchestrator) before doing any harness fanout. Lives under
 /// `.k2so/` so it survives anything that touches the workspace

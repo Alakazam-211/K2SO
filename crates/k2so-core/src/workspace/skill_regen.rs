@@ -1,11 +1,23 @@
-//! Workspace SKILL.md regen + scaffolding cluster.
+//! Workspace SKILL.md regeneration orchestrator.
 //!
-//! Phase 2.5d: extracted from the monolithic `agents/workspace.rs`. This
-//! module owns the canonical SKILL.md write flow — composing the
-//! lead-agent body (manager brief or AI planner brief), writing it to
-//! `.k2so/skills/k2so/SKILL.md`, adopting SOURCE-region drift back into
-//! PROJECT.md / AGENT.md, archiving pre-existing user-authored files,
-//! and stamping content-hash drift baselines.
+//! This is the **workspace-level** regen entry point. Renamed from
+//! `workspace/skill_writer.rs` → `workspace/skill_regen.rs` in 0.39.0
+//! to disambiguate from the lower-level per-harness fanout writer at
+//! [`crate::skills::writer`] (which writes individual SKILL.md files
+//! to each harness discovery path). This module composes the
+//! workspace-level lead-agent body (manager brief from
+//! [`crate::skills::content::generate_manager_skill_content`] or AI-
+//! planner brief from
+//! [`crate::skills::content::generate_k2so_agent_skill_content`]),
+//! prepends a per-regen workspace-inbox snapshot, writes the canonical
+//! `.k2so/skills/k2so/SKILL.md`, adopts SOURCE-region drift back into
+//! `PROJECT.md` / `AGENT.md`, archives pre-existing user-authored
+//! files, and stamps content-hash drift baselines.
+//!
+//! Phase 2.5d: extracted from the monolithic `agents/workspace.rs`.
+//! 0.39.0: routed body composition through `skills/content.rs`
+//! canonical generators instead of inline templates (fixes A25-verb
+//! drift), then renamed for clarity.
 //!
 //! Sibling [`crate::workspace::harness`] owns the harness file-discovery
 //! fan-out (symlink scaffolding, cursor MDC, aider conf merge), and
@@ -1023,7 +1035,7 @@ r#"# {project_name}
 
 #[cfg(test)]
 mod tests {
-    //! Phase 2 Tier 2.1 coverage for skill_writer entry points that the
+    //! Phase 2 Tier 2.1 coverage for skill_regen entry points that the
     //! migrations.rs::migration_safety_tests block doesn't already
     //! exercise. The migration tests cover the safe-symlink contract,
     //! the import-into-user-notes flow, and strip_workspace_skill_tail
@@ -1043,7 +1055,7 @@ mod tests {
 
     fn scratch_project() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "k2so-skill-writer-test-{}-{}",
+            "k2so-skill-regen-test-{}-{}",
             std::process::id(),
             Uuid::new_v4(),
         ));

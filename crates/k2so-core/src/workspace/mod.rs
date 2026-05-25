@@ -43,8 +43,10 @@ pub mod reviews;
 pub mod scheduler;
 // Phase 2.5d: SKILL.md regen + scaffolding (write_workspace_skill_file*
 // + regenerate_workspace_skill cluster). Extracted from
-// `agents/workspace.rs`.
-pub mod skill_writer;
+// `agents/workspace.rs`. Renamed in 0.39.0 from `skill_writer` →
+// `skill_regen` to disambiguate from the lower-level per-harness
+// fanout writer at `crate::skills::writer`.
+pub mod skill_regen;
 // Phase 2.5d: workspace-root harness file-discovery cluster
 // (symlink/scaffold helpers + preview + ingest + disable). Extracted
 // from `agents/workspace.rs`.

@@ -15,7 +15,7 @@
 //!     pipeline for a workspace
 //!   - [`disable_workspace_claude_md`] — flip the root CLAUDE.md off
 //!
-//! Sibling [`crate::workspace::skill_writer`] owns the canonical
+//! Sibling [`crate::workspace::skill_regen`] owns the canonical
 //! SKILL.md regen, [`crate::workspace::teardown`] owns the disconnect
 //! flow, and [`crate::workspace::migrations`] hosts the archive
 //! utilities all three call.
@@ -31,7 +31,7 @@ use crate::workspace::migrations::{
     archive_claude_md_file, harvest_per_agent_claude_md_files,
     inject_first_migration_banner,
 };
-use crate::workspace::skill_writer::{import_claude_md_into_user_notes, write_workspace_skill_file};
+use crate::workspace::skill_regen::{import_claude_md_into_user_notes, write_workspace_skill_file};
 
 // ══════════════════════════════════════════════════════════════════════
 // Constants
@@ -122,7 +122,7 @@ pub(crate) fn safe_symlink_harness_file(
 /// Workspace-level harness file-discovery targets.
 ///
 /// Phase 2.5d: `pub(crate)` so the sibling
-/// [`crate::workspace::skill_writer`] can invoke it from
+/// [`crate::workspace::skill_regen`] can invoke it from
 /// `write_workspace_skill_file_with_body` while harness cluster still
 
 /// lives in this file (moves out in Tier A.3).

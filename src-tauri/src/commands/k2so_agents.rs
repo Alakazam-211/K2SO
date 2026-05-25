@@ -750,13 +750,14 @@ pub fn k2so_agents_resume_chat_args(
 ///
 /// Pre-0.33.0 this was `k2so_agents_generate_workspace_claude_md` —
 /// back-compat alias below.
-/// Body lives in `k2so_core::workspace::skill_writer::regenerate_workspace_skill`
+/// Body lives in `k2so_core::workspace::skill_regen::regenerate_workspace_skill`
+/// (renamed from `skill_writer` in 0.39.0)
 /// (Phase 2 Unit 7d). The Tauri wrapper stays for the invoke handler.
 #[tauri::command]
 pub fn k2so_agents_regenerate_workspace_skill(
     project_path: String,
 ) -> Result<String, String> {
-    k2so_core::workspace::skill_writer::regenerate_workspace_skill(project_path)
+    k2so_core::workspace::skill_regen::regenerate_workspace_skill(project_path)
 }
 
 /// Back-compat alias for [`k2so_agents_regenerate_workspace_skill`].
@@ -1342,7 +1343,7 @@ pub fn k2so_agents_regenerate_skills(
 /// into every harness discovery path. `./CLAUDE.md` joins that list as
 /// of 0.32.7, replacing the separately-generated workspace CLAUDE.md.
 pub fn write_workspace_skill_file(project_path: &str) {
-    k2so_core::workspace::skill_writer::write_workspace_skill_file(project_path)
+    k2so_core::workspace::skill_regen::write_workspace_skill_file(project_path)
 }
 
 /// Variant that lets callers pass a pre-composed body (typically the
@@ -1368,7 +1369,7 @@ pub fn write_workspace_skill_file(project_path: &str) {
 ///   8. Stamp .k2so/.last-skill-regen so subsequent drift-adoption mtime
 ///      comparisons have a reference point.
 pub fn write_workspace_skill_file_with_body(project_path: &str, base_body: Option<&str>) {
-    k2so_core::workspace::skill_writer::write_workspace_skill_file_with_body(project_path, base_body)
+    k2so_core::workspace::skill_regen::write_workspace_skill_file_with_body(project_path, base_body)
 }
 
 // SKILL scaffolding cluster (write_workspace_skill_file_with_body,
@@ -1395,7 +1396,7 @@ pub use k2so_core::workspace::harness::{
 pub use k2so_core::workspace::migrations::{
     detect_interrupted_regen, harvest_per_agent_claude_md_files,
 };
-pub use k2so_core::workspace::skill_writer::{
+pub use k2so_core::workspace::skill_regen::{
     ensure_all_skills_up_to_date, SKILL_USER_NOTES_SENTINEL, USER_NOTES_PLACEHOLDER,
 };
 pub use k2so_core::workspace::teardown::{

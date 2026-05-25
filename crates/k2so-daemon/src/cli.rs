@@ -1320,7 +1320,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                         Ok(outcome) => {
                             // Unit 7c: regen directly (workspace_regen
                             // bridge retired — body lives in k2so-core).
-                            k2so_core::workspace::skill_writer::write_workspace_skill_file(&p);
+                            k2so_core::workspace::skill_regen::write_workspace_skill_file(&p);
                             respond(Ok::<_, String>(outcome))
                         }
                         Err(e) => CliResponse::bad_request(e),
@@ -1339,7 +1339,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                     return CliResponse::bad_request(e);
                 }
                 // Unit 7c: regen directly (bridge retired — body in core).
-                k2so_core::workspace::skill_writer::write_workspace_skill_file(&p);
+                k2so_core::workspace::skill_regen::write_workspace_skill_file(&p);
                 CliResponse::ok_json(r#"{"success":true}"#.to_string())
             }
             Err(r) => r,
