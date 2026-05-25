@@ -79,9 +79,9 @@ The `terminal write` and `terminal read` verbs are internal-tier — used by orc
 A searchable overlay showing all active CLI LLM sessions across workspaces. Click to navigate, copy terminal ID for CLI reference, or send messages directly to running agents. TopBar button shows active agent count.
 
 **Coordinator Automation:**
-- `k2so heartbeat wake` -- detects inbox work, wakes the coordinator (resumes previous session), and sends a triage message
-- `k2so agent complete` -- sub-agent completion that auto-merges (Build state) or submits for review (Managed Service) based on workspace state capabilities
-- Delegates include a completion protocol in CLAUDE.md so sub-agents know how to finish their work
+- `k2so heartbeat wake` -- detects inbox work, wakes the workspace-agent (resumes previous session), and sends a triage message
+- `k2so agent complete` -- work-item completion that auto-merges (Build state) or submits for review (Managed Service) based on workspace state capabilities
+- Delegated worktrees include a completion protocol in CLAUDE.md so the workspace-agent knows how to finish each work item
 
 **Chat Tab Live Terminal Connection:**
 The Chat tab for Coordinators and Worktrees follows a three-step lifecycle:
