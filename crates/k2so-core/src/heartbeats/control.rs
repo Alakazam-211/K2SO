@@ -180,3 +180,206 @@ pub fn heartbeat_action(
     write_heartbeat_config(&project_path, &agent_name, &config)?;
     Ok(config)
 }
+
+#[cfg(test)]
+mod tests {
+    //! Pre-0.39.0 test-update PRD, Tier 1.6 — fills the inline-test
+    //! gap that audit #555 flagged for this Phase-2.5d extraction.
+    //!
+    //! These tests build a throwaway "project root" under
+    //! `std::env::temp_dir()` and create the legacy `.k2so/agents/<name>/`
+    //! agent directory by hand — `agent_dir()` falls through to that
+    //! path when no `AGENT.md` / `SKILL.md` probe matches (see
+    //! `workspace::agent_identity::agent_dir`). All file I/O lives
+    //! under the temp project root; no `HOME` or DB mutation needed.
+
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Throwaway project root: `<tmpdir>/k2so-hb-control-<label>-<pid>-<nanos>`.
+    /// Dropping the guard removes the tree.
+    struct TempProject {
+        path: PathBuf,
+    }
+
+    impl TempProject {
+        fn new(label: &str) -> Self {
+            let pid = std::process::id();
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir()
+                .join(format!("k2so-hb-control-{label}-{pid}-{nanos}"));
+            std::fs::create_dir_all(&path).expect("create tempdir");
+            Self { path }
+        }
+
+        /// Scaffold the legacy `<root>/.k2so/agents/<name>/` shape so
+        /// `agent_dir(root, name)` returns this path. No AGENT.md /
+        /// SKILL.md is written, so the layout probes in
+        /// `workspace::agent_identity::agent_dir` fall through to the
+        /// `agents_dir(...).join(agent_name)` final branch.
+        fn make_agent(&self, name: &str) -> PathBuf {
+            let dir = self.path.join(".k2so").join("agents").join(name);
+            std::fs::create_dir_all(&dir).expect("create agent dir");
+            dir
+        }
+
+        fn path_str(&self) -> String {
+            self.path.to_string_lossy().to_string()
+        }
+    }
+
+    impl Drop for TempProject {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn set_heartbeat_clamps_interval_below_min() {
+        let tp = TempProject::new("clamp-below-min");
+        tp.make_agent("scout");
+        // Default min_interval_seconds is well above 1s; passing 1
+        // MUST clamp up to the config's min.
+        let cfg = set_heartbeat(
+            tp.path_str(),
+            "scout".to_string(),
+            Some(1),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("set_heartbeat");
+        assert!(
+            cfg.interval_seconds >= cfg.min_interval_seconds,
+            "interval {} should clamp up to min {}",
+            cfg.interval_seconds,
+            cfg.min_interval_seconds
+        );
+        // And the clamped value must equal the floor — not some other
+        // surprise number (e.g., the requested 1 leaking through).
+        assert_eq!(
+            cfg.interval_seconds, cfg.min_interval_seconds,
+            "below-min request should land exactly at min"
+        );
+    }
+
+    #[test]
+    fn set_heartbeat_clamps_interval_above_max() {
+        let tp = TempProject::new("clamp-above-max");
+        tp.make_agent("scout");
+        // u64::MAX is guaranteed above the configured max.
+        let cfg = set_heartbeat(
+            tp.path_str(),
+            "scout".to_string(),
+            Some(u64::MAX),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("set_heartbeat");
+        assert_eq!(
+            cfg.interval_seconds, cfg.max_interval_seconds,
+            "above-max request should land exactly at max"
+        );
+    }
+
+    #[test]
+    fn set_heartbeat_force_wake_sets_next_wake_to_now_and_records_user() {
+        let tp = TempProject::new("force-wake");
+        tp.make_agent("scout");
+        let before = chrono::Utc::now();
+        let cfg = set_heartbeat(
+            tp.path_str(),
+            "scout".to_string(),
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+        )
+        .expect("set_heartbeat force_wake");
+        let after = chrono::Utc::now();
+
+        let nw_str = cfg.next_wake.expect("force_wake must populate next_wake");
+        let nw = chrono::DateTime::parse_from_rfc3339(&nw_str)
+            .expect("next_wake must be valid RFC3339")
+            .with_timezone(&chrono::Utc);
+        // The function calls `Utc::now()` once and stamps that into
+        // next_wake; it MUST fall between `before` and `after`.
+        assert!(
+            nw >= before && nw <= after,
+            "next_wake {nw} not within [{before}, {after}]"
+        );
+        // force_wake also flips updated_by to "user" (vs. "agent"
+        // for non-force-wake set_heartbeat calls).
+        assert_eq!(
+            cfg.updated_by, "user",
+            "force_wake must record updated_by=user"
+        );
+    }
+
+    #[test]
+    fn set_heartbeat_without_force_wake_schedules_next_wake_into_future() {
+        let tp = TempProject::new("future-wake");
+        tp.make_agent("scout");
+        // Explicit clamp-safe interval so we know the value the
+        // function used to advance next_wake.
+        let cfg = set_heartbeat(
+            tp.path_str(),
+            "scout".to_string(),
+            Some(900),
+            None,
+            None,
+            None,
+            Some(false),
+        )
+        .expect("set_heartbeat normal");
+        let nw_str = cfg.next_wake.expect("normal set must populate next_wake");
+        let nw = chrono::DateTime::parse_from_rfc3339(&nw_str)
+            .expect("next_wake must be valid RFC3339")
+            .with_timezone(&chrono::Utc);
+        let now = chrono::Utc::now();
+        assert!(
+            nw > now,
+            "non-force-wake next_wake must be in the future; nw={nw} now={now}"
+        );
+        // updated_by stays "agent" for non-force-wake calls.
+        assert_eq!(cfg.updated_by, "agent");
+    }
+
+    #[test]
+    fn get_heartbeat_returns_defaults_when_config_missing() {
+        let tp = TempProject::new("defaults");
+        tp.make_agent("scout");
+        // No heartbeat.json written yet → get_heartbeat returns the
+        // default config (not Err).
+        let cfg = get_heartbeat(tp.path_str(), "scout".to_string())
+            .expect("get_heartbeat on agent with no config");
+        let default = AgentHeartbeatConfig::default();
+        assert_eq!(cfg.interval_seconds, default.interval_seconds);
+        assert_eq!(cfg.min_interval_seconds, default.min_interval_seconds);
+        assert_eq!(cfg.max_interval_seconds, default.max_interval_seconds);
+        assert_eq!(cfg.consecutive_no_ops, 0);
+        assert!(
+            cfg.next_wake.is_none(),
+            "default config has no next_wake (got: {:?})",
+            cfg.next_wake
+        );
+    }
+
+    #[test]
+    fn get_heartbeat_errors_when_agent_does_not_exist() {
+        let tp = TempProject::new("missing-agent");
+        // No agent dir created.
+        let err = get_heartbeat(tp.path_str(), "ghost".to_string()).unwrap_err();
+        assert!(
+            err.contains("does not exist"),
+            "expected 'does not exist' in error, got: {err}"
+        );
+    }
+}

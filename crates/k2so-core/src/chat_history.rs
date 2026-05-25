@@ -2766,4 +2766,57 @@ mod tests {
             "still pinned after unpin: {pinned2:?}"
         );
     }
+
+    // ── Cross-provider dedup tests (closes #551 / audit #555 gap) ──
+    //
+    // Phase 2.5 fix #550 added a dedupe pass to `parse_gemini_sessions`
+    // after observing that the Gemini CLI checkpoints a single logical
+    // session into multiple `.jsonl` files (every file in the chats/
+    // dir carries the SAME `sessionId` header). Without dedup the
+    // history list surfaces duplicate React keys.
+    //
+    // The Cursor parser carries an equivalent `best_by_id` collapse
+    // (see line ~906: `match best_by_id.get(&chat_id) { ... }`). This
+    // test exercises that path with the same chat_id appearing under
+    // two different project-hash directories.
+    //
+    // Pi + Codex parsers DO NOT currently dedupe — see findings noted
+    // in the Tier 1 sub-agent report. Tests for those parsers are
+    // deliberately omitted here: writing them would either lock in
+    // the broken behavior or fail the suite without a paired fix.
+
+    #[test]
+    fn parse_cursor_sessions_dedupes_chat_id_across_hash_dirs() {
+        let _g = UNIT6_HOME_LOCK.lock();
+        let _h = U6HomeGuard::new("cursor-dedup");
+        let cursor_chats = dirs::home_dir().unwrap().join(".cursor").join("chats");
+        // Two project-hash dirs, same chat_id under each.
+        let hash_a = cursor_chats.join("00000000000000000000000000000001");
+        let hash_b = cursor_chats.join("00000000000000000000000000000002");
+        let chat_id = "shared-chat-id-xyz";
+        let chat_a = hash_a.join(chat_id);
+        let chat_b = hash_b.join(chat_id);
+        std::fs::create_dir_all(&chat_a).unwrap();
+        std::fs::create_dir_all(&chat_b).unwrap();
+        // Empty (non-sqlite) store.db files trigger the file_ts
+        // fallback path (read_cursor_chat_meta returns None →
+        // generic "Cursor session ..." title). The parser still
+        // includes them in best_by_id, which is exactly what we
+        // need to exercise the dedup branch.
+        std::fs::write(chat_a.join("store.db"), b"").unwrap();
+        std::fs::write(chat_b.join("store.db"), b"").unwrap();
+
+        let sessions = parse_cursor_sessions(None).expect("parse");
+        // Same chat_id under two hash dirs → 1 session in output.
+        let matching: Vec<_> = sessions
+            .iter()
+            .filter(|s| s.session_id == chat_id)
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "expected dedup by chat_id; got: {sessions:?}"
+        );
+        assert_eq!(matching[0].provider, "cursor");
+    }
 }

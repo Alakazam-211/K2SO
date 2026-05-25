@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, it, expect } from 'vitest'
 import {
   agentChatId,
@@ -157,10 +158,15 @@ describe('agentNameFromId', () => {
 })
 
 describe('round trip', () => {
-  it('agent_chat round trip', () => {
+  it('agent_chat round trip (0.37.5: agent dropped from canonical id)', () => {
+    // Post-0.37.5: agentChatId ignores the agent arg and produces
+    // the bare-pid form. The parser yields `agent: ''` for that
+    // shape (see the bare-pid test at line ~34). The legacy
+    // `<pid>:<agent>` shape still round-trips with the agent name
+    // intact — covered separately below.
     const id = agentChatId('p_1', 'alice')
     const parsed = parseTerminalId(id)
-    expect(parsed).toEqual({ kind: 'agent_chat', projectId: 'p_1', agent: 'alice' })
+    expect(parsed).toEqual({ kind: 'agent_chat', projectId: 'p_1', agent: '' })
   })
 
   it('heartbeat round trip', () => {

@@ -17,9 +17,10 @@
 #   - tests/                — assertions / fixture data
 #   - drizzle_sql/0049_*    — the migration that rewrites the row data
 #   - drizzle_sql/0042_*    — historical migration prose
-#   - unification.rs        — pre-0.37.0 layout migration (legitimate
-#                             migration helper that handles a directory
-#                             named `__lead__` left behind on disk)
+#   - migrations/unification_0_37_0.rs — pre-0.37.0 layout migration
+#                             (legitimate migration helper that handles
+#                             a directory named `__lead__` left behind
+#                             on disk)
 #   - line comments (// /// #) — documentation, including comments
 #     that explicitly describe the removal
 #   - allow-listed multi-line JSDoc / JSX continuation lines for the
@@ -51,8 +52,6 @@ exclude_file() {
     case "$f" in
         crates/k2so-core/drizzle_sql/0049_drop_lead_sentinel_in_activity_feed.sql) return 0 ;;
         crates/k2so-core/drizzle_sql/0042_canonical_key_drop_agent_suffix.sql) return 0 ;;
-        crates/k2so-core/src/agents/unification.rs) return 0 ;;
-        # Phase 2.5c.10 relocated this from agents/unification.rs.
         crates/k2so-core/src/migrations/unification_0_37_0.rs) return 0 ;;
     esac
     return 1
