@@ -1325,29 +1325,54 @@ mod tests {
     }
 
     #[test]
-    fn regenerate_workspace_skill_emits_no_deprecated_verbs_with_pre_existing_template_agent() {
-        // Pre-seed a sub-agent dir so the manager-tier generator picks
-        // it up in its team-roster walk. Verifies that custom template
-        // agents present in `.k2so/agents/` don't reintroduce
-        // deprecated verbs via the canonical generator's roster output.
+    fn regenerate_workspace_skill_emits_no_deprecated_verbs_with_pre_existing_skill_dir() {
+        // 0.39.0 (workspace==agent): the manager body's "Team" section
+        // is now sourced from `connections::list_peers` — bidirectional
+        // connected workspaces — NOT from a `.k2so/agents/` directory
+        // walk or `.k2so/skills/<name>/` enumeration.
+        //
+        // Pre-seed a `.k2so/skills/<name>/` entry (the layout post-
+        // Phase-2.5b) and assert the regenerated body:
+        //   1. Does NOT introduce deprecated verbs.
+        //   2. Reports an empty Team section (no connections seeded)
+        //      with the canonical "No connected workspaces yet" hint.
+        //   3. Does NOT list the seeded skill as a team member —
+        //      skills are documentation profiles, not peers.
         let proj = scratch_project();
         let path = proj.to_str().unwrap().to_string();
 
-        fs::create_dir_all(proj.join(".k2so/agents/backend-eng")).unwrap();
+        fs::create_dir_all(proj.join(".k2so/skills/backend-eng")).unwrap();
         fs::write(
-            proj.join(".k2so/agents/backend-eng/AGENT.md"),
+            proj.join(".k2so/skills/backend-eng/SKILL.md"),
             "---\nname: backend-eng\nrole: Backend engineer\ntype: agent-template\n---\n",
         )
         .unwrap();
 
         let body = regenerate_workspace_skill(path).expect("regen ok");
-        assert_regen_body_has_no_deprecated_verbs(&body, "manager-mode regen (with backend-eng)");
+        assert_regen_body_has_no_deprecated_verbs(&body, "manager-mode regen (with backend-eng skill)");
 
-        // The team-roster walk should surface the seeded agent.
+        // Team section reports empty — no connections seeded.
         assert!(
-            body.contains("backend-eng"),
-            "manager body should reference the seeded backend-eng agent",
+            body.contains("No connected workspaces yet"),
+            "manager body must report empty Team (no connections seeded); first 400 chars:\n{}",
+            &body[..body.len().min(400)],
         );
+        // The seeded skill must not appear in the team section. Slice
+        // the body to just the team region to avoid false positives
+        // from unrelated places where the name might legitimately
+        // appear (none expected here, but be precise).
+        let team_start = body.find("## Team — Connected Workspaces").expect("team section present");
+        let after_team = &body[team_start..];
+        let team_end_rel = after_team[2..]
+            .find("\n## ")
+            .map(|i| i + 2)
+            .unwrap_or(after_team.len());
+        let team_region = &after_team[..team_end_rel];
+        assert!(
+            !team_region.contains("backend-eng"),
+            "seeded skill must NOT appear as team member; team region:\n{team_region}"
+        );
+
         fs::remove_dir_all(&proj).ok();
     }
 

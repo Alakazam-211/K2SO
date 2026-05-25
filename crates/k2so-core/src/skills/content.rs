@@ -195,68 +195,42 @@ pub fn generate_manager_skill_content(project_path: &str, project_name: &str) ->
                 skill.push_str(&format!("**Mode: {}** — {}\n\n", state_name, state_desc));
             }
 
-            // Get connected workspaces
-            let mut connections = Vec::new();
-            if let Ok(rels) = crate::db::schema::WorkspaceRelation::list_for_source(&conn, &project_id) {
-                for r in &rels {
-                    if let Ok(name) = conn.query_row(
-                        "SELECT name FROM projects WHERE id = ?1",
-                        rusqlite::params![r.target_project_id],
-                        |row| row.get::<_, String>(0),
-                    ) {
-                        connections.push(format!("- **{}** (oversees)", name));
-                    }
-                }
-            }
-            if let Ok(rels) = crate::db::schema::WorkspaceRelation::list_for_target(&conn, &project_id) {
-                for r in &rels {
-                    if let Ok(name) = conn.query_row(
-                        "SELECT name FROM projects WHERE id = ?1",
-                        rusqlite::params![r.source_project_id],
-                        |row| row.get::<_, String>(0),
-                    ) {
-                        connections.push(format!("- **{}** (connected agent)", name));
-                    }
-                }
-            }
-            if !connections.is_empty() {
-                skill.push_str("## Connected Workspaces\n\n");
-                for c in &connections {
-                    skill.push_str(c);
-                    skill.push('\n');
-                }
-                skill.push('\n');
-            }
         }
     }
 
-    // ── 2. Team Roster (from agents directory) ──
-    let agents_root = agents_dir(project_path);
-    if agents_root.exists() {
-        let mut team = Vec::new();
-        if let Ok(entries) = fs::read_dir(&agents_root) {
-            for entry in entries.flatten() {
-                if !entry.file_type().map_or(false, |ft| ft.is_dir()) { continue; }
-                let name = entry.file_name().to_string_lossy().to_string();
-                let agent_md = entry.path().join("AGENT.md");
-                if agent_md.exists() {
-                    let content = fs::read_to_string(&agent_md).unwrap_or_default();
-                    let fm = parse_frontmatter(&content);
-                    let role = fm.get("role").cloned().unwrap_or_default();
-                    let agent_type = fm.get("type").cloned().unwrap_or_default();
-                    // Skip the manager itself and k2so-agent
-                    if agent_type == "manager" || agent_type == "coordinator" || agent_type == "pod-leader" || agent_type == "k2so" { continue; }
-                    team.push(format!("- **{}** — {}", name, role));
-                }
-            }
-        }
-        if !team.is_empty() {
-            skill.push_str("## Skill Profiles Available\n\nThese skill profiles ship with this workspace. Read one with `k2so skills profile <name>` and load it into your harness's session context when you need that persona — your harness owns the actual spawn.\n\n");
-            for t in &team {
-                skill.push_str(t);
-                skill.push('\n');
+    // ── 2. Team — Connected Workspaces ──
+    //
+    // 0.39.0 directive (workspace==agent model): the team is the set
+    // of OTHER CONNECTED WORKSPACES — peers, not subordinates. The
+    // user-facing render is intentionally direction-agnostic: whoever
+    // initiated the relation, both sides see the other as just
+    // "connected." That's exactly what `list_peers` returns
+    // (bidirectional, deduped). The legacy team-roster directory walk
+    // over `.k2so/agents/<name>/` was retired here in the same change
+    // — skills are documentation profiles, not team members.
+    skill.push_str("## Team — Connected Workspaces\n\n");
+    skill.push_str("These are other workspace-agents you can collaborate with. Each is itself an agent (hands, memory, skills) — peers, not subordinates.\n\n");
+    skill.push_str("To message one:\n\n");
+    skill.push_str("    k2so msg <workspace-name> \"your message\"           # plain\n");
+    skill.push_str("    k2so msg <workspace-name> --inbox \"your message\"   # drops into their inbox\n\n");
+    skill.push_str("The recipient reads it on their next heartbeat or session start and can respond or act collaboratively.\n\n");
+
+    match crate::connections::list_peers(project_path) {
+        Ok(peers) if !peers.is_empty() => {
+            skill.push_str("### Currently connected\n\n");
+            for peer in &peers {
+                skill.push_str(&format!("  - {}\n", peer.project_name));
             }
             skill.push('\n');
+            skill.push_str("To add a connection:    k2so connections add <other-workspace-path>\n");
+            skill.push_str("To see all connections: k2so connections list\n\n");
+        }
+        // Project not registered (Err) OR no peers (Ok empty) — same
+        // user-facing message either way: tell them how to wire one up.
+        _ => {
+            skill.push_str("### No connected workspaces yet\n\n");
+            skill.push_str("You're operating in isolation. To collaborate with another workspace-agent:\n\n");
+            skill.push_str("    k2so connections add <other-workspace-path>\n\n");
         }
     }
 
@@ -1018,6 +992,316 @@ mod tests {
             "generate_manager_skill_content",
             &["k2so inbox", "k2so checkin", "k2so reviews"],
         );
+    }
+
+    // ── 0.39.0 team section (workspace==agent model) ──────────────
+    //
+    // The manager SKILL.md's "Team" section used to walk
+    // `.k2so/agents/<name>/` (legacy multi-agent tree) and render
+    // each subdirectory as a team member. Post-0.39.0 a workspace IS
+    // an agent — the team is the set of OTHER CONNECTED WORKSPACES
+    // (peers, not subordinates). These tests pin the new contract:
+    //
+    //   - empty peers → "No connected workspaces yet" hint with
+    //     `k2so connections add <other-workspace-path>` instruction
+    //   - present peers → flat alphabetical list (no direction tags)
+    //   - always teaches `k2so msg <workspace-name>` syntax
+    //   - never says "outgoing" / "incoming" (direction is a data-
+    //     model concept, not a user-visible one)
+    //   - never walks `.k2so/skills/` for team membership (skills are
+    //     documentation profiles, not peers)
+    //
+    // Each test uses a UUID-suffixed project path so it doesn't
+    // collide with other tests sharing the process-wide in-memory DB.
+
+    fn make_project_for_skill_test(name: &str) -> (String, String) {
+        let db = crate::db::shared();
+        let conn = db.lock();
+        let path = format!("/tmp/skill-team-{}-{}", name, Uuid::new_v4());
+        let id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)",
+            rusqlite::params![id, name, &path],
+        )
+        .expect("insert project");
+        (path, id)
+    }
+
+    #[test]
+    fn manager_team_section_renders_empty_hint_when_no_peers() {
+        let project_path = format!("/tmp/manager-team-empty-{}", Uuid::new_v4());
+        let body = generate_manager_skill_content(&project_path, "Lonely");
+
+        assert!(
+            body.contains("## Team — Connected Workspaces"),
+            "team section header must always render"
+        );
+        assert!(
+            body.contains("No connected workspaces yet"),
+            "empty-peers case must render the 'No connected workspaces yet' hint:\n{body}"
+        );
+        assert!(
+            body.contains("k2so connections add"),
+            "empty-peers hint must teach `k2so connections add`:\n{body}"
+        );
+    }
+
+    #[test]
+    fn manager_team_section_lists_peers_as_flat_alphabetical_list() {
+        let (me_path, me_id) = make_project_for_skill_test("flatlist-me");
+        // Create peers and outgoing relations from me → them so they
+        // appear in our peer list.
+        let mut expected_names = Vec::new();
+        for name in ["zebra", "alpha", "mango"] {
+            let (_p, pid) = make_project_for_skill_test(name);
+            let db = crate::db::shared();
+            let conn = db.lock();
+            crate::db::schema::WorkspaceRelation::create(
+                &conn,
+                &Uuid::new_v4().to_string(),
+                &me_id,
+                &pid,
+                "oversees",
+            )
+            .unwrap();
+            drop(conn);
+            // The actual project_name we INSERTed includes a UUID
+            // suffix to avoid collisions; capture what it was.
+            let stored_name: String = {
+                let db = crate::db::shared();
+                let conn = db.lock();
+                conn.query_row(
+                    "SELECT name FROM projects WHERE id = ?1",
+                    rusqlite::params![pid],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            };
+            expected_names.push(stored_name);
+        }
+        expected_names.sort();
+
+        let body = generate_manager_skill_content(&me_path, "FlatList");
+
+        assert!(
+            body.contains("### Currently connected"),
+            "non-empty peers case must render 'Currently connected' subsection:\n{body}"
+        );
+
+        // Each peer name appears in the body. Their relative order
+        // matches alphabetical sort — find the index of each and
+        // assert monotonic increase.
+        let mut indices: Vec<usize> = Vec::new();
+        for n in &expected_names {
+            let idx = body
+                .find(n.as_str())
+                .unwrap_or_else(|| panic!("peer name '{n}' missing from body:\n{body}"));
+            indices.push(idx);
+        }
+        let mut sorted = indices.clone();
+        sorted.sort();
+        assert_eq!(
+            indices, sorted,
+            "peers must appear in alphabetical order; got names={:?} indices={:?}",
+            expected_names, indices
+        );
+    }
+
+    #[test]
+    fn manager_team_section_teaches_k2so_msg_syntax() {
+        let project_path = format!("/tmp/manager-team-msg-{}", Uuid::new_v4());
+        let body = generate_manager_skill_content(&project_path, "MsgTeach");
+
+        // Both forms must be teachable: plain and --inbox. The
+        // workspace==agent model relies on `k2so msg <workspace>` as
+        // the primary peer-communication primitive.
+        assert!(
+            body.contains("k2so msg <workspace-name> \"your message\""),
+            "team section must teach plain `k2so msg <workspace-name>` form:\n{body}"
+        );
+        assert!(
+            body.contains("k2so msg <workspace-name> --inbox"),
+            "team section must teach `--inbox` form for queued delivery:\n{body}"
+        );
+    }
+
+    #[test]
+    fn manager_team_section_does_not_show_direction_labels() {
+        // Wire up a bidirectional relation (both incoming AND outgoing
+        // between two workspaces) and assert the rendered team section
+        // never mentions "outgoing", "incoming", "(oversees)" etc. The
+        // data model is directional; the user-facing render is not.
+        let (me_path, me_id) = make_project_for_skill_test("nodir-me");
+        let (_peer_path, peer_id) = make_project_for_skill_test("nodir-peer");
+        {
+            let db = crate::db::shared();
+            let conn = db.lock();
+            crate::db::schema::WorkspaceRelation::create(
+                &conn,
+                &Uuid::new_v4().to_string(),
+                &me_id,
+                &peer_id,
+                "oversees",
+            )
+            .unwrap();
+            crate::db::schema::WorkspaceRelation::create(
+                &conn,
+                &Uuid::new_v4().to_string(),
+                &peer_id,
+                &me_id,
+                "collaborator",
+            )
+            .unwrap();
+        }
+
+        let body = generate_manager_skill_content(&me_path, "NoDir");
+
+        // Scan the team section specifically: from "## Team —" until
+        // the next "##" heading. That's where direction labels would
+        // appear if they leaked through.
+        let team_start = body
+            .find("## Team — Connected Workspaces")
+            .expect("team section present");
+        let after_team = &body[team_start..];
+        // Next top-level ## section caps the slice; ### subsections
+        // stay inside the team region.
+        let team_end_rel = after_team[2..]
+            .find("\n## ")
+            .map(|i| i + 2)
+            .unwrap_or(after_team.len());
+        let team_region = &after_team[..team_end_rel];
+
+        for bad in ["outgoing", "incoming", "(oversees)", "(connected agent)", "(collaborator)"] {
+            assert!(
+                !team_region.contains(bad),
+                "team section must not surface direction/relation label '{bad}':\n{team_region}"
+            );
+        }
+    }
+
+    /// Smoke-print helper for the 0.39.0 K3 worktree report. Renders
+    /// the team section in three scenarios and prints them to stderr
+    /// (use `cargo test ... -- --ignored --nocapture
+    /// manager_team_section_smoke_print` to see the output). Marked
+    /// `#[ignore]` so it doesn't run by default — it's a diagnostic,
+    /// not a regression guard.
+    #[test]
+    #[ignore]
+    fn manager_team_section_smoke_print() {
+        // Helper: extract just the team section from a full skill body.
+        fn team_only(body: &str) -> &str {
+            let start = body
+                .find("## Team — Connected Workspaces")
+                .expect("team section present");
+            let after = &body[start..];
+            let end_rel = after[2..].find("\n## ").map(|i| i + 2).unwrap_or(after.len());
+            &after[..end_rel]
+        }
+
+        // (a) 0-peer workspace — unregistered path so list_peers returns
+        // Err and we get the empty-hint render.
+        let zero_path = format!("/tmp/smoke-zero-{}", Uuid::new_v4());
+        let zero_body = generate_manager_skill_content(&zero_path, "ZeroPeer");
+        eprintln!("\n===== SCENARIO (a): 0-peer workspace =====");
+        eprintln!("{}", team_only(&zero_body));
+
+        // (b) 1-outgoing-only peer.
+        let (out_me_path, out_me_id) = make_project_for_skill_test("smoke-out-me");
+        let (_out_peer_path, out_peer_id) = make_project_for_skill_test("smoke-out-peer");
+        {
+            let db = crate::db::shared();
+            let conn = db.lock();
+            crate::db::schema::WorkspaceRelation::create(
+                &conn,
+                &Uuid::new_v4().to_string(),
+                &out_me_id,
+                &out_peer_id,
+                "oversees",
+            )
+            .unwrap();
+        }
+        let out_body = generate_manager_skill_content(&out_me_path, "OutgoingOnly");
+        eprintln!("\n===== SCENARIO (b): 1-outgoing-only peer =====");
+        eprintln!("{}", team_only(&out_body));
+
+        // (c) 1-outgoing + 1-incoming (two distinct peers).
+        let (bi_me_path, bi_me_id) = make_project_for_skill_test("smoke-bi-me");
+        let (_a_path, a_id) = make_project_for_skill_test("smoke-bi-out-peer");
+        let (_b_path, b_id) = make_project_for_skill_test("smoke-bi-in-peer");
+        {
+            let db = crate::db::shared();
+            let conn = db.lock();
+            // outgoing: me → a
+            crate::db::schema::WorkspaceRelation::create(
+                &conn,
+                &Uuid::new_v4().to_string(),
+                &bi_me_id,
+                &a_id,
+                "oversees",
+            )
+            .unwrap();
+            // incoming: b → me
+            crate::db::schema::WorkspaceRelation::create(
+                &conn,
+                &Uuid::new_v4().to_string(),
+                &b_id,
+                &bi_me_id,
+                "collaborator",
+            )
+            .unwrap();
+        }
+        let bi_body = generate_manager_skill_content(&bi_me_path, "OutgoingPlusIncoming");
+        eprintln!("\n===== SCENARIO (c): 1-outgoing + 1-incoming =====");
+        eprintln!("{}", team_only(&bi_body));
+    }
+
+    #[test]
+    fn manager_team_section_does_not_walk_skills_dir() {
+        // Skills are documentation profiles, not team members. Seed a
+        // workspace with `.k2so/skills/<harness>/` entries but ZERO
+        // connections and assert the rendered team section reports
+        // "No connected workspaces yet" — not a roster derived from
+        // the skills filesystem.
+        let project_path = format!("/tmp/manager-team-skipskills-{}", Uuid::new_v4());
+        std::fs::create_dir_all(format!("{project_path}/.k2so/skills/qa-eng")).unwrap();
+        std::fs::write(
+            format!("{project_path}/.k2so/skills/qa-eng/SKILL.md"),
+            "---\nname: qa-eng\nrole: QA engineer\ntype: agent-template\n---\n\nbody",
+        )
+        .unwrap();
+        std::fs::create_dir_all(format!("{project_path}/.k2so/skills/rust-eng")).unwrap();
+        std::fs::write(
+            format!("{project_path}/.k2so/skills/rust-eng/SKILL.md"),
+            "---\nname: rust-eng\nrole: Rust engineer\ntype: agent-template\n---\n\nbody",
+        )
+        .unwrap();
+
+        let body = generate_manager_skill_content(&project_path, "SkipSkills");
+
+        assert!(
+            body.contains("No connected workspaces yet"),
+            "with skills present but no connections, team section must still report empty:\n{body}"
+        );
+        // Skill names must not appear as if they were team members.
+        // (They may legitimately appear elsewhere in the body
+        // referencing `k2so skills profile <name>`; we only assert
+        // they aren't listed as bullet entries in the team section.)
+        let team_start = body.find("## Team — Connected Workspaces").unwrap();
+        let after_team = &body[team_start..];
+        let team_end_rel = after_team[2..]
+            .find("\n## ")
+            .map(|i| i + 2)
+            .unwrap_or(after_team.len());
+        let team_region = &after_team[..team_end_rel];
+        for skill_name in ["qa-eng", "rust-eng"] {
+            assert!(
+                !team_region.contains(skill_name),
+                "skill name '{skill_name}' must not appear in team section:\n{team_region}"
+            );
+        }
+
+        // Cleanup
+        std::fs::remove_dir_all(&project_path).ok();
     }
 
     // ── generate_custom_agent_skill_content ────────────────────────
