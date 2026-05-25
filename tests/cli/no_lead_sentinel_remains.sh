@@ -52,6 +52,8 @@ exclude_file() {
         crates/k2so-core/drizzle_sql/0049_drop_lead_sentinel_in_activity_feed.sql) return 0 ;;
         crates/k2so-core/drizzle_sql/0042_canonical_key_drop_agent_suffix.sql) return 0 ;;
         crates/k2so-core/src/agents/unification.rs) return 0 ;;
+        # Phase 2.5c.10 relocated this from agents/unification.rs.
+        crates/k2so-core/src/migrations/unification_0_37_0.rs) return 0 ;;
     esac
     return 1
 }
