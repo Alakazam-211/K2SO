@@ -29,6 +29,9 @@ pub mod skill_writer;
 // (symlink/scaffold helpers + preview + ingest + disable). Extracted
 // from `agents/workspace.rs`.
 pub mod harness;
+// Phase 2.5d: workspace teardown (disconnect) — freeze or restore the
+// symlinks K2SO scaffolded. Extracted from `agents/workspace.rs`.
+pub mod teardown;
 pub mod session;
 pub mod settings;
 pub mod terminal_id;

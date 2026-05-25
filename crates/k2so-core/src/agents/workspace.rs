@@ -6,285 +6,36 @@
 //! wrappers in `commands/k2so_agents.rs` remain as thin forwards into
 //! this module (deleted entirely by Unit 7c).
 //!
-//! Two clusters of functionality live here:
-//!
-//! 1. **One-shot migration helpers** (post-0.32.x heartbeat + filename
-//!    layout fixups). Each is idempotent and gated by an on-disk
-//!    sentinel or row-existence check so re-running on every boot is
-//!    cheap and safe.
-//!
-//! 2. **SKILL scaffolding** (the regen orchestrator that writes
-//!    `.k2so/skills/k2so/SKILL.md`, fans it out to every harness
-//!    discovery path, adopts SOURCE-region drift back into PROJECT.md /
-//!    AGENT.md, archives any pre-existing user-authored files, and
-//!    stamps content-hash drift baselines).
-//!
-//! Neither cluster touches Tauri state, AppHandle, or Emitter — the
-//! whole thing is host-agnostic by construction, so the Unit 1
-//! `WorkspaceRegenProvider` trait pattern wasn't needed.
+//! Phase 2.5d: the actual workspace lifecycle code has been distributed
+//! into the four sibling modules below. This file is now exclusively a
+//! back-compat shim (pub-use re-exports) + the cross-cluster
+//! migration-safety integration tests. Both retire together with the
+//! `agents/` directory in Tier C.
 
-use std::fs;
-use std::path::PathBuf;
-
-use crate::fs_atomic::{atomic_write_str, log_if_err};
-// Phase 2.5d: back-compat re-exports. Migration helpers moved to
-// `crate::workspace::migrations`; existing call sites
-// (`k2so_daemon::main`, `projects_ops`, etc.) still spell the path
-// `crate::agents::workspace::<fn>`. Retire these aliases together with
-// `agents/` in Tier C.
+// Phase 2.5d: back-compat re-exports. The actual code lives under
+// `crate::workspace::*` after the split. Existing call sites in
+// `src-tauri`, `k2so-daemon`, and elsewhere still spell paths through
+// `crate::agents::workspace::<fn>` — the aliases keep those working
+// through the deprecation window. Retire together with `agents/` in
+// Tier C.
 pub use crate::workspace::migrations::{
     archive_orphan_top_tier_agents, detect_interrupted_regen, ensure_workspace_wakeups,
     harvest_per_agent_claude_md_files, migrate_filenames_to_uppercase,
     migrate_or_scaffold_lead_heartbeat, promote_legacy_heartbeat, repair_mismigrated_heartbeats,
 };
-// Phase 2.5d: SKILL.md regen cluster re-exports. Same back-compat rule
-// as above.
 pub use crate::workspace::skill_writer::{
     append_workspace_source_regions, ensure_all_skills_up_to_date, regenerate_workspace_skill,
     strip_workspace_skill_tail, write_workspace_skill_file,
     write_workspace_skill_file_with_body, SKILL_USER_NOTES_SENTINEL, USER_NOTES_PLACEHOLDER,
 };
-// Phase 2.5d: harness cluster re-exports. Same back-compat rule.
 pub use crate::workspace::harness::{
     disable_workspace_claude_md, k2so_agents_preview_workspace_ingest,
     k2so_agents_run_workspace_ingest, HARNESS_WORKSPACE_FILES, WorkspacePreviewEntry,
 };
+pub use crate::workspace::teardown::{
+    k2so_agents_teardown_workspace, teardown_workspace_harness_files, TeardownMode, TeardownResult,
+};
 
-
-
-// ══════════════════════════════════════════════════════════════════════
-// Public types
-// ══════════════════════════════════════════════════════════════════════
-
-/// Summary returned to the UI after a teardown. One entry per file
-/// touched, with a human-readable note so the dialog can show what
-/// happened.
-#[derive(serde::Serialize, Debug)]
-pub struct TeardownResult {
-    pub action: String,
-    pub path: String,
-    pub note: String,
-}
-
-/// User's choice when they remove/disconnect a workspace.
-///
-/// - `keep_current`: freeze the current canonical SKILL.md body into each
-///   symlinked file as a real file. Every CLI LLM the user had enabled
-///   keeps working, reading the last-known merged context. Best when
-///   the user is stepping away but wants their tools to still have context.
-///
-/// - `restore_original`: replace each symlinked file with whatever was
-///   there before K2SO took over (from `.k2so/migration/`). Files K2SO
-///   created fresh (no archive) are deleted. The workspace looks like
-///   it did pre-K2SO except for the `.k2so/` folder, which stays
-///   intact as the restore source (and the reconnect-later safety net).
-///
-/// In both modes `.k2so/` itself is preserved. Nothing is destroyed.
-#[derive(Clone, Copy, Debug)]
-pub enum TeardownMode {
-    KeepCurrent,
-    RestoreOriginal,
-}
-
-
-// ══════════════════════════════════════════════════════════════════════
-// Workspace teardown (disconnect)
-// ══════════════════════════════════════════════════════════════════════
-
-/// Freeze or restore every workspace-root symlink, returning a per-file
-/// summary the UI can display.
-pub fn teardown_workspace_harness_files(
-    project_path: &str,
-    mode: TeardownMode,
-) -> Vec<TeardownResult> {
-    let root = PathBuf::from(project_path);
-    let canonical = root.join(".k2so/skills/k2so/SKILL.md");
-    let current_body = fs::read_to_string(&canonical).unwrap_or_default();
-    let mut results: Vec<TeardownResult> = Vec::new();
-
-    for rel in HARNESS_WORKSPACE_FILES {
-        let path = root.join(rel);
-        let Ok(meta) = fs::symlink_metadata(&path) else { continue };
-        if !meta.file_type().is_symlink() {
-            continue;
-        }
-
-        match mode {
-            TeardownMode::KeepCurrent => match atomic_write_str(&path, &current_body) {
-                Ok(()) => results.push(TeardownResult {
-                    action: "froze".to_string(),
-                    path: rel.to_string(),
-                    note: "Replaced symlink with a frozen snapshot of the current SKILL.md. Tool will keep reading this context.".to_string(),
-                }),
-                Err(e) => results.push(TeardownResult {
-                    action: "failed".to_string(),
-                    path: rel.to_string(),
-                    note: format!(
-                        "Could not write frozen snapshot ({}); original symlink left intact.",
-                        e
-                    ),
-                }),
-            },
-            TeardownMode::RestoreOriginal => match find_latest_archive(project_path, rel) {
-                Some(archive_path) => match fs::read_to_string(&archive_path) {
-                    Ok(body) => match atomic_write_str(&path, &body) {
-                        Ok(()) => results.push(TeardownResult {
-                            action: "restored".to_string(),
-                            path: rel.to_string(),
-                            note: format!("Restored from archive: {}", archive_path.display()),
-                        }),
-                        Err(e) => results.push(TeardownResult {
-                            action: "failed".to_string(),
-                            path: rel.to_string(),
-                            note: format!(
-                                "Found archive {} but write failed: {}; symlink left intact.",
-                                archive_path.display(),
-                                e
-                            ),
-                        }),
-                    },
-                    Err(e) => results.push(TeardownResult {
-                        action: "failed".to_string(),
-                        path: rel.to_string(),
-                        note: format!(
-                            "Archive unreadable ({}): {}; symlink left intact.",
-                            archive_path.display(),
-                            e
-                        ),
-                    }),
-                },
-                None => {
-                    log_if_err(
-                        "restore_original trash symlink",
-                        &path,
-                        crate::safe_delete::trash_or_remove(&path),
-                    );
-                    results.push(TeardownResult {
-                        action: "removed".to_string(),
-                        path: rel.to_string(),
-                        note: "No prior archive — K2SO created this file fresh; sent to Trash.".to_string(),
-                    });
-                }
-            },
-        }
-    }
-
-    if matches!(mode, TeardownMode::RestoreOriginal) {
-        let aider_path = root.join(".aider.conf.yml");
-        if let Some(archive) = find_latest_archive(project_path, ".aider.conf.yml") {
-            match fs::read_to_string(&archive) {
-                Ok(body) => match atomic_write_str(&aider_path, &body) {
-                    Ok(()) => results.push(TeardownResult {
-                        action: "restored".to_string(),
-                        path: ".aider.conf.yml".to_string(),
-                        note: format!("Restored from archive: {}", archive.display()),
-                    }),
-                    Err(e) => results.push(TeardownResult {
-                        action: "failed".to_string(),
-                        path: ".aider.conf.yml".to_string(),
-                        note: format!(
-                            "Archive {} read ok but restore write failed: {}",
-                            archive.display(),
-                            e
-                        ),
-                    }),
-                },
-                Err(e) => results.push(TeardownResult {
-                    action: "failed".to_string(),
-                    path: ".aider.conf.yml".to_string(),
-                    note: format!("Archive unreadable: {}", e),
-                }),
-            }
-        } else if aider_path.exists() {
-            log_if_err(
-                "teardown trash aider.conf.yml",
-                &aider_path,
-                crate::safe_delete::trash_or_remove(&aider_path),
-            );
-            results.push(TeardownResult {
-                action: "removed".to_string(),
-                path: ".aider.conf.yml".to_string(),
-                note: "No prior archive — K2SO scaffolded this file fresh; sent to Trash.".to_string(),
-            });
-        }
-    }
-
-    results
-}
-
-/// Walk `.k2so/migration/` looking for the most-recent archive that
-/// matches the relative harness path.
-fn find_latest_archive(project_path: &str, rel: &str) -> Option<PathBuf> {
-    let migration_root = PathBuf::from(project_path).join(".k2so").join("migration");
-    if !migration_root.is_dir() {
-        return None;
-    }
-
-    let (subdir, leaf) = match rel.rsplit_once('/') {
-        Some((parent, leaf)) => (Some(parent.to_string()), leaf.to_string()),
-        None => (None, rel.to_string()),
-    };
-    let search_dir = match &subdir {
-        Some(s) => migration_root.join(s),
-        None => migration_root.clone(),
-    };
-    if !search_dir.is_dir() {
-        return None;
-    }
-
-    let (leaf_stem, leaf_ext) = match leaf.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), format!(".{}", ext)),
-        _ => (leaf.clone(), String::new()),
-    };
-
-    let mut best: Option<(u128, PathBuf)> = None;
-    if let Ok(entries) = fs::read_dir(&search_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(n) => n,
-                None => continue,
-            };
-            let prefix = format!("{}-", leaf_stem);
-            if !name.starts_with(&prefix) {
-                continue;
-            }
-            if !leaf_ext.is_empty() && !name.ends_with(&leaf_ext) {
-                continue;
-            }
-            let rest = &name[prefix.len()..];
-            let rest = if leaf_ext.is_empty() {
-                rest
-            } else {
-                rest.trim_end_matches(&leaf_ext[..])
-            };
-            let ts_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            let Ok(ts) = ts_str.parse::<u128>() else { continue };
-            match &best {
-                Some((existing_ts, _)) if ts <= *existing_ts => {}
-                _ => best = Some((ts, path.clone())),
-            }
-        }
-    }
-    best.map(|(_, p)| p)
-}
-
-/// Tauri-style entrypoint: parse mode string + run teardown. Returns
-/// the per-file result list ready for JSON-encoding back to the UI.
-pub fn k2so_agents_teardown_workspace(
-    project_path: String,
-    mode: String,
-) -> Result<Vec<TeardownResult>, String> {
-    let m = match mode.as_str() {
-        "keep_current" => TeardownMode::KeepCurrent,
-        "restore_original" => TeardownMode::RestoreOriginal,
-        other => return Err(format!("unknown teardown mode: {}", other)),
-    };
-    Ok(teardown_workspace_harness_files(&project_path, m))
-}
 
 // ══════════════════════════════════════════════════════════════════════
 // Migration-safety tests (Phase 7c/7d invariants)
@@ -301,6 +52,7 @@ pub fn k2so_agents_teardown_workspace(
 #[cfg(test)]
 mod migration_safety_tests {
     use super::*;
+    use std::fs;
     use std::path::Path;
     use crate::workspace::migrations::{archive_claude_md_file, inject_first_migration_banner};
     use crate::workspace::skill_writer::{
