@@ -1207,7 +1207,25 @@ pub fn parse_gemini_sessions(project_filter: Option<&str>) -> Result<Vec<ChatSes
             });
         }
     }
-    Ok(results)
+    // Dedupe by session_id: Gemini's CLI checkpoints a session into
+    // multiple .jsonl files when the user resumes — every file in the
+    // chats/ dir carries the SAME `sessionId` in its header. Without
+    // deduping we'd hand back the same logical session multiple times,
+    // which surfaces as duplicate React keys in the chat history list
+    // (Phase 2.5 finding #550). Keep the entry with the latest
+    // timestamp (i.e. the most recently-updated checkpoint), which
+    // also happens to carry the most accurate message_count.
+    use std::collections::HashMap;
+    let mut by_session: HashMap<String, ChatSession> = HashMap::new();
+    for s in results {
+        match by_session.get(&s.session_id) {
+            Some(existing) if existing.timestamp >= s.timestamp => {}
+            _ => {
+                by_session.insert(s.session_id.clone(), s);
+            }
+        }
+    }
+    Ok(by_session.into_values().collect())
 }
 
 // ── Pi chat parsing ─────────────────────────────────────────────────────
