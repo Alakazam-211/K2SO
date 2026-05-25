@@ -30,6 +30,11 @@ pub mod onboarding;
 // `agents/resume_chat.rs` — operates on workspace_sessions, naturally
 // workspace-scoped.
 pub mod resume_chat;
+// Phase 2.5e: review queue — workspace-manager approval path for
+// agent worktrees (review_queue / review_approve / review_reject /
+// review_request_changes / agent_complete). Relocated from
+// `agents/reviews.rs`.
+pub mod reviews;
 pub mod scheduler;
 // Phase 2.5d: SKILL.md regen + scaffolding (write_workspace_skill_file*
 // + regenerate_workspace_skill cluster). Extracted from

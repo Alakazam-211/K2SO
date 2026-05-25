@@ -19,12 +19,11 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 
-use crate::agents::delegate::strip_worktree_from_frontmatter;
-use crate::agents::parse_frontmatter;
-use crate::agents::scheduler::{agent_work_dir, get_workspace_state};
-use crate::agents::session::{k2so_agents_unlock, simple_date};
-use crate::agents::work_item::{atomic_write, read_work_item, WorkItem};
-use crate::agents::agents_dir;
+use crate::deprecated::delegate::strip_worktree_from_frontmatter;
+use crate::workspace::agent_identity::{agents_dir, parse_frontmatter};
+use crate::workspace::scheduler::{agent_work_dir, get_workspace_state};
+use crate::workspace::session::{k2so_agents_unlock, simple_date};
+use crate::workspace::work_item::{atomic_write, read_work_item, WorkItem};
 
 /// One file in the branch diff between main and the agent's worktree.
 /// Mirrors `crate::git::FileDiffSummary` but drops the `old_path` field

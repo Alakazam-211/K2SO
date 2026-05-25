@@ -76,7 +76,9 @@ pub use crate::workspace::onboarding;
 /// Phase 2.5e: `resume_chat` relocated to
 /// [`crate::workspace::resume_chat`]. Back-compat alias.
 pub use crate::workspace::resume_chat;
-pub mod reviews;
+/// Phase 2.5e: `reviews` relocated to [`crate::workspace::reviews`].
+/// Back-compat alias.
+pub use crate::workspace::reviews;
 /// Phase 2.5c: `scheduler` relocated to [`crate::workspace::scheduler`].
 /// Back-compat alias for callers that still reference
 /// `agents::scheduler::*`.
