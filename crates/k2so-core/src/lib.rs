@@ -33,6 +33,11 @@ pub mod agents;
 pub mod app_settings;
 pub mod chat_history;
 pub mod companion;
+// Phase 2.5e: workspace-to-workspace connections registry (relocated
+// from `agents/connections.rs`). Powers `k2so connections list/add/
+// remove`. Not workspace-scoped — operates on `workspace_relations`
+// linking two projects together.
+pub mod connections;
 pub mod db;
 pub mod db_ops;
 // Phase 2.5c: retired-but-preserved surface; modules here are

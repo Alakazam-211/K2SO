@@ -10,8 +10,8 @@
 //! headlessly. Same three verbs src-tauri had: `list` / `add` /
 //! `remove`.
 
-use crate::agents::resolve_project_id;
 use crate::db::schema::{log_activity, WorkspaceRelation};
+use crate::workspace::agent_identity::resolve_project_id;
 
 /// Dispatch by `action`. Returns a JSON-serialized string matching
 /// the shapes the CLI has emitted since 0.32.x.

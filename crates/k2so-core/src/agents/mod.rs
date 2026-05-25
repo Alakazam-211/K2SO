@@ -44,7 +44,9 @@ pub use crate::workspace::checkin;
 // `workspace/relations.rs`); `regenerate_skills` migrated to
 // `skills/crud.rs`. All downstream call sites updated in step 13;
 // no back-compat shim required here.
-pub mod connections;
+/// Phase 2.5e: `connections` relocated to top-level
+/// [`crate::connections`]. Back-compat alias.
+pub use crate::connections;
 /// Phase 2.5c: `cron_schedule` relocated to
 /// [`crate::heartbeats::cron`]. Back-compat alias.
 pub use crate::heartbeats::cron as cron_schedule;
