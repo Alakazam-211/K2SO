@@ -57,12 +57,18 @@ pub fn skill_source_agent_md_end(name: &str) -> String {
 
 // ── Version constants ────────────────────────────────────────────────
 
-pub const SKILL_VERSION_MANAGER: u32 = 1;
-pub const SKILL_VERSION_K2SO_AGENT: u32 = 1;
-pub const SKILL_VERSION_CUSTOM_AGENT: u32 = 1;
-pub const SKILL_VERSION_TEMPLATE: u32 = 1;
-/// Bumped to 4 in 0.32.7 when workspace skill adopted SOURCE sub-regions.
-pub const SKILL_VERSION_WORKSPACE: u32 = 4;
+/// Bumped to 2 in 0.39.0: Phase 2.1 A25 canonical CLI verbs replace
+/// the pre-Phase-2 deprecated surface (`k2so delegate`, `work *`,
+/// `agents create`, etc.). All four tiers re-roll on next startup so
+/// unmodified SKILL.md files stop telling agents to run dead commands.
+pub const SKILL_VERSION_MANAGER: u32 = 2;
+pub const SKILL_VERSION_K2SO_AGENT: u32 = 2;
+pub const SKILL_VERSION_CUSTOM_AGENT: u32 = 2;
+pub const SKILL_VERSION_TEMPLATE: u32 = 2;
+/// Bumped to 5 in 0.39.0: same Phase 2.1 A25 verb refresh applied to
+/// the workspace-root template body (Cli tools section, workflow
+/// docs). Was 4 since 0.32.7 (SOURCE sub-regions adoption).
+pub const SKILL_VERSION_WORKSPACE: u32 = 5;
 
 // ── Content checksumming ─────────────────────────────────────────────
 
