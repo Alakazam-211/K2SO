@@ -35,7 +35,31 @@ pub mod channel;
 /// Phase 2.5c: `checkin` relocated to [`crate::workspace::checkin`].
 /// Back-compat alias.
 pub use crate::workspace::checkin;
-pub mod commands;
+/// Phase 2.5d: `commands` was the per-cluster CRUD + heartbeat-control +
+/// editor + relations file. Each cluster relocated to its canonical
+/// post-split home (`workspace/agent.rs`, `heartbeats/control.rs`,
+/// `workspace/agent_editor.rs`, `workspace/relations.rs`); the
+/// `regenerate_skills` fn migrated to `skills/crud.rs` with both call
+/// sites updated. This inline submodule preserves the
+/// `crate::agents::commands::*` path for any downstream caller that
+/// still spells it the old way. Retire in Tier C alongside `agents/`.
+pub mod commands {
+    pub use crate::heartbeats::control::{
+        ensure_agent_wakeup, get_heartbeat, heartbeat_action, heartbeat_noop, set_heartbeat,
+    };
+    pub use crate::workspace::agent::{
+        cleanup_agent_backups, create, delete, delete_inner, get_profile, list, log_agent_warning,
+        update_agent_md_field, update_field, update_profile, K2soAgentInfo,
+    };
+    pub use crate::workspace::agent_editor::{
+        k2so_agents_get_editor_context, k2so_agents_preview_agent_context,
+        k2so_agents_regenerate_agent_context, k2so_agents_save_agent_md,
+    };
+    pub use crate::workspace::relations::{
+        workspace_relations_create, workspace_relations_delete, workspace_relations_list,
+        workspace_relations_list_incoming, workspace_session_get,
+    };
+}
 pub mod connections;
 /// Phase 2.5c: `cron_schedule` relocated to
 /// [`crate::heartbeats::cron`]. Back-compat alias.
