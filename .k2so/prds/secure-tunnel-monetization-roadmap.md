@@ -36,7 +36,7 @@ This document tracks remaining decisions, blocks, and sequencing. Each phase has
 ✅ Phase 2.1 — CLI redesign + inbox primitive + __lead__ removal (DONE — 8 commits)
 ✅ Phase 2.5b — skills filesystem consolidation + UI rename (DONE)
 ✅ Phase 2.5c — k2so-core file/module rename (DONE — 25 commits)
-🔄 Phase 2.5d — agents/workspace.rs + commands.rs split (IN FLIGHT)
+✅ Phase 2.5d — agents/workspace.rs + commands.rs split (DONE — 10 commits)
 🔄 Phase 2.5 main — build+smoke validation (IN FLIGHT — dev launch testing user-driven)
 🚀 PUBLIC 0.39.0 RELEASE — ships after Phase 2.5d + final smoke pass (EARLY RELEASE, 2026-05-25 decision)
 ⏳ Workweek polish — creature comforts users have been requesting (0.39.x)
