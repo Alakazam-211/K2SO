@@ -39,16 +39,6 @@ use k2so_core::agent_hooks::{
 #[cfg(test)]
 const RECENT_EVENTS_CAP: usize = 50;
 
-/// Event queue for channel-based agents. Key: "project_path:agent_name"
-// `EVENT_QUEUES` moved to k2so_core::agents::events.
-
-// `MAX_EVENTS_PER_QUEUE` moved to k2so_core::agents::events.
-
-// `ChannelEvent` struct moved to k2so_core::agents::events.
-
-// `event_queues()` accessor moved to k2so_core::agents::events.
-
-
 /// Force-fire a specific heartbeat by name, bypassing its schedule. The
 /// frontend uses this for per-row Launch buttons in the workspace drawer
 /// so the user can manually kick off a scheduled workflow without waiting
@@ -141,10 +131,6 @@ pub fn k2so_sessions_list_for_workspace(path: String) -> Result<String, String> 
     client.cli_get("/cli/sessions/list-for-workspace", &[("path", &path)])
 }
 
-// `push_agent_event` moved to k2so_core::agents::events.
-
-// `drain_agent_events` moved to k2so_core::agents::events.
-
 // The helpers below (`get_port`, `get_token`, `generate_token`,
 // `shell_escape`) were callers' entry points into the deleted Tauri
 // HTTP dispatcher (`start_server`). The dispatcher itself moved to
@@ -200,9 +186,8 @@ fn shell_escape(s: &str) -> String {
 // removed: the equivalent surface lives on the daemon as
 // `/cli/agents/mode`, `/cli/agents/settings/*`, and
 // `/cli/workspace/remove` (see crates/k2so-daemon/src/cli.rs), and
-// the daemon delegates to `k2so_core::agents::settings::*` and
-// `k2so_core::agents::workspaces::*` for the actual DB work — the
-// canonical single source of truth.
+// the daemon delegates into `k2so_core::workspace::*` for the
+// actual DB work — the canonical single source of truth.
 //
 // The workspace-harness teardown side of `cli_remove_workspace`
 // (`teardown_workspace_harness_files`) stays in Tauri for now under
