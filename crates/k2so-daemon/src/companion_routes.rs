@@ -416,14 +416,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&p);
     }
 
-    /// Regression for the pre-Phase-2.5b silent-zero bug. With one
-    /// agent done-item present in the legacy `.k2so/agents/<name>/work/done/`
-    /// layout (which is what `review_queue` currently still indexes),
-    /// the count must reflect it instead of always returning 0.
-    /// Once `review_queue` itself migrates off `agents_dir`, this
-    /// test continues to pass without modification because the
-    /// companion endpoint reads via the canonical surface, not the
-    /// filesystem directly.
+    /// Regression for the pre-Phase-2.5b silent-zero bug. The
+    /// companion's pending-reviews badge always returned 0 because
+    /// `review_queue` walked `.k2so/agents/<n>/work/done/` — a
+    /// directory retired by the 2.5b unification migration. With
+    /// `review_queue` migrated to read from the workspace's unified
+    /// inbox (`.k2so/inbox/done/`), seeding a done item there must
+    /// produce a non-zero count via the canonical surface.
+    ///
+    /// (Pre-fix this test seeded the LEGACY `.k2so/agents/<n>/work/done/`
+    /// shape and still passed because `review_queue` was reading from
+    /// it. After the 0.39.0 review_queue migration, the canonical
+    /// surface ignores the legacy tree entirely — so the test seeds
+    /// the unified-inbox shape to exercise the new code path.)
     #[test]
     fn count_pending_reviews_uses_review_queue_as_source_of_truth() {
         let _ = k2so_core::db::init_for_tests();
@@ -447,25 +452,20 @@ mod tests {
             .unwrap();
         }
 
-        // Seed the legacy shape — one agent with one done item.
-        // `review_queue` currently uses `agents_dir` for its scan, so
-        // this is what produces a non-zero count via the canonical
-        // surface today. (When the queue itself migrates to a different
-        // source, the assertion below still holds because the count
-        // is derived from `review_queue`'s output.)
-        let agent_done = p.join(".k2so/agents/backend/work/done");
-        std::fs::create_dir_all(&agent_done).unwrap();
+        // Seed the post-2.5b unified-inbox shape. `review_queue` now
+        // walks `<workspace>/.k2so/inbox/done/*.md` (NOT the retired
+        // `.k2so/agents/<n>/work/done/` tree), so the seed file lands
+        // here. Frontmatter carries the `branch:` field that
+        // `review_queue` parses to group items by agent.
+        let inbox_done = p.join(".k2so/inbox/done");
+        std::fs::create_dir_all(&inbox_done).unwrap();
         std::fs::write(
-            agent_done.join("oauth.md"),
-            "---\ntitle: OAuth\n---\n\nbody",
+            inbox_done.join("oauth.md"),
+            "---\ntitle: OAuth\nbranch: agent/backend/oauth\n---\n\nbody",
         )
         .unwrap();
 
         let count = count_pending_reviews(&p.to_string_lossy());
-        // The pre-fix walk-the-filesystem implementation and the
-        // canonical surface both report >=1 here when the legacy
-        // shape exists, so this assertion proves the new code path
-        // does NOT silently swallow non-zero counts.
         assert!(
             count >= 1,
             "expected >=1 from canonical review_queue (got {count})",
