@@ -6,7 +6,10 @@
 **Strategic goal**: launch the K2SO Hosted middle-tier ($2-?/mo `<sub>.k2.dev`) — the secure tunnel monetization product.
 **Intermediate milestone**: Public 0.39.0 release (sign+notarize+DMG ship) — unblocks the audience that will subscribe.
 **Release strategy update (2026-05-25)**: ship **0.39.0 EARLY** — right after Phase 2.5d closes + one more smoke pass. Phase 2.6 (tunnel decision) and Phase 3 (contract hardening) become the **0.40.x cycle**, deferred to the workweek. Rationale: weekend over; Phase 2.6+ work is additive (doesn't change existing-user behavior); current users can start validating the new infrastructure during the workweek; workweek focus shifts to creature comforts users have been requesting.
-**Estimated wall time remaining**: ~1 day to 0.39.0 public release; further weeks to monetization launch (Phase 4).
+
+**4-cycle weekend roadmap (2026-05-25)**: the post-0.39.0 path is now a 4-weekend plan from 0.40.0 → 1.0.0. See **`.k2so/prds/0.40.x-to-1.0-weekend-roadmap.md`** for the cycle-by-cycle scope. Headline: K2SO → K2 rename at 0.40.0, Brain/Documentation at 0.41.0, TTS + Kessel v2 at 0.42.0, K2 graduates at 1.0.0.
+
+**Estimated wall time remaining**: ~1 day to 0.39.0 public release; ~4 weeks to 1.0.0.
 
 ---
 
