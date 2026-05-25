@@ -403,3 +403,182 @@ pub fn disable_workspace_claude_md(project_path: String) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    //! Phase 2 Tier 2.1 coverage for the workspace harness preview +
+    //! disable surface. The ingest function (`run_workspace_ingest`)
+    //! triggers the full skill-writer fanout which is exercised by
+    //! `workspace/migrations.rs::migration_safety_tests`; this module
+    //! covers the read-only preview shape + the disable lifecycle.
+    use super::*;
+    use std::fs;
+    use uuid::Uuid;
+
+    fn scratch_project() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "k2so-harness-test-{}-{}",
+            std::process::id(),
+            Uuid::new_v4(),
+        ));
+        fs::create_dir_all(dir.join(".k2so")).unwrap();
+        dir
+    }
+
+    fn entries_by_path(entries: &[WorkspacePreviewEntry]) -> std::collections::HashMap<String, &WorkspacePreviewEntry> {
+        entries.iter().map(|e| (e.path.clone(), e)).collect()
+    }
+
+    #[test]
+    fn preview_workspace_ingest_reports_create_for_clean_workspace() {
+        let proj = scratch_project();
+        let path = proj.to_str().unwrap().to_string();
+
+        let entries = k2so_agents_preview_workspace_ingest(path).expect("preview ok");
+
+        // Every collision target + marker file should be reported.
+        let by_path = entries_by_path(&entries);
+        for rel in ["CLAUDE.md", "GEMINI.md", "AGENT.md", ".goosehints", ".cursor/rules/k2so.mdc"] {
+            let e = by_path.get(rel).unwrap_or_else(|| {
+                panic!("preview should include '{rel}', got {entries:?}")
+            });
+            assert_eq!(
+                e.action, "create",
+                "clean workspace should report action=create for {rel}, got {:?}",
+                e.action
+            );
+            assert!(e.size_bytes.is_none(), "no pre-existing file → no size");
+        }
+        // .aider.conf.yml is reported as create for a fresh workspace.
+        let aider = by_path
+            .get(".aider.conf.yml")
+            .expect("aider entry present");
+        assert_eq!(aider.action, "create");
+        // AGENTS.md + copilot-instructions are marker-injected when
+        // present, "create" when absent (we created none, so create).
+        for rel in ["AGENTS.md", ".github/copilot-instructions.md"] {
+            let e = by_path.get(rel).unwrap_or_else(|| {
+                panic!("preview should include {rel}, got entries: {entries:?}")
+            });
+            assert_eq!(e.action, "create");
+        }
+
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn preview_workspace_ingest_reports_archive_and_import_for_user_authored_file() {
+        let proj = scratch_project();
+        let path = proj.to_str().unwrap().to_string();
+
+        // Seed a user-authored CLAUDE.md (no `k2so_generated: true` signature).
+        fs::write(
+            proj.join("CLAUDE.md"),
+            "# my own claude memory\n\nDo X then Y.\n",
+        )
+        .unwrap();
+
+        let entries = k2so_agents_preview_workspace_ingest(path).expect("preview ok");
+        let by_path = entries_by_path(&entries);
+
+        let claude = by_path
+            .get("CLAUDE.md")
+            .expect("CLAUDE.md entry should be present");
+        assert_eq!(
+            claude.action, "archive_and_import",
+            "user-authored CLAUDE.md should be archived + imported, got {:?}",
+            claude.action
+        );
+        assert!(
+            claude.size_bytes.is_some(),
+            "existing-file branch must report size_bytes"
+        );
+
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn preview_workspace_ingest_reports_refresh_for_k2so_generated_cursor_mdc() {
+        let proj = scratch_project();
+        let path = proj.to_str().unwrap().to_string();
+
+        // Seed a K2SO-authored cursor mdc — the signature `k2so_generated: true`
+        // is the discriminator vs user-authored.
+        let cursor_dir = proj.join(".cursor").join("rules");
+        fs::create_dir_all(&cursor_dir).unwrap();
+        fs::write(
+            cursor_dir.join("k2so.mdc"),
+            "---\nk2so_generated: true\n---\n\n# managed\n",
+        )
+        .unwrap();
+
+        let entries = k2so_agents_preview_workspace_ingest(path).expect("preview");
+        let by_path = entries_by_path(&entries);
+
+        let mdc = by_path
+            .get(".cursor/rules/k2so.mdc")
+            .expect("cursor mdc entry present");
+        assert_eq!(
+            mdc.action, "refresh",
+            "k2so-generated file should be refreshed in place, got {:?}",
+            mdc.action,
+        );
+
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn preview_workspace_ingest_reports_marker_injected_for_existing_agents_md() {
+        let proj = scratch_project();
+        let path = proj.to_str().unwrap().to_string();
+        fs::write(proj.join("AGENTS.md"), "user-authored agents.md content").unwrap();
+
+        let entries = k2so_agents_preview_workspace_ingest(path).expect("preview");
+        let by_path = entries_by_path(&entries);
+
+        let agents = by_path.get("AGENTS.md").expect("AGENTS.md entry");
+        assert_eq!(
+            agents.action, "marker_injected",
+            "existing AGENTS.md should be treated as marker-injection target, got {:?}",
+            agents.action,
+        );
+
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn disable_workspace_claude_md_moves_existing_file_to_disabled_path() {
+        let proj = scratch_project();
+        let path = proj.to_str().unwrap().to_string();
+
+        let claude = proj.join("CLAUDE.md");
+        fs::write(&claude, "my body").unwrap();
+        let disabled = proj.join(".k2so").join("CLAUDE.md.disabled");
+        assert!(!disabled.exists(), "sanity: disabled file should not pre-exist");
+
+        disable_workspace_claude_md(path).expect("disable ok");
+
+        assert!(!claude.exists(), "root CLAUDE.md must be moved away");
+        assert!(disabled.exists(), "disabled path must now hold the body");
+        let preserved = fs::read_to_string(&disabled).unwrap();
+        assert_eq!(preserved, "my body", "content must be preserved byte-for-byte");
+
+        fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn disable_workspace_claude_md_noops_when_root_file_absent() {
+        let proj = scratch_project();
+        let path = proj.to_str().unwrap().to_string();
+        // No CLAUDE.md at the workspace root.
+        assert!(!proj.join("CLAUDE.md").exists());
+
+        // Should succeed silently, not error.
+        disable_workspace_claude_md(path).expect("no-op disable should not error");
+
+        // Disabled path also should not be created.
+        assert!(!proj.join(".k2so").join("CLAUDE.md.disabled").exists());
+
+        fs::remove_dir_all(&proj).ok();
+    }
+}
