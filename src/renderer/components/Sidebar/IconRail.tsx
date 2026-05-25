@@ -101,30 +101,34 @@ export default function IconRail(): React.JSX.Element {
 
   const expand = useSidebarStore((s) => s.expand)
 
-  const agenticEnabled = useSettingsStore((s) => s.agenticSystemsEnabled)
   const focusGroupsEnabled = useFocusGroupsStore((s) => s.focusGroupsEnabled)
   const activeFocusGroupId = useFocusGroupsStore((s) => s.activeFocusGroupId)
   const backgroundWorkspaces = useTabsStore((s) => s.backgroundWorkspaces)
   const hasActiveAgents = useActiveAgentsStore((s) => s.hasActiveAgents())
   const paneStatuses = useActiveAgentsStore((s) => s.paneStatuses)
 
-  // Zone 1: Agents & Pinned
-  const agentProjects = useMemo(() =>
-    agenticEnabled ? projects.filter((p) => p.agentMode === 'agent' || p.agentMode === 'custom') : [],
-    [projects, agenticEnabled])
-  const agentIds = useMemo(() => new Set(agentProjects.map((p) => p.id)), [agentProjects])
+  // Zone 1: Pinned (manually pinned by the user). Pre-0.39.0 we
+  // auto-pinned every agent-mode workspace (Custom + K2SO Agent) to
+  // the top regardless of user intent. 0.39.0 retires that — users
+  // can still pin any workspace including agent-mode ones, but the
+  // forced top placement is gone. Unpinned agent-mode workspaces
+  // flow through Zone 2 / Zone 3 like any other workspace.
   const pinnedProjects = useMemo(() =>
-    projects.filter((p) => p.pinned && !agentIds.has(p.id)), [projects, agentIds])
-  const topSection = useMemo(() => [...agentProjects, ...pinnedProjects], [agentProjects, pinnedProjects])
+    projects.filter((p) => p.pinned), [projects])
+  const topSection = pinnedProjects
 
-  // Zone 2: Workspaces in current focus group
+  // Zone 2: Workspaces in current focus group (unpinned). Post-0.39.0
+  // unpinned agent-mode workspaces appear here, not force-pinned to
+  // Zone 1.
   const filteredProjects = useMemo(() => {
-    const unpinned = projects.filter((p) => !p.pinned && !agentIds.has(p.id))
+    const unpinned = projects.filter((p) => !p.pinned)
     if (!focusGroupsEnabled || activeFocusGroupId === null) return unpinned
     return unpinned.filter((p) => p.focusGroupId === activeFocusGroupId)
-  }, [projects, focusGroupsEnabled, activeFocusGroupId, agentIds])
+  }, [projects, focusGroupsEnabled, activeFocusGroupId])
 
-  // Zone 3: Active
+  // Zone 3: Active. Workspaces with recent activity — post-0.39.0
+  // agent-mode workspaces are eligible (no longer auto-shunted to
+  // Zone 1).
   const [tick, setTick] = useState(0)
   useEffect(() => {
     const interval = setInterval(() => setTick((t) => t + 1), 60000)
@@ -135,12 +139,10 @@ export default function IconRail(): React.JSX.Element {
     const hasHookActivity = paneStatuses.size > 0 && Array.from(paneStatuses.values()).some(
       (s) => s === 'working' || s === 'permission' || s === 'review'
     )
-    // Only exclude projects already in the top section (agents/pinned)
-    const topIds = new Set([...agentIds, ...pinnedProjects.map((p) => p.id)])
+    // Exclude pinned (Zone 1). Agent-mode is no longer a force-exclude.
+    const pinnedIds = new Set(pinnedProjects.map((p) => p.id))
     return projects.filter((p) => {
-      if (topIds.has(p.id)) return false
-      if (p.pinned) return false
-      if (p.agentMode === 'agent' || p.agentMode === 'custom') return false
+      if (pinnedIds.has(p.id)) return false
       if (p.manuallyActive) return true
       if (p.lastInteractionAt && (now - p.lastInteractionAt) < TWENTY_FOUR_HOURS) return true
       if (p.id === activeProjectId && (hasActiveAgents || hasHookActivity)) return true
@@ -149,7 +151,7 @@ export default function IconRail(): React.JSX.Element {
       return false
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projects, agentIds, pinnedProjects, activeProjectId, hasActiveAgents, paneStatuses, backgroundWorkspaces, tick])
+  }, [projects, pinnedProjects, activeProjectId, hasActiveAgents, paneStatuses, backgroundWorkspaces, tick])
 
   const handleAddProject = useCallback(async () => {
     const folderPath = await invoke<string | null>('projects_pick_folder')
