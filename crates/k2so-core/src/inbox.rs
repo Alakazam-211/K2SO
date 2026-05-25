@@ -282,9 +282,13 @@ pub fn archive(workspace: &Path, id: &str) -> Result<PathBuf, String> {
 }
 
 /// Send an item to the macOS Recycle Bin. Recoverable from Trash.
+///
+/// SAFETY: routes through `scratch_safe_trash` so test scratch paths
+/// under std::env::temp_dir() skip the trash crate (avoids macOS
+/// Touch ID prompts). Production paths still go to recycle bin.
 pub fn delete(workspace: &Path, id: &str) -> Result<(), String> {
     let (_, src) = locate_item(workspace, id)?;
-    crate::safe_delete::trash(&src)
+    crate::safe_delete_scratch::scratch_safe_trash(&src)
 }
 
 /// Append a `respond` payload to the original item's file as a quoted
@@ -432,7 +436,12 @@ pub fn migrate_work_to_inbox(workspace: &Path) -> MigrationReport {
     // Send the entire .k2so/work/ to the macOS Recycle Bin (recoverable
     // for ~30 days). Per PRD A24.4: if there was unexpected user content
     // beyond the standard layout, the user can recover from Trash.
-    match crate::safe_delete::trash(&work_root) {
+    //
+    // SAFETY: routes through `scratch_safe_trash` so test scratch paths
+    // under std::env::temp_dir() bypass the trash crate (avoids macOS
+    // Touch ID prompts during cargo test + bash-CLI sandbox runs).
+    // Production workspace paths still go through `safe_delete::trash`.
+    match crate::safe_delete_scratch::scratch_safe_trash(&work_root) {
         Ok(()) => report.trashed_work_root = true,
         Err(e) => report.errors.push(format!("trash {}: {}", work_root.display(), e)),
     }

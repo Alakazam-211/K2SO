@@ -180,7 +180,11 @@ fn migrate_primary_agent(
         outcome.work_items_merged += merge_work_dirs(&work_src, &work_dst, outcome)?;
         // 0.37.6: trash the now-empty (or post-merge) work dir
         // so any unmerged residue is recoverable.
-        let _ = crate::safe_delete::trash(&work_src);
+        //
+        // SAFETY: routes through `scratch_safe_trash` so test scratch
+        // paths under temp_dir() skip the trash crate (avoids macOS
+        // Touch ID prompts during cargo test).
+        let _ = crate::safe_delete_scratch::scratch_safe_trash(&work_src);
     }
 
     // 3c: heartbeats/<sched>/* → .k2so/heartbeats/<sched>/*
@@ -191,7 +195,7 @@ fn migrate_primary_agent(
         // 0.37.6: trash post-merge — heartbeat content (WAKEUP.md
         // edits) was just copied to dst, but sending the source to
         // Trash gives recoverability if the merge missed something.
-        let _ = crate::safe_delete::trash(&hb_src);
+        let _ = crate::safe_delete_scratch::scratch_safe_trash(&hb_src);
     }
 
     // 3d: delete compiled outputs that regen.
@@ -201,7 +205,7 @@ fn migrate_primary_agent(
     for f in ["CLAUDE.md", "SKILL.md"] {
         let p = src.join(f);
         if p.exists() {
-            let _ = crate::safe_delete::trash(&p);
+            let _ = crate::safe_delete_scratch::scratch_safe_trash(&p);
         }
     }
 
@@ -345,12 +349,16 @@ fn migrate_templates(
         // Templates have no inbox — drop work/, CLAUDE.md, SKILL.md.
         // 0.37.6: trash, not permanent. Same reasoning as the
         // primary-agent migration above.
-        let _ = crate::safe_delete::trash(src.join("work"));
-        let _ = crate::safe_delete::trash(src.join("CLAUDE.md"));
-        let _ = crate::safe_delete::trash(src.join("SKILL.md"));
+        //
+        // SAFETY: routes through `scratch_safe_trash` so test scratch
+        // paths under temp_dir() skip the trash crate (avoids macOS
+        // Touch ID prompts during cargo test).
+        let _ = crate::safe_delete_scratch::scratch_safe_trash(src.join("work"));
+        let _ = crate::safe_delete_scratch::scratch_safe_trash(src.join("CLAUDE.md"));
+        let _ = crate::safe_delete_scratch::scratch_safe_trash(src.join("SKILL.md"));
 
         // Drop heartbeats/ on templates too — they don't run.
-        let _ = crate::safe_delete::trash(src.join("heartbeats"));
+        let _ = crate::safe_delete_scratch::scratch_safe_trash(src.join("heartbeats"));
 
         // Anything else under the template dir that we don't
         // recognize → archive to legacy under the template name.

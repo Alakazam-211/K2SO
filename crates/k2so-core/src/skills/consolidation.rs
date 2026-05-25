@@ -222,8 +222,14 @@ pub fn consolidate_skills_v1(workspace: &Path) -> ConsolidationOutcome {
     // the OS recycle bin. Recoverable for ~30 days if the user wants
     // the originals back. safe_delete::trash is the canonical path
     // for any deletion that could touch user content.
+    //
+    // SAFETY: routes through `scratch_safe_trash` so test scratch
+    // paths under std::env::temp_dir() bypass the trash crate (avoids
+    // macOS Touch ID prompts during cargo test + bash-CLI sandbox
+    // runs — `skills_consolidation_first_boot.sh` previously fired
+    // two prompts here). Production workspaces still trash.
     if agents.exists() {
-        match crate::safe_delete::trash(&agents) {
+        match crate::safe_delete_scratch::scratch_safe_trash(&agents) {
             Ok(()) => outcome.trashed_agents = true,
             Err(e) => outcome
                 .errors
@@ -231,7 +237,7 @@ pub fn consolidate_skills_v1(workspace: &Path) -> ConsolidationOutcome {
         }
     }
     if templates.exists() {
-        match crate::safe_delete::trash(&templates) {
+        match crate::safe_delete_scratch::scratch_safe_trash(&templates) {
             Ok(()) => outcome.trashed_agent_templates = true,
             Err(e) => outcome
                 .errors
@@ -422,7 +428,10 @@ fn handle_agent_md_at(skill_dir: &Path, outcome: &mut ConsolidationOutcome) {
         // Both exist. SKILL.md wins. Route AGENT.md to trash so the
         // user has a recovery path if their AGENT.md had unique
         // content not captured in SKILL.md.
-        match crate::safe_delete::trash(&agent_md) {
+        //
+        // SAFETY: routes through `scratch_safe_trash` so test scratch
+        // paths bypass the trash crate (no Touch ID prompts).
+        match crate::safe_delete_scratch::scratch_safe_trash(&agent_md) {
             Ok(()) => outcome.agent_md_discarded += 1,
             Err(e) => outcome.errors.push(format!(
                 "trash duplicate AGENT.md at {}: {}",

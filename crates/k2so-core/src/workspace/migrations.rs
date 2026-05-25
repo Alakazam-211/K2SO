@@ -622,7 +622,13 @@ pub fn harvest_per_agent_claude_md_files(project_path: &str) {
                 &format!("agents/{}/CLAUDE.md", name),
             ) {
                 Some(archive_path) => {
-                    if let Err(e) = crate::safe_delete::trash(&claude_md) {
+                    // SAFETY: routes through `scratch_safe_trash` so
+                    // test scratch paths under temp_dir() skip the
+                    // trash crate (avoids macOS Touch ID prompts
+                    // during cargo test).
+                    if let Err(e) =
+                        crate::safe_delete_scratch::scratch_safe_trash(&claude_md)
+                    {
                         log_if_err::<(), _>(
                             "harvest trash original",
                             &claude_md,

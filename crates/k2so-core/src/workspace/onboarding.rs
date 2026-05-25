@@ -272,7 +272,11 @@ pub fn adopt_harness_as_project_md(
     // written an archive copy to .k2so/migration/ but Trash gives
     // the user a second recovery path if something went wrong with
     // the archive write.
-    crate::safe_delete::trash(source_path)
+    //
+    // SAFETY: routes through `scratch_safe_trash` so test scratch
+    // paths under temp_dir() skip the trash crate (avoids macOS
+    // Touch ID prompts during cargo test).
+    crate::safe_delete_scratch::scratch_safe_trash(source_path)
         .map_err(|e| format!("trash adopted source: {e}"))?;
 
     Ok(AdoptionOutcome {

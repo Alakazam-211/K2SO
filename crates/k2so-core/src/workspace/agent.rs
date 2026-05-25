@@ -318,7 +318,11 @@ pub fn delete_inner(project_path: &str, name: &str, force: bool) -> Result<(), S
     // potentially user-authored work items, heartbeat config,
     // skill content. Recoverable from Trash if the user changes
     // their mind.
-    crate::safe_delete::trash(&dir)
+    //
+    // SAFETY: routes through `scratch_safe_trash` so test scratch
+    // paths under temp_dir() skip the trash crate (avoids macOS
+    // Touch ID prompts during cargo test).
+    crate::safe_delete_scratch::scratch_safe_trash(&dir)
         .map_err(|e| format!("Failed to delete agent: {}", e))?;
     Ok(())
 }

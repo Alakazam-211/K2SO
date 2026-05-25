@@ -74,6 +74,12 @@ pub mod projects_ops;
 pub mod push;
 pub mod review_checklist;
 pub mod safe_delete;
+// 0.39.0: test-aware trash wrapper for production call sites that are
+// exercised by cargo tests + bash CLI sandbox tests. Bypasses the
+// `trash` crate (and the macOS AppleEvents Touch ID prompt) for
+// paths under `std::env::temp_dir()`. Production user-content paths
+// keep going through `safe_delete::trash`. See module docs.
+pub mod safe_delete_scratch;
 pub mod scheduler;
 pub mod skill_layers;
 // Phase 2.5b — unified home for documentation profiles. Consolidates

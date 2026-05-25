@@ -228,10 +228,14 @@ pub fn k2so_heartbeat_remove(project_path: String, name: String) -> Result<(), S
     // 0.37.0: heartbeats live at .k2so/heartbeats/<sched>/ now.
     // 0.37.6: route to recycle bin — heartbeat dir contains the
     // user-edited WAKEUP.md + history files; recoverable on change-of-mind.
+    //
+    // SAFETY: routes through `scratch_safe_trash` so test scratch
+    // paths under temp_dir() skip the trash crate (avoids macOS
+    // Touch ID prompts during cargo test).
     let hb_dir = crate::workspace::agent_identity::workspace_heartbeats_dir(&project_path)
         .join(&name);
     if hb_dir.exists() {
-        let _ = crate::safe_delete::trash(&hb_dir);
+        let _ = crate::safe_delete_scratch::scratch_safe_trash(&hb_dir);
     }
     Ok(())
 }
