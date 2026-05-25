@@ -223,131 +223,22 @@ fn resolve_for_agent_ignores_signal_to_field() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Roster — filesystem reads
+// Roster — connections-backed (0.39.0 rewrite)
 // ─────────────────────────────────────────────────────────────────────
-
-fn tmp_workspace_root(tag: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "k2so-roster-test-{}-{}-{}",
-        tag,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    let _ = std::fs::remove_dir_all(&path);
-    std::fs::create_dir_all(path.join(".k2so/agents")).unwrap();
-    path
-}
-
-fn mk_agent(root: &PathBuf, name: &str, skill: Option<&str>) {
-    let dir = root.join(".k2so/agents").join(name);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("agent.md"), "# agent\n").unwrap();
-    if let Some(s) = skill {
-        std::fs::write(dir.join("SKILL.md"), s).unwrap();
-    }
-}
-
-#[test]
-fn roster_all_known_lists_agents_with_agent_md() {
-    let _g = ROSTER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let root = tmp_workspace_root("all-known");
-    mk_agent(&root, "alice", Some("alice specializes in X"));
-    mk_agent(&root, "bob", None);
-    // Directory with NO agent.md — should NOT appear.
-    std::fs::create_dir_all(root.join(".k2so/agents/not-an-agent")).unwrap();
-
-    let out = awareness::roster::query(RosterFilter::AllKnown(&root));
-    let names: Vec<_> = out.iter().map(|a| a.name.as_str()).collect();
-    assert_eq!(names, vec!["alice", "bob"]);
-}
-
-#[test]
-fn roster_skips_hidden_directories() {
-    let _g = ROSTER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let root = tmp_workspace_root("hidden");
-    mk_agent(&root, "alice", None);
-    // .archive/ is a K2SO convention — previously-archived agents,
-    // not live. Make it look like it has agent.md to test the hidden-
-    // dir skip, not the agent.md filter.
-    let archived = root.join(".k2so/agents/.archive");
-    std::fs::create_dir_all(&archived).unwrap();
-    std::fs::write(archived.join("agent.md"), "# archived\n").unwrap();
-
-    let out = awareness::roster::query(RosterFilter::AllKnown(&root));
-    let names: Vec<_> = out.iter().map(|a| a.name.as_str()).collect();
-    assert_eq!(names, vec!["alice"]);
-}
-
-#[test]
-fn roster_skill_summary_strips_frontmatter_and_truncates() {
-    let _g = ROSTER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let root = tmp_workspace_root("skill");
-    // Single frontmatter block, then a body long enough to test
-    // the 200-char truncation.
-    let skill_body = format!(
-        "---\ntitle: alice\n---\n\n{}",
-        "This is the real body content. ".repeat(10)
-    );
-    mk_agent(&root, "alice", Some(&skill_body));
-
-    let out = awareness::roster::query(RosterFilter::AllKnown(&root));
-    let alice = out.iter().find(|a| a.name == "alice").unwrap();
-    assert!(
-        !alice.skill_summary.contains("title: alice"),
-        "summary should not include frontmatter: {:?}",
-        alice.skill_summary
-    );
-    assert!(alice.skill_summary.starts_with("This is the real body"));
-    assert!(
-        alice.skill_summary.chars().count() <= 200,
-        "summary should truncate at 200 chars, got {}",
-        alice.skill_summary.chars().count()
-    );
-}
-
-#[test]
-fn roster_lookup_returns_none_for_unknown_agent() {
-    let _g = ROSTER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let root = tmp_workspace_root("lookup-none");
-    mk_agent(&root, "alice", None);
-
-    let found = awareness::roster::lookup(&root, "alice");
-    assert!(found.is_some());
-    let absent = awareness::roster::lookup(&root, "bob");
-    assert!(absent.is_none());
-}
-
-#[test]
-fn roster_marks_live_when_session_registered_with_agent_name() {
-    let _g = ROSTER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let root = tmp_workspace_root("live-flag");
-    mk_agent(&root, "alice", None);
-    mk_agent(&root, "bob", None);
-
-    // Register a session for alice.
-    let alice_id = SessionId::new();
-    let entry = registry::register(alice_id);
-    entry.set_agent_name("alice");
-
-    // Scan should mark alice Live, bob Offline.
-    let out = awareness::roster::query(RosterFilter::AllKnown(&root));
-    let alice = out.iter().find(|a| a.name == "alice").unwrap();
-    let bob = out.iter().find(|a| a.name == "bob").unwrap();
-    assert_eq!(alice.state, RosterState::Live);
-    assert_eq!(bob.state, RosterState::Offline);
-
-    // LiveInWorkspace filter drops bob.
-    let live_only = awareness::roster::query(RosterFilter::LiveInWorkspace(&root));
-    let live_names: Vec<_> = live_only.iter().map(|a| a.name.as_str()).collect();
-    assert_eq!(live_names, vec!["alice"]);
-
-    // Cleanup — if we don't drop the entry, subsequent parallel
-    // tests might see alice live when they shouldn't.
-    registry::unregister(&alice_id);
-}
+//
+// Pre-0.39 the roster was filesystem-backed (it walked
+// `.k2so/agents/<name>/`). 0.39.0's workspace==agent model moved the
+// data source to `crate::connections::list_peers` — a workspace's
+// "team" is the set of other connected workspaces, not subdirectories
+// in its own tree. The integration-level filesystem tests that lived
+// here were superseded by the in-module tests in
+// `crates/k2so-core/src/awareness/roster.rs`, which can seed the
+// shared in-memory DB directly without needing the daemon to be up.
+//
+// `agent_info_json_serializes_cleanly` survives because it's a pure
+// type-level round-trip — but the `skill_summary` field is now
+// `Option<String>` (always `None` for peers until cross-workspace
+// skill reads land; see roster.rs module head for the follow-up).
 
 #[test]
 fn agent_info_json_serializes_cleanly() {
@@ -355,7 +246,7 @@ fn agent_info_json_serializes_cleanly() {
         name: "alice".into(),
         workspace: Some(WorkspaceId("k2so".into())),
         state: RosterState::Live,
-        skill_summary: "does things".into(),
+        skill_summary: Some("does things".into()),
     };
     let json = serde_json::to_string(&info).unwrap();
     assert!(json.contains(r#""state":"live""#), "{json}");
