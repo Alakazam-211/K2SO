@@ -1511,12 +1511,13 @@ pub fn workspace_relations_delete(id: String) -> Result<(), String> {
 
 /// Regenerate SKILL.md files for all agents in a workspace.
 /// Called on app startup (migration) and via CLI `k2so skills regenerate`.
-/// Core logic lives in `k2so_core::agents::commands::regenerate_skills`.
+/// Core logic lives in `k2so_core::skills::crud::regenerate_skills`
+/// (relocated from `k2so_core::agents::commands` in Phase 2.5d).
 #[tauri::command]
 pub fn k2so_agents_regenerate_skills(
     project_path: String,
 ) -> Result<serde_json::Value, String> {
-    k2so_core::agents::commands::regenerate_skills(project_path)
+    k2so_core::skills::crud::regenerate_skills(project_path)
 }
 
 // `const K2SO_SECTION_BEGIN` moved to k2so_core::agents::skill_writer.

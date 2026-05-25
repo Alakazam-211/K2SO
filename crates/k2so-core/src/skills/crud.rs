@@ -22,7 +22,7 @@ use std::fs;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
-use crate::agents::{skill_dir, skills_dir};
+use crate::agents::{parse_frontmatter, skill_dir, skills_dir};
 use crate::safe_delete;
 
 /// Compact row for the workspace-settings Skills list. Returned by
@@ -457,4 +457,129 @@ mod tests {
     // prompt during `cargo test` on macOS. Per memory/feedback_recycle_bin_tests.md
     // we deliberately omit this test from the unit suite; the CLI / Tauri
     // path is exercised end-to-end via the parity shell test instead.
+}
+
+
+
+// Phase 2.5d: Skill regeneration relocated from
+// `agents/commands.rs::regenerate_skills`. The Tauri command +
+// daemon CLI both call into this canonical home post-split.
+use crate::agents::skill::{
+    ensure_skill_up_to_date, SKILL_VERSION_CUSTOM_AGENT, SKILL_VERSION_K2SO_AGENT,
+    SKILL_VERSION_MANAGER, SKILL_VERSION_TEMPLATE,
+};
+use crate::agents::skill_content::{
+    generate_custom_agent_skill_content, generate_k2so_agent_skill_content,
+    generate_manager_skill_content, generate_template_skill_content,
+};
+use crate::agents::skill_writer::write_skill_to_all_harnesses;
+
+/// Regenerate SKILL.md files for every agent in a workspace. Called
+/// on app startup (migration sweep) and via `k2so skills regenerate`
+/// from the CLI.
+///
+/// Returns `{ "updated": N }` on success. Missing `.k2so/agents/` is
+/// a benign no-op that returns `{ "updated": 0 }`.
+pub fn regenerate_skills(project_path: String) -> Result<serde_json::Value, String> {
+    let agents_root = std::path::PathBuf::from(&project_path).join(".k2so/agents");
+    if !agents_root.exists() {
+        return Ok(serde_json::json!({"updated": 0}));
+    }
+
+    let project_name = std::path::Path::new(&project_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".to_string());
+
+    let mut updated = 0;
+    if let Ok(entries) = fs::read_dir(&agents_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+
+            let agent_md = path.join("AGENT.md");
+            let agent_type = if agent_md.exists() {
+                let content = fs::read_to_string(&agent_md).unwrap_or_default();
+                let fm = parse_frontmatter(&content);
+                let raw = fm.get("type").cloned().unwrap_or_default();
+                match raw.as_str() {
+                    "pod-leader" | "coordinator" | "manager" => "manager".to_string(),
+                    "custom" => "custom".to_string(),
+                    "k2so" => "k2so".to_string(),
+                    "agent-template" => "agent-template".to_string(),
+                    _ => {
+                        let is_mgr = fm.get("manager").map(|v| v == "true").unwrap_or(false)
+                            || fm.get("coordinator").map(|v| v == "true").unwrap_or(false)
+                            || fm.get("pod_leader").map(|v| v == "true").unwrap_or(false);
+                        if is_mgr {
+                            "manager".to_string()
+                        } else {
+                            "agent-template".to_string()
+                        }
+                    }
+                }
+            } else {
+                "agent-template".to_string()
+            };
+
+            let (skill_content, skill_type_tag, skill_version) = match agent_type.as_str() {
+                "manager" => (
+                    generate_manager_skill_content(&project_path, &project_name),
+                    "manager",
+                    SKILL_VERSION_MANAGER,
+                ),
+                "k2so" => (
+                    generate_k2so_agent_skill_content(&project_name, &name),
+                    "k2so-agent",
+                    SKILL_VERSION_K2SO_AGENT,
+                ),
+                "custom" => (
+                    generate_custom_agent_skill_content(&project_name, &name),
+                    "custom-agent",
+                    SKILL_VERSION_CUSTOM_AGENT,
+                ),
+                _ => (
+                    generate_template_skill_content(&project_name, &name),
+                    "agent-template",
+                    SKILL_VERSION_TEMPLATE,
+                ),
+            };
+
+            let skill_path = path.join("SKILL.md");
+            ensure_skill_up_to_date(
+                &skill_path,
+                skill_type_tag,
+                skill_version,
+                &skill_content,
+                None,
+            );
+            updated += 1;
+
+            let description = match agent_type.as_str() {
+                "manager" => format!("K2SO Workspace Manager commands for {}", name),
+                "k2so" => format!("K2SO Agent commands for {} — full surface", name),
+                "custom" => format!("K2SO agent commands for {}", name),
+                _ => format!("K2SO agent template commands for {}", name),
+            };
+            write_skill_to_all_harnesses(
+                &project_path,
+                &format!("k2so-{}", name),
+                skill_type_tag,
+                skill_version,
+                &description,
+                &skill_content,
+                false,
+            );
+        }
+    }
+
+    Ok(serde_json::json!({"updated": updated}))
+
 }

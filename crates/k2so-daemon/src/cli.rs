@@ -883,7 +883,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
 
         // ── Skill fan-out ───────────────────────────────────────────
         "/cli/skills/regenerate" => match need_project(params) {
-            Ok(p) => respond(k2so_core::agents::commands::regenerate_skills(p)),
+            Ok(p) => respond(k2so_core::skills::crud::regenerate_skills(p)),
             Err(r) => r,
         },
 
