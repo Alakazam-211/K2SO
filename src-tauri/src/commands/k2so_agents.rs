@@ -849,14 +849,14 @@ pub fn k2so_agents_disable_workspace_claude_md(project_path: String) -> Result<(
 }
 
 // `CLI_TOOLS_DOCS` removed in 0.39.0. Was a stale duplicate of the
-// core version (k2so_core::workspace::skill_writer) with zero callers
+// core version (k2so_core::workspace::skill_regen) with zero callers
 // in this crate (Phase 2.1 final audit). The core version is the
 // authoritative source consumed by the SKILL.md generator and uses
 // the Phase 2.1 A25 canonical verbs. Mirrors the parallel removal of
 // `WORKFLOW_DOCS` from this same file.
 
 // `WORKFLOW_DOCS` removed in 0.39.0f. The constant was a stale duplicate
-// of the core version (now in `k2so_core::workspace::skill_writer`); it
+// of the core version (now in `k2so_core::workspace::skill_regen`); it
 // had zero callers in this crate (Phase 2.1 final audit). The core
 // version is the authoritative source consumed by the SKILL.md generator.
 
