@@ -56,10 +56,10 @@ The heartbeat system uses a two-tier cost model. A local LLM (Qwen 1.5B, running
 Coordinators can run as persistent Claude sessions with MCP channel integration (`--channels`). K2SO implements an MCP channel server that pushes events (new work items, git changes, CI results, agent lifecycle events) directly into the running session. No polling delay, no context reload -- the agent maintains full session context across events.
 
 **Self-Configuring Agents:**
-Coordinators create and configure Agent Templates via CLI (`k2so agent create`, `k2so agent update`). Agent profiles (`agent.md`) are editable with AI assistance via the built-in AIFileEditor. Each Coordinator knows its team members' strengths by reading their `agent.md` files before delegating.
+Coordinators create and configure skill profiles via CLI (`k2so skills create`, `k2so skills profile`). Skill profiles (`SKILL.md`) are editable with AI assistance via the built-in AIFileEditor. Each Coordinator knows its workspace's available skills by reading those files before applying a role to work.
 
 **Decentralized Work Discovery:**
-Each Coordinator knows where to find work (GitHub Issues, Linear, PRDs) via its `agent.md`. No central scanner or integration layer needed -- agents use CLI tools (`gh`, `git`, `curl`) already available in the terminal. The filesystem work queue (`.k2so/agents/{name}/work/{inbox,active,done}/`) is the always-on mechanism, scanned by the local LLM triage at near-zero cost.
+Each workspace knows where to find work (GitHub Issues, Linear, PRDs) via its agent profile. No central scanner or integration layer needed -- agents use CLI tools (`gh`, `git`, `curl`) already available in the terminal. The filesystem work queue at `.k2so/inbox/` is the always-on mechanism, scanned by the local LLM triage at near-zero cost.
 
 **Multi-Terminal Execution:**
 Agents can spawn parallel sub-terminals for concurrent tasks (`k2so terminal spawn`). Sub-terminals appear as pane splits within the agent's tab.
@@ -69,9 +69,11 @@ Heartbeat agents use Claude Code's `--resume` flag to continue from their last s
 
 **Virtual Terminal I/O:**
 The `k2so` CLI can read from and write to any running terminal session. Agents can communicate with each other across workspaces:
-- `k2so agents running` -- list all active CLI LLM sessions
-- `k2so terminal write <id> "message"` -- send text to a running terminal (raw PTY keystrokes)
-- `k2so terminal read <id> --lines 50` -- read the last N lines from a terminal buffer
+- `k2so workspace list --running` -- list all workspaces with live agents right now
+- `k2so terminal write <id> "message"` -- (advanced/internal) send text to a running terminal by id (raw PTY keystrokes)
+- `k2so terminal read <id> --lines 50` -- (advanced/internal) read the last N lines from a terminal buffer
+
+The `terminal write` and `terminal read` verbs are internal-tier — used by orchestrators that integrate with K2SO. For everyday use, prefer `k2so msg <workspace> "..."` (live cross-workspace delivery) and `k2so inbox` (async email-style inbox).
 
 **Running Agents Panel (Cmd+J):**
 A searchable overlay showing all active CLI LLM sessions across workspaces. Click to navigate, copy terminal ID for CLI reference, or send messages directly to running agents. TopBar button shows active agent count.
