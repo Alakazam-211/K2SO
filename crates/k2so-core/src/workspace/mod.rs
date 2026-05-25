@@ -16,6 +16,9 @@ pub mod checkin;
 pub mod display;
 pub mod events;
 pub mod launch_profile;
+// Phase 2.5d: boot-time idempotent migration helpers, extracted from
+// the monolithic `agents/workspace.rs`.
+pub mod migrations;
 pub mod onboarding;
 pub mod scheduler;
 pub mod session;
