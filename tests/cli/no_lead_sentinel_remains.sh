@@ -107,7 +107,7 @@ while IFS= read -r line; do
     esac
 
     echo "$line"
-done < <(grep -rn '__lead__' crates/ src-tauri/ cli/k2so src/ channels/ 2>/dev/null) > "$HITS_FILE"
+done < <(grep -rn --binary-files=without-match --exclude-dir=target --exclude-dir=node_modules --exclude-dir=dist '__lead__' crates/ src-tauri/ cli/k2so src/ channels/ 2>/dev/null) > "$HITS_FILE"
 
 if [ -s "$HITS_FILE" ]; then
     echo "FAIL: production code still contains \`__lead__\` literal:" >&2
