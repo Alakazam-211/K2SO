@@ -847,97 +847,12 @@ pub fn k2so_agents_disable_workspace_claude_md(project_path: String) -> Result<(
     k2so_core::workspace::harness::disable_workspace_claude_md(project_path)
 }
 
-const CLI_TOOLS_DOCS: &str = r#"## K2SO CLI Tools
-
-You are operating inside K2SO. The `k2so` command is available in your terminal.
-K2SO does the heavy lifting — each command is a single atomic operation.
-
-### Assign Work to an Agent (one step)
-```
-k2so delegate <agent> <work-file>
-```
-This single command does everything:
-- Creates a git worktree (branch: `agent/<name>/<task>`)
-- Writes a CLAUDE.md into the worktree with the agent's identity + task context
-- Moves the work item from inbox → active with worktree metadata
-- Opens a Claude terminal session in the worktree for the agent to start working
-
-### Create Work Items
-```
-k2so work create --title "..." --body "..." --agent <name> --priority high --type task
-k2so work create --title "..." --body "..."   # Goes to workspace inbox (no agent)
-```
-
-### Check Status
-```
-k2so agents list                     # All agents with inbox/active/done counts
-k2so agents work <name>              # Agent's work items
-k2so work inbox                      # Workspace-level inbox
-k2so reviews                         # Pending reviews (completed work)
-```
-
-### Reviews (one step each)
-```
-k2so review approve <agent> <branch>   # Merges branch + removes worktree + cleans up
-k2so review reject <agent>             # Removes worktree + moves work back to inbox
-k2so review reject <agent> --reason "..." # Same + creates feedback file
-k2so review feedback <agent> -m "..."  # Send feedback without rejecting
-```
-
-### Git
-```
-k2so commit                          # AI-assisted commit review
-k2so commit-merge                    # AI commit then merge into main
-```
-
-### Waking the Workspace Manager (USE THIS — not `k2so heartbeat`)
-```
-k2so heartbeat wake                     # THE RIGHT WAY: resumes manager session, sends triage message
-```
-**IMPORTANT:** Always use `k2so heartbeat wake` to wake the workspace manager, NOT `k2so heartbeat`.
-- `heartbeat wake` → resumes the manager's previous session, detects inbox work, sends delegation instructions
-- `heartbeat` (without "wake") → raw triage that launches the workspace's primary agent, does NOT resume sessions or send messages
-
-### Workspace Setup
-```
-k2so mode                               # Show current settings
-k2so mode <off|agent|manager>            # Set workspace agent mode
-k2so heartbeat <on|off>                 # Enable/disable automatic heartbeat
-k2so settings                           # Show all workspace settings
-```
-
-### Agent Management
-```
-k2so agent create <name> --role "..."   # Create a new agent
-k2so agent update --name <n> --field <f> --value "..."  # Update agent profile
-k2so agent list                         # List all agents with work counts
-k2so agent profile <name>              # Read agent's identity (agent.md)
-k2so agents work <name>                 # Show agent's work items
-k2so agents launch <name>              # Launch agent's Claude session
-```
-
-### Cross-Workspace (use K2SO_PROJECT_PATH, not cd)
-```
-K2SO_PROJECT_PATH=/path/to/workspace k2so work send --title "..." --body "..."
-K2SO_PROJECT_PATH=/path/to/workspace k2so heartbeat wake
-k2so work move --agent <name> --file <f> --from inbox --to active
-```
-**IMPORTANT:** When targeting a different workspace, use `K2SO_PROJECT_PATH=/path k2so ...`
-Do NOT use `cd /path && k2so ...` — the cd resets your shell and may cause path resolution issues.
-
-### Running Agents & Terminal I/O
-```
-k2so agents running                 # List all active CLI LLM sessions
-k2so terminal write <id> "message"  # Send text to a running terminal
-k2so terminal read <id> --lines 50  # Read last N lines from terminal buffer
-```
-
-### Completion
-```
-k2so agent complete --agent <n> --file <f>  # Complete work (auto-merge or submit for review)
-```
-
-"#;
+// `CLI_TOOLS_DOCS` removed in 0.39.0. Was a stale duplicate of the
+// core version (k2so_core::workspace::skill_writer) with zero callers
+// in this crate (Phase 2.1 final audit). The core version is the
+// authoritative source consumed by the SKILL.md generator and uses
+// the Phase 2.1 A25 canonical verbs. Mirrors the parallel removal of
+// `WORKFLOW_DOCS` from this same file.
 
 // `WORKFLOW_DOCS` removed in 0.39.0f. The constant was a stale duplicate
 // of the core version (now in `k2so_core::workspace::skill_writer`); it
