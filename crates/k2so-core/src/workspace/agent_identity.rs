@@ -72,10 +72,13 @@ pub fn workspace_heartbeats_dir(project_path: &str) -> PathBuf {
 }
 
 /// Post-Phase-2.5b: `<project>/.k2so/skills/` — the unified home for
-/// every documentation profile (skill) in the workspace. Replaces the
-/// pre-2.5b split across `.k2so/agents/<name>/` (instances) and
-/// `.k2so/agent-templates/<role>/` (master templates). Migration runs
-/// at daemon boot per upgraded workspace; see
+/// every skill profile the workspace-agent owns. A workspace IS an
+/// agent (hands, memory, self-built tools, proactivity via
+/// heartbeats); skills are the documentation profiles that describe
+/// how this workspace-agent operates. Replaces the pre-2.5b split
+/// across `.k2so/agents/<name>/` and `.k2so/agent-templates/<role>/`
+/// which carried over from the earlier sub-agent model. Migration
+/// runs at daemon boot per upgraded workspace; see
 /// [`crate::skills::consolidation::consolidate_skills_v1`].
 pub fn skills_dir(project_path: &str) -> PathBuf {
     PathBuf::from(project_path).join(".k2so").join("skills")
@@ -89,12 +92,16 @@ pub fn skill_dir(project_path: &str, skill_name: &str) -> PathBuf {
 
 /// Resolve the on-disk directory for an agent name within a workspace.
 ///
+/// In the workspace==agent model `agent_name` is mostly a routing
+/// key for legacy call sites — the primary workspace-agent is keyed
+/// on the workspace itself, so callers that pass a name still
+/// resolve onto the unified path transparently.
+///
 /// **Layout-aware.** Probes in this order:
-/// 1. `<project>/.k2so/agent/AGENT.md` exists — post-0.37.0 primary.
-///    `agent_name` is ignored here; the primary is keyed on
-///    workspace, not name. Callers that pass a name (e.g.
-///    `agent_dir(project, "pod-leader")`) get the unified path
-///    transparently — historic call sites keep working without
+/// 1. `<project>/.k2so/agent/AGENT.md` exists — post-0.37.0 primary
+///    workspace-agent. `agent_name` is ignored here; the primary is
+///    keyed on workspace, not name. Historic call sites
+///    (e.g. `agent_dir(project, "pod-leader")`) keep working without
 ///    changes during the deprecation window.
 ///
 ///    Probing for AGENT.md (not just the dir) matters because the
@@ -106,9 +113,10 @@ pub fn skill_dir(project_path: &str, skill_name: &str) -> PathBuf {
 ///    Gating the probe on the populated state avoids a
 ///    chicken-and-egg failure during migration.
 /// 2. `<project>/.k2so/skills/<agent_name>/` exists with either
-///    SKILL.md or AGENT.md — post-Phase-2.5b unified home. Probed
-///    AFTER the workspace primary so a sub-agent named the same as
-///    the primary doesn't accidentally shadow the workspace persona.
+///    SKILL.md or AGENT.md — post-Phase-2.5b unified home for skill
+///    profiles. Probed AFTER the workspace primary so a skill named
+///    the same as the workspace-agent doesn't accidentally shadow
+///    the primary persona.
 /// 3. `<project>/.k2so/agent-templates/<agent_name>/AGENT.md`
 ///    exists — legacy template path. Pre-Phase-2.5b workspaces that
 ///    haven't been first-boot-migrated yet still answer here; on
