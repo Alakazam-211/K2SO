@@ -25,6 +25,11 @@ pub mod launch_profile;
 // the monolithic `agents/workspace.rs`.
 pub mod migrations;
 pub mod onboarding;
+// Phase 2.5e: `claude --resume` / `--session-id` arg resolver for the
+// workspace's canonical chat session. Relocated from
+// `agents/resume_chat.rs` — operates on workspace_sessions, naturally
+// workspace-scoped.
+pub mod resume_chat;
 pub mod scheduler;
 // Phase 2.5d: SKILL.md regen + scaffolding (write_workspace_skill_file*
 // + regenerate_workspace_skill cluster). Extracted from
