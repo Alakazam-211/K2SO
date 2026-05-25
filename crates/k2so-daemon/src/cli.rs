@@ -413,14 +413,14 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
 
         // ── Review queue ────────────────────────────────────────────
         "/cli/reviews" => match need_project(params) {
-            Ok(p) => respond(k2so_core::agents::reviews::review_queue(&p)),
+            Ok(p) => respond(k2so_core::workspace::reviews::review_queue(&p)),
             Err(r) => r,
         },
         "/cli/review/approve" => match need_project(params) {
             Ok(p) => {
                 let branch = str_param(params, "branch");
                 let agent = str_param(params, "agent");
-                match k2so_core::agents::reviews::review_approve(p, branch, agent) {
+                match k2so_core::workspace::reviews::review_approve(p, branch, agent) {
                     Ok(msg) => CliResponse::ok_json(
                         serde_json::json!({"success": true, "message": msg}).to_string(),
                     ),
@@ -430,7 +430,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
         "/cli/review/reject" => match need_project(params) {
-            Ok(p) => respond_unit(k2so_core::agents::reviews::review_reject(
+            Ok(p) => respond_unit(k2so_core::workspace::reviews::review_reject(
                 p,
                 str_param(params, "agent"),
                 opt_param(params, "reason"),
@@ -438,7 +438,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
         "/cli/review/feedback" => match need_project(params) {
-            Ok(p) => respond_unit(k2so_core::agents::reviews::review_request_changes(
+            Ok(p) => respond_unit(k2so_core::workspace::reviews::review_request_changes(
                 p,
                 str_param(params, "agent"),
                 str_param(params, "feedback"),
@@ -489,20 +489,20 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         // ── Workspace lifecycle ─────────────────────────────────────
         "/cli/workspace/create" => {
             let target = str_param(params, "path");
-            match k2so_core::agents::workspaces::create_workspace(&target) {
+            match k2so_core::workspace::lifecycle::create_workspace(&target) {
                 Ok(body) => CliResponse::ok_json(body),
                 Err(e) => CliResponse::bad_request(e),
             }
         }
         "/cli/workspace/open" => {
             let target = str_param(params, "path");
-            match k2so_core::agents::workspaces::open_workspace(&target) {
+            match k2so_core::workspace::lifecycle::open_workspace(&target) {
                 Ok(body) => CliResponse::ok_json(body),
                 Err(e) => CliResponse::bad_request(e),
             }
         }
         "/cli/workspace/cleanup" => {
-            match k2so_core::agents::workspaces::cleanup_stale_workspaces() {
+            match k2so_core::workspace::lifecycle::cleanup_stale_workspaces() {
                 Ok(body) => CliResponse::ok_json(body),
                 Err(e) => CliResponse::bad_request(e),
             }
@@ -523,7 +523,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         // pre-allocate logic — it lives in `k2so_core::agents::resume_chat`
         // and is callable purely.
         "/cli/workspace/resume-chat-args" => match need_project(params) {
-            Ok(p) => match k2so_core::agents::resume_chat::resolve_resume_chat_args(&p) {
+            Ok(p) => match k2so_core::workspace::resume_chat::resolve_resume_chat_args(&p) {
                 Ok(out) => CliResponse::ok_json(out.to_json().to_string()),
                 Err(e) => CliResponse::bad_request(e),
             },
@@ -736,7 +736,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                 );
             }
             let target = str_param(params, "path");
-            match k2so_core::agents::workspaces::remove_workspace_db_only(&target) {
+            match k2so_core::workspace::lifecycle::remove_workspace_db_only(&target) {
                 Ok(body) => CliResponse::ok_json(body),
                 Err(e) => CliResponse::bad_request(e),
             }
@@ -747,7 +747,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Ok(p) => {
                 let agent = str_param(params, "agent");
                 let file = str_param(params, "file");
-                match k2so_core::agents::reviews::agent_complete(p, agent, file) {
+                match k2so_core::workspace::reviews::agent_complete(p, agent, file) {
                     Ok(body) => CliResponse::ok_json(body),
                     Err(e) => CliResponse::bad_request(e),
                 }
@@ -793,7 +793,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
                     .unwrap_or_else(|| "list".to_string());
                 let target = opt_param(params, "target");
                 let rel_type = opt_param(params, "type");
-                match k2so_core::agents::connections::connections(
+                match k2so_core::connections::connections(
                     &p,
                     &action,
                     target.as_deref(),
@@ -849,7 +849,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
 
         // ── Agent channel ops (status / done / reserve / release) ──
         "/cli/status" => match need_project(params) {
-            Ok(p) => respond(k2so_core::agents::channel::status(
+            Ok(p) => respond(k2so_core::workspace::agent_channel::status(
                 p,
                 str_param(params, "agent"),
                 str_param(params, "message"),
@@ -857,7 +857,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
         "/cli/done" => match need_project(params) {
-            Ok(p) => respond(k2so_core::agents::channel::done(
+            Ok(p) => respond(k2so_core::workspace::agent_channel::done(
                 p,
                 str_param(params, "agent"),
                 opt_param(params, "blocked"),
@@ -865,7 +865,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
         "/cli/reserve" => match need_project(params) {
-            Ok(p) => respond(k2so_core::agents::channel::reserve(
+            Ok(p) => respond(k2so_core::workspace::agent_channel::reserve(
                 p,
                 str_param(params, "agent"),
                 str_param(params, "paths"),
@@ -873,7 +873,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
         "/cli/release" => match need_project(params) {
-            Ok(p) => respond(k2so_core::agents::channel::release(
+            Ok(p) => respond(k2so_core::workspace::agent_channel::release(
                 p,
                 str_param(params, "agent"),
                 str_param(params, "paths"),

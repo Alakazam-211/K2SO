@@ -797,7 +797,7 @@ pub fn k2so_agents_resume_chat_args(
     // shared k2so-core helper. Same logic, same SQL writes, same
     // result; the daemon-routed path is preferred for cache + lock
     // alignment but a Tauri-only build still works on its own.
-    k2so_core::agents::resume_chat::resolve_resume_chat_args(&project_path)
+    k2so_core::workspace::resume_chat::resolve_resume_chat_args(&project_path)
         .map(|out| out.to_json())
 }
 
@@ -1046,62 +1046,62 @@ k2so agent complete --agent <n> --file <f>  # Complete work (auto-merge or submi
 // the types so the Tauri command signatures below (and any callers that
 // imported from this module) keep their shapes.
 
-pub use k2so_core::agents::reviews::{ReviewDiffFile, ReviewItem};
+pub use k2so_core::workspace::reviews::{ReviewDiffFile, ReviewItem};
 
 /// Get the review queue — agents with completed work in worktree branches.
 #[tauri::command]
 pub async fn k2so_agents_review_queue(project_path: String) -> Result<Vec<ReviewItem>, String> {
-    tokio::task::spawn_blocking(move || k2so_core::agents::reviews::review_queue(&project_path))
+    tokio::task::spawn_blocking(move || k2so_core::workspace::reviews::review_queue(&project_path))
         .await
         .map_err(|e| format!("review_queue task failed: {}", e))?
 }
 
 pub fn k2so_agents_review_queue_inner(project_path: &str) -> Result<Vec<ReviewItem>, String> {
-    k2so_core::agents::reviews::review_queue(project_path)
+    k2so_core::workspace::reviews::review_queue(project_path)
 }
 
 /// Sub-agent completion. Core logic in
-/// `k2so_core::agents::reviews::agent_complete`.
+/// `k2so_core::workspace::reviews::agent_complete`.
 pub fn k2so_agent_complete(
     project_path: String,
     agent_name: String,
     filename: String,
 ) -> Result<String, String> {
-    k2so_core::agents::reviews::agent_complete(project_path, agent_name, filename)
+    k2so_core::workspace::reviews::agent_complete(project_path, agent_name, filename)
 }
 
 /// Approve the agent's branch — merge + cleanup. Core logic lives in
-/// `k2so_core::agents::reviews::review_approve`.
+/// `k2so_core::workspace::reviews::review_approve`.
 #[tauri::command]
 pub fn k2so_agents_review_approve(
     project_path: String,
     branch: String,
     agent_name: String,
 ) -> Result<String, String> {
-    k2so_core::agents::reviews::review_approve(project_path, branch, agent_name)
+    k2so_core::workspace::reviews::review_approve(project_path, branch, agent_name)
 }
 
 /// Reject the agent's work — clean up worktree, restore inbox, write
 /// optional feedback. Core logic lives in
-/// `k2so_core::agents::reviews::review_reject`.
+/// `k2so_core::workspace::reviews::review_reject`.
 #[tauri::command]
 pub fn k2so_agents_review_reject(
     project_path: String,
     agent_name: String,
     reason: Option<String>,
 ) -> Result<(), String> {
-    k2so_core::agents::reviews::review_reject(project_path, agent_name, reason)
+    k2so_core::workspace::reviews::review_reject(project_path, agent_name, reason)
 }
 
 /// Request changes — drop a feedback file in inbox, don't tear down
-/// the worktree. Core logic in `k2so_core::agents::reviews::review_request_changes`.
+/// the worktree. Core logic in `k2so_core::workspace::reviews::review_request_changes`.
 #[tauri::command]
 pub fn k2so_agents_review_request_changes(
     project_path: String,
     agent_name: String,
     feedback: String,
 ) -> Result<(), String> {
-    k2so_core::agents::reviews::review_request_changes(project_path, agent_name, feedback)
+    k2so_core::workspace::reviews::review_request_changes(project_path, agent_name, feedback)
 }
 
 // ── Heartbeat Triage (Workspace State) ──────────────────────────────────
