@@ -48,61 +48,17 @@
 
 use std::path::Path;
 
-/// True if `path` lives under the OS temp directory (or a common
-/// macOS sandboxed temp location). On macOS the `trash` crate calls
-/// Finder via AppleScript; Finder requires Touch ID auth AND only
-/// has access to user-territory paths. Temp paths under `/var/folders/`
-/// or `$TMPDIR` are NOT user-territory, so the trash op either
-/// prompts forever or auths-but-fails with "permission denied."
-/// For those, skip the trash crate entirely and use direct removal —
-/// the path is test/scratch data; recovery from the OS recycle bin
-/// wouldn't have worked anyway.
-fn is_scratch_path(path: &Path) -> bool {
-    // Lexical check before canonicalize so we don't trigger I/O on
-    // every call. Covers the common cases:
-    //   - std::env::temp_dir() ($TMPDIR on macOS, /tmp on Linux)
-    //   - macOS per-user TemporaryItems: /var/folders/<hash>/T/...
-    //   - /tmp/ as a fallback
-    let temp_dir = std::env::temp_dir();
-    if path.starts_with(&temp_dir) {
-        return true;
-    }
-    let lossy = path.to_string_lossy();
-    lossy.starts_with("/var/folders/") || lossy.starts_with("/tmp/")
-}
-
 /// Send a path (file or directory) to the OS recycle bin. Returns
 /// an error if the trash operation fails (most commonly: missing
 /// trash service on minimal Linux, permission denied, path doesn't
 /// exist). Callers should surface the error rather than silently
 /// fall back to permanent deletion — the whole point of this
 /// helper is "don't permanently destroy user data."
-///
-/// **Scratch-path bypass**: paths under `$TMPDIR` / `/var/folders/` /
-/// `/tmp/` skip the OS recycle bin (Finder can't access those on
-/// macOS even with Touch ID auth) and use direct `fs::remove_*`.
-/// Test/scratch paths never had a meaningful recovery surface; this
-/// avoids endless Touch ID prompts during `cargo test`.
 pub fn trash<P: AsRef<Path>>(path: P) -> Result<(), String> {
     let path_ref = path.as_ref();
     if !path_ref.exists() {
         // Mirror `fs::remove_*` semantics: not-existing is success.
         return Ok(());
-    }
-    if is_scratch_path(path_ref) {
-        // Direct removal for test/scratch paths — bypass Finder + Touch ID.
-        let result = if path_ref.is_dir() {
-            std::fs::remove_dir_all(path_ref)
-        } else {
-            std::fs::remove_file(path_ref)
-        };
-        return result.map_err(|e| {
-            format!(
-                "remove {} failed: {} (scratch path, no recycle-bin recovery available)",
-                path_ref.display(),
-                e
-            )
-        });
     }
     trash::delete(path_ref).map_err(|e| {
         format!(
@@ -149,16 +105,6 @@ pub fn trash_or_remove<P: AsRef<Path>>(path: P) -> std::io::Result<()> {
     let path_ref = path.as_ref();
     if !path_ref.exists() {
         return Ok(());
-    }
-    // Scratch-path bypass (same rationale as `trash` above) — skip the
-    // trash crate entirely for temp paths so we don't trigger Finder
-    // + Touch ID on `cargo test`.
-    if is_scratch_path(path_ref) {
-        return if path_ref.is_dir() {
-            std::fs::remove_dir_all(path_ref)
-        } else {
-            std::fs::remove_file(path_ref)
-        };
     }
     match trash::delete(path_ref) {
         Ok(()) => Ok(()),
