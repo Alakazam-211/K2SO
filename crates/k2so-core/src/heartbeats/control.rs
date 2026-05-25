@@ -13,11 +13,11 @@
 //! code together.
 
 
-use crate::agents::scheduler::{
+use crate::workspace::agent_identity::{agent_dir, resolve_project_id};
+use crate::workspace::scheduler::{
     read_heartbeat_config, write_heartbeat_config, AgentHeartbeatConfig,
 };
-use crate::agents::wake::{agent_wakeup_path, wakeup_template_for};
-use crate::agents::{agent_dir, resolve_project_id};
+use crate::workspace::wake_prompts::{agent_wakeup_path, wakeup_template_for};
 use crate::db::schema::WorkspaceSession;
 use crate::fs_atomic::{atomic_write_str, log_if_err};
 use crate::workspace::agent::log_agent_warning;
@@ -44,7 +44,7 @@ pub fn ensure_agent_wakeup(project_path: &str, agent_name: &str, agent_type: &st
     // the agent-root wakeup.md is no longer the source of truth.
     // Skip scaffolding to avoid tricking the repair pass into
     // clobbering real content.
-    let hb_default = crate::agents::workspace_heartbeats_dir(project_path)
+    let hb_default = crate::workspace::agent_identity::workspace_heartbeats_dir(project_path)
         .join("default")
         .join("WAKEUP.md");
     if hb_default.exists() {

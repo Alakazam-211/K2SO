@@ -26,15 +26,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::agents::{agent_dir, agents_dir, parse_frontmatter};
-use crate::agents::skill::{
-    ensure_skill_up_to_date, SKILL_VERSION_CUSTOM_AGENT, SKILL_VERSION_K2SO_AGENT,
-    SKILL_VERSION_MANAGER, SKILL_VERSION_TEMPLATE,
-};
-use crate::agents::skill_content::{
+use crate::skills::content::{
     generate_custom_agent_skill_content, generate_k2so_agent_skill_content,
     generate_manager_skill_content, generate_template_skill_content,
 };
+use crate::skills::version::{
+    ensure_skill_up_to_date, SKILL_VERSION_CUSTOM_AGENT, SKILL_VERSION_K2SO_AGENT,
+    SKILL_VERSION_MANAGER, SKILL_VERSION_TEMPLATE,
+};
+use crate::workspace::agent_identity::{agent_dir, agents_dir, parse_frontmatter};
 use crate::fs_atomic::{atomic_symlink, atomic_write_str, log_if_err};
 
 /// Markers that delimit the K2SO-managed section inside
@@ -181,7 +181,7 @@ pub fn write_skill_to_all_harnesses(
     // touching CLAUDE.md / GEMINI.md / .cursor/rules / etc. Canonical
     // SKILL above is still authoritative for K2SO's own use; we just
     // don't fan out to the user-visible harness paths.
-    if crate::agents::onboarding::is_harness_management_skipped(project_path) {
+    if crate::workspace::onboarding::is_harness_management_skipped(project_path) {
         return;
     }
 

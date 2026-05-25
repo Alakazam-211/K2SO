@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::agents::{
+use crate::workspace::agent_identity::{
     agent_dir, agents_dir, find_primary_agent, parse_frontmatter, resolve_project_id,
 };
 use crate::db::schema::{WorkspaceSession, HeartbeatFire, WorkspaceState};

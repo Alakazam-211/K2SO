@@ -19,7 +19,7 @@ use std::fs;
 
 use serde::Serialize;
 
-use crate::agents::{agent_dir, find_primary_agent, resolve_project_id};
+use crate::workspace::agent_identity::{agent_dir, find_primary_agent, resolve_project_id};
 use crate::db::schema::{AgentHeartbeat, HeartbeatFire};
 use crate::log_debug;
 use crate::scheduler::should_project_fire;
@@ -81,7 +81,7 @@ pub fn k2so_heartbeat_add(
 
     // Create heartbeat folder and scaffold wakeup.md at the
     // workspace-level path the runtime reads from.
-    let hb_dir = crate::agents::workspace_heartbeats_dir(&project_path)
+    let hb_dir = crate::workspace::agent_identity::workspace_heartbeats_dir(&project_path)
         .join(&name);
     fs::create_dir_all(&hb_dir)
         .map_err(|e| format!("Failed to create heartbeat folder: {}", e))?;
@@ -133,7 +133,7 @@ pub fn k2so_heartbeat_add(
     // returned: we don't want to fail the user's heartbeat add over
     // a launchctl quirk; they can re-apply Settings → Wake Scheduler
     // to recover.
-    match crate::agents::heartbeat_install::ensure_cron_installed() {
+    match crate::heartbeats::install::ensure_cron_installed() {
         Ok(true) => log_debug!("[heartbeat-add] cron infrastructure installed for first time"),
         Ok(false) => {}
         Err(e) => log_debug!("[heartbeat-add] WARN: ensure_cron_installed: {e}"),
@@ -228,7 +228,7 @@ pub fn k2so_heartbeat_remove(project_path: String, name: String) -> Result<(), S
     // 0.37.0: heartbeats live at .k2so/heartbeats/<sched>/ now.
     // 0.37.6: route to recycle bin — heartbeat dir contains the
     // user-edited WAKEUP.md + history files; recoverable on change-of-mind.
-    let hb_dir = crate::agents::workspace_heartbeats_dir(&project_path)
+    let hb_dir = crate::workspace::agent_identity::workspace_heartbeats_dir(&project_path)
         .join(&name);
     if hb_dir.exists() {
         let _ = crate::safe_delete::trash(&hb_dir);
@@ -359,7 +359,7 @@ pub fn k2so_agents_heartbeat_tick(project_path: &str) -> Vec<HeartbeatFireCandid
         // inspired `starting_deadline_secs` window left heartbeats dark
         // for 22+ days after any pause longer than the grace (~600s).
         // Observed live in production. See `cron_schedule::is_due`.
-        if !crate::agents::cron_schedule::is_due(&hb) {
+        if !crate::heartbeats::cron::is_due(&hb) {
             let _ = HeartbeatFire::insert_with_schedule(
                 &conn,
                 &project_id,
@@ -455,7 +455,7 @@ pub fn k2so_heartbeat_rename(
     // wakeup folder on disk; agent identity isn't part of either.
     // Dropped the legacy find_primary_agent probe (see add path).
     // 0.37.0: rename within the workspace-level heartbeats dir.
-    let hb_parent = crate::agents::workspace_heartbeats_dir(&project_path);
+    let hb_parent = crate::workspace::agent_identity::workspace_heartbeats_dir(&project_path);
     let old_dir = hb_parent.join(&old_name);
     let new_dir = hb_parent.join(&new_name);
 

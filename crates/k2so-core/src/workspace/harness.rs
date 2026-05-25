@@ -24,8 +24,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::agents::skill_writer::force_symlink;
-use crate::agents::wake::strip_frontmatter;
+use crate::skills::writer::force_symlink;
+use crate::workspace::wake_prompts::strip_frontmatter;
 use crate::fs_atomic::{atomic_write_str, log_if_err};
 use crate::workspace::migrations::{
     archive_claude_md_file, harvest_per_agent_claude_md_files,

@@ -48,7 +48,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::agents::agent_dir;
+use crate::workspace::agent_identity::agent_dir;
 
 /// Coordination-level tag. Controls per-session message budgets in
 /// G5. Five levels by design — agent authors pick one, budgets map

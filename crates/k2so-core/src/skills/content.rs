@@ -24,13 +24,13 @@
 use std::fs;
 use std::path::PathBuf;
 
-use crate::agents::work_item::{safe_read_to_string, WorkItem};
-use crate::agents::{
+use crate::skills::version::{ensure_skill_up_to_date, SKILL_VERSION_TEMPLATE};
+use crate::workspace::agent_identity::{
     agent_dir, agent_type_for, agents_dir, parse_frontmatter, resolve_project_id,
 };
-use crate::agents::scheduler::{agent_work_dir, get_workspace_state};
-use crate::agents::skill::{ensure_skill_up_to_date, SKILL_VERSION_TEMPLATE};
-use crate::agents::wake::strip_frontmatter;
+use crate::workspace::scheduler::{agent_work_dir, get_workspace_state};
+use crate::workspace::wake_prompts::strip_frontmatter;
+use crate::workspace::work_item::{safe_read_to_string, WorkItem};
 use crate::fs_atomic::{atomic_write_str, log_if_err};
 
 // Embedded documentation snippet that's appended to Custom-mode

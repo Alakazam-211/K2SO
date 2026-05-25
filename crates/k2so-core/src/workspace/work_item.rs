@@ -11,7 +11,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::agents::parse_frontmatter;
+use crate::workspace::agent_identity::parse_frontmatter;
 
 /// Maximum file size for reading work items and agent profiles (1 MiB).
 /// Prevents memory exhaustion from malicious or corrupted files.

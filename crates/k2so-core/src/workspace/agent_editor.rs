@@ -10,8 +10,8 @@
 
 use std::fs;
 
-use crate::agents::work_item::atomic_write;
-use crate::agents::{agent_dir, parse_frontmatter};
+use crate::workspace::agent_identity::{agent_dir, parse_frontmatter};
+use crate::workspace::work_item::atomic_write;
 use crate::workspace::agent::cleanup_agent_backups;
 
 
@@ -76,7 +76,7 @@ pub fn k2so_agents_preview_agent_context(
     project_path: String,
     agent_name: String,
 ) -> Result<serde_json::Value, String> {
-    let generated = crate::agents::skill_content::generate_agent_claude_md_content(
+    let generated = crate::skills::content::generate_agent_claude_md_content(
         &project_path,
         &agent_name,
         None,
@@ -85,7 +85,7 @@ pub fn k2so_agents_preview_agent_context(
     let dir = agent_dir(&project_path, &agent_name);
     let on_disk_path = dir.join("CLAUDE.md");
     let on_disk = if on_disk_path.exists() {
-        Some(crate::agents::work_item::safe_read_to_string(&on_disk_path).unwrap_or_default())
+        Some(crate::workspace::work_item::safe_read_to_string(&on_disk_path).unwrap_or_default())
     } else {
         None
     };
@@ -112,7 +112,7 @@ pub fn k2so_agents_regenerate_agent_context(
     project_path: String,
     agent_name: String,
 ) -> Result<String, String> {
-    let md = crate::agents::skill_content::generate_agent_claude_md_content(
+    let md = crate::skills::content::generate_agent_claude_md_content(
         &project_path,
         &agent_name,
         None,

@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::agents::{agent_dir, agents_dir, agent_type_for};
+use crate::workspace::agent_identity::{agent_dir, agent_type_for, agents_dir};
 use crate::fs_atomic::atomic_write_str;
 
 /// Sentinel filename. Presence under `.k2so/` means the unification

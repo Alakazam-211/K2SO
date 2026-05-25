@@ -22,7 +22,7 @@ use std::fs;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
-use crate::agents::{parse_frontmatter, skill_dir, skills_dir};
+use crate::workspace::agent_identity::{parse_frontmatter, skill_dir, skills_dir};
 use crate::safe_delete;
 
 /// Compact row for the workspace-settings Skills list. Returned by
@@ -464,15 +464,15 @@ mod tests {
 // Phase 2.5d: Skill regeneration relocated from
 // `agents/commands.rs::regenerate_skills`. The Tauri command +
 // daemon CLI both call into this canonical home post-split.
-use crate::agents::skill::{
-    ensure_skill_up_to_date, SKILL_VERSION_CUSTOM_AGENT, SKILL_VERSION_K2SO_AGENT,
-    SKILL_VERSION_MANAGER, SKILL_VERSION_TEMPLATE,
-};
-use crate::agents::skill_content::{
+use crate::skills::content::{
     generate_custom_agent_skill_content, generate_k2so_agent_skill_content,
     generate_manager_skill_content, generate_template_skill_content,
 };
-use crate::agents::skill_writer::write_skill_to_all_harnesses;
+use crate::skills::version::{
+    ensure_skill_up_to_date, SKILL_VERSION_CUSTOM_AGENT, SKILL_VERSION_K2SO_AGENT,
+    SKILL_VERSION_MANAGER, SKILL_VERSION_TEMPLATE,
+};
+use crate::skills::writer::write_skill_to_all_harnesses;
 
 /// Regenerate SKILL.md files for every agent in a workspace. Called
 /// on app startup (migration sweep) and via `k2so skills regenerate`

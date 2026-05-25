@@ -26,8 +26,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::agents::wake::{compose_wake_prompt_for_agent, compose_wake_prompt_for_workspace};
-use crate::agents::{agent_type_for, resolve_project_id};
+use crate::workspace::agent_identity::{agent_type_for, resolve_project_id};
+use crate::workspace::wake_prompts::{
+    compose_wake_prompt_for_agent, compose_wake_prompt_for_workspace,
+};
 use crate::db::schema::{
     get_unread_messages, log_activity, mark_messages_read, ActivityFeedEntry, WorkspaceSession,
     WorkspaceRelation,

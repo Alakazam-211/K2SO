@@ -782,7 +782,7 @@ mod migration_safety_tests {
     use std::path::Path;
     use std::path::PathBuf;
     use uuid::Uuid;
-    use crate::agents::skill::{SKILL_BEGIN_MARKER, SKILL_END_MARKER};
+    use crate::skills::version::{SKILL_BEGIN_MARKER, SKILL_END_MARKER};
     use crate::workspace::harness::{safe_symlink_harness_file, scaffold_aider_conf, HARNESS_WORKSPACE_FILES};
     use crate::workspace::skill_writer::{
         append_workspace_source_regions, content_hash_of, import_claude_md_into_user_notes,

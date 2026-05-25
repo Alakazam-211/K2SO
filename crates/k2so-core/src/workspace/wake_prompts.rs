@@ -21,7 +21,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::agents::{agent_dir, agent_type_for, resolve_project_id};
+use crate::workspace::agent_identity::{agent_dir, agent_type_for, resolve_project_id};
 use crate::db::schema::AgentHeartbeat;
 use crate::terminal::event_sink::TerminalEventSink;
 use crate::terminal::grid_types::GridUpdate;
@@ -231,7 +231,7 @@ impl TerminalEventSink for NoOpTerminalEventSink {
 /// 1. `TerminalManager::create` in `crate::terminal::shared()` — the
 ///    PTY is owned by the daemon process, survives the Tauri app
 ///    reopening/closing.
-/// 2. [`crate::agents::session::k2so_agents_lock`] — writes the
+/// 2. [`crate::workspace::session::k2so_agents_lock`] — writes the
 ///    `agent_sessions` row + legacy `.lock` file so subsequent
 ///    scheduler ticks skip this agent.
 /// 3. `AgentHookEventSink` fires `HookEvent::CliTerminalSpawnBackground`
@@ -334,7 +334,7 @@ pub fn spawn_wake_headless(
     // Mark the session running so the next scheduler tick skips it.
     // Best-effort: don't fail the spawn if the DB write trips (PTY is
     // already live and will run regardless).
-    let _ = crate::agents::session::k2so_agents_lock(
+    let _ = crate::workspace::session::k2so_agents_lock(
         project_path.to_string(),
         agent_name.to_string(),
         Some(terminal_id.clone()),
@@ -355,7 +355,7 @@ pub fn spawn_wake_headless(
     if let Some(hb_name) = heartbeat_name {
         let db = crate::db::shared();
         let conn = db.lock();
-        if let Some(project_id) = crate::agents::resolve_project_id(&conn, project_path) {
+        if let Some(project_id) = crate::workspace::agent_identity::resolve_project_id(&conn, project_path) {
             let _ = crate::db::schema::AgentHeartbeat::save_session_id(
                 &conn, &project_id, hb_name, &pinned_session_id,
             );
@@ -430,7 +430,7 @@ pub fn spawn_wake_headless(
                 // is independent of the user's Chat tab — see the
                 // matching comment in src-tauri's spawn_wake_pty.
                 if heartbeat_name_owned.is_none() {
-                    match crate::agents::session::k2so_agents_save_session_id(
+                    match crate::workspace::session::k2so_agents_save_session_id(
                         project_path_owned.clone(),
                         agent_name_owned.clone(),
                         session_id.clone(),
@@ -454,7 +454,7 @@ pub fn spawn_wake_headless(
                 if let Some(ref hb_name) = heartbeat_name_owned {
                     let db = crate::db::shared();
                     let conn = db.lock();
-                    if let Some(project_id) = crate::agents::resolve_project_id(&conn, &project_path_owned) {
+                    if let Some(project_id) = crate::workspace::agent_identity::resolve_project_id(&conn, &project_path_owned) {
                         match crate::db::schema::AgentHeartbeat::save_session_id(
                             &conn, &project_id, hb_name, &session_id,
                         ) {

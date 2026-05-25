@@ -39,7 +39,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use crate::agents::launch_profile::CoordinationLevel;
+use crate::workspace::launch_profile::CoordinationLevel;
 
 /// Shared budget counter, keyed by `(workspace_id, from_agent)`.
 /// Value = number of signals this sender has emitted so far this

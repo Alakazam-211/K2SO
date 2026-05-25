@@ -23,10 +23,12 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::agents::session::simple_date;
-use crate::agents::skill_writer::{generate_default_agent_body, write_agent_skill_file};
-use crate::agents::work_item::atomic_write;
-use crate::agents::{agent_dir, agent_type_for, agents_dir, parse_frontmatter};
+use crate::skills::writer::{generate_default_agent_body, write_agent_skill_file};
+use crate::workspace::agent_identity::{
+    agent_dir, agent_type_for, agents_dir, parse_frontmatter,
+};
+use crate::workspace::session::simple_date;
+use crate::workspace::work_item::atomic_write;
 use crate::heartbeats::control::ensure_agent_wakeup;
 use crate::workspace::scheduler::{agent_work_dir, count_md_files};
 
@@ -94,7 +96,7 @@ pub fn log_agent_warning(project_path: &str, agent_name: &str, message: &str) {
 /// keeps returning useful data during the boot-cycle window where
 /// the daemon hasn't run `consolidate_skills_v1` yet.
 pub fn list(project_path: String) -> Result<Vec<K2soAgentInfo>, String> {
-    let new_home = crate::agents::skills_dir(&project_path);
+    let new_home = crate::workspace::agent_identity::skills_dir(&project_path);
     let dir = if new_home.exists() {
         new_home
     } else {

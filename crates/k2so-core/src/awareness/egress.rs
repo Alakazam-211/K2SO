@@ -192,7 +192,7 @@ pub fn deliver(signal: &AgentSignal, inbox_root: &std::path::Path) -> DeliveryRe
 /// is within budget (the budget counter has been incremented as a
 /// side effect).
 fn maybe_deny_over_budget(signal: &AgentSignal) -> Option<DeliveryReport> {
-    use crate::agents::launch_profile::{load_coordination_level, CoordinationLevel};
+    use crate::workspace::launch_profile::{load_coordination_level, CoordinationLevel};
     use crate::awareness::budget::{
         check_and_increment, BudgetCheck, BudgetDecision, CLI_SENDER_NAME,
     };
@@ -254,7 +254,7 @@ fn maybe_deny_over_budget(signal: &AgentSignal) -> Option<DeliveryReport> {
 fn resolve_coordination_level(
     workspace_id: &str,
     agent_name: &str,
-) -> Option<crate::agents::launch_profile::CoordinationLevel> {
+) -> Option<crate::workspace::launch_profile::CoordinationLevel> {
     let db = crate::db::shared();
     let conn = db.lock();
     let project_path: String = conn
@@ -265,7 +265,7 @@ fn resolve_coordination_level(
         )
         .ok()?;
     drop(conn);
-    Some(crate::agents::launch_profile::load_coordination_level(
+    Some(crate::workspace::launch_profile::load_coordination_level(
         &project_path,
         agent_name,
     ))

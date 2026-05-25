@@ -20,8 +20,8 @@
 
 use std::fs;
 
-use crate::agents::{agent_dir, resolve_project_id};
-use crate::agents::scheduler::agent_work_dir;
+use crate::workspace::agent_identity::{agent_dir, resolve_project_id};
+use crate::workspace::scheduler::agent_work_dir;
 use crate::db::schema::WorkspaceSession;
 
 /// Best-effort upsert of an `agent_sessions` row + create the legacy

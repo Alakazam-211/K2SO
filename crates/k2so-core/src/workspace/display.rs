@@ -187,7 +187,7 @@ pub fn set_agent_display_name(project_path: &str, name: &str) -> Result<(), Stri
 
     let updated = rewrite_frontmatter_field(&content, "display_name", name);
 
-    crate::agents::work_item::atomic_write(&agent_md, &updated)?;
+    crate::workspace::work_item::atomic_write(&agent_md, &updated)?;
 
     cache().lock().unwrap().remove(project_path);
 

@@ -26,11 +26,9 @@
 use std::fs;
 use std::path::Path;
 
-use crate::agents::scheduler::{
-    agent_work_dir, get_workspace_state, is_agent_locked,
-};
-use crate::agents::work_item::{read_work_item, WorkItem};
-use crate::agents::{agents_dir, find_primary_agent, parse_frontmatter};
+use crate::workspace::agent_identity::{agents_dir, find_primary_agent, parse_frontmatter};
+use crate::workspace::scheduler::{agent_work_dir, get_workspace_state, is_agent_locked};
+use crate::workspace::work_item::{read_work_item, WorkItem};
 use crate::inbox::{list_folder as inbox_list_folder, InboxItem};
 
 /// Plain-text triage summary. Walks `.k2so/agents/*/work/inbox` +

@@ -18,19 +18,19 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::agents::onboarding::is_harness_management_skipped;
-use crate::agents::skill::{
+use crate::skills::version::{
     skill_checksum_hex, skill_source_agent_md_begin, skill_source_agent_md_end,
     SKILL_END_MARKER, SKILL_SOURCE_PROJECT_MD_BEGIN, SKILL_SOURCE_PROJECT_MD_END,
     SKILL_VERSION_WORKSPACE,
 };
-use crate::agents::skill_writer::{
+use crate::skills::writer::{
     force_symlink, skill_update_footer, upsert_k2so_section, write_skill_to_all_harnesses,
 };
-use crate::agents::wake::strip_frontmatter;
-use crate::agents::{
+use crate::workspace::agent_identity::{
     agent_dir, agent_type_for, agents_dir, find_primary_agent, parse_frontmatter,
 };
+use crate::workspace::onboarding::is_harness_management_skipped;
+use crate::workspace::wake_prompts::strip_frontmatter;
 use crate::fs_atomic::{self, atomic_symlink, atomic_write_str, log_if_err};
 use crate::log_debug;
 use crate::workspace::migrations::{
@@ -697,7 +697,7 @@ pub fn ensure_all_skills_up_to_date(project_path: &str) {
             "pod-leader" | "coordinator" => "manager".to_string(),
             other => other.to_string(),
         };
-        crate::agents::skill_writer::write_agent_skill_file(
+        crate::skills::writer::write_agent_skill_file(
             project_path,
             &agent_name,
             &normalized_type,
@@ -863,10 +863,8 @@ You are launched into a dedicated worktree with your task already set up.
 /// Returns the composed CLAUDE.md body that was injected into the
 /// canonical SKILL.md — the renderer's regen UIs use this for preview.
 pub fn regenerate_workspace_skill(project_path: String) -> Result<String, String> {
-    use crate::agents::skill_writer::{
-        generate_default_agent_body, write_agent_skill_file,
-    };
-    use crate::agents::work_item::read_work_item;
+    use crate::skills::writer::{generate_default_agent_body, write_agent_skill_file};
+    use crate::workspace::work_item::read_work_item;
 
     let project_name = std::path::Path::new(&project_path)
         .file_name()
@@ -1080,7 +1078,7 @@ r#"# {project_name}
 "#,
                 project_name = project_name,
             );
-            let _ = crate::agents::work_item::atomic_write(&project_md_path, &project_md_content);
+            let _ = crate::workspace::work_item::atomic_write(&project_md_path, &project_md_content);
         }
     }
 

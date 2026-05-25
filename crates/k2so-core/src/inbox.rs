@@ -32,8 +32,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::agents::parse_frontmatter;
-use crate::agents::work_item::{atomic_write, safe_read_to_string};
+use crate::workspace::agent_identity::parse_frontmatter;
+use crate::workspace::work_item::{atomic_write, safe_read_to_string};
 
 /// One inbox item — markdown file with YAML frontmatter.
 #[derive(Debug, Clone, Serialize, Deserialize)]

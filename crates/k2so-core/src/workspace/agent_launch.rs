@@ -29,11 +29,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::agents::scheduler::{agent_work_dir, priority_rank};
-use crate::agents::skill_content::compose_agent_wake_context;
-use crate::agents::wake::{compose_wake_prompt_for_agent, compose_wake_prompt_from_path};
-use crate::agents::work_item::{read_work_item, WorkItem};
-use crate::agents::{agent_dir, parse_frontmatter, resolve_project_id};
+use crate::skills::content::compose_agent_wake_context;
+use crate::workspace::agent_identity::{agent_dir, parse_frontmatter, resolve_project_id};
+use crate::workspace::scheduler::{agent_work_dir, priority_rank};
+use crate::workspace::wake_prompts::{
+    compose_wake_prompt_for_agent, compose_wake_prompt_from_path,
+};
+use crate::workspace::work_item::{read_work_item, WorkItem};
 use crate::chat_history;
 use crate::db::schema::WorkspaceSession;
 
@@ -129,7 +131,7 @@ pub fn k2so_agents_build_launch(
 
         if let Some((top_path, _)) = items.into_iter().next() {
             let source_file = top_path.to_string_lossy().to_string();
-            return crate::agents::delegate::k2so_agents_delegate(
+            return crate::deprecated::delegate::k2so_agents_delegate(
                 project_path,
                 agent_name,
                 source_file,
