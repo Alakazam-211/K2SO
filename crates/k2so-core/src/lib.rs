@@ -29,7 +29,12 @@ macro_rules! log_debug {
 }
 
 pub mod agent_hooks;
-pub mod agents;
+// Phase 2.5e: `agents` module retired. All historical homes for
+// agent-scoped code redistributed across `workspace/`, `skills/`,
+// `heartbeats/`, `deprecated/`, `migrations/`, top-level
+// `connections.rs`, etc. The directory + module are deleted as of
+// Phase 2.5e; downstream callers (daemon CLI + Tauri commands) use
+// the canonical post-relocation paths directly.
 pub mod app_settings;
 pub mod chat_history;
 pub mod companion;
