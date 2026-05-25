@@ -75,12 +75,16 @@ pub fn daemon_status() -> DaemonStatusResponse {
 /// migration so Install / Reinstall operations agree on which binary
 /// the plist should point at. Returns `Err` if the binary isn't
 /// bundled (common in dev) or if we can't read the current exe path.
+///
+/// Pure path resolution + the `exists()` check live in
+/// `k2so_core::daemon_lifecycle::bundled_daemon_path`; this wrapper
+/// adds the actual filesystem touch (Tauri context only) so a K2
+/// Connect host can compute the same hypothetical path without
+/// performing the FS probe.
 fn locate_bundled_daemon() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("locate Tauri binary: {e}"))?;
-    let dir = exe
-        .parent()
+    let candidate = k2so_core::daemon_lifecycle::bundled_daemon_path(&exe)
         .ok_or_else(|| "Tauri binary has no parent dir".to_string())?;
-    let candidate = dir.join("k2so-daemon");
     if !candidate.exists() {
         return Err(format!(
             "k2so-daemon not found at {} — dev builds don't bundle it; run from a release DMG",
@@ -143,11 +147,16 @@ pub fn daemon_uninstall() -> Result<(), String> {
 /// Internal-call-friendly version (no Tauri command attribute) used by
 /// the version-mismatch auto-restart path in `lib.rs`. The
 /// `#[tauri::command]` wrapper just delegates to this.
+///
+/// Arg vector construction lives in
+/// `k2so_core::daemon_lifecycle::launchctl_kickstart_args` so K2
+/// Connect (which runs the same kickstart via SSH on a remote host)
+/// produces the same exact arg shape.
 pub fn kickstart_daemon() -> Result<(), String> {
     let uid = unsafe { libc::getuid() };
-    let target = format!("gui/{}/com.k2so.k2so-daemon", uid);
+    let args = k2so_core::daemon_lifecycle::launchctl_kickstart_args(uid);
     let out = Command::new("launchctl")
-        .args(["kickstart", "-k", &target])
+        .args(&args)
         .output()
         .map_err(|e| format!("launchctl kickstart: {e}"))?;
     if !out.status.success() {

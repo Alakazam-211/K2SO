@@ -43,6 +43,12 @@ pub mod companion;
 // remove`. Not workspace-scoped — operates on `workspace_relations`
 // linking two projects together.
 pub mod connections;
+// Headless-friendly daemon lifecycle abstractions (label, plist
+// generation, launchctl arg vectors). Shared between Tauri's
+// `daemon_install` / `daemon_restart` commands and K2 Connect's
+// remote-daemon bootstrap path so both agree on the canonical
+// label + plist shape.
+pub mod daemon_lifecycle;
 pub mod db;
 pub mod db_ops;
 // Phase 2.5c: retired-but-preserved surface; modules here are
