@@ -118,9 +118,11 @@ K2SO's test suite went through Phase 2.0 / 2.1 / 2.5b / 2.5c / 2.5d (and 2.5e is
 
 ---
 
-## Tier 2 — Defer to 0.39.x or 0.40.x (~10-12 hours when scheduled)
+## Tier 2 — ALSO required for 0.39.0 ship (~10-12 hours; per user direction 2026-05-25)
 
-These are coverage gaps for Phase 2.5d-extracted modules. NOT blocking 0.39.0 release.
+**Originally** scoped as defer-to-0.39.x. User direction pulled forward into 0.39.0 ship — principle: "we shouldn't leave the pivot's work behind." Phase 2.5d created these coverage gaps; close them as part of the same release.
+
+Coverage gaps for Phase 2.5d-extracted modules. Now blocking 0.39.0 release.
 
 ### 2.1 Coverage gaps for Phase 2.5d extractions (6 modules)
 
@@ -255,6 +257,7 @@ Pod-leader runs items 1-3 + 7 inline (~30 min), then briefs a subagent for items
 
 ### For 0.39.0 release gate
 
+**Tier 1:**
 1. ✅ Tier 1.1 — `no_lead_sentinel_remains.sh` path updated
 2. ✅ Tier 1.2 — `terminal-id.test.ts` jsdom env added
 3. ✅ Tier 1.3 — Hard-deprecation tests verified against current CLI
@@ -263,9 +266,15 @@ Pod-leader runs items 1-3 + 7 inline (~30 min), then briefs a subagent for items
 6. ✅ Tier 1.6 — `heartbeats/control.rs` tests added
 7. ✅ Tier 1.7 — Full test suite green: `cargo test --workspace` 907+ passing, doctest clean, typecheck baseline 47, bash CLI green
 
+**Tier 2 (added per user direction 2026-05-25 — pulled forward from 0.39.x):**
+8. ✅ Tier 2.1 — Inline unit tests added to 6 Phase 2.5d-extracted modules
+9. ✅ Tier 2.2 — Snapshot tests added for `skills/content.rs` 4 generators
+10. ✅ Tier 2.3 — `hasLoadedFromDaemon` vitest added
+11. ✅ Tier 2.4 — `inbox_heartbeat_interaction.sh` integration test added
+
 ### For 0.39.x / 0.40.x cycles
 
-Tier 2 items get their own micro-PRs as time permits. Track in roadmap.
+Only Tier 3 items remain post-release (pre-existing flakes, CI infrastructure improvements). Tier 2 is no longer deferred.
 
 ---
 
