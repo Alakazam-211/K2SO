@@ -6,9 +6,11 @@
 //! - [`status`] — update the agent's `agent_sessions.status_message`.
 //!   Also writes a `status` activity-feed entry so the UI history
 //!   shows what the agent was doing at each tick.
-//! - [`done`] — mark the current active/ work item as complete:
-//!   move the file to done/, flip the session to `sleeping`, log
-//!   `task.done` (or `task.blocked` when the caller passes a reason).
+//! - [`done`] — mark the workspace's in-flight work item complete:
+//!   move the first item in `.k2so/inbox/active/` to `done/` via the
+//!   unified `crate::inbox::*` primitive, flip the session to
+//!   `sleeping`, log `task.done` (or `task.blocked` when the caller
+//!   passes a reason).
 //! - [`reserve`] — claim a set of filesystem paths for exclusive
 //!   editing. Writes a JSON registry at `.k2so/reservations.json`.
 //!   Callers include a comma-separated path list; the function
@@ -20,7 +22,7 @@
 //! Tauri keeps its `#[tauri::command]` handlers as thin forwards.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::db::schema::{log_activity, WorkspaceSession};
 use crate::workspace::agent_identity::resolve_project_id;
@@ -63,10 +65,17 @@ pub fn status(
     Ok(serde_json::json!({ "success": true }))
 }
 
-/// Complete (or block) the agent's current active/ work item. Moves
-/// the first file from `active/` to `done/`, flips the session to
-/// `sleeping`, logs an activity entry. `blocked = Some(reason)` swaps
-/// the event type to `task.blocked`.
+/// Complete (or block) the workspace's in-flight work item. Moves
+/// the first item in `.k2so/inbox/active/` to `.k2so/inbox/done/`,
+/// flips the session to `sleeping`, logs an activity entry.
+/// `blocked = Some(reason)` swaps the event type to `task.blocked`.
+///
+/// Post-Phase-2.5b the workspace IS the agent — so "the agent's
+/// in-flight task" lives at workspace level in the unified inbox,
+/// not in the retired per-agent `.k2so/agents/<name>/work/` tree.
+/// Routes through `crate::inbox::*` so the same primitive that
+/// powers `checkin` / `inbox` / scheduler reads governs the
+/// completion write too.
 pub fn done(
     project_path: String,
     agent: String,
@@ -77,28 +86,22 @@ pub fn done(
     }
     let project_id = open_project(&project_path)?;
 
-    let active_dir = PathBuf::from(&project_path)
-        .join(".k2so/agents")
-        .join(&agent)
-        .join("work/active");
-    let done_dir = PathBuf::from(&project_path)
-        .join(".k2so/agents")
-        .join(&agent)
-        .join("work/done");
-
-    let mut moved_file = None;
-    if active_dir.is_dir() {
-        if let Some(Ok(entry)) = fs::read_dir(&active_dir)
-            .ok()
-            .and_then(|mut d| d.next())
-        {
-            let _ = fs::create_dir_all(&done_dir);
-            let dest = done_dir.join(entry.file_name());
-            if fs::rename(entry.path(), &dest).is_ok() {
-                moved_file = Some(entry.file_name().to_string_lossy().to_string());
+    let workspace = Path::new(&project_path);
+    let active_items = crate::inbox::list_folder(workspace, "active");
+    let moved_file: Option<String> = match active_items.into_iter().next() {
+        Some(item) => {
+            // `archive` moves the item to the standard `done/` folder —
+            // creating the folder on first use. Best-effort: a move
+            // failure is logged via the activity-feed entry below
+            // (summary = "no active task") so the caller can see the
+            // session flipped to sleeping but nothing was archived.
+            match crate::inbox::archive(workspace, &item.id) {
+                Ok(_) => Some(item.filename),
+                Err(_) => None,
             }
         }
-    }
+        None => None,
+    };
 
     let db = crate::db::shared();
     let conn = db.lock();
@@ -333,6 +336,74 @@ mod tests {
         let map = read_reservations(&path);
         assert_eq!(map.len(), 1);
         assert!(map.contains_key("src/foo.rs"));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Phase 2.5b regression: `done()` must move the in-flight item
+    /// from `.k2so/inbox/active/` to `.k2so/inbox/done/`, NOT the
+    /// retired `.k2so/agents/<name>/work/{active,done}/` tree.
+    /// Reproduces the post-2.5b workspace shape where `.k2so/agents/`
+    /// is absent entirely.
+    #[test]
+    fn done_moves_from_workspace_inbox_active_not_legacy_agents_dir() {
+        let _ = crate::db::init_for_tests();
+        let tmp = unique_tmp();
+        let project_path = tmp.to_string_lossy().to_string();
+
+        // Register the project row so `open_project` resolves.
+        let project_id =
+            format!("proj-channel-done-{}-{}", std::process::id(), TEST_COUNTER.fetch_add(1, Ordering::SeqCst));
+        {
+            let db = crate::db::shared();
+            let conn = db.lock();
+            conn.execute(
+                "INSERT OR REPLACE INTO projects \
+                 (id, path, name, color, agent_mode, pinned, tab_order) \
+                 VALUES (?1, ?2, ?3, '#123456', 'manager', 0, 0)",
+                rusqlite::params![project_id, project_path, "test"],
+            )
+            .unwrap();
+        }
+
+        // Post-Phase-2.5b shape: workspace inbox only. Explicitly no
+        // `.k2so/agents/` directory.
+        let inbox_root = tmp.join(".k2so").join("inbox");
+        fs::create_dir_all(inbox_root.join("active")).unwrap();
+        fs::write(
+            inbox_root.join("active").join("ship-it.md"),
+            "---\ntitle: Ship It\npriority: high\n---\n\nBody.",
+        )
+        .unwrap();
+        assert!(
+            !tmp.join(".k2so").join("agents").exists(),
+            "regression precondition: .k2so/agents/ must NOT exist",
+        );
+
+        let result = done(project_path.clone(), "any-agent".to_string(), None)
+            .expect("done() should succeed");
+
+        // File reported in response.
+        assert_eq!(
+            result.get("file").and_then(|f| f.as_str()),
+            Some("ship-it.md"),
+            "response should name the moved file; got: {result}",
+        );
+
+        // The item now lives in `.k2so/inbox/done/`, not in any
+        // `.k2so/agents/*/work/done/` path.
+        assert!(
+            inbox_root.join("done").join("ship-it.md").exists(),
+            "ship-it.md should have landed in workspace inbox done/",
+        );
+        assert!(
+            !inbox_root.join("active").join("ship-it.md").exists(),
+            "ship-it.md should no longer be in active/",
+        );
+        assert!(
+            !tmp.join(".k2so").join("agents").exists(),
+            "done() must NOT recreate the legacy .k2so/agents/ tree",
+        );
+
         let _ = fs::remove_dir_all(&tmp);
     }
 }
