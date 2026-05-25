@@ -34,6 +34,12 @@ pub mod harness;
 pub mod teardown;
 // Phase 2.5d: Agent CRUD commands. Extracted from `agents/commands.rs`.
 pub mod agent;
+// Phase 2.5d: AIFileEditor surface for editing AGENT.md. Extracted from
+// `agents/commands.rs`.
+pub mod agent_editor;
+// Phase 2.5d: workspace_sessions + workspace_relations DB accessors.
+// Extracted from `agents/commands.rs`.
+pub mod relations;
 pub mod session;
 pub mod settings;
 pub mod terminal_id;
