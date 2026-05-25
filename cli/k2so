@@ -2195,39 +2195,18 @@ cmd_sessions() {
     esac
 }
 
-# Roster query — "who's in the office?"
-#
-# Usage:
-#   k2so roster                    # all known agents in current workspace
-#   k2so roster --live             # only live agents
+# 0.39.0 (workspace==agent model): roster ≡ connections. The
+# pre-0.39 cmd_roster walked `.k2so/agents/<name>/` for "known
+# agents" in the calling workspace — a model that predates the
+# workspace==agent unification. Post-0.39 the team of an agent is
+# the set of OTHER CONNECTED WORKSPACES, surfaced by
+# `k2so connections list`. Both `k2so roster` and `k2so who` now
+# fail_deprecated pointing at `connections list`. The function
+# body is intentionally a stub — the dispatch arms route to
+# fail_deprecated directly so cmd_roster is no longer reachable
+# in practice.
 cmd_roster() {
-    local filter="all"
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --live) filter="live"; shift ;;
-            *) shift ;;
-        esac
-    done
-    # Roster lives in-core; daemon exposes it via a future route.
-    # Phase 3 MVP: filesystem-scan of .k2so/agents/ for known
-    # agents. Liveness not yet reported in CLI output (daemon-side
-    # registration path arrives in Phase 4); tests use the Rust
-    # API directly.
-    local agents_dir="${PROJECT}/.k2so/agents"
-    [[ ! -d "$agents_dir" ]] && { echo "No .k2so/agents/ found at $PROJECT" >&2; exit 1; }
-    echo "Roster for $PROJECT (filter: $filter)"
-    for dir in "$agents_dir"/*/; do
-        local name
-        name=$(basename "$dir")
-        # Skip hidden dirs (.archive).
-        [[ "$name" == .* ]] && continue
-        [[ ! -f "$dir/agent.md" ]] && continue
-        local skill_summary=""
-        if [[ -f "$dir/SKILL.md" ]]; then
-            skill_summary=$(tail -n +5 "$dir/SKILL.md" 2>/dev/null | head -c 80 | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')
-        fi
-        printf "  %-20s  %s\n" "$name" "${skill_summary:0:80}"
-    done
+    fail_deprecated "roster" "k2so connections list"
 }
 
 cmd_reserve() {
@@ -2268,6 +2247,14 @@ cmd_connections() {
     shift 2>/dev/null || true
     case "$action" in
         list)
+            # 0.39.0 (workspace==agent model): connections list renders
+            # a bidirectional, deduped peer list — both workspaces in a
+            # connection see each other as just "connected." Direction
+            # is a data-model concept (source → target rows), not a
+            # user-visible distinction; the daemon-side dispatch in
+            # `core::connections::connections("list", ...)` returns the
+            # deduped Peer shape (`projectId`, `projectName`,
+            # `relationTypes`) — no `direction` / `type` fields.
             cli_request "/cli/connections" "action=list" | python3 -c "
 import json, sys
 try:
@@ -2277,11 +2264,7 @@ try:
         print('No connections.')
     else:
         for c in conns:
-            arrow = chr(8594) if c['direction'] == 'outgoing' else chr(8592)
-            name = c['projectName']
-            rtype = c['type']
-            direction = c['direction']
-            print('  %s %s (%s, %s)' % (arrow, name, rtype, direction))
+            print('  - %s' % c.get('projectName', '?'))
 except Exception as e:
     sys.stderr.write('Error: %s\n' % e)
 " 2>/dev/null
@@ -3387,8 +3370,14 @@ cmd_activity() {
 }
 
 cmd_who() {
-    # 0.39.0f Phase 2.1: roster → who (PRD A5).
-    cmd_roster "$@"
+    # 0.39.0 (workspace==agent model): `who` collapses into
+    # `connections list`. The Phase-2.1 rename (roster → who) was a
+    # naming pass; the model-cleanup happened in 0.39.0 when the
+    # roster's data source moved from `.k2so/agents/` filesystem
+    # walks to `crate::connections::list_peers`. With the data
+    # source aligned, the verb itself collapses too — `who` and
+    # `connections list` answer the same question.
+    fail_deprecated "who" "k2so connections list"
 }
 
 # ── Phase 2.1: help text helpers ──────────────────────────────────────
@@ -3614,7 +3603,8 @@ HARD-DEPRECATED (verb removed; commands exit non-zero with pointer)
   commit-merge                    → commit --merge
   companion                       → daemon companion
   whatsnew                        → whats-new
-  roster                          → who
+  roster                          → connections list  (0.39.0)
+  who                             → connections list  (0.39.0)
   feed                            → activity
   signal <target> <kind> <payload> → msg <workspace> --signal <kind> [...]
   status "msg"                    → checkin --status "msg"
@@ -3862,8 +3852,9 @@ TALK TO OTHERS
   msg <workspace> "text"                Live delivery (call/IM — blocks until landed)
   msg <workspace> "text" --inbox        Drop in their inbox (email — async)
   msg <workspace> --signal <kind> ...   Emit a typed signal (advanced)
-  who                                   Workspaces with live agents right now
-  connections list|add|remove           Cross-workspace links
+  connections list                      Connected workspaces (bidirectional)
+  connections add <path>                Connect to another workspace
+  connections remove <name>             Disconnect
 
 YOUR INBOX
   inbox                                 Show inbox items (default)
@@ -4424,12 +4415,15 @@ EOF
         fail_deprecated "signal" "k2so msg <workspace> --signal <kind> [--payload <json>]"
         ;;
     roster)
-        # Phase 2.1 A5: hard-deprecated. Use who.
-        fail_deprecated "roster" "k2so who"
+        # 0.39.0: roster ≡ connections in the workspace==agent model.
+        # The Phase-2.1 pointer was `k2so who`; 0.39.0 makes the
+        # canonical command `k2so connections list`.
+        fail_deprecated "roster" "k2so connections list"
         ;;
     who)
-        # Phase 2.1 A5: roster → who.
-        shift; cmd_who "$@"
+        # 0.39.0: roster ≡ connections. Both legacy verbs collapse to
+        # `k2so connections list`. See cmd_who docstring for context.
+        fail_deprecated "who" "k2so connections list"
         ;;
     activity)
         # Phase 2.1 A5: feed → activity.
