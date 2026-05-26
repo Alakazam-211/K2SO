@@ -3,6 +3,25 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.3 — ConnectionGate fix: no more black screen after update
+
+Patch release. 0.39.2's ConnectionGate gated the *render* of the
+app but still loaded the entire app's modules at startup. Several
+stores fire daemon fetches the moment they're imported — if the
+daemon was still kickstarting (the auto-update scenario), those
+fetches failed and the stores got stuck in a broken state, leaving
+the app rendering as a black window even after the gate dismissed.
+
+0.39.3 defers loading the app's modules until the daemon is verified
+healthy. App imports happen for the first time AFTER the gate sees a
+green daemon — so every store's initial fetch hits a daemon that's
+ready to respond. The black-screen-then-reload workaround is gone.
+
+Bonus polish: the Reload button on the Connecting screen now appears
+after 10 seconds (was 30), with friendlier copy explaining that the
+daemon may still be loading and offering both "quit + relaunch" and
+"reload" as recovery options.
+
 ## 0.39.2 — ConnectionGate: render after daemon healthy
 
 Patch release. Fixes the "blank screen after update" race that some

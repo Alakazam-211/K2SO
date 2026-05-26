@@ -1,37 +1,40 @@
 /**
- * ConnectionGate — wraps the React app and gates render on daemon
- * reachability.
+ * ConnectionGate — wraps the React app and gates BOTH render AND module
+ * import on daemon reachability.
  *
- * Why this exists (0.39.2):
+ * Why this exists (0.39.2 → fixed in 0.39.3):
  *
- * On auto-update, the OLD daemon process stays in memory until
- * launchctl kickstart cycles it. Meanwhile the new K2SO.app launches,
- * React mounts, and the renderer's initial fetches (settings,
- * projects, workspaces) race the daemon restart. If those fetches
- * hit the daemon mid-restart, they fail silently and React mounts
- * against empty/stale data — visually presents as a blank app until
- * the user right-clicks → Reload.
+ * 0.39.2 shipped a gate that only delayed the *render* of <App />.
+ * That was insufficient: <App /> imports a long list of Zustand
+ * stores (projects, tabs, settings, focus-groups, timer, assistant,
+ * panels, …) and several of those stores fire eager daemon fetches
+ * at import time (not at component mount time). When index.tsx
+ * statically imported <App /> at startup, those stores burned their
+ * initial fetches against a down daemon, ended up in stuck/failed
+ * state, and stayed broken even after the gate dismissed — App
+ * mounted against empty stores and rendered as a black window.
  *
- * The gate polls the daemon's unauthenticated /ping endpoint until
- * it responds. Until then, it shows a "Connecting…" overlay. Once
- * the daemon is reachable, it unmounts the overlay and renders the
- * actual app — every store's initial fetch then runs against a
- * healthy daemon, no race.
+ * 0.39.3 fixes this by deferring the *import* of <App /> until the
+ * daemon is verified healthy. The gate uses dynamic `import('./App')`
+ * so the entire App module tree (and its transitively-imported
+ * stores) doesn't enter the JS context until /ping succeeds. Stores
+ * therefore fire their initial fetches against a known-healthy
+ * daemon, no race, no stuck state.
  *
- * Designed to be reusable for K2 Connect: a remote daemon (Machine
- * A's daemon, accessed from Machine B over a tunnel) may be
- * transiently unreachable for the same reasons — restart, network
- * blip, tunnel reconnect. The gate's "retry until reachable, show
- * Connecting… while we wait" pattern is the same primitive.
+ * Same primitive is reusable for K2 Connect: a remote daemon
+ * (Machine A's daemon, accessed from Machine B over a tunnel) may
+ * be transiently unreachable. Gate behaviour is identical — show
+ * "Connecting…", retry, mount app once reachable.
  *
- * Happy path: /ping succeeds on first try, overlay never paints
- * (or paints for <100ms). User sees the app mount normally.
+ * Happy path: /ping succeeds on first try, overlay flashes for
+ * <100ms (or skips entirely), user sees the app mount normally.
  *
- * Auto-update path: /ping fails for ~1-3s while daemon restarts,
- * gate shows the overlay, mounts the app once /ping responds. No
- * blank screen, no manual reload required.
+ * Auto-update / cold-start race path: /ping fails for 1-3s, gate
+ * shows "Connecting…", mounts the app once /ping responds — App
+ * module imports happen NOW, stores fire fetches against the
+ * healthy daemon, render succeeds cleanly.
  *
- * Permanent-failure path: after ~30s of failed polls, a Reload
+ * Permanent-failure path: after ~10s of failed polls, a Reload
  * button appears so the user can recover instead of staring at an
  * infinite spinner.
  */
@@ -57,14 +60,14 @@ async function pingDaemon(): Promise<boolean> {
   }
 }
 
-interface ConnectionGateProps {
-  children: React.ReactNode
-}
+type AppComponent = React.ComponentType
 
-export function ConnectionGate({ children }: ConnectionGateProps): React.ReactElement {
+export function ConnectionGate(): React.ReactElement {
   const [connected, setConnected] = useState(false)
   const [attempts, setAttempts] = useState(0)
+  const [AppModule, setAppModule] = useState<AppComponent | null>(null)
 
+  // Phase 1: poll daemon until reachable.
   useEffect(() => {
     let cancelled = false
     let timeoutId: ReturnType<typeof setTimeout> | null = null
@@ -77,8 +80,6 @@ export function ConnectionGate({ children }: ConnectionGateProps): React.ReactEl
         return
       }
       setAttempts((a) => a + 1)
-      // 500ms backoff between attempts. Bounded by the ~30s retry
-      // budget below, so worst case ~60 attempts total.
       timeoutId = setTimeout(() => { void tryConnect() }, 500)
     }
 
@@ -90,11 +91,36 @@ export function ConnectionGate({ children }: ConnectionGateProps): React.ReactEl
     }
   }, [])
 
-  if (!connected) {
+  // Phase 2: once daemon is reachable, dynamically import App.
+  // The import side-effects (store creation, eager fetches) only
+  // run NOW, after the daemon is confirmed healthy.
+  useEffect(() => {
+    if (!connected) return
+    let cancelled = false
+    void import('../App').then((mod) => {
+      if (cancelled) return
+      // Wrap in a function returning the component so React's
+      // useState setter doesn't call it as a setter callback.
+      setAppModule(() => mod.default)
+    }).catch((err: unknown) => {
+      // Dynamic import failure (network error, bundle missing).
+      // Keep showing the overlay; user can hit Reload.
+      console.error('[ConnectionGate] dynamic import of App failed:', err)
+    })
+    return () => { cancelled = true }
+  }, [connected])
+
+  // Show overlay while either (a) daemon not reachable, or
+  // (b) App module hasn't finished loading yet.
+  if (!connected || AppModule === null) {
     return <ConnectingOverlay attempts={attempts} />
   }
 
-  return <>{children}</>
+  // App module is loaded — mount it. Store fetches will fire from
+  // module-init effects (which run NOW for the first time) against
+  // the healthy daemon.
+  const App = AppModule
+  return <App />
 }
 
 interface ConnectingOverlayProps {
@@ -102,11 +128,11 @@ interface ConnectingOverlayProps {
 }
 
 function ConnectingOverlay({ attempts }: ConnectingOverlayProps): React.ReactElement {
-  // After ~30s of failed polls (60 attempts at 500ms), surface a
+  // After ~10s of failed polls (20 attempts at 500ms), surface a
   // Reload button so the user can recover from a stuck state instead
   // of staring at an infinite spinner. Most auto-update restarts
-  // complete in 1-3s; if we're at 30s, something's genuinely wrong.
-  const showReloadButton = attempts >= 60
+  // complete in 1-3s; if we're at 10s, something's genuinely wrong.
+  const showReloadButton = attempts >= 20
 
   return (
     <div
@@ -126,25 +152,20 @@ function ConnectingOverlay({ attempts }: ConnectingOverlayProps): React.ReactEle
         cursor: 'default',
       }}
     >
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem' }}>
-        <div style={{ fontSize: '1rem', fontWeight: 500 }}>
-          Connecting…
-        </div>
-        {attempts >= 4 && (
-          <div style={{ fontSize: '0.75rem', opacity: 0.55, fontFamily: 'ui-monospace, monospace' }}>
-            Waiting for K2SO daemon (attempt {attempts + 1})
-          </div>
-        )}
+      <div style={{ fontSize: '1rem', fontWeight: 500 }}>
+        Connecting…
       </div>
       {showReloadButton && (
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem' }}>
-          <div style={{ fontSize: '0.85rem', opacity: 0.7, maxWidth: '400px', textAlign: 'center', lineHeight: 1.5 }}>
-            The daemon isn't responding. This usually clears on its own — try reloading.
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.75rem' }}>
+          <div style={{ fontSize: '0.85rem', opacity: 0.75, maxWidth: '440px', textAlign: 'center', lineHeight: 1.5 }}>
+            Your K2SO daemon may still be loading.
+            <br />
+            If you're unsure, quit and relaunch the app, or try reloading with the button below.
           </div>
           <button
             onClick={() => { window.location.reload() }}
             style={{
-              padding: '0.5rem 1rem',
+              padding: '0.5rem 1.25rem',
               fontSize: '0.85rem',
               borderRadius: '4px',
               border: '1px solid var(--color-border, rgba(255,255,255,0.15))',
