@@ -16,3 +16,4 @@
 //! `terminal_routes`, ...) — the dispatcher is just the spine.
 
 pub mod dispatcher;
+pub mod http;

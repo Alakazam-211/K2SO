@@ -1082,7 +1082,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         // listener served them with these same semantics; H7
         // preserves the contract.
         "/cli/agents/triage" => match need_project(params) {
-            Ok(p) => CliResponse::ok_text(crate::handle_agents_triage(&p)),
+            Ok(p) => CliResponse::ok_text(crate::triage::handle_triage(&p)),
             Err(r) => r,
         },
         "/cli/scheduler-tick" => match need_project(params) {
