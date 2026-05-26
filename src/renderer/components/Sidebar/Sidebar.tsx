@@ -791,23 +791,19 @@ export default function Sidebar(): React.JSX.Element {
     })
   }, [])
 
-  // Agent-mode workspaces float to top (K2SO Agents + Custom Agents, not pods)
-  const agentProjects = useMemo(() =>
-    agenticEnabled ? projects.filter((p) => p.agentMode === 'agent' || p.agentMode === 'custom') : [],
-    [projects, agenticEnabled])
-
-  const agentIds = useMemo(() => new Set(agentProjects.map((p) => p.id)), [agentProjects])
-
+  // 0.39.0: retired forced floating of agent-mode workspaces to the top
+  // (was a separate `agentProjects` zone above `pinnedProjects`). Agent-mode
+  // workspaces now flow through the same Pinned / focus group / ungrouped
+  // lists as any other workspace. Users pin manually if they want them
+  // surfaced. Single-list-of-workspaces model end-to-end.
   const pinnedProjects = useMemo(() =>
-    projects.filter((p) => p.pinned && !agentIds.has(p.id)), [projects, agentIds])
-
-  const regularPinned = pinnedProjects
+    projects.filter((p) => p.pinned), [projects])
 
   const filteredProjects = useMemo(() => {
-    const unpinned = projects.filter((p) => !p.pinned && !agentIds.has(p.id))
+    const unpinned = projects.filter((p) => !p.pinned)
     if (!focusGroupsEnabled || activeFocusGroupId === null) return unpinned
     return unpinned.filter((p) => p.focusGroupId === activeFocusGroupId)
-  }, [projects, focusGroupsEnabled, activeFocusGroupId, agentIds])
+  }, [projects, focusGroupsEnabled, activeFocusGroupId])
 
   // ── Nudge to enable focus groups at 10+ workspaces (every 3 hours) ──
   useEffect(() => {
@@ -834,9 +830,9 @@ export default function Sidebar(): React.JSX.Element {
 
   // ── Drag-to-reorder state ──────────────────────────────────────────
   const [dragId, setDragId] = useState<string | null>(null)
-  const [dragZone, setDragZone] = useState<'agents' | 'pinned' | 'unpinned' | null>(null)
+  const [dragZone, setDragZone] = useState<'pinned' | 'unpinned' | null>(null)
   const [dropIndex, setDropIndex] = useState<number | null>(null)
-  const agentsRef = useRef<HTMLDivElement>(null)
+  // 0.39.0: agentsRef retired — Agents drag zone no longer exists.
   const pinnedRef = useRef<HTMLDivElement>(null)
   const unpinnedRef = useRef<HTMLDivElement>(null)
   const dropIndexRef = useRef<number | null>(null)
@@ -844,7 +840,7 @@ export default function Sidebar(): React.JSX.Element {
   const handleProjectMouseDown = useCallback((
     e: React.MouseEvent,
     projectId: string,
-    zone: 'agents' | 'pinned' | 'unpinned'
+    zone: 'pinned' | 'unpinned'
   ) => {
     if (e.button !== 0) return
     if ((e.target as HTMLElement).closest('button')) return
@@ -865,7 +861,7 @@ export default function Sidebar(): React.JSX.Element {
       if (!started) return
 
       // Determine drop index based on mouse Y
-      const containerEl = (zone === 'agents' ? agentsRef : zone === 'pinned' ? pinnedRef : unpinnedRef).current
+      const containerEl = (zone === 'pinned' ? pinnedRef : unpinnedRef).current
       if (!containerEl) return
 
       const items = containerEl.querySelectorAll('[data-project-id]')
@@ -888,11 +884,11 @@ export default function Sidebar(): React.JSX.Element {
 
       if (started) {
         const allProjects = useProjectsStore.getState().projects
-        const list = zone === 'agents'
-          ? [...allProjects.filter((p) => p.agentMode === 'agent' || p.agentMode === 'custom')]
-          : zone === 'pinned'
-          ? [...allProjects.filter((p) => p.pinned && (!p.agentMode || p.agentMode === 'off'))]
-          : [...allProjects.filter((p) => !p.pinned && (!p.agentMode || p.agentMode === 'off'))]
+        // 0.39.0: 'agents' drag zone retired; pinned zone now accepts ALL
+        // pinned workspaces regardless of agentMode.
+        const list = zone === 'pinned'
+          ? [...allProjects.filter((p) => p.pinned)]
+          : [...allProjects.filter((p) => !p.pinned)]
         const di = dropIndexRef.current
         const fromIdx = list.findIndex((p) => p.id === projectId)
         if (fromIdx >= 0 && di !== null && fromIdx !== di && fromIdx !== di - 1) {
@@ -1050,11 +1046,13 @@ export default function Sidebar(): React.JSX.Element {
     <div className="relative flex flex-col h-full">
       <ResizeHandle />
 
-      {/* Agents & Pinned workspaces — always visible above focus groups.
+      {/* Pinned workspaces — always visible above focus groups.
           0.37.13: collapsible header + inner scroll when > 10 items so the
-          section doesn't push focus groups + active dock off-screen. */}
-      {(agentProjects.length > 0 || pinnedProjects.length > 0) && (() => {
-        const totalCount = agentProjects.length + pinnedProjects.length
+          section doesn't push focus groups + active dock off-screen.
+          0.39.0: agent-mode workspaces now flow through this single Pinned
+          section (no dedicated Agents zone above). */}
+      {pinnedProjects.length > 0 && (() => {
+        const totalCount = pinnedProjects.length
         const SCROLL_THRESHOLD = 10
         const SCROLL_MAX_HEIGHT = 360 // ~7-8 items visible before scrolling
         const useScroll = totalCount > SCROLL_THRESHOLD
@@ -1068,7 +1066,7 @@ export default function Sidebar(): React.JSX.Element {
             aria-controls="sidebar-agents-pinned-content"
           >
             <span className="text-[10px] font-semibold tracking-wider text-[var(--color-text-muted)] uppercase">
-              {agentProjects.length > 0 && pinnedProjects.length > 0 ? 'Agents & Pinned' : agentProjects.length > 0 ? 'Agents' : 'Pinned'}
+              Pinned
             </span>
             <span className="text-[10px] text-[var(--color-text-muted)] tabular-nums px-1.5 py-0.5 bg-white/[0.06] font-mono">
               {totalCount}
@@ -1094,50 +1092,13 @@ export default function Sidebar(): React.JSX.Element {
             }}
           >
             <div style={useScroll ? { maxHeight: SCROLL_MAX_HEIGHT, overflowY: 'auto' } : undefined}>
-          {/* Agents zone — reorderable independently */}
-          {agentProjects.length > 0 && (
-            <div ref={agentsRef}>
-              {(() => {
-                let flatIdx = 0
-                return agentProjects.map((project, idx) => {
-                  const myStartIdx = flatIdx
-                  flatIdx += 1
-                  return (
-                    <div
-                      key={project.id}
-                      data-project-id={project.id}
-                      style={{ opacity: dragId === project.id ? 0.4 : 1 }}
-                      onMouseDown={(e) => handleProjectMouseDown(e, project.id, 'agents')}
-                    >
-                      {dragZone === 'agents' && dropIndex === idx && (
-                        <div className="h-[2px] bg-[var(--color-accent)] mx-3" />
-                      )}
-                      <SingleProjectItem
-                        project={project}
-                        isActive={project.id === activeProjectId}
-                        onContextMenu={handleContextMenu}
-                        shortcutIndex={myStartIdx}
-                      />
-                    </div>
-                  )
-                })
-              })()}
-              {dragZone === 'agents' && dropIndex === agentProjects.length && (
-                <div className="h-[2px] bg-[var(--color-accent)] mx-3" />
-              )}
-            </div>
-          )}
-
-          {/* Divider between agents and pinned */}
-          {agentProjects.length > 0 && regularPinned.length > 0 && (
-            <div className="mx-3 my-1 border-t border-[var(--color-border)]" />
-          )}
-
-          {/* Pinned zone — reorderable independently */}
+          {/* Pinned zone — reorderable. 0.39.0: includes ALL pinned
+              workspaces regardless of agentMode (the separate Agents
+              zone above this was retired). */}
           <div ref={pinnedRef}>
             {(() => {
-              let flatIdx = agentProjects.length
-              return regularPinned.map((project, idx) => {
+              let flatIdx = 0
+              return pinnedProjects.map((project, idx) => {
                 const myStartIdx = flatIdx
                 flatIdx += 1
                 return (
