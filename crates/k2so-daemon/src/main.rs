@@ -48,7 +48,7 @@ mod events;
 mod fs_routes;
 mod git_routes;
 mod heartbeat_launch;
-mod heartbeat_launchd_routes;
+mod heartbeat_routes;
 mod inbox_routes;
 mod llm_host;
 mod llm_routes;
@@ -1612,7 +1612,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             let body_bytes = read_post_body(&mut stream, &mut buf).await;
             // launchctl bootstrap can stall briefly under load; F5.
             let r = tokio::task::spawn_blocking(move || {
-                heartbeat_launchd_routes::handle_install_launchd(&body_bytes)
+                heartbeat_routes::handle_install_launchd(&body_bytes)
             })
             .await
             .unwrap_or_else(|e| crate::cli_response::CliResponse {
@@ -1648,7 +1648,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             }
             let body_bytes = read_post_body(&mut stream, &mut buf).await;
             let r = tokio::task::spawn_blocking(move || {
-                heartbeat_launchd_routes::handle_uninstall_launchd(&body_bytes)
+                heartbeat_routes::handle_uninstall_launchd(&body_bytes)
             })
             .await
             .unwrap_or_else(|e| crate::cli_response::CliResponse {
@@ -1684,7 +1684,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             }
             let body_bytes = read_post_body(&mut stream, &mut buf).await;
             let r = tokio::task::spawn_blocking(move || {
-                heartbeat_launchd_routes::handle_apply_wake_scheduler(&body_bytes)
+                heartbeat_routes::handle_apply_wake_scheduler(&body_bytes)
             })
             .await
             .unwrap_or_else(|e| crate::cli_response::CliResponse {
@@ -2015,298 +2015,11 @@ fn parse_params(
     k2so_core::agent_hooks::parse_query_params(&path_and_query)
 }
 
-/// Dispatch an authenticated `/cli/heartbeat/*` request to the matching
-/// core function. Returns the JSON response body on success or an error
-/// message the caller turns into a 400.
-///
-/// Mirrors the dispatch shape in src-tauri's agent_hooks server so the
-/// CLI sees identical responses regardless of which process is
-/// listening. Unrecognized sub-paths return 404 (caller picks the
-/// status code from the string).
-fn handle_cli_heartbeat(
-    path: &str,
-    project_path: &str,
-    params: &std::collections::HashMap<String, String>,
-) -> Result<String, String> {
-    use k2so_core::heartbeats as hb;
-
-    match path {
-        "/cli/heartbeat/add" => {
-            let name = params.get("name").cloned().unwrap_or_default();
-            let frequency = params.get("frequency").cloned().unwrap_or_default();
-            let spec_json = params
-                .get("spec")
-                .cloned()
-                .unwrap_or_else(|| "{}".to_string());
-            if name.is_empty() || frequency.is_empty() {
-                return Err("Missing 'name' or 'frequency' parameter".to_string());
-            }
-            hb::k2so_heartbeat_add(project_path.to_string(), name, frequency, spec_json)
-                .map(|v| v.to_string())
-        }
-        "/cli/heartbeat/list" => hb::k2so_heartbeat_list(project_path.to_string())
-            .map(|rows| serde_json::to_string(&rows).unwrap_or_default()),
-        "/cli/heartbeat/list-archived" => {
-            hb::k2so_heartbeat_list_archived(project_path.to_string())
-                .map(|rows| serde_json::to_string(&rows).unwrap_or_default())
-        }
-        "/cli/heartbeat/archive" => {
-            let name = params.get("name").cloned().unwrap_or_default();
-            if name.is_empty() {
-                return Err("Missing 'name' parameter".to_string());
-            }
-            hb::k2so_heartbeat_archive(project_path.to_string(), name)
-                .map(|_| r#"{"success":true}"#.to_string())
-        }
-        "/cli/heartbeat/unarchive" => {
-            let name = params.get("name").cloned().unwrap_or_default();
-            if name.is_empty() {
-                return Err("Missing 'name' parameter".to_string());
-            }
-            hb::k2so_heartbeat_unarchive(project_path.to_string(), name)
-                .map(|_| r#"{"success":true}"#.to_string())
-        }
-        "/cli/heartbeat/fire" | "/cli/heartbeat/launch" => {
-            // Manual single-heartbeat launch — does NOT consult schedule
-            // window. Routes through the smart-launch decision tree
-            // (fresh-fire / inject-into-live / resume-and-fire) so the
-            // CLI, the Tauri Launch button, and the cron tick all share
-            // one canonical path. `fire` kept as an alias since the
-            // existing CLI verb predates `launch`.
-            let name = params.get("name").cloned().unwrap_or_default();
-            Ok(crate::heartbeat_launch::smart_launch(project_path, &name).to_string())
-        }
-        "/cli/heartbeat/remove" => {
-            let name = params.get("name").cloned().unwrap_or_default();
-            if name.is_empty() {
-                return Err("Missing 'name' parameter".to_string());
-            }
-            hb::k2so_heartbeat_remove(project_path.to_string(), name)
-                .map(|_| r#"{"success":true}"#.to_string())
-        }
-        "/cli/heartbeat/enable" => {
-            let name = params.get("name").cloned().unwrap_or_default();
-            let enabled = params
-                .get("enabled")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(true);
-            if name.is_empty() {
-                return Err("Missing 'name' parameter".to_string());
-            }
-            hb::k2so_heartbeat_set_enabled(project_path.to_string(), name, enabled)
-                .map(|_| r#"{"success":true}"#.to_string())
-        }
-        "/cli/heartbeat/set-use-workspace-session" => {
-            // 0.37.8 — flip the per-heartbeat opt-in to deliver
-            // WAKEUP.md into the workspace's pinned chat session
-            // instead of the heartbeat's own saved session.
-            let name = params.get("name").cloned().unwrap_or_default();
-            let enabled = params
-                .get("enabled")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(false);
-            if name.is_empty() {
-                return Err("Missing 'name' parameter".to_string());
-            }
-            hb::k2so_heartbeat_set_use_workspace_session(
-                project_path.to_string(),
-                name,
-                enabled,
-            )
-            .map(|_| r#"{"success":true}"#.to_string())
-        }
-        "/cli/heartbeat/edit" => {
-            let name = params.get("name").cloned().unwrap_or_default();
-            let frequency = params.get("frequency").cloned().unwrap_or_default();
-            let spec_json = params.get("spec").cloned().unwrap_or_default();
-            if name.is_empty() || frequency.is_empty() {
-                return Err("Missing 'name' or 'frequency' parameter".to_string());
-            }
-            hb::k2so_heartbeat_edit(project_path.to_string(), name, frequency, spec_json)
-                .map(|_| r#"{"success":true}"#.to_string())
-        }
-        "/cli/heartbeat/rename" => {
-            let old_name = params.get("from").cloned().unwrap_or_default();
-            let new_name = params.get("to").cloned().unwrap_or_default();
-            if old_name.is_empty() || new_name.is_empty() {
-                return Err("Missing 'from' or 'to' parameter".to_string());
-            }
-            hb::k2so_heartbeat_rename(project_path.to_string(), old_name, new_name)
-                .map(|_| r#"{"success":true}"#.to_string())
-        }
-        "/cli/heartbeat/status" => {
-            // Last N fires for a specific schedule name.
-            let name = params.get("name").cloned().unwrap_or_default();
-            let limit = params
-                .get("limit")
-                .and_then(|s| s.parse::<i64>().ok())
-                .unwrap_or(10)
-                .clamp(1, 200);
-            if name.is_empty() {
-                return Err("Missing 'name' parameter".to_string());
-            }
-            let db = k2so_core::db::shared();
-            let conn = db.lock();
-            let project_id = k2so_core::workspace::agent_identity::resolve_project_id(&conn, project_path)
-                .ok_or_else(|| format!("Project not found: {project_path}"))?;
-            k2so_core::db::schema::HeartbeatFire::list_by_schedule_name(
-                &conn,
-                &project_id,
-                &name,
-                limit,
-            )
-            .map(|rows| serde_json::to_string(&rows).unwrap_or_default())
-            .map_err(|e| e.to_string())
-        }
-        "/cli/heartbeat/fires-list" => {
-            // Recent fires for the whole project. Powers the Settings
-            // History panel. Migrated alongside the rest of the
-            // heartbeat CRUD so the daemon serves the same surface
-            // src-tauri did.
-            let limit = params
-                .get("limit")
-                .and_then(|s| s.parse::<i64>().ok());
-            hb::k2so_heartbeat_fires_list(project_path.to_string(), limit)
-                .map(|rows| serde_json::to_string(&rows).unwrap_or_default())
-        }
-        "/cli/heartbeat/active-session" => {
-            // 0036 — heartbeat-active-session lookup. Reads the row's
-            // `active_terminal_id` and verifies via session_lookup
-            // (covers both legacy session_map and v2_session_map).
-            // Returns the agent_name as well so the renderer can pass
-            // it to TerminalPane's `attachAgentName` override and
-            // /cli/sessions/v2/spawn returns the existing session
-            // (reused=true) instead of spawning a duplicate. See
-            // `.k2so/prds/heartbeat-active-session-tracking.md`.
-            let name = params.get("name").cloned().unwrap_or_default();
-            if name.is_empty() {
-                return Err("Missing 'name' parameter".to_string());
-            }
-            let db = k2so_core::db::shared();
-            let conn = db.lock();
-            let project_id = k2so_core::workspace::agent_identity::resolve_project_id(&conn, project_path)
-                .ok_or_else(|| format!("Project not found: {project_path}"))?;
-            let hb_row =
-                k2so_core::db::schema::AgentHeartbeat::get_by_name(&conn, &project_id, &name)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("no heartbeat '{name}'"))?;
-            let mut active_id = hb_row.active_terminal_id.clone();
-            // Walk both legacy + v2 session maps so we accept any
-            // running PTY (heartbeat fresh-fires today land in v2;
-            // legacy chat tabs may still be in session_map).
-            let (mut active_agent_name, mut session_alive, mut is_v2) =
-                match active_id.as_deref() {
-                    Some(tid) => match k2so_core::session::SessionId::parse(tid) {
-                        Some(sid) => {
-                            let snap = crate::session_lookup::snapshot_all();
-                            let found = snap
-                                .iter()
-                                .find(|(_n, live)| live.session_id() == sid);
-                            match found {
-                                Some((nm, live)) => {
-                                    (Some(nm.clone()), true, live.is_v2())
-                                }
-                                None => (None, false, false),
-                            }
-                        }
-                        None => (None, false, false),
-                    },
-                    None => (None, false, false),
-                };
-            // Lazy cleanup so the next call reflects reality.
-            if active_id.is_some() && !session_alive {
-                let _ = k2so_core::db::schema::AgentHeartbeat::clear_active_terminal_id(
-                    &conn, &project_id, &name,
-                );
-                active_id = None;
-            }
-            // Fallback: stamp was null or pointed at a corpse. Scan
-            // argv for any live PTY running `--resume <last_session_id>`
-            // and surface it. Avoids the duplicate-claude-process
-            // problem where clicking a heartbeat row spawns yet
-            // another `claude --resume` against an already-running
-            // session. When found, stamp the row so subsequent calls
-            // go straight through the fast path above.
-            if !session_alive {
-                if let Some(saved) = hb_row
-                    .last_session_id
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                {
-                    let snap = crate::session_lookup::snapshot_all();
-                    // Prefer `tab-*` agent names (visible UI tabs) over
-                    // daemon-internal agent names. Same ranking
-                    // `find_live_for_resume` uses.
-                    let mut matches: Vec<&(String, crate::session_lookup::LiveSession)> =
-                        snap.iter()
-                            .filter(|(_n, live)| {
-                                let args = live.args();
-                                let mut i = 0;
-                                while i + 1 < args.len() {
-                                    if (args[i] == "--session-id"
-                                        || args[i] == "--resume")
-                                        && args[i + 1] == saved
-                                    {
-                                        return true;
-                                    }
-                                    i += 1;
-                                }
-                                false
-                            })
-                            .collect();
-                    matches.sort_by_key(|(n, _)| if n.starts_with("tab-") { 0 } else { 1 });
-                    if let Some((nm, live)) = matches.first() {
-                        let new_tid = live.session_id().to_string();
-                        let _ = k2so_core::db::schema::AgentHeartbeat::save_active_terminal_id(
-                            &conn, &project_id, &name, &new_tid,
-                        );
-                        active_id = Some(new_tid);
-                        active_agent_name = Some(nm.clone());
-                        session_alive = true;
-                        is_v2 = live.is_v2();
-                    }
-                }
-            }
-            Ok(serde_json::json!({
-                "name": hb_row.name,
-                "claudeSessionId": hb_row.last_session_id,
-                "activeTerminalId": if session_alive { active_id.clone() } else { None },
-                "activeAgentName": active_agent_name,
-                "sessionAlive": session_alive,
-                "isV2": is_v2,
-            })
-            .to_string())
-        }
-        _ => Err(format!("Unknown heartbeat route: {path}")),
-    }
-}
-
 /// Thin forwarder to `triage::handle_triage` (read-only summary).
 /// Kept as a named fn here because `cli::dispatch` (in main.rs's
 /// module tree) references `crate::handle_agents_triage`.
 fn handle_agents_triage(project_path: &str) -> String {
     crate::triage::handle_triage(project_path)
-}
-
-/// Dispatch `/cli/heartbeat-log` (the "all recent fires" diagnostic
-/// route). Same pattern as handle_cli_heartbeat but factored out
-/// because the URL sits at /cli/heartbeat-log, not under /cli/heartbeat/.
-fn handle_cli_heartbeat_log(
-    project_path: &str,
-    params: &std::collections::HashMap<String, String>,
-) -> Result<String, String> {
-    let limit = params
-        .get("limit")
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(50)
-        .clamp(1, 500);
-    let db = k2so_core::db::shared();
-    let conn = db.lock();
-    let project_id = k2so_core::workspace::agent_identity::resolve_project_id(&conn, project_path)
-        .ok_or_else(|| format!("Project not found: {project_path}"))?;
-    k2so_core::db::schema::HeartbeatFire::list_by_project(&conn, &project_id, limit)
-        .map(|rows| serde_json::to_string(&rows).unwrap_or_default())
-        .map_err(|e| e.to_string())
 }
 
 /// Parse `token=<value>` out of a URL-encoded query string and compare

@@ -1107,9 +1107,9 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             match need_project(params) {
                 Ok(pp) => {
                     let result = if p == "/cli/heartbeat-log" {
-                        crate::handle_cli_heartbeat_log(&pp, params)
+                        crate::heartbeat_routes::dispatch_log(&pp, params)
                     } else {
-                        crate::handle_cli_heartbeat(p, &pp, params)
+                        crate::heartbeat_routes::dispatch_get(p, &pp, params)
                     };
                     match result {
                         Ok(body) => CliResponse::ok_json(body),
@@ -1352,10 +1352,9 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             Err(r) => r,
         },
 
-        // Note: `/cli/heartbeat/active-session` lives in main.rs's
-        // `handle_cli_heartbeat` dispatcher (alongside the rest of the
-        // heartbeat CRUD), not here — main.rs intercepts /cli/heartbeat/*
-        // before this fallthrough dispatcher runs.
+        // Note: `/cli/heartbeat/active-session` lives in
+        // `heartbeat_routes::dispatch_get` (alongside the rest of the
+        // heartbeat CRUD), reached via the `/cli/heartbeat/*` arm above.
 
         // ── Phase 2 Unit 6: filesystem (GET) ──────────────────────
         //
