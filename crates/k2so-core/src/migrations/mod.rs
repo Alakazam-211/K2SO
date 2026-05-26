@@ -10,3 +10,8 @@
 //! in (e.g. `unification_0_37_0`).
 
 pub mod unification_0_37_0;
+// `legacy_agent_types_v1` — frontmatter rewrite for the pre-0.34 pod
+// vocabulary (pod-member → agent-template, pod-leader → manager).
+// Moved from `src-tauri/src/lib.rs` to daemon first-boot in 0.39.0
+// so K2 Connect / headless daemons pick it up without Tauri.
+pub mod legacy_agent_types_v1;

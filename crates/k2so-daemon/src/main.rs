@@ -269,6 +269,13 @@ async fn async_main() {
     // closed, and on remote daemons that have no Tauri at all.
     run_workspace_legacy_migrations_sweep();
 
+    // 0.39.0 K2 Connect prep: `legacy_agent_types_v1` migration moved
+    // from `src-tauri/src/lib.rs` (where it ran only on Tauri startup).
+    // Headless daemons / K2 Connect now pick up the pre-0.34 pod-
+    // vocabulary frontmatter rewrite without Tauri ever booting. Gated
+    // by the `code_migrations` table so it's a one-shot pass per DB.
+    run_legacy_agent_types_v1_migration();
+
     // Phase 2 Unit 4 — workspace_layouts one-shot migration moved
     // from `src-tauri/src/lib.rs::migrate_workspace_layouts_to_db`.
     // Reads `~/.k2so/settings.json#workspaceLayouts`, inserts each
@@ -2534,6 +2541,70 @@ fn run_workspace_unification_sweep() {
     // failure on one workspace doesn't stop the sweep. See
     // `canonical_session::boot_sweep_ensure_canonical_sessions`.
     crate::canonical_session::boot_sweep_ensure_canonical_sessions();
+}
+
+/// 0.39.0 K2 Connect prep — daemon-side runner for the
+/// `legacy_agent_types_v1` AGENT.md frontmatter rewrite.
+///
+/// Pre-0.34 (pod vocabulary era) workspaces store agent type strings
+/// as `type: pod-member` / `type: pod-leader` / `pod_leader: true`.
+/// This migration walks every registered project's `.k2so/agents/<n>/`
+/// dirs and rewrites those tokens to the post-0.34 vocabulary
+/// (`agent-template` / `manager`). Gated by the `code_migrations`
+/// table so it's a one-shot pass per local DB.
+///
+/// Previously lived in `src-tauri/src/lib.rs::setup` and ran only
+/// when the Tauri app launched. Moving it daemon-side closes the
+/// K2 Connect gap: a remote daemon serving headless workspaces now
+/// rewrites legacy frontmatter on its own first boot, so type-aware
+/// surfaces don't render stale labels until someone happens to
+/// launch K2SO.app.
+///
+/// Errors are swallowed (logged via `log_debug!`) — a single bad
+/// workspace must not stop the daemon from booting.
+fn run_legacy_agent_types_v1_migration() {
+    use k2so_core::migrations::legacy_agent_types_v1 as mig;
+
+    // DB gating: only run when the marker hasn't landed yet.
+    let needs_run = {
+        let db_arc = k2so_core::db::shared();
+        let conn = db_arc.lock();
+        !k2so_core::db::has_code_migration_applied(&conn, mig::MIGRATION_ID)
+    };
+    if !needs_run {
+        return;
+    }
+
+    // Snapshot project paths (drops the lock before we start touching
+    // the filesystem — the per-file rewrites can be slow if a
+    // workspace has hundreds of agent dirs).
+    let project_paths: Vec<String> = {
+        let db_arc = k2so_core::db::shared();
+        let conn = db_arc.lock();
+        k2so_core::db::schema::Project::list(&conn)
+            .map(|rows| rows.into_iter().map(|p| p.path).collect())
+            .unwrap_or_default()
+    };
+
+    let outcome = mig::run(project_paths.iter().map(std::path::PathBuf::from));
+
+    // Mark applied unconditionally — matches the pre-move Tauri
+    // behavior. A partial failure mid-sweep means the per-file write
+    // errors got logged at debug level and we move on. Bumping the
+    // migration ID is the escape hatch for "force a re-run."
+    {
+        let db_arc = k2so_core::db::shared();
+        let conn = db_arc.lock();
+        k2so_core::db::mark_code_migration_applied(
+            &conn,
+            mig::MIGRATION_ID,
+            Some(&format!("rewrote {} AGENT.md files", outcome.rewritten_count)),
+        );
+    }
+    log_debug!(
+        "[daemon/migrations] legacy_agent_types_v1: rewrote {} AGENT.md files; future boots will skip this scan",
+        outcome.rewritten_count
+    );
 }
 
 /// Phase 2 Unit 7b — daemon-side replacement for the per-workspace

@@ -320,74 +320,12 @@ pub fn run() {
                 let _ = std::fs::create_dir_all(templates.join("custom-agent"));
             }
 
-            // Migrate legacy agent types in AGENT.md files (pod-member → agent-template,
-            // pod-leader → manager). Gated via the `code_migrations` table so this
-            // only runs the first time post-upgrade; subsequent launches skip entirely
-            // instead of rescanning every AGENT.md in every project.
-            perf_timer!("startup_migrate_legacy_agent_types", {
-                const MIGRATION_ID: &str = "legacy_agent_types_v1";
-                let needs_run = {
-                    let db_arc = crate::db::shared();
-                    let db = db_arc.lock();
-                    !db::has_code_migration_applied(&db, MIGRATION_ID)
-                };
-                if needs_run {
-                    let paths: Vec<String> = {
-                        let db_arc = crate::db::shared();
-                        let db = db_arc.lock();
-                        // Phase 2 close-out: use the schema helper
-                        // instead of a raw `db.prepare()` so this file
-                        // stays SQL-free. `Project::list` returns rows
-                        // ordered by `tab_order`; we only need paths.
-                        k2so_core::db::schema::Project::list(&db)
-                            .map(|rows| rows.into_iter().map(|p| p.path).collect())
-                            .unwrap_or_default()
-                    };
-                    let mut rewritten_count = 0usize;
-                    for path in &paths {
-                        let agents_dir = std::path::PathBuf::from(path).join(".k2so/agents");
-                        if !agents_dir.exists() { continue; }
-                        if let Ok(entries) = std::fs::read_dir(&agents_dir) {
-                            for entry in entries.flatten() {
-                                let agent_md = entry.path().join("AGENT.md");
-                                if !agent_md.exists() { continue; }
-                                if let Ok(content) = std::fs::read_to_string(&agent_md) {
-                                    let mut updated = content.clone();
-                                    let mut changed = false;
-                                    if updated.contains("type: pod-member") {
-                                        updated = updated.replace("type: pod-member", "type: agent-template");
-                                        changed = true;
-                                    }
-                                    if updated.contains("type: pod-leader") {
-                                        updated = updated.replace("type: pod-leader", "type: manager");
-                                        changed = true;
-                                    }
-                                    if updated.contains("pod_leader: true") {
-                                        updated = updated.replace("pod_leader: true", "manager: true");
-                                        changed = true;
-                                    }
-                                    if changed {
-                                        let _ = std::fs::write(&agent_md, &updated);
-                                        rewritten_count += 1;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // Record completion — idempotent via INSERT OR IGNORE.
-                    let db_arc = crate::db::shared();
-                    let db = db_arc.lock();
-                    db::mark_code_migration_applied(
-                        &db,
-                        MIGRATION_ID,
-                        Some(&format!("rewrote {} AGENT.md files", rewritten_count)),
-                    );
-                    log_debug!(
-                        "[k2so] legacy_agent_types_v1: rewrote {} AGENT.md files; future launches will skip this scan",
-                        rewritten_count
-                    );
-                }
-            });
+            // 0.39.0 K2 Connect prep: the `legacy_agent_types_v1`
+            // AGENT.md frontmatter rewrite (pod-member → agent-template,
+            // pod-leader → manager) moved to the daemon's first-boot
+            // pass (`run_legacy_agent_types_v1_migration` in
+            // `crates/k2so-daemon/src/main.rs`). Headless / remote
+            // daemons now pick it up without Tauri being present.
 
             // Install the k2so-daemon launchd agent if it isn't already
             // installed AND the daemon binary is bundled next to us.
