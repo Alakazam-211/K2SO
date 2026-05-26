@@ -214,13 +214,10 @@ pub fn k2so_workspace_set_agent_display_name(
     Ok(())
 }
 
-pub fn k2so_agents_delete_inner(
-    project_path: &str,
-    name: &str,
-    force: bool,
-) -> Result<(), String> {
-    k2so_core::workspace::agent::delete_inner(project_path, name, force)
-}
+// `k2so_agents_delete_inner` shim removed in 0.39.0 — zero callers
+// across src-tauri/ and the JS frontend. The implementation in
+// `k2so_core::workspace::agent::delete_inner` stays; callers that
+// need it (currently only k2so-core itself) reach it directly.
 
 #[tauri::command]
 pub fn k2so_agents_update_field(
@@ -450,13 +447,9 @@ pub fn k2so_heartbeat_edit(
 // struct itself lives in k2so-core.
 pub use k2so_core::heartbeats::HeartbeatFireCandidate;
 
-pub fn k2so_agents_heartbeat_tick(project_path: &str) -> Vec<HeartbeatFireCandidate> {
-    k2so_core::heartbeats::k2so_agents_heartbeat_tick(project_path)
-}
-
-pub fn stamp_heartbeat_fired(project_path: &str, heartbeat_name: &str) {
-    k2so_core::heartbeats::stamp_heartbeat_fired(project_path, heartbeat_name)
-}
+// `k2so_agents_heartbeat_tick` + `stamp_heartbeat_fired` shims removed
+// in 0.39.0 — both had zero callers in src-tauri/ + frontend. The
+// daemon's heartbeat loop calls `k2so_core::heartbeats::*` directly.
 
 #[tauri::command]
 pub fn k2so_heartbeat_rename(
@@ -475,88 +468,21 @@ pub fn k2so_heartbeat_fires_list(
     k2so_core::heartbeats::k2so_heartbeat_fires_list(project_path, limit)
 }
 
-/// Archive orphan top-tier agents — agents whose type is `custom`,
-/// `manager`, or `k2so` but that aren't the current primary for this
-/// workspace. Moves them to `.k2so/agents/.archive/<name>-<timestamp>/`
-/// and removes their DB rows (`agent_sessions`, and any stray
-/// `agent_heartbeats` pointing at the orphan's folder). Templates are
-/// ALWAYS preserved — the Workspace Manager delegates to them on-demand.
-///
-/// Idempotent: no-op when there are no orphans. Called at startup
-/// (after heartbeat repair) and from projects_update before an
-/// agent_mode change takes effect.
-pub fn archive_orphan_top_tier_agents(project_path: &str) -> Vec<String> {
-    k2so_core::workspace::migrations::archive_orphan_top_tier_agents(project_path)
-}
-
-/// Detect and repair heartbeats whose `wakeup_path` points at the wrong
-/// agent — typically caused by the pre-0.32.1 migration picking an
-/// orphan agent directory from a prior agent-mode swap. Called on
-/// startup after `promote_legacy_heartbeat`. Idempotent: no-op when
-/// all rows already point at the correct agent.
-pub fn repair_mismigrated_heartbeats(project_path: &str) {
-    k2so_core::workspace::migrations::repair_mismigrated_heartbeats(project_path)
-}
-
-/// One-time promotion of the legacy `projects.heartbeat_schedule` single-slot
-/// config into the multi-heartbeat `agent_heartbeats` table. Safe to call
-/// repeatedly; no-ops when the project already has any agent_heartbeats
-/// row (migration is idempotent). Moves the legacy `wakeup.md` to
-/// `heartbeats/default/wakeup.md` so everything lives under a consistent
-/// hierarchy post-migration.
-pub fn promote_legacy_heartbeat(project_path: &str) {
-    k2so_core::workspace::migrations::promote_legacy_heartbeat(project_path)
-}
-
-/// Scaffold the wakeup files for a single workspace — one for each
-/// existing agent that supports wake-up. Safe to call repeatedly;
-/// never overwrites an existing file. Used by the app-launch migration
-/// pass. Workspace-level `.k2so/wakeup.md` is no longer scaffolded
-/// here — `migrate_or_scaffold_lead_heartbeat` handles the workspace
-/// manager case via the multi-heartbeat system.
-pub fn ensure_workspace_wakeups(project_path: &str) {
-    k2so_core::workspace::migrations::ensure_workspace_wakeups(project_path)
-}
-
-/// For Workspace Manager projects, make sure the workspace's primary
-/// agent has at least one heartbeat row. Two paths:
-///
-/// 1. **Migrate existing `.k2so/wakeup.md`** (users who configured the
-///    retired Workspace Wake-up). Copy its content into the workspace
-///    primary's `heartbeats/default/wakeup.md`, insert a matching
-///    `agent_heartbeats` row (hourly default), rename the old file to
-///    `.k2so/wakeup.md.migrated` so nothing else picks it up.
-///
-/// 2. **Scaffold a lean default** for fresh manager workspaces. The
-///    SKILL.md layers (Standing Orders / Delegation + Review / etc.)
-///    already carry the manager's playbook, so the per-row wakeup.md
-///    is just the "wake trigger" — one-sentence action prompt.
-///
-/// Rename lowercase `agent.md` / `wakeup.md` filenames to UPPERCASE in all
-/// known locations within a workspace. Idempotent — skips files that are
-/// already uppercase.
-///
-/// Case-insensitive filesystems (macOS HFS+, default APFS) refuse a direct
-/// `fs::rename("agent.md", "AGENT.md")` — it's the same filename to the FS.
-/// We two-step through a temporary name so the final result is a real case
-/// change recorded in the directory entry.
-///
-/// Scope:
-///   `.k2so/agents/<agent>/agent.md` → `.../AGENT.md`
-///   `.k2so/agents/<agent>/wakeup.md` → `.../WAKEUP.md` (agent-root legacy)
-///   `.k2so/agents/<agent>/heartbeats/<sched>/wakeup.md` → `.../WAKEUP.md`
-///
-/// `.k2so/PROJECT.md` is already UPPERCASE in the shipping scaffold and
-/// doesn't need migration.
-pub fn migrate_filenames_to_uppercase(project_path: &str) {
-    k2so_core::workspace::migrations::migrate_filenames_to_uppercase(project_path)
-}
-
-/// Idempotent: bails immediately if the workspace's primary already
-/// has any heartbeat row, or if the project isn't in manager mode.
-pub fn migrate_or_scaffold_lead_heartbeat(project_path: &str) {
-    k2so_core::workspace::migrations::migrate_or_scaffold_lead_heartbeat(project_path)
-}
+// Migration-helper shims removed in 0.39.0 (zero callers across
+// src-tauri/ + frontend; the daemon's boot sweep at
+// `run_workspace_legacy_migrations_sweep` calls
+// `k2so_core::workspace::migrations::*` directly):
+//
+//   - archive_orphan_top_tier_agents
+//   - repair_mismigrated_heartbeats
+//   - promote_legacy_heartbeat
+//   - ensure_workspace_wakeups
+//   - migrate_filenames_to_uppercase
+//   - migrate_or_scaffold_lead_heartbeat
+//
+// The underlying implementations live in
+// `crates/k2so-core/src/workspace/migrations.rs` and are invoked by
+// the daemon on every boot.
 
 // ── Frontmatter parsing ────────────────────────────────────────────────
 
