@@ -47,6 +47,14 @@ AGENTS.md
 .k2so/.unification-*-done
 .k2so/agents/.archive/
 
+# 0.39.0 — work→inbox + skills consolidation migrations. The inbox/
+# directory holds runtime work items the daemon manages (replacing the
+# old .k2so/work/ tree); the *-v1-done sentinels mark migrations the
+# daemon has applied to this workspace.
+.k2so/inbox/
+.k2so/.work-to-inbox-migration-v1-done
+.k2so/.skills-consolidation-v1-done
+
 # Stub workspace dirs auto-created by some bridge experiments;
 # contain AGENT.md / CLAUDE.md / etc which are themselves gitignored.
 _broadcast/
