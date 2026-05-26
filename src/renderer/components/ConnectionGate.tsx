@@ -1,89 +1,180 @@
 /**
- * ConnectionGate — wraps the React app and gates BOTH render AND module
- * import on daemon reachability.
+ * ConnectionGate — gates BOTH render AND module import of the app on the
+ * daemon being (a) the build paired with THIS app and (b) finished with
+ * its first-boot migrations.
  *
- * Why this exists (0.39.2 → fixed in 0.39.3):
+ * ## Why this exists
  *
- * 0.39.2 shipped a gate that only delayed the *render* of <App />.
- * That was insufficient: <App /> imports a long list of Zustand
- * stores (projects, tabs, settings, focus-groups, timer, assistant,
- * panels, …) and several of those stores fire eager daemon fetches
- * at import time (not at component mount time). When index.tsx
- * statically imported <App /> at startup, those stores burned their
- * initial fetches against a down daemon, ended up in stuck/failed
- * state, and stayed broken even after the gate dismissed — App
- * mounted against empty stores and rendered as a black window.
+ * 0.39.2/0.39.3 deferred the import of <App /> until the daemon answered
+ * /ping, so its eager store fetches wouldn't fire against a down daemon.
+ * But /ping only proves *something* is listening — and during a
+ * 0.38.x → 0.39.x auto-update the OUTGOING old daemon was still bound to
+ * the stable port answering /ping while the new daemon was being
+ * kickstarted and grinding through its (heavy, one-time) first-boot
+ * migration. The gate took that false-positive ping, mounted the app,
+ * and its fetches hit the gap where the old daemon had been killed and
+ * the new one wasn't serving yet → blank window ("appears to have
+ * crashed").
  *
- * 0.39.3 fixes this by deferring the *import* of <App /> until the
- * daemon is verified healthy. The gate uses dynamic `import('./App')`
- * so the entire App module tree (and its transitively-imported
- * stores) doesn't enter the JS context until /ping succeeds. Stores
- * therefore fire their initial fetches against a known-healthy
- * daemon, no race, no stuck state.
+ * ## The fix (0.39.5)
  *
- * Same primitive is reusable for K2 Connect: a remote daemon
- * (Machine A's daemon, accessed from Machine B over a tunnel) may
- * be transiently unreachable. Gate behaviour is identical — show
- * "Connecting…", retry, mount app once reachable.
+ * The daemon now binds its port BEFORE migrating and exposes a versioned
+ * readiness handshake at GET /boot-status:
  *
- * Happy path: /ping succeeds on first try, overlay flashes for
- * <100ms (or skips entirely), user sees the app mount normally.
+ *     { version, protocol, phase, detail }
  *
- * Auto-update / cold-start race path: /ping fails for 1-3s, gate
- * shows "Connecting…", mounts the app once /ping responds — App
- * module imports happen NOW, stores fire fetches against the
- * healthy daemon, render succeeds cleanly.
+ * This gate polls /boot-status and only mounts when an **acceptance
+ * policy** says so. The local/auto-update policy ([`localPairedPolicy`])
+ * requires `version === this app's bundled version` AND `phase ===
+ * 'ready'` — so it can never bind to the outgoing old daemon (which
+ * either reports an older version or, pre-0.39.5, 404s /boot-status
+ * entirely), and it can render the migration progress (`detail`) to the
+ * user instead of a blank window.
  *
- * Permanent-failure path: after ~10s of failed polls, a Reload
- * button appears so the user can recover instead of staring at an
- * infinite spinner.
+ * ## Future-proofing (K2 Connect)
+ *
+ * The gate core is version-agnostic: the version/protocol decision lives
+ * entirely in the injected policy. K2 Connect, which legitimately talks
+ * to a remote daemon of a *different* marketing version, will supply a
+ * different policy that range-checks `protocol` instead of requiring
+ * exact `version` equality — without touching this component. Keep that
+ * logic in the policy, never inline. See
+ * [[project_daemon_handshake_contract]].
  */
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { getDaemonWs, invalidateDaemonWs } from '@/kessel/daemon-ws'
 
-/** Hit the daemon's /ping endpoint with a short per-attempt timeout.
- *  Returns true if the daemon responded 2xx, false on any error. */
-async function pingDaemon(): Promise<boolean> {
+/** Shape of the daemon's GET /boot-status response. `detail` is free-text
+ *  for the UI only — never branch on it. */
+interface DaemonBootStatus {
+  version: string
+  protocol: number
+  phase: string // 'starting' | 'migrating' | 'ready' | 'error' | future
+  detail: string
+}
+
+/** The gate's verdict for a single poll. */
+type GateDecision =
+  | { kind: 'accept' }
+  | { kind: 'migrating'; detail: string }
+  | { kind: 'wait'; reason: string } // unreachable / wrong version / old daemon
+
+/** Decides whether to mount the app against a daemon, given its
+ *  /boot-status (or null when unreachable / 404 / unparseable). */
+interface AcceptancePolicy {
+  decide(status: DaemonBootStatus | null): GateDecision
+}
+
+/**
+ * Local auto-update / startup policy: only accept the daemon BUILT AND
+ * SHIPPED with this app. `expectedVersion` is the app's bundled version
+ * (from Tauri's getVersion()); the release script keeps it in lockstep
+ * with the daemon's CARGO_PKG_VERSION, so exact equality is the correct
+ * pairing check.
+ *
+ * If `expectedVersion` is null (non-Tauri/dev context where getVersion()
+ * is unavailable) we fall back to readiness-only — still safe, because a
+ * pre-0.39.5 daemon has no /boot-status and surfaces as `null` → wait.
+ *
+ * NOTE: this exact-equality is deliberately confined here. K2 Connect
+ * must NOT reuse it — a remote daemon can be a different version. See the
+ * file header.
+ */
+function localPairedPolicy(expectedVersion: string | null): AcceptancePolicy {
+  return {
+    decide(status: DaemonBootStatus | null): GateDecision {
+      if (!status) {
+        // Unreachable, or a pre-0.39.5 daemon that 404s /boot-status —
+        // i.e. the outgoing old daemon during an update. Keep waiting.
+        return { kind: 'wait', reason: 'unreachable-or-legacy-daemon' }
+      }
+      if (expectedVersion && status.version !== expectedVersion) {
+        // A daemon answered, but it's not the one paired with this app
+        // (e.g. an older daemon still up mid-update). Never mount against
+        // it — wait for the kickstarted, correctly-versioned daemon.
+        return { kind: 'wait', reason: `version ${status.version} != app ${expectedVersion}` }
+      }
+      if (status.phase !== 'ready') {
+        // Correct daemon, still finishing first-boot migrations. Show the
+        // user what's happening instead of a blank screen.
+        return { kind: 'migrating', detail: status.detail }
+      }
+      return { kind: 'accept' }
+    },
+  }
+}
+
+/** Resolve this app's bundled version via Tauri. Returns null outside a
+ *  Tauri context (e.g. a plain browser dev server) so the gate degrades
+ *  to readiness-only rather than hanging. */
+async function getAppVersion(): Promise<string | null> {
+  try {
+    const { getVersion } = await import('@tauri-apps/api/app')
+    return await getVersion()
+  } catch {
+    return null
+  }
+}
+
+/** Hit the daemon's /boot-status with a short per-attempt timeout.
+ *  Returns the parsed status, or null on any error / non-2xx (covers a
+ *  pre-0.39.5 daemon's 404, network error, timeout, missing port file). */
+async function fetchBootStatus(): Promise<DaemonBootStatus | null> {
   try {
     const { port } = await getDaemonWs()
-    const resp = await fetch(`http://127.0.0.1:${port}/ping`, {
+    const resp = await fetch(`http://127.0.0.1:${port}/boot-status`, {
       signal: AbortSignal.timeout(2000),
     })
-    return resp.ok
+    if (!resp.ok) {
+      // 404 ⇒ pre-0.39.5 daemon (no /boot-status route). Re-read the port
+      // file next poll in case a kickstart moved it.
+      invalidateDaemonWs()
+      return null
+    }
+    return (await resp.json()) as DaemonBootStatus
   } catch {
-    // Network error, timeout, port file missing, etc. — daemon
-    // isn't ready yet. Invalidate cached port so the next poll
-    // re-reads ~/.k2so/daemon.port (covers the case where kickstart
-    // assigned a new port).
+    // Network error, timeout, port file missing, etc. — daemon isn't
+    // reachable yet. Invalidate cached port so the next poll re-reads
+    // ~/.k2so/daemon.port (covers a kickstart-assigned port change).
     invalidateDaemonWs()
-    return false
+    return null
   }
 }
 
 type AppComponent = React.ComponentType
 
 export function ConnectionGate(): React.ReactElement {
-  const [connected, setConnected] = useState(false)
+  const [decision, setDecision] = useState<GateDecision>({ kind: 'wait', reason: 'starting' })
   const [attempts, setAttempts] = useState(0)
   const [AppModule, setAppModule] = useState<AppComponent | null>(null)
+  const policyRef = useRef<AcceptancePolicy | null>(null)
 
-  // Phase 1: poll daemon until reachable.
+  // Phase 1: resolve the app version once, then poll /boot-status until
+  // the acceptance policy says to mount.
   useEffect(() => {
     let cancelled = false
     let timeoutId: ReturnType<typeof setTimeout> | null = null
 
-    const tryConnect = async (): Promise<void> => {
-      const ok = await pingDaemon()
-      if (cancelled) return
-      if (ok) {
-        setConnected(true)
-        return
+    const ensurePolicy = async (): Promise<AcceptancePolicy> => {
+      if (!policyRef.current) {
+        const version = await getAppVersion()
+        policyRef.current = localPairedPolicy(version)
       }
-      setAttempts((a) => a + 1)
-      timeoutId = setTimeout(() => { void tryConnect() }, 500)
+      return policyRef.current
     }
 
-    void tryConnect()
+    const tick = async (): Promise<void> => {
+      const policy = await ensurePolicy()
+      const status = await fetchBootStatus()
+      if (cancelled) return
+      const next = policy.decide(status)
+      setDecision(next)
+      if (next.kind === 'accept') return // stop polling; Phase 2 takes over
+      setAttempts((a) => a + 1)
+      timeoutId = setTimeout(() => { void tick() }, 500)
+    }
+
+    void tick()
 
     return () => {
       cancelled = true
@@ -91,48 +182,48 @@ export function ConnectionGate(): React.ReactElement {
     }
   }, [])
 
-  // Phase 2: once daemon is reachable, dynamically import App.
-  // The import side-effects (store creation, eager fetches) only
-  // run NOW, after the daemon is confirmed healthy.
+  // Phase 2: once accepted, dynamically import App. Its import
+  // side-effects (store creation, eager fetches) run NOW for the first
+  // time, against a daemon confirmed to be the right version AND ready.
   useEffect(() => {
-    if (!connected) return
+    if (decision.kind !== 'accept') return
     let cancelled = false
     void import('../App').then((mod) => {
       if (cancelled) return
-      // Wrap in a function returning the component so React's
-      // useState setter doesn't call it as a setter callback.
       setAppModule(() => mod.default)
     }).catch((err: unknown) => {
-      // Dynamic import failure (network error, bundle missing).
-      // Keep showing the overlay; user can hit Reload.
       console.error('[ConnectionGate] dynamic import of App failed:', err)
     })
     return () => { cancelled = true }
-  }, [connected])
+  }, [decision.kind])
 
-  // Show overlay while either (a) daemon not reachable, or
-  // (b) App module hasn't finished loading yet.
-  if (!connected || AppModule === null) {
-    return <ConnectingOverlay attempts={attempts} />
+  if (decision.kind !== 'accept' || AppModule === null) {
+    return <ConnectingOverlay decision={decision} attempts={attempts} />
   }
 
-  // App module is loaded — mount it. Store fetches will fire from
-  // module-init effects (which run NOW for the first time) against
-  // the healthy daemon.
   const App = AppModule
   return <App />
 }
 
 interface ConnectingOverlayProps {
+  decision: GateDecision
   attempts: number
 }
 
-function ConnectingOverlay({ attempts }: ConnectingOverlayProps): React.ReactElement {
-  // After ~10s of failed polls (20 attempts at 500ms), surface a
-  // Reload button so the user can recover from a stuck state instead
-  // of staring at an infinite spinner. Most auto-update restarts
-  // complete in 1-3s; if we're at 10s, something's genuinely wrong.
-  const showReloadButton = attempts >= 20
+function ConnectingOverlay({ decision, attempts }: ConnectingOverlayProps): React.ReactElement {
+  const migrating = decision.kind === 'migrating'
+
+  // Heading + sub-line. While the (correct) daemon is migrating we tell
+  // the user updates are being applied; otherwise it's a plain connect.
+  const heading = migrating ? 'Setting up K2SO…' : 'Connecting…'
+  const subline = migrating
+    ? (decision.detail && decision.detail.length > 0 ? decision.detail : 'Applying updates…')
+    : null
+
+  // Reload escape hatch. A big upgrade's migration sweep can legitimately
+  // take a while, so don't nag during 'migrating' (only after ~60s). For
+  // a plain 'wait' (unreachable / wrong version) surface it after ~10s.
+  const showReloadButton = migrating ? attempts >= 120 : attempts >= 20
 
   return (
     <div
@@ -143,7 +234,7 @@ function ConnectingOverlay({ attempts }: ConnectingOverlayProps): React.ReactEle
         alignItems: 'center',
         justifyContent: 'center',
         flexDirection: 'column',
-        gap: '1.5rem',
+        gap: '1.25rem',
         background: 'var(--color-bg, #0a0a0a)',
         color: 'var(--color-text-primary, #e0e0e0)',
         fontFamily: 'system-ui, -apple-system, sans-serif',
@@ -152,15 +243,18 @@ function ConnectingOverlay({ attempts }: ConnectingOverlayProps): React.ReactEle
         cursor: 'default',
       }}
     >
-      <div style={{ fontSize: '1rem', fontWeight: 500 }}>
-        Connecting…
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem' }}>
+        <div style={{ fontSize: '1rem', fontWeight: 500 }}>{heading}</div>
+        {subline !== null && (
+          <div style={{ fontSize: '0.85rem', opacity: 0.7 }}>{subline}</div>
+        )}
       </div>
       {showReloadButton && (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.75rem' }}>
           <div style={{ fontSize: '0.85rem', opacity: 0.75, maxWidth: '440px', textAlign: 'center', lineHeight: 1.5 }}>
-            Your K2SO daemon may still be loading.
-            <br />
-            If you're unsure, quit and relaunch the app, or try reloading with the button below.
+            {migrating
+              ? 'K2SO is still applying updates. This can take a minute on a large upgrade — you can keep waiting, or reload below.'
+              : "Your K2SO daemon may still be loading. If you're unsure, quit and relaunch the app, or try reloading with the button below."}
           </div>
           <button
             onClick={() => { window.location.reload() }}

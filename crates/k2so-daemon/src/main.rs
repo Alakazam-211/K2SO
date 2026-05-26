@@ -36,6 +36,7 @@
 
 mod agents_routes;
 mod awareness_ws;
+mod boot_status;
 mod canonical_session;
 mod chat_routes;
 mod claude_auth_host;
@@ -252,53 +253,26 @@ async fn async_main() {
         }
     }
 
-    // 0.37.0 workspace–agent unification migration. Per-workspace,
-    // sentinel-gated, idempotent. Runs synchronously before the
-    // listener accepts traffic so route handlers always see the
-    // unified layout. See `.k2so/prds/workspace-agent-unification.md`
-    // and `k2so_core::migrations::unification_0_37_0`.
-    run_workspace_unification_sweep();
-
-    // Phase 2 Unit 7b — boot-time per-workspace legacy migrations +
-    // SKILL.md refresh. Each helper is idempotent: archive_orphan
-    // returns immediately when there are no orphans, the heartbeat
-    // migrators no-op once rows exist, ensure_all_skills_up_to_date
-    // is checksum-gated. Pre-Phase-2 these ran from Tauri's setup
-    // hook in `src-tauri/src/lib.rs`; relocating to the daemon means
-    // they fire on `launchctl bootstrap` boots even when Tauri is
-    // closed, and on remote daemons that have no Tauri at all.
-    run_workspace_legacy_migrations_sweep();
-
-    // 0.39.0 K2 Connect prep: `legacy_agent_types_v1` migration moved
-    // from `src-tauri/src/lib.rs` (where it ran only on Tauri startup).
-    // Headless daemons / K2 Connect now pick up the pre-0.34 pod-
-    // vocabulary frontmatter rewrite without Tauri ever booting. Gated
-    // by the `code_migrations` table so it's a one-shot pass per DB.
-    run_legacy_agent_types_v1_migration();
-
-    // 0.39.0 sidebar polish — auto-pin every workspace that was in
-    // agent mode pre-0.39.0, so the retirement of the auto-promote-to-
-    // top behavior doesn't make users think their agents disappeared.
-    // Gated by `code_migrations` so it's a one-shot pass per DB.
-    run_auto_pin_existing_agents_migration();
-
-    // 0.39.1 correction — the 0.39.0 ship of the above migration had
-    // an over-broad filter that pinned manager/coordinator/pod
-    // workspaces too. This corrective migration unpins those for
-    // users who already ran the buggy version. Gated by its own
-    // `code_migrations` ID so it runs once per DB; no-op for fresh
-    // 0.39.1 installs (where the corrected filter pinned only
-    // agent + custom from the start).
-    run_correct_auto_pin_filter_migration();
-
-    // Phase 2 Unit 4 — workspace_layouts one-shot migration moved
-    // from `src-tauri/src/lib.rs::migrate_workspace_layouts_to_db`.
-    // Reads `~/.k2so/settings.json#workspaceLayouts`, inserts each
-    // pre-existing layout into the `workspace_layouts` table, then
-    // strips the key from settings.json. Idempotent on the second
-    // boot (the key is gone). Running daemon-side means a remote
-    // daemon (K2SO Connect) picks it up without Tauri being present.
-    k2so_core::db_ops::migrate_workspace_layouts_to_db();
+    // ── 0.39.5: bind the listener BEFORE the first-boot migrations ──
+    //
+    // Pre-0.39.5 the migration sweep ran HERE, before the port was
+    // bound. During a 0.38.x → 0.39.x auto-update that left the new
+    // daemon unreachable for the entire (multi-second, 64-workspace)
+    // migration window, while the OUTGOING old daemon was still bound
+    // to the stable port and still answered /ping with 200. The
+    // renderer's ConnectionGate took that false-positive "healthy"
+    // ping, mounted the app, and its store fetches landed in the gap
+    // where the old daemon had been killed and the new one was still
+    // migrating → blank window ("appears to have crashed").
+    //
+    // We now bind first, spawn the accept loop, and advertise
+    // phase=migrating via /boot-status so the renderer can SEE us
+    // booting and read our version. The migrations run just below, and
+    // the dispatcher 503s every real route until `boot_status::set_ready()`
+    // — so route handlers STILL only ever observe fully-migrated state.
+    // The pre-0.39.5 "handlers see migrated state" invariant is
+    // preserved; it's enforced by the readiness gate now instead of by
+    // ordering. See boot_status.rs + release-notes-0.39.5.md.
 
     // Phase 2.5 follow-up: prefer the port stored in `~/.k2so/daemon.port`
     // from the previous boot so the renderer's `daemon_ws_url` cache + the
@@ -382,6 +356,125 @@ async fn async_main() {
     let (event_tx, _) = broadcast::channel::<WireEvent>(EVENT_CHANNEL_CAP);
     let event_tx = Arc::new(event_tx);
     k2so_core::agent_hooks::set_sink(Box::new(DaemonBroadcastSink::new((*event_tx).clone())));
+
+    let state = DaemonState {
+        token: Arc::new(token.clone()),
+        started_at: Instant::now(),
+        port,
+        event_tx: event_tx.clone(),
+    };
+
+    // Graceful-shutdown channel. launchd sends SIGTERM on system shutdown
+    // or `launchctl unload`; Ctrl+C is the local-dev path. Both land on
+    // the same broadcast so in-flight handlers get a chance to flush.
+    // `main_shutdown_rx` is subscribed BEFORE the blocking migration
+    // sweep so a Ctrl+C during migration is buffered and observed when
+    // async_main awaits it below. The outer `shutdown_tx` stays owned by
+    // async_main for its whole lifetime so receivers never see `Closed`.
+    let (shutdown_tx, _shutdown_rx) = broadcast::channel::<()>(1);
+    let mut main_shutdown_rx = shutdown_tx.subscribe();
+    {
+        let shutdown_tx_for_signal = shutdown_tx.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                log_debug!("[daemon] Ctrl+C received, shutting down");
+                let _ = shutdown_tx_for_signal.send(());
+            }
+        });
+    }
+
+    // 0.39.5: spawn the accept loop NOW, while phase = migrating. The
+    // dispatcher serves /ping, /health and /boot-status (so the renderer
+    // can see us booting, read our version, and render migration
+    // progress) and returns 503 for every real route until set_ready()
+    // runs below. It's its own tokio task so the synchronous,
+    // multi-second migration sweep on this thread can't starve it — the
+    // runtime is multi-threaded.
+    boot_status::set_migrating("Starting up…");
+    {
+        let state = state.clone();
+        let shutdown_tx = shutdown_tx.clone();
+        tokio::spawn(async move {
+            let mut shutdown_rx = shutdown_tx.subscribe();
+            loop {
+                tokio::select! {
+                    res = listener.accept() => {
+                        match res {
+                            Ok((stream, _addr)) => {
+                                let st = state.clone();
+                                let mut shutdown = shutdown_tx.subscribe();
+                                tokio::spawn(async move {
+                                    tokio::select! {
+                                        _ = routes::dispatcher::dispatch(stream, st) => {}
+                                        _ = shutdown.recv() => {}
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                log_debug!("[daemon] accept error: {e}");
+                            }
+                        }
+                    }
+                    _ = shutdown_rx.recv() => {
+                        log_debug!("[daemon] accept loop exiting");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // ── First-boot migrations (now AFTER bind; gated by the 503 above) ──
+    // Route handlers never observe partial state: the dispatcher returns
+    // 503 for every non-liveness route until set_ready() at the end of boot.
+    boot_status::set_detail("Applying updates…");
+
+    // 0.37.0 workspace–agent unification migration. Per-workspace,
+    // sentinel-gated, idempotent. See
+    // `.k2so/prds/workspace-agent-unification.md` and
+    // `k2so_core::migrations::unification_0_37_0`.
+    run_workspace_unification_sweep();
+
+    // Phase 2 Unit 7b — boot-time per-workspace legacy migrations +
+    // SKILL.md refresh. Each helper is idempotent: archive_orphan
+    // returns immediately when there are no orphans, the heartbeat
+    // migrators no-op once rows exist, ensure_all_skills_up_to_date
+    // is checksum-gated. Pre-Phase-2 these ran from Tauri's setup
+    // hook in `src-tauri/src/lib.rs`; relocating to the daemon means
+    // they fire on `launchctl bootstrap` boots even when Tauri is
+    // closed, and on remote daemons that have no Tauri at all.
+    run_workspace_legacy_migrations_sweep();
+
+    // 0.39.0 K2 Connect prep: `legacy_agent_types_v1` migration moved
+    // from `src-tauri/src/lib.rs` (where it ran only on Tauri startup).
+    // Headless daemons / K2 Connect now pick up the pre-0.34 pod-
+    // vocabulary frontmatter rewrite without Tauri ever booting. Gated
+    // by the `code_migrations` table so it's a one-shot pass per DB.
+    run_legacy_agent_types_v1_migration();
+
+    // 0.39.0 sidebar polish — auto-pin every workspace that was in
+    // agent mode pre-0.39.0, so the retirement of the auto-promote-to-
+    // top behavior doesn't make users think their agents disappeared.
+    // Gated by `code_migrations` so it's a one-shot pass per DB.
+    run_auto_pin_existing_agents_migration();
+
+    // 0.39.1 correction — the 0.39.0 ship of the above migration had
+    // an over-broad filter that pinned manager/coordinator/pod
+    // workspaces too. This corrective migration unpins those for
+    // users who already ran the buggy version. Gated by its own
+    // `code_migrations` ID so it runs once per DB; no-op for fresh
+    // 0.39.1 installs (where the corrected filter pinned only
+    // agent + custom from the start).
+    run_correct_auto_pin_filter_migration();
+
+    // Phase 2 Unit 4 — workspace_layouts one-shot migration moved
+    // from `src-tauri/src/lib.rs::migrate_workspace_layouts_to_db`.
+    // Reads `~/.k2so/settings.json#workspaceLayouts`, inserts each
+    // pre-existing layout into the `workspace_layouts` table, then
+    // strips the key from settings.json. Idempotent on the second
+    // boot (the key is gone). Running daemon-side means a remote
+    // daemon (K2SO Connect) picks it up without Tauri being present.
+    k2so_core::db_ops::migrate_workspace_layouts_to_db();
 
     // 0.34.0 Phase 3.1 — register the daemon-side InjectProvider +
     // WakeProvider so awareness::egress can actually reach live
@@ -491,51 +584,18 @@ async fn async_main() {
         });
     }
 
-    let state = DaemonState {
-        token: Arc::new(token),
-        started_at: Instant::now(),
-        port,
-        event_tx,
-    };
+    // Everything a route handler depends on is now in place — open the
+    // gate. The dispatcher stops 503ing real routes, and the renderer's
+    // /boot-status poll flips to phase=ready, mounts the app against the
+    // correctly-paired daemon, and stops showing "Applying updates…".
+    boot_status::set_ready();
+    log_debug!("[daemon] boot complete — phase=ready");
 
-    // Graceful-shutdown channel. launchd sends SIGTERM on system shutdown
-    // or `launchctl unload`; Ctrl+C is the local-dev path. Both land on
-    // the same broadcast so in-flight handlers get a chance to flush.
-    let (shutdown_tx, _shutdown_rx) = broadcast::channel::<()>(1);
-    let shutdown_tx_for_signal = shutdown_tx.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            log_debug!("[daemon] Ctrl+C received, shutting down");
-            let _ = shutdown_tx_for_signal.send(());
-        }
-    });
-
-    let mut shutdown_rx = shutdown_tx.subscribe();
-    loop {
-        tokio::select! {
-            res = listener.accept() => {
-                match res {
-                    Ok((stream, _addr)) => {
-                        let st = state.clone();
-                        let mut shutdown = shutdown_tx.subscribe();
-                        tokio::spawn(async move {
-                            tokio::select! {
-                                _ = routes::dispatcher::dispatch(stream, st) => {}
-                                _ = shutdown.recv() => {}
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        log_debug!("[daemon] accept error: {e}");
-                    }
-                }
-            }
-            _ = shutdown_rx.recv() => {
-                log_debug!("[daemon] accept loop exiting");
-                break;
-            }
-        }
-    }
+    // Keep the process alive until shutdown; the accept loop runs as its
+    // own task (spawned above). A Ctrl+C during the migration sweep was
+    // buffered on `main_shutdown_rx`, so this returns promptly then too.
+    let _ = main_shutdown_rx.recv().await;
+    log_debug!("[daemon] async_main exiting");
 }
 
 /// Re-claim `~/.k2so/heartbeat.port` if something else has stomped it.

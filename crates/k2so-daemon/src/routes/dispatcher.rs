@@ -211,6 +211,28 @@ pub async fn dispatch(mut stream: TcpStream, state: crate::DaemonState) {
     let query = query.to_string();
     drop(req);
 
+    // 0.39.5 readiness gate. While the daemon is still completing
+    // first-boot migrations (phase != ready) it has bound its port and
+    // answers liveness + the /boot-status handshake — so the renderer's
+    // ConnectionGate can SEE us booting and read our version — but every
+    // real route returns 503 so no handler runs against half-migrated
+    // state. This preserves the pre-0.39.5 "handlers always see migrated
+    // state" invariant now that migrations run AFTER the listener binds.
+    // See `crate::boot_status`.
+    if !crate::boot_status::is_ready()
+        && !matches!(path.as_str(), "/ping" | "/health" | "/boot-status")
+    {
+        let _ = stream.read(&mut buf).await;
+        super::http::send_response(
+            &mut stream,
+            "503 Service Unavailable",
+            "application/json",
+            r#"{"state":"migrating","error":"daemon is completing first-boot migrations"}"#,
+        )
+        .await;
+        return;
+    }
+
     match path.as_str() {
         "/ping" => {
             let _ = stream.read(&mut buf).await;
@@ -230,6 +252,35 @@ pub async fn dispatch(mut stream: TcpStream, state: crate::DaemonState) {
                 r#"{"status":"ok"}"#,
             )
             .await;
+        }
+        "/boot-status" => {
+            let _ = stream.read(&mut buf).await;
+            // 0.39.5: unauthenticated daemon-identity + readiness
+            // handshake. The renderer's ConnectionGate polls this to
+            // decide whether to mount the app against THIS daemon.
+            //
+            // - `version`  — exact build string. The LocalPaired policy
+            //   (auto-update path) requires it to equal the app's bundled
+            //   version, so the renderer never binds to an OUTGOING old
+            //   daemon during an update.
+            // - `protocol` — daemon↔client API version K2 Connect
+            //   range-checks for remote daemons (decoupled from the
+            //   marketing version).
+            // - `phase`    — starting | migrating | ready (+ reserved
+            //   error). Clients treat anything but `ready` as not-ready.
+            // - `detail`   — free-text for the UI only; never parsed.
+            //
+            // Pre-0.39.5 daemons have no such route and return 404, so an
+            // outgoing old daemon fails the gate without special-casing.
+            // See `crate::boot_status` + `[[project_daemon_handshake_contract]]`.
+            let body = serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "protocol": crate::boot_status::PROTOCOL,
+                "phase": crate::boot_status::phase_str(),
+                "detail": crate::boot_status::detail(),
+            })
+            .to_string();
+            super::http::send_response(&mut stream, "200 OK", "application/json", &body).await;
         }
         "/status" => {
             let _ = stream.read(&mut buf).await;

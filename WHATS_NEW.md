@@ -3,6 +3,29 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.5 — No more blank window after an update
+
+Bug-fix release. If you ever updated K2SO and landed on a blank/black
+window that only a right-click → Reload could fix, this is the release
+that ends it — especially when updating from an older version that has
+a lot of one-time setup to do on first launch.
+
+**What was happening:** during an update, the app could briefly talk to
+the *old* daemon that was on its way out, mount against it, and then get
+stranded when the new daemon was still busy applying updates. No crash —
+just a window that never finished loading.
+
+**What's fixed:** the app now refuses to start against anything but the
+daemon that ships with this exact build, and the daemon reports its
+progress while it works. So instead of a blank window you'll see a
+brief **"Setting up K2SO — applying updates…"** while first-boot
+migrations run, then the app opens normally. On a big upgrade that
+setup can take a few seconds; you'll see it happening rather than
+staring at black.
+
+Nothing for you to do — just smoother updates from here on, no matter
+how old the version you're coming from.
+
 ## 0.39.4 — What's New popup: walk back to 0.39.0
 
 Tiny UX fix to the "What's new" popup itself. Before: if you landed
