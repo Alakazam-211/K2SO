@@ -944,17 +944,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         // here because this is one of the routes Mobile Companion
         // and K2SO Connect will hit over the ngrok tunnel.
         "/cli/companion/set-password" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1011,17 +1001,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             // Method gate (see feedback_post_only_route_guards memory + the
             // /cli/claude-auth/refresh-now comment): the top-level dispatch
             // lets a GET through on POST-allowlisted routes. Reject explicitly.
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1050,17 +1030,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             send_response(&mut stream, r.status, r.content_type, &r.body).await;
         }
         "/cli/llm/load-model" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1086,17 +1056,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             send_response(&mut stream, r.status, r.content_type, &r.body).await;
         }
         "/cli/llm/download-default" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1120,17 +1080,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         // Method gate: same rationale as /cli/companion/set-password
         // above. Don't let a GET disconnect a live session.
         "/cli/companion/disconnect-session" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1163,17 +1113,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         // refresh / uninstall the user's launchd scheduler. Caught
         // during smoke testing.
         "/cli/claude-auth/refresh-now" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1197,17 +1137,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         // launchd plist (macOS) or installs the crontab entry
         // (linux). Idempotent. POST-only (see /refresh-now comment).
         "/cli/claude-auth/install-scheduler" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1228,17 +1158,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         // Unloads + removes the plist (macOS) or strips the
         // crontab entry (linux). Idempotent. POST-only.
         "/cli/claude-auth/uninstall-scheduler" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1262,17 +1182,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         // the same process that owns the live companion runtime.
         // Method gate per feedback_post_only_route_guards memory.
         "/cli/settings/update" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1295,17 +1205,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         // so a browser refresh can't accidentally trigger it.
         // Method gate per feedback_post_only_route_guards memory.
         "/cli/settings/reset" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1337,17 +1237,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         // the explicit `if !is_post` guard, a curl GET could
         // silently spawn / kill a PTY.
         "/cli/terminal/create" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1375,17 +1265,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             send_response(&mut stream, r.status, r.content_type, &r.body).await;
         }
         "/cli/terminal/kill" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1412,17 +1292,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             send_response(&mut stream, r.status, r.content_type, &r.body).await;
         }
         "/cli/terminal/resize" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1439,17 +1309,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             send_response(&mut stream, r.status, r.content_type, &r.body).await;
         }
         "/cli/terminal/kill-foreground" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1466,17 +1326,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             send_response(&mut stream, r.status, r.content_type, &r.body).await;
         }
         "/cli/terminal/scroll" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1493,17 +1343,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             send_response(&mut stream, r.status, r.content_type, &r.body).await;
         }
         "/cli/terminal/log" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1526,17 +1366,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         // arbitrary-string TerminalManager IDs need a parallel path.
         // Body: `{"id":"...","data":"..."}`.
         "/cli/terminal/lifecycle-write" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1553,17 +1383,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             send_response(&mut stream, r.status, r.content_type, &r.body).await;
         }
         "/cli/terminal/set-focus" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1587,17 +1407,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         // launchctl bootstrap. See `crates/k2so-core/src/agents/
         // heartbeat_install.rs` for the install/uninstall bodies.
         "/cli/heartbeat/install-launchd" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1624,17 +1434,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             send_response(&mut stream, r.status, r.content_type, &r.body).await;
         }
         "/cli/heartbeat/uninstall-launchd" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1660,17 +1460,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
             send_response(&mut stream, r.status, r.content_type, &r.body).await;
         }
         "/cli/heartbeat/apply-wake-scheduler" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -1699,17 +1489,7 @@ async fn handle_connection(mut stream: TcpStream, state: DaemonState) {
         // src-tauri/src/commands/projects.rs's agent_mode-change
         // path. Body: `{"project_path": "/path"}`.
         "/cli/agents/archive-orphans" => {
-            if !is_post {
-                let _ = stream.read(&mut buf).await;
-                send_response(
-                    &mut stream,
-                    "405 Method Not Allowed",
-                    "application/json",
-                    r#"{"error":"POST required"}"#,
-                )
-                .await;
-                return;
-            }
+            if !require_post(&mut stream, &mut buf, is_post).await { return; }
             if !token_ok(&query, state.token.as_str()) {
                 let _ = stream.read(&mut buf).await;
                 send_response(
@@ -2064,6 +1844,42 @@ async fn send_cors_preflight(stream: &mut TcpStream) {
         Content-Length: 0\r\n\
         Connection: close\r\n\r\n";
     let _ = stream.write_all(resp.as_bytes()).await;
+}
+
+/// Method-gate guard for POST-only `/cli/*` routes.
+///
+/// Per the [`feedback_post_only_route_guards`] memory: every mutating
+/// `/cli/*` route must reject non-POST methods at the handler top, NOT
+/// rely on the top-level dispatch's GET/POST allowlist — that allowlist
+/// only blocks methods like PUT/DELETE/HEAD, it does NOT block GET on
+/// POST-allowlisted routes. Without an explicit per-handler gate, a
+/// `curl http://127.0.0.1:<port>/cli/dangerous-route?token=X` GET would
+/// silently trigger the mutation.
+///
+/// Returns `true` when the request is a POST and the caller should
+/// continue; returns `false` after sending a `405 Method Not Allowed`
+/// response, in which case the caller MUST early-return without touching
+/// the stream further. The peeked request bytes are drained on rejection
+/// so the response actually goes out.
+///
+/// Usage:
+///
+/// ```ignore
+/// if !require_post(&mut stream, &mut buf, is_post).await { return; }
+/// ```
+async fn require_post(stream: &mut TcpStream, buf: &mut [u8], is_post: bool) -> bool {
+    if is_post {
+        return true;
+    }
+    let _ = stream.read(buf).await;
+    send_response(
+        stream,
+        "405 Method Not Allowed",
+        "application/json",
+        r#"{"error":"POST required"}"#,
+    )
+    .await;
+    false
 }
 
 /// Read the body of a POST request. Consumes the request line and
