@@ -146,6 +146,13 @@ fn prime_hook_config_from_daemon() {
 /// to block Tauri's setup hook on a synchronous HTTP round-trip. Polls
 /// up to 10× at 500ms intervals; if the daemon stays unreachable we
 /// log and bow out — bigger problem than version skew at that point.
+///
+/// 0.39.2: on detected version mismatch, kickstarts the daemon and
+/// returns. The renderer-side [`ConnectionGate`] handles waiting +
+/// rendering — keeps the Rust shell simple (just signals "restart
+/// needed") and centralizes the user-facing "Connecting..." UX +
+/// retry logic in React. Same gate pattern is reusable for K2
+/// Connect where remote daemons may be transiently unreachable.
 fn check_daemon_version_and_restart() {
     use std::time::Duration;
     std::thread::spawn(|| {

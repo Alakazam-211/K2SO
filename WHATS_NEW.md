@@ -3,6 +3,19 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.2 — ConnectionGate: render after daemon healthy
+
+Patch release. Fixes the "blank screen after update" race that some
+users saw when 0.39.1 landed via auto-updater. A new ConnectionGate
+component shows a small "Connecting…" overlay while it waits for the
+daemon to be reachable, then mounts the app once it responds. No
+more "right-click → Reload to make it work" on first launch after
+update.
+
+Bonus: this is the same primitive K2 Connect will use when
+connecting to remote daemons (where transient unreachability is
+normal). So the architecture lands now and pays dividends later.
+
 ## 0.39.1 — Manager-pin fix
 
 Patch release. 0.39.0's one-shot migration over-pinned workspaces in
