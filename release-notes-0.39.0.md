@@ -212,9 +212,14 @@ Pre-0.39.0 ship included a comprehensive Tier 1/2/3 test cleanup:
   layout tables, drop the `agent_sessions_archive` table, remove
   index artifacts, and clear the `__lead__` sentinel out of the
   activity feed.
-- **Auto-pin of agent-mode workspaces retired** (commit `4b517687`).
-  Agent-mode workspaces no longer self-promote into the pinned-sidebar
-  group; users pin explicitly via the UI.
+- **Auto-pin of agent-mode workspaces retired** (commits `4b517687` +
+  Settings ProjectsSection follow-up). Agent-mode workspaces no longer
+  self-promote — neither in the **nav sidebar** nor in the **Workspaces
+  Settings page** where you organize what shows up in your primary
+  nav. The dedicated "Agents" section in Settings is gone; agent-mode
+  workspaces now appear in the same Pinned / focus group / ungrouped
+  lists as any other workspace. **Pin manually if you want them
+  surfaced at the top.** Single-list-of-workspaces model end-to-end.
 - **Sidebar / Skills section polish** (commits `e395ee23`, `82c95aac`):
   Skills promoted out of Agent Settings into its own top-level section
   above Worktrees; Agent Settings details hidden when workspace mode is

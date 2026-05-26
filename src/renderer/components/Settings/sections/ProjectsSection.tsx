@@ -221,15 +221,13 @@ export function ProjectsSection(): React.JSX.Element {
     return p.name.toLowerCase().includes(q) || p.path.toLowerCase().includes(q)
   }, [searchQuery])
 
-  const agentPinnedProjects = useMemo(() =>
-    settingsAgenticEnabled ? projects.filter((p) => (p.agentMode === 'agent' || p.agentMode === 'custom') && matchesSearch(p)) : [],
-    [projects, settingsAgenticEnabled, matchesSearch])
-  const agentIds = useMemo(() => new Set(
-    (settingsAgenticEnabled ? projects.filter((p) => p.agentMode === 'agent' || p.agentMode === 'custom') : []).map((p) => p.id)
-  ), [projects, settingsAgenticEnabled])
-  const pinnedProjects = useMemo(() => projects.filter((p) => p.pinned && !agentIds.has(p.id) && matchesSearch(p)), [projects, agentIds, matchesSearch])
-  const regularPinnedProjects = pinnedProjects
-  const ungroupedProjects = projects.filter((p) => !p.focusGroupId && !p.pinned && !agentIds.has(p.id) && matchesSearch(p))
+  // 0.39.0: retired the per-agent forced-pinned section. Agent-mode
+  // workspaces flow through the regular Pinned + ungrouped lists like
+  // any other workspace. Users pin them manually if they want them
+  // surfaced; otherwise they appear in their focus group / ungrouped
+  // section. Same one-list-of-workspaces model end-to-end.
+  const pinnedProjects = useMemo(() => projects.filter((p) => p.pinned && matchesSearch(p)), [projects, matchesSearch])
+  const ungroupedProjects = projects.filter((p) => !p.focusGroupId && !p.pinned && matchesSearch(p))
   const reorderProjects = useProjectsStore((s) => s.reorderProjects)
 
   const handleReorderMouseDown = useCallback((
@@ -302,10 +300,12 @@ export function ProjectsSection(): React.JSX.Element {
           const currentProjects = useProjectsStore.getState().projects
           let list: typeof projects = []
           const z = reorderZoneRef.current
-          if (z === 'agents') {
-            list = [...currentProjects.filter((p) => p.agentMode === 'agent' || p.agentMode === 'custom')]
-          } else if (z === 'pinned') {
-            list = [...currentProjects.filter((p) => p.pinned && (!p.agentMode || p.agentMode === 'off'))]
+          if (z === 'pinned') {
+            // 0.39.0: pinned zone includes ALL pinned workspaces
+            // regardless of agentMode. The pre-0.39.0 'agents' zone
+            // was retired — agent-mode workspaces now flow through
+            // the same zones as any other workspace.
+            list = [...currentProjects.filter((p) => p.pinned)]
           } else if (z === 'ungrouped' || z === 'flat') {
             list = [...currentProjects.filter((p) => !p.pinned && !p.focusGroupId)]
           } else if (z?.startsWith('group:')) {
@@ -340,20 +340,19 @@ export function ProjectsSection(): React.JSX.Element {
   // Build flat list of all visible projects for keyboard navigation
   const allVisibleProjects = useMemo(() => {
     const result: typeof projects = []
-    result.push(...agentPinnedProjects)
-    result.push(...regularPinnedProjects)
+    result.push(...pinnedProjects)
     if (focusGroupsEnabled) {
       for (const group of focusGroups) {
-        const gp = projects.filter((p) => p.focusGroupId === group.id && !p.pinned && !agentIds.has(p.id) && matchesSearch(p))
+        const gp = projects.filter((p) => p.focusGroupId === group.id && !p.pinned && matchesSearch(p))
         result.push(...gp)
       }
       result.push(...ungroupedProjects)
     } else {
-      const flat = projects.filter((p) => !agentIds.has(p.id) && !p.pinned && matchesSearch(p))
+      const flat = projects.filter((p) => !p.pinned && matchesSearch(p))
       result.push(...flat)
     }
     return result
-  }, [agentPinnedProjects, regularPinnedProjects, focusGroups, focusGroupsEnabled, projects, agentIds, ungroupedProjects, matchesSearch])
+  }, [pinnedProjects, focusGroups, focusGroupsEnabled, projects, ungroupedProjects, matchesSearch])
 
   // Reset keyboard index when search changes
   useEffect(() => { setKeyboardIndex(-1) }, [searchQuery])
@@ -533,36 +532,12 @@ export function ProjectsSection(): React.JSX.Element {
         </div>
 
         {/* Workspace list — pinned at top, then groups or flat */}
+        {/* 0.39.0: retired the dedicated Agents section — agent-mode
+            workspaces flow through Pinned / focus groups / ungrouped
+            like any other workspace. Single Pinned section below. */}
         <div className="flex-1 overflow-y-auto px-1 py-1">
-          {/* ── Agent workspaces ── */}
-          {agentPinnedProjects.length > 0 && (
-            <div className="mb-1 pb-1 border-b border-[var(--color-border)]">
-              <div className="px-2 pt-1 pb-1 flex items-center gap-1.5">
-                <span className="text-[10px] font-semibold text-[var(--color-accent)] uppercase tracking-wider">
-                  Agents
-                </span>
-                <span className="text-[9px] tabular-nums font-medium px-1.5 py-0.5 bg-[var(--color-accent)]/10 text-[var(--color-accent)]">
-                  {agentPinnedProjects.length}
-                </span>
-              </div>
-              <div data-reorder-zone="agents">
-                {agentPinnedProjects.map((p, idx) => (
-                  <div key={p.id} className="border-l-2 border-[var(--color-accent)]">
-                    {reorderZone === 'agents' && reorderDropIndex === idx && (
-                      <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
-                    )}
-                    {renderProjectRow(p, 'agents', "[data-reorder-zone='agents']")}
-                  </div>
-                ))}
-                {reorderZone === 'agents' && reorderDropIndex === agentPinnedProjects.length && (
-                  <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
-                )}
-              </div>
-            </div>
-          )}
-
           {/* ── Pinned workspaces ── */}
-          {regularPinnedProjects.length > 0 && (
+          {pinnedProjects.length > 0 && (
             <div className="mb-1 pb-1 border-b border-[var(--color-border)]">
               <div className="px-2 pt-1 pb-1">
                 <span className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
@@ -570,7 +545,7 @@ export function ProjectsSection(): React.JSX.Element {
                 </span>
               </div>
               <div data-reorder-zone="pinned">
-                {regularPinnedProjects.map((p, idx) => (
+                {pinnedProjects.map((p, idx) => (
                   <div key={p.id}>
                     {reorderZone === 'pinned' && reorderDropIndex === idx && (
                       <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
@@ -578,7 +553,7 @@ export function ProjectsSection(): React.JSX.Element {
                     {renderProjectRow(p, 'pinned', "[data-reorder-zone='pinned']")}
                   </div>
                 ))}
-                {reorderZone === 'pinned' && reorderDropIndex === regularPinnedProjects.length && (
+                {reorderZone === 'pinned' && reorderDropIndex === pinnedProjects.length && (
                   <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
                 )}
               </div>
@@ -590,7 +565,7 @@ export function ProjectsSection(): React.JSX.Element {
               {/* Focus group folders */}
               <div data-focus-group-reorder-container>
               {focusGroups.map((group, groupIdx) => {
-                const groupProjects = projects.filter((p) => p.focusGroupId === group.id && !p.pinned && !agentIds.has(p.id) && matchesSearch(p))
+                const groupProjects = projects.filter((p) => p.focusGroupId === group.id && !p.pinned && matchesSearch(p))
                 const isCollapsed = collapsedGroups.has(group.id)
                 const isDragOver = dragOverGroupId === group.id
                 const zoneId = `group:${group.id}`
@@ -739,7 +714,7 @@ export function ProjectsSection(): React.JSX.Element {
                 </span>
               </div>
               <div data-reorder-zone="flat">
-                {projects.filter((p) => !p.pinned && !agentIds.has(p.id)).map((p, idx) => (
+                {projects.filter((p) => !p.pinned).map((p, idx) => (
                   <div key={p.id}>
                     {reorderZone === 'flat' && reorderDropIndex === idx && (
                       <div className="h-[2px] bg-[var(--color-accent)] mx-2" />
