@@ -904,8 +904,8 @@ pub async fn dispatch(mut stream: TcpStream, state: crate::DaemonState) {
         // K2SO Connect (remote daemon without Tauri) can install +
         // remove the scheduler under its own GUI session. Method
         // gates are inline so a stray GET can't trigger a
-        // launchctl bootstrap. See `crates/k2so-core/src/agents/
-        // heartbeat_install.rs` for the install/uninstall bodies.
+        // launchctl bootstrap. See `crates/k2so-core/src/heartbeats/
+        // install.rs` for the install/uninstall bodies.
         "/cli/heartbeat/install-launchd" => {
             if !super::http::require_post(&mut stream, &mut buf, is_post).await { return; }
             if !super::http::token_ok(&query, state.token.as_str()) {

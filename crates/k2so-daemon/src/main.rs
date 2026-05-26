@@ -256,7 +256,7 @@ async fn async_main() {
     // sentinel-gated, idempotent. Runs synchronously before the
     // listener accepts traffic so route handlers always see the
     // unified layout. See `.k2so/prds/workspace-agent-unification.md`
-    // and `k2so_core::agents::unification`.
+    // and `k2so_core::migrations::unification_0_37_0`.
     run_workspace_unification_sweep();
 
     // Phase 2 Unit 7b — boot-time per-workspace legacy migrations +
