@@ -15,3 +15,8 @@ pub mod unification_0_37_0;
 // Moved from `src-tauri/src/lib.rs` to daemon first-boot in 0.39.0
 // so K2 Connect / headless daemons pick it up without Tauri.
 pub mod legacy_agent_types_v1;
+// `auto_pin_existing_agents_0_39_0` — flip pinned=1 for every workspace
+// that was in agent mode pre-0.39.0, so users upgrading don't see their
+// agents "disappear" from the top of the nav (the auto-promote-to-top
+// behavior was retired in 0.39.0).
+pub mod auto_pin_existing_agents_0_39_0;

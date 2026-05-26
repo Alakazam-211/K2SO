@@ -6,24 +6,25 @@ files in the repo root for the full developer-facing changelog.
 ## 0.39.0 — Clean foundation: new CLI, unified sidebar, chat/inbox everywhere
 
 The first public release after a major behind-the-scenes refactor. K2SO
-got a lot tidier — same product, cleaner bones. Three things you'll
-actually notice:
+got a lot tidier — same product, cleaner bones. Things you'll notice:
 
-- **Agents are no longer auto-pinned to the top.** Workspaces in agent
-  mode used to force themselves into a dedicated "Agents & Pinned"
-  section at the top of your sidebar AND the Settings page where you
-  organize your workspaces. That section is **gone** — agent-mode
-  workspaces now flow through the same Pinned / focus groups /
-  ungrouped lists as any other workspace. **If you want an agent
-  workspace at the top of your nav, pin it manually** (right-click →
-  Pin) like you would any workspace. Existing pins stay; the change
-  only affects what's auto-pinned going forward.
+- **Workspaces sidebar simplified.** The "Agents & Pinned" auto-promote
+  behavior is gone — agent-mode workspaces no longer get a dedicated
+  section forced above your manually pinned workspaces. **A one-time
+  migration on first launch pins every workspace that was in agent
+  mode** so nothing moves on you visibly: the workspaces that lived in
+  the auto-promoted Agents section will still appear at the top of
+  your Pinned list. If you don't want them pinned, right-click → Unpin
+  any of them — they'll flow into the normal ungrouped / focus-group
+  sections. Future workspaces you switch into agent mode won't
+  auto-pin; you decide where they go. Same for the Workspaces Settings
+  page where you organize what shows up in your nav.
 
 - **Chat + Inbox tabs visible for every workspace** — even ones with
   agent mode set to "off". Every workspace is reachable via cross-
   workspace messaging (`k2so msg <workspace>`), so the inbox surface
-  should always be available. Previously these tabs hid when agent
-  mode was off, which made the receive side invisible.
+  is always available now. Previously these tabs hid when agent mode
+  was off, which made the receive side invisible.
 
 - **New CLI** with 24 cleaner verbs across daily / power / internal
   tiers. Old verbs like `k2so delegate`, `k2so work create`, `k2so
@@ -31,8 +32,24 @@ actually notice:
   replacement (`k2so inbox compose`, `k2so connections list`, etc.).
   See `release-notes-0.39.0.md` for the full deprecation map.
 
-Plus a long list of bug fixes shipping in this release — see the full
-developer notes for the catalog.
+- **Storage shapes consolidated**: `.k2so/work/` → `.k2so/inbox/` and
+  `.k2so/agents/<name>/` → `.k2so/skills/<harness>/`. The daemon
+  migrates existing workspaces on first launch; no manual steps
+  required. Your inbox items and skills survive — they just live in
+  cleaner paths now.
+
+- **Daemon-first foundation.** Most logic moved from the desktop shell
+  into the daemon so the same code can power K2 Connect / K2 Companion
+  (coming in 0.40.0). Mobile companion's pending-reviews badge, the
+  desktop Review Queue UI, the heartbeat triage, and `cli` commands
+  all share one source of truth now. **Bug fixes shipping with this**:
+  `/cli/agentic` settings no longer 400s, review queue no longer
+  silently shows 0, regenerated SKILL.md / CLAUDE.md / AGENT.md use
+  the new CLI verbs, chat-history dedup for Pi / Codex / Cursor-IDE
+  parsers, trash test infra hardened against macOS Touch ID flakes.
+
+Plus a long list of internal cleanup — see `release-notes-0.39.0.md`
+for the developer-facing catalog.
 
 ## 0.38.13 — Faster launch + smarter memory threshold
 

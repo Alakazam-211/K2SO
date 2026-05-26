@@ -212,16 +212,21 @@ Pre-0.39.0 ship included a comprehensive Tier 1/2/3 test cleanup:
   layout tables, drop the `agent_sessions_archive` table, remove
   index artifacts, and clear the `__lead__` sentinel out of the
   activity feed.
-- **Auto-pin of agent-mode workspaces retired** (commits `4b517687` +
-  `5fa1a562` + `6efd4b40` + `b77f818c`). Agent-mode workspaces no
-  longer self-promote — neither in the **nav sidebar** (collapsed icon
-  rail AND expanded sidebar) nor in the **Workspaces Settings page**
-  where you organize what shows up in your primary nav. The dedicated
-  "Agents" section / "AGENTS & PINNED" header is gone; agent-mode
-  workspaces now appear in the same Pinned / focus group / ungrouped
-  lists as any other workspace. **Pin manually if you want them
-  surfaced at the top.** Single-list-of-workspaces model across all
-  three nav code paths.
+- **Auto-pin of agent-mode workspaces retired + one-time upgrade
+  migration** (commits `4b517687` + `5fa1a562` + `6efd4b40` +
+  `b77f818c` + auto_pin_existing_agents_0_39_0). The "AGENTS & PINNED"
+  auto-promote behavior is gone from the collapsed icon rail, the
+  expanded sidebar, AND the Workspaces Settings page. To avoid users
+  thinking their agents "disappeared" on upgrade, a one-shot daemon
+  migration (gated by `code_migrations`, fires once per local DB)
+  flips `pinned = 1` for every workspace currently in agent mode
+  (agent / custom / manager / coordinator / pod) that isn't already
+  pinned. Existing agents stay visible at the top of the Pinned list
+  on first 0.39.0 launch; users can unpin via the existing UI
+  affordance. Future workspaces switched into agent mode do NOT
+  auto-pin — they flow through the normal Pinned / focus group /
+  ungrouped sections like any other workspace. Single-list-of-
+  workspaces model end-to-end.
 
 - **Pinned Chat + Inbox tabs visible regardless of agent mode.** Per
   the workspace==agent model, every workspace IS an agent that can

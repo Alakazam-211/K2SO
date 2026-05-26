@@ -276,6 +276,12 @@ async fn async_main() {
     // by the `code_migrations` table so it's a one-shot pass per DB.
     run_legacy_agent_types_v1_migration();
 
+    // 0.39.0 sidebar polish — auto-pin every workspace that was in
+    // agent mode pre-0.39.0, so the retirement of the auto-promote-to-
+    // top behavior doesn't make users think their agents disappeared.
+    // Gated by `code_migrations` so it's a one-shot pass per DB.
+    run_auto_pin_existing_agents_migration();
+
     // Phase 2 Unit 4 — workspace_layouts one-shot migration moved
     // from `src-tauri/src/lib.rs::migrate_workspace_layouts_to_db`.
     // Reads `~/.k2so/settings.json#workspaceLayouts`, inserts each
@@ -717,6 +723,65 @@ fn run_workspace_unification_sweep() {
     // failure on one workspace doesn't stop the sweep. See
     // `canonical_session::boot_sweep_ensure_canonical_sessions`.
     crate::canonical_session::boot_sweep_ensure_canonical_sessions();
+}
+
+/// 0.39.0 sidebar polish — daemon-side runner for
+/// `auto_pin_existing_agents_0_39_0`.
+///
+/// Pre-0.39.0 the sidebar auto-promoted every agent-mode workspace
+/// into a dedicated "Agents & Pinned" section above the user's
+/// manually-pinned workspaces. 0.39.0 retired that auto-promotion —
+/// agent-mode workspaces now flow through the same Pinned / focus
+/// group / ungrouped sections as any other workspace.
+///
+/// Without this migration, users upgrading from <0.39.0 would see
+/// every workspace that previously appeared in the Agents section
+/// vanish from the top of their nav on first 0.39.0 launch. The
+/// workspaces themselves are unchanged — they just move from the
+/// auto-promoted section to wherever the user's focus group / pinned
+/// state placed them. To avoid the surprise, this one-shot migration
+/// flips `pinned = 1` for any workspace currently in an agent mode
+/// (agent / custom / manager / coordinator / pod) that isn't already
+/// pinned. Existing pins are untouched; users can unpin via the
+/// existing UI affordance if they don't want agent-mode workspaces
+/// in their Pinned section.
+///
+/// Future workspaces switched into agent mode (post-migration) do
+/// NOT auto-pin — they flow through the normal sections like any
+/// other workspace. The auto-promote behavior is permanently gone;
+/// this migration is just the one-shot bridge.
+///
+/// Errors are swallowed (logged via `log_debug!`) — a SQL failure
+/// here must not stop the daemon from booting.
+fn run_auto_pin_existing_agents_migration() {
+    use k2so_core::migrations::auto_pin_existing_agents_0_39_0 as mig;
+
+    let db_arc = k2so_core::db::shared();
+    let conn = db_arc.lock();
+
+    if k2so_core::db::has_code_migration_applied(&conn, mig::MIGRATION_ID) {
+        return;
+    }
+
+    let outcome = match mig::run(&conn) {
+        Ok(o) => o,
+        Err(e) => {
+            log_debug!(
+                "[daemon/migrations] auto_pin_existing_agents_0_39_0 failed: {e}; will retry on next boot"
+            );
+            return;
+        }
+    };
+
+    k2so_core::db::mark_code_migration_applied(
+        &conn,
+        mig::MIGRATION_ID,
+        Some(&format!("pinned {} agent-mode workspaces", outcome.pinned_count)),
+    );
+    log_debug!(
+        "[daemon/migrations] auto_pin_existing_agents_0_39_0: pinned {} agent-mode workspaces; future boots will skip",
+        outcome.pinned_count
+    );
 }
 
 /// 0.39.0 K2 Connect prep — daemon-side runner for the
