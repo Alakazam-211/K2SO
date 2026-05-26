@@ -12,19 +12,21 @@
 //!    resume-context system prompt.
 //! 2. **Delegate from inbox.** Agent has work waiting in `inbox/` but
 //!    no active worktree → call
-//!    [`crate::agents::delegate::k2so_agents_delegate`] on the highest-
-//!    priority item, which creates a worktree + moves inbox → active
-//!    in one step.
+//!    [`crate::deprecated::delegate::k2so_agents_delegate`] (now
+//!    deprecated alongside the rest of the agents-CRUD surface) on the
+//!    highest-priority item, which creates a worktree + moves inbox →
+//!    active in one step.
 //! 3. **Fresh launch.** No active worktree, no inbox → launch in the
 //!    project root with a compose_agent_wake_context system prompt,
 //!    the agent's wakeup.md as the user message, and a
 //!    checksum-derived resume session ID if one is on file.
 //!
 //! The daemon's lid-closed wake path uses a much simpler variant
-//! (`crate::agents::wake::spawn_wake_headless`) that doesn't branch on work
-//! queue state — lid-closed fires just want to hand the agent its
-//! wakeup.md. This function is the supervised-launch surface that
-//! needs the full decision tree.
+//! (`k2so_daemon::wake_headless::spawn_wake_headless`, moved out of
+//! `k2so_core::agents::wake` to the daemon in 0.37.0) that doesn't
+//! branch on work queue state — lid-closed fires just want to hand
+//! the agent its wakeup.md. This function is the supervised-launch
+//! surface that needs the full decision tree.
 
 use std::fs;
 use std::path::{Path, PathBuf};

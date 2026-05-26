@@ -12,14 +12,12 @@
 //! agent's SKILL.md.
 //!
 //! The SKILL wrapping / versioning / checksum protocol itself lives in
-//! [`super::skill`]; this module is the content side.
+//! [`crate::skills::version`]; this module is the content side.
 //!
 //! All four `generate_*_skill_content` entry points also pull custom
 //! layers from `~/.k2so/templates/<tier>/*.md` via [`load_custom_layers`]
 //! — that's how the Agent Skills Settings UI's user-editable tab
 //! injects project-global conventions into every agent of a given tier.
-//!
-//! [`super::skill`]: crate::agents::skill
 
 use std::fs;
 use std::path::PathBuf;
@@ -334,7 +332,7 @@ Only workspaces linked via `k2so connections` are reachable.
 
 ### Discover peers + connections
 ```
-k2so who                                       # workspaces with live agents now
+k2so connections list                          # workspaces with live agents now
 k2so connections list|add|remove               # cross-workspace links
 ```
 
@@ -425,8 +423,7 @@ Only workspaces linked via `k2so connections` are reachable.
 ## Discover peers
 
 ```
-k2so who                            # workspaces with live agents
-k2so connections list               # who's wired up to you
+k2so connections list               # workspaces with live agents (and who's wired up to you)
 ```
 
 ## Glossary
@@ -554,8 +551,7 @@ k2so heartbeat log [-n N]
 ## Cross-workspace messaging
 
 ```
-k2so connections list                                    # who's wired up to me
-k2so who                                                 # workspaces with live agents
+k2so connections list                                    # who's wired up to me / workspaces with live agents
 k2so msg <workspace> "text"                              # live delivery (call/IM)
 k2so msg <workspace> --inbox --title "..." --body "..."  # inbox delivery (email)
 k2so msg <workspace> --signal <kind> --payload '{...}'   # typed signal (advanced)

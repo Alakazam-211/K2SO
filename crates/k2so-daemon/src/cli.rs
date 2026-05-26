@@ -11,10 +11,14 @@
 //! 4. Returns `(status_code, content_type, body)` which the caller
 //!    renders as an HTTP response.
 //!
-//! Each per-route handler is a thin wrapper around a
-//! `k2so_core::agents::*` or `k2so_core::agent_hooks` function —
-//! effectively the "daemon-side invoke_handler" mirror of the
-//! Tauri-side command registry in src-tauri.
+//! Each per-route handler is a thin wrapper around the relevant
+//! `k2so_core` submodule — typically `workspace::*`, `skills::*`,
+//! `heartbeats::*`, `awareness::*`, or `agent_hooks` (the legacy
+//! `k2so_core::agents::*` umbrella module no longer exists; the
+//! surviving agents-CRUD helpers live in `k2so_core::deprecated::*`
+//! and the daemon owns the runtime wake / spawn paths). Effectively
+//! the "daemon-side invoke_handler" mirror of the Tauri-side command
+//! registry in src-tauri.
 //!
 //! Routes that require a `project` / `project_path` query parameter
 //! accept EITHER — see `project_param` in main.rs. Routes that
@@ -520,7 +524,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         // Daemon-first: every thin client (Tauri pinned tab, mobile
         // companion, future MCP, CLI) hits this route. No client
         // duplicates the SQL lookup + JSONL existence check + fresh
-        // pre-allocate logic — it lives in `k2so_core::agents::resume_chat`
+        // pre-allocate logic — it lives in `k2so_core::workspace::resume_chat`
         // and is callable purely.
         "/cli/workspace/resume-chat-args" => match need_project(params) {
             Ok(p) => match k2so_core::workspace::resume_chat::resolve_resume_chat_args(&p) {
@@ -1294,10 +1298,13 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
 
         // ── Onboarding (workspace-add three-option flow) ────────
         //
-        // Logic lives in `k2so_core::agents::onboarding`. Daemon
-        // exposes the four ops over HTTP so the `k2so onboarding`
-        // CLI subcommand and any other headless caller can drive
-        // the same flow as the Tauri `WorkspaceOnboardingModal`.
+        // Logic lives in `k2so_core::workspace::onboarding`; the
+        // daemon owns the onboarding routes (Phase 2.5c moved the
+        // command surface out of the legacy `k2so_core::agents::*`
+        // umbrella). Daemon exposes the four ops over HTTP so the
+        // `k2so onboarding` CLI subcommand and any other headless
+        // caller can drive the same flow as the Tauri
+        // `WorkspaceOnboardingModal`.
         // Adopt + Start Fresh fire the workspace-regen bridge —
         // a no-op when the host hasn't registered a regen impl
         // (next Tauri launch picks up the staged PROJECT.md).

@@ -35,7 +35,7 @@ use crate::cli_response::CliResponse;
 use crate::spawn::{spawn_agent_session_v2_blocking, SpawnWorkspaceSessionRequest};
 
 /// H6: spawn a wake PTY via the Session Stream pipeline (same
-/// shape as `k2so_core::agents::wake::spawn_wake_headless` but
+/// shape as `crate::wake_headless::spawn_wake_headless` but
 /// daemon-owned — the resulting session lands in `session_map`
 /// and is reachable by every /cli/* route that looks up by agent
 /// name). Caller decides which backend to use based on the

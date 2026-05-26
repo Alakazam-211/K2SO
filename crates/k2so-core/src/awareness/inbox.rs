@@ -126,7 +126,7 @@ pub fn drain(inbox_root: &Path, agent: &str) -> Vec<AgentSignal> {
 }
 
 /// Peek at pending signal count without consuming them. Useful for
-/// dashboards / telemetry / the `k2so roster` output. Same
+/// dashboards / telemetry / the `k2so connections list` output. Same
 /// directory-missing-is-empty semantics as `drain`.
 pub fn pending_count(inbox_root: &Path, agent: &str) -> usize {
     let agent_dir = inbox_root.join(sanitize_agent_name(agent));

@@ -1,7 +1,8 @@
 //! Chat-history helpers shared between Tauri + daemon.
 //!
-//! When a heartbeat wake spawns `claude` via [`crate::agents::wake::
-//! spawn_wake_headless`], we need to save the provider's new session
+//! When a heartbeat wake spawns `claude` via
+//! `k2so_daemon::wake_headless::spawn_wake_headless` (moved to the
+//! daemon in 0.37.0), we need to save the provider's new session
 //! ID on the `agent_sessions.session_id` row ~5 seconds later so the
 //! *next* wake can `--resume <id>` into the same chat instead of
 //! starting fresh. That requires scanning the provider's own history

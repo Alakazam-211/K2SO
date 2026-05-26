@@ -110,7 +110,7 @@ pub fn from_session(
 }
 
 /// Route a signal emitted from outside any session (e.g. the
-/// `k2so signal` CLI). Caller supplies the workspace + from-agent
+/// `k2so msg` CLI). Caller supplies the workspace + from-agent
 /// directly since there's no session to infer from.
 pub fn from_cli(signal: AgentSignal) -> DeliveryReport {
     egress::deliver(&signal, &inbox_root())

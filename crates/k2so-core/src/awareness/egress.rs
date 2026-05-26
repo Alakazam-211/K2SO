@@ -145,7 +145,7 @@ pub struct DeliveryReport {
 // ─────────────────────────────────────────────────────────────────────
 
 /// Deliver `signal`. Returns what actually happened; callers (the
-/// `k2so signal` CLI, APC ingress) use the report to decide
+/// `k2so msg` CLI, APC ingress) use the report to decide
 /// follow-up (prints, retries, etc.).
 ///
 /// `inbox_root` is the directory under which per-agent inboxes

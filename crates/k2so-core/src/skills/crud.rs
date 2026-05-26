@@ -152,7 +152,8 @@ pub fn profile(project_path: &str, name: &str) -> Result<String, String> {
 /// ```
 ///
 /// Name validation: alphanumeric + `-` / `_` only. Mirrors the
-/// validation in `k2so_core::agents::commands::create`.
+/// validation in `k2so_core::agents::commands::create` (moved to
+/// `crate::deprecated::*` in Phase 2.5c).
 pub fn create(
     project_path: &str,
     name: &str,

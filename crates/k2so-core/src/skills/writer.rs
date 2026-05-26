@@ -19,7 +19,7 @@
 //! | `.github/copilot-instructions.md` | marker-injected block | GitHub Copilot |
 //!
 //! The canonical path is upgrade-tracked (the full SKILL upgrade
-//! protocol in [`crate::agents::skill`]); symlinks always point at it,
+//! protocol in [`crate::skills::version`]); symlinks always point at it,
 //! so a version bump propagates to every harness on its next discovery
 //! pass without writing to each location individually.
 
@@ -148,7 +148,8 @@ pub fn force_symlink(source: &Path, target: &Path) {
 /// fanout step — no symlinks into `.claude/`, `.opencode/`, `.pi/`,
 /// no marker injection into `AGENTS.md` or
 /// `.github/copilot-instructions.md`. The user keeps full control
-/// of those files. See [`crate::agents::onboarding`] for the flag.
+/// of those files. The flag is owned by the daemon-side onboarding
+/// routes (moved out of `k2so_core::agents::*` in 0.37.0).
 pub fn write_skill_to_all_harnesses(
     project_path: &str,
     skill_name: &str,

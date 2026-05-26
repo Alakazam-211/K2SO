@@ -7,7 +7,7 @@
 //! plist — silent failure with no obvious recovery path.
 //!
 //! This module is the daemon's self-bootstrap. [`ensure_cron_installed`]
-//! is idempotent and called from [`crate::agents::heartbeat::k2so_heartbeat_add`]
+//! is idempotent and called from [`crate::heartbeats::k2so_heartbeat_add`]
 //! after a successful row insert. Headless installs (CLI / daemon
 //! without Tauri ever launched) get cron working from the first
 //! `k2so heartbeat add` onward.
