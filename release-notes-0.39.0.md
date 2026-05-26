@@ -213,13 +213,26 @@ Pre-0.39.0 ship included a comprehensive Tier 1/2/3 test cleanup:
   index artifacts, and clear the `__lead__` sentinel out of the
   activity feed.
 - **Auto-pin of agent-mode workspaces retired** (commits `4b517687` +
-  Settings ProjectsSection follow-up). Agent-mode workspaces no longer
-  self-promote — neither in the **nav sidebar** nor in the **Workspaces
-  Settings page** where you organize what shows up in your primary
-  nav. The dedicated "Agents" section in Settings is gone; agent-mode
+  `5fa1a562` + `6efd4b40` + `b77f818c`). Agent-mode workspaces no
+  longer self-promote — neither in the **nav sidebar** (collapsed icon
+  rail AND expanded sidebar) nor in the **Workspaces Settings page**
+  where you organize what shows up in your primary nav. The dedicated
+  "Agents" section / "AGENTS & PINNED" header is gone; agent-mode
   workspaces now appear in the same Pinned / focus group / ungrouped
   lists as any other workspace. **Pin manually if you want them
-  surfaced at the top.** Single-list-of-workspaces model end-to-end.
+  surfaced at the top.** Single-list-of-workspaces model across all
+  three nav code paths.
+
+- **Pinned Chat + Inbox tabs visible regardless of agent mode.** Per
+  the workspace==agent model, every workspace IS an agent that can
+  receive cross-workspace messages via `k2so msg <workspace>` — even
+  workspaces with `agentMode: off`. Pre-0.39.0 the Chat + Inbox pinned
+  tabs were hidden when agent mode was off, which hid the receive
+  surface even though the underlying capability was always present.
+  Now the tabs stay visible in every workspace; clicking the Chat tab
+  spawns a CLI session (Claude Code, Codex, etc.) against the
+  workspace; the Inbox tab shows incoming messages from connected
+  workspaces.
 - **Sidebar / Skills section polish** (commits `e395ee23`, `82c95aac`):
   Skills promoted out of Agent Settings into its own top-level section
   above Worktrees; Agent Settings details hidden when workspace mode is

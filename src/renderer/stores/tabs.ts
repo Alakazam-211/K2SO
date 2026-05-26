@@ -596,10 +596,17 @@ export function ensurePinnedAgentTabForMode(
 ): void {
   setTimeout(async () => {
     const tabsStore = useTabsStore.getState()
-    if (!agentMode || agentMode === 'off') {
-      tabsStore.removeSystemAgentTab()
-      return
-    }
+
+    // 0.39.0: Chat + Inbox tabs render for EVERY workspace, including
+    // ones with agentMode === 'off'. Reason: per the workspace==agent
+    // model, every workspace is an agent that other workspaces can
+    // message via `k2so msg <workspace>` regardless of whether the
+    // user has agent automation actively running here. The Inbox tab
+    // shows incoming cross-workspace messages; the Chat tab spawns a
+    // CLI session (Claude Code, Codex, etc.) against this workspace
+    // when clicked. Pre-0.39.0 these tabs were hidden when agent mode
+    // was off — that hid the inbox/chat surface even though the
+    // underlying capability was always present.
 
     let title = 'Agent'
     if (agentMode === 'manager' || agentMode === 'coordinator') {
@@ -608,6 +615,8 @@ export function ensurePinnedAgentTabForMode(
       title = 'Agent'
     } else if (agentMode === 'agent') {
       title = 'K2SO'
+    } else if (!agentMode || agentMode === 'off') {
+      title = 'Workspace'  // agent-mode-off: workspace is its own agent
     }
 
     // Resolve the actual primary agent name from the backend. The
