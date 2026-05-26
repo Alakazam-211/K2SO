@@ -257,7 +257,8 @@ export default function IconRail(): React.JSX.Element {
       className="flex flex-col items-center h-full bg-[var(--color-bg-surface)] border-r border-[var(--color-border)] py-2 flex-shrink-0"
       style={{ width: RAIL_WIDTH }}
     >
-      {/* Zone 1: Agents & Pinned */}
+      {/* Zone 1: Pinned (0.39.0: agent-mode workspaces flow through here
+          as manual pins, not auto-promoted as a separate section) */}
       {topSection.length > 0 && (
         <div className="flex flex-col items-center gap-0.5 pb-1.5 w-full">
           {topSection.map((project, i) => (
