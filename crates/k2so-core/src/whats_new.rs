@@ -3,9 +3,22 @@
 //! 0.38.7 ships a popup that fires on the first Tauri-app launch after
 //! a version upgrade. Content lives in [`WHATS_NEW_MARKDOWN`] — a copy
 //! of `WHATS_NEW.md` from the repo root, embedded into the daemon
-//! binary at build time. The popup shows the markdown slice spanning
-//! `(last_seen_version, current_version]`, so a user who skips one or
-//! more versions catches up on everything they missed.
+//! binary at build time.
+//!
+//! **Show-the-popup decision (`has_new`)** is `(last_seen, current]`-
+//! based: there must be at least one section newer than what the user
+//! last dismissed.
+//!
+//! **What the popup *contains* (`content`)**, however, is the full
+//! current MAJOR.MINOR track up through `current_version`. Reasoning:
+//! when a user lands on a minor track mid-stream (e.g. they install
+//! 0.39.3 with `last_seen = 0.39.2`), the (last_seen, current] slice
+//! would only include 0.39.3 — but the foundational entry that opened
+//! the track (0.39.0) often holds migration / behavioural context the
+//! user needs regardless of which patch they ended up on. Surfacing
+//! the entire minor track lets the modal's ←/→ pagination walk every
+//! 0.39.x entry, so first-time-on-a-minor-track users can read the
+//! whole story.
 //!
 //! State lives in `~/.k2so/whats-new.state` — a single line containing
 //! the last version the user dismissed the popup for. Absent file =
@@ -50,8 +63,12 @@ pub struct WhatsNewCheck {
     pub last_seen_version: Option<String>,
     /// True iff there's at least one unseen section worth showing.
     pub has_new: bool,
-    /// The markdown slice spanning `(last_seen_version, current_version]`.
-    /// Empty string when `has_new` is false.
+    /// The markdown payload to show in the modal. When `has_new` is
+    /// true, this is the full current MAJOR.MINOR track up through
+    /// `current_version` (e.g. all 0.39.x entries `<= 0.39.3`), so the
+    /// modal can paginate back through every entry on the user's
+    /// current minor track — not just the entries newer than
+    /// `last_seen_version`. Empty string when `has_new` is false.
     pub content: String,
 }
 
@@ -144,9 +161,11 @@ pub fn compare_semver(a: &str, b: &str) -> Ordering {
 // Slice computation
 // ─────────────────────────────────────────────────────────────────────
 
-/// Compute the markdown to show: every section `v` such that
+/// Compute the markdown for every section `v` such that
 /// `last_seen < v <= current`. If `last_seen` is None, every section
-/// `<= current` is included.
+/// `<= current` is included. Used by [`check_for_user`] only to
+/// determine whether anything *newer than what the user last saw*
+/// exists — i.e., whether to auto-fire the popup at all.
 pub fn slice_unseen(
     sections: &[VersionSection],
     last_seen: Option<&str>,
@@ -161,6 +180,43 @@ pub fn slice_unseen(
             };
             let at_or_below_current = compare_semver(&s.version, current) != Ordering::Greater;
             above_last_seen && at_or_below_current
+        })
+        .map(|s| s.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Extract the MAJOR.MINOR prefix from a `X.Y.Z` version string.
+/// Returns `"0.39"` for `"0.39.3"`, `"1.0"` for `"1.0.0"`, etc. If the
+/// input has fewer than two dot-separated components, returns the
+/// input unchanged (defensive — caller's [`current_version`] comes
+/// from `CARGO_PKG_VERSION` so this branch shouldn't fire in
+/// production).
+fn minor_track(version: &str) -> String {
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() >= 2 {
+        format!("{}.{}", parts[0], parts[1])
+    } else {
+        version.to_string()
+    }
+}
+
+/// Compute the markdown for every section in `current`'s MAJOR.MINOR
+/// track up through `current` itself — e.g. for `current = "0.39.3"`,
+/// every section whose version starts with `"0.39."` and is `<= 0.39.3`.
+///
+/// This is what populates [`WhatsNewCheck::content`] when the popup
+/// fires: even if `last_seen` was already inside the current minor
+/// track (so the (last_seen, current] slice would be tiny), the modal
+/// still receives the full track so its ←/→ pagination can walk every
+/// entry. See the module-level doc for rationale.
+pub fn slice_minor_track(sections: &[VersionSection], current: &str) -> String {
+    let track = minor_track(current);
+    sections
+        .iter()
+        .filter(|s| {
+            minor_track(&s.version) == track
+                && compare_semver(&s.version, current) != Ordering::Greater
         })
         .map(|s| s.content.clone())
         .collect::<Vec<_>>()
@@ -225,8 +281,19 @@ pub fn clear_last_seen() -> std::io::Result<()> {
 pub fn check_for_user(current_version: &str) -> WhatsNewCheck {
     let last_seen = read_last_seen();
     let sections = parse_changelog(WHATS_NEW_MARKDOWN);
-    let content = slice_unseen(&sections, last_seen.as_deref(), current_version);
-    let has_new = !content.trim().is_empty();
+    // Decide whether to auto-fire: only when there's at least one
+    // section newer than what the user last dismissed.
+    let unseen = slice_unseen(&sections, last_seen.as_deref(), current_version);
+    let has_new = !unseen.trim().is_empty();
+    // What to ship to the modal: the full current minor-track up
+    // through `current_version`. Lets the modal paginate back to the
+    // start of the current minor (e.g. 0.39.0 from 0.39.3) even if
+    // `last_seen` was already in the track — see module doc.
+    let content = if has_new {
+        slice_minor_track(&sections, current_version)
+    } else {
+        String::new()
+    };
     WhatsNewCheck {
         current_version: current_version.to_string(),
         last_seen_version: last_seen,
@@ -406,6 +473,97 @@ Daemon owns sessions.
         assert!(!out.contains("## 0.38.6 "));
         assert!(out.contains("## 0.38.5 "));
         assert!(out.contains("## 0.38.0 "));
+    }
+
+    // ── Minor-track slice ────────────────────────────────────────────
+
+    const MULTI_MINOR_SAMPLE: &str = r#"# K2SO — What's New
+
+## 0.39.3 — patch three
+
+three body
+
+## 0.39.2 — patch two
+
+two body
+
+## 0.39.1 — patch one
+
+one body
+
+## 0.39.0 — minor open
+
+minor-open body
+
+## 0.38.13 — older minor
+
+older body
+
+## 0.38.0 — older minor open
+
+older minor body
+"#;
+
+    #[test]
+    fn minor_track_extracts_major_dot_minor() {
+        assert_eq!(minor_track("0.39.3"), "0.39");
+        assert_eq!(minor_track("0.39.0"), "0.39");
+        assert_eq!(minor_track("1.0.0"), "1.0");
+        assert_eq!(minor_track("0.38.13"), "0.38");
+    }
+
+    #[test]
+    fn minor_track_defensive_on_malformed_input() {
+        // Single-segment input passes through unchanged — no panic.
+        assert_eq!(minor_track("garbage"), "garbage");
+        assert_eq!(minor_track(""), "");
+    }
+
+    #[test]
+    fn slice_minor_track_includes_only_current_minor_up_to_current() {
+        let sections = parse_changelog(MULTI_MINOR_SAMPLE);
+        // current = 0.39.3 → must include all 0.39.x, must exclude all 0.38.x.
+        let out = slice_minor_track(&sections, "0.39.3");
+        assert!(out.contains("## 0.39.3"), "must include current");
+        assert!(out.contains("## 0.39.2"), "must include earlier in-track patch");
+        assert!(out.contains("## 0.39.1"), "must include earlier in-track patch");
+        assert!(out.contains("## 0.39.0"), "must include track-opener");
+        assert!(!out.contains("## 0.38.13"), "must exclude older minor");
+        assert!(!out.contains("## 0.38.0"), "must exclude older minor");
+    }
+
+    #[test]
+    fn slice_minor_track_caps_at_current_excluding_future_patches() {
+        let sections = parse_changelog(MULTI_MINOR_SAMPLE);
+        // current = 0.39.1 → must include 0.39.0 and 0.39.1, must
+        // exclude 0.39.2 / 0.39.3 (defensive: file has future patches
+        // ahead of the daemon binary's version, e.g. dev environment).
+        let out = slice_minor_track(&sections, "0.39.1");
+        assert!(out.contains("## 0.39.1"));
+        assert!(out.contains("## 0.39.0"));
+        assert!(!out.contains("## 0.39.2"));
+        assert!(!out.contains("## 0.39.3"));
+    }
+
+    #[test]
+    fn slice_minor_track_at_track_opener_is_just_the_opener() {
+        let sections = parse_changelog(MULTI_MINOR_SAMPLE);
+        // current = 0.39.0 → only the track opener; no other 0.39.x
+        // exists at-or-below 0.39.0.
+        let out = slice_minor_track(&sections, "0.39.0");
+        assert!(out.contains("## 0.39.0"));
+        assert!(!out.contains("## 0.39.1"));
+        assert!(!out.contains("## 0.38.13"));
+    }
+
+    #[test]
+    fn slice_minor_track_empty_when_no_sections_in_track() {
+        let sections = parse_changelog(MULTI_MINOR_SAMPLE);
+        // Asking about a minor track that doesn't exist in the file
+        // (e.g. 0.40.x) returns empty — no leakage from neighbouring
+        // tracks.
+        let out = slice_minor_track(&sections, "0.40.0");
+        assert!(out.trim().is_empty(), "got: {out:?}");
     }
 
     // ── State file I/O ───────────────────────────────────────────────

@@ -3,6 +3,27 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.4 — What's New popup: walk back to 0.39.0
+
+Tiny UX fix to the "What's new" popup itself. Before: if you landed
+mid-track on a 0.39.x patch (e.g. you updated 0.39.2 → 0.39.3 via
+auto-update), the popup only showed entries newer than the version
+you'd last dismissed — so you missed the foundational **0.39.0**
+entry that explains why your workspaces sidebar got rearranged.
+
+Now: while you're anywhere on the 0.39.x minor track, the popup
+always carries **every 0.39.x entry** up through the version you
+just installed.
+
+**👈 Hit the ← arrow at the bottom-left of this popup to walk
+back through 0.39.3, 0.39.2, 0.39.1, and 0.39.0.** The 0.39.0
+entry is the one to read if you're wondering where your "Agents"
+section went or why some workspaces are now pinned — it's the
+release where that all changed, and it's only one ← away.
+
+The same behaviour will hold for every future minor: land
+anywhere on the X.Y.* track, walk back to read the whole story.
+
 ## 0.39.3 — ConnectionGate fix: no more black screen after update
 
 Patch release. 0.39.2's ConnectionGate gated the *render* of the
