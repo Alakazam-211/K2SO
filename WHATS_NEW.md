@@ -3,6 +3,37 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.0 — Clean foundation: new CLI, unified sidebar, chat/inbox everywhere
+
+The first public release after a major behind-the-scenes refactor. K2SO
+got a lot tidier — same product, cleaner bones. Three things you'll
+actually notice:
+
+- **Agents are no longer auto-pinned to the top.** Workspaces in agent
+  mode used to force themselves into a dedicated "Agents & Pinned"
+  section at the top of your sidebar AND the Settings page where you
+  organize your workspaces. That section is **gone** — agent-mode
+  workspaces now flow through the same Pinned / focus groups /
+  ungrouped lists as any other workspace. **If you want an agent
+  workspace at the top of your nav, pin it manually** (right-click →
+  Pin) like you would any workspace. Existing pins stay; the change
+  only affects what's auto-pinned going forward.
+
+- **Chat + Inbox tabs visible for every workspace** — even ones with
+  agent mode set to "off". Every workspace is reachable via cross-
+  workspace messaging (`k2so msg <workspace>`), so the inbox surface
+  should always be available. Previously these tabs hid when agent
+  mode was off, which made the receive side invisible.
+
+- **New CLI** with 24 cleaner verbs across daily / power / internal
+  tiers. Old verbs like `k2so delegate`, `k2so work create`, `k2so
+  who`, `k2so roster` now print a helpful error pointing at their
+  replacement (`k2so inbox compose`, `k2so connections list`, etc.).
+  See `release-notes-0.39.0.md` for the full deprecation map.
+
+Plus a long list of bug fixes shipping in this release — see the full
+developer notes for the catalog.
+
 ## 0.38.13 — Faster launch + smarter memory threshold
 
 Cleanup pass on 0.38.12's two big additions:
