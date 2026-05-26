@@ -782,7 +782,6 @@ pub fn run() {
             commands::k2so_agents::k2so_workspace_agent_display_name,
             commands::k2so_agents::k2so_workspace_set_agent_display_name,
             commands::k2so_agents::k2so_agents_delete,
-            commands::k2so_agents::k2so_agents_update_field,
             commands::k2so_agents::k2so_agents_get_heartbeat,
             commands::k2so_agents::k2so_agents_set_heartbeat,
             commands::k2so_agents::k2so_agents_scheduler_tick,
@@ -835,9 +834,6 @@ pub fn run() {
             // had zero frontend callers (confirmed via Phase 2.1c
             // audit) and are removed here.
             commands::k2so_agents::k2so_agents_get_profile,
-            commands::k2so_agents::k2so_agents_update_profile,
-            commands::k2so_agents::k2so_agents_regenerate_agent_context,
-            commands::k2so_agents::k2so_agents_preview_agent_context,
             commands::k2so_agents::k2so_agents_regenerate_workspace_skill,
             commands::k2so_agents::k2so_onboarding_scan,
             commands::k2so_agents::k2so_onboarding_adopt,
@@ -846,7 +842,6 @@ pub fn run() {
             // Back-compat aliases — retained during the 0.33.0 rename window so
             // stale React `invoke()` names keep working until every call site
             // has migrated to the canonical new names above.
-            commands::k2so_agents::k2so_agents_generate_claude_md,
             commands::k2so_agents::k2so_agents_teardown_workspace,
             commands::k2so_agents::k2so_agents_preview_workspace_ingest,
             commands::k2so_agents::k2so_agents_run_workspace_ingest,
@@ -866,8 +861,6 @@ pub fn run() {
             // `workspace_msg::deliver_to_inbox` — the inbox-delivery
             // path is now `k2so_core::inbox::compose` end-to-end.
             commands::k2so_agents::k2so_agents_lock,
-            commands::k2so_agents::k2so_agents_unlock,
-            commands::k2so_agents::k2so_agents_triage_summary,
             commands::k2so_agents::k2so_agents_triage_decide,
             commands::k2so_agents::k2so_agents_install_heartbeat,
             commands::k2so_agents::k2so_agents_uninstall_heartbeat,
@@ -907,8 +900,6 @@ pub fn run() {
             commands::k2so_agents::k2so_agents_regenerate_skills,
             // Agent Editor
             commands::k2so_agents::k2so_agents_get_editor_context,
-            commands::k2so_agents::k2so_agents_preview_claude_md,
-            commands::k2so_agents::k2so_agents_regenerate_claude_md,
             commands::k2so_agents::k2so_agents_save_agent_md,
             // Phase 2 Unit 6 — `commands::review_checklist::*` shims
             // deleted. Renderer hits `/cli/review-checklist/*` on the

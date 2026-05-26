@@ -219,15 +219,10 @@ pub fn k2so_workspace_set_agent_display_name(
 // `k2so_core::workspace::agent::delete_inner` stays; callers that
 // need it (currently only k2so-core itself) reach it directly.
 
-#[tauri::command]
-pub fn k2so_agents_update_field(
-    project_path: String,
-    name: String,
-    field: String,
-    value: String,
-) -> Result<String, String> {
-    k2so_core::workspace::agent::update_field(project_path, name, field, value)
-}
+// k2so_agents_update_field and k2so_agents_update_profile deleted in
+// 0.39.0 cleanup — zero React callers; the per-field/per-profile editor
+// surface is unused since the Agent Settings UI moved to AGENT.md edits
+// via `k2so_agents_save_agent_md`.
 
 #[tauri::command]
 pub fn k2so_agents_get_profile(
@@ -235,15 +230,6 @@ pub fn k2so_agents_get_profile(
     agent_name: String,
 ) -> Result<String, String> {
     k2so_core::workspace::agent::get_profile(project_path, agent_name)
-}
-
-#[tauri::command]
-pub fn k2so_agents_update_profile(
-    project_path: String,
-    agent_name: String,
-    content: String,
-) -> Result<(), String> {
-    k2so_core::workspace::agent::update_profile(project_path, agent_name, content)
 }
 
 // Phase 2.1c Item 2 — `k2so_agents_work_list`, `k2so_agents_work_create`,
@@ -545,47 +531,20 @@ pub fn k2so_agents_lock(
     k2so_core::workspace::session::k2so_agents_lock(project_path, agent_name, terminal_id, owner)
 }
 
-#[tauri::command]
-pub fn k2so_agents_unlock(project_path: String, agent_name: String) -> Result<(), String> {
-    k2so_core::workspace::session::k2so_agents_unlock(project_path, agent_name)
-}
+// k2so_agents_unlock deleted in 0.39.0 cleanup — zero React callers
+// and unpaired with any `k2so_agents_lock` invocation that would expect
+// a matching release. The unlock path is now driven entirely by the
+// daemon's session-end hooks (workspace_sessions row delete).
 
 // ── Agent context / SKILL.md regen ─────────────────────────────────────
 //
-// Pre-0.33.0 these commands were `k2so_agents_*_claude_md`, which was
-// honest when CLAUDE.md was the canonical per-agent system prompt file.
-// Phase 1a (0.32.x) made SKILL.md the harness-agnostic source of truth
-// and turned CLAUDE.md into a symlink-or-copy for Claude Code's auto-
-// discovery; these commands regenerate BOTH but "context" is the
-// honest name for what they return. The legacy `_claude_md` aliases
-// are retained as thin forwards in the same module for back-compat.
-
-/// Regenerate an agent's context bundle: the full `--append-system-
-/// prompt` body returned to the caller AND a fresh SKILL.md +
-/// CLAUDE.md written to the agent's directory. Same as calling
-/// `k2so_agents_preview_agent_context` followed by an atomic write.
-///
-/// Body lives in `k2so_core::workspace::agent_editor::k2so_agents_regenerate_agent_context`
-/// (Phase 2 Unit 7d).
-#[tauri::command]
-pub fn k2so_agents_regenerate_agent_context(
-    project_path: String,
-    agent_name: String,
-) -> Result<String, String> {
-    k2so_core::workspace::agent_editor::k2so_agents_regenerate_agent_context(project_path, agent_name)
-}
-
-/// Back-compat alias for [`k2so_agents_regenerate_agent_context`].
-/// Kept so React components that still invoke the old name keep
-/// working during the rename window. New code should use the new
-/// name.
-#[tauri::command]
-pub fn k2so_agents_generate_claude_md(
-    project_path: String,
-    agent_name: String,
-) -> Result<String, String> {
-    k2so_agents_regenerate_agent_context(project_path, agent_name)
-}
+// 0.39.0 cleanup: `k2so_agents_regenerate_agent_context` +
+// `k2so_agents_generate_claude_md` (back-compat alias) +
+// `k2so_agents_regenerate_claude_md` (back-compat alias) deleted —
+// zero React/CLI/test callers. SKILL/CLAUDE.md regen runs implicitly
+// from wake builders (`k2so_agents_build_launch`) so the on-demand
+// command surface is unused. Core `k2so_core::workspace::agent_editor::
+// k2so_agents_regenerate_agent_context` stays for in-process callers.
 
 /// Full-fat wake-launch builder (UI "Launch" button +
 /// heartbeat auto-launch). Body lives in
@@ -853,14 +812,9 @@ pub fn k2so_agents_review_request_changes(
 
 // ── Heartbeat Triage (Workspace State) ──────────────────────────────────
 
-/// Build a triage summary for the local LLM to evaluate.
-/// Returns a plain-text summary of all agents with pending work in a project.
-/// The local LLM reads this and decides which agents (if any) should be launched.
-/// Respects workspace state capabilities — items with "off" capability are excluded.
-#[tauri::command]
-pub fn k2so_agents_triage_summary(project_path: String) -> Result<String, String> {
-    k2so_core::workspace::triage::triage_summary(&project_path)
-}
+// k2so_agents_triage_summary deleted in 0.39.0 cleanup — zero React
+// callers; the triage summary is built and consumed entirely inside
+// the daemon's heartbeat fire path via `k2so_core::workspace::triage`.
 
 /// Determine what should be launched based on triage.
 ///
@@ -1116,36 +1070,14 @@ pub fn k2so_agents_get_editor_context(
     k2so_core::workspace::agent_editor::k2so_agents_get_editor_context(project_path, agent_name)
 }
 
-/// Preview the agent's context bundle without writing to disk.
-/// Body lives in `k2so_core::workspace::agent_editor::k2so_agents_preview_agent_context`
-/// (Phase 2 Unit 7d).
-#[tauri::command]
-pub fn k2so_agents_preview_agent_context(
-    project_path: String,
-    agent_name: String,
-) -> Result<serde_json::Value, String> {
-    k2so_core::workspace::agent_editor::k2so_agents_preview_agent_context(project_path, agent_name)
-}
-
-/// Back-compat alias for [`k2so_agents_preview_agent_context`].
-#[tauri::command]
-pub fn k2so_agents_preview_claude_md(
-    project_path: String,
-    agent_name: String,
-) -> Result<serde_json::Value, String> {
-    k2so_agents_preview_agent_context(project_path, agent_name)
-}
-
-/// Back-compat alias. Pre-0.33.0 this was a separate fn from
-/// `generate_claude_md` even though they did identical work; merged
-/// into [`k2so_agents_regenerate_agent_context`] during the rename.
-#[tauri::command]
-pub fn k2so_agents_regenerate_claude_md(
-    project_path: String,
-    agent_name: String,
-) -> Result<String, String> {
-    k2so_agents_regenerate_agent_context(project_path, agent_name)
-}
+// 0.39.0 cleanup: `k2so_agents_preview_agent_context` + the
+// `k2so_agents_preview_claude_md` back-compat alias +
+// `k2so_agents_regenerate_claude_md` back-compat alias deleted —
+// zero React/CLI/test callers. The on-disk preview is reconstructed
+// on demand by `k2so_agents_get_editor_context` (which the editor
+// actually uses). Core
+// `k2so_core::workspace::agent_editor::k2so_agents_preview_agent_context`
+// stays available for in-process callers.
 
 /// Save an agent's agent.md file, creating a timestamped backup of the
 /// previous version. Body lives in
