@@ -1,0 +1,1184 @@
+//! HTTP route dispatcher for the k2so-daemon binary.
+//!
+//! Pre-0.39.0 this entire function body lived inline in `main.rs`'s
+//! `handle_connection`. Extraction is a mechanical move — every match
+//! arm, every per-route comment, every method-gating guard is preserved
+//! verbatim. The dispatcher reaches back into `main.rs` for the helper
+//! functions (`send_response`, `require_post`, `read_post_body`,
+//! `token_ok`, `parse_params`, `project_param`, `handle_archive_orphans`,
+//! `dispatch_unit6_post`, `handle_agents_triage`) and the `BANNER`
+//! constant + `DaemonState` struct, all of which were re-exposed as
+//! `pub(crate)` during the extraction.
+//!
+//! `/cli/*` POST routes use `crate::require_post` to enforce
+//! method gating per [[feedback_post_only_route_guards]] memory; the
+//! starts_with arms (`/cli/git/`, `/cli/states/`, `/cli/workspaces/`,
+//! `/cli/focus-groups/`, `/cli/sections/`, `/cli/workspace-layouts/`,
+//! `/cli/timer/`, `/cli/presets/`, `/cli/window-state/`,
+//! `/cli/projects/`, `/cli/fs/`, `/cli/chat/`, `/cli/themes/`,
+//! `/cli/skill-layers/`, `/cli/review-checklist/`, `/cli/inbox/`)
+//! inherit the gate from the top-level `method != "GET" && !(is_post &&
+//! post_allowed)` 405 short-circuit. See `feedback_post_only_route_guards`
+//! for the full rationale.
+
+use tokio::io::AsyncReadExt;
+use tokio::net::TcpStream;
+
+/// Serve one connection. On any IO error or malformed request we drop the
+/// socket — every response also sets `Connection: close` so callers don't
+/// reuse the socket.
+///
+/// `/events` is the one exception: on a valid token we hand the raw
+/// [`TcpStream`] off to [`crate::events::serve_events_connection`] which
+/// performs the WebSocket upgrade via `tokio_tungstenite::accept_async`
+/// — that function consumes the handshake bytes itself, so we DO NOT
+/// read the request body here for that route.
+pub async fn dispatch(mut stream: TcpStream, state: crate::DaemonState) {
+    // Peek just the request line + headers so we can route on path
+    // without consuming the body. Enough for WS handshakes (which
+    // tokio-tungstenite will re-read) and the small GET bodies (which
+    // have no body).
+    let mut buf = [0u8; 4096];
+    let n = match stream.peek(&mut buf).await {
+        Ok(n) if n > 0 => n,
+        _ => return,
+    };
+    let req = String::from_utf8_lossy(&buf[..n]);
+
+    let first_line = req.lines().next().unwrap_or("");
+    let parts: Vec<&str> = first_line.split_whitespace().collect();
+    let (method, path_and_query) = match parts.as_slice() {
+        [m, p, ..] => (*m, *p),
+        _ => {
+            // Consume what we peeked so the error gets delivered.
+            let _ = stream.read(&mut buf).await;
+            crate::send_response(&mut stream, "400 Bad Request", "text/plain", "bad request\n").await;
+            return;
+        }
+    };
+
+    // Phase 4.5: handle CORS preflight before the method allowlist.
+    // The Tauri WebView origin (tauri://localhost or http://localhost:5173
+    // in dev) is cross-origin relative to http://127.0.0.1:<port>, so
+    // the browser sends an OPTIONS preflight before every POST. We
+    // answer it with permissive CORS headers — token auth still
+    // gates every real request, so `Access-Control-Allow-Origin: *`
+    // adds no security risk and avoids hard-coding every possible
+    // Tauri dev-server port.
+    if method == "OPTIONS" {
+        let _ = stream.read(&mut buf).await;
+        crate::send_cors_preflight(&mut stream).await;
+        return;
+    }
+
+    // Most routes are GET. Specific POST-accepting routes are
+    // allowlisted here so non-GET hits other paths get a clean 405.
+    let is_post = method == "POST";
+    let post_allowed = matches!(
+        path_and_query.split_once('?').map(|(p, _)| p).unwrap_or(path_and_query),
+        "/cli/awareness/publish"
+            | "/cli/sessions/v2/spawn"
+            | "/cli/sessions/v2/close"
+            // Phase 2 Unit 1 — body-bearing companion control routes.
+            // Password and session-token live in the body so they
+            // don't end up in URL-logged form on shared/loopback
+            // intermediaries.
+            | "/cli/companion/set-password"
+            | "/cli/companion/disconnect-session"
+            // Phase 2 Unit 5 — Claude Auth mutating routes. POST
+            // (not GET) so they're not idempotent-cached by any
+            // future proxy and so they parallel Unit 1's pattern
+            // for "this writes state". The status read-side stays
+            // a GET and goes through `crate::cli::dispatch`.
+            | "/cli/claude-auth/refresh-now"
+            | "/cli/claude-auth/install-scheduler"
+            | "/cli/claude-auth/uninstall-scheduler"
+            // Phase 2 Unit 2 — LLM control + chat. Chat body
+            // carries the user message + workspace context. Load
+            // takes a path. Download-default takes no body but is
+            // a write-side operation so we accept POST for it too.
+            | "/cli/llm/chat"
+            | "/cli/llm/load-model"
+            | "/cli/llm/download-default"
+            // Phase 2 Unit 7a — settings writes. Partial settings
+            // payloads live in the body; `reset` is POST so it can't
+            // be reached via a stray GET / browser refresh.
+            | "/cli/settings/update"
+            | "/cli/settings/reset"
+            // Phase 2 Unit 6 — filesystem mutations + chat history
+            // mutations + theme/skill-layer/review-checklist
+            // mutations. JSON bodies carry the arguments (paths,
+            // file contents, source/destination tuples) so they
+            // aren't URL-encoded in proxy logs.
+            | "/cli/fs/search-tree"
+            | "/cli/fs/write-file"
+            | "/cli/fs/move"
+            | "/cli/fs/copy"
+            | "/cli/fs/delete"
+            | "/cli/fs/rename"
+            | "/cli/fs/create"
+            | "/cli/fs/duplicate"
+            | "/cli/fs/open-finder"
+            | "/cli/fs/open-external"
+            | "/cli/chat/rename"
+            | "/cli/chat/toggle-pin"
+            | "/cli/chat/migrate-ide"
+            | "/cli/themes/create-template"
+            | "/cli/themes/delete"
+            | "/cli/skill-layers/create"
+            | "/cli/skill-layers/delete"
+            | "/cli/review-checklist/write"
+            | "/cli/review-checklist/toggle"
+            | "/cli/review-checklist/init"
+            // Phase 2 Unit 3 — terminal PTY lifecycle. JSON-bodied
+            // mutating routes; method-gated per-handler below.
+            | "/cli/terminal/create"
+            | "/cli/terminal/kill"
+            | "/cli/terminal/resize"
+            | "/cli/terminal/kill-foreground"
+            | "/cli/terminal/scroll"
+            | "/cli/terminal/log"
+            | "/cli/terminal/lifecycle-write"
+            | "/cli/terminal/set-focus"
+            // Phase 2 Unit 7c — heartbeat-launchd installer + orphan-
+            // agents sweep. Body-bearing writes; method-gated below.
+            | "/cli/heartbeat/install-launchd"
+            | "/cli/heartbeat/uninstall-launchd"
+            | "/cli/heartbeat/apply-wake-scheduler"
+            | "/cli/agents/archive-orphans"
+            // Phase 2 Unit 4 — DB-writing routes (states / workspaces /
+            // focus-groups / sections / workspace-layouts / timer /
+            // presets / window-state / projects / git). JSON-bodied
+            // writes — implicit method gate via the `starts_with`
+            // dispatch arm in handle_connection that runs Unit 4's
+            // POST dispatch. Listed explicitly here so the top-level
+            // 405 guard never short-circuits them.
+            | "/cli/states/create" | "/cli/states/update" | "/cli/states/delete"
+            | "/cli/workspaces/create" | "/cli/workspaces/delete" | "/cli/workspaces/set-nav-visible"
+            | "/cli/focus-groups/create" | "/cli/focus-groups/update" | "/cli/focus-groups/delete"
+            | "/cli/focus-groups/assign" | "/cli/focus-groups/reconcile"
+            | "/cli/sections/create" | "/cli/sections/update" | "/cli/sections/delete"
+            | "/cli/sections/reorder" | "/cli/sections/assign"
+            | "/cli/workspace-layouts/save" | "/cli/workspace-layouts/delete"
+            | "/cli/timer/create" | "/cli/timer/delete"
+            | "/cli/presets/create" | "/cli/presets/update" | "/cli/presets/delete"
+            | "/cli/presets/reorder" | "/cli/presets/reset"
+            | "/cli/window-state/set"
+            | "/cli/projects/create" | "/cli/projects/update" | "/cli/projects/delete"
+            | "/cli/projects/reorder" | "/cli/projects/touch-interaction"
+            | "/cli/projects/touch-interaction-clear" | "/cli/projects/add-from-path"
+            | "/cli/projects/add-without-git" | "/cli/projects/init-git-and-open"
+            | "/cli/projects/enable-worktrees" | "/cli/projects/detect-icon"
+            | "/cli/projects/set-icon" | "/cli/projects/clear-icon"
+            | "/cli/projects/open-in-finder" | "/cli/projects/open-in-editor"
+            | "/cli/projects/open-in-terminal" | "/cli/projects/refresh-editors"
+            | "/cli/git/create-worktree" | "/cli/git/remove-worktree"
+            | "/cli/git/reopen-worktree" | "/cli/git/stage" | "/cli/git/unstage"
+            | "/cli/git/stage-all" | "/cli/git/commit" | "/cli/git/merge-branch"
+            | "/cli/git/abort-merge" | "/cli/git/resolve" | "/cli/git/delete-branch"
+            | "/cli/git/prune-worktrees"
+            // Phase 2.1 — workspace inbox mutating routes (A22.1).
+            // Query-string POSTs (no JSON body); dispatched via
+            // `inbox_routes::dispatch_post`. The `/cli/inbox/migrate`
+            // route is a one-shot helper for tests / explicit
+            // re-migration triggers — daemon first-boot also auto-
+            // invokes (Phase 2.1b wiring).
+            | "/cli/inbox/compose"
+            | "/cli/inbox/move"
+            | "/cli/inbox/archive"
+            | "/cli/inbox/delete"
+            | "/cli/inbox/respond"
+            | "/cli/inbox/migrate"
+    );
+    if method != "GET" && !(is_post && post_allowed) {
+        let _ = stream.read(&mut buf).await;
+        crate::send_response(
+            &mut stream,
+            "405 Method Not Allowed",
+            "application/json",
+            r#"{"error":"method not allowed for this route"}"#,
+        )
+        .await;
+        return;
+    }
+
+    let (path, query) = match path_and_query.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (path_and_query, ""),
+    };
+    // Copy out of the lossy Cow so we can consume the read buffer below
+    // without extending the immutable borrow.
+    let path = path.to_string();
+    let query = query.to_string();
+    drop(req);
+
+    match path.as_str() {
+        "/ping" => {
+            let _ = stream.read(&mut buf).await;
+            // Unauthenticated. Smallest liveness check.
+            crate::send_response(&mut stream, "200 OK", "text/plain; charset=utf-8", crate::BANNER).await;
+        }
+        "/health" => {
+            // Unauthenticated liveness probe the behavior test suite
+            // polls before it does anything. Mirrors the body shape
+            // src-tauri's agent_hooks server returns so tests can talk
+            // to either process without branching.
+            let _ = stream.read(&mut buf).await;
+            crate::send_response(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                r#"{"status":"ok"}"#,
+            )
+            .await;
+        }
+        "/status" => {
+            let _ = stream.read(&mut buf).await;
+            // Token-gated. Returns a small JSON blob describing the
+            // daemon's state so the Tauri app can verify it's talking to
+            // the right process.
+            if !crate::token_ok(&query, state.token.as_str()) {
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let uptime_secs = state.started_at.elapsed().as_secs();
+            let pid = std::process::id();
+            let body = format!(
+                r#"{{"version":"{}","uptime_secs":{},"pid":{},"port":{}}}"#,
+                env!("CARGO_PKG_VERSION"),
+                uptime_secs,
+                pid,
+                state.port,
+            );
+            crate::send_response(&mut stream, "200 OK", "application/json", &body).await;
+        }
+        "/hook/complete" => {
+            // Agent-lifecycle hook endpoint. URL-encoded query params
+            // carry paneId / tabId / eventType / token. Business logic
+            // (ring buffer, emit, WorkspaceSession.status sync) lives in
+            // k2so_core so src-tauri's existing server hits the same
+            // code path.
+            let _ = stream.read(&mut buf).await;
+            let params = crate::parse_params(&path, &query);
+            let req_token = params.get("token").cloned().unwrap_or_default();
+            if req_token != *state.token {
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"Invalid or missing auth token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body = k2so_core::agent_hooks::handle_hook_complete(&params);
+            crate::send_response(&mut stream, "200 OK", "application/json", body).await;
+        }
+        // Session Stream WS subscribe endpoint (0.34.0 Phase 2).
+        // Lives on a /cli/ path but routes to the WS handler rather
+        // than crate::cli::dispatch because it's an HTTP upgrade, not a
+        // JSON request. Branch must precede the generic /cli/
+        // catchall below or the dispatch would swallow it.
+        "/cli/sessions/subscribe" => {
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let params = crate::parse_params(&path, &query);
+            crate::sessions_ws::serve_session_subscribe_connection(stream, params).await;
+        }
+        // Canvas Plan Phase 2: raw-byte stream subscribe. Parallel
+        // to /cli/sessions/subscribe but streams PTY bytes as
+        // binary WS frames for clients running their own vte.
+        "/cli/sessions/bytes" => {
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let params = crate::parse_params(&path, &query);
+            crate::sessions_bytes_ws::serve_session_bytes_connection(stream, params).await;
+        }
+        // Alacritty_v2 (A3): grid snapshot + delta WS endpoint.
+        // Serves one Tauri thin client per session. Single-subscriber
+        // by design. See `.k2so/prds/alacritty-v2.md`.
+        "/cli/sessions/grid" => {
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let params = crate::parse_params(&path, &query);
+            crate::sessions_grid_ws::serve_session_grid_connection(stream, params).await;
+        }
+        // 0.38.0 Commit 4: daemon-authoritative session lifecycle
+        // stream. Pushes `session_added`/`session_removed` JSON
+        // frames to subscribers whose `path=` matches the affected
+        // session's cwd. Renderer + mobile companion consume the
+        // same wire format. See `.k2so/prds/daemon-authoritative-tabs.md`.
+        "/cli/sessions/events" => {
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let params = crate::parse_params(&path, &query);
+            crate::session_events_ws::serve_session_events_connection(stream, params).await;
+        }
+        // Awareness Bus endpoints (0.34.0 Phase 3).
+        // `/cli/awareness/publish` — POST JSON body → egress::deliver
+        // `/cli/awareness/subscribe` — WS, streams bus signals out
+        "/cli/awareness/publish" => {
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            let result = crate::awareness_ws::handle_publish(&body_bytes);
+            crate::send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        "/cli/awareness/subscribe" => {
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            crate::awareness_ws::serve_awareness_subscribe_connection(stream).await;
+        }
+        // POST /cli/sessions/v2/spawn — Alacritty_v2 find-or-spawn
+        // (A4). Parallel to /cli/sessions/spawn but produces a
+        // DaemonPtySession (registered in v2_session_map) instead
+        // of a SessionStreamSession. Idempotent on agent_name: same
+        // name → same session, suitable for remount reattach.
+        "/cli/sessions/v2/spawn" => {
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            let result = crate::v2_spawn::handle_v2_spawn(&body_bytes);
+            crate::send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/sessions/v2/close — explicit teardown of a v2
+        // session. Called only from `tabs.ts::removeTab` (A6).
+        "/cli/sessions/v2/close" => {
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            let result = crate::v2_spawn::handle_v2_close(&body_bytes);
+            crate::send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/companion/set-password — Phase 2 Unit 1.
+        // Body: `{"password": "..."}`. Hashes argon2id, stores in
+        // macOS Keychain (preferred) or settings.json (fallback),
+        // then invalidates every live companion session so the old
+        // token can't be replayed.
+        //
+        // Method gate: see the long-form note on /cli/claude-auth/
+        // refresh-now below — the top-level dispatch lets a GET
+        // through on POST-allowlisted routes. Mirror Unit 5's
+        // explicit `if !is_post` guard so a GET against this route
+        // can't trigger the password rotation. Especially important
+        // here because this is one of the routes Mobile Companion
+        // and K2SO Connect will hit over the ngrok tunnel.
+        "/cli/companion/set-password" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            let result = crate::companion_routes::handle_companion_set_password(&body_bytes);
+            crate::send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // ── Phase 2 Unit 2 — /cli/llm/* ────────────────────────────
+        // GET routes are cheap; POST routes go through llm_routes
+        // which owns the supervisor's subprocess machinery. All
+        // five routes are token-gated by the standard query-string
+        // check so callers must pass `?token=<token>` like every
+        // other /cli/* endpoint.
+        "/cli/llm/check" => {
+            let _ = stream.read(&mut buf).await;
+            if !crate::token_ok(&query, state.token.as_str()) {
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let r = crate::llm_routes::handle_check();
+            crate::send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/llm/status" => {
+            let _ = stream.read(&mut buf).await;
+            if !crate::token_ok(&query, state.token.as_str()) {
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let r = crate::llm_routes::handle_status();
+            crate::send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/llm/chat" => {
+            // Method gate (see feedback_post_only_route_guards memory + the
+            // /cli/claude-auth/refresh-now comment): the top-level dispatch
+            // lets a GET through on POST-allowlisted routes. Reject explicitly.
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            // Inference is CPU/GPU heavy and may block for tens of
+            // seconds. Run on a blocking worker so the runtime's
+            // accept-loop threads stay free.
+            let r = tokio::task::spawn_blocking(move || {
+                crate::llm_routes::handle_chat(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            crate::send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/llm/load-model" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            let r = tokio::task::spawn_blocking(move || {
+                crate::llm_routes::handle_load_model(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            crate::send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/llm/download-default" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            // Body is currently empty; read+drop to flush.
+            let _ = crate::read_post_body(&mut stream, &mut buf).await;
+            let r = crate::llm_routes::handle_download_default(&state.event_tx);
+            crate::send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        // POST /cli/companion/disconnect-session — Phase 2 Unit 1.
+        // Body: `{"sessionToken": "..."}`. Removes the session row
+        // and any WS clients still attached to it.
+        //
+        // Method gate: same rationale as /cli/companion/set-password
+        // above. Don't let a GET disconnect a live session.
+        "/cli/companion/disconnect-session" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            let result =
+                crate::companion_routes::handle_companion_disconnect_session(&body_bytes);
+            crate::send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/claude-auth/refresh-now — Phase 2 Unit 5.
+        // No body required (the refresh token comes from the local
+        // Keychain / credentials file). POST instead of GET because
+        // it mutates token state. Returns the same status payload
+        // shape as GET /cli/claude-auth/status.
+        //
+        // NOTE on method gating: the top-level dispatch only rejects
+        // non-GET/non-POST methods; it doesn't reject GET on a
+        // POST-allowlisted route (most routes accept both today and
+        // gate behavior on body-presence). For Unit 5's mutating
+        // routes — which have no body — we must explicitly reject
+        // GET in the handler, or a curl GET would silently install /
+        // refresh / uninstall the user's launchd scheduler. Caught
+        // during smoke testing.
+        "/cli/claude-auth/refresh-now" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            // Drain whatever body the client sent so the socket
+            // doesn't get half-read state. We don't use it.
+            let _ = crate::read_post_body(&mut stream, &mut buf).await;
+            let result = crate::claude_auth_host::handle_refresh_now();
+            crate::send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/claude-auth/install-scheduler — Phase 2 Unit 5.
+        // Writes ~/.k2so/claude-auth-refresh.sh + loads the
+        // launchd plist (macOS) or installs the crontab entry
+        // (linux). Idempotent. POST-only (see /refresh-now comment).
+        "/cli/claude-auth/install-scheduler" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let _ = crate::read_post_body(&mut stream, &mut buf).await;
+            let result = crate::claude_auth_host::handle_install_scheduler();
+            crate::send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/claude-auth/uninstall-scheduler — Phase 2 Unit 5.
+        // Unloads + removes the plist (macOS) or strips the
+        // crontab entry (linux). Idempotent. POST-only.
+        "/cli/claude-auth/uninstall-scheduler" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let _ = crate::read_post_body(&mut stream, &mut buf).await;
+            let result = crate::claude_auth_host::handle_uninstall_scheduler();
+            crate::send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/settings/update — Phase 2 Unit 7a.
+        // Body: arbitrary JSON object deep-merged into settings.json.
+        // F3 closure runs inside `app_settings::update()` — companion-
+        // credential changes invalidate live sessions server-side, in
+        // the same process that owns the live companion runtime.
+        // Method gate per feedback_post_only_route_guards memory.
+        "/cli/settings/update" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            let result = crate::settings_routes::handle_settings_update(&body_bytes);
+            crate::send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/settings/reset — Phase 2 Unit 7a.
+        // Restores `AppSettings::default()`, deletes Keychain hash,
+        // invalidates every live companion session. POST (not GET)
+        // so a browser refresh can't accidentally trigger it.
+        // Method gate per feedback_post_only_route_guards memory.
+        "/cli/settings/reset" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let _ = stream.read(&mut buf).await;
+            let result = crate::settings_routes::handle_settings_reset();
+            crate::send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // Phase 2 Unit 3 — terminal PTY lifecycle (POST routes).
+        // Each handler runs through the process-wide
+        // `k2so_core::terminal::shared()` TerminalManager so daemon
+        // ownership is uniform. The blocking create handler is
+        // dispatched via `tokio::task::spawn_blocking` (F5) since
+        // posix_spawn + alacritty Term::new can stall briefly under
+        // load. The non-blocking handlers (kill/resize/scroll/etc.)
+        // are cheap mutex+method calls and run inline.
+        //
+        // Method gate: see the long-form comment on
+        // `/cli/claude-auth/refresh-now`. The top-level dispatch
+        // does NOT reject GET on POST-allowlisted routes — without
+        // the explicit `if !is_post` guard, a curl GET could
+        // silently spawn / kill a PTY.
+        "/cli/terminal/create" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            // F5: posix_spawn + alacritty Term::new can block; run
+            // off the accept-loop thread pool.
+            let r = tokio::task::spawn_blocking(move || {
+                crate::terminal_lifecycle_routes::handle_create(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            crate::send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/terminal/kill" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            // Kill can block briefly waiting on child reap; F5.
+            let r = tokio::task::spawn_blocking(move || {
+                crate::terminal_lifecycle_routes::handle_kill(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            crate::send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/terminal/resize" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            let r = crate::terminal_lifecycle_routes::handle_resize(&body_bytes);
+            crate::send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/terminal/kill-foreground" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            let r = crate::terminal_lifecycle_routes::handle_kill_foreground(&body_bytes);
+            crate::send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/terminal/scroll" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            let r = crate::terminal_lifecycle_routes::handle_scroll(&body_bytes);
+            crate::send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/terminal/log" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            let r = crate::terminal_lifecycle_routes::handle_log(&body_bytes);
+            crate::send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        // POST /cli/terminal/lifecycle-write — byte-level write for
+        // TerminalManager-owned terminals. The existing
+        // /cli/terminal/write (GET, in terminal_routes.rs) operates on
+        // the session_map's UUID-keyed sessions; the legacy
+        // arbitrary-string TerminalManager IDs need a parallel path.
+        // Body: `{"id":"...","data":"..."}`.
+        "/cli/terminal/lifecycle-write" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            let r = crate::terminal_lifecycle_routes::handle_lifecycle_write(&body_bytes);
+            crate::send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/terminal/set-focus" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            let r = crate::terminal_lifecycle_routes::handle_set_focus(&body_bytes);
+            crate::send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        // Phase 2 Unit 7c — heartbeat-launchd installer routes.
+        // Daemon owns its own `com.k2so.agent-heartbeat.plist` so
+        // K2SO Connect (remote daemon without Tauri) can install +
+        // remove the scheduler under its own GUI session. Method
+        // gates are inline so a stray GET can't trigger a
+        // launchctl bootstrap. See `crates/k2so-core/src/agents/
+        // heartbeat_install.rs` for the install/uninstall bodies.
+        "/cli/heartbeat/install-launchd" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            // launchctl bootstrap can stall briefly under load; F5.
+            let r = tokio::task::spawn_blocking(move || {
+                crate::heartbeat_routes::handle_install_launchd(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            crate::send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/heartbeat/uninstall-launchd" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            let r = tokio::task::spawn_blocking(move || {
+                crate::heartbeat_routes::handle_uninstall_launchd(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            crate::send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/heartbeat/apply-wake-scheduler" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            let r = tokio::task::spawn_blocking(move || {
+                crate::heartbeat_routes::handle_apply_wake_scheduler(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            crate::send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        // Phase 2 Unit 7c — orphan-agent sweep, refactored out of
+        // src-tauri/src/commands/projects.rs's agent_mode-change
+        // path. Body: `{"project_path": "/path"}`.
+        "/cli/agents/archive-orphans" => {
+            if !crate::require_post(&mut stream, &mut buf, is_post).await { return; }
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            // fs walk + db lock — F5.
+            let r = tokio::task::spawn_blocking(move || {
+                crate::handle_archive_orphans(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            crate::send_response(&mut stream, r.status, r.content_type, &r.body).await;
+        }
+        // Phase 2 Unit 4 — POST routes for git (libgit2 ops). F5:
+        // spawn_blocking because diff/merge/status on large repos
+        // can block for 100s of ms.
+        p if is_post && post_allowed && p.starts_with("/cli/git/") => {
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            let p_owned = p.to_string();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::git_routes::dispatch_unit4_git_post(&p_owned, &body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            crate::send_response(&mut stream, result.status, result.content_type, &result.body)
+                .await;
+        }
+        // Phase 2 Unit 4 — POST routes for DB-writing domains. JSON-
+        // bodied writes; per-route allowlist + same implicit gate
+        // pattern as Unit 6. Dispatch is `dispatch_unit4_post`.
+        p if is_post && post_allowed && (
+            p.starts_with("/cli/states/")
+                || p.starts_with("/cli/workspaces/")
+                || p.starts_with("/cli/focus-groups/")
+                || p.starts_with("/cli/sections/")
+                || p.starts_with("/cli/workspace-layouts/")
+                || p.starts_with("/cli/timer/")
+                || p.starts_with("/cli/presets/")
+                || p.starts_with("/cli/window-state/")
+                || p.starts_with("/cli/projects/")
+        ) => {
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            let result = crate::db_routes::dispatch_unit4_post(p, &body_bytes);
+            crate::send_response(&mut stream, result.status, result.content_type, &result.body)
+                .await;
+        }
+        // Phase 2 Unit 6 — POST routes for filesystem / chat /
+        // themes / skill-layers / review-checklist. All JSON-bodied;
+        // delegate to per-domain modules. The match-arm guard
+        // (`is_post && post_allowed && starts_with`) is the implicit
+        // method gate — a GET on these paths falls through to the
+        // generic `/cli/` catchall below, which returns a 404
+        // "unknown route" since dispatch doesn't have GET handlers
+        // for these paths. Functionally equivalent to Unit 5/7a's
+        // explicit 405s; the response code differs but no silent
+        // mutation is possible either way.
+        p if is_post && post_allowed && (
+            p.starts_with("/cli/fs/")
+                || p.starts_with("/cli/chat/")
+                || p.starts_with("/cli/themes/")
+                || p.starts_with("/cli/skill-layers/")
+                || p.starts_with("/cli/review-checklist/")
+        ) => {
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            let body_bytes = crate::read_post_body(&mut stream, &mut buf).await;
+            let result = crate::dispatch_unit6_post(p, &body_bytes);
+            crate::send_response(&mut stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // Phase 2.1 — workspace inbox POST routes. Query-string only
+        // (no body). Token gate is explicit per method-gate rule;
+        // body is drained to keep the connection clean. Filesystem
+        // operations run in spawn_blocking per F5 (atomic-rename of
+        // a `.md` file isn't slow, but `safe_delete::trash` calls
+        // into macOS Finder via AppleScript and CAN block).
+        p if is_post && post_allowed && p.starts_with("/cli/inbox/") => {
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            // Drain body (we don't use it — params come from query).
+            let _ = crate::read_post_body(&mut stream, &mut buf).await;
+            let params = crate::parse_params(&path, &query);
+            let p_owned = p.to_string();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::inbox_routes::dispatch_post(&p_owned, &params)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            crate::send_response(&mut stream, result.status, result.content_type, &result.body).await;
+        }
+        // Unified /cli/* dispatch. Auth + param validation +
+        // per-route handler all live in `crate::cli::dispatch`; main.rs
+        // just translates the CliResponse into bytes.
+        p if p.starts_with("/cli/") => {
+            let _ = stream.read(&mut buf).await;
+            let params = crate::parse_params(&path, &query);
+            let req_token = params.get("token").cloned().unwrap_or_default();
+            if req_token != *state.token {
+                let r = crate::cli::CliResponse::forbidden();
+                crate::send_response(&mut stream, r.status, r.content_type, &r.body).await;
+                return;
+            }
+            let resp = crate::cli::dispatch(p, &params);
+            crate::send_response(&mut stream, resp.status, resp.content_type, &resp.body).await;
+        }
+        "/events" => {
+            // Token check BEFORE the upgrade so unauthenticated clients
+            // see an HTTP 403 instead of a dangling WS close.
+            if !crate::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                crate::send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return;
+            }
+            // Hand off to tokio-tungstenite; the handshake is still
+            // unread in the stream buffer.
+            crate::events::serve_events_connection(stream, state.event_tx.clone()).await;
+        }
+        _ => {
+            let _ = stream.read(&mut buf).await;
+            crate::send_response(&mut stream, "404 Not Found", "text/plain", "not found\n").await;
+        }
+    }
+}
