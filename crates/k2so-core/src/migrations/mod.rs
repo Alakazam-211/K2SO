@@ -18,5 +18,10 @@ pub mod legacy_agent_types_v1;
 // `auto_pin_existing_agents_0_39_0` — flip pinned=1 for every workspace
 // that was in agent mode pre-0.39.0, so users upgrading don't see their
 // agents "disappear" from the top of the nav (the auto-promote-to-top
-// behavior was retired in 0.39.0).
+// behavior was retired in 0.39.0). 0.39.1 narrowed the filter to only
+// ('agent', 'custom') after the original ship over-pinned managers.
 pub mod auto_pin_existing_agents_0_39_0;
+// `correct_auto_pin_filter_0_39_1` — corrective migration for users who
+// already ran the buggy 0.39.0 version of auto_pin_existing_agents.
+// Unpins manager / coordinator / pod workspaces.
+pub mod correct_auto_pin_filter_0_39_1;

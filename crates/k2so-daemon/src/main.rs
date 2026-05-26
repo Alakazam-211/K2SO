@@ -282,6 +282,15 @@ async fn async_main() {
     // Gated by `code_migrations` so it's a one-shot pass per DB.
     run_auto_pin_existing_agents_migration();
 
+    // 0.39.1 correction — the 0.39.0 ship of the above migration had
+    // an over-broad filter that pinned manager/coordinator/pod
+    // workspaces too. This corrective migration unpins those for
+    // users who already ran the buggy version. Gated by its own
+    // `code_migrations` ID so it runs once per DB; no-op for fresh
+    // 0.39.1 installs (where the corrected filter pinned only
+    // agent + custom from the start).
+    run_correct_auto_pin_filter_migration();
+
     // Phase 2 Unit 4 — workspace_layouts one-shot migration moved
     // from `src-tauri/src/lib.rs::migrate_workspace_layouts_to_db`.
     // Reads `~/.k2so/settings.json#workspaceLayouts`, inserts each
@@ -781,6 +790,56 @@ fn run_auto_pin_existing_agents_migration() {
     log_debug!(
         "[daemon/migrations] auto_pin_existing_agents_0_39_0: pinned {} agent-mode workspaces; future boots will skip",
         outcome.pinned_count
+    );
+}
+
+/// 0.39.1 corrective — daemon-side runner for
+/// `correct_auto_pin_filter_0_39_1`.
+///
+/// 0.39.0 shipped with [`auto_pin_existing_agents_0_39_0`] using an
+/// over-broad filter that pinned `manager` / `coordinator` / `pod`
+/// workspaces in addition to the correct `agent` + `custom`. The
+/// pre-0.39.0 sidebar only auto-promoted `agent` + `custom` — the
+/// manager family never appeared in the auto-promoted Agents section.
+/// This corrective migration unpins the over-pinned manager-family
+/// workspaces for users who already ran the buggy 0.39.0 version.
+///
+/// Gated by its own `code_migrations` ID; one-shot per DB. No-op for
+/// fresh 0.39.1 installs where the 0.39.0 migration's corrected
+/// filter pinned only agent + custom from the start.
+///
+/// Errors swallowed (logged via `log_debug!`) — boot must not fail.
+fn run_correct_auto_pin_filter_migration() {
+    use k2so_core::migrations::correct_auto_pin_filter_0_39_1 as mig;
+
+    let db_arc = k2so_core::db::shared();
+    let conn = db_arc.lock();
+
+    if k2so_core::db::has_code_migration_applied(&conn, mig::MIGRATION_ID) {
+        return;
+    }
+
+    let outcome = match mig::run(&conn) {
+        Ok(o) => o,
+        Err(e) => {
+            log_debug!(
+                "[daemon/migrations] correct_auto_pin_filter_0_39_1 failed: {e}; will retry on next boot"
+            );
+            return;
+        }
+    };
+
+    k2so_core::db::mark_code_migration_applied(
+        &conn,
+        mig::MIGRATION_ID,
+        Some(&format!(
+            "unpinned {} over-pinned manager-family workspaces",
+            outcome.unpinned_count
+        )),
+    );
+    log_debug!(
+        "[daemon/migrations] correct_auto_pin_filter_0_39_1: unpinned {} workspaces",
+        outcome.unpinned_count
     );
 }
 

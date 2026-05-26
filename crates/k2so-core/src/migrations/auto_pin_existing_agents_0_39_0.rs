@@ -52,11 +52,18 @@ pub struct AutoPinOutcome {
 /// dedicated Agents section. Those are the workspaces that need to
 /// be pinned manually now that the auto-promotion is gone.
 pub fn run(conn: &Connection) -> Result<AutoPinOutcome, rusqlite::Error> {
+    // 0.39.1 fix: original 0.39.0 ship included manager / coordinator
+    // / pod in the filter, but the pre-0.39.0 sidebar only auto-
+    // promoted `agent` (K2SO Agent) and `custom` (Custom Agent) — not
+    // manager-mode workspaces. Filter narrowed to match the original
+    // auto-promote scope. See correct_auto_pin_filter_0_39_1 for the
+    // corrective migration that unpins manager/coordinator/pod for
+    // users who already ran the over-broad 0.39.0 version.
     let changed = conn.execute(
         "UPDATE projects \
          SET pinned = 1 \
          WHERE pinned = 0 \
-           AND agent_mode IN ('agent', 'custom', 'manager', 'coordinator', 'pod')",
+           AND agent_mode IN ('agent', 'custom')",
         [],
     )?;
     Ok(AutoPinOutcome { pinned_count: changed })
@@ -135,13 +142,17 @@ mod tests {
     }
 
     #[test]
-    fn manager_coordinator_pod_workspaces_all_get_pinned() {
+    fn manager_coordinator_pod_workspaces_are_NOT_pinned() {
+        // 0.39.1 narrowed the filter — manager-mode workspaces never
+        // auto-promoted pre-0.39.0 so they shouldn't be pinned by
+        // this migration. (See correct_auto_pin_filter_0_39_1 for the
+        // corrective migration that fixes the buggy 0.39.0 ship.)
         let conn = make_test_db();
         insert_project(&conn, "ws-manager", 0, "manager");
         insert_project(&conn, "ws-coordinator", 0, "coordinator");
         insert_project(&conn, "ws-pod", 0, "pod");
         let outcome = run(&conn).expect("run migration");
-        assert_eq!(outcome.pinned_count, 3);
+        assert_eq!(outcome.pinned_count, 0);
     }
 
     #[test]
@@ -155,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_modes_pins_only_agent_family() {
+    fn mixed_modes_pins_only_agent_and_custom() {
         let conn = make_test_db();
         insert_project(&conn, "off1", 0, "off");
         insert_project(&conn, "off2", 0, "off");
@@ -163,16 +174,17 @@ mod tests {
         insert_project(&conn, "custom1", 0, "custom");
         insert_project(&conn, "manager1", 0, "manager");
         let outcome = run(&conn).expect("run migration");
-        assert_eq!(outcome.pinned_count, 3);
-        // off workspaces stay unpinned
-        let off_pinned: i64 = conn
+        // Only agent1 + custom1 — manager1 stays unpinned (0.39.1 narrowed filter)
+        assert_eq!(outcome.pinned_count, 2);
+        // off + manager workspaces stay unpinned
+        let unpinned: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM projects WHERE pinned = 1 AND agent_mode = 'off'",
+                "SELECT COUNT(*) FROM projects WHERE pinned = 0",
                 [],
                 |row| row.get(0),
             )
-            .expect("count off pinned");
-        assert_eq!(off_pinned, 0);
+            .expect("count unpinned");
+        assert_eq!(unpinned, 3); // off1, off2, manager1
     }
 
     #[test]

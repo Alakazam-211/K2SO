@@ -3,6 +3,20 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.1 — Manager-pin fix
+
+Patch release. 0.39.0's one-shot migration over-pinned workspaces in
+**manager mode** (manager / coordinator / pod) — the pre-0.39.0
+sidebar only auto-promoted **K2SO Agent** and **Custom Agent**
+workspaces, so manager-mode shouldn't have been pinned by the
+migration. 0.39.1 ships a corrective one-shot migration that unpins
+those manager-family workspaces on first launch.
+
+**This only happens once.** After the corrective migration runs,
+your pin choices are yours to keep — re-pin any manager workspaces
+you want at the top (right-click → Pin) and they stay pinned across
+all future versions.
+
 ## 0.39.0 — Clean foundation: new CLI, unified sidebar, chat/inbox everywhere
 
 The first public release after a major behind-the-scenes refactor. K2SO
