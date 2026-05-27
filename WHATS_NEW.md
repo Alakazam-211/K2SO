@@ -3,6 +3,30 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.6 — Terminal-stall storm fixed
+
+Bug-fix release. If you ever saw every terminal session **lag or stall
+for about 15 seconds at once** — usually with a lot of agent terminals
+open — then "come back to life" on its own, this is the release that
+ends it.
+
+**What was happening:** the renderer's "Active agents" sidebar polled
+every running terminal individually every 2.5 seconds, firing one
+small HTTP request per terminal. On a box with many agent terminals
+that meant a periodic flood of requests through the WebView's
+networking stack — enough to spike renderer CPU to 80–128% and stall
+every terminal at once until the storm cleared. The daemon was idle
+throughout (a victim, not the cause).
+
+**What's fixed:** the sidebar now makes **one request per poll**
+instead of one per terminal, and stops re-rendering the active-agents
+list when nothing has actually changed. Behaviour is identical — same
+agents detected, same idle/active dots — just without the
+request-storm side-effect.
+
+Thanks to the user who profiled this in production and submitted the
+fix.
+
 ## 0.39.5 — No more blank window after an update
 
 Bug-fix release. If you ever updated K2SO and landed on a blank/black
