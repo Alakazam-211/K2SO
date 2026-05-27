@@ -4,7 +4,8 @@ import { daemonCliGet } from '@/lib/daemon-cli'
 import {
   terminalCreate,
   terminalExists,
-  terminalGetForegroundCommand,
+  terminalListRunning,
+  type RunningTerminalInfo,
 } from '@/lib/terminal-daemon'
 import { useTabsStore, type TerminalItemData } from './tabs'
 import { useToastStore } from './toast'
@@ -15,6 +16,31 @@ import { KNOWN_AGENT_COMMANDS, AGENT_IDLE_THRESHOLD_MS } from '@shared/constants
 import { agentChatId, worktreeChatId } from '@/lib/terminal-id'
 
 export type PaneStatus = 'idle' | 'working' | 'permission' | 'review'
+
+/** Structural equality for the polled agents map. Lets `pollOnce` keep the
+ *  existing `agents` Map reference (and avoid a spurious re-render of every
+ *  subscriber) when a poll cycle yields the same set of agents. */
+function agentMapsEqual(
+  a: Map<string, ActiveAgent>,
+  b: Map<string, ActiveAgent>,
+): boolean {
+  if (a.size !== b.size) return false
+  for (const [id, av] of a) {
+    const bv = b.get(id)
+    if (
+      !bv ||
+      av.command !== bv.command ||
+      av.status !== bv.status ||
+      av.hookStatus !== bv.hookStatus ||
+      av.tabId !== bv.tabId ||
+      av.tabTitle !== bv.tabTitle ||
+      av.groupIndex !== bv.groupIndex
+    ) {
+      return false
+    }
+  }
+  return true
+}
 
 export interface ActiveAgent {
   terminalId: string
@@ -389,29 +415,41 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
     const now = Date.now()
     const { agents: oldAgents, outputTimestamps } = get()
 
-    await Promise.all(
-      terminals.map(async (t) => {
-        try {
-          const command = await terminalGetForegroundCommand(t.terminalId)
-          if (command && KNOWN_AGENT_COMMANDS.has(command)) {
-            const lastOutput = outputTimestamps.get(t.terminalId) ?? 0
-            const status: 'active' | 'idle' = (now - lastOutput < AGENT_IDLE_THRESHOLD_MS) ? 'active' : 'idle'
+    // Fetch every live PTY's foreground command in a SINGLE request
+    // (`/cli/terminal/list-running`) instead of one
+    // `/cli/terminal/foreground-cmd` request per terminal. The old
+    // per-terminal `Promise.all` fired N HTTP requests on every poll
+    // (~2.5s); with many open terminals that flooded the WebView's
+    // network stack (WebKit ResourceRequest churn) and was a prime
+    // contributor to the intermittent terminal-stall storm. `list-running`
+    // computes the identical `get_foreground_command` per terminal
+    // daemon-side, so this is behaviour-preserving — just one round-trip.
+    let running: RunningTerminalInfo[] = []
+    try {
+      running = await terminalListRunning()
+    } catch {
+      // Daemon momentarily unreachable — skip this cycle's agent
+      // detection rather than thrash with per-terminal retries.
+    }
+    const cmdByTerminal = new Map(running.map((r) => [r.terminalId, r.command]))
 
-            newAgents.set(t.terminalId, {
-              terminalId: t.terminalId,
-              command,
-              tabId: t.tabId,
-              tabTitle: t.tabTitle,
-              groupIndex: t.groupIndex,
-              status,
-              hookStatus: get().paneStatuses.get(t.terminalId) ?? 'idle',
-            })
-          }
-        } catch {
-          // Terminal may have been killed — ignore
-        }
-      })
-    )
+    for (const t of terminals) {
+      const command = cmdByTerminal.get(t.terminalId) ?? null
+      if (command && KNOWN_AGENT_COMMANDS.has(command)) {
+        const lastOutput = outputTimestamps.get(t.terminalId) ?? 0
+        const status: 'active' | 'idle' = (now - lastOutput < AGENT_IDLE_THRESHOLD_MS) ? 'active' : 'idle'
+
+        newAgents.set(t.terminalId, {
+          terminalId: t.terminalId,
+          command,
+          tabId: t.tabId,
+          tabTitle: t.tabTitle,
+          groupIndex: t.groupIndex,
+          status,
+          hookStatus: get().paneStatuses.get(t.terminalId) ?? 'idle',
+        })
+      }
+    }
 
     // Detect transitions and fire toasts
     const toast = useToastStore.getState()
@@ -492,10 +530,19 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
       }
     }
 
-    if (statusesChanged) {
+    // Only replace the `agents` Map reference when its contents actually
+    // changed. Pre-fix this unconditionally set a fresh Map every poll
+    // (~2.5s), forcing every component subscribing to `agents` (sidebar
+    // Active section, IconRail, …) to re-render every cycle even when
+    // nothing changed — sustained re-render churn that amplified the
+    // terminal-stall storm. (`paneStatuses` already had this guard.)
+    const agentsChanged = !agentMapsEqual(oldAgents, newAgents)
+    if (agentsChanged && statusesChanged) {
       set({ agents: newAgents, paneStatuses: cleanedStatuses })
-    } else {
+    } else if (agentsChanged) {
       set({ agents: newAgents })
+    } else if (statusesChanged) {
+      set({ paneStatuses: cleanedStatuses })
     }
   },
 }))
