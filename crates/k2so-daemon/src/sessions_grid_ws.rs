@@ -127,9 +127,10 @@ static NEXT_SUBSCRIBER_ID: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 
 pub async fn serve_session_grid_connection(
-    stream: TcpStream,
+    stream: &mut TcpStream,
     params: HashMap<String, String>,
 ) {
+    // 0.39.7: stream borrowed (was owned). See events.rs.
     let session_id = match params.get("session").and_then(|s| SessionId::parse(s)) {
         Some(id) => id,
         None => {
@@ -557,7 +558,7 @@ where
     })
 }
 
-async fn send_error_then_close(stream: TcpStream, msg: &str) {
+async fn send_error_then_close(stream: &mut TcpStream, msg: &str) {
     let err = Outbound::Error {
         message: msg.to_string(),
     };

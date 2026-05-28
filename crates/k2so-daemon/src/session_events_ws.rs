@@ -63,9 +63,10 @@ struct ErrorEvent {
 /// after token auth + query parsing. `params` carries the parsed
 /// query string; we require `path` and 400 on absence.
 pub async fn serve_session_events_connection(
-    stream: TcpStream,
+    stream: &mut TcpStream,
     params: HashMap<String, String>,
 ) {
+    // 0.39.7: stream borrowed (was owned). See events.rs.
     let workspace_path = match params.get("path").map(String::as_str) {
         Some(p) if !p.is_empty() => p.to_string(),
         _ => {
@@ -209,7 +210,7 @@ where
     })
 }
 
-async fn send_error_then_close(stream: TcpStream, msg: &str) {
+async fn send_error_then_close(stream: &mut TcpStream, msg: &str) {
     let err = ErrorEvent {
         kind: "error",
         message: msg.to_string(),

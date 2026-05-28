@@ -55,9 +55,10 @@ use k2so_core::session::{registry, SessionId};
 /// cleanly on any protocol / lookup failure so the caller's
 /// connection handler can drop the socket.
 pub async fn serve_session_bytes_connection(
-    stream: TcpStream,
+    stream: &mut TcpStream,
     params: HashMap<String, String>,
 ) {
+    // 0.39.7: stream borrowed (was owned). See events.rs.
     let session_id = match params.get("session").and_then(|s| SessionId::parse(s)) {
         Some(id) => id,
         None => {
@@ -237,7 +238,7 @@ pub async fn serve_session_bytes_connection(
 /// Pre-upgrade HTTP error response. The socket is still raw HTTP
 /// when we send this — the caller invoked us before the WS
 /// handshake, so a 400 with a JSON error body is appropriate.
-async fn send_error_then_close(mut stream: TcpStream, message: &str) {
+async fn send_error_then_close(stream: &mut TcpStream, message: &str) {
     use tokio::io::AsyncWriteExt;
     let body = format!("{{\"error\":{}}}", serde_json::json!(message));
     let resp = format!(

@@ -62,9 +62,21 @@ pub(crate) fn project_param(
 }
 
 /// Write a single HTTP response with the canonical header set the
-/// daemon emits on every route — `Connection: close`, permissive CORS
-/// for the Tauri WebView, content-length, the supplied status and
-/// content-type.
+/// daemon emits on every route — permissive CORS for the Tauri
+/// WebView, content-length, the supplied status and content-type.
+///
+/// **0.39.7:** This function no longer emits `Connection: close`.
+/// HTTP/1.1's default is keep-alive; the dispatcher loops on the same
+/// `TcpStream` to serve subsequent requests, so we let the connection
+/// stay open and rely on the client-supplied `Connection: close`
+/// header (or the dispatcher's idle-timeout) to tear it down.
+///
+/// Why this matters: macOS's WKWebView Networking process has a
+/// soft `RLIMIT_NOFILE = 256`. Pre-0.39.7 every renderer fetch was a
+/// fresh TCP socket because of the forced close; WKWebView's slow
+/// fd cleanup left a steady stream of `CLOSE_WAIT` sockets that
+/// progressively filled the table and locked up the UI after ~50min
+/// of normal use. See issue #2 + `release-notes-0.39.7.md`.
 pub(crate) async fn send_response(stream: &mut TcpStream, status: &str, ct: &str, body: &str) {
     // CORS headers on every response so the Tauri WebView (cross-
     // origin from tauri://localhost or http://localhost:5173 to
@@ -75,8 +87,7 @@ pub(crate) async fn send_response(stream: &mut TcpStream, status: &str, ct: &str
          Content-Type: {ct}\r\n\
          Content-Length: {}\r\n\
          Access-Control-Allow-Origin: *\r\n\
-         Access-Control-Expose-Headers: *\r\n\
-         Connection: close\r\n\r\n{}",
+         Access-Control-Expose-Headers: *\r\n\r\n{}",
         body.len(),
         body,
     );
@@ -86,15 +97,50 @@ pub(crate) async fn send_response(stream: &mut TcpStream, status: &str, ct: &str
 /// Respond to a CORS preflight (OPTIONS) with permissive headers so
 /// the WebView accepts the subsequent GET/POST. 204 No Content is
 /// the conventional preflight response status.
+///
+/// **0.39.7:** as with [`send_response`], no longer emits
+/// `Connection: close`. The same TCP connection is then reused for
+/// the actual GET/POST that the preflight authorized — saves a
+/// socket per write-side operation.
 pub(crate) async fn send_cors_preflight(stream: &mut TcpStream) {
     let resp = "HTTP/1.1 204 No Content\r\n\
         Access-Control-Allow-Origin: *\r\n\
         Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
         Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
         Access-Control-Max-Age: 600\r\n\
-        Content-Length: 0\r\n\
-        Connection: close\r\n\r\n";
+        Content-Length: 0\r\n\r\n";
     let _ = stream.write_all(resp.as_bytes()).await;
+}
+
+/// Parse a `Connection:` header value from a request-headers blob
+/// (the first chunk of the request, up through `\r\n\r\n`) and
+/// return `true` iff it explicitly requests `close`.
+///
+/// 0.39.7: the dispatcher uses this to decide whether to break out
+/// of the keep-alive loop after responding. HTTP/1.1's default is
+/// keep-alive, so absence of the header (or any non-`close` value)
+/// means "keep the socket open." Comparison is ASCII-case-insensitive
+/// per RFC 9110 §5.6.
+pub(crate) fn request_wants_close(headers_blob: &str) -> bool {
+    for line in headers_blob.lines() {
+        // Header lines are `Field-Name: value` with optional folding
+        // (which RFC 7230 deprecated; we don't handle it). Locate the
+        // colon, lowercase the field name in-place via ASCII.
+        let Some(colon) = line.find(':') else { continue };
+        let name = &line[..colon];
+        if !name.eq_ignore_ascii_case("connection") {
+            continue;
+        }
+        let value = line[colon + 1..].trim();
+        // `Connection` is comma-separated tokens (e.g.
+        // `keep-alive, Upgrade`). Match `close` token-wise.
+        for tok in value.split(',') {
+            if tok.trim().eq_ignore_ascii_case("close") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Method-gate guard for POST-only `/cli/*` routes.
@@ -329,5 +375,65 @@ mod tests {
             params.is_empty(),
             "expected empty params, got: {params:?}",
         );
+    }
+
+    // ── request_wants_close: keep-alive break-out gate ──────────────
+
+    #[test]
+    fn request_wants_close_returns_false_when_header_absent() {
+        // HTTP/1.1 default is keep-alive — absence of `Connection`
+        // means the loop should keep going.
+        let headers = "GET /cli/foo HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+        assert!(!request_wants_close(headers));
+    }
+
+    #[test]
+    fn request_wants_close_returns_true_for_explicit_close() {
+        let headers = "GET / HTTP/1.1\r\nConnection: close\r\n";
+        assert!(request_wants_close(headers));
+    }
+
+    #[test]
+    fn request_wants_close_returns_false_for_keep_alive() {
+        // HTTP/1.0 clients send this explicitly to opt in; HTTP/1.1
+        // ones may send it redundantly. Either way: not close.
+        let headers = "GET / HTTP/1.1\r\nConnection: keep-alive\r\n";
+        assert!(!request_wants_close(headers));
+    }
+
+    #[test]
+    fn request_wants_close_is_case_insensitive_on_field_name_and_value() {
+        // RFC 9110 §5.6: field names + token values are case-insensitive.
+        // We must not miss `CONNECTION: CLOSE` or `connection: Close`.
+        assert!(request_wants_close("GET / HTTP/1.1\r\nCONNECTION: CLOSE\r\n"));
+        assert!(request_wants_close("GET / HTTP/1.1\r\nconnection: Close\r\n"));
+    }
+
+    #[test]
+    fn request_wants_close_handles_token_in_multi_value_header() {
+        // `Connection` is a comma-separated token list. `close` may
+        // appear alongside e.g. `Upgrade`. We must find it.
+        assert!(request_wants_close(
+            "GET / HTTP/1.1\r\nConnection: keep-alive, close\r\n"
+        ));
+        assert!(request_wants_close(
+            "GET / HTTP/1.1\r\nConnection: Upgrade, close\r\n"
+        ));
+    }
+
+    #[test]
+    fn request_wants_close_ignores_unrelated_headers_containing_close() {
+        // `X-Close-Reason: close` is NOT a Connection header. The
+        // field-name match must gate against this.
+        let headers =
+            "GET / HTTP/1.1\r\nX-Close-Reason: close\r\nCookie: close=foo\r\n";
+        assert!(!request_wants_close(headers));
+    }
+
+    #[test]
+    fn request_wants_close_handles_no_value() {
+        // `Connection:` with no value should not match.
+        let headers = "GET / HTTP/1.1\r\nConnection:\r\n";
+        assert!(!request_wants_close(headers));
     }
 }

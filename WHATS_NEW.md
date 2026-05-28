@@ -3,6 +3,30 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.7 — No more "K2SO slows down over the hour" lockups
+
+Bug-fix release. If you ever ran K2SO for ~45 min to an hour and watched
+it progressively slow down — file tree's `loading…` indicator lengthening,
+terminals stalling for stretches, then everything "coming back to life
+out of nowhere" — this is the release that ends it.
+
+**What was happening:** every fetch the app made to its own background
+daemon was a brand-new TCP connection, because the daemon forced
+`Connection: close` on every response. macOS's web-renderer process
+has a default cap of 256 sockets, and it cleans them up slowly. Over
+~50 minutes of normal use the leftover sockets piled up against that
+ceiling, and new requests had to wait for the kernel to time out old
+sockets before they could go through. That's the "loading…" lengthening
+and the freezes-then-recovery you saw.
+
+**What's fixed:** the daemon now reuses one TCP connection for many
+requests (standard HTTP keep-alive). Sockets recycle properly; the
+~50-min wall is gone. A user reported the bug with a full live-CPU +
+`lsof` + `sample` profile that nailed the root cause — credit to them
+for the diagnosis.
+
+Nothing for you to do — just smoother long sessions from here on.
+
 ## 0.39.6 — Terminal-stall storm fixed
 
 Bug-fix release. If you ever saw every terminal session **lag or stall

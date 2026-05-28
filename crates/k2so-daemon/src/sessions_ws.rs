@@ -43,9 +43,10 @@ use k2so_core::session::{registry, Frame, SessionId};
 /// daemon's connection handler can drop the socket without
 /// additional handling.
 pub async fn serve_session_subscribe_connection(
-    stream: TcpStream,
+    stream: &mut TcpStream,
     params: HashMap<String, String>,
 ) {
+    // 0.39.7: stream borrowed (was owned). See events.rs.
     let session_id = match params.get("session").and_then(|s| SessionId::parse(s)) {
         Some(id) => id,
         None => {
@@ -221,7 +222,7 @@ pub async fn serve_session_subscribe_connection(
 /// Attempt to send a pre-upgrade HTTP error response. The caller
 /// used `serve_session_subscribe_connection` before the WS upgrade
 /// happened, so the socket is still raw HTTP.
-async fn send_error_then_close(mut stream: TcpStream, message: &str) {
+async fn send_error_then_close(stream: &mut TcpStream, message: &str) {
     use tokio::io::AsyncWriteExt;
     let body = format!("{{\"error\":{}}}", serde_json::json!(message));
     let resp = format!(

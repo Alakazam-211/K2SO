@@ -77,7 +77,10 @@ pub struct HandlerResult {
 /// bus, and fan every signal out to the connected client as a JSON
 /// text message. Exits when the bus closes (daemon shutdown) or
 /// the client disconnects.
-pub async fn serve_awareness_subscribe_connection(stream: TcpStream) {
+pub async fn serve_awareness_subscribe_connection(stream: &mut TcpStream) {
+    // 0.39.7: stream borrowed (was owned). See `events.rs` for
+    // rationale — dispatcher keeps stream ownership across its
+    // keep-alive loop iterations.
     let ws = match tokio_tungstenite::accept_async(stream).await {
         Ok(ws) => ws,
         Err(e) => {

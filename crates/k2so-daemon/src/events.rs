@@ -88,9 +88,16 @@ impl AgentHookEventSink for DaemonBroadcastSink {
 /// consume the handshake bytes directly. Returns when the client
 /// disconnects, the broadcast channel drops, or a write fails.
 pub async fn serve_events_connection(
-    stream: TcpStream,
+    stream: &mut TcpStream,
     tx: Arc<broadcast::Sender<WireEvent>>,
 ) {
+    // 0.39.7: stream is borrowed (was owned). The dispatcher keeps
+    // ownership of the TcpStream across iterations of its keep-alive
+    // loop; WS handoffs only need read/write access for the lifetime
+    // of the upgraded connection. `tokio_tungstenite::accept_async`
+    // accepts &mut TcpStream because the blanket AsyncRead/AsyncWrite
+    // impl on &mut T satisfies its `S: AsyncRead + AsyncWrite + Unpin`
+    // bound.
     let ws = match tokio_tungstenite::accept_async(stream).await {
         Ok(ws) => ws,
         Err(e) => {

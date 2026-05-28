@@ -34,8 +34,11 @@ async fn start_awareness_subscribe_server() -> u16 {
         .expect("bind loopback");
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.expect("accept");
-        k2so_daemon::awareness_ws::serve_awareness_subscribe_connection(stream).await;
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        // 0.39.7: WS handlers now borrow the stream (so the daemon's
+        // keep-alive dispatcher can own it across HTTP iterations).
+        // Test owns its own stream and passes a mutable borrow.
+        k2so_daemon::awareness_ws::serve_awareness_subscribe_connection(&mut stream).await;
     });
     port
 }
