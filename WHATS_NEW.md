@@ -3,6 +3,24 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.9 — Hotfix: exited terminals stay exited
+
+Hotfix for a regression introduced in 0.39.8's reconnect logic. If a
+terminal's child process exited (you closed a shell with `exit`, an
+agent ran to completion, etc.) at exactly the moment the daemon's
+WebSocket connection dropped, the new reconnect path would
+incorrectly resurrect the exited terminal as a brand-new shell
+session — visually confusing and wrong.
+
+0.39.9 fixes that: an exited terminal stays exited, even if the
+WebSocket teardown races the child-exit event. Normal mid-flight
+WebSocket reconnects (the actual fix from 0.39.8) work exactly as
+before.
+
+If you didn't see any weird "my terminal that ran to completion came
+back as a fresh shell" behavior on 0.39.8 — congrats, you weren't
+hitting the race; just update and move on.
+
 ## 0.39.8 — Terminal panes recover from network blips + no more "frame stalls"
 
 Two distinct long-running-session bugs fixed, both reported with

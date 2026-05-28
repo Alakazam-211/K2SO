@@ -363,6 +363,26 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   // pane really unmounts.
   const [reconnectAttempt, setReconnectAttempt] = useState(0)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 0.39.9: phase, but as a ref. `ws.onclose` (bound inside the boot
+  // effect) needs to consult the LATEST phase to know whether to
+  // skip reconnect after a real `child_exit` — but the closure
+  // captured `phase` from when `boot()` ran, so a phase change in
+  // `onmessage` (e.g. setPhase({kind:'exited',...})) wouldn't be
+  // visible inside `onclose`. Pre-0.39.9 that meant a child exit
+  // followed by the daemon dropping the WS would resurrect the
+  // terminal as a fresh session. We mirror `phase` into a ref via
+  // a tiny useEffect below, then `onclose` reads `phaseRef.current`.
+  const phaseRef = useRef<Phase>({ kind: 'idle' })
+  // 0.39.9: keep `phaseRef` in lockstep with `phase` so the boot
+  // effect's `ws.onclose` closure can always read the latest phase
+  // when deciding whether to skip reconnect after `child_exit`.
+  // Without this sync, the closure would see whatever `phase` value
+  // was current when the boot effect last ran — which is stale by
+  // the time `onclose` fires after a `child_exit` message updates
+  // phase via the renderer's own `setPhase` call.
+  useEffect(() => {
+    phaseRef.current = phase
+  }, [phase])
   const [snapshot, setSnapshot] = useState<TermGridSnapshot | null>(null)
   const [viewportOffset, setViewportOffset] = useState(0)
   const [isFocused, setIsFocused] = useState<boolean>(() =>
@@ -929,13 +949,26 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
             useActiveAgentsStore.getState().recordTitleActivity(terminalId, false)
             break
           }
-          case 'child_exit':
-            setPhase({
+          case 'child_exit': {
+            // 0.39.9: update `phaseRef.current` SYNCHRONOUSLY with
+            // the setPhase call. The phase-sync useEffect runs after
+            // React commits, but the daemon typically closes the WS
+            // in the same JS task after sending `child_exit` — so
+            // `ws.onclose` fires before the useEffect has a chance
+            // to update the ref. Writing the ref inline here lets
+            // `ws.onclose` correctly see phase=exited and skip the
+            // reconnect. Without this, the closure-capture fix from
+            // 0.39.8 → 0.39.9 still has a synchronous-event race
+            // that resurrects the exited terminal.
+            const next: Phase = {
               kind: 'exited',
               sessionId: spawn.sessionId,
               exitCode: parsed.payload.exit_code,
-            })
+            }
+            phaseRef.current = next
+            setPhase(next)
             break
+          }
           case 'error':
             setPhase({ kind: 'error', message: parsed.payload.message })
             break
@@ -962,10 +995,21 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
         // returning the SAME sessionId for an already-existing
         // session, so the PTY survives intact across the reconnect.
         if (cancelled) return
-        // Real child exit (user closed the terminal) — don't reconnect.
-        // The child_exit ws-message handler above sets phase=exited;
-        // any onclose that follows is part of the natural teardown.
-        if (phase.kind === 'exited') return
+        // Real child exit (the child process actually exited) — don't
+        // reconnect. The `child_exit` ws-message handler above sets
+        // phase=exited via `setPhase`; any onclose that follows is
+        // part of the natural teardown.
+        //
+        // 0.39.9: read from `phaseRef.current`, not the closure-
+        // captured `phase`. The boot effect captures `phase` at the
+        // time `boot()` runs, but `child_exit` updates phase via
+        // `setPhase` AFTER that — so the closure-captured `phase`
+        // is stale by the time `onclose` actually fires. Reading
+        // through the ref (synced via the useEffect above) sees the
+        // current value. Without this fix, a real child exit racing
+        // the daemon's WS teardown would resurrect the exited
+        // terminal as a fresh spawn on reconnect. See 0.39.8 regression.
+        if (phaseRef.current.kind === 'exited') return
         // Coalesce: if a timer is already pending, don't double-schedule.
         if (reconnectTimerRef.current !== null) return
         // Backoff between attempts. Caps at 5s so a sustained outage
