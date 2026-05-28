@@ -3,6 +3,50 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.8 — Terminal panes recover from network blips + no more "frame stalls"
+
+Two distinct long-running-session bugs fixed, both reported with
+deep diagnostic profiles by external users. Combined with 0.39.7's
+fd-exhaustion fix, multi-hour K2SO sessions should now stay smooth.
+
+### Terminal panes survive network blips (was: silently frozen until quit)
+
+Before: if a WebSocket between K2SO and its background daemon dropped
+mid-flight — TCP reset, macOS App Nap, network blip — the terminal
+pane went silently dead. Last frame stayed on screen, keystrokes
+went nowhere, and the only fix was to quit and relaunch the app.
+Cause: the WS `close` handler was a no-op, with no reconnect path.
+
+Now: each terminal pane automatically reconnects within ~500 ms of
+a drop (with a brief backoff for sustained outages). The PTY
+session survives intact — your shell history, scrollback, and
+running program continue. You'll see the pane go to "Connecting…"
+briefly and then come back to life.
+
+The session-events subscription (which keeps the workspace sidebar
+in sync) got the same treatment: any error or close now triggers
+an idempotent reconnect. Closes a gap where WebKit Networking
+hiccups could leave that channel silently dead.
+
+### Terminal output no longer "freezes then snaps"
+
+Before: in long sessions, every terminal could intermittently freeze
+for a beat then "catch up" all at once. The renderer was hot-looping
+focus claims/releases to the daemon, eventually overrunning the
+daemon's broadcast buffer by **thousands** of frames; recovery
+required the daemon to flush a fresh full-grid snapshot. During the
+overrun window all subscribers stopped seeing live updates.
+
+Now: focus claims are deduplicated at the WebSocket-send level, so
+the daemon only hears about real focus transitions (not React
+re-render noise). In the common single-viewer case, the channel goes
+completely silent except for legitimate user-driven focus changes
+— and the broadcast buffer never overruns.
+
+Thanks to the users who profiled both of these in production
+(Issues #3 and #5) and submitted complete fix recommendations along
+with their diagnoses.
+
 ## 0.39.7 — No more "K2SO slows down over the hour" lockups
 
 Bug-fix release. If you ever ran K2SO for ~45 min to an hour and watched

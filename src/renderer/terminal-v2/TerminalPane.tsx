@@ -352,6 +352,17 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   const linkClickMode = useTerminalSettingsStore((s) => s.linkClickMode)
 
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' })
+  // Issue #5: mid-flight WS drops (TCP reset, WebKit Networking
+  // throttling, brief process pressure) used to leave the terminal
+  // silently frozen on its last frame — `ws.onclose` was a no-op so
+  // no reconnect path existed. `reconnectAttempt` is bumped from
+  // `onclose` after a backoff timer; it's in the boot effect's dep
+  // array, so the effect tears down + re-runs (fresh spawn — daemon's
+  // /cli/sessions/v2/spawn is idempotent on agent_name, returns the
+  // same sessionId — and fresh WS handshake). Reset to 0 when the
+  // pane really unmounts.
+  const [reconnectAttempt, setReconnectAttempt] = useState(0)
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [snapshot, setSnapshot] = useState<TermGridSnapshot | null>(null)
   const [viewportOffset, setViewportOffset] = useState(0)
   const [isFocused, setIsFocused] = useState<boolean>(() =>
@@ -779,6 +790,25 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
 
       if (!ws) return // unreachable; satisfies TS
       wsRef.current = ws
+      // Issue #5 (re-prime active-viewer handshake on each WS
+      // (re)connect): the daemon-side subscriber that opens on the
+      // new WS is fresh and has no notion that we were previously
+      // "active". Reset the send-level dedup AND emit the current
+      // focus state so the daemon's `active_subscriber` tracking
+      // is correct on the new connection. Without this, a reconnect
+      // would leave a focused window with `lastSentActiveRef === true`
+      // → next focus-change would short-circuit (value unchanged) →
+      // daemon never learns we're the active viewer.
+      lastSentActiveRef.current = null
+      const focusedAtConnect = useWindowFocusStore.getState().isFocused
+      try {
+        ws.send(JSON.stringify({ action: 'set_active', active: focusedAtConnect }))
+        lastSentActiveRef.current = focusedAtConnect
+      } catch {
+        // WS could be in a half-open state right after handshake.
+        // The set_active effect's focus subscriber will recover on
+        // the next focus change via dedup-guarded sendSetActive.
+      }
       // Note: ws.onopen is intentionally NOT set here — the connect
       // retry loop above handled the open path and logged perf.
       // Setting onopen on an already-open socket would never fire
@@ -921,9 +951,42 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
           prev.kind === 'exited' ? prev : { kind: 'error', message: 'ws error' },
         )
       }
-      ws.onclose = () => {
-        // Clean client-side state. Session on daemon is unaffected
-        // unless the daemon itself closed (child exit handled above).
+      ws.onclose = (ev) => {
+        // Issue #5: pre-0.39.8 this was a no-op, leaving the terminal
+        // permanently silent after any mid-flight WS drop (TCP reset,
+        // WebKit Networking quirk, App Nap, etc.). Now we schedule a
+        // reconnect — bump `reconnectAttempt`, the boot effect's
+        // dep array sees the change and re-runs (fresh spawn +
+        // fresh WS handshake). The daemon's
+        // `/cli/sessions/v2/spawn` is idempotent on `agent_name`,
+        // returning the SAME sessionId for an already-existing
+        // session, so the PTY survives intact across the reconnect.
+        if (cancelled) return
+        // Real child exit (user closed the terminal) — don't reconnect.
+        // The child_exit ws-message handler above sets phase=exited;
+        // any onclose that follows is part of the natural teardown.
+        if (phase.kind === 'exited') return
+        // Coalesce: if a timer is already pending, don't double-schedule.
+        if (reconnectTimerRef.current !== null) return
+        // Backoff between attempts. Caps at 5s so a sustained outage
+        // doesn't spin forever, but the first reconnect after a
+        // single-shot drop is fast (~500ms) so the user barely sees it.
+        const delayMs = Math.min(500 * 2 ** Math.min(reconnectAttempt, 4), 5000)
+        if (import.meta.env.DEV) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[v2-reconnect] tid=${terminalId.slice(0, 8)} ws closed (code=${ev.code}) — reconnect in ${delayMs}ms (attempt #${reconnectAttempt + 1})`,
+          )
+        }
+        // Phase → 'connecting' so the UI shows we're recovering,
+        // not stuck in 'ready' with a dead WS underneath.
+        setPhase((prev) =>
+          prev.kind === 'exited' ? prev : { kind: 'connecting', sessionId: spawn.sessionId },
+        )
+        reconnectTimerRef.current = setTimeout(() => {
+          reconnectTimerRef.current = null
+          setReconnectAttempt((n) => n + 1)
+        }, delayMs)
       }
     }
 
@@ -931,6 +994,14 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
 
     return () => {
       cancelled = true
+      // Issue #5: cancel any pending reconnect timer when the boot
+      // effect tears down (real unmount OR a reconnect-driven re-run).
+      // Without this, a re-run would schedule a new connect on top of
+      // a pending one and we'd race two parallel handshakes.
+      if (reconnectTimerRef.current !== null) {
+        clearTimeout(reconnectTimerRef.current)
+        reconnectTimerRef.current = null
+      }
       // Close the WS but do NOT call /cli/sessions/v2/close.
       // Daemon session survives. Deliberate tab-close teardown
       // is wired in A6 via tabs.ts::removeTab.
@@ -940,7 +1011,11 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       }
       wsRef.current = null
     }
-  }, [terminalId, cwd, command, args?.join('\0')])
+    // `reconnectAttempt` in the dep array is what re-triggers boot()
+    // on a WS drop (see ws.onclose above). Each bump tears this effect
+    // down via the cleanup return above, then re-runs the body with
+    // a fresh spawn + handshake.
+  }, [terminalId, cwd, command, args?.join('\0'), reconnectAttempt])
 
   // ── A7.5 perf: first_render + tui_first_paint + SUMMARY ──────
   // first_render fires once after `setSnapshot` causes a paint.
@@ -1121,11 +1196,40 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   // mounted pane in a non-focused window would never tell the
   // daemon it exists, leaving `active_subscriber` stale until the
   // next focus transition.
+  // Tracks the last `set_active` value we sent over THIS pane's WS so
+  // we can short-circuit duplicate emissions. Ref (not state) — the
+  // value is wire-protocol state, not React state; we never want a
+  // re-render from updating it. Reset to `null` (== "no value sent
+  // yet") whenever `wsRef.current` changes identity (a new WS = a new
+  // dedup window). See the effect below.
+  const lastSentActiveRef = useRef<boolean | null>(null)
+
   useEffect(() => {
+    // The active-viewer handshake is a feature, not noise — it tells
+    // the daemon WHICH connected client is the live viewer so it can
+    // size the grid and route focus events correctly when multiple
+    // clients share one PTY (desktop + mobile, or split panes). In
+    // the single-viewer case it should be silent: one initial claim
+    // when the WS opens, then nothing until window focus genuinely
+    // changes.
+    //
+    // The send-level dedup (`lastSentActiveRef`) makes that
+    // single-viewer silence robust regardless of how often upstream
+    // re-renders this effect — a defense against the thrash filed as
+    // Issue #3 where the daemon's grid broadcast overran by 3409
+    // events because the renderer was emitting `set_active` in a
+    // tight loop. (Caused by `phase.kind` churn re-firing the effect
+    // and the focus subscriber re-emitting on each transition with
+    // no idempotence guard.)
     const sendSetActive = (active: boolean): void => {
+      // Idempotent: skip the WS write if the daemon already saw
+      // this exact value from us. Closes Issue #3 even if upstream
+      // (`isFocused`, `phase.kind`) ever flaps again.
+      if (lastSentActiveRef.current === active) return
       const ws = wsRef.current
       if (!ws || ws.readyState !== WebSocket.OPEN) return
       ws.send(JSON.stringify({ action: 'set_active', active }))
+      lastSentActiveRef.current = active
     }
 
     let wasFocused = useWindowFocusStore.getState().isFocused
@@ -1155,8 +1259,29 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       }
       wasFocused = nowFocused
     })
-    return () => { unsub() }
-  }, [phase.kind])
+    return () => {
+      unsub()
+      // Symmetric cleanup — if we claimed active on mount, release
+      // on unmount so the daemon's `active_subscriber` tracking
+      // doesn't think a torn-down pane is still the active viewer.
+      // The send-level dedup means this is a no-op when we never
+      // claimed (initial `isFocused` was false), so it's safe to
+      // call unconditionally.
+      const ws = wsRef.current
+      if (ws && ws.readyState === WebSocket.OPEN && lastSentActiveRef.current === true) {
+        ws.send(JSON.stringify({ action: 'set_active', active: false }))
+        lastSentActiveRef.current = false
+      }
+    }
+    // NOTE: `phase.kind` was previously in this dep array — pre-Issue
+    // #3 it caused this effect to tear down + re-mount on every phase
+    // transition (mount, ready, exited, error, …), each time re-firing
+    // the initial `sendSetActive(wasFocused)` and starting a fresh
+    // focus subscriber. The effect body doesn't actually read
+    // `phase.kind` (it reads `wsRef.current` + the focus store), so
+    // the dep was load-bearing for nothing and amplified the thrash.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // ── Keyboard input ────────────────────────────────────────────
   // 0.37.9 — handlers attach to the shadow <textarea> instead of the

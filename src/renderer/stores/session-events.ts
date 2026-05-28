@@ -119,6 +119,29 @@ export function subscribeToWorkspaceSessionEvents(
     }, delay)
   }
 
+  /**
+   * Issue #5: idempotent reconnect trigger fired from BOTH `onerror`
+   * AND `onclose`. The WHATWG spec sequences `onerror → onclose` for
+   * an aborted connection, and the pre-0.39.8 code relied on that —
+   * `onerror` was a no-op trusting `onclose` would follow. In
+   * practice WebKit under process throttling (App Nap), network-
+   * stack pressure, or WebKit-Networking-side hiccups can fire
+   * `onerror` WITHOUT a follow-up `onclose`, which left the
+   * subscriber permanently dead (no reconnect ever scheduled).
+   *
+   * Calling `triggerReconnect()` from both is safe because of the
+   * `reconnectTimer !== null` early-out: the normal
+   * `onerror → onclose` sequence schedules exactly one timer (the
+   * second call is a no-op), and the pathological
+   * `onerror-without-onclose` case still schedules one. The backoff
+   * progression isn't double-advanced.
+   */
+  const triggerReconnect = (): void => {
+    if (stopped) return
+    if (reconnectTimer !== null) return
+    scheduleReconnect()
+  }
+
   const openSocket = async (): Promise<void> => {
     if (stopped) return
     let creds: { port: number; token: string }
@@ -185,8 +208,12 @@ export function subscribeToWorkspaceSessionEvents(
     }
 
     ws.onerror = () => {
-      // onclose will follow with a non-1000 code; do nothing here so
-      // we don't double-schedule the reconnect.
+      // 0.39.8 (Issue #5): always trigger reconnect on error. The
+      // pre-0.39.8 assumption that `onclose` reliably follows
+      // `onerror` doesn't hold under WebKit Networking throttling.
+      // `triggerReconnect` is idempotent — if `onclose` does
+      // follow, its trigger is a no-op (timer already pending).
+      triggerReconnect()
     }
 
     ws.onclose = (ev) => {
@@ -202,7 +229,7 @@ export function subscribeToWorkspaceSessionEvents(
       console.debug(
         `[session-events] WS closed (code=${ev.code}, reason="${ev.reason ?? ''}") — scheduling reconnect`,
       )
-      scheduleReconnect()
+      triggerReconnect()
     }
   }
 
