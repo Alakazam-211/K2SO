@@ -50,14 +50,61 @@ use crate::session_lookup;
 /// All three forms produce the same response shape:
 /// `{"lines":["row1","row2",...]}`.
 pub fn handle_read(params: &HashMap<String, String>) -> CliResponse {
-    let id_str = match params.get("id") {
-        Some(s) if !s.is_empty() => s.as_str(),
-        _ => return CliResponse::bad_request("missing id param"),
-    };
     let requested_lines: usize = params
         .get("lines")
         .and_then(|s| s.parse().ok())
         .unwrap_or(50);
+
+    // 0.39.x: workspace-name addressed read — the `k2so read <workspace>`
+    // surface. Resolves a workspace NAME (or path / id) the same way
+    // `msg` / `inbox` do, then reads that workspace's canonical
+    // (primary / coordinator) v2 session — or `<project_id>:<agent>`
+    // when `agent=` is given. Lets one agent peek another agent's live
+    // terminal (human-in-the-loop, diagnose a stuck agent, read before
+    // inject) without first discovering a session UUID. Distinct from
+    // the `id=` forms below, which address a session directly.
+    if let Some(ws) = params
+        .get("workspace")
+        .map(String::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        let project_path = match crate::workspace_msg::resolve_workspace(ws) {
+            Some(p) => p,
+            None => {
+                return CliResponse::bad_request(format!(
+                    "unknown workspace '{ws}' (pass a name, path, or id — see `k2so connections list`)"
+                ))
+            }
+        };
+        let project_id = match crate::canonical_session::lookup_project_id(&project_path) {
+            Some(id) => id,
+            None => {
+                return CliResponse::bad_request(format!(
+                    "workspace '{ws}' has no project id on record"
+                ))
+            }
+        };
+        let agent = params
+            .get("agent")
+            .map(String::as_str)
+            .filter(|s| !s.is_empty());
+        let key = build_canonical_read_key(&project_id, agent);
+        return match crate::v2_session_map::lookup_by_agent_name(&key) {
+            Some(session) => read_v2_grid_lines(&session, requested_lines),
+            None => CliResponse::bad_request(format!(
+                "no live session for workspace '{ws}'{} — it may be asleep \
+                 (check with `k2so sessions live {ws}`)",
+                agent
+                    .map(|a| format!(" agent '{a}'"))
+                    .unwrap_or_default(),
+            )),
+        };
+    }
+
+    let id_str = match params.get("id") {
+        Some(s) if !s.is_empty() => s.as_str(),
+        _ => return CliResponse::bad_request("missing id or workspace param"),
+    };
 
     // Form 2: canonical key `<project_id>:<agent>` — lookup_by_agent_name
     // accepts arbitrary string keys, so a colon-bearing id that
@@ -607,4 +654,63 @@ pub fn handle_agents_reap(_params: &HashMap<String, String>) -> CliResponse {
         })
         .to_string(),
     )
+}
+
+/// Build the `v2_session_map` lookup key for a workspace-addressed
+/// read (`k2so read <workspace> [--agent <name>]`).
+///
+/// - **No agent** → the workspace's canonical (primary / coordinator)
+///   session, keyed by the bare `project_id`
+///   (`canonical_session::canonical_key_for`). This is the session a
+///   human-in-the-loop agent most often wants to peek.
+/// - **With agent** → that specific agent's PTY, keyed
+///   `<project_id>:<agent>` (the same form `handle_read`'s `id=` Form 2
+///   accepts).
+///
+/// Pure (no DB / no lock) so the key shape is unit-testable; the DB
+/// resolution (`resolve_workspace` → `lookup_project_id`) is exercised
+/// by the live smoke test.
+fn build_canonical_read_key(project_id: &str, agent: Option<&str>) -> String {
+    match agent {
+        Some(a) => format!("{project_id}:{a}"),
+        None => crate::canonical_session::canonical_key_for(project_id),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_key_without_agent_is_bare_project_id() {
+        // Canonical (primary/coordinator) session is keyed by the bare
+        // project_id — must match canonical_session::canonical_key_for.
+        let pid = "11111111-2222-3333-4444-555555555555";
+        assert_eq!(build_canonical_read_key(pid, None), pid);
+        assert_eq!(
+            build_canonical_read_key(pid, None),
+            crate::canonical_session::canonical_key_for(pid),
+        );
+    }
+
+    #[test]
+    fn read_key_with_agent_is_project_id_colon_agent() {
+        let pid = "11111111-2222-3333-4444-555555555555";
+        assert_eq!(
+            build_canonical_read_key(pid, Some("scout")),
+            format!("{pid}:scout"),
+        );
+    }
+
+    #[test]
+    fn read_key_with_agent_matches_handle_read_form2_shape() {
+        // handle_read's Form-2 colon-key branch looks up
+        // `<project_id>:<agent>` verbatim via lookup_by_agent_name, so
+        // the key we build for the `--agent` path must be byte-identical
+        // to what a caller would pass as `id=<project_id>:<agent>`.
+        let pid = "abc";
+        let key = build_canonical_read_key(pid, Some("frontend-eng"));
+        assert!(key.contains(':'));
+        assert_eq!(key, "abc:frontend-eng");
+    }
 }

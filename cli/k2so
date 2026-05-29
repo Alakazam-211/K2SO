@@ -4,7 +4,7 @@
 # Works inside K2SO terminals (auto-configured) and external terminals
 # (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
 
-K2SO_CLI_VERSION="0.39.6"
+K2SO_CLI_VERSION="0.39.9"
 
 set -euo pipefail
 
@@ -1103,6 +1103,52 @@ data = json.loads(sys.stdin.read())
 for line in data.get('lines', []):
     print(line)
 " 2>/dev/null || cli_request "/cli/terminal/read" "id=$(urlencode "$terminal_id")&lines=$lines"
+}
+
+# 0.39.x: read a workspace's live terminal by NAME — the read
+# complement to `msg` (talk live) and `inbox` (mail). Resolves the
+# workspace name daemon-side to its canonical (primary / coordinator)
+# session, or a specific agent's session with `--agent <name>`. Prints
+# the last N lines of plain text (default 50), one per line. Use this
+# to peek another agent before injecting (human-in-the-loop) or to
+# diagnose a stuck agent.
+cmd_read() {
+    local workspace="${1:-}"
+    local lines=50
+    local agent=""
+    shift || true
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --lines) lines="$2"; shift 2 ;;
+            --agent) agent="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    if [ -z "$workspace" ]; then
+        echo "Usage: k2so read <workspace> [--lines N] [--agent <name>]" >&2
+        exit 1
+    fi
+    local query="workspace=$(urlencode "$workspace")&lines=$lines"
+    if [ -n "$agent" ]; then
+        query="$query&agent=$(urlencode "$agent")"
+    fi
+    # Prefer python to unwrap {"lines":[...]} into one line per row and
+    # surface daemon {"error":...} to stderr with a non-zero exit (so
+    # agents scripting `k2so read` can detect failure). Fall back to the
+    # raw daemon JSON only when python3 is genuinely unavailable.
+    if command -v python3 >/dev/null 2>&1; then
+        cli_request "/cli/terminal/read" "$query" | python3 -c "
+import json, sys
+data = json.loads(sys.stdin.read())
+if isinstance(data, dict) and 'error' in data:
+    sys.stderr.write(str(data['error']) + '\n')
+    sys.exit(1)
+for line in data.get('lines', []):
+    print(line)
+"
+    else
+        cli_request "/cli/terminal/read" "$query"
+    fi
 }
 
 cmd_heartbeat_wake() {
@@ -2844,6 +2890,7 @@ cmd_help() {
         -a|--advanced|advanced)   cmd_help_v2_advanced ;;
         --internal|internal)      cmd_help_internal ;;
         msg)                      cmd_help_msg ;;
+        read)                     cmd_help_read ;;
         inbox)                    cmd_help_inbox ;;
         workspace)                cmd_help_workspace ;;
         skills)                   cmd_help_skills ;;
@@ -2889,10 +2936,26 @@ RESPONSE (JSON)
 
   Exit code 0 on success, 2 on any failure.
 
+LENGTH LIMIT — IMPORTANT
+  Live `msg` is injected into the recipient's running input line (as if
+  typed, then Enter). It is for SHORT, single-line messages. Long or
+  multi-line text gets TRUNCATED or mangled by the recipient's terminal
+  input widget (Claude Code / Codex / Gemini all treat fast-arriving
+  bytes as a paste with input-buffer limits). For anything longer than a
+  sentence or two — task briefs, file contents, structured/multi-line
+  content — use the inbox instead, which has no length limit and the
+  recipient reads on their own schedule:
+
+      k2so msg <workspace> --inbox --title "..." --body "..."
+
 RELATED VERBS
-  k2so work send <workspace> --title "..." --body "..."
-      Queue a task — recipient reads on their own schedule.
-      Use this when `msg` would be too intrusive.
+  k2so msg <workspace> --inbox --title "..." --body "..."
+      Queue a task (email-style) — recipient reads on their own
+      schedule, no length limit. Use for anything long or non-urgent.
+
+  k2so read <workspace> [--lines N] [--agent <name>]
+      Read the recipient's live terminal (peek before you inject, or
+      diagnose a stuck agent). The read complement to `msg`.
 
   k2so terminal write <id> "text"      (see `k2so help --advanced`)
       Raw bytes to any PTY by terminal ID. Power-user escape hatch
@@ -2903,6 +2966,49 @@ EXAMPLES
   k2so msg scout_v3 "ready when you are"
   k2so msg scout_v3 "ping" --from sms-bridge
   k2so msg /Users/me/work/MyApp "deploy completed"
+EOF
+}
+
+cmd_help_read() {
+    cat <<'EOF'
+k2so read <workspace> [--lines N] [--agent <name>]
+
+Read another workspace's LIVE terminal — the last N lines of plain
+text from its running session. The "read" complement to the messaging
+verbs: `msg` talks live, `inbox` is mail, `read` looks over their
+shoulder. Addresses by workspace NAME exactly like `msg`.
+
+Use it to PEEK BEFORE YOU INJECT (human-in-the-loop: see what an agent
+is doing / waiting on before sending it a message), or to diagnose a
+stuck or quiet agent.
+
+ARGUMENTS
+  <workspace>    Workspace name (preferred — see `k2so connections list`).
+                 Absolute path or project UUID also accepted. Same
+                 addressing as `k2so msg`.
+
+OPTIONS
+  --lines N      How many trailing lines to return. Default 50.
+  --agent <name> Read a specific agent's session in the workspace.
+                 Omit to read the workspace's primary (coordinator)
+                 session — the usual target.
+
+OUTPUT
+  Plain text, one terminal row per line (most recent at the bottom).
+  Styling / cursor are stripped — this is for reading, not rendering.
+  Exit code 0 on success; non-zero with a hint if the workspace isn't
+  found or has no live session (it may be asleep — see
+  `k2so sessions live <workspace>`).
+
+RELATED VERBS
+  k2so msg <workspace> "text"          Talk to the agent live.
+  k2so msg <ws> --inbox --title ...    Queue a task (email-style).
+  k2so sessions live <workspace>       List a workspace's live sessions.
+
+EXAMPLES
+  k2so read scout_v3                   # last 50 lines of its coordinator
+  k2so read scout_v3 --lines 120       # more history
+  k2so read MyApp --agent frontend-eng # a specific agent's session
 EOF
 }
 
@@ -2992,7 +3098,7 @@ cmd_update() {
 
     # Extract the version from the remote script
     local remote_version
-    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.39.6"//')
+    remote_version=$(echo "$remote_script" | grep -m1 '^K2SO_CLI_VERSION=' | sed 's/K2SO_CLI_VERSION="0.39.9"//')
     if [ -z "$remote_version" ]; then
         echo "Error: Could not parse remote version." >&2
         exit 1
@@ -3849,9 +3955,10 @@ one primary agent that reads its inbox, applies skills to work, and
 coordinates with other workspaces.
 
 TALK TO OTHERS
-  msg <workspace> "text"                Live delivery (call/IM — blocks until landed)
-  msg <workspace> "text" --inbox        Drop in their inbox (email — async)
+  msg <workspace> "text"                Live delivery (call/IM — blocks until landed; SHORT messages only)
+  msg <workspace> "text" --inbox        Drop in their inbox (email — async, no length limit)
   msg <workspace> --signal <kind> ...   Emit a typed signal (advanced)
+  read <workspace> [--lines N]          Read their live terminal (peek before you inject)
   connections list                      Connected workspaces (bidirectional)
   connections add <path>                Connect to another workspace
   connections remove <name>             Disconnect
@@ -4402,6 +4509,13 @@ EOF
     msg)
         # Phase 2.1: msg now has --inbox and --signal flag forms.
         shift; cmd_msg_v2 "$@"
+        ;;
+    read)
+        # 0.39.x: read a workspace's live terminal by NAME — the read
+        # complement to `msg` (talk live) and `inbox` (mail). Addresses
+        # by workspace name like `msg`, resolving to that workspace's
+        # canonical session (or `--agent <name>` for a specific agent).
+        shift; cmd_read "$@"
         ;;
     whatsnew)
         # Phase 2.1: hard-deprecated spelling. Use whats-new.
