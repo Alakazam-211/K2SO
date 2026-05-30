@@ -3,6 +3,39 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.10 — Read another agent's terminal + agent-setup fix
+
+Three improvements for working with agents.
+
+**`k2so read <workspace>` — look over another agent's shoulder.** The
+read complement to the messaging verbs: `msg` talks live, `inbox` is
+mail, and now `read` shows you the last N lines of another workspace's
+live terminal. Great for human-in-the-loop — peek at what an agent is
+doing or waiting on *before* you send it a message, or diagnose one
+that's gone quiet:
+
+```
+k2so read <workspace>                 # last 50 lines of its session
+k2so read <workspace> --lines 120     # more history
+k2so read <workspace> --agent <name>  # a specific agent's session
+```
+
+**`msg` length limit is now documented.** Live `msg` is for short,
+single-line messages — it's injected into the recipient's input line,
+so long or multi-line text gets truncated. For anything substantial
+(task briefs, file contents, multi-line notes) use the inbox, which has
+no length limit: `k2so msg <workspace> --inbox --title "..." --body "..."`.
+That length limit is the whole reason the inbox exists.
+
+**Fixed: new agents are set up in the right place.** When you turned a
+workspace into a Custom or K2SO agent, its persona file could get
+scaffolded into a legacy `.k2so/agents/` folder instead of the canonical
+`.k2so/agent/AGENT.md` — so an agent's documentation could land
+somewhere the rest of K2SO wasn't looking. New agents now go to the
+correct location, and any workspace already affected gets its agent
+files moved back automatically on the next launch (your content is
+preserved).
+
 ## 0.39.9 — Hotfix: exited terminals stay exited
 
 Hotfix for a regression introduced in 0.39.8's reconnect logic. If a
