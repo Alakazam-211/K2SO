@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::skills::writer::{generate_default_agent_body, write_agent_skill_file};
 use crate::workspace::agent_identity::{
-    agent_dir, agent_type_for, agents_dir, parse_frontmatter,
+    agent_dir, agent_type_for, agents_dir, parse_frontmatter, workspace_agent_path,
 };
 use crate::workspace::session::simple_date;
 use crate::workspace::work_item::atomic_write;
@@ -224,23 +224,30 @@ pub fn create(
         });
     }
 
-    let dir = agent_dir(&project_path, &name);
-    if dir.exists() {
-        return Err(format!("Agent '{}' already exists", name));
-    }
+    // 0.39.x: scaffold a NEW agent at the CANONICAL `.k2so/agent/`
+    // (workspace_agent_path), NOT the legacy `.k2so/agents/<name>/`.
+    //
+    // Pre-fix this used `agent_dir()` — a *resolver* whose final
+    // fallback is `.k2so/agents/<name>` — as the creation TARGET. So a
+    // brand-new agent (no canonical AGENT.md yet) got scaffolded into
+    // the retired plural folder, and a user's agent docs landed in
+    // `.k2so/agents/<name>/AGENT.md` instead of `.k2so/agent/AGENT.md`.
+    // The post-0.37.0 model is one agent per workspace at `.k2so/agent/`;
+    // the unification migration moves legacy dirs, but `create()` for a
+    // fresh agent was never repointed. (We only reach here when the
+    // canonical AGENT.md does NOT already exist — the early-return above
+    // handled that case, so we won't clobber an existing persona.)
+    let dir = workspace_agent_path(&project_path);
 
     let agent_type = agent_type.unwrap_or_else(|| "agent-template".to_string());
     let is_manager = agent_type == "manager" || agent_type == "coordinator";
 
-    fs::create_dir_all(agent_work_dir(&project_path, &name, "inbox"))
-        .map_err(|e| format!("Failed to create inbox: {}", e))?;
-    fs::create_dir_all(agent_work_dir(&project_path, &name, "active"))
-        .map_err(|e| format!("Failed to create active: {}", e))?;
-    fs::create_dir_all(agent_work_dir(&project_path, &name, "done"))
-        .map_err(|e| format!("Failed to create done: {}", e))?;
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create agent dir: {}", e))?;
     // Post-Phase-2.1: scaffold the unified workspace inbox at
-    // `.k2so/inbox/` (not the retired `.k2so/work/inbox/`). Best-effort —
-    // an existing inbox is fine.
+    // `.k2so/inbox/` (not the retired `.k2so/work/inbox/` nor the legacy
+    // per-agent `work/{inbox,active,done}` under `.k2so/agents/`).
+    // Best-effort — an existing inbox is fine.
     let _ = fs::create_dir_all(crate::inbox::inbox_root(std::path::Path::new(&project_path)));
 
     let agent_md = dir.join("AGENT.md");
@@ -274,6 +281,106 @@ pub fn create(
         is_manager,
         agent_type,
     })
+}
+
+/// 0.39.x repair sweep: move a stray legacy `.k2so/agents/<name>/`
+/// agent to the canonical `.k2so/agent/`.
+///
+/// A pre-0.39.x `create()` bug (see the comment in `create`) scaffolded
+/// brand-new agents into the legacy plural `.k2so/agents/<name>/` folder
+/// instead of canonical `.k2so/agent/`. Workspaces that hit it AFTER the
+/// one-shot 0.37.0 unification migration already ran won't get fixed by
+/// that migration (its sentinel is set), so this runs every boot and
+/// self-heals — including a user who put ALL their agent docs in the
+/// legacy folder.
+///
+/// Conservative + idempotent:
+/// - No-op if canonical `.k2so/agent/AGENT.md` already exists (never
+///   clobber a real persona).
+/// - No-op if there's no legacy `.k2so/agents/` directory.
+/// - Picks the first non-`.archive` legacy agent dir that has an
+///   `AGENT.md`, then moves ALL its entries (AGENT.md + any docs/subdirs
+///   the user added) into `.k2so/agent/`. Per-entry: skip if a
+///   same-named target already exists (don't clobber). Leaves the now-
+///   emptied legacy dir in place — harmless once canonical wins
+///   resolution, and NOT trashed to avoid macOS Finder Touch-ID prompts
+///   during a headless boot sweep.
+///
+/// Returns `true` if it moved anything.
+pub fn repoint_stray_legacy_agent(project_path: &str) -> bool {
+    let canonical = workspace_agent_path(project_path);
+    if canonical.join("AGENT.md").exists() {
+        return false; // canonical persona already present — nothing to do
+    }
+    let legacy_root = agents_dir(project_path);
+    if !legacy_root.exists() {
+        return false;
+    }
+
+    // Find the first legacy agent dir (skip dotfiles like `.archive`)
+    // that actually holds an AGENT.md.
+    let entries = match fs::read_dir(&legacy_root) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    let mut legacy_agent: Option<std::path::PathBuf> = None;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        let is_dotdir = entry
+            .file_name()
+            .to_str()
+            .map(|n| n.starts_with('.'))
+            .unwrap_or(true);
+        if p.is_dir() && !is_dotdir && p.join("AGENT.md").exists() {
+            legacy_agent = Some(p);
+            break;
+        }
+    }
+    let Some(src_dir) = legacy_agent else {
+        return false;
+    };
+
+    if let Err(e) = fs::create_dir_all(&canonical) {
+        crate::log_debug!(
+            "[repoint-legacy-agent] {}: create canonical dir failed: {e}",
+            project_path
+        );
+        return false;
+    }
+
+    // Move each top-level entry; a single rename moves whole subtrees.
+    let inner = match fs::read_dir(&src_dir) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    let mut moved = 0usize;
+    for entry in inner.flatten() {
+        let src = entry.path();
+        let Some(fname) = src.file_name() else { continue };
+        let dst = canonical.join(fname);
+        if dst.exists() {
+            continue; // don't clobber an existing canonical file
+        }
+        match fs::rename(&src, &dst) {
+            Ok(()) => moved += 1,
+            Err(e) => crate::log_debug!(
+                "[repoint-legacy-agent] {}: move {:?} -> {:?} failed: {e}",
+                project_path,
+                src,
+                dst
+            ),
+        }
+    }
+
+    if moved > 0 {
+        crate::log_debug!(
+            "[repoint-legacy-agent] {}: moved {moved} entr{} from {:?} to canonical .k2so/agent/",
+            project_path,
+            if moved == 1 { "y" } else { "ies" },
+            src_dir,
+        );
+    }
+    moved > 0
 }
 
 /// Delete an agent's dir. Refuses for manager agents or agents with
@@ -511,6 +618,99 @@ mod tests {
         assert!(update_agent_md_field("no fm", "role", "x").is_err());
     }
 
+    // ── 0.39.x: repoint_stray_legacy_agent (filesystem-only) ─────────
+
+    fn tmp_ws() -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "k2so-repoint-test-{}-{}",
+            std::process::id(),
+            // monotonic-ish uniqueness without Date/rand (forbidden):
+            // use an atomic counter.
+            {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static N: AtomicU64 = AtomicU64::new(0);
+                N.fetch_add(1, Ordering::SeqCst)
+            }
+        ));
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn repoint_moves_stray_legacy_persona_to_canonical() {
+        let ws = tmp_ws();
+        let wss = ws.to_string_lossy().to_string();
+        // Simulate the create() bug: persona + a user doc under the
+        // legacy plural folder, and NO canonical .k2so/agent/AGENT.md.
+        let legacy = ws.join(".k2so/agents/scout");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("AGENT.md"), "---\nname: scout\n---\npersona body").unwrap();
+        fs::write(legacy.join("NOTES.md"), "all my agent docs").unwrap();
+
+        let moved = repoint_stray_legacy_agent(&wss);
+        assert!(moved, "should report it moved content");
+
+        let canonical = ws.join(".k2so/agent");
+        assert_eq!(
+            fs::read_to_string(canonical.join("AGENT.md")).unwrap(),
+            "---\nname: scout\n---\npersona body",
+            "persona must land at canonical .k2so/agent/AGENT.md",
+        );
+        assert_eq!(
+            fs::read_to_string(canonical.join("NOTES.md")).unwrap(),
+            "all my agent docs",
+            "user docs must move alongside the persona",
+        );
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn repoint_noop_when_canonical_already_exists() {
+        let ws = tmp_ws();
+        let wss = ws.to_string_lossy().to_string();
+        // Canonical persona present → must NOT clobber it.
+        let canonical = ws.join(".k2so/agent");
+        fs::create_dir_all(&canonical).unwrap();
+        fs::write(canonical.join("AGENT.md"), "real canonical persona").unwrap();
+        // A stray legacy also exists, but should be left alone.
+        let legacy = ws.join(".k2so/agents/scout");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("AGENT.md"), "legacy stray").unwrap();
+
+        assert!(!repoint_stray_legacy_agent(&wss), "must no-op when canonical exists");
+        assert_eq!(
+            fs::read_to_string(canonical.join("AGENT.md")).unwrap(),
+            "real canonical persona",
+            "canonical persona must be untouched",
+        );
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn repoint_noop_when_no_legacy_folder() {
+        let ws = tmp_ws();
+        let wss = ws.to_string_lossy().to_string();
+        assert!(!repoint_stray_legacy_agent(&wss));
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn repoint_skips_dot_archive_only_legacy() {
+        let ws = tmp_ws();
+        let wss = ws.to_string_lossy().to_string();
+        // Only an archive dir under legacy — no live agent to repoint.
+        let archive = ws.join(".k2so/agents/.archive/old-agent-20260101");
+        fs::create_dir_all(&archive).unwrap();
+        fs::write(archive.join("AGENT.md"), "archived").unwrap();
+
+        assert!(!repoint_stray_legacy_agent(&wss), "must skip .archive entries");
+        assert!(
+            !ws.join(".k2so/agent/AGENT.md").exists(),
+            "must not create canonical from an archive",
+        );
+        let _ = fs::remove_dir_all(&ws);
+    }
+
     // ── 0.37.0 post-unification idempotency ──────────────────────
     //
     // The AIFileEditor "Manage Persona" button calls `create()` to
@@ -587,14 +787,16 @@ mod tests {
     }
 
     #[test]
-    fn create_does_not_short_circuit_pre_unification() {
-        // No .k2so/agent/AGENT.md on disk → workspace hasn't been
-        // migrated yet. create() should fall through to its
-        // legacy path (which writes to .k2so/agents/<name>/).
-        // Verify create() succeeds (writes AGENT.md to the legacy
-        // path) for a fresh workspace.
+    fn create_writes_canonical_agent_dir_not_legacy() {
+        // 0.39.x: a fresh workspace (no `.k2so/agent/AGENT.md` yet) must
+        // get its new agent scaffolded at the CANONICAL `.k2so/agent/`,
+        // NOT the legacy plural `.k2so/agents/<name>/`. This is the
+        // regression fix: pre-0.39.x `create()` used the `agent_dir()`
+        // resolver (legacy fallback) as the creation target, so a user's
+        // agent docs landed in `.k2so/agents/` instead of
+        // `.k2so/agent/AGENT.md`.
         let dir = std::env::temp_dir().join(format!(
-            "k2so-commands-create-pre-unif-{}-{}",
+            "k2so-commands-create-canonical-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -604,7 +806,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.to_string_lossy().into_owned();
 
-        // Sanity: no unified path exists pre-call.
+        // Sanity: no canonical path exists pre-call.
         assert!(!dir.join(".k2so/agent/AGENT.md").exists());
 
         let result = create(
@@ -616,10 +818,15 @@ mod tests {
         );
         assert!(result.is_ok(), "fresh create should succeed: {result:?}");
 
-        // Post-call the legacy path got written.
+        // Canonical persona is written.
         assert!(
-            dir.join(".k2so/agents/fresh-agent/AGENT.md").exists(),
-            "legacy path .k2so/agents/<name>/AGENT.md should be written when no unified primary"
+            dir.join(".k2so/agent/AGENT.md").exists(),
+            "create() must write the canonical .k2so/agent/AGENT.md",
+        );
+        // And the legacy plural folder must NOT be created.
+        assert!(
+            !dir.join(".k2so/agents").exists(),
+            "create() must NOT create the legacy .k2so/agents/ folder",
         );
 
         let _ = std::fs::remove_dir_all(&dir);

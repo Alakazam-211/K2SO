@@ -1043,6 +1043,17 @@ fn run_workspace_legacy_migrations_sweep() {
 
         workspace::migrate_filenames_to_uppercase(&project.path);
         workspace::detect_interrupted_regen(&project.path);
+        // 0.39.x: self-heal the pre-0.39.x `create()` bug that scaffolded
+        // brand-new agents into the legacy `.k2so/agents/<name>/` folder
+        // instead of canonical `.k2so/agent/`. Idempotent — no-op once
+        // canonical AGENT.md exists. Runs before the heartbeat/skill
+        // steps below so they resolve the canonical agent dir.
+        if k2so_core::workspace::agent::repoint_stray_legacy_agent(&project.path) {
+            log_debug!(
+                "[daemon/migrations] repoint_stray_legacy_agent({}): moved legacy .k2so/agents/<name>/ → canonical .k2so/agent/",
+                project.path,
+            );
+        }
         workspace::harvest_per_agent_claude_md_files(&project.path);
         workspace::migrate_or_scaffold_lead_heartbeat(&project.path);
         workspace::ensure_workspace_wakeups(&project.path);
