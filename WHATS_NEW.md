@@ -3,6 +3,30 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.11 — Self-healing window: no more black screen after sleep or update
+
+If K2SO ever opened to a **black, unresponsive window** — after an
+update, or after your laptop slept and woke — this release makes it
+recover on its own.
+
+The root cause was the app's renderer occasionally not coming back to
+life: the window's web layer would load but never start running, most
+often right after an auto-update or when the Mac's app-rendering
+process gets killed during sleep/wake. Until now the only fix was the
+hidden right-click → Reload, which ordinary users would never think to
+do — so the app just looked broken.
+
+K2SO now watches its own window with a lightweight heartbeat. If the
+interface stops responding, the app **automatically reloads it from
+the native side** (the same thing the manual reload did) and brings
+it back within a few seconds — no clicking required. It covers both
+the after-update case and the after-sleep case, and it won't touch a
+window that's working fine.
+
+Also: the update button in Settings → General now reads **"Download"**
+instead of "Download & Install" (the install happens when you click
+the separate "Install & Relaunch" button).
+
 ## 0.39.10 — Read another agent's terminal + agent-setup fix
 
 Three improvements for working with agents.
