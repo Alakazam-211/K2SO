@@ -5,16 +5,21 @@ import { invoke } from '@tauri-apps/api/core'
 import { ConnectionGate } from './components/ConnectionGate'
 import { installExternalLinkHandler } from './lib/external-link-handler'
 
-// 0.39.x (Issue #6): webview liveness watchdog — "first contact".
-// Fire this synchronously, as the VERY FIRST thing the bundle does, so
-// the Rust-side watchdog (src-tauri/src/lib.rs) knows the renderer JS
-// actually executed. If WKWebView loads index.html but never runs this
-// bundle (the black-screen-after-update failure mode), this never
-// fires, and the watchdog reloads the webview from Rust to recover —
-// the programmatic equivalent of the manual right-click → Reload.
-// `.catch` swallows the rejection in non-Tauri/dev (browser) contexts
-// where `invoke` has no backend.
-void invoke('renderer_hello').catch(() => {})
+// 0.39.x (Issue #6): webview liveness HEARTBEAT.
+// Beat once synchronously the instant the bundle executes (so the
+// Rust-side watchdog in src-tauri/src/lib.rs knows the renderer JS came
+// alive at launch), then on a ~3s timer for the rest of the session.
+// The watchdog reloads the webview from Rust (the programmatic
+// equivalent of right-click → Reload) if these heartbeats go stale —
+// covering BOTH the black-screen-after-update launch failure AND a
+// mid-session content-process death (e.g. the renderer crashing after
+// the laptop sleeps + wakes). `.catch` swallows the rejection in
+// non-Tauri/dev (browser) contexts where `invoke` has no backend.
+const beat = (): void => {
+  void invoke('renderer_heartbeat').catch(() => {})
+}
+beat()
+setInterval(beat, 3000)
 
 // NOTE: do NOT statically import `./App` here. ConnectionGate uses
 // `import('./App')` dynamically only AFTER the daemon is verified

@@ -209,54 +209,87 @@ pub fn warm_http_pool_async() {}
 
 // ── 0.39.x (Issue #6): webview liveness watchdog ─────────────────────
 //
-// K2SO can launch into a black, unresponsive window where WKWebView
-// loaded `index.html` but never executed the renderer JS bundle —
-// observed reproducibly after an auto-update over the running process.
-// Right-click → Reload always fixes it, but ordinary users won't know
-// to do that, so the app reads as broken after an update.
+// K2SO can land in a black, unresponsive window where the renderer JS
+// isn't running — in TWO situations:
+//   1. At LAUNCH (esp. after an auto-update over the running process):
+//      WKWebView loads index.html but never executes the JS bundle.
+//   2. MID-SESSION: the WKWebView content process dies and respawns
+//      blank — most commonly when the laptop sleeps and wakes. This is
+//      the case a user actually hit ("renderer crashed after my computer
+//      took a nap").
+// In both, right-click → Reload fixes it, but ordinary users won't know
+// to do that, so the app reads as broken.
 //
 // This is UPSTREAM of every 0.39.2–0.39.5 black-screen defense
-// (ConnectionGate, dynamic-import, the versioned /boot-status handshake,
-// LocalPaired policy) — they all live in the renderer JS and therefore
-// cannot fire when the renderer JS itself isn't running. The recovery
-// has to come from Rust.
+// (ConnectionGate, dynamic-import, /boot-status handshake, LocalPaired
+// policy) — they all live in the renderer JS and cannot fire when the
+// renderer JS itself isn't running. Recovery has to come from Rust.
 //
-// Mechanism: the renderer calls the `renderer_hello` command at the very
-// top of `index.tsx` (the instant the bundle executes). A Rust watchdog
-// thread waits for that "first contact"; if it stays silent, it
-// programmatically reloads the webview (the equivalent of the manual
-// menu reload, which is known to work) up to MAX_RELOADS times, then
-// surfaces a native error sheet so the user gets feedback instead of a
-// black void.
-static RENDERER_ALIVE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+// Mechanism: a renderer HEARTBEAT. `index.tsx` calls `renderer_heartbeat`
+// the instant the bundle executes and then on a timer (~3s). A persistent
+// Rust watchdog thread tracks the last heartbeat time; if the renderer
+// goes silent past a threshold for a couple consecutive checks (so a
+// normal sleep/wake where the renderer resumes within a tick doesn't
+// false-trip it), it programmatically reloads the webview (the
+// equivalent of the manual menu reload, which is known to work) up to
+// MAX_RELOADS times, then surfaces a native error sheet. Whenever a
+// heartbeat resumes, the watchdog re-arms — so it recovers launch
+// failures AND mid-session content-process deaths.
+//
+// Wall-clock millis of the last renderer heartbeat (0 = none yet).
+// SystemTime (not Instant) so a long sleep counts as elapsed time.
+static LAST_HEARTBEAT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
-/// Renderer "first contact" — invoked once from `index.tsx` the moment
-/// the JS bundle starts executing. Satisfies the webview liveness
-/// watchdog so it never reloads a working window.
+fn now_unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Renderer liveness heartbeat — invoked from `index.tsx` the moment the
+/// bundle executes and then on a ~3s timer. Stamps the watchdog so it
+/// knows the renderer JS is alive and never reloads a working window.
 #[tauri::command]
-fn renderer_hello() {
-    RENDERER_ALIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+fn renderer_heartbeat() {
+    LAST_HEARTBEAT_MS.store(now_unix_millis(), std::sync::atomic::Ordering::SeqCst);
 }
 
 /// What the webview watchdog should do this tick. Pulled out as a pure
-/// function so the (otherwise webview-bound) state machine — and
-/// especially the retry cap — is unit-testable without a real WKWebView.
+/// function so the (otherwise webview-bound) state machine — staleness +
+/// the confirm-streak + the retry cap — is unit-testable without a real
+/// WKWebView.
 #[derive(Debug, PartialEq, Eq)]
 enum WatchdogAction {
-    /// Renderer reported first contact — stop watching.
-    Stop,
-    /// Renderer still silent and reload budget remains — reload now.
+    /// Renderer is heartbeating — reset all counters, keep watching.
+    Healthy,
+    /// Stale but not yet confirmed (streak below threshold) — wait one
+    /// more tick before acting. Guards against a sleep/wake race where
+    /// the renderer resumes a beat late.
+    Watch,
+    /// Stale, confirmed, budget remains — reload now.
     Reload,
-    /// Reload budget exhausted, still silent — give up + error sheet.
+    /// Stale, confirmed, budget exhausted — give up + error sheet (once).
     GiveUp,
 }
 
-/// `alive` = renderer reported first contact; `reloads_done` = how many
-/// programmatic reloads we've already issued; `max_reloads` = the cap.
-fn watchdog_next_action(alive: bool, reloads_done: u32, max_reloads: u32) -> WatchdogAction {
-    if alive {
-        WatchdogAction::Stop
+/// `is_stale` = no heartbeat within the staleness window; `stale_streak`
+/// = consecutive stale ticks observed so far; `reloads_done` = reloads
+/// issued in the current stale episode; `min_stale_streak` = ticks of
+/// confirmed staleness required before the first reload; `max_reloads`
+/// = reload cap before giving up.
+fn watchdog_decision(
+    is_stale: bool,
+    stale_streak: u32,
+    reloads_done: u32,
+    min_stale_streak: u32,
+    max_reloads: u32,
+) -> WatchdogAction {
+    if !is_stale {
+        WatchdogAction::Healthy
+    } else if stale_streak < min_stale_streak {
+        WatchdogAction::Watch
     } else if reloads_done >= max_reloads {
         WatchdogAction::GiveUp
     } else {
@@ -693,79 +726,111 @@ pub fn run() {
             }
 
             // 0.39.x (Issue #6): webview liveness watchdog. See the
-            // `renderer_hello` doc above. Launch-only: it watches for the
-            // renderer's first-contact signal and, if the renderer JS
-            // never runs, reloads the webview from Rust (then a native
-            // error sheet) — recovering the black-screen-after-update
-            // case that all the renderer-side defenses can't reach.
+            // doc on `renderer_heartbeat` above. Persistent: it recovers
+            // BOTH the launch black-screen (renderer JS never runs at
+            // startup) AND mid-session content-process death (e.g. the
+            // renderer crashing after the laptop sleeps + wakes), by
+            // tracking the renderer's heartbeat and reloading the webview
+            // from Rust when the heartbeat goes stale — then a native
+            // error sheet if reloads don't bring it back.
             if let Some(win) = app.get_webview_window("main") {
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
                     use std::sync::atomic::Ordering;
-                    // 6s is comfortably longer than the happy-path
-                    // first-contact (~100ms, since `renderer_hello` fires
-                    // at the top of index.tsx before any daemon work) and
-                    // short enough that a stuck user recovers fast.
-                    const WAIT: std::time::Duration = std::time::Duration::from_secs(6);
+                    // Check cadence. Recovery latency ≈ MIN_STALE_STREAK
+                    // ticks once staleness begins (~6s).
+                    const TICK: std::time::Duration = std::time::Duration::from_secs(3);
+                    // No heartbeat for this long ⇒ stale. The renderer
+                    // beats every ~3s, so 9s tolerates ~2 missed beats of
+                    // ordinary main-thread jank without a false reload.
+                    const STALE_MS: u64 = 9_000;
+                    // Require this many consecutive stale ticks before the
+                    // first reload — kills the sleep/wake race where the
+                    // surviving renderer resumes a beat late.
+                    const MIN_STALE_STREAK: u32 = 2;
                     const MAX_RELOADS: u32 = 3;
+
+                    let mut stale_streak = 0u32;
                     let mut reloads = 0u32;
+                    let mut gave_up = false;
                     loop {
-                        std::thread::sleep(WAIT);
-                        let alive = RENDERER_ALIVE.load(Ordering::SeqCst);
-                        match watchdog_next_action(alive, reloads, MAX_RELOADS) {
-                            WatchdogAction::Stop => {
-                                // Renderer executed + phoned home — happy
-                                // path. Stop watching for the rest of the
-                                // process lifetime.
+                        std::thread::sleep(TICK);
+                        let last = LAST_HEARTBEAT_MS.load(Ordering::SeqCst);
+                        // last == 0 → renderer has never beaten yet (launch
+                        // window). Treat as stale so the launch case is
+                        // covered too.
+                        let is_stale = last == 0
+                            || now_unix_millis().saturating_sub(last) > STALE_MS;
+                        match watchdog_decision(
+                            is_stale,
+                            stale_streak,
+                            reloads,
+                            MIN_STALE_STREAK,
+                            MAX_RELOADS,
+                        ) {
+                            WatchdogAction::Healthy => {
+                                // Heartbeat present — renderer is alive.
+                                // Re-arm so a LATER crash (sleep/wake) is
+                                // caught fresh.
                                 if reloads > 0 {
                                     log_debug!(
                                         "[webview-watchdog] renderer recovered after {reloads} reload(s)"
                                     );
                                 }
-                                return;
+                                stale_streak = 0;
+                                reloads = 0;
+                                gave_up = false;
                             }
-                            WatchdogAction::GiveUp => {
-                                log_debug!(
-                                    "[webview-watchdog] renderer never reported first contact after \
-                                     {MAX_RELOADS} reloads — giving up; surfacing error sheet"
-                                );
-                                // Best-effort diagnostic breadcrumb in ~/.k2so/.
-                                if let Ok(home) = std::env::var("HOME") {
-                                    let log_path = std::path::Path::new(&home)
-                                        .join(".k2so")
-                                        .join("webview-watchdog.log");
-                                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                                        .create(true)
-                                        .append(true)
-                                        .open(&log_path)
-                                    {
-                                        use std::io::Write;
-                                        let _ = writeln!(
-                                            f,
-                                            "renderer JS never executed; {MAX_RELOADS} programmatic reloads failed",
-                                        );
-                                    }
-                                }
-                                use tauri_plugin_dialog::DialogExt;
-                                handle
-                                    .dialog()
-                                    .message(
-                                        "K2SO didn't finish loading. Please quit and relaunch the app.\n\n\
-                                         If this keeps happening, reinstalling the latest version usually fixes it.",
-                                    )
-                                    .title("K2SO couldn't load")
-                                    .blocking_show();
-                                return;
+                            WatchdogAction::Watch => {
+                                stale_streak += 1;
                             }
                             WatchdogAction::Reload => {
+                                stale_streak += 1;
                                 reloads += 1;
                                 log_debug!(
-                                    "[webview-watchdog] renderer silent after {}s — reloading webview \
-                                     (attempt {reloads}/{MAX_RELOADS})",
-                                    WAIT.as_secs() * reloads as u64,
+                                    "[webview-watchdog] renderer heartbeat stale — reloading webview \
+                                     (attempt {reloads}/{MAX_RELOADS})"
                                 );
                                 // Programmatic equivalent of right-click → Reload.
                                 let _ = win.eval("window.location.reload()");
+                            }
+                            WatchdogAction::GiveUp => {
+                                // Show the error sheet + log ONCE per stale
+                                // episode (re-armed when a heartbeat
+                                // resumes). Keep watching, but stop
+                                // reloading so we never loop forever.
+                                if !gave_up {
+                                    gave_up = true;
+                                    log_debug!(
+                                        "[webview-watchdog] renderer still silent after {MAX_RELOADS} \
+                                         reloads — giving up; surfacing error sheet"
+                                    );
+                                    if let Ok(home) = std::env::var("HOME") {
+                                        let log_path = std::path::Path::new(&home)
+                                            .join(".k2so")
+                                            .join("webview-watchdog.log");
+                                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                                            .create(true)
+                                            .append(true)
+                                            .open(&log_path)
+                                        {
+                                            use std::io::Write;
+                                            let _ = writeln!(
+                                                f,
+                                                "renderer JS unresponsive; {MAX_RELOADS} programmatic reloads failed",
+                                            );
+                                        }
+                                    }
+                                    use tauri_plugin_dialog::DialogExt;
+                                    handle
+                                        .dialog()
+                                        .message(
+                                            "K2SO stopped responding. Please quit and relaunch the app.\n\n\
+                                             If this keeps happening, reinstalling the latest version usually fixes it.",
+                                        )
+                                        .title("K2SO couldn't load")
+                                        .blocking_show();
+                                }
                             }
                         }
                     }
@@ -775,8 +840,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            // 0.39.x (Issue #6): webview liveness watchdog first-contact signal.
-            renderer_hello,
+            // 0.39.x (Issue #6): webview liveness watchdog heartbeat.
+            renderer_heartbeat,
             // Projects
             commands::projects::projects_list,
             commands::projects::projects_create,
@@ -1148,50 +1213,112 @@ pub fn run() {
 
 #[cfg(test)]
 mod webview_watchdog_tests {
-    use super::{watchdog_next_action, WatchdogAction};
+    use super::{watchdog_decision, WatchdogAction};
+
+    const MIN_STREAK: u32 = 2;
+    const MAX_RELOADS: u32 = 3;
 
     #[test]
-    fn alive_always_stops_regardless_of_reload_count() {
-        assert_eq!(watchdog_next_action(true, 0, 3), WatchdogAction::Stop);
-        assert_eq!(watchdog_next_action(true, 3, 3), WatchdogAction::Stop);
-        assert_eq!(watchdog_next_action(true, 99, 3), WatchdogAction::Stop);
+    fn healthy_when_not_stale_regardless_of_counters() {
+        // A live heartbeat always resets — never reload a working window.
+        assert_eq!(
+            watchdog_decision(false, 0, 0, MIN_STREAK, MAX_RELOADS),
+            WatchdogAction::Healthy
+        );
+        assert_eq!(
+            watchdog_decision(false, 5, 3, MIN_STREAK, MAX_RELOADS),
+            WatchdogAction::Healthy
+        );
     }
 
     #[test]
-    fn silent_with_budget_remaining_reloads() {
-        // 0, 1, 2 reloads done (cap 3) → still reload.
-        assert_eq!(watchdog_next_action(false, 0, 3), WatchdogAction::Reload);
-        assert_eq!(watchdog_next_action(false, 1, 3), WatchdogAction::Reload);
-        assert_eq!(watchdog_next_action(false, 2, 3), WatchdogAction::Reload);
+    fn stale_below_streak_only_watches() {
+        // First confirmed-staleness tick(s) wait — guards the sleep/wake
+        // race where the surviving renderer resumes one beat late.
+        assert_eq!(
+            watchdog_decision(true, 0, 0, MIN_STREAK, MAX_RELOADS),
+            WatchdogAction::Watch
+        );
+        assert_eq!(
+            watchdog_decision(true, 1, 0, MIN_STREAK, MAX_RELOADS),
+            WatchdogAction::Watch
+        );
     }
 
     #[test]
-    fn silent_at_or_past_cap_gives_up() {
-        // Exactly at the cap (3 reloads already issued) → give up, not a
-        // 4th reload. Guards the off-by-one on the retry budget.
-        assert_eq!(watchdog_next_action(false, 3, 3), WatchdogAction::GiveUp);
-        assert_eq!(watchdog_next_action(false, 4, 3), WatchdogAction::GiveUp);
+    fn stale_confirmed_with_budget_reloads() {
+        // Streak met, budget remains → reload.
+        assert_eq!(
+            watchdog_decision(true, 2, 0, MIN_STREAK, MAX_RELOADS),
+            WatchdogAction::Reload
+        );
+        assert_eq!(
+            watchdog_decision(true, 9, 2, MIN_STREAK, MAX_RELOADS),
+            WatchdogAction::Reload
+        );
     }
 
     #[test]
-    fn full_sequence_is_three_reloads_then_give_up() {
-        // Walk the state machine exactly as the loop does: silent the
-        // whole time → Reload, Reload, Reload, GiveUp (never a 4th).
-        let cap = 3;
+    fn stale_confirmed_at_cap_gives_up() {
+        // Budget exhausted → give up (error sheet), not a 4th reload.
+        assert_eq!(
+            watchdog_decision(true, 2, 3, MIN_STREAK, MAX_RELOADS),
+            WatchdogAction::GiveUp
+        );
+        assert_eq!(
+            watchdog_decision(true, 9, 4, MIN_STREAK, MAX_RELOADS),
+            WatchdogAction::GiveUp
+        );
+    }
+
+    #[test]
+    fn full_episode_watches_then_three_reloads_then_gives_up() {
+        // Walk the loop's exact accounting for a renderer that stays
+        // stale the whole time: Watch×(MIN_STREAK-1 extra), then 3
+        // Reloads, then GiveUp — never a 4th reload.
+        let mut stale_streak = 0u32;
         let mut reloads = 0u32;
         let mut actions = Vec::new();
-        for _ in 0..6 {
-            let a = watchdog_next_action(false, reloads, cap);
+        for _ in 0..8 {
+            let a = watchdog_decision(true, stale_streak, reloads, MIN_STREAK, MAX_RELOADS);
             actions.push(format!("{a:?}"));
             match a {
-                WatchdogAction::Reload => reloads += 1,
-                WatchdogAction::GiveUp | WatchdogAction::Stop => break,
+                WatchdogAction::Watch => stale_streak += 1,
+                WatchdogAction::Reload => {
+                    stale_streak += 1;
+                    reloads += 1;
+                }
+                WatchdogAction::GiveUp => break,
+                WatchdogAction::Healthy => unreachable!(),
             }
         }
         assert_eq!(
             actions,
-            vec!["Reload", "Reload", "Reload", "GiveUp"],
-            "must reload exactly {cap} times then give up",
+            vec!["Watch", "Watch", "Reload", "Reload", "Reload", "GiveUp"],
+            "2 watch ticks then exactly 3 reloads then give up",
+        );
+    }
+
+    #[test]
+    fn recovery_resets_so_a_later_crash_is_caught_fresh() {
+        // After reloads bring the renderer back (Healthy), the loop
+        // resets its counters; a subsequent crash must start a fresh
+        // episode (Watch → … → Reload), not jump straight to GiveUp.
+        // Simulate: stale episode partway, then heartbeat resumes, then
+        // stale again.
+        let mut stale_streak = 2u32;
+        let mut reloads = 2u32;
+        // Heartbeat resumes:
+        assert_eq!(
+            watchdog_decision(false, stale_streak, reloads, MIN_STREAK, MAX_RELOADS),
+            WatchdogAction::Healthy
+        );
+        stale_streak = 0;
+        reloads = 0;
+        // New crash later → fresh episode starts with Watch, not GiveUp.
+        assert_eq!(
+            watchdog_decision(true, stale_streak, reloads, MIN_STREAK, MAX_RELOADS),
+            WatchdogAction::Watch
         );
     }
 }
