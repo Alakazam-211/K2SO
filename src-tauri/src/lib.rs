@@ -207,6 +207,63 @@ fn check_daemon_version_and_restart() {
 /// blocking reqwest runtime the old Kessel spawn path needed warm.
 pub fn warm_http_pool_async() {}
 
+// ── 0.39.x (Issue #6): webview liveness watchdog ─────────────────────
+//
+// K2SO can launch into a black, unresponsive window where WKWebView
+// loaded `index.html` but never executed the renderer JS bundle —
+// observed reproducibly after an auto-update over the running process.
+// Right-click → Reload always fixes it, but ordinary users won't know
+// to do that, so the app reads as broken after an update.
+//
+// This is UPSTREAM of every 0.39.2–0.39.5 black-screen defense
+// (ConnectionGate, dynamic-import, the versioned /boot-status handshake,
+// LocalPaired policy) — they all live in the renderer JS and therefore
+// cannot fire when the renderer JS itself isn't running. The recovery
+// has to come from Rust.
+//
+// Mechanism: the renderer calls the `renderer_hello` command at the very
+// top of `index.tsx` (the instant the bundle executes). A Rust watchdog
+// thread waits for that "first contact"; if it stays silent, it
+// programmatically reloads the webview (the equivalent of the manual
+// menu reload, which is known to work) up to MAX_RELOADS times, then
+// surfaces a native error sheet so the user gets feedback instead of a
+// black void.
+static RENDERER_ALIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Renderer "first contact" — invoked once from `index.tsx` the moment
+/// the JS bundle starts executing. Satisfies the webview liveness
+/// watchdog so it never reloads a working window.
+#[tauri::command]
+fn renderer_hello() {
+    RENDERER_ALIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// What the webview watchdog should do this tick. Pulled out as a pure
+/// function so the (otherwise webview-bound) state machine — and
+/// especially the retry cap — is unit-testable without a real WKWebView.
+#[derive(Debug, PartialEq, Eq)]
+enum WatchdogAction {
+    /// Renderer reported first contact — stop watching.
+    Stop,
+    /// Renderer still silent and reload budget remains — reload now.
+    Reload,
+    /// Reload budget exhausted, still silent — give up + error sheet.
+    GiveUp,
+}
+
+/// `alive` = renderer reported first contact; `reloads_done` = how many
+/// programmatic reloads we've already issued; `max_reloads` = the cap.
+fn watchdog_next_action(alive: bool, reloads_done: u32, max_reloads: u32) -> WatchdogAction {
+    if alive {
+        WatchdogAction::Stop
+    } else if reloads_done >= max_reloads {
+        WatchdogAction::GiveUp
+    } else {
+        WatchdogAction::Reload
+    }
+}
+
 pub fn run() {
     // Ignore SIGPIPE so writing to a dead PTY returns EPIPE instead of
     // killing the entire process.
@@ -634,9 +691,92 @@ pub fn run() {
             if let Err(e) = tray::install(&app.handle().clone()) {
                 log_debug!("[tray] install failed: {e} (continuing without tray)");
             }
+
+            // 0.39.x (Issue #6): webview liveness watchdog. See the
+            // `renderer_hello` doc above. Launch-only: it watches for the
+            // renderer's first-contact signal and, if the renderer JS
+            // never runs, reloads the webview from Rust (then a native
+            // error sheet) — recovering the black-screen-after-update
+            // case that all the renderer-side defenses can't reach.
+            if let Some(win) = app.get_webview_window("main") {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    use std::sync::atomic::Ordering;
+                    // 6s is comfortably longer than the happy-path
+                    // first-contact (~100ms, since `renderer_hello` fires
+                    // at the top of index.tsx before any daemon work) and
+                    // short enough that a stuck user recovers fast.
+                    const WAIT: std::time::Duration = std::time::Duration::from_secs(6);
+                    const MAX_RELOADS: u32 = 3;
+                    let mut reloads = 0u32;
+                    loop {
+                        std::thread::sleep(WAIT);
+                        let alive = RENDERER_ALIVE.load(Ordering::SeqCst);
+                        match watchdog_next_action(alive, reloads, MAX_RELOADS) {
+                            WatchdogAction::Stop => {
+                                // Renderer executed + phoned home — happy
+                                // path. Stop watching for the rest of the
+                                // process lifetime.
+                                if reloads > 0 {
+                                    log_debug!(
+                                        "[webview-watchdog] renderer recovered after {reloads} reload(s)"
+                                    );
+                                }
+                                return;
+                            }
+                            WatchdogAction::GiveUp => {
+                                log_debug!(
+                                    "[webview-watchdog] renderer never reported first contact after \
+                                     {MAX_RELOADS} reloads — giving up; surfacing error sheet"
+                                );
+                                // Best-effort diagnostic breadcrumb in ~/.k2so/.
+                                if let Ok(home) = std::env::var("HOME") {
+                                    let log_path = std::path::Path::new(&home)
+                                        .join(".k2so")
+                                        .join("webview-watchdog.log");
+                                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(&log_path)
+                                    {
+                                        use std::io::Write;
+                                        let _ = writeln!(
+                                            f,
+                                            "renderer JS never executed; {MAX_RELOADS} programmatic reloads failed",
+                                        );
+                                    }
+                                }
+                                use tauri_plugin_dialog::DialogExt;
+                                handle
+                                    .dialog()
+                                    .message(
+                                        "K2SO didn't finish loading. Please quit and relaunch the app.\n\n\
+                                         If this keeps happening, reinstalling the latest version usually fixes it.",
+                                    )
+                                    .title("K2SO couldn't load")
+                                    .blocking_show();
+                                return;
+                            }
+                            WatchdogAction::Reload => {
+                                reloads += 1;
+                                log_debug!(
+                                    "[webview-watchdog] renderer silent after {}s — reloading webview \
+                                     (attempt {reloads}/{MAX_RELOADS})",
+                                    WAIT.as_secs() * reloads as u64,
+                                );
+                                // Programmatic equivalent of right-click → Reload.
+                                let _ = win.eval("window.location.reload()");
+                            }
+                        }
+                    }
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // 0.39.x (Issue #6): webview liveness watchdog first-contact signal.
+            renderer_hello,
             // Projects
             commands::projects::projects_list,
             commands::projects::projects_create,
@@ -1005,3 +1145,53 @@ pub fn run() {
 // `migrate_workspace_layouts_to_db` moved to
 // `k2so_core::db_ops::migrate_workspace_layouts_to_db`; the daemon
 // runs it on its own first boot now.
+
+#[cfg(test)]
+mod webview_watchdog_tests {
+    use super::{watchdog_next_action, WatchdogAction};
+
+    #[test]
+    fn alive_always_stops_regardless_of_reload_count() {
+        assert_eq!(watchdog_next_action(true, 0, 3), WatchdogAction::Stop);
+        assert_eq!(watchdog_next_action(true, 3, 3), WatchdogAction::Stop);
+        assert_eq!(watchdog_next_action(true, 99, 3), WatchdogAction::Stop);
+    }
+
+    #[test]
+    fn silent_with_budget_remaining_reloads() {
+        // 0, 1, 2 reloads done (cap 3) → still reload.
+        assert_eq!(watchdog_next_action(false, 0, 3), WatchdogAction::Reload);
+        assert_eq!(watchdog_next_action(false, 1, 3), WatchdogAction::Reload);
+        assert_eq!(watchdog_next_action(false, 2, 3), WatchdogAction::Reload);
+    }
+
+    #[test]
+    fn silent_at_or_past_cap_gives_up() {
+        // Exactly at the cap (3 reloads already issued) → give up, not a
+        // 4th reload. Guards the off-by-one on the retry budget.
+        assert_eq!(watchdog_next_action(false, 3, 3), WatchdogAction::GiveUp);
+        assert_eq!(watchdog_next_action(false, 4, 3), WatchdogAction::GiveUp);
+    }
+
+    #[test]
+    fn full_sequence_is_three_reloads_then_give_up() {
+        // Walk the state machine exactly as the loop does: silent the
+        // whole time → Reload, Reload, Reload, GiveUp (never a 4th).
+        let cap = 3;
+        let mut reloads = 0u32;
+        let mut actions = Vec::new();
+        for _ in 0..6 {
+            let a = watchdog_next_action(false, reloads, cap);
+            actions.push(format!("{a:?}"));
+            match a {
+                WatchdogAction::Reload => reloads += 1,
+                WatchdogAction::GiveUp | WatchdogAction::Stop => break,
+            }
+        }
+        assert_eq!(
+            actions,
+            vec!["Reload", "Reload", "Reload", "GiveUp"],
+            "must reload exactly {cap} times then give up",
+        );
+    }
+}

@@ -1,8 +1,20 @@
 import './globals.css'
 import React from 'react'
 import ReactDOM from 'react-dom/client'
+import { invoke } from '@tauri-apps/api/core'
 import { ConnectionGate } from './components/ConnectionGate'
 import { installExternalLinkHandler } from './lib/external-link-handler'
+
+// 0.39.x (Issue #6): webview liveness watchdog — "first contact".
+// Fire this synchronously, as the VERY FIRST thing the bundle does, so
+// the Rust-side watchdog (src-tauri/src/lib.rs) knows the renderer JS
+// actually executed. If WKWebView loads index.html but never runs this
+// bundle (the black-screen-after-update failure mode), this never
+// fires, and the watchdog reloads the webview from Rust to recover —
+// the programmatic equivalent of the manual right-click → Reload.
+// `.catch` swallows the rejection in non-Tauri/dev (browser) contexts
+// where `invoke` has no backend.
+void invoke('renderer_hello').catch(() => {})
 
 // NOTE: do NOT statically import `./App` here. ConnectionGate uses
 // `import('./App')` dynamically only AFTER the daemon is verified
