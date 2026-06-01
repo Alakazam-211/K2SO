@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { computeDesiredActive } from './activeViewer'
+import { computeDesiredActive, shouldHoldGridWs } from './activeViewer'
 
 // Exhaustive truth table for the Issue #8 active-viewer predicate.
 // The active claim must be true ONLY when all three signals hold;
@@ -38,5 +38,41 @@ describe('computeDesiredActive', () => {
   it('only the all-true combination claims active', () => {
     const trueCount = cases.filter((c) => c.expected).length
     expect(trueCount).toBe(1)
+  })
+})
+
+// Issue #8 (0.39.13) — grid-WS hold predicate. A pane streams the
+// session's live grid ONLY while visible AND its child hasn't exited.
+// Hidden background tabs / off-screen heartbeat spawns hold no grid-WS
+// (their daemon PTY survives untouched); an exited session has nothing
+// left to stream.
+describe('shouldHoldGridWs', () => {
+  const cases: Array<{
+    visible: boolean
+    exited: boolean
+    expected: boolean
+  }> = [
+    { visible: false, exited: false, expected: false },
+    { visible: false, exited: true, expected: false },
+    { visible: true, exited: false, expected: true },
+    { visible: true, exited: true, expected: false },
+  ]
+
+  for (const c of cases) {
+    it(`visible=${c.visible} exited=${c.exited} -> ${c.expected}`, () => {
+      expect(shouldHoldGridWs({ visible: c.visible, exited: c.exited })).toBe(
+        c.expected,
+      )
+    })
+  }
+
+  it('holds the grid-WS only for a visible, not-yet-exited pane', () => {
+    const trueCount = cases.filter((c) => c.expected).length
+    expect(trueCount).toBe(1)
+  })
+
+  it('a hidden pane never holds a grid-WS regardless of exit state', () => {
+    expect(shouldHoldGridWs({ visible: false, exited: false })).toBe(false)
+    expect(shouldHoldGridWs({ visible: false, exited: true })).toBe(false)
   })
 })

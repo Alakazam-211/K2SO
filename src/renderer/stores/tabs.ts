@@ -3070,6 +3070,20 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
   stashWorkspace: (key: string) => {
     const state = get()
+    // Issue #8 (0.39.13) — stashing the active workspace is the
+    // authoritative "this workspace is no longer in the foreground"
+    // point, so close its session-events WS here. This guarantees the
+    // invariant "no active workspace ⇒ no session-events subscription":
+    // a stash that ISN'T immediately followed by a restore (e.g.
+    // `setActiveProject(null)`, which stashes then returns early) no
+    // longer leaks the previous workspace's WS. The matching
+    // `restoreWorkspace` re-opens a fresh subscription for the workspace
+    // it brings to the foreground. Guarded on key match so an unrelated
+    // stash can't tear down the active sub. `tearDownActiveWorkspaceSubscription`
+    // is idempotent.
+    if (activeSessionEventsKey === key) {
+      tearDownActiveWorkspaceSubscription()
+    }
     if (state.tabs.length === 0 && state.extraGroups.length === 0) {
       // Workspace is empty — clear background snapshot AND DB session so
       // restoreWorkspace doesn't resurrect old tabs from either source
@@ -3125,6 +3139,27 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         backgroundWorkspaces: remaining,
         activeWorkspaceKey: key,
       })
+      // Issue #8 (0.39.13) — session-events subscription handoff on the
+      // live fast path. The slow path delegates to
+      // `loadLayoutForWorkspace`, which tears down + re-subscribes; this
+      // fast path used to do neither. The switch sequence is
+      // `stashWorkspace(old)` → `restoreWorkspace(new)`, and
+      // `stashWorkspace` does NOT touch the subscription — so taking
+      // this branch left `activeSessionEventsUnsub` pointing at the
+      // PREVIOUS workspace's WS (still open, leaking) while the
+      // restored workspace had no subscription at all. Re-point it at
+      // the restored workspace so exactly one workspace's session-events
+      // WS is ever open. `subscribeForActiveWorkspace` tears down the
+      // stale sub before opening the new one (idempotent), so this is
+      // also a no-op-safe re-entry if we were already subscribed to
+      // `key`.
+      const [projectId, workspaceId] = key.split(':')
+      if (projectId && workspaceId) {
+        subscribeForActiveWorkspace(key, projectId, workspaceId, cwd)
+      } else {
+        // Malformed key — at minimum don't leak the previous sub.
+        tearDownActiveWorkspaceSubscription()
+      }
       // Pinned agent tab is ensured by the projects store after restoreWorkspace
       return
     }

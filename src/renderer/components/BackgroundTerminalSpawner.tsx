@@ -1,4 +1,5 @@
 import { useActiveAgentsStore } from '@/stores/active-agents'
+import { TabVisibilityContext } from '@/contexts/TabVisibilityContext'
 import { TerminalPane } from '@/terminal-v2/TerminalPane'
 
 /**
@@ -15,6 +16,15 @@ import { TerminalPane } from '@/terminal-v2/TerminalPane'
  * defeating the whole "agent runs while you're not looking"
  * purpose of heartbeat wake. v2's daemon-hosted PTY survives.
  * See `.claude/plans/happy-hatching-locket.md` (A8).
+ *
+ * Issue #8 (0.39.13) — these panes are SPAWN-ONLY: they exist purely
+ * to create the daemon PTY, never to stream its grid. We render them
+ * under `TabVisibilityContext.Provider value={false}` so TerminalPane's
+ * visibility gating runs the idempotent spawn POST but never opens a
+ * grid-WS. Without this they're rendered outside any tab wrapper, where
+ * `useIsTabVisible()` returns the default `true` and each spawn would
+ * pile another subscriber onto the session's grid broadcast — the
+ * heartbeat-driven churn this fix eliminates.
  */
 export function BackgroundTerminalSpawner(): React.JSX.Element | null {
   const spawns = useActiveAgentsStore((s) => s.backgroundSpawns)
@@ -37,15 +47,17 @@ export function BackgroundTerminalSpawner(): React.JSX.Element | null {
       }}
       aria-hidden
     >
-      {spawns.map((spawn) => (
-        <TerminalPane
-          key={spawn.id}
-          terminalId={spawn.terminalId}
-          cwd={spawn.cwd}
-          command={spawn.command}
-          args={spawn.args}
-        />
-      ))}
+      <TabVisibilityContext.Provider value={false}>
+        {spawns.map((spawn) => (
+          <TerminalPane
+            key={spawn.id}
+            terminalId={spawn.terminalId}
+            cwd={spawn.cwd}
+            command={spawn.command}
+            args={spawn.args}
+          />
+        ))}
+      </TabVisibilityContext.Provider>
     </div>
   )
 }

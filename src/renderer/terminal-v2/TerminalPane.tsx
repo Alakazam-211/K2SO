@@ -29,7 +29,7 @@ import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 
 import { useKesselConfig } from '../kessel/config-context'
 import { useIsTabVisible } from '@/contexts/TabVisibilityContext'
-import { computeDesiredActive } from './activeViewer'
+import { computeDesiredActive, shouldHoldGridWs } from './activeViewer'
 import {
   keyEventToSequence,
   naturalTextEditingSequence,
@@ -302,6 +302,11 @@ type Phase =
   | { kind: 'spawning' }
   | { kind: 'connecting'; sessionId: string }
   | { kind: 'ready'; sessionId: string }
+  // Issue #8 (0.39.13): PTY is spawned/attached on the daemon, but this
+  // pane is hidden so it holds NO grid-WS. The session is warm; we just
+  // aren't streaming its grid. Transitions back to 'connecting' when the
+  // pane becomes visible (the boot effect re-runs and opens the WS).
+  | { kind: 'parked'; sessionId: string }
   | { kind: 'exited'; sessionId: string; exitCode: number | null }
   | { kind: 'error'; message: string }
 
@@ -750,7 +755,38 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       firstSnapshotReusedRef.current = spawn.reused
       if (cancelled) return
 
-      setPhase({ kind: 'connecting', sessionId: spawn.sessionId })
+      // 0.39.13: capture the session id into a typed local. `spawn` is
+      // typed `never` here (the self-referential `as typeof spawn` cast
+      // at the fetch site widens it — a pre-existing quirk noted in the
+      // baseline tsc errors), so reading `spawn.sessionId` in MORE
+      // places would add more of those `'never'` errors. Reading it
+      // once through a typed local keeps this change at zero new tsc
+      // errors AND reads cleaner.
+      const sessionId: string = (spawn as { sessionId: string }).sessionId
+
+      // Issue #8 (0.39.13) — decouple "PTY spawned/attached" from
+      // "grid-WS open & streaming". The spawn POST above already ran
+      // (idempotent — creates or re-attaches the daemon PTY, keeping
+      // the session warm). We open the grid-WS ONLY when this pane is
+      // visible. A hidden pane (background tab, off-screen heartbeat
+      // spawn) parks here without subscribing to the session's grid
+      // broadcast — that's the subscriber pile-up this fix eliminates.
+      //
+      // Read the LIVE visibility ref (not the closure-captured render
+      // value): the boot effect re-runs whenever `isTabVisible` flips
+      // (it's in the dep array), so on a hidden→visible transition this
+      // body re-executes with `tabVisibleRef.current === true` and falls
+      // through to open the WS; on visible→hidden the effect's cleanup
+      // closes the WS and this guard prevents reopening it. The daemon
+      // sends a fresh snapshot on every (re)subscribe, so a re-shown
+      // pane catches up to the current PTY state with zero data loss.
+      if (!tabVisibleRef.current) {
+        perfLog('park_hidden', { sid: sessionId.slice(0, 8) })
+        setPhase({ kind: 'parked', sessionId })
+        return
+      }
+
+      setPhase({ kind: 'connecting', sessionId })
 
       perfLog('ws_opening')
       const __t_ws = performance.now()
@@ -1036,7 +1072,23 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
         // current value. Without this fix, a real child exit racing
         // the daemon's WS teardown would resurrect the exited
         // terminal as a fresh spawn on reconnect. See 0.39.8 regression.
-        if (phaseRef.current.kind === 'exited') return
+        // Issue #8 (0.39.13): don't reconnect a stream nobody is
+        // watching, and don't resurrect an exited session. If the pane
+        // went hidden (visible→hidden tears down the boot effect and
+        // closes the WS — but a racing in-flight drop could also land
+        // here), the grid-WS must stay closed; the boot effect re-runs
+        // on the hidden→visible transition and reopens it then.
+        // `shouldHoldGridWs` is the single pure predicate for "should
+        // this pane be streaming right now" — it folds in the
+        // child-exit check (`exited` ⇒ don't hold) that the previous
+        // standalone `phaseRef.current.kind === 'exited'` early-return
+        // handled.
+        if (!shouldHoldGridWs({
+          visible: tabVisibleRef.current,
+          exited: phaseRef.current.kind === 'exited',
+        })) {
+          return
+        }
         // Coalesce: if a timer is already pending, don't double-schedule.
         if (reconnectTimerRef.current !== null) return
         // Backoff between attempts. Caps at 5s so a sustained outage
@@ -1086,7 +1138,19 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     // on a WS drop (see ws.onclose above). Each bump tears this effect
     // down via the cleanup return above, then re-runs the body with
     // a fresh spawn + handshake.
-  }, [terminalId, cwd, command, args?.join('\0'), reconnectAttempt])
+    //
+    // Issue #8 (0.39.13): `isTabVisible` is in the dep array so a
+    // visibility flip re-runs the whole lifecycle. On visible→hidden
+    // the cleanup closes the grid-WS (PTY survives — no
+    // /cli/sessions/v2/close) and the re-run parks (no WS reopened); on
+    // hidden→visible the re-run does the idempotent spawn POST again
+    // (keeps the session warm / re-attaches if the daemon restarted)
+    // and opens a fresh grid-WS, and the daemon's on-subscribe snapshot
+    // brings the pane fully up to date. The spawn POST is cheap and
+    // idempotent (same path the reconnect already exercises), so paying
+    // it on a show is acceptable and keeps spawn-retry-on-daemon-restart
+    // behavior intact even for panes that were hidden during a restart.
+  }, [terminalId, cwd, command, args?.join('\0'), reconnectAttempt, isTabVisible])
 
   // ── A7.5 perf: first_render + tui_first_paint + SUMMARY ──────
   // first_render fires once after `setSnapshot` causes a paint.
