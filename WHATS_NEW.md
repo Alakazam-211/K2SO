@@ -3,6 +3,29 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.12 — Terminals that don't freeze, and chat history that shows the right project
+
+Two fixes from user reports.
+
+**Terminals no longer stall and "catch up."** If you run with more than
+one terminal open — or just keep K2SO running for a while with several
+workspaces — terminals could freeze for a few seconds and then suddenly
+jump back to life, getting worse the longer the app was open. The cause
+was an internal "who's the live view of this terminal?" signal that
+every open pane was claiming at once, including hidden background tabs,
+whenever the window had focus. With many sessions that turned into a
+constant tug-of-war that flooded the terminal's live-update channel —
+the flood is what you saw as the freeze, and the recovery is what you
+saw as the sudden catch-up. Now only the **one terminal you're actually
+looking at and typing in** claims that role, so the tug-of-war can't
+happen no matter how many sessions are open or reconnecting.
+
+**Chat history shows the workspace you're in.** Opening the chat-history
+panel inside one workspace could show *another* workspace's chats — the
+one that happened to be globally active (usually whichever has agents
+running). The panel now binds to the workspace it's opened from, so you
+always see that workspace's own history.
+
 ## 0.39.11 — Self-healing window: no more black screen after sleep or update
 
 If K2SO ever opened to a **black, unresponsive window** — after an
