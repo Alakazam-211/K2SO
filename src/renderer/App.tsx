@@ -101,7 +101,10 @@ function LeftPanelContent({ rootPath, header }: { rootPath?: string; header?: Re
     >
       {activeTab === 'files' && rootPath && <FileTree rootPath={rootPath} />}
       {activeTab === 'changes' && <ChangesPanel />}
-      {activeTab === 'history' && <ChatHistory />}
+      {/* #7: bind ChatHistory to THIS panel's host workspace (rootPath),
+          not the globally-active workspace. Without the prop it would
+          resolve from global pointers and show another workspace's chats. */}
+      {activeTab === 'history' && <ChatHistory projectPath={rootPath} />}
       {activeTab === 'workspace' && <WorkspacePanel />}
     </TabbedPanel>
   )
@@ -128,7 +131,9 @@ function RightPanelContent({ rootPath, header }: { rootPath?: string; header?: R
     >
       {activeTab === 'files' && rootPath && <FileTree rootPath={rootPath} />}
       {activeTab === 'changes' && <ChangesPanel />}
-      {activeTab === 'history' && <ChatHistory />}
+      {/* #7: bind ChatHistory to THIS panel's host workspace (rootPath),
+          not the globally-active workspace. See LeftPanelContent. */}
+      {activeTab === 'history' && <ChatHistory projectPath={rootPath} />}
       {activeTab === 'workspace' && <WorkspacePanel />}
     </TabbedPanel>
   )

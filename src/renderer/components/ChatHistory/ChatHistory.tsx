@@ -7,6 +7,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { usePresetsStore } from '@/stores/presets'
 import AgentIcon from '@/components/AgentIcon/AgentIcon'
 import { KeyCombo } from '@/components/KeySymbol'
+import { resolveChatHistoryHost } from './resolveHost'
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -179,7 +180,17 @@ function RefreshIcon(): React.JSX.Element {
 
 // ── Component ────────────────────────────────────────────────────────
 
-export default function ChatHistory(): React.JSX.Element {
+interface ChatHistoryProps {
+  /** Host workspace path supplied by the panel that mounts this view
+   *  (LeftPanelContent / RightPanelContent → `rootPath`). Binds the panel
+   *  to the workspace it lives in instead of the globally-active one.
+   *  See issue #7 + `resolveChatHistoryHost`. Optional so any future
+   *  caller that doesn't pass it falls back to the legacy global-pointer
+   *  behavior rather than breaking. */
+  projectPath?: string
+}
+
+export default function ChatHistory({ projectPath: hostProjectPath }: ChatHistoryProps = {}): React.JSX.Element {
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -199,9 +210,15 @@ export default function ChatHistory(): React.JSX.Element {
   const activeProjectId = useProjectsStore((s) => s.activeProjectId)
   const activeWorkspaceId = useProjectsStore((s) => s.activeWorkspaceId)
 
-  const activeProject = projects.find((p) => p.id === activeProjectId)
-  const activeWorkspace = activeProject?.workspaces.find((w) => w.id === activeWorkspaceId)
-  const projectPath = activeWorkspace?.worktreePath ?? activeProject?.path
+  // Resolve the HOST workspace this panel is mounted inside — bound to the
+  // `projectPath` prop, NOT the global active pointers. This is the #7 fix:
+  // opening history in workspace A must show A's chats even when B is
+  // globally active. Falls back to the global pointers only when no host
+  // path is supplied (defensive — every real mount passes one).
+  const { project: activeProject, workspace: activeWorkspace, projectPath } = useMemo(
+    () => resolveChatHistoryHost(projects, hostProjectPath, activeProjectId, activeWorkspaceId),
+    [projects, hostProjectPath, activeProjectId, activeWorkspaceId],
+  )
 
   const fetchSessions = useCallback(async (showLoading = false) => {
     if (!projectPath) {
@@ -234,6 +251,12 @@ export default function ChatHistory(): React.JSX.Element {
       // ignore
     }
     try {
+      // NOTE: chat/pinned is global-scoped (not project-scoped). That's safe
+      // ONLY because the session list itself is project-scoped via chat/list
+      // above — a pin key (`provider:sessionId`) can only ever match a row
+      // that's already in THIS host's list, so cross-project pins never
+      // surface here. If chat/list ever stops being project-scoped, this
+      // would need scoping too. (Issue #7 secondary note — left as-is.)
       const pinned = await daemonCliGet<string[]>('chat/pinned')
       setPinnedKeys(new Set(pinned))
     } catch {
@@ -570,7 +593,12 @@ export default function ChatHistory(): React.JSX.Element {
     [handleAgenticSearch, handleSessionClick, flatSessions, selectedIndex]
   )
 
-  if (!activeProject) {
+  // Empty-state keys on the resolved host path (not `activeProject`): when
+  // bound by `projectPath` we can have a valid host path before the matching
+  // project row is loaded into the store. `fetchSessions` already no-ops on
+  // an undefined path, so this only blanks the panel when there's genuinely
+  // no workspace to show.
+  if (!projectPath) {
     return (
       <div className="h-full flex items-center justify-center p-4">
         <p className="text-xs text-[var(--color-text-muted)] font-mono">No project selected</p>
