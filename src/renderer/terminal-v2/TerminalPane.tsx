@@ -29,6 +29,7 @@ import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 
 import { useKesselConfig } from '../kessel/config-context'
 import { useIsTabVisible } from '@/contexts/TabVisibilityContext'
+import { computeDesiredActive } from './activeViewer'
 import {
   keyEventToSequence,
   naturalTextEditingSequence,
@@ -423,6 +424,25 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   const wsRef = useRef<WebSocket | null>(null)
   const isTabVisible = useIsTabVisible()
 
+  // Issue #8 — mirror the two render-derived inputs to the
+  // active-viewer predicate (`isFocused` pane-focus state, `isTabVisible`
+  // context) into refs so the window-focus store subscriber and the
+  // WS-connect initial-claim path can read the latest values WITHOUT
+  // re-subscribing on every change. Same pattern as `phaseRef` above:
+  // the subscriber lives in a `[]`-deps effect (so it can't thrash —
+  // see Issue #3) but must still see fresh pane-focus / visibility.
+  // A small recompute effect (declared with the set_active effect
+  // below) reacts to `isFocused` / `isTabVisible` changes and routes
+  // through the same dedup-guarded `sendSetActive`.
+  const paneFocusedRef = useRef(false)
+  const tabVisibleRef = useRef(false)
+  useEffect(() => {
+    paneFocusedRef.current = isFocused
+  }, [isFocused])
+  useEffect(() => {
+    tabVisibleRef.current = isTabVisible
+  }, [isTabVisible])
+
   // ── A7.5 perf instrumentation (DEV-only) ─────────────────────
   // mountT0 is captured once via lazy useRef init so re-renders
   // don't reset it. Stage timings accumulate into stageMsRef so
@@ -813,21 +833,28 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       // Issue #5 (re-prime active-viewer handshake on each WS
       // (re)connect): the daemon-side subscriber that opens on the
       // new WS is fresh and has no notion that we were previously
-      // "active". Reset the send-level dedup AND emit the current
-      // focus state so the daemon's `active_subscriber` tracking
-      // is correct on the new connection. Without this, a reconnect
-      // would leave a focused window with `lastSentActiveRef === true`
-      // → next focus-change would short-circuit (value unchanged) →
-      // daemon never learns we're the active viewer.
+      // "active". Reset the send-level dedup so the next computed
+      // value is always (re-)sent on this new connection. Without
+      // this, a reconnect would leave a focused window with
+      // `lastSentActiveRef === true` → the next recompute would
+      // short-circuit (value unchanged) → the fresh daemon
+      // subscriber never learns we're the active viewer.
       lastSentActiveRef.current = null
-      const focusedAtConnect = useWindowFocusStore.getState().isFocused
+      // Issue #8: re-prime using the FULL predicate (visible AND
+      // pane-focused AND window-focused), not window-focus alone.
+      // A backgrounded pane that reconnects (e.g. WebKit dropped the
+      // throttled background-tab socket) must NOT re-claim active —
+      // pre-#8 it re-primed on window focus and a long-lived window
+      // accumulated many such hidden claimants, flooding the grid
+      // broadcast. `recomputeAndSendActiveRef` reads the live
+      // visibility/focus refs and routes through the dedup guard.
       try {
-        ws.send(JSON.stringify({ action: 'set_active', active: focusedAtConnect }))
-        lastSentActiveRef.current = focusedAtConnect
+        recomputeAndSendActiveRef.current()
       } catch {
         // WS could be in a half-open state right after handshake.
-        // The set_active effect's focus subscriber will recover on
-        // the next focus change via dedup-guarded sendSetActive.
+        // The set_active effect's focus subscriber + recompute effect
+        // will recover on the next focus/visibility change via the
+        // dedup-guarded path.
       }
       // Note: ws.onopen is intentionally NOT set here — the connect
       // retry loop above handled the open path and logged perf.
@@ -1247,6 +1274,12 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   // yet") whenever `wsRef.current` changes identity (a new WS = a new
   // dedup window). See the effect below.
   const lastSentActiveRef = useRef<boolean | null>(null)
+  // Issue #8 — stable handle to the "recompute desired active state and
+  // send it (dedup-guarded)" routine. Lives in a ref so the boot
+  // effect's WS-connect path (a different `[]`-deps effect) can call
+  // the latest implementation without taking it as a dep. The set_active
+  // effect below assigns it once on mount.
+  const recomputeAndSendActiveRef = useRef<() => void>(() => {})
 
   useEffect(() => {
     // The active-viewer handshake is a feature, not noise — it tells
@@ -1268,7 +1301,9 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     const sendSetActive = (active: boolean): void => {
       // Idempotent: skip the WS write if the daemon already saw
       // this exact value from us. Closes Issue #3 even if upstream
-      // (`isFocused`, `phase.kind`) ever flaps again.
+      // (`isFocused`, `isTabVisible`, window focus, `phase.kind`)
+      // ever flaps again — this dedup is what makes recomputing on
+      // every source change safe (no re-run thrash reaches the wire).
       if (lastSentActiveRef.current === active) return
       const ws = wsRef.current
       if (!ws || ws.readyState !== WebSocket.OPEN) return
@@ -1276,21 +1311,52 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       lastSentActiveRef.current = active
     }
 
+    // Issue #8 — single source of truth for the active claim. The
+    // desired state is visible AND pane-focused AND window-focused.
+    // We read all three from refs/store (no React deps) so every
+    // caller — the window-focus subscriber, the WS-connect re-prime,
+    // and the visibility/focus recompute effect — converges on the
+    // same dedup-guarded send. A pane that is hidden or blurred sends
+    // `set_active(false)`; only the visible+focused pane claims.
+    const recomputeAndSendActive = (): void => {
+      const windowFocused = useWindowFocusStore.getState().isFocused
+      const desired = computeDesiredActive({
+        visible: tabVisibleRef.current,
+        paneFocused: paneFocusedRef.current,
+        windowFocused,
+      })
+      sendSetActive(desired)
+    }
+    // Expose the latest implementation to the boot effect's WS-connect
+    // re-prime path (a separate effect can't close over this one).
+    recomputeAndSendActiveRef.current = recomputeAndSendActive
+
     let wasFocused = useWindowFocusStore.getState().isFocused
     // Initial claim — happens after WS is open. The boot effect
     // wires `wsRef.current` once the v2 spawn completes; if the
     // WS isn't open yet when this fires, the send is a no-op.
-    // It's fine — the focus-transition path below will claim
-    // when the user interacts.
-    sendSetActive(wasFocused)
+    // It's fine — the recompute paths below will claim when the
+    // user interacts / the pane becomes visible+focused.
+    recomputeAndSendActive()
 
     const unsub = useWindowFocusStore.subscribe((state) => {
       const nowFocused = state.isFocused
       if (wasFocused !== nowFocused) {
-        sendSetActive(nowFocused)
+        // Recompute against the full predicate — window focus is only
+        // one of the three inputs now. The dedup short-circuits if the
+        // combined result didn't actually change (e.g. window regains
+        // focus but this pane is hidden → still `false`, no send).
+        recomputeAndSendActive()
         // On focus-gain, re-emit the latest dimensions so the PTY
-        // snaps to this window's grid.
-        if (!wasFocused && nowFocused && lastResizeRef.current) {
+        // snaps to this window's grid — but only if we're actually
+        // the active viewer now (visible+focused). A hidden pane must
+        // not ping-pong resizes on window focus (the #8 flood path).
+        if (
+          !wasFocused &&
+          nowFocused &&
+          lastSentActiveRef.current === true &&
+          lastResizeRef.current
+        ) {
           const ws = wsRef.current
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({
@@ -1305,6 +1371,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     })
     return () => {
       unsub()
+      recomputeAndSendActiveRef.current = () => {}
       // Symmetric cleanup — if we claimed active on mount, release
       // on unmount so the daemon's `active_subscriber` tracking
       // doesn't think a torn-down pane is still the active viewer.
@@ -1326,6 +1393,26 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     // the dep was load-bearing for nothing and amplified the thrash.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Issue #8 — recompute the active claim when pane-focus or tab
+  // visibility changes (window-focus changes are handled by the
+  // store subscriber inside the effect above). These two inputs are
+  // React render values, so a dep-driven effect is the natural
+  // trigger. It runs AFTER the two mirror-ref effects (declared
+  // earlier, so they commit first) — meaning `paneFocusedRef` /
+  // `tabVisibleRef` already hold the new values when we recompute.
+  //
+  // This is the release-on-hidden + release-on-blur path (Part 1/2):
+  // when this pane loses visibility or pane-focus the recompute
+  // yields `false` and `sendSetActive(false)` releases the claim.
+  // It does NOT reintroduce Issue #3: the effect only re-runs when
+  // `isFocused`/`isTabVisible` genuinely change (real user-visible
+  // transitions, not a tight loop), and every send still passes
+  // through the `lastSentActiveRef` dedup — so even a spurious
+  // re-run that computes the same value writes nothing to the wire.
+  useEffect(() => {
+    recomputeAndSendActiveRef.current()
+  }, [isFocused, isTabVisible])
 
   // ── Keyboard input ────────────────────────────────────────────
   // 0.37.9 — handlers attach to the shadow <textarea> instead of the

@@ -126,6 +126,48 @@ enum Inbound {
 static NEXT_SUBSCRIBER_ID: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 
+/// The state transition a `SetActive` frame implies, given the
+/// session's current `active_subscriber` value and the requesting
+/// subscriber's id. Extracted as a pure function so the idempotence
+/// rules (Issue #8) are unit-testable without spinning up a PTY +
+/// WebSocket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetActiveOutcome {
+    /// `active:true` from a subscriber that does NOT currently hold
+    /// the claim — store our id (displacing any prior claimer).
+    Claim,
+    /// `active:false` from the subscriber that currently holds the
+    /// claim — clear it (CAS guards against a concurrent takeover).
+    Release,
+    /// No state change: a redundant claim (we already hold it) or a
+    /// redundant release (we never held it). Skip the store + skip
+    /// the log so a chatty client can't flood the grid broadcast.
+    NoOp,
+}
+
+/// Decide what a `SetActive { active }` frame should do given the
+/// current `active_subscriber` (0 == no claim) and the requesting
+/// `subscriber_id` (always nonzero — 0 is the sentinel).
+fn decide_set_active(current: u64, subscriber_id: u64, active: bool) -> SetActiveOutcome {
+    if active {
+        // Claiming. Only a real state change if we're not already
+        // the active subscriber. (current may be 0 = unclaimed, or
+        // another subscriber's id = displace them — both are claims.)
+        if current == subscriber_id {
+            SetActiveOutcome::NoOp
+        } else {
+            SetActiveOutcome::Claim
+        }
+    } else {
+        // Releasing. Only a real change if we currently hold it.
+        if current == subscriber_id {
+            SetActiveOutcome::Release
+        } else {
+            SetActiveOutcome::NoOp
+        }
+    }
+}
+
 pub async fn serve_session_grid_connection(
     stream: &mut TcpStream,
     params: HashMap<String, String>,
@@ -440,42 +482,67 @@ pub async fn serve_session_grid_connection(
                                 }
                             }
                             Ok(Inbound::SetActive { active }) => {
-                                if active {
-                                    // Claim: stamp our id. Previous
-                                    // claimer (if any) is silently
-                                    // displaced; that's the intended
-                                    // semantics — most-recent claim
-                                    // wins.
-                                    session.active_subscriber.store(
-                                        subscriber_id,
-                                        std::sync::atomic::Ordering::Relaxed,
-                                    );
-                                    log_debug!(
-                                        "[v2-perf] side=daemon stage=active_claim \
-                                         session={} sub={}",
-                                        session.session_id,
-                                        subscriber_id,
-                                    );
-                                } else {
-                                    // Release: only clear if we still
-                                    // hold the claim. CAS prevents
-                                    // accidentally releasing someone
-                                    // else's claim if claims rapidly
-                                    // alternate between viewers.
-                                    let _ = session
-                                        .active_subscriber
-                                        .compare_exchange(
+                                // Issue #8 backstop: make the claim/release
+                                // handler idempotent. A long-lived window
+                                // with many mounted-but-hidden panes used
+                                // to fire `set_active(true)` from every pane
+                                // on each window-focus event, re-storing the
+                                // same `active_subscriber` and re-logging on
+                                // every redundant claim. With the renderer
+                                // now keying on visible+focused, this should
+                                // be quiet — but we enforce it daemon-side so
+                                // a noisy/buggy client can't reintroduce the
+                                // grid-broadcast flood that produced the
+                                // "stall then recover" symptom. We compute the
+                                // transition with a pure helper (unit-tested
+                                // below), apply only real state changes, and
+                                // only log when something actually changed.
+                                let prev = session
+                                    .active_subscriber
+                                    .load(std::sync::atomic::Ordering::Relaxed);
+                                match decide_set_active(prev, subscriber_id, active) {
+                                    SetActiveOutcome::Claim => {
+                                        // Real claim: we weren't already the
+                                        // active subscriber. Previous claimer
+                                        // (if any) is silently displaced —
+                                        // most-recent claim wins.
+                                        session.active_subscriber.store(
                                             subscriber_id,
-                                            0,
-                                            std::sync::atomic::Ordering::Relaxed,
                                             std::sync::atomic::Ordering::Relaxed,
                                         );
-                                    log_debug!(
-                                        "[v2-perf] side=daemon stage=active_release \
-                                         session={} sub={}",
-                                        session.session_id,
-                                        subscriber_id,
-                                    );
+                                        log_debug!(
+                                            "[v2-perf] side=daemon stage=active_claim \
+                                             session={} sub={}",
+                                            session.session_id,
+                                            subscriber_id,
+                                        );
+                                    }
+                                    SetActiveOutcome::Release => {
+                                        // Real release: we held the claim and
+                                        // are giving it up. CAS so a viewer
+                                        // that took over before us isn't
+                                        // accidentally cleared.
+                                        let _ = session
+                                            .active_subscriber
+                                            .compare_exchange(
+                                                subscriber_id,
+                                                0,
+                                                std::sync::atomic::Ordering::Relaxed,
+                                                std::sync::atomic::Ordering::Relaxed,
+                                            );
+                                        log_debug!(
+                                            "[v2-perf] side=daemon stage=active_release \
+                                             session={} sub={}",
+                                            session.session_id,
+                                            subscriber_id,
+                                        );
+                                    }
+                                    SetActiveOutcome::NoOp => {
+                                        // Redundant claim/release — no state
+                                        // change, no log. This is the Issue #8
+                                        // backstop: silence the churn instead
+                                        // of faithfully re-storing + re-logging.
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -569,4 +636,54 @@ async fn send_error_then_close(stream: &mut TcpStream, msg: &str) {
     let (mut write, _read) = ws.split();
     let _ = send_outbound(&mut write, &err).await;
     let _ = write.close().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Issue #8: the active-viewer claim/release handler must be
+    // idempotent. These tests pin the pure decision so a future edit
+    // can't silently reintroduce the redundant-store + redundant-log
+    // churn that flooded the per-session grid broadcast channel.
+
+    #[test]
+    fn claiming_when_unclaimed_is_a_real_claim() {
+        // active_subscriber == 0 (no claim), sub 7 claims → Claim.
+        assert_eq!(decide_set_active(0, 7, true), SetActiveOutcome::Claim);
+    }
+
+    #[test]
+    fn claiming_twice_with_same_subscriber_is_a_noop() {
+        // We already hold the claim; re-asserting it changes nothing
+        // and must not store or log again.
+        assert_eq!(decide_set_active(7, 7, true), SetActiveOutcome::NoOp);
+    }
+
+    #[test]
+    fn claiming_when_another_holds_it_displaces() {
+        // Most-recent-claim-wins: sub 9 claims while sub 7 holds it →
+        // a real Claim (the handler stores 9, displacing 7).
+        assert_eq!(decide_set_active(7, 9, true), SetActiveOutcome::Claim);
+    }
+
+    #[test]
+    fn releasing_our_own_claim_is_a_real_release() {
+        assert_eq!(decide_set_active(7, 7, false), SetActiveOutcome::Release);
+    }
+
+    #[test]
+    fn releasing_when_unclaimed_is_a_noop() {
+        // Never held it (current == 0) → release is a no-op, no CAS
+        // attempt, no log.
+        assert_eq!(decide_set_active(0, 7, false), SetActiveOutcome::NoOp);
+    }
+
+    #[test]
+    fn releasing_someone_elses_claim_is_a_noop() {
+        // sub 7 sends release while sub 9 holds the claim — must NOT
+        // clear sub 9's claim and must NOT log. The runtime CAS would
+        // also reject this, but we short-circuit before logging.
+        assert_eq!(decide_set_active(9, 7, false), SetActiveOutcome::NoOp);
+    }
 }

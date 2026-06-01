@@ -86,11 +86,22 @@ impl Dimensions for TermSize {
 /// plain `std::thread` (not a tokio context). `broadcast::Sender::send`
 /// is thread-safe and non-blocking, so cross-context use is fine.
 ///
-/// Channel capacity is 256 — enough to absorb a burst of Wakeup
-/// events during a heavy PTY read without lagging subscribers.
-/// Alacritty typically emits ~10-100 events/sec on active use;
-/// 256 is several seconds of headroom at worst case.
-pub const EVENT_CHANNEL_CAPACITY: usize = 256;
+/// Channel capacity. Each `Wakeup` event drives one `build_emit`
+/// snapshot/delta on the subscriber side; if the channel fills before
+/// a briefly-slow subscriber drains it, that subscriber gets
+/// `RecvError::Lagged` and we flush a fresh full snapshot — which is
+/// itself more traffic. Issue #8: a long-lived window that accumulated
+/// many mounted panes could fire a burst of resize/claim churn that,
+/// combined with full-screen TUI redraws, briefly overran the old
+/// 256-slot bound → `lagged` → snapshot flush → more traffic → the
+/// visible "stall then recover". The renderer-side fix (claim only the
+/// visible+focused pane) removes the churn at the source; this larger
+/// bound is the defense-in-depth backstop so a single full-screen
+/// redraw burst can't tip a momentarily-slow subscriber into the
+/// lag/flush cycle. 4096 ≈ tens of seconds of headroom at Alacritty's
+/// typical ~10-100 events/sec, while staying bounded (each slot is a
+/// small `AlacEvent`, so the ceiling is a few hundred KB worst case).
+pub const EVENT_CHANNEL_CAPACITY: usize = 4096;
 
 #[derive(Clone)]
 pub struct DaemonEventListener {
