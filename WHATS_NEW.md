@@ -3,7 +3,24 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
-## 0.39.13 — The app only streams the terminal you're looking at
+## 0.39.14 — Pinned Chat/Inbox tabs always point at the right workspace
+
+Fixes a bug where a workspace's **pinned Chat and Inbox tabs** could stay
+stuck pointing at a *different* workspace — wrong agent, wrong folder,
+and (for Chat) the wrong conversation. New terminal tabs always opened
+in the right place, but the pinned tabs kept routing to the other
+workspace, and there was no way to fix it from the app.
+
+It happened mainly to workspaces **created from inside another
+workspace** (e.g. spinning up a new workspace from within an existing
+one's chat) — the new workspace's pinned tabs picked up the parent's
+context and held onto it.
+
+Now K2SO **re-checks and corrects** a pinned tab's workspace every time
+you switch into it, so any affected workspace **heals itself the next
+time you open it** — no reinstall, no settings to touch. (When the
+workspace is corrected, the pinned Chat tab also starts a fresh
+conversation, since the old one belonged to the other workspace.)
 
 A follow-on to 0.39.12's terminal-stall fix that removes the root cause
 rather than just the symptom.
