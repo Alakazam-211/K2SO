@@ -587,6 +587,39 @@ interface TabsState {
 
 let tabCounter = 0
 
+/** Reconcile a restored system agent tab to the current workspace.
+ *  Returns the same tab reference when nothing changed (cheap, no
+ *  needless re-render); otherwise a shallow-copied tab whose agent
+ *  item(s) carry the authoritative agentName/projectPath. Drops the
+ *  chat sessionId when projectPath changes — that session was the old
+ *  workspace's. See the call site in `ensureSystemAgentTabs`. */
+function reconcileSystemAgentTab(tab: Tab, agentName: string, projectPath: string): Tab {
+  let mutated = false
+  const newPaneGroups = new Map<string, PaneGroup>()
+  for (const [pgId, pg] of tab.paneGroups) {
+    let pgChanged = false
+    const newItems = pg.items.map((item) => {
+      if (item.type !== 'agent') return item
+      const d = item.data as AgentItemData
+      if (d.agentName === agentName && d.projectPath === projectPath) return item
+      pgChanged = true
+      const pathChanged = d.projectPath !== projectPath
+      return {
+        ...item,
+        data: {
+          ...d,
+          agentName,
+          projectPath,
+          sessionId: pathChanged ? undefined : d.sessionId,
+        },
+      }
+    })
+    if (pgChanged) mutated = true
+    newPaneGroups.set(pgId, pgChanged ? { ...pg, items: newItems } : pg)
+  }
+  return mutated ? { ...tab, paneGroups: newPaneGroups } : tab
+}
+
 /** Ensure the pinned system agent tab matches the given agent mode.
  *  Called by the projects store after workspace restore/switch.
  *  Resolves the primary agent name from the backend asynchronously. */
@@ -1620,8 +1653,23 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     for (const section of wantSections) {
       const existing = bySection.get(section)
       if (existing) {
-        orderedSystemTabs.push(existing)
-        if (!firstTabId) firstTabId = existing.id
+        // Heal stale workspace context on the pinned tab. A system agent
+        // tab restored from this workspace's saved layout can carry an
+        // agentName/projectPath from a *different* workspace — the
+        // serialized layout stores projectPath (see serializeTab) and
+        // restoreLayout replays it verbatim, so a value baked in under
+        // another workspace survives the switch. The pinned tab IS the
+        // current workspace's own agent surface, so reconcile its agent
+        // item(s) to the authoritative agentName/projectPath we were
+        // called with (sourced from project.path via
+        // ensurePinnedAgentTabForMode). Without this, the Chat/Inbox tab
+        // keeps routing to the wrong workspace even though new terminal
+        // tabs — which spawn against the live workspace cwd — are correct.
+        // When projectPath changes, drop the chat sessionId: that Claude
+        // session belonged to the old workspace.
+        const reconciled = reconcileSystemAgentTab(existing, agentName, projectPath)
+        orderedSystemTabs.push(reconciled)
+        if (!firstTabId) firstTabId = reconciled.id
         continue
       }
       const tabId = crypto.randomUUID()
