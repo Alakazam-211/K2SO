@@ -305,7 +305,8 @@ type Phase =
   // Issue #8 (0.39.13): PTY is spawned/attached on the daemon, but this
   // pane is hidden so it holds NO grid-WS. The session is warm; we just
   // aren't streaming its grid. Transitions back to 'connecting' when the
-  // pane becomes visible (the boot effect re-runs and opens the WS).
+  // pane becomes visible (the grid-WS effect opens the WS) — WITHOUT
+  // re-running the spawn POST (spawn lifecycle is a separate effect now).
   | { kind: 'parked'; sessionId: string }
   | { kind: 'exited'; sessionId: string; exitCode: number | null }
   | { kind: 'error'; message: string }
@@ -369,6 +370,38 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   // pane really unmounts.
   const [reconnectAttempt, setReconnectAttempt] = useState(0)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 0.39.13 — spawn ⊥ stream decoupling.
+  //
+  // v1 (the regression we're fixing) put `isTabVisible` in the boot
+  // effect's dep array, coupling the grid-WS lifecycle to the spawn
+  // effect: any poll-driven re-render that re-ran the boot effect (or
+  // any transient visibility re-eval) tore down + reopened the grid-WS
+  // — the visible pane's WS detached/attached every ~3s in lockstep
+  // with the active-agents poll, with a redundant spawn POST each time.
+  //
+  // The fix splits the lifecycle into two effects:
+  //   - SPAWN effect (deps: terminalId, cwd, command, args, reconnectAttempt
+  //     — all STABLE; NO isTabVisible): runs the idempotent spawn POST,
+  //     stashes the sessionId in `sessionIdRef`, and bumps `spawnGeneration`
+  //     to announce "a fresh PTY is ready to be streamed". It never opens
+  //     a grid-WS and never tears down on a visibility flip.
+  //   - GRID-WS effect (deps: spawnGeneration, isTabVisible): the ONLY
+  //     thing that opens/closes the grid-WS. A real visible↔hidden flip
+  //     (or a fresh spawn generation) reconciles the WS; a spurious
+  //     re-render with unchanged visibility is a guarded no-op
+  //     (`appliedVisibleRef`), so it never drops/reopens on the poll.
+  const sessionIdRef = useRef<string | null>(null)
+  const [spawnGeneration, setSpawnGeneration] = useState(0)
+  // Last visible state the grid-WS effect actually ACTED on. Lets the
+  // effect distinguish a true visible↔hidden transition (open/close the
+  // WS) from a re-run where visibility didn't change (no-op). `null`
+  // until the first reconcile.
+  const appliedVisibleRef = useRef<boolean | null>(null)
+  // Stable handle to "open a grid-WS for the current sessionId". Lives
+  // in a ref so the grid-WS effect (whose deps are spawnGeneration +
+  // isTabVisible) can call the latest implementation without taking the
+  // big WS-open closure as a dependency. Assigned once below.
+  const openGridWsRef = useRef<() => Promise<void>>(async () => {})
   // 0.39.9: phase, but as a ref. `ws.onclose` (bound inside the boot
   // effect) needs to consult the LATEST phase to know whether to
   // skip reconnect after a real `child_exit` — but the closure
@@ -616,12 +649,15 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     return () => clearInterval(interval)
   }, [terminalId])
 
-  // ── Spawn + WS lifecycle ──────────────────────────────────────
+  // ── Spawn effect (0.39.13: spawn ⊥ stream) ────────────────────
   //
-  // One effect handles the whole flow: HTTP POST to v2 spawn, then
-  // open WS. Any step failing parks the component in `{error}` and
-  // surfaces a message overlay. Cleanup on unmount closes the WS
-  // only — daemon-side session survives.
+  // Runs the idempotent HTTP POST to /cli/sessions/v2/spawn ONLY —
+  // it no longer opens the grid-WS. On success it stashes the sessionId
+  // in `sessionIdRef` and bumps `spawnGeneration`; the dedicated grid-WS
+  // lifecycle effect below opens/closes the stream based on visibility.
+  // Deps are STABLE (no `isTabVisible`), so a poll-driven re-render can
+  // never tear this down or re-issue the spawn POST — the v1 churn this
+  // fix removes. Any step failing parks the component in `{error}`.
   useEffect(() => {
     let cancelled = false
     // For heartbeat-surfaced tabs, attachAgentName carries the daemon's
@@ -764,32 +800,100 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       // errors AND reads cleaner.
       const sessionId: string = (spawn as { sessionId: string }).sessionId
 
-      // Issue #8 (0.39.13) — decouple "PTY spawned/attached" from
-      // "grid-WS open & streaming". The spawn POST above already ran
-      // (idempotent — creates or re-attaches the daemon PTY, keeping
-      // the session warm). We open the grid-WS ONLY when this pane is
-      // visible. A hidden pane (background tab, off-screen heartbeat
-      // spawn) parks here without subscribing to the session's grid
-      // broadcast — that's the subscriber pile-up this fix eliminates.
-      //
-      // Read the LIVE visibility ref (not the closure-captured render
-      // value): the boot effect re-runs whenever `isTabVisible` flips
-      // (it's in the dep array), so on a hidden→visible transition this
-      // body re-executes with `tabVisibleRef.current === true` and falls
-      // through to open the WS; on visible→hidden the effect's cleanup
-      // closes the WS and this guard prevents reopening it. The daemon
-      // sends a fresh snapshot on every (re)subscribe, so a re-shown
-      // pane catches up to the current PTY state with zero data loss.
+      // 0.39.13 — spawn ⊥ stream. The PTY is now spawned/attached on the
+      // daemon. We do NOT open the grid-WS here. Instead we stash the
+      // sessionId and bump `spawnGeneration`; the dedicated grid-WS
+      // effect (deps: spawnGeneration + isTabVisible) decides whether to
+      // open a WS based purely on visibility — so a poll-driven re-render
+      // can never tear this spawn down or churn the stream.
+      sessionIdRef.current = sessionId
+      // Phase reflects spawn outcome only; the grid-WS effect will move
+      // us to 'connecting'/'ready' (visible) or leave us 'parked'
+      // (hidden). Reading the live visibility ref keeps the initial
+      // phase honest for the first paint.
+      setPhase(
+        tabVisibleRef.current
+          ? { kind: 'connecting', sessionId }
+          : { kind: 'parked', sessionId },
+      )
       if (!tabVisibleRef.current) {
         perfLog('park_hidden', { sid: sessionId.slice(0, 8) })
-        setPhase({ kind: 'parked', sessionId })
-        return
       }
+      // Announce a fresh PTY generation. This is what wakes the grid-WS
+      // effect to (re)open the stream for a visible pane — including on
+      // reconnect, where the daemon's idempotent spawn returns the SAME
+      // sessionId (so a sessionId-keyed effect alone would NOT re-fire;
+      // the monotonically-increasing generation guarantees it does).
+      setSpawnGeneration((g) => g + 1)
+    }
 
-      setPhase({ kind: 'connecting', sessionId })
+    void boot()
 
-      perfLog('ws_opening')
-      const __t_ws = performance.now()
+    return () => {
+      cancelled = true
+      // Cancel any pending reconnect timer when the spawn effect tears
+      // down (real unmount OR a reconnect-driven re-run via
+      // reconnectAttempt). Without this, a re-run would schedule a new
+      // connect on top of a pending one and we'd race two handshakes.
+      if (reconnectTimerRef.current !== null) {
+        clearTimeout(reconnectTimerRef.current)
+        reconnectTimerRef.current = null
+      }
+      // Forget the spawned session for this generation; the grid-WS
+      // effect's cleanup (below) owns closing the socket.
+      sessionIdRef.current = null
+    }
+    // 0.39.13 — STABLE deps only. `isTabVisible` is deliberately NOT
+    // here: visibility no longer drives spawn. `reconnectAttempt` still
+    // re-runs the spawn (Issue #5: a genuine mid-flight WS drop bumps
+    // it; the daemon's idempotent spawn re-attaches the same PTY and the
+    // bumped spawnGeneration re-opens the grid-WS). The big WS-open
+    // closure now lives in `openGridWs` below, called by the grid-WS
+    // effect — not inline here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [terminalId, cwd, command, args?.join('\0'), reconnectAttempt])
+
+  // ── Grid-WS open routine (0.39.13) ────────────────────────────
+  // The whole WS handshake + handler wiring, extracted from the old
+  // boot effect so it can be invoked by the visibility-driven grid-WS
+  // effect rather than re-run as part of spawn. Reads the current
+  // sessionId from `sessionIdRef` (set by the spawn effect). Idempotent
+  // on an already-open socket: callers guard via `wsRef.current`.
+  const openGridWs = useCallback(async (): Promise<void> => {
+    const sessionId = sessionIdRef.current
+    if (!sessionId) return
+    // Don't open a second socket on top of a live/connecting one.
+    const existing = wsRef.current
+    if (
+      existing &&
+      (existing.readyState === WebSocket.OPEN ||
+        existing.readyState === WebSocket.CONNECTING)
+    ) {
+      return
+    }
+
+    // Staleness guard re-checked at every await point: if the pane went
+    // hidden, the session changed, or unmounted while we were mid-
+    // handshake, abandon this connect attempt so we never open a socket
+    // for a pane that no longer wants to stream.
+    const isStale = () =>
+      sessionIdRef.current !== sessionId ||
+      appliedVisibleRef.current !== true
+
+    let creds: { port: number; token: string } | null = null
+    try {
+      creds = await getDaemonWs()
+    } catch {
+      // Creds unavailable (daemon mid-restart). The next visibility
+      // reconcile / reconnect will retry. Leave phase as-is.
+      return
+    }
+    if (isStale() || !creds) return
+
+    setPhase({ kind: 'connecting', sessionId })
+
+    perfLog('ws_opening')
+    const __t_ws = performance.now()
 
       // 0.37.7: WS connect-with-retry. Smooths the install-relaunch
       // race where the renderer mounts before the daemon has finished
@@ -809,10 +913,10 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       let ws: WebSocket | null = null
       let wsAttempt = 0
       while (true) {
-        if (cancelled) return
+        if (isStale()) return
         wsAttempt += 1
         const candidate = new WebSocket(
-          `ws://127.0.0.1:${creds.port}/cli/sessions/grid?session=${spawn.sessionId}&token=${creds.token}`,
+          `ws://127.0.0.1:${creds.port}/cli/sessions/grid?session=${sessionId}&token=${creds.token}`,
         )
         // Race: open vs. close-before-open. Browser fires both
         // `onerror` then `onclose` when a connection is rejected
@@ -829,7 +933,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
           candidate.onerror = () => { cleanup(); resolve(false) }
           candidate.onclose = () => { cleanup(); resolve(false) }
         })
-        if (cancelled) {
+        if (isStale()) {
           if (candidate.readyState !== WebSocket.CLOSED) candidate.close()
           return
         }
@@ -927,7 +1031,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
             // means HMR'd code wouldn't take effect on existing
             // sessions. Driving it from setSnapshot's downstream
             // effect avoids that whole class of bug.
-            setPhase({ kind: 'ready', sessionId: spawn.sessionId })
+            setPhase({ kind: 'ready', sessionId })
             break
           }
           case 'delta':
@@ -993,7 +1097,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
             const newLabel = parsed.payload.label ?? ''
             useSessionLabelsStore
               .getState()
-              .setSessionLabel(spawn.sessionId, newLabel)
+              .setSessionLabel(sessionId, newLabel)
             if (newLabel && tabId) {
               useTabsStore.getState().setTabTitle(tabId, newLabel)
             }
@@ -1025,7 +1129,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
             // that resurrects the exited terminal.
             const next: Phase = {
               kind: 'exited',
-              sessionId: spawn.sessionId,
+              sessionId,
               exitCode: parsed.payload.exit_code,
             }
             phaseRef.current = next
@@ -1039,7 +1143,8 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       }
 
       ws.onerror = () => {
-        if (cancelled) return
+        // Ignore events from a socket we've already replaced/closed.
+        if (wsRef.current !== ws) return
         // If we already received child_exit, the daemon initiated the
         // teardown and any onerror that follows is a concurrent TCP
         // close, not a real failure. Don't clobber the 'exited' state.
@@ -1048,41 +1153,25 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
         )
       }
       ws.onclose = (ev) => {
-        // Issue #5: pre-0.39.8 this was a no-op, leaving the terminal
-        // permanently silent after any mid-flight WS drop (TCP reset,
-        // WebKit Networking quirk, App Nap, etc.). Now we schedule a
-        // reconnect — bump `reconnectAttempt`, the boot effect's
-        // dep array sees the change and re-runs (fresh spawn +
-        // fresh WS handshake). The daemon's
-        // `/cli/sessions/v2/spawn` is idempotent on `agent_name`,
-        // returning the SAME sessionId for an already-existing
-        // session, so the PTY survives intact across the reconnect.
-        if (cancelled) return
-        // Real child exit (the child process actually exited) — don't
-        // reconnect. The `child_exit` ws-message handler above sets
-        // phase=exited via `setPhase`; any onclose that follows is
-        // part of the natural teardown.
+        // Ignore close events from a socket we've already replaced (the
+        // grid-WS effect closed it on hide, or a newer connect superseded
+        // it). Only the live socket may schedule a reconnect.
+        if (wsRef.current !== ws) return
+        wsRef.current = null
+        // Issue #5 + Issue #8 (0.39.13): a genuine mid-flight WS drop
+        // (TCP reset, WebKit Networking quirk, App Nap) on a VISIBLE,
+        // not-yet-exited pane schedules a reconnect by bumping
+        // `reconnectAttempt` — the spawn effect re-runs (idempotent
+        // spawn re-attaches the same daemon PTY) and the bumped
+        // `spawnGeneration` re-opens a fresh grid-WS.
         //
-        // 0.39.9: read from `phaseRef.current`, not the closure-
-        // captured `phase`. The boot effect captures `phase` at the
-        // time `boot()` runs, but `child_exit` updates phase via
-        // `setPhase` AFTER that — so the closure-captured `phase`
-        // is stale by the time `onclose` actually fires. Reading
-        // through the ref (synced via the useEffect above) sees the
-        // current value. Without this fix, a real child exit racing
-        // the daemon's WS teardown would resurrect the exited
-        // terminal as a fresh spawn on reconnect. See 0.39.8 regression.
-        // Issue #8 (0.39.13): don't reconnect a stream nobody is
-        // watching, and don't resurrect an exited session. If the pane
-        // went hidden (visible→hidden tears down the boot effect and
-        // closes the WS — but a racing in-flight drop could also land
-        // here), the grid-WS must stay closed; the boot effect re-runs
-        // on the hidden→visible transition and reopens it then.
         // `shouldHoldGridWs` is the single pure predicate for "should
-        // this pane be streaming right now" — it folds in the
-        // child-exit check (`exited` ⇒ don't hold) that the previous
-        // standalone `phaseRef.current.kind === 'exited'` early-return
-        // handled.
+        // this pane be streaming right now". It folds in BOTH gates:
+        //   - exited ⇒ don't reconnect (child really exited; 0.39.9
+        //     phaseRef-synchronous fix prevents resurrecting it).
+        //   - hidden ⇒ don't reconnect (we deliberately closed the WS
+        //     on hide; the grid-WS effect reopens on the next show, and
+        //     reconnecting a stream nobody watches is the #8 pile-up).
         if (!shouldHoldGridWs({
           visible: tabVisibleRef.current,
           exited: phaseRef.current.kind === 'exited',
@@ -1104,53 +1193,95 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
         // Phase → 'connecting' so the UI shows we're recovering,
         // not stuck in 'ready' with a dead WS underneath.
         setPhase((prev) =>
-          prev.kind === 'exited' ? prev : { kind: 'connecting', sessionId: spawn.sessionId },
+          prev.kind === 'exited' ? prev : { kind: 'connecting', sessionId },
         )
         reconnectTimerRef.current = setTimeout(() => {
           reconnectTimerRef.current = null
           setReconnectAttempt((n) => n + 1)
         }, delayMs)
       }
-    }
+  }, [terminalId, perfLog, reconnectAttempt])
 
-    void boot()
+  // Keep the ref pointing at the latest `openGridWs` so the grid-WS
+  // lifecycle effect (which doesn't take the big closure as a dep) always
+  // invokes the current implementation.
+  useEffect(() => {
+    openGridWsRef.current = openGridWs
+  }, [openGridWs])
 
-    return () => {
-      cancelled = true
-      // Issue #5: cancel any pending reconnect timer when the boot
-      // effect tears down (real unmount OR a reconnect-driven re-run).
-      // Without this, a re-run would schedule a new connect on top of
-      // a pending one and we'd race two parallel handshakes.
+  // ── Grid-WS lifecycle effect (0.39.13) ────────────────────────
+  // The ONLY place the grid-WS opens or closes. Keyed on
+  // `spawnGeneration` (a fresh PTY became available — spawn / reconnect)
+  // and `isTabVisible` (real visible↔hidden transitions). A spurious
+  // re-render with unchanged visibility is a guarded no-op via
+  // `appliedVisibleRef`, so a steadily-visible idle pane holds exactly
+  // ONE grid-WS that never churns on the active-agents poll cycle —
+  // the v1 regression this fix removes.
+  useEffect(() => {
+    const visible = isTabVisible
+    const haveSession = sessionIdRef.current !== null
+    // Whether we should be streaming right now. `exited` is read from
+    // the live phase ref so an exited pane never (re)opens.
+    const wantOpen =
+      haveSession &&
+      shouldHoldGridWs({ visible, exited: phaseRef.current.kind === 'exited' })
+
+    appliedVisibleRef.current = visible
+
+    if (wantOpen) {
+      // `openGridWs` is a guarded no-op if a socket is already
+      // open/connecting, so a re-run that didn't actually change
+      // visibility won't churn the stream.
+      void openGridWsRef.current()
+    } else {
+      // Not streaming: park (visible but no session yet / exited) or
+      // hidden. Close any live socket — PTY survives on the daemon
+      // (never /cli/sessions/v2/close). Cancel a pending reconnect so a
+      // hide-while-reconnecting doesn't reopen behind our back.
       if (reconnectTimerRef.current !== null) {
         clearTimeout(reconnectTimerRef.current)
         reconnectTimerRef.current = null
       }
-      // Close the WS but do NOT call /cli/sessions/v2/close.
-      // Daemon session survives. Deliberate tab-close teardown
-      // is wired in A6 via tabs.ts::removeTab.
       const ws = wsRef.current
-      if (ws && ws.readyState !== WebSocket.CLOSED) {
-        ws.close()
+      if (ws) {
+        // Detach onclose first so closing here doesn't trip the
+        // reconnect scheduler (`wsRef.current !== ws` would also catch
+        // it, but null the ref explicitly to be unambiguous).
+        wsRef.current = null
+        if (ws.readyState !== WebSocket.CLOSED) ws.close()
+        // A pane that is still visible but lost its session (shouldn't
+        // happen) stays in its current phase; a hidden pane with a known
+        // session parks so the UI reflects "warm, not streaming".
+        const sid = sessionIdRef.current
+        if (!visible && sid) {
+          setPhase((prev) =>
+            prev.kind === 'exited' ? prev : { kind: 'parked', sessionId: sid },
+          )
+        }
       }
+    }
+    // No cleanup that closes the socket: closing is driven by the
+    // reconcile above (on a real hide) and by the unmount effect below.
+    // Closing in cleanup would tear the WS down on every benign re-run.
+  }, [spawnGeneration, isTabVisible])
+
+  // ── Grid-WS unmount teardown (0.39.13) ────────────────────────
+  // Real unmount only ([] deps): close the WS (PTY survives — never
+  // /cli/sessions/v2/close; deliberate tab-close teardown is in A6 via
+  // tabs.ts::removeTab) and cancel any pending reconnect. Split from the
+  // reconcile effect so a visibility/generation re-run never closes the
+  // socket as a side effect.
+  useEffect(() => {
+    return () => {
+      if (reconnectTimerRef.current !== null) {
+        clearTimeout(reconnectTimerRef.current)
+        reconnectTimerRef.current = null
+      }
+      const ws = wsRef.current
+      if (ws && ws.readyState !== WebSocket.CLOSED) ws.close()
       wsRef.current = null
     }
-    // `reconnectAttempt` in the dep array is what re-triggers boot()
-    // on a WS drop (see ws.onclose above). Each bump tears this effect
-    // down via the cleanup return above, then re-runs the body with
-    // a fresh spawn + handshake.
-    //
-    // Issue #8 (0.39.13): `isTabVisible` is in the dep array so a
-    // visibility flip re-runs the whole lifecycle. On visible→hidden
-    // the cleanup closes the grid-WS (PTY survives — no
-    // /cli/sessions/v2/close) and the re-run parks (no WS reopened); on
-    // hidden→visible the re-run does the idempotent spawn POST again
-    // (keeps the session warm / re-attaches if the daemon restarted)
-    // and opens a fresh grid-WS, and the daemon's on-subscribe snapshot
-    // brings the pane fully up to date. The spawn POST is cheap and
-    // idempotent (same path the reconnect already exercises), so paying
-    // it on a show is acceptable and keeps spawn-retry-on-daemon-restart
-    // behavior intact even for panes that were hidden during a restart.
-  }, [terminalId, cwd, command, args?.join('\0'), reconnectAttempt, isTabVisible])
+  }, [])
 
   // ── A7.5 perf: first_render + tui_first_paint + SUMMARY ──────
   // first_render fires once after `setSnapshot` causes a paint.
