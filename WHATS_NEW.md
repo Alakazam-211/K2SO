@@ -3,7 +3,28 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
-## 0.39.12 — Terminals that don't freeze, and chat history that shows the right project
+## 0.39.13 — The app only streams the terminal you're looking at
+
+A follow-on to 0.39.12's terminal-stall fix that removes the root cause
+rather than just the symptom.
+
+K2SO keeps every workspace's terminal session running in the background
+(that work never pauses) — but until now the app also kept a **live
+data stream open for every one of them**, even sessions you weren't
+looking at. With many workspaces and a long-running app, that piled up
+into a lot of redundant streaming, which was the underlying driver of
+the terminal stalls.
+
+Now the app **streams only the terminal pane that's actually on
+screen.** When you switch tabs or workspaces, it stops streaming the
+one you left and starts streaming the one you land on — instantly, with
+no loss, because the session itself keeps running in the daemon the
+whole time. Background sessions stay fully alive and keep working; the
+app just doesn't waste resources rendering them when you can't see them.
+
+The result: dramatically less background load, and terminals stay
+responsive no matter how many workspaces you have open or how long
+the app has been running.
 
 Two fixes from user reports.
 
