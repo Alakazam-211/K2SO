@@ -146,6 +146,69 @@ describe('ensureSystemAgentTabs', () => {
     expect(sections).toContain('chat')
   })
 
+  it('heals a restored pinned tab carrying a stale workspace path', () => {
+    // Repro: HK47's saved layout has a pinned Chat tab whose agent item
+    // still points at the K2SO workspace (projectPath baked in under the
+    // wrong workspace and replayed verbatim by restoreLayout). Switching
+    // into HK47 calls ensureSystemAgentTabs with HK47's authoritative
+    // path — the existing tab must be reconciled, not reused as-is.
+    useTabsStore.setState({
+      tabs: [{
+        id: 'stale-chat',
+        title: 'Chat',
+        mosaicTree: 'pg-1',
+        paneGroups: new Map([['pg-1', {
+          id: 'pg-1',
+          items: [{
+            id: 'item-1',
+            type: 'agent',
+            data: {
+              agentName: 'k2so-manager',
+              projectPath: '/workspaces/K2SO',
+              section: 'chat',
+              sessionId: 'old-k2so-session',
+            },
+          }],
+          activeItemIndex: 0,
+        }]]),
+        isSystemAgent: true,
+      }],
+      activeTabId: 'stale-chat',
+      splitCount: 1,
+      extraGroups: [],
+      activeGroupIndex: 0,
+    })
+
+    useTabsStore.getState().ensureSystemAgentTabs('hk47-manager', '/workspaces/HK47', 'Manager')
+
+    const systemTabs = useTabsStore.getState().tabs.filter((t) => t.isSystemAgent)
+    const chatTab = systemTabs.find((t) => t.title === 'Chat')!
+    const chatData = (() => {
+      const it = Array.from(chatTab.paneGroups.values())[0].items[0]
+      return it.type === 'agent' ? (it.data as AgentItemData) : null
+    })()
+
+    // Reconciled to HK47, not left pointing at K2SO.
+    expect(chatData?.projectPath).toBe('/workspaces/HK47')
+    expect(chatData?.agentName).toBe('hk47-manager')
+    // The Claude session belonged to the old workspace — dropped.
+    expect(chatData?.sessionId).toBeUndefined()
+    // Tab identity is preserved (state continuity), only data changed.
+    expect(chatTab.id).toBe('stale-chat')
+  })
+
+  it('does not mutate a pinned tab that already matches the workspace', () => {
+    useTabsStore.getState().ensureSystemAgentTabs('alice', '/tmp/proj', 'Agent')
+    const before = useTabsStore.getState().tabs.filter((t) => t.isSystemAgent)
+
+    useTabsStore.getState().ensureSystemAgentTabs('alice', '/tmp/proj', 'Agent')
+    const after = useTabsStore.getState().tabs.filter((t) => t.isSystemAgent)
+
+    // Same tab object references — no needless re-render when nothing changed.
+    expect(after[0]).toBe(before[0])
+    expect(after[1]).toBe(before[1])
+  })
+
   it('inserts pinned tabs at the front of the strip', () => {
     // Seed a non-system tab first.
     useTabsStore.setState((s) => ({
