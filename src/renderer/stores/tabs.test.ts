@@ -1,5 +1,22 @@
-import { describe, it, expect, beforeEach } from 'vitest'
-import { useTabsStore, type AgentItemData } from './tabs'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { useTabsStore, ensurePinnedAgentTabForMode, type AgentItemData } from './tabs'
+
+// ensurePinnedAgentTabForMode resolves the agent name via Tauri
+// `invoke`. Stub it so the async resolution completes deterministically
+// in the jsdom/node test env (no Tauri bridge).
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: vi.fn(async (cmd: string) => {
+    if (cmd === 'k2so_agents_list') return []
+    if (cmd === 'k2so_workspace_agent_display_name') return 'resolved-agent'
+    return null
+  }),
+}))
+
+/** Flush the setTimeout(…,0) + awaited invoke chain inside
+ *  ensurePinnedAgentTabForMode. */
+async function flushPinnedTabResolution(): Promise<void> {
+  for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0))
+}
 
 /**
  * Tests for the post-0.36.0 pinned-agent-tab split behaviour.
@@ -233,6 +250,41 @@ describe('ensureSystemAgentTabs', () => {
     expect(tabs[0].isSystemAgent).toBe(true)
     expect(tabs[1].isSystemAgent).toBe(true)
     expect(tabs[2].id).toBe('user-tab')
+  })
+})
+
+describe('ensurePinnedAgentTabForMode active-workspace guard', () => {
+  beforeEach(() => {
+    reset()
+    useTabsStore.setState({ activeWorkspaceKey: null })
+  })
+
+  it('does NOT stamp pinned tabs when the workspace changed during async resolution', async () => {
+    // Repro of the HK47 corruption: a workspace switch races the async
+    // agent-name resolution. The call is FOR workspace A, but the user
+    // switches to B before resolution finishes. The stale callback must
+    // not write A's agent into B's (now-active) tab set.
+    useTabsStore.setState({ activeWorkspaceKey: 'projA:wsA' })
+    ensurePinnedAgentTabForMode('off', '/tmp/workspaceA')
+    // User switches away before resolution completes.
+    useTabsStore.setState({ activeWorkspaceKey: 'projB:wsB' })
+
+    await flushPinnedTabResolution()
+
+    expect(useTabsStore.getState().tabs.filter((t) => t.isSystemAgent)).toHaveLength(0)
+  })
+
+  it('stamps pinned tabs when the workspace is unchanged', async () => {
+    useTabsStore.setState({ activeWorkspaceKey: 'projA:wsA' })
+    ensurePinnedAgentTabForMode('off', '/tmp/workspaceA')
+
+    await flushPinnedTabResolution()
+
+    const sys = useTabsStore.getState().tabs.filter((t) => t.isSystemAgent)
+    expect(sys.length).toBeGreaterThan(0)
+    const item = Array.from(sys[0].paneGroups.values())[0]?.items[0]
+    expect(item?.type).toBe('agent')
+    expect((item!.data as AgentItemData).projectPath).toBe('/tmp/workspaceA')
   })
 })
 

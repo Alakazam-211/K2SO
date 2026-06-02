@@ -627,6 +627,13 @@ export function ensurePinnedAgentTabForMode(
   agentMode: string,
   projectPath: string,
 ): void {
+  // Capture the workspace this call is FOR. setActiveWorkspace sets
+  // activeWorkspaceKey (via restoreWorkspace) synchronously before
+  // calling us, so this is the workspace the caller intends to pin
+  // tabs for. We re-check it after the async agent-name resolution
+  // below and bail if the user switched away in the meantime — see
+  // the guard before ensureSystemAgentTabs.
+  const expectedWorkspaceKey = useTabsStore.getState().activeWorkspaceKey
   setTimeout(async () => {
     const tabsStore = useTabsStore.getState()
 
@@ -689,6 +696,16 @@ export function ensurePinnedAgentTabForMode(
       }
     }
 
+    // Active-workspace guard. agent-name resolution above is async
+    // (a setTimeout plus an awaited k2so_agents_list round-trip), so
+    // the user can switch workspaces while this call is in flight.
+    // ensureSystemAgentTabs mutates the GLOBALLY-active tab set, so a
+    // stale callback would stamp THIS workspace's agent/projectPath
+    // into whichever workspace is now active — e.g. switching from a
+    // K2SO worktree (agent `cli-eng`, path `…/K2SO`) into HK47 mid-
+    // resolution writes `cli-eng`/`…/K2SO` into HK47's pinned tabs.
+    // Bail if the active workspace changed since we were scheduled.
+    if (useTabsStore.getState().activeWorkspaceKey !== expectedWorkspaceKey) return
     tabsStore.ensureSystemAgentTabs(agentName, projectPath, title)
   }, 0)
 }
