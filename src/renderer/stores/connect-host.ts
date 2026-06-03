@@ -160,9 +160,12 @@ interface ConnectHostState {
    * sign-in via `selectHost`). */
   pendingSignIn: ConnectHost | null
   /** Switch the active daemon. Pass 'local' for This Mac, or a saved
-   *  ConnectHost. Selecting a host stamps `lastConnectedAt` optimistically
-   *  is left to the gate (step #4); for now we just re-point. */
-  selectHost: (hostOrLocal: ActiveHost) => void
+   *  ConnectHost. Sets `connectionStatus:'connecting'` immediately (UI
+   *  feedback), then flips `activeHost` only AFTER the proxy override
+   *  resolves — closing the ordering race where the `<App>` remount's
+   *  refetch could beat the override into place. Returns a promise that
+   *  resolves once the flip has happened; callers may fire-and-forget. */
+  selectHost: (hostOrLocal: ActiveHost) => Promise<void>
   /** Add (or replace by id) a host in the address book. */
   addHost: (host: ConnectHost) => void
   /** Remove a host by id. If it's the active host, fall back to 'local'.
@@ -172,8 +175,12 @@ interface ConnectHostState {
   setConnectionStatus: (status: ConnectionStatus) => void
   /** Set a host's in-memory token (e.g. after a successful sign-in) so
    *  daemon-ws.ts can use it for the active connection. Does NOT touch
-   *  the keychain — call `rememberToken`/`forgetToken` for that. */
-  setHostToken: (id: string, token: string) => void
+   *  the keychain — call `rememberToken`/`forgetToken` for that. When the
+   *  updated host is the active remote, the proxy override is refreshed
+   *  BEFORE the `activeHost` object is swapped, mirroring `selectHost`'s
+   *  ordering guarantee. Returns a promise that resolves once that swap
+   *  has happened. */
+  setHostToken: (id: string, token: string) => Promise<void>
   /** Boot-time hydration: load the durable host list from
    *  ~/.k2so/connect-hosts.json, then resolve each REMEMBERED host's
    *  token from the keychain into memory. Idempotent; call once from the
@@ -187,8 +194,9 @@ interface ConnectHostState {
    * in-memory + keychain session token (NOT the remembered password) and
    * re-trigger the full-screen sign-in for that host. No-op for 'local'
    * or a host id that isn't the active remote (a stale 401 from a prior
-   * host must not interrupt the current one). */
-  expireSession: (hostId: string) => void
+   * host must not interrupt the current one). Returns a promise that
+   * resolves once the proxy override has been cleared and state flipped. */
+  expireSession: (hostId: string) => Promise<void>
   /** Dismiss the full-screen sign-in without switching. */
   cancelSignIn: () => void
   /**
@@ -392,18 +400,23 @@ function hostBaseUrl(host: Pick<ConnectHost, 'hostname' | 'port' | 'secure'>): s
  *   - ConnectHost → `base: <scheme>://<authority>` (443 omitted for
  *     secure), `token: <session token>`.
  *
- * Fired SYNCHRONOUSLY at the top of every action that changes `activeHost`
- * (selectHost / expireSession / setHostToken), so the override is in place
- * on the Rust side before the gate accepts and remounts `<App>` (which
- * re-fires `fetchProjects()` and friends). The gate's first accept always
- * costs at least one `/boot-status` round-trip, so this fire-and-forget
- * invoke wins the race comfortably; we still guard against the
- * tokenless-remote case (no token → clear to local) so a remote call can
- * never fire without auth and earn an "Invalid or missing auth token".
+ * AWAITED before every `activeHost` flip (selectHost / expireSession /
+ * setHostToken), so the override is in place on the Rust side BEFORE the
+ * gate sees the new host and remounts `<App>` (which re-fires
+ * `fetchProjects()` and friends). Awaiting closes an ordering race: the
+ * `activeHost` change drives `<App key={hostKey}>` to remount and refetch,
+ * and if that refetch raced ahead of the override landing, a snap-back to
+ * local would fetch against the dead remote (0 workspaces). We still guard
+ * against the tokenless-remote case (no token → clear to local) so a
+ * remote call can never fire without auth and earn an "Invalid or missing
+ * auth token".
  *
- * Best-effort + Tauri-only: no-ops (resolves) in the vitest/web env.
+ * Returns the invoke promise so callers can `await` it before flipping
+ * `activeHost`. Best-effort + Tauri-only: resolves (never rejects) in the
+ * vitest/web env, and swallows IPC failures so a flip is never blocked by
+ * a proxy hiccup.
  */
-function applyActiveDaemon(active: ActiveHost): void {
+function applyActiveDaemon(active: ActiveHost): Promise<void> {
   let base: string | null = null
   let token: string | null = null
   if (active !== 'local' && active.token && active.token.length > 0) {
@@ -415,10 +428,12 @@ function applyActiveDaemon(active: ActiveHost): void {
   // tokenless remote requests.
   //
   // `Promise.resolve(...)` wraps the invoke so a non-Tauri test double
-  // that returns a bare value (not a promise) can't blow up the `.catch`.
-  void Promise.resolve(invoke('set_active_daemon', { base, token })).catch(() => {
-    /* non-Tauri (vitest/web) or IPC failure — local stays the default */
-  })
+  // that returns a bare value (not a promise) can't blow up the `.then`.
+  return Promise.resolve(invoke('set_active_daemon', { base, token }))
+    .then(() => undefined)
+    .catch(() => {
+      /* non-Tauri (vitest/web) or IPC failure — local stays the default */
+    })
 }
 
 /** Result of {@link loginToHost}. On success the session token is also
@@ -501,23 +516,27 @@ export const useConnectHostStore = create<ConnectHostState>((set, get) => ({
   connectionStatus: 'connecting',
   pendingSignIn: null,
 
-  selectHost: (hostOrLocal) => {
-    // Point the Tauri→daemon proxy layer at the new host BEFORE flipping
-    // activeHost — flipping it drives the gate's re-poll → accept → <App>
-    // remount → fetchProjects(), so the override must already be in place
-    // so those proxy commands hit the right daemon.
-    applyActiveDaemon(hostOrLocal)
-    // A switch immediately re-enters the connecting state; the gate
-    // flips it to 'connected' once the new host accepts. Clears any
-    // pending sign-in (we're committing to a host now).
-    set({ activeHost: hostOrLocal, connectionStatus: 'connecting', pendingSignIn: null })
+  selectHost: async (hostOrLocal) => {
+    // Immediate UI feedback: enter 'connecting' + clear any pending
+    // sign-in synchronously (we're committing to a host now). The gate
+    // flips to 'connected' once the new host accepts. Crucially we do NOT
+    // flip `activeHost` yet — that drives the `<App key={hostKey}>` remount
+    // → fetchProjects(), which must not fire until the proxy override is in
+    // place (see applyActiveDaemon).
+    set({ connectionStatus: 'connecting', pendingSignIn: null })
+    // Point the Tauri→daemon proxy layer at the new host and WAIT for it to
+    // land, then flip activeHost. Awaiting closes the ordering race where
+    // the remount's refetch could beat the override into place (a snap-back
+    // to local would otherwise fetch the dead remote → 0 workspaces).
+    await applyActiveDaemon(hostOrLocal)
+    set({ activeHost: hostOrLocal })
   },
 
   requestSignIn: (host) => {
     set({ pendingSignIn: host })
   },
 
-  expireSession: (hostId) => {
+  expireSession: async (hostId) => {
     const { activeHost, hosts } = get()
     // Only act when the EXPIRED host is the active remote — a late 401
     // from a host we already switched away from must not hijack the UI.
@@ -527,11 +546,15 @@ export const useConnectHostStore = create<ConnectHostState>((set, get) => ({
     const cleared = hosts.map((h) => (h.id === hostId ? { ...h, token: '' } : h))
     const clearedActive: ActiveHost = { ...activeHost, token: '' }
     void forgetToken(hostId)
+    // Immediately reflect the dropped token in the host list + raise the
+    // sign-in overlay (UI feedback) — these don't change `activeHost`'s
+    // identity so they can't trigger a premature refetch.
+    set({ hosts: cleared, pendingSignIn: clearedActive, connectionStatus: 'connecting' })
     // The session token is now empty → clear the proxy override back to
-    // local so the host-unaware commands don't keep firing tokenless
-    // remote requests while the user re-signs-in.
-    applyActiveDaemon(clearedActive)
-    set({ hosts: cleared, activeHost: clearedActive, pendingSignIn: clearedActive })
+    // local BEFORE flipping `activeHost`, so the host-unaware commands the
+    // remount re-fires don't keep hitting the dead remote.
+    await applyActiveDaemon(clearedActive)
+    set({ activeHost: clearedActive })
   },
 
   cancelSignIn: () => {
@@ -601,20 +624,25 @@ export const useConnectHostStore = create<ConnectHostState>((set, get) => ({
     set({ hosts: next, activeHost: nextActive })
   },
 
-  setHostToken: (id, token) => {
+  setHostToken: async (id, token) => {
     const { hosts, activeHost } = get()
     const hosts2 = hosts.map((h) => (h.id === id ? { ...h, token } : h))
+    // Update the host list immediately (no `activeHost`-identity change, so
+    // no premature refetch).
+    set({ hosts: hosts2 })
     // Keep the active host object in sync if it's the one being updated,
     // so daemon-ws.ts (which reads activeHost.token) sees the new token.
     const active2: ActiveHost =
       activeHost !== 'local' && activeHost.id === id
         ? { ...activeHost, token }
         : activeHost
-    // If we just set the token for the ACTIVE remote host (e.g. a silent
-    // re-login committed a fresh session token), refresh the proxy
-    // override so the host-unaware commands pick it up immediately.
-    if (active2 !== activeHost) applyActiveDaemon(active2)
-    set({ hosts: hosts2, activeHost: active2 })
+    if (active2 === activeHost) return
+    // We just set the token for the ACTIVE remote host (e.g. a silent
+    // re-login committed a fresh session token). Refresh the proxy override
+    // and WAIT for it to land before swapping the active host object, so the
+    // host-unaware commands the remount re-fires carry the fresh token.
+    await applyActiveDaemon(active2)
+    set({ activeHost: active2 })
   },
 
   hydrateFromDisk: async () => {

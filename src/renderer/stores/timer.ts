@@ -1,10 +1,15 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
+import { emit } from '@tauri-apps/api/event'
 import { useProjectsStore } from '@/stores/projects'
 import { useToastStore } from '@/stores/toast'
 // Phase 2 Unit 7a — settings live in the daemon. timer_* invokes
 // (DB-backed time entries) remain Tauri-side until Unit 4.
 import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
+// Plan B — DB-backed time entries are host-aware: route them through the
+// daemon `/cli/timer/*` HTTP layer (local OR remote) instead of the
+// localhost-pinned Tauri `timer_*` invoke proxy.
+import { daemonCliGet, daemonCliGetText, daemonCliPost } from '@/lib/daemon-cli'
 // Phase 2.5 fix (finding #547) — daemon-reconnect retry bus.
 import { onDaemonConnected } from '@/lib/daemon-reconnect'
 
@@ -114,6 +119,21 @@ function broadcastTimerState(state: TimerState): void {
     channel: 'sync:timer',
     payload,
   }).catch((e) => console.warn('[timer] broadcast failed:', e))
+}
+
+/**
+ * Plan B cross-window sync: the old Tauri `timer_entry_{create,delete}`
+ * commands emitted `sync:timer-entries` from Rust so OTHER windows (e.g.
+ * focus windows) re-fetch their entry list. Now that the renderer talks to
+ * the daemon directly, that Rust-side emit no longer fires — so we emit the
+ * SAME event from the renderer after each mutation. `useWindowSync.ts`
+ * listens for it and calls `fetchEntries()`. Fire-and-forget; a failed emit
+ * (non-Tauri/web) is non-fatal — only cross-window refresh is affected.
+ */
+function emitEntriesChanged(): void {
+  void emit('sync:timer-entries').catch((e) =>
+    console.warn('[timer] sync:timer-entries emit failed:', e),
+  )
 }
 
 /**
@@ -326,7 +346,7 @@ export const useTimerStore = create<TimerState>((set, get) => ({
     const projectId = useProjectsStore.getState().activeProjectId ?? undefined
 
     try {
-      await invoke('timer_entry_create', {
+      await daemonCliPost('timer/create', {
         id: generateId(),
         projectId: projectId ?? null,
         startTime: startTimeSec,
@@ -334,6 +354,7 @@ export const useTimerStore = create<TimerState>((set, get) => ({
         durationSeconds,
         memo: null,
       })
+      emitEntriesChanged()
     } catch (err) {
       console.error('[timer] Failed to save entry on close:', err)
     }
@@ -368,7 +389,7 @@ export const useTimerStore = create<TimerState>((set, get) => ({
 
     const id = generateId()
     try {
-      await invoke('timer_entry_create', {
+      await daemonCliPost('timer/create', {
         id,
         projectId: projectId ?? null,
         startTime: startTimeSec,
@@ -376,6 +397,7 @@ export const useTimerStore = create<TimerState>((set, get) => ({
         durationSeconds,
         memo: memo || null,
       })
+      emitEntriesChanged()
     } catch (err) {
       console.error('[timer] Failed to save entry:', err)
       useToastStore.getState().addToast('Failed to save timer entry', 'error')
@@ -433,10 +455,13 @@ export const useTimerStore = create<TimerState>((set, get) => ({
 
   fetchEntries: async (start?: number, end?: number, projectId?: string) => {
     try {
-      const entries = await invoke<TimeEntry[]>('timer_entries_list', {
-        start: start ?? null,
-        end: end ?? null,
-        projectId: projectId ?? null,
+      // GET query params are snake_case (the daemon reads `project_id`);
+      // the camelCase TimeEntry response shape matches the Rust struct's
+      // `#[serde(rename_all = "camelCase")]`.
+      const entries = await daemonCliGet<TimeEntry[]>('timer/entries-list', {
+        start,
+        end,
+        project_id: projectId,
       })
       set({ entries })
     } catch (err) {
@@ -446,9 +471,10 @@ export const useTimerStore = create<TimerState>((set, get) => ({
 
   deleteEntry: async (id: string) => {
     try {
-      await invoke('timer_entry_delete', { id })
+      await daemonCliPost('timer/delete', { id })
       // Remove locally
       set({ entries: get().entries.filter((e) => e.id !== id) })
+      emitEntriesChanged()
     } catch (err) {
       console.error('[timer] Failed to delete entry:', err)
     }
@@ -456,11 +482,15 @@ export const useTimerStore = create<TimerState>((set, get) => ({
 
   exportEntries: async (format: 'csv' | 'json', start?: number, end?: number, projectId?: string) => {
     try {
-      const result = await invoke<string>('timer_entries_export', {
+      // Export returns text (CSV or a JSON-array STRING). Use the raw-text
+      // variant so a `format=json` body is NOT parsed into an array — the
+      // caller blobs the string verbatim for download (parsing would break
+      // `new Blob([data])`). snake_case query params, as everywhere.
+      const result = await daemonCliGetText('timer/entries-export', {
         format,
-        start: start ?? null,
-        end: end ?? null,
-        projectId: projectId ?? null,
+        start,
+        end,
+        project_id: projectId,
       })
       return result
     } catch (err) {

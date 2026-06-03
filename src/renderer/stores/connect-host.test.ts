@@ -124,16 +124,16 @@ describe('connect-host store', () => {
     expect(s.hosts).toEqual([])
   })
 
-  it('addHost appends and selectHost switches the active host', () => {
+  it('addHost appends and selectHost switches the active host', async () => {
     const host = makeHost()
     useConnectHostStore.getState().addHost(host)
     expect(useConnectHostStore.getState().hosts).toHaveLength(1)
     expect(useConnectHostStore.getState().hosts[0]).toEqual(host)
 
-    useConnectHostStore.getState().selectHost(host)
+    await useConnectHostStore.getState().selectHost(host)
     expect(useConnectHostStore.getState().activeHost).toEqual(host)
 
-    useConnectHostStore.getState().selectHost('local')
+    await useConnectHostStore.getState().selectHost('local')
     expect(useConnectHostStore.getState().activeHost).toBe('local')
   })
 
@@ -145,29 +145,51 @@ describe('connect-host store', () => {
       secure: true,
       token: 'sess-tok-xyz',
     })
-    useConnectHostStore.getState().selectHost(host)
-    // applyActiveDaemon fires the invoke without awaiting; flush microtasks.
-    await Promise.resolve()
+    await useConnectHostStore.getState().selectHost(host)
     expect(lastSetActiveDaemon).toEqual({ base: 'https://reggie.k2.dev', token: 'sess-tok-xyz' })
 
     // A non-secure remote carries its explicit port.
     const lan = makeHost({ id: 'lan', hostname: '10.0.0.5', port: 51234, secure: false, token: 'lan-tok' })
-    useConnectHostStore.getState().selectHost(lan)
-    await Promise.resolve()
+    await useConnectHostStore.getState().selectHost(lan)
     expect(lastSetActiveDaemon).toEqual({ base: 'http://10.0.0.5:51234', token: 'lan-tok' })
   })
 
+  it('selectHost applies the proxy override BEFORE activeHost is observable', async () => {
+    // The ordering-race guard: the `set_active_daemon` override must land
+    // before the `activeHost` flip that drives the <App> remount + refetch.
+    // Without this, a snap-back to local would refetch against the dead
+    // remote (0 workspaces).
+    const host = makeHost({ id: 'race', hostname: 'box.k2.dev', port: 443, secure: true, token: 'race-tok' })
+    useConnectHostStore.getState().addHost(host)
+
+    const proxyInvokeCount = () =>
+      invokeMock.mock.calls.filter((c) => c[0] === 'set_active_daemon').length
+    const before = proxyInvokeCount()
+
+    const p = useConnectHostStore.getState().selectHost(host)
+
+    // SYNCHRONOUSLY after the call: 'connecting' is set for UI feedback and
+    // the proxy override invoke has already fired, but `activeHost` has NOT
+    // flipped yet — it is gated on the awaited override resolving.
+    expect(useConnectHostStore.getState().connectionStatus).toBe('connecting')
+    expect(proxyInvokeCount()).toBe(before + 1)
+    expect(useConnectHostStore.getState().activeHost).toBe('local')
+
+    await p
+
+    // Only AFTER the override resolves does `activeHost` flip to the remote.
+    expect(useConnectHostStore.getState().activeHost).toEqual(host)
+    expect(lastSetActiveDaemon).toEqual({ base: 'https://box.k2.dev', token: 'race-tok' })
+  })
+
   it('selectHost(local) clears the proxy override back to local', async () => {
-    useConnectHostStore.getState().selectHost(makeHost({ token: 't' }))
-    await Promise.resolve()
-    useConnectHostStore.getState().selectHost('local')
-    await Promise.resolve()
+    await useConnectHostStore.getState().selectHost(makeHost({ token: 't' }))
+    await useConnectHostStore.getState().selectHost('local')
     expect(lastSetActiveDaemon).toEqual({ base: null, token: null })
   })
 
   it('a remote host with no token clears the proxy to local (never tokenless remote)', async () => {
-    useConnectHostStore.getState().selectHost(makeHost({ token: '' }))
-    await Promise.resolve()
+    await useConnectHostStore.getState().selectHost(makeHost({ token: '' }))
     // Empty token → base/token null so DaemonClient stays on local rather
     // than firing tokenless remote requests (the "Invalid or missing auth
     // token" guard).
@@ -177,26 +199,22 @@ describe('connect-host store', () => {
   it('expireSession clears the proxy override (dead session → local)', async () => {
     const host = makeHost({ id: 'rx', token: 'live-tok' })
     useConnectHostStore.getState().addHost(host)
-    useConnectHostStore.getState().selectHost(host)
-    await Promise.resolve()
+    await useConnectHostStore.getState().selectHost(host)
     expect(lastSetActiveDaemon).toEqual({ base: 'http://192.168.1.50:47800', token: 'live-tok' })
 
-    useConnectHostStore.getState().expireSession('rx')
-    await Promise.resolve()
+    await useConnectHostStore.getState().expireSession('rx')
     expect(lastSetActiveDaemon).toEqual({ base: null, token: null })
   })
 
   it('setHostToken on the active remote refreshes the proxy override', async () => {
     const host = makeHost({ id: 'rt', token: '' })
     useConnectHostStore.getState().addHost(host)
-    useConnectHostStore.getState().selectHost(host)
-    await Promise.resolve()
+    await useConnectHostStore.getState().selectHost(host)
     // Tokenless active remote → proxy is cleared to local.
     expect(lastSetActiveDaemon).toEqual({ base: null, token: null })
 
     // A silent re-login commits a fresh session token for the active host.
-    useConnectHostStore.getState().setHostToken('rt', 'fresh-tok')
-    await Promise.resolve()
+    await useConnectHostStore.getState().setHostToken('rt', 'fresh-tok')
     expect(lastSetActiveDaemon).toEqual({ base: 'http://192.168.1.50:47800', token: 'fresh-tok' })
   })
 
@@ -233,22 +251,22 @@ describe('connect-host store', () => {
     expect(parsed.map((h) => h.id)).toEqual(['b'])
   })
 
-  it('removeHost of the ACTIVE host falls back to local', () => {
+  it('removeHost of the ACTIVE host falls back to local', async () => {
     const host = makeHost({ id: 'active' })
     useConnectHostStore.getState().addHost(host)
-    useConnectHostStore.getState().selectHost(host)
+    await useConnectHostStore.getState().selectHost(host)
     expect(useConnectHostStore.getState().activeHost).toEqual(host)
 
     useConnectHostStore.getState().removeHost('active')
     expect(useConnectHostStore.getState().activeHost).toBe('local')
   })
 
-  it('removeHost of a NON-active host leaves the active host intact', () => {
+  it('removeHost of a NON-active host leaves the active host intact', async () => {
     const a = makeHost({ id: 'a' })
     const b = makeHost({ id: 'b' })
     useConnectHostStore.getState().addHost(a)
     useConnectHostStore.getState().addHost(b)
-    useConnectHostStore.getState().selectHost(b)
+    await useConnectHostStore.getState().selectHost(b)
     useConnectHostStore.getState().removeHost('a')
     expect(useConnectHostStore.getState().activeHost).toEqual(b)
   })
@@ -308,11 +326,11 @@ describe('connect-host store', () => {
   })
 
   // ── setHostToken ─────────────────────────────────────────────────────
-  it('setHostToken updates the in-memory token on the host AND the active host', () => {
+  it('setHostToken updates the in-memory token on the host AND the active host', async () => {
     const host = makeHost({ id: 'h1', token: '' })
     useConnectHostStore.getState().addHost(host)
-    useConnectHostStore.getState().selectHost(host)
-    useConnectHostStore.getState().setHostToken('h1', 'fresh-token')
+    await useConnectHostStore.getState().selectHost(host)
+    await useConnectHostStore.getState().setHostToken('h1', 'fresh-token')
     expect(useConnectHostStore.getState().hosts[0].token).toBe('fresh-token')
     const active = useConnectHostStore.getState().activeHost
     expect(active !== 'local' && active.token).toBe('fresh-token')

@@ -64,6 +64,38 @@ export async function daemonCliGet<T = unknown>(
 }
 
 /**
+ * GET /cli/<route>?<params>&token=<token>, returning the RAW response
+ * body as text — never JSON-parsed. Use this for routes whose body is
+ * plain text or whose JSON-shaped payload must be handled verbatim by the
+ * caller (e.g. `timer/entries-export`, where a `format=json` body is a
+ * JSON array string that the caller blobs/downloads as-is — parsing it to
+ * an array would break `new Blob([data])`).
+ *
+ * Same creds resolution + connection-retry + remote-401 handling as
+ * `daemonCliGet`; only the success-body handling differs (text, not JSON).
+ * Throws on non-2xx with the same `{"error":"..."}`-aware message.
+ */
+export async function daemonCliGetText(
+  route: string,
+  params?: Record<string, string | number | boolean | undefined | null>,
+): Promise<string> {
+  return withConnRetry(async () => {
+    const creds = await getDaemonWs()
+    const search = new URLSearchParams()
+    if (params) {
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== null) search.set(k, String(v))
+      }
+    }
+    search.set('token', creds.token)
+    const url = `${daemonHttpBase(creds)}/cli/${route}?${search.toString()}`
+    const res = await fetch(url, { method: 'GET' })
+    handleRemoteUnauthorized(res)
+    return parseDaemonText(res)
+  })
+}
+
+/**
  * POST /cli/<route>?token=<token> with `body` JSON-encoded. `body`
  * fields go in the body, NOT the query string — passwords and large
  * payloads (file contents) belong out of URL-logging path.
@@ -161,6 +193,24 @@ async function parseDaemonResponse<T>(res: Response): Promise<T> {
     // same.
     return text as unknown as T
   }
+}
+
+/** Like `parseDaemonResponse` but returns the raw body text on success
+ *  (no JSON parse). Non-2xx still throws the `{"error":"..."}`-aware
+ *  message so callers see a useful string, not `[object Response]`. */
+async function parseDaemonText(res: Response): Promise<string> {
+  const text = await res.text()
+  if (!res.ok) {
+    let msg = text
+    try {
+      const parsed = JSON.parse(text)
+      if (parsed && typeof parsed.error === 'string') msg = parsed.error
+    } catch {
+      /* fall through with raw text */
+    }
+    throw new Error(msg || `daemon ${route(res.url)} ${res.status}`)
+  }
+  return text
 }
 
 function route(url: string): string {
