@@ -42,7 +42,8 @@
  * [[project_daemon_handshake_contract]].
  */
 import React, { useEffect, useRef, useState } from 'react'
-import { getDaemonWs, invalidateDaemonWs } from '@/kessel/daemon-ws'
+import { getDaemonWs, invalidateDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
+import { useConnectHostStore } from '@/stores/connect-host'
 
 /** Shape of the daemon's GET /boot-status response. `detail` is free-text
  *  for the UI only — never branch on it. */
@@ -121,8 +122,11 @@ async function getAppVersion(): Promise<string | null> {
  *  pre-0.39.5 daemon's 404, network error, timeout, missing port file). */
 async function fetchBootStatus(): Promise<DaemonBootStatus | null> {
   try {
-    const { port } = await getDaemonWs()
-    const resp = await fetch(`http://127.0.0.1:${port}/boot-status`, {
+    // Host-aware (K2 Connect step #1): polls the ACTIVE host's
+    // /boot-status. For 'local' this is byte-identical to before
+    // (host === '127.0.0.1').
+    const creds = await getDaemonWs()
+    const resp = await fetch(`${daemonHttpBase(creds)}/boot-status`, {
       signal: AbortSignal.timeout(2000),
     })
     if (!resp.ok) {
@@ -143,19 +147,44 @@ async function fetchBootStatus(): Promise<DaemonBootStatus | null> {
 
 type AppComponent = React.ComponentType
 
+/** A stable identity for the active host — changes whenever the user
+ *  switches daemons. Drives a gate re-poll + a clean App remount so all
+ *  live sockets re-establish against the new host. */
+function activeHostKey(active: ReturnType<typeof useConnectHostStore.getState>['activeHost']): string {
+  return active === 'local' ? 'local' : `${active.id}:${active.hostname}:${active.port}`
+}
+
 export function ConnectionGate(): React.ReactElement {
   const [decision, setDecision] = useState<GateDecision>({ kind: 'wait', reason: 'starting' })
   const [attempts, setAttempts] = useState(0)
   const [AppModule, setAppModule] = useState<AppComponent | null>(null)
   const policyRef = useRef<AcceptancePolicy | null>(null)
 
-  // Phase 1: resolve the app version once, then poll /boot-status until
-  // the acceptance policy says to mount.
+  // K2 Connect step #1: the gate is host-aware. `hostKey` changes when
+  // the user picks a different daemon in the top-bar switcher → the
+  // polling effect below re-runs against the new host, and the <App>
+  // element is keyed by it so a switch remounts the app cleanly (all
+  // sockets re-open through the new host's creds).
+  const activeHost = useConnectHostStore((s) => s.activeHost)
+  const hostKey = activeHostKey(activeHost)
+
+  // Phase 1: resolve the app version once, then poll the ACTIVE host's
+  // /boot-status until the acceptance policy says to mount. Re-runs when
+  // the active host changes (hostKey dep).
   useEffect(() => {
     let cancelled = false
     let timeoutId: ReturnType<typeof setTimeout> | null = null
 
+    // A host switch must re-poll from scratch: drop any prior accept so
+    // the overlay shows while the new host is contacted.
+    setDecision({ kind: 'wait', reason: 'switching-host' })
+    setAttempts(0)
+
     const ensurePolicy = async (): Promise<AcceptancePolicy> => {
+      // KEEP the localPairedPolicy for now (step #1/#2). A SAME-VERSION
+      // second daemon passes it, which is how a remote is tested today.
+      // TODO(#4): inject a remote protocol-range policy when activeHost
+      // is a ConnectHost.
       if (!policyRef.current) {
         const version = await getAppVersion()
         policyRef.current = localPairedPolicy(version)
@@ -169,6 +198,10 @@ export function ConnectionGate(): React.ReactElement {
       if (cancelled) return
       const next = policy.decide(status)
       setDecision(next)
+      // Surface the active host's live status to the top-bar switcher.
+      useConnectHostStore.getState().setConnectionStatus(
+        next.kind === 'accept' ? 'connected' : 'connecting',
+      )
       if (next.kind === 'accept') return // stop polling; Phase 2 takes over
       setAttempts((a) => a + 1)
       timeoutId = setTimeout(() => { void tick() }, 500)
@@ -180,7 +213,7 @@ export function ConnectionGate(): React.ReactElement {
       cancelled = true
       if (timeoutId !== null) clearTimeout(timeoutId)
     }
-  }, [])
+  }, [hostKey])
 
   // Phase 2: once accepted, dynamically import App. Its import
   // side-effects (store creation, eager fetches) run NOW for the first
@@ -202,7 +235,10 @@ export function ConnectionGate(): React.ReactElement {
   }
 
   const App = AppModule
-  return <App />
+  // Key by the active host so switching daemons unmounts + remounts App
+  // wholesale — every store, WS, and terminal pane re-initializes against
+  // the new host's creds rather than clinging to the old socket.
+  return <App key={hostKey} />
 }
 
 interface ConnectingOverlayProps {
