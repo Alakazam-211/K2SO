@@ -32,7 +32,6 @@ const SECTIONS: { id: SettingsSection; label: string; agenticOnly?: boolean }[] 
   { id: 'terminal', label: 'Terminal' },
   { id: 'code-editor', label: 'Code Editor' },
   { id: 'editors-agents', label: 'Editors & Agents' },
-  { id: 'connections', label: 'Connections' },
   { id: 'k2-connect', label: 'K2 Connect' },
   { id: 'companion', label: 'K2 Companion' },
   { id: 'wake-scheduler', label: 'Heartbeats', agenticOnly: true },
@@ -202,15 +201,15 @@ export default function Settings(): React.JSX.Element {
             <CompanionSection />
           </SectionErrorBoundary>
         )}
-        {activeSection === 'connections' && (
-          <SectionErrorBoundary>
-            <ConnectionsSection />
-          </SectionErrorBoundary>
-        )}
-        {activeSection === 'k2-connect' && (
-          <SectionErrorBoundary>
-            <K2ConnectSection />
-          </SectionErrorBoundary>
+        {(activeSection === 'k2-connect' || activeSection === 'connections') && (
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-8 items-start">
+            <SectionErrorBoundary>
+              <K2ConnectSection />
+            </SectionErrorBoundary>
+            <SectionErrorBoundary>
+              <ConnectionsSection />
+            </SectionErrorBoundary>
+          </div>
         )}
         {activeSection === 'projects' && (
           <SectionErrorBoundary>

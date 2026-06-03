@@ -185,7 +185,7 @@ export function ConnectionsSection(): React.JSX.Element {
     'w-full px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag'
 
   return (
-    <div className="max-w-xl">
+    <div className="w-full">
       <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-1">Connections</h2>
       <p className="text-[10px] text-[var(--color-text-muted)] mb-4">
         K2 servers this device connects to. Each server&apos;s password is stored in your OS
