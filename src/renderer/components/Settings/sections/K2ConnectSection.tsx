@@ -24,7 +24,7 @@
 // (task #617) — that's the daemon-owned access list (PRD §6.2), a
 // separate area from this account/expose page.
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { getDaemonWs, daemonHttpBase, invalidateDaemonWs } from '@/kessel/daemon-ws'
 import type { SettingEntry } from '../searchManifest'
@@ -34,9 +34,13 @@ import {
   signOut as accountSignOut,
   refreshSession,
   listSubdomains,
+  claimSubdomain,
+  releaseSubdomain,
+  freshClaim,
   type K2Session,
   type K2Subdomain,
 } from '../lib/k2-account'
+import { useConfirmDialogStore } from '@/stores/confirm-dialog'
 
 const DEFAULT_SERVER_ADDR = '178.156.232.105'
 const DEFAULT_SERVER_PORT = 7000
@@ -48,6 +52,30 @@ const DEFAULT_SERVER_PORT = 7000
 const ACCOUNT_KEYCHAIN_SERVICE = 'com.k2so.connect.account'
 const SESSION_ACCOUNT_KEY = 'session-refresh-token'
 const EMAIL_ACCOUNT_KEY = 'session-email'
+
+// A stable per-install device id used for the subdomain claim/lease. Created
+// once and persisted to localStorage so the same machine always presents the
+// same identity to the claim RPC (so its own claim never looks like "another
+// device"). Falls back to a random id if crypto/localStorage are unavailable.
+const DEVICE_ID_KEY = 'k2.connect.device-id'
+function getDeviceId(): string {
+  try {
+    const existing = localStorage.getItem(DEVICE_ID_KEY)
+    if (existing) return existing
+    const fresh =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `dev-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    localStorage.setItem(DEVICE_ID_KEY, fresh)
+    return fresh
+  } catch {
+    return `dev-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  }
+}
+
+// Heartbeat cadence: re-claim every 60s while the tunnel runs to keep the
+// 3-minute server lease alive.
+const CLAIM_HEARTBEAT_MS = 60_000
 
 export const K2_CONNECT_MANIFEST: SettingEntry[] = [
   { id: 'k2-connect.account-login', section: 'k2-connect', label: 'Sign in to K2 Connect', description: 'Sign in to k2.dev to pick a purchased subdomain', keywords: ['login', 'sign in', 'account', 'k2.dev', 'email', 'password'] },
@@ -211,6 +239,21 @@ export function K2ConnectSection(): React.JSX.Element {
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null)
   const [boundMsg, setBoundMsg] = useState<string | null>(null)
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [swapBusy, setSwapBusy] = useState(false)
+
+  // ── Subdomain claim / lease ───────────────────────────────────────────
+  const deviceIdRef = useRef<string>(getDeviceId())
+  const deviceId = deviceIdRef.current
+  // navigator.platform is deprecated but still the simplest stable hint;
+  // it's purely cosmetic ("MacIntel" etc.) — the holder UI falls back to
+  // "another device" when absent.
+  const deviceLabel = typeof navigator !== 'undefined' ? navigator.platform || undefined : undefined
+  // The 60s lease-refresh interval, while a tunnel is running.
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // Refs the heartbeat reads so it never closes over stale values.
+  const accessTokenRef = useRef<string | null>(null)
+  const boundLabelRef = useRef<string | null>(null)
+  const confirm = useConfirmDialogStore((s) => s.confirm)
 
   // ── Users / Access state ──────────────────────────────────────────────
   const [users, setUsers] = useState<K2User[]>([])
@@ -285,6 +328,61 @@ export function K2ConnectSection(): React.JSX.Element {
       if (res.ok) setStatus((await res.json()) as TunnelStatus)
     } catch { /* ignore */ }
   }
+
+  // Keep the access token + bound-subdomain refs current for the heartbeat.
+  useEffect(() => {
+    accessTokenRef.current = session?.accessToken ?? null
+  }, [session])
+  useEffect(() => {
+    boundLabelRef.current = subdomain.trim() || null
+  }, [subdomain])
+
+  // ── Claim / lease heartbeat ───────────────────────────────────────────
+  const stopHeartbeat = (): void => {
+    if (heartbeatRef.current !== null) {
+      clearInterval(heartbeatRef.current)
+      heartbeatRef.current = null
+    }
+  }
+
+  const startHeartbeat = (): void => {
+    stopHeartbeat()
+    heartbeatRef.current = setInterval(() => {
+      const accessToken = accessTokenRef.current
+      const label = boundLabelRef.current
+      if (!accessToken || !label) return
+      // Best-effort refresh; a transient failure shouldn't tear down the
+      // tunnel — the next tick (or the 3-min server expiry) will reconcile.
+      void claimSubdomain(accessToken, label, deviceId, deviceLabel).catch(() => undefined)
+    }, CLAIM_HEARTBEAT_MS)
+  }
+
+  // Refresh the owned-subdomain list (incl. live claim columns) so the
+  // dropdown grey-out reflects the latest holders.
+  const refreshSubdomains = async (): Promise<void> => {
+    const accessToken = accessTokenRef.current
+    if (!accessToken) return
+    try {
+      const subs = await listSubdomains(accessToken)
+      setSubdomains(subs)
+    } catch { /* ignore — keep the current list */ }
+  }
+
+  // Tear the heartbeat down on unmount.
+  useEffect(() => stopHeartbeat, [])
+
+  // If the tunnel is already running (e.g. resumed from a prior session or
+  // auto-start) and we have an account session + a bound subdomain, make
+  // sure the lease is being heartbeated.
+  useEffect(() => {
+    const live = status?.running ?? false
+    if (live && session && subdomain.trim()) {
+      if (heartbeatRef.current === null) startHeartbeat()
+    } else if (!live) {
+      stopHeartbeat()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status?.running, session, subdomain])
 
   // ── Users / Access actions ────────────────────────────────────────────
   const refreshUsers = async (): Promise<void> => {
@@ -468,13 +566,32 @@ export function K2ConnectSection(): React.JSX.Element {
     setError(null)
     try {
       const sub = subdomain.trim()
+      // Claim the lease BEFORE starting. If a *different* device holds a
+      // fresh claim, refuse to start and surface who holds it.
+      const accessToken = session?.accessToken ?? accessTokenRef.current
+      if (sub && accessToken) {
+        try {
+          const result = await claimSubdomain(accessToken, sub, deviceId, deviceLabel)
+          if (!result.claimed && result.holder && result.holder !== deviceId) {
+            setError(`${sub}.k2.dev is in use on another device — stop it there first.`)
+            return
+          }
+        } catch (e) {
+          setError(e instanceof Error ? e.message : 'Failed to claim subdomain')
+          return
+        }
+      }
       const res = await tunnelPost(`start${sub ? `?subdomain=${encodeURIComponent(sub)}` : ''}`)
       if (!res.ok) {
         // The connector surfaces the frpc-not-installed hint verbatim here.
         setError(await errText(res))
+        // Don't keep the lease we just took if the tunnel didn't start.
+        if (sub && accessToken) void releaseSubdomain(accessToken, sub, deviceId).catch(() => undefined)
         return
       }
       await refreshStatus()
+      // Lease is ours and the tunnel is up — keep it fresh.
+      startHeartbeat()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Start failed')
     } finally {
@@ -485,6 +602,12 @@ export function K2ConnectSection(): React.JSX.Element {
   const stopTunnel = async (): Promise<void> => {
     setBusy(true)
     setError(null)
+    // Stop heartbeating + release the lease (best-effort) regardless of the
+    // stop call's outcome.
+    stopHeartbeat()
+    const accessToken = session?.accessToken ?? accessTokenRef.current
+    const bound = subdomain.trim()
+    if (accessToken && bound) void releaseSubdomain(accessToken, bound, deviceId).catch(() => undefined)
     try {
       const res = await tunnelPost('stop')
       if (!res.ok) {
@@ -594,13 +717,108 @@ export function K2ConnectSection(): React.JSX.Element {
 
   // The custom dropdown's option values are the subdomain labels; map a
   // chosen value back to its full row so bindSubdomain gets the token.
-  const subdomainOptions = subdomains.map((s) => ({
-    value: s.label,
-    label: s.status === 'active' ? `${s.label}.k2.dev` : `${s.label}.k2.dev (${s.status})`,
-  }))
+  // Greys out (disables) any subdomain held by a *different* device whose
+  // claim is still fresh; tags this device's own active claim.
+  const subdomainOptions = subdomains.map((s) => {
+    const heldByOther = !!s.claimed_by && s.claimed_by !== deviceId && freshClaim(s.claimed_at)
+    const heldBySelf = s.claimed_by === deviceId && freshClaim(s.claimed_at)
+    const base = s.status === 'active' ? `${s.label}.k2.dev` : `${s.label}.k2.dev (${s.status})`
+    const suffix = heldByOther ? ' (in use on another device)' : heldBySelf ? ' (this device)' : ''
+    return { value: s.label, label: `${base}${suffix}`, disabled: heldByOther }
+  })
+
+  // Bind the chosen subdomain into config WITHOUT starting (used when no
+  // tunnel is running, and as the bind step inside the swap flow).
   const handleSubdomainPick = async (value: string): Promise<void> => {
+    // Swap-confirm when a tunnel is already running and the pick differs
+    // from the currently-bound subdomain.
+    if (running && value !== subdomain.trim()) {
+      const ok = await confirm({
+        title: 'Swap tunnel?',
+        message: `This will end your current tunnel at ${subdomain.trim()}.k2.dev and start ${value}.k2.dev.`,
+        confirmLabel: 'Confirm',
+      })
+      if (!ok) {
+        // Revert: nudge the controlled dropdown back to the current value.
+        setSelectedLabel(subdomain.trim() || null)
+        return
+      }
+      await swapTunnel(value)
+      return
+    }
     const row = subdomains.find((s) => s.label === value)
     if (row) await bindSubdomain(row)
+  }
+
+  // Swap an already-running tunnel to a different subdomain:
+  // stop → release(old) → bind(new) → claim(new) → start.
+  const swapTunnel = async (value: string): Promise<void> => {
+    const row = subdomains.find((s) => s.label === value)
+    if (!row) return
+    const oldLabel = subdomain.trim()
+    const accessToken = session?.accessToken ?? accessTokenRef.current
+    setSwapBusy(true)
+    setError(null)
+    setBoundMsg(null)
+    try {
+      stopHeartbeat()
+      // 1. Stop the current tunnel.
+      const stopRes = await tunnelPost('stop')
+      if (!stopRes.ok) {
+        setError(await errText(stopRes))
+        return
+      }
+      // 2. Release the old lease (best-effort).
+      if (accessToken && oldLabel) {
+        void releaseSubdomain(accessToken, oldLabel, deviceId).catch(() => undefined)
+      }
+      // 3. Bind the new subdomain (config + state).
+      setSelectedLabel(row.label)
+      setSubdomain(row.label)
+      setToken(row.tunnel_token)
+      const cfgRes = await tunnelPost('config', {
+        serverAddr: serverAddr.trim() || DEFAULT_SERVER_ADDR,
+        serverPort: Number(serverPort) || DEFAULT_SERVER_PORT,
+        subdomain: row.label,
+        token: row.tunnel_token,
+      })
+      if (!cfgRes.ok) {
+        setError(await errText(cfgRes))
+        return
+      }
+      const cfg = (await cfgRes.json()) as TunnelConfigView
+      setTokenSet(cfg.tokenSet)
+      setToken('')
+      boundLabelRef.current = row.label
+      // 4. Claim the new lease.
+      if (accessToken) {
+        try {
+          const result = await claimSubdomain(accessToken, row.label, deviceId, deviceLabel)
+          if (!result.claimed && result.holder && result.holder !== deviceId) {
+            setError(`${row.label}.k2.dev is in use on another device — stop it there first.`)
+            return
+          }
+        } catch (e) {
+          setError(e instanceof Error ? e.message : 'Failed to claim subdomain')
+          return
+        }
+      }
+      // 5. Start the new tunnel.
+      const startRes = await tunnelPost(`start?subdomain=${encodeURIComponent(row.label)}`)
+      if (!startRes.ok) {
+        setError(await errText(startRes))
+        if (accessToken) void releaseSubdomain(accessToken, row.label, deviceId).catch(() => undefined)
+        return
+      }
+      await refreshStatus()
+      startHeartbeat()
+      setBoundMsg(`Swapped to ${row.label}.k2.dev.`)
+      void refreshSubdomains()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Swap failed')
+    } finally {
+      setSwapBusy(false)
+    }
   }
 
   return (
@@ -777,15 +995,15 @@ export function K2ConnectSection(): React.JSX.Element {
           {running ? (
             <button
               onClick={() => void stopTunnel()}
-              disabled={busy}
+              disabled={busy || swapBusy}
               className="px-3 py-1 text-[11px] text-white bg-red-500/80 hover:bg-red-500 no-drag cursor-pointer disabled:opacity-60"
             >
-              Stop tunnel
+              {swapBusy ? 'Swapping…' : 'Stop tunnel'}
             </button>
           ) : (
             <button
               onClick={() => void startTunnel()}
-              disabled={busy}
+              disabled={busy || swapBusy}
               className="px-3 py-1 text-[11px] text-white bg-[var(--color-accent)] hover:opacity-90 no-drag cursor-pointer disabled:opacity-60"
             >
               Start tunnel

@@ -21,6 +21,22 @@ export interface K2Subdomain {
   status: string
   /** The frpc bearer token bound to this subdomain. SECRET. */
   tunnel_token: string
+  /** Device id currently holding the live claim/lease, if any. */
+  claimed_by?: string | null
+  /** ISO timestamp of the last claim heartbeat, if any. */
+  claimed_at?: string | null
+  /** Human-readable label of the holding device, if any. */
+  claimed_label?: string | null
+}
+
+/** Result of a `claim_subdomain` RPC. */
+export interface K2ClaimResult {
+  /** true = THIS device now holds the lease (also acts as a heartbeat). */
+  claimed: boolean
+  /** When `claimed:false`, the device id that currently holds it. */
+  holder: string | null
+  /** When `claimed:false`, the human label of the holding device. */
+  holderLabel: string | null
 }
 
 /** An authenticated k2.dev session. The access token is short-lived and
@@ -100,7 +116,7 @@ export async function refreshSession(refreshToken: string): Promise<K2Session> {
  *  the caller, so no user filter is needed client-side. */
 export async function listSubdomains(accessToken: string): Promise<K2Subdomain[]> {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/subdomains?select=label,status,tunnel_token`,
+    `${SUPABASE_URL}/rest/v1/subdomains?select=label,status,tunnel_token,claimed_by,claimed_at,claimed_label`,
     {
       method: 'GET',
       headers: {
@@ -116,6 +132,69 @@ export async function listSubdomains(accessToken: string): Promise<K2Subdomain[]
   const rows = (await res.json()) as unknown
   if (!Array.isArray(rows)) return []
   return rows as K2Subdomain[]
+}
+
+/** Claim (or heartbeat) a subdomain lease for this device. A successful
+ *  claim (`claimed:true`) means THIS device now holds the lease — re-calling
+ *  refreshes it. `claimed:false` means a *different* device holds a fresh
+ *  claim (the `holder` / `holderLabel` identify who). Claims auto-expire
+ *  server-side after 3 minutes without a heartbeat. */
+export async function claimSubdomain(
+  accessToken: string,
+  label: string,
+  deviceId: string,
+  deviceLabel?: string,
+): Promise<K2ClaimResult> {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/claim_subdomain`, {
+    method: 'POST',
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ p_label: label, p_device_id: deviceId, p_device_label: deviceLabel ?? null }),
+  })
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as SupabaseTokenResponse
+    throw new Error(authErrorMessage(body, res.status))
+  }
+  const rows = (await res.json()) as unknown
+  const row = Array.isArray(rows) ? (rows[0] as Record<string, unknown> | undefined) : undefined
+  return {
+    claimed: !!row?.claimed,
+    holder: (row?.holder as string | null) ?? null,
+    holderLabel: (row?.holder_label as string | null) ?? null,
+  }
+}
+
+/** Release this device's lease on a subdomain (best-effort). */
+export async function releaseSubdomain(
+  accessToken: string,
+  label: string,
+  deviceId: string,
+): Promise<void> {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/release_subdomain`, {
+    method: 'POST',
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ p_label: label, p_device_id: deviceId }),
+  })
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as SupabaseTokenResponse
+    throw new Error(authErrorMessage(body, res.status))
+  }
+}
+
+/** True if `claimedAt` is within the last 3 minutes — i.e. a live lease
+ *  (server-side claims expire after 3 min of no heartbeat). */
+export function freshClaim(claimedAt: string | null | undefined): boolean {
+  if (!claimedAt) return false
+  const t = Date.parse(claimedAt)
+  if (Number.isNaN(t)) return false
+  return Date.now() - t < 3 * 60 * 1000
 }
 
 /** Best-effort sign-out. Revokes the session server-side; failures are

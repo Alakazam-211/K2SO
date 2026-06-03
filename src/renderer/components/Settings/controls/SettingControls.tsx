@@ -58,7 +58,7 @@ export function SettingDropdown({
   className,
 }: {
   value: string
-  options: { value: string; label: string }[]
+  options: { value: string; label: string; disabled?: boolean }[]
   onChange: (value: string) => void | Promise<void>
   className?: string
 }): React.JSX.Element {
@@ -97,14 +97,22 @@ export function SettingDropdown({
         <div className="absolute top-full right-0 z-50 mt-0.5 min-w-full bg-[var(--color-bg-surface)] border border-[var(--color-border)] shadow-xl max-h-60 overflow-y-auto">
           {options.map((option) => {
             const isActive = option.value === value
+            const isDisabled = option.disabled === true
             return (
               <button
                 key={option.value}
-                onClick={() => { onChange(option.value); setIsOpen(false) }}
-                className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors cursor-pointer ${
-                  isActive
-                    ? 'text-[var(--color-accent)] bg-[var(--color-accent)]/10'
-                    : 'text-[var(--color-text-secondary)] hover:bg-white/[0.04] hover:text-[var(--color-text-primary)]'
+                disabled={isDisabled}
+                onClick={() => {
+                  if (isDisabled) return
+                  onChange(option.value)
+                  setIsOpen(false)
+                }}
+                className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
+                  isDisabled
+                    ? 'text-[var(--color-text-muted)] opacity-50 cursor-not-allowed'
+                    : isActive
+                      ? 'text-[var(--color-accent)] bg-[var(--color-accent)]/10 cursor-pointer'
+                      : 'text-[var(--color-text-secondary)] hover:bg-white/[0.04] hover:text-[var(--color-text-primary)] cursor-pointer'
                 }`}
               >
                 <span className="truncate flex-1">{option.label}</span>
