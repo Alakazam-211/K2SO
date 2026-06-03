@@ -236,8 +236,8 @@ pub fn account_page_html() -> String {
 </head>
 <body>
   <div class="card">
-    <h1>Log in to manage your account for <code>{sub}</code></h1>
-    <p class="sub">Enter your K2 Connect credentials.</p>
+    <h1 id="heading">Log in to manage your account for <code>{sub}</code></h1>
+    <p class="sub" id="loginSub">Enter your K2 Connect credentials.</p>
 
     <form id="loginForm">
       <label for="u">Username</label>
@@ -269,6 +269,18 @@ pub fn account_page_html() -> String {
   const changeForm = document.getElementById('changeForm');
   const loginMsg = document.getElementById('loginMsg');
   const changeMsg = document.getElementById('changeMsg');
+  const heading = document.getElementById('heading');
+  const loginSub = document.getElementById('loginSub');
+  // Capture the subdomain from the heading's <code> (already escaped server-side).
+  const SUB = (heading.querySelector('code') || {{ textContent: 'this server' }}).textContent;
+  function showLoggedIn() {{
+    heading.textContent = 'Manage your account for ' + SUB;
+    if (loginSub) loginSub.classList.add('hidden');
+  }}
+  function showLoggedOut() {{
+    heading.textContent = 'Log in to manage your account for ' + SUB;
+    if (loginSub) loginSub.classList.remove('hidden');
+  }}
 
   loginForm.addEventListener('submit', async (e) => {{
     e.preventDefault();
@@ -291,6 +303,7 @@ pub fn account_page_html() -> String {
       const data = await res.json();
       token = data.token;
       document.getElementById('who').textContent = 'Signed in as ' + (data.username || '');
+      showLoggedIn();
       loginForm.classList.add('hidden');
       changeForm.classList.remove('hidden');
       document.getElementById('cp').focus();
@@ -335,6 +348,7 @@ pub fn account_page_html() -> String {
           changeForm.classList.add('hidden');
           loginForm.reset();
           loginForm.classList.remove('hidden');
+          showLoggedOut();
           loginMsg.textContent = '';
         }}, 1800);
       }} else if (res.status === 400) {{
