@@ -162,7 +162,7 @@ export function ContextLayersPreview({ projectPath, agentMode, onOpenSettings, o
       name: layer.title,
       kind: 'global',
       subtitle: layer.preview || undefined,
-      description: `**Custom layer** (applies to all ${tier === 'manager' ? 'manager' : tier === 'custom_agent' ? 'custom-agent' : 'template'} workspaces). Edit in Settings → Agent Skills.`,
+      description: `**Custom layer** (applies to all ${tier === 'manager' ? 'manager' : tier === 'custom_agent' ? 'custom-agent' : 'template'} workspaces). Edit in Settings → Canonical Agent Flow.`,
       editAction: onOpenSettings,
       loadOnExpand: async () => {
         try {
@@ -235,7 +235,7 @@ export function ContextLayersPreview({ projectPath, agentMode, onOpenSettings, o
           <button
             onClick={onOpenSettings}
             className="text-[10px] text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] no-drag cursor-pointer"
-            title="Edit layers in Settings → Agent Skills"
+            title="Edit layers in Settings → Canonical Agent Flow"
           >
             Edit layers ↗
           </button>

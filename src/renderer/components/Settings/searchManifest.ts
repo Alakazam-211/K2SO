@@ -97,7 +97,7 @@ export const SECTION_LABELS: Record<SettingsSection, string> = {
   general: 'General',
   projects: 'Workspaces',
   'workspace-states': 'Workspace States',
-  'agent-skills': 'Agent Skills',
+  'agent-skills': 'Canonical Agent Flow',
   terminal: 'Terminal',
   'code-editor': 'Code Editor',
   'editors-agents': 'Editors & Agents',

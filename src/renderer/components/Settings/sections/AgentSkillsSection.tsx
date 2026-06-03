@@ -1,412 +1,229 @@
 import React from 'react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
-import Markdown from '@/components/Markdown/Markdown'
-import remarkGfm from 'remark-gfm'
 import type { SettingEntry } from '../searchManifest'
 import { AgentContextDiagram } from './AgentContextDiagram'
+import { useProjectsStore } from '@/stores/projects'
+import { type HarnessProbe, harnessStateLabel } from './canonicalState'
+
+// Renamed from "Agent Skills" → "Canonical Agent Flow" (canonical-agents
+// PRD §11). The section is no longer a four-tier "skills shipped to tiers of
+// agents" picker. Post-`agents/`-removal a workspace IS one agent: there is
+// a single agent under .k2so/agent/ + a flat skills list under .k2so/skills/.
+// This page is the explainer + control surface for how the workspace's
+// canonical setup works: .k2so/agent/AGENT.md is THE canonical source, and
+// the per-harness files (CLAUDE.md, GEMINI.md, …) are MIRRORS of it.
 
 export const AGENT_SKILLS_MANIFEST: SettingEntry[] = [
-  { id: 'agent-skills.manager', section: 'agent-skills', label: 'Workspace Manager Skills', description: 'Auto-generated + custom skill layers for the workspace manager', keywords: ['manager', 'skills', 'workspace', 'triage', 'delegate'] },
-  { id: 'agent-skills.k2so-agent', section: 'agent-skills', label: 'K2SO Agent Skills', description: 'Skill layers for the K2SO planner agent (PRDs, milestones, technical plans)', keywords: ['k2so', 'agent', 'planner', 'prd', 'milestone', 'skills'] },
-  { id: 'agent-skills.agent-template', section: 'agent-skills', label: 'Agent Template Skills', description: 'Skill layers shared by every team member agent', keywords: ['template', 'skills', 'agent', 'checkin'] },
-  { id: 'agent-skills.custom-agent', section: 'agent-skills', label: 'Custom Agent Skills', description: 'Skill layers for custom / heartbeat-driven agents', keywords: ['custom', 'skills', 'agent', 'cross-workspace'] },
-  { id: 'agent-skills.add-layer', section: 'agent-skills', label: 'Add Skill Layer', description: 'Create a new markdown skill layer', keywords: ['add', 'new', 'layer', 'skill'] },
+  { id: 'agent-skills.canonical-flow', section: 'agent-skills', label: 'Canonical Agent Flow', description: 'How .k2so/agent/AGENT.md is mirrored out to the AI-harness files', keywords: ['canonical', 'agent', 'harness', 'mirror', 'fan-out', 'AGENT.md'] },
+  { id: 'agent-skills.workspace-manager', section: 'agent-skills', label: 'Workspace Manager skill', description: 'Opt-in role skill — weaves Workspace Manager guidance into AGENT.md', keywords: ['manager', 'skill', 'role', 'triage', 'delegate'] },
+  { id: 'agent-skills.k2-agent', section: 'agent-skills', label: 'K2 Agent skill', description: 'Opt-in role skill — weaves K2 Agent (planner) guidance into AGENT.md', keywords: ['k2', 'agent', 'planner', 'prd', 'skill', 'role'] },
+  { id: 'agent-skills.k2-canonical-agent', section: 'agent-skills', label: 'K2 Canonical Agent skill', description: 'Opt-in skill — unify the workspace harness files safely (copies)', keywords: ['canonical', 'unify', 'harness', 'merge', 'mirror', 'skill'] },
+  { id: 'agent-skills.harness-fanout', section: 'agent-skills', label: 'Harness fan-out (symlinks)', description: 'Per-workspace permission to programmatically symlink harness files', keywords: ['fan-out', 'symlink', 'harness', 'permission', 'checkbox'] },
 ]
 
-type SkillTier = 'manager' | 'k2so_agent' | 'agent_template' | 'custom_agent'
-
-interface SkillLayerInfo {
-  filename: string
-  title: string
-  preview: string
-  path: string
-}
-
-const SKILL_TABS: { key: SkillTier; label: string }[] = [
-  { key: 'custom_agent', label: 'Custom Agent' },
-  { key: 'k2so_agent', label: 'K2SO Agent' },
-  { key: 'manager', label: 'Workspace Manager' },
-  { key: 'agent_template', label: 'Agent Template' },
+// The three opt-in skills of this PRD (canonical-agents §2), surfaced as
+// first-class entries in the flat skills list. `dir` is the .k2so/skills/<dir>
+// name (matches OptInSkill::dir_name in core).
+const OPT_IN_SKILLS: { dir: string; label: string; blurb: string }[] = [
+  {
+    dir: 'workspace-manager',
+    label: 'Workspace Manager',
+    blurb:
+      'Role knowledge for the manager — standing orders, the k2so CLI verb surface, delegation/review. The agent weaves it into AGENT.md organically. Enable + run it from a manager workspace’s Agent section.',
+  },
+  {
+    dir: 'k2-agent',
+    label: 'K2 Agent',
+    blurb:
+      'Role knowledge for the planner agent — PRDs, milestones, technical plans. Woven into AGENT.md organically. Enable + run it from a K2-Agent workspace’s Agent section.',
+  },
+  {
+    dir: 'k2-canonical-agent',
+    label: 'K2 Canonical Agent',
+    blurb:
+      'Unifies the workspace’s AI-harness files safely: diagnose per-harness state, merge existing harness content into AGENT.md/PROJECT.md, then mirror out as backed-up, byte-reversible COPIES. Available to every workspace.',
+  },
 ]
-
-/// Per-tier tagline surfaced in the "context stack" explanation block so
-/// the user sees at-a-glance what this bundle gets injected into.
-const TIER_BLURB: Record<SkillTier, string> = {
-  custom_agent:
-    'every Custom-mode agent K2SO launches (single-agent workspaces that operate autonomously on their own inbox)',
-  k2so_agent:
-    'the K2SO planner agent — the workspace-local agent that builds PRDs, milestones, and technical plans',
-  manager:
-    'the workspace manager — the top-of-stack agent that triages inboxes and delegates to sub-agents',
-  agent_template:
-    'every sub-agent (frontend-eng, rust-eng, qa-eng, etc.) K2SO delegates work to under a manager',
-}
-
-const LOCKED_LAYERS: Record<SkillTier, string[]> = {
-  manager: [
-    'Identity + Workspace State',
-    'Connected Workspaces',
-    'Team Roster',
-    'Standing Orders',
-    'Decision Framework',
-    'Delegation + Review',
-    'Communication Commands',
-  ],
-  k2so_agent: [
-    'Identity',
-    'Every Wake (k2so checkin)',
-    'Report + Complete',
-    'Planning (PRDs + Milestones)',
-    'Your Own Heartbeats',
-    'Cross-Workspace Messaging',
-    'File Reservations',
-    'Settings + Diagnostic',
-  ],
-  agent_template: [
-    'Identity',
-    'Check In + Status + Done',
-    'File Reservations',
-  ],
-  custom_agent: [
-    'Identity',
-    'Check In + Status + Done',
-    'Cross-Workspace Messaging',
-    'File Reservations',
-  ],
-}
-
-// Static content descriptions for locked layers (shown in preview)
-const LOCKED_LAYER_DESCRIPTIONS: Record<string, string> = {
-  'Identity + Workspace State': '**Auto-generated per workspace.**\n\nIncludes the workspace name, current mode (Build/Managed/Maintenance/Locked), and mode description. Each workspace gets unique identity context.',
-  'Connected Workspaces': '**Auto-generated per workspace.**\n\nLists workspaces connected via workspace relations — both outgoing (workspaces this manager oversees) and incoming (agents that communicate with this workspace).',
-  'Team Roster': '**Auto-generated per workspace.**\n\nLists all agent templates in this workspace with their names and roles. The manager uses this to decide which specialist to delegate work to.',
-  'Standing Orders': '**Auto-generated (same for all managers).**\n\n9-step checklist run on every wake cycle:\n1. `k2so checkin`\n2. Triage messages\n3. Triage work items by priority\n4. Handle simple tasks directly\n5. Delegate complex tasks\n6. Check active agents\n7. Review completed work\n8. Update status\n9. Mark done or blocked',
-  'Decision Framework': '**Auto-generated (same for all managers).**\n\nTwo decision axes:\n- **By complexity**: Simple (work directly) vs Complex (delegate)\n- **By workspace mode**: Build (full autonomy), Managed (features need approval), Maintenance (bugs only), Locked (no activity)',
-  'Delegation + Review': '**Auto-generated (same for all managers).**\n\nDelegation: choose agent → create work item → `k2so delegate` → agent works in worktree → review.\n\nReview: `k2so review approve/reject/feedback` for completed agent work.',
-  'Communication Commands': '**Auto-generated (same for all managers).**\n\nCore commands: `k2so checkin`, `k2so status`, `k2so done`, `k2so msg`, `k2so reserve`, `k2so release`.',
-  'Identity': '**Auto-generated per agent.**\n\nThe agent name and workspace it belongs to.',
-  'Check In + Status + Done': '**Auto-generated (same for all).**\n\n`k2so checkin` — wake up briefing\n`k2so status "msg"` — report progress\n`k2so done` / `k2so done --blocked "reason"` — complete or block task',
-  'File Reservations': '**Auto-generated (same for all).**\n\n`k2so reserve <paths>` — claim files for exclusive editing\n`k2so release` — release claims',
-  'Cross-Workspace Messaging': '**Auto-generated (same for all custom agents).**\n\n`k2so msg <workspace>:inbox "text"` — send work to connected workspaces\n`k2so msg --wake` — urgent delivery with agent wake-up',
-}
 
 export function AgentSkillsSection(): React.JSX.Element {
-  const [activeTier, setActiveTier] = useState<SkillTier>('custom_agent')
-  const [layers, setLayers] = useState<SkillLayerInfo[]>([])
-  const [adding, setAdding] = useState(false)
-  const [newName, setNewName] = useState('')
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
-  const [toast, setToast] = useState<string | null>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
-  // Expanded section keys (stable: `locked:<name>` or `user:<filename>`).
-  // Multiple rows can be open at once so the user can diff two layers
-  // side by side without losing their place. Cleared on tab change.
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  // Resolved user-layer body cache so expanding a layer twice doesn't
-  // re-fetch from disk each time.
-  const [userContent, setUserContent] = useState<Record<string, string>>({})
+  // Workspace-scoped surfaces (per-harness state + the fan-out permission)
+  // resolve against the active project — this is a global section but the
+  // canonical state + marker are per-workspace.
+  const activeProject = useProjectsStore((s) =>
+    s.projects.find((p) => p.id === s.activeProjectId) ?? null,
+  )
+  const projectPath = activeProject?.path ?? null
 
-  const loadLayers = useCallback(async (tier: SkillTier) => {
+  const [probes, setProbes] = useState<HarnessProbe[]>([])
+  const [fanoutEnabled, setFanoutEnabled] = useState(false)
+  const [fanoutBusy, setFanoutBusy] = useState(false)
+
+  const refresh = useCallback(async () => {
+    if (!projectPath) {
+      setProbes([])
+      return
+    }
     try {
-      const list = await daemonCliGet<SkillLayerInfo[]>('skill-layers/list', { tier })
-      setLayers(list)
+      const next = await invoke<HarnessProbe[]>('k2so_detect_canonical_state', { projectPath })
+      setProbes(next)
     } catch (err) {
-      console.error('[agent-skills] Failed to load layers:', err)
-      setLayers([])
+      console.warn('[canonical-flow] detect_canonical_state failed:', err)
+      setProbes([])
     }
-  }, [])
-
-  useEffect(() => {
-    loadLayers(activeTier)
-  }, [activeTier, loadLayers])
-
-  useEffect(() => {
-    if (adding && inputRef.current) {
-      inputRef.current.focus()
-    }
-  }, [adding])
-
-  useEffect(() => {
-    if (toast) {
-      const t = setTimeout(() => setToast(null), 2000)
-      return () => clearTimeout(t)
-    }
-  }, [toast])
-
-  const handleCreate = useCallback(async () => {
-    const name = newName.trim()
-    if (!name) return
     try {
-      await daemonCliPost<SkillLayerInfo>('skill-layers/create', { tier: activeTier, name })
-      setNewName('')
-      setAdding(false)
-      loadLayers(activeTier)
+      const on = await invoke<boolean>('k2so_harness_fanout_enabled', { projectPath })
+      setFanoutEnabled(on)
     } catch (err) {
-      console.error('[agent-skills] Create failed:', err)
+      console.warn('[canonical-flow] harness_fanout_enabled failed:', err)
     }
-  }, [newName, activeTier, loadLayers])
+  }, [projectPath])
 
-  const handleDelete = useCallback(async (filename: string) => {
-    try {
-      await daemonCliPost('skill-layers/delete', { tier: activeTier, filename })
-      setConfirmDelete(null)
-      loadLayers(activeTier)
-    } catch (err) {
-      console.error('[agent-skills] Delete failed:', err)
-    }
-  }, [activeTier, loadLayers])
-
-  const handleEdit = useCallback((layer: SkillLayerInfo) => {
-    navigator.clipboard.writeText(layer.path).then(() => {
-      setToast('Copied path — open in your editor')
-    }).catch(() => {
-      setToast(layer.path)
-    })
-  }, [])
-
-  // Clear open sections + cached user bodies on tier change so stale
-  // content doesn't leak between tabs.
   useEffect(() => {
-    setExpanded(new Set())
-    setUserContent({})
-  }, [activeTier])
+    refresh()
+  }, [refresh])
 
-  const toggleExpanded = useCallback((key: string, layer?: SkillLayerInfo) => {
-    setExpanded((prev) => {
-      const next = new Set(prev)
-      if (next.has(key)) {
-        next.delete(key)
-        return next
-      }
-      next.add(key)
-      // If this is a user layer and we haven't cached its body yet,
-      // fetch on open. Locked layers use the in-module description map.
-      if (layer && userContent[layer.filename] === undefined) {
-        daemonCliGet<{ content: string }>('skill-layers/get-content', { tier: activeTier, filename: layer.filename })
-          .then((r) => setUserContent((c) => ({
-            ...c,
-            [layer.filename]: r.content || '*Empty layer — click Edit to add content.*',
-          })))
-          .catch(() => setUserContent((c) => ({ ...c, [layer.filename]: '*Failed to load content.*' })))
-      }
-      return next
-    })
-  }, [activeTier, userContent])
-
-  const locked = LOCKED_LAYERS[activeTier]
-  const activeLabel = SKILL_TABS.find((t) => t.key === activeTier)?.label ?? 'this tier'
+  const toggleFanout = useCallback(async () => {
+    if (!projectPath || fanoutBusy) return
+    const next = !fanoutEnabled
+    setFanoutBusy(true)
+    // Optimistic — reflect immediately, reconcile on failure.
+    setFanoutEnabled(next)
+    try {
+      await invoke('k2so_set_harness_fanout_enabled', { projectPath, enabled: next })
+      await refresh()
+    } catch (err) {
+      console.error('[canonical-flow] set_harness_fanout_enabled failed:', err)
+      setFanoutEnabled(!next)
+    } finally {
+      setFanoutBusy(false)
+    }
+  }, [projectPath, fanoutEnabled, fanoutBusy, refresh])
 
   return (
     <div className="max-w-3xl">
-      <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-1">Agent Skills</h2>
+      <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-1">Canonical Agent Flow</h2>
       <p className="text-xs text-[var(--color-text-muted)] mb-4">
-        Every K2SO agent is launched with a composed system prompt — the auto layers below plus any custom layers you add. Pick a tab to see what's shipped to that specific kind of agent.
+        Each AI coding tool reads its project notes from a different file. K2SO keeps{' '}
+        <span className="font-mono text-[var(--color-text-secondary)]">.k2so/agent/AGENT.md</span> as
+        THE canonical source — the per-harness files (
+        <span className="font-mono">CLAUDE.md</span>, <span className="font-mono">GEMINI.md</span>,
+        …) are <span className="text-[var(--color-text-secondary)]">mirrors</span> of it. Write your
+        context once; every tool sees the same picture.
       </p>
 
-      {/* Tier tabs */}
-      <div className="flex gap-1 mb-4 flex-wrap">
-        {SKILL_TABS.map(({ key, label }) => (
-          <button
-            key={key}
-            onClick={() => { setActiveTier(key); setAdding(false); setConfirmDelete(null) }}
-            className={`px-3 py-1 text-[10px] font-medium transition-colors no-drag cursor-pointer ${
-              activeTier === key
-                ? 'bg-[var(--color-accent)] text-white'
-                : 'bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]'
-            }`}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
+      {/* Canonical-source diagram: AGENT.md → harness mirrors. */}
+      <AgentContextDiagram />
 
-      {/* Context flow diagram — changes per tier so users can see where each
-          file ends up at launch / wake. */}
-      <AgentContextDiagram tier={activeTier} />
-
-      {/* Context-stack explanation. Replaces the prior "click a layer to
-          preview" tooltip with a per-tier description so the first thing a
-          user reads on this tab explains *what* they're configuring. */}
-      <div className="border border-[var(--color-border)] bg-[var(--color-bg-elevated)]/30 px-3 py-2.5 mb-3 text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
-        <div className="font-medium text-[var(--color-text-primary)] mb-1">
-          {activeLabel} context stack
-        </div>
+      {/* The two opt-in routes (PRD §11). */}
+      <div className="border border-[var(--color-border)] bg-[var(--color-bg-elevated)]/30 px-3 py-2.5 mb-4 text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
+        <div className="font-medium text-[var(--color-text-primary)] mb-1">Two opt-in routes to canonical</div>
+        <p className="mb-1.5">
+          <span className="text-[var(--color-text-primary)]">Skill route (recommended).</span>{' '}
+          Run the <span className="text-[var(--color-text-primary)]">K2 Canonical Agent</span> from a
+          workspace’s Agent section. It writes safe <span className="text-[var(--color-text-primary)]">copies</span>{' '}
+          of AGENT.md into the harness files you choose — backed up first, byte-reversible.
+        </p>
         <p>
-          This is the stack of layers K2SO composes into the system prompt for{' '}
-          <span className="text-[var(--color-text-primary)]">{TIER_BLURB[activeTier]}</span>.
-          Auto layers are always included and regenerated on every launch. Custom layers
-          — markdown files under <code className="text-[10px] bg-[var(--color-bg-elevated)] px-1 py-0.5 rounded">~/.k2so/templates/</code> — stack on top, so
-          anything you add here applies to every workspace that ships a{' '}
-          {activeLabel.toLowerCase()}. Click a layer to expand its content inline.
+          <span className="text-[var(--color-text-primary)]">Checkbox route.</span> Enable harness
+          fan-out below for ongoing <span className="text-[var(--color-text-primary)]">programmatic symlinks</span>{' '}
+          pointing back at the canonical AGENT.md. Hands-off, but always-on.
         </p>
       </div>
 
-      {/* Single-column collapsible layer list. Clicking a row toggles
-          inline expansion — no more right-side preview panel. Multiple
-          rows can be expanded at once for side-by-side comparison. */}
-      <div className="border border-[var(--color-border)]">
-        {/* Locked (auto-composed) layers */}
-        {locked.map((name, i) => {
-          const key = `locked:${name}`
-          const isOpen = expanded.has(key)
-          const description = LOCKED_LAYER_DESCRIPTIONS[name] || `*Auto-generated section: ${name}*`
-          return (
-            <div key={`locked-${i}`} className="border-b border-[var(--color-border)] last:border-b-0">
-              <button
-                type="button"
-                onClick={() => toggleExpanded(key)}
-                className="w-full flex items-center justify-between px-3 py-2 text-left text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-white/[0.03] no-drag cursor-pointer transition-colors"
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <span
-                    className={`inline-block text-[10px] text-[var(--color-text-muted)] transition-transform flex-shrink-0 w-3 ${
-                      isOpen ? 'rotate-90' : ''
-                    }`}
-                  >
-                    ▸
-                  </span>
-                  <span className="w-1 h-4 bg-[var(--color-text-muted)]/30 rounded-sm flex-shrink-0" />
-                  <span className="text-xs truncate">{name}</span>
-                </div>
-                <span className="text-[10px] italic flex-shrink-0">auto</span>
-              </button>
-              {isOpen && (
-                <div className="px-3 pb-3 pt-1 border-t border-[var(--color-border)]/50 bg-black/[0.15]">
-                  <div className="prose prose-invert prose-xs max-w-none text-xs text-[var(--color-text-secondary)] leading-relaxed">
-                    <Markdown remarkPlugins={[remarkGfm]}>{description}</Markdown>
-                  </div>
-                </div>
-              )}
+      {/* Per-workspace permission checkbox (PRD §4 opt-in route). */}
+      <div className="border border-[var(--color-border)] px-3 py-3 mb-4">
+        <label className={`flex items-start gap-2.5 ${projectPath ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'}`}>
+          <input
+            type="checkbox"
+            checked={fanoutEnabled}
+            disabled={!projectPath || fanoutBusy}
+            onChange={toggleFanout}
+            className="mt-0.5"
+            style={{ accentColor: 'var(--color-accent)' }}
+          />
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-[var(--color-text-primary)]">
+              Enable harness fan-out (programmatic symlinks)
             </div>
-          )
-        })}
-
-        {/* Custom (user-authored) layers */}
-        {layers.map((layer) => {
-          const key = `user:${layer.filename}`
-          const isOpen = expanded.has(key)
-          const body = userContent[layer.filename]
-          return (
-            <div key={layer.filename} className="border-b border-[var(--color-border)] last:border-b-0">
-              <div
-                className={`flex items-center justify-between px-3 py-2 no-drag cursor-pointer transition-colors ${
-                  isOpen ? 'bg-white/[0.03]' : 'hover:bg-white/[0.03]'
-                }`}
-                onClick={() => toggleExpanded(key, layer)}
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <span
-                    className={`inline-block text-[10px] text-[var(--color-text-muted)] transition-transform flex-shrink-0 w-3 ${
-                      isOpen ? 'rotate-90' : ''
-                    }`}
-                  >
-                    ▸
-                  </span>
-                  <span className="w-1 h-4 bg-[var(--color-accent)] rounded-sm flex-shrink-0" />
-                  <div className="min-w-0">
-                    <span className="text-xs text-[var(--color-text-primary)] block truncate">{layer.title}</span>
-                    {layer.preview && (
-                      <span className="text-[10px] text-[var(--color-text-muted)] block truncate">{layer.preview}</span>
-                    )}
-                  </div>
-                </div>
-                <div
-                  className="flex items-center gap-2 flex-shrink-0"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  {confirmDelete === layer.filename ? (
-                    <>
-                      <span className="text-[10px] text-[var(--color-text-muted)]">Delete?</span>
-                      <button
-                        onClick={() => handleDelete(layer.filename)}
-                        className="text-[10px] text-red-400 hover:text-red-300 no-drag cursor-pointer"
-                      >
-                        Yes
-                      </button>
-                      <button
-                        onClick={() => setConfirmDelete(null)}
-                        className="text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] no-drag cursor-pointer"
-                      >
-                        No
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <button
-                        onClick={() => handleEdit(layer)}
-                        className="text-[10px] text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] no-drag cursor-pointer"
-                      >
-                        Edit
-                      </button>
-                      <button
-                        onClick={() => setConfirmDelete(layer.filename)}
-                        className="text-[10px] text-red-400 hover:text-red-300 no-drag cursor-pointer"
-                      >
-                        Delete
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-              {isOpen && (
-                <div className="px-3 pb-3 pt-1 border-t border-[var(--color-border)]/50 bg-black/[0.15]">
-                  <div className="prose prose-invert prose-xs max-w-none text-xs text-[var(--color-text-secondary)] leading-relaxed">
-                    <Markdown remarkPlugins={[remarkGfm]}>
-                      {body ?? '*Loading...*'}
-                    </Markdown>
-                  </div>
-                </div>
-              )}
-            </div>
-          )
-        })}
-
-        {/* Add-layer inline input / trigger */}
-        {adding ? (
-          <div className="flex items-center gap-2 px-3 py-2 border-b border-[var(--color-border)] last:border-b-0">
-            <input
-              ref={inputRef}
-              type="text"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleCreate()
-                if (e.key === 'Escape') { setAdding(false); setNewName('') }
-              }}
-              placeholder="Layer name..."
-              className="flex-1 text-xs bg-transparent border border-[var(--color-border)] px-2 py-1 text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
-            />
-            <button
-              onClick={handleCreate}
-              className="text-[10px] text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] no-drag cursor-pointer"
-            >
-              Create
-            </button>
-            <button
-              onClick={() => { setAdding(false); setNewName('') }}
-              className="text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] no-drag cursor-pointer"
-            >
-              Cancel
-            </button>
+            <p className="text-[10px] text-[var(--color-text-muted)] leading-snug mt-0.5">
+              When checked, K2SO continuously fans the canonical{' '}
+              <span className="font-mono">.k2so/agent/AGENT.md</span> out into this workspace’s harness
+              files as symlinks (on boot, agent-create, agent-launch, and regen). Off by default —
+              prefer the K2 Canonical Agent skill for safe copies. Scoped to{' '}
+              {activeProject ? <span className="font-mono">{activeProject.name}</span> : 'the active workspace'}.
+            </p>
+            {!projectPath ? (
+              <p className="text-[10px] text-[var(--color-text-muted)] italic mt-1">
+                Select a workspace to manage its harness fan-out.
+              </p>
+            ) : null}
           </div>
-        ) : (
-          <button
-            onClick={() => setAdding(true)}
-            className="w-full text-left px-3 py-2 text-[10px] text-[var(--color-accent)] hover:bg-[var(--color-bg-elevated)] no-drag cursor-pointer transition-colors"
-          >
-            + Add Layer
-          </button>
-        )}
+        </label>
       </div>
 
-      {/* Toast */}
-      {toast && (
-        <div className="mt-3 px-3 py-1.5 text-[10px] text-[var(--color-text-primary)] bg-[var(--color-bg-elevated)] border border-[var(--color-border)] inline-block">
-          {toast}
-        </div>
-      )}
+      {/* The three opt-in skills as first-class entries (flat list). */}
+      <div className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] mb-1.5">
+        Opt-in skills under <span className="font-mono">.k2so/skills/</span>
+      </div>
+      <div className="border border-[var(--color-border)] mb-4">
+        {OPT_IN_SKILLS.map((skill, i) => (
+          <div
+            key={skill.dir}
+            className={`px-3 py-2.5 ${i < OPT_IN_SKILLS.length - 1 ? 'border-b border-[var(--color-border)]' : ''}`}
+          >
+            <div className="flex items-center gap-2">
+              <span className="w-1 h-4 bg-[var(--color-accent)] rounded-sm flex-shrink-0" />
+              <span className="text-xs font-medium text-[var(--color-text-primary)]">{skill.label}</span>
+              <span className="text-[9px] font-mono text-[var(--color-text-muted)]">.k2so/skills/{skill.dir}/</span>
+            </div>
+            <p className="text-[10px] text-[var(--color-text-muted)] leading-snug mt-1 pl-3">{skill.blurb}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Live per-harness state (PRD §5.2 / §11) — copy / symlink / unmanaged. */}
+      <div className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] mb-1.5">
+        Per-harness state{activeProject ? <> · <span className="font-mono">{activeProject.name}</span></> : null}
+      </div>
+      <div className="border border-[var(--color-border)] bg-[var(--color-bg-elevated)]/30">
+        {!projectPath ? (
+          <p className="px-3 py-2.5 text-[11px] text-[var(--color-text-muted)] italic">
+            Select a workspace to see how each harness file maps back to the canonical AGENT.md.
+          </p>
+        ) : probes.length === 0 ? (
+          <p className="px-3 py-2.5 text-[11px] text-[var(--color-text-muted)] italic">
+            No harness files detected in this workspace.
+          </p>
+        ) : (
+          probes.map((p, i) => (
+            <div
+              key={p.relative_path}
+              className={`flex items-center justify-between gap-2 px-3 py-2 ${
+                i < probes.length - 1 ? 'border-b border-[var(--color-border)]' : ''
+              }`}
+            >
+              <div className="min-w-0">
+                <span className="text-[11px] font-mono text-[var(--color-text-primary)] truncate">
+                  {p.relative_path}
+                </span>
+                <span className="text-[10px] text-[var(--color-text-muted)] ml-2">{p.label}</span>
+              </div>
+              <span
+                className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 border whitespace-nowrap ${
+                  p.state.kind === 'unified'
+                    ? 'text-emerald-300 bg-emerald-500/10 border-emerald-500/30'
+                    : p.state.kind === 'unmanaged'
+                      ? 'text-amber-300 bg-amber-500/10 border-amber-500/30'
+                      : 'text-[var(--color-text-muted)] bg-[var(--color-bg-elevated)] border-[var(--color-border)]'
+                }`}
+              >
+                {harnessStateLabel(p.state)}
+              </span>
+            </div>
+          ))
+        )}
+      </div>
     </div>
   )
 }

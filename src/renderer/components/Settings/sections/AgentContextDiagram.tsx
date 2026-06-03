@@ -1,252 +1,93 @@
 import React from 'react'
 
-type SkillTier = 'manager' | 'k2so_agent' | 'agent_template' | 'custom_agent'
+// Reworked for the canonical-agents PRD (§4 / §7 / §11). The OLD diagram
+// showed the composed SKILL.md as the canonical artifact and claimed K2SO
+// "fans it out to every harness — 12 harnesses" unconditionally. Both are
+// corrected here:
+//   • THE canonical artifact is .k2so/agent/AGENT.md (Model A). The
+//     per-harness files (CLAUDE.md, GEMINI.md, …) are MIRRORS of it.
+//   • Mirroring is OPT-IN and per-harness — never an always-on 12-way
+//     fan-out. Two routes: the K2 Canonical Agent skill (safe copies) or
+//     the harness-fan-out checkbox (programmatic symlinks).
 
-interface Props {
-  tier: SkillTier
-}
+// The harness mirror targets K2SO actually supports (from core —
+// HARNESS_WORKSPACE_FILES + the extended probe list). Per-harness + opt-in,
+// not a blanket "12 harnesses".
+const HARNESS_MIRRORS: { label: string; path: string }[] = [
+  { label: 'Claude Code', path: './CLAUDE.md' },
+  { label: 'Gemini', path: './GEMINI.md' },
+  { label: 'Agent.md (generic)', path: './AGENT.md' },
+  { label: 'Goose', path: './.goosehints' },
+  { label: 'Cursor', path: './.cursor/rules/k2so.mdc' },
+  { label: 'Aider', path: './.aider.conf.yml (read:)' },
+  { label: 'OpenCode', path: './.opencode/agent/k2so.md' },
+  { label: 'Pi', path: './.pi/skills/k2so/SKILL.md' },
+  { label: 'AGENTS.md (multi)', path: './AGENTS.md (marker)' },
+  { label: 'GitHub Copilot', path: './.github/copilot-instructions.md (marker)' },
+]
 
-/**
- * Where a source flows to. As of 0.32.7 there is ONE derived artifact —
- * the canonical `SKILL.md` — which fans out to every CLI LLM via
- * symlinks / marker injection. `argv` is per-launch injection used for
- * content that can't live in the shared workspace file (heartbeat
- * trigger messages + per-delegation task kickoffs).
- */
-type FlowDestination = 'skill_md' | 'argv'
-
-interface SourceNode {
-  label: string
-  path: string
-  flowsTo: FlowDestination
-  hint?: string
-}
-
-interface DeliveryChannel {
-  label: string
-  kind: 'file' | 'argv'
-  hint: string
-  /** Short list of discovery paths or CLI flags this channel covers. */
-  reaches: string[]
-}
-
-const FILE_DISCOVERY: DeliveryChannel = {
-  label: 'File discovery',
-  kind: 'file',
-  hint: 'Every CLI LLM opened in this workspace sees the same canonical context — K2SO-launched or not.',
-  reaches: [
-    './CLAUDE.md → SKILL.md',
-    './GEMINI.md → SKILL.md',
-    './AGENT.md → SKILL.md (agent.md spec)',
-    './.goosehints → SKILL.md',
-    './.cursor/rules/k2so.mdc (generated)',
-    './AGENTS.md (marker-injected)',
-    '.github/copilot-instructions.md (marker-injected)',
-    '.aider.conf.yml → read: SKILL.md',
-  ],
-}
-
-const ARGV_INJECTION_AGENT: DeliveryChannel = {
-  label: 'argv injection',
-  kind: 'argv',
-  hint: 'Only the specific agent K2SO is launching at that moment — per-agent persona + heartbeat trigger.',
-  reaches: [
-    '--append-system-prompt (Claude, Codex, Cursor)',
-    '--system (OpenCode)',
-    'Modelfile (Ollama, per-launch)',
-    'profile YAML (Open Interpreter)',
-    'positional argv — heartbeat WAKEUP.md',
-  ],
-}
-
-const ARGV_INJECTION_TEMPLATE: DeliveryChannel = {
-  label: 'argv injection',
-  kind: 'argv',
-  hint: 'Per-delegation — each worktree gets a fresh launch with the task file as the kickoff.',
-  reaches: [
-    '--append-system-prompt (launched in worktree)',
-    'positional argv — "resume this task" kickoff',
-    'per-worktree CLAUDE.md — task title + priority + kickoff',
-  ],
-}
-
-interface TierSpec {
-  sources: SourceNode[]
-  /** Per-tier description of the single canonical SKILL.md. */
-  canonical: string
-  deliveries: DeliveryChannel[]
-}
-
-// Path labels reflect the post-Phase-2.5b layout: every documentation
-// profile (skill) lives at `.k2so/skills/<name>/SKILL.md`, and
-// heartbeats are workspace-level at `.k2so/heartbeats/<name>-<sched>/`
-// (the skill name + schedule are joined with a hyphen during the
-// consolidation migration). The legacy `.k2so/agents/<name>/AGENT.md`
-// + `.k2so/agents/<name>/heartbeats/<sched>/` paths are gone on every
-// migrated workspace; these strings are user-facing docs only, so
-// keeping them accurate matters more than parameterizing them.
-const MANAGER_SPEC: TierSpec = {
-  sources: [
-    { label: 'PROJECT.md', path: '.k2so/PROJECT.md', hint: 'Codebase knowledge shared by every agent in this workspace.', flowsTo: 'skill_md' },
-    { label: 'SKILL.md (manager)', path: '.k2so/skills/<manager>/SKILL.md', hint: 'Manager persona — workspace-global, embedded in the canonical SKILL.md.', flowsTo: 'skill_md' },
-    { label: 'SKILL.md (sub-agent)', path: '.k2so/skills/<sub-agent>/SKILL.md', hint: 'Sub-agent personas stay per-launch — argv-injected when the specific agent spawns.', flowsTo: 'argv' },
-    { label: 'WAKEUP.md (triage)', path: '.k2so/heartbeats/<manager>-triage/WAKEUP.md', hint: 'Fires on the manager heartbeat schedule — delivered as the first user message.', flowsTo: 'argv' },
-  ],
-  canonical: 'Manager workspaces: SKILL.md carries PROJECT.md + manager skill + K2SO-managed layers. Sub-agent personas never live here — they would collide if 5 sub-agents stacked their SKILL.md bodies into one file.',
-  deliveries: [FILE_DISCOVERY, ARGV_INJECTION_AGENT],
-}
-
-const K2SO_AGENT_SPEC: TierSpec = {
-  sources: [
-    { label: 'PROJECT.md', path: '.k2so/PROJECT.md', hint: 'Workspace-scope codebase context.', flowsTo: 'skill_md' },
-    { label: 'SKILL.md', path: '.k2so/skills/<k2so-agent>/SKILL.md', hint: 'Sole agent persona — embedded in the canonical SKILL.md since this is a single-agent workspace.', flowsTo: 'skill_md' },
-    { label: 'WAKEUP.md (each heartbeat)', path: '.k2so/heartbeats/<k2so-agent>-<sched>/WAKEUP.md', hint: 'Per-schedule wake trigger — delivered as the first user message on fire.', flowsTo: 'argv' },
-  ],
-  canonical: 'K2SO Agent workspaces: SKILL.md carries the sole agent\'s persona + PROJECT.md + the K2SO planning surface (PRDs, milestones, cross-workspace messaging).',
-  deliveries: [FILE_DISCOVERY, ARGV_INJECTION_AGENT],
-}
-
-const CUSTOM_AGENT_SPEC: TierSpec = {
-  sources: [
-    { label: 'PROJECT.md', path: '.k2so/PROJECT.md', hint: 'Codebase knowledge (if the custom agent is codebase-scoped).', flowsTo: 'skill_md' },
-    { label: 'SKILL.md', path: '.k2so/skills/<custom>/SKILL.md', hint: 'User-defined agent persona — embedded in the canonical SKILL.md for single-agent workspaces.', flowsTo: 'skill_md' },
-    { label: 'WAKEUP.md (each heartbeat)', path: '.k2so/heartbeats/<custom>-<sched>/WAKEUP.md', hint: 'Per-schedule wake trigger.', flowsTo: 'argv' },
-  ],
-  canonical: 'Custom Agent workspaces: SKILL.md carries the custom persona + optional PROJECT.md. Single-agent workspace, so the sole agent is the workspace-level context.',
-  deliveries: [FILE_DISCOVERY, ARGV_INJECTION_AGENT],
-}
-
-const AGENT_TEMPLATE_SPEC: TierSpec = {
-  sources: [
-    { label: 'PROJECT.md', path: '.k2so/PROJECT.md', hint: 'Templates inherit the workspace PROJECT.md via the file-discovery symlink walk-up.', flowsTo: 'skill_md' },
-    { label: 'SKILL.md', path: '.k2so/skills/<template>/SKILL.md', hint: 'Template persona — argv-injected per delegation so each worktree launch carries it fresh.', flowsTo: 'argv' },
-    { label: 'Task file', path: '.k2so/inbox/<task>.md', hint: 'When `k2so delegate` fires, the workspace inbox task becomes the launch kickoff.', flowsTo: 'argv' },
-  ],
-  canonical: 'Agent Templates: SKILL.md ships workspace-level context (PROJECT.md + K2SO-managed layers) so the template sees the codebase. The template\'s own persona is argv-only — each delegated worktree gets it via --append-system-prompt.',
-  deliveries: [FILE_DISCOVERY, ARGV_INJECTION_TEMPLATE],
-}
-
-function specForTier(tier: SkillTier): TierSpec {
-  switch (tier) {
-    case 'manager': return MANAGER_SPEC
-    case 'k2so_agent': return K2SO_AGENT_SPEC
-    case 'agent_template': return AGENT_TEMPLATE_SPEC
-    case 'custom_agent': return CUSTOM_AGENT_SPEC
-  }
-}
-
-function flowAccent(flow: FlowDestination): string {
-  switch (flow) {
-    case 'skill_md': return 'border-sky-400/50 bg-sky-400/5 text-sky-200'
-    case 'argv': return 'border-emerald-400/50 bg-emerald-400/5 text-emerald-200'
-  }
-}
-
-function flowLabel(flow: FlowDestination): string {
-  return flow === 'skill_md' ? '→ SKILL.md' : '→ argv'
-}
-
-export function AgentContextDiagram({ tier }: Props): React.JSX.Element {
-  const spec = specForTier(tier)
-  const tierName =
-    tier === 'manager' ? 'Workspace Manager' :
-    tier === 'k2so_agent' ? 'K2SO Agent' :
-    tier === 'agent_template' ? 'Agent Template' :
-    'Custom Agent'
-
+export function AgentContextDiagram(): React.JSX.Element {
   return (
     <div className="border border-[var(--color-border)] bg-[var(--color-bg-elevated)]/30 px-4 py-3 mb-4">
       <div className="flex items-center justify-between mb-2">
         <h3 className="text-[11px] font-semibold text-[var(--color-text-primary)]">
-          How context flows to a {tierName}
+          Canonical source → harness mirrors
         </h3>
         <div className="flex items-center gap-3 text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">
-          <span className="flex items-center gap-1"><span className="w-2 h-2 border border-sky-400/50 bg-sky-400/10" /> → SKILL.md</span>
-          <span className="flex items-center gap-1"><span className="w-2 h-2 border border-emerald-400/50 bg-emerald-400/10" /> → argv</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 border border-sky-400/50 bg-sky-400/10" /> canonical</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 border border-[var(--color-border)] bg-[var(--color-bg-elevated)]" /> mirror (opt-in)</span>
         </div>
       </div>
 
-      <div className="grid gap-3" style={{ gridTemplateColumns: 'minmax(0,1.3fr) auto minmax(0,1fr) auto minmax(0,1.2fr)' }}>
-        {/* Col 1: sources (three user-editable file types) */}
+      <div className="grid gap-3 items-center" style={{ gridTemplateColumns: 'minmax(0,1fr) auto minmax(0,1.3fr)' }}>
+        {/* Col 1: the single canonical source (Model A). */}
         <div className="flex flex-col gap-1.5">
-          <div className="text-[9px] uppercase tracking-wider text-[var(--color-text-muted)] mb-0.5">You edit — 3 file types</div>
-          {spec.sources.map((s) => (
-            <div
-              key={s.label + s.path}
-              className={`border px-2 py-1.5 ${flowAccent(s.flowsTo)}`}
-              title={s.hint}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-[11px] font-medium">{s.label}</div>
-                <div className="text-[9px] opacity-70 flex-shrink-0">{flowLabel(s.flowsTo)}</div>
-              </div>
-              <div className="text-[9px] font-mono opacity-70 truncate">{s.path}</div>
-            </div>
-          ))}
-        </div>
-
-        {/* Arrow col → */}
-        <div className="flex flex-col justify-center text-[var(--color-text-muted)] text-xs">
-          <div className="h-full flex items-center">→</div>
-        </div>
-
-        {/* Col 2: single canonical SKILL.md */}
-        <div className="flex flex-col gap-1.5 justify-center">
-          <div className="text-[9px] uppercase tracking-wider text-[var(--color-text-muted)] mb-0.5">K2SO composes — 1 file</div>
+          <div className="text-[9px] uppercase tracking-wider text-[var(--color-text-muted)] mb-0.5">You + the agent author — Model A</div>
           <div className="border border-sky-400/50 bg-sky-400/10 px-2 py-2">
             <div className="flex items-center justify-between gap-2">
-              <div className="text-[12px] font-semibold text-sky-200">SKILL.md</div>
+              <div className="text-[12px] font-semibold text-sky-200">AGENT.md</div>
               <div className="text-[8px] uppercase tracking-wider px-1.5 py-0.5 bg-sky-400/20 text-sky-100 rounded-sm">canonical</div>
             </div>
-            <div className="text-[9px] text-sky-100/70 leading-snug mt-1">{spec.canonical}</div>
-            <div className="text-[9px] font-mono text-sky-200/60 mt-1 truncate">.k2so/skills/k2so/SKILL.md</div>
+            <div className="text-[9px] font-mono text-sky-200/60 mt-1 truncate">.k2so/agent/AGENT.md</div>
+          </div>
+          <div className="border border-sky-400/30 bg-sky-400/5 px-2 py-1.5">
+            <div className="text-[11px] font-medium text-sky-200/90">PROJECT.md</div>
+            <div className="text-[9px] font-mono text-sky-200/50 mt-0.5 truncate">.k2so/PROJECT.md</div>
           </div>
           <div className="text-[9px] text-[var(--color-text-muted)] italic mt-1 leading-snug">
-            Regenerated on every launch. Every CLI LLM — 12 harnesses — sees this same file.
+            The source of truth. The harness files are derived FROM here — never the reverse.
           </div>
         </div>
 
-        {/* Arrow col → */}
-        <div className="flex flex-col justify-center text-[var(--color-text-muted)] text-xs">
-          <div className="h-full flex items-center">→</div>
+        {/* Arrow + route legend. */}
+        <div className="flex flex-col justify-center items-center text-[var(--color-text-muted)]">
+          <div className="text-xs">→</div>
+          <div className="text-[8px] uppercase tracking-wider mt-1 text-center leading-snug">
+            opt-in<br />copy or symlink
+          </div>
         </div>
 
-        {/* Col 3: two delivery channels */}
-        <div className="flex flex-col gap-1.5 justify-center">
-          <div className="text-[9px] uppercase tracking-wider text-[var(--color-text-muted)] mb-0.5">Reaches agents — 2 channels</div>
-          {spec.deliveries.map((d) => {
-            const accent = d.kind === 'file'
-              ? 'border-sky-400/40 bg-sky-400/5'
-              : 'border-emerald-400/40 bg-emerald-400/5'
-            const labelColor = d.kind === 'file' ? 'text-sky-200' : 'text-emerald-200'
-            return (
-              <div key={d.label} className={`border px-2 py-1.5 ${accent}`} title={d.hint}>
-                <div className={`text-[11px] font-medium ${labelColor}`}>{d.label}</div>
-                <div className="text-[9px] text-[var(--color-text-muted)] leading-snug mt-0.5">{d.hint}</div>
-                <div className="text-[9px] font-mono opacity-60 mt-1 space-y-0.5">
-                  {d.reaches.slice(0, 4).map((r) => (
-                    <div key={r} className="truncate">• {r}</div>
-                  ))}
-                  {d.reaches.length > 4 ? (
-                    <div className="italic opacity-70">+{d.reaches.length - 4} more</div>
-                  ) : null}
-                </div>
+        {/* Col 2: per-harness mirrors. */}
+        <div className="flex flex-col gap-1">
+          <div className="text-[9px] uppercase tracking-wider text-[var(--color-text-muted)] mb-0.5">Mirrors — per-harness, opt-in</div>
+          <div className="grid grid-cols-2 gap-1">
+            {HARNESS_MIRRORS.map((m) => (
+              <div key={m.path} className="border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-1.5 py-1" title={m.path}>
+                <div className="text-[10px] text-[var(--color-text-secondary)] truncate">{m.label}</div>
+                <div className="text-[8px] font-mono text-[var(--color-text-muted)] truncate">{m.path}</div>
               </div>
-            )
-          })}
+            ))}
+          </div>
         </div>
       </div>
 
-      {/* Footer: summary of the authoring contract */}
+      {/* Footer: the two opt-in routes. */}
       <div className="mt-3 pt-2 border-t border-[var(--color-border)] text-[9px] text-[var(--color-text-muted)] leading-snug">
-        <span className="text-[var(--color-text-secondary)] font-medium">You edit 3 file types</span>
-        {' '}(per-skill SKILL.md, workspace PROJECT.md, per-heartbeat WAKEUP.md).{' '}
-        <span className="text-[var(--color-text-secondary)] font-medium">K2SO composes 1 canonical file</span>
-        {' '}(SKILL.md) and fans it out to every harness —{' '}
-        <span className="font-mono text-[var(--color-text-secondary)]">./CLAUDE.md</span>,
-        {' '}<span className="font-mono text-[var(--color-text-secondary)]">./GEMINI.md</span>,
-        {' '}<span className="font-mono text-[var(--color-text-secondary)]">./AGENTS.md</span>, and 9 more.
-        Per-launch content (sub-agent persona, heartbeat trigger, task kickoff) arrives via argv.
+        Mirroring is <span className="text-[var(--color-text-secondary)] font-medium">opt-in and per-harness</span>.
+        Run the <span className="text-[var(--color-text-secondary)]">K2 Canonical Agent</span> skill for safe,
+        byte-reversible <span className="text-[var(--color-text-secondary)]">copies</span>, or enable harness
+        fan-out for ongoing <span className="text-[var(--color-text-secondary)]">symlinks</span>. Nothing is
+        mirrored until you choose a route.
       </div>
     </div>
   )

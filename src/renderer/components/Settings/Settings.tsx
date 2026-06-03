@@ -26,7 +26,7 @@ const SECTIONS: { id: SettingsSection; label: string; agenticOnly?: boolean }[] 
   { id: 'general', label: 'General' },
   { id: 'projects', label: 'Workspaces' },
   { id: 'workspace-states', label: 'Workspace States', agenticOnly: true },
-  { id: 'agent-skills', label: 'Agent Skills', agenticOnly: true },
+  { id: 'agent-skills', label: 'Canonical Agent Flow', agenticOnly: true },
   { id: 'terminal', label: 'Terminal' },
   { id: 'code-editor', label: 'Code Editor' },
   { id: 'editors-agents', label: 'Editors & Agents' },
