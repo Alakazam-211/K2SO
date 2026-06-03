@@ -279,7 +279,17 @@ fn next_tab_order(conn: &rusqlite::Connection) -> i64 {
 pub fn projects_list() -> Result<Vec<Project>, String> {
     let db = db::shared();
     let conn = db.lock();
-    Project::list(&conn).map_err(|e| e.to_string())
+    // Filter out the internal audit sentinels (`_orphan`, `_broadcast`).
+    // They're seeded into `projects` only to satisfy the activity-feed
+    // FK and must never appear in the user-facing workspace sidebar.
+    // The unfiltered `Project::list` below stays intact for internal
+    // callers (heartbeat/agent scanning, dedup/import, migrations).
+    let projects = Project::list(&conn)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|p| !db::AUDIT_SENTINEL_IDS.contains(&p.id.as_str()))
+        .collect();
+    Ok(projects)
 }
 
 pub fn projects_create(
@@ -824,4 +834,95 @@ pub fn project_name(project_id: &str) -> Result<String, String> {
     let conn = db.lock();
     let p = Project::get(&conn, project_id).map_err(|e| e.to_string())?;
     Ok(p.name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ensure_project(id: &str, path: &str, name: &str) {
+        let db = db::shared();
+        let conn = db.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO projects \
+             (id, path, name, color, agent_mode, pinned, tab_order) \
+             VALUES (?1, ?2, ?3, '#123456', 'off', 0, 0)",
+            rusqlite::params![id, path, name],
+        )
+        .unwrap();
+    }
+
+    fn delete_project(id: &str) {
+        let db = db::shared();
+        let conn = db.lock();
+        let _ = conn.execute("DELETE FROM projects WHERE id = ?1", rusqlite::params![id]);
+    }
+
+    /// `projects_list()` is the UI-facing wrapper. It MUST hide the
+    /// internal audit sentinels (`_orphan`, `_broadcast`), while the
+    /// underlying `Project::list()` — used by internal callers like
+    /// heartbeat/agent scanning and dedup/import — MUST still return
+    /// them. Asserting both surfaces here pins the invariant that they
+    /// differ by exactly the two sentinel rows.
+    #[test]
+    fn projects_list_hides_audit_sentinels_but_project_list_keeps_them() {
+        // init_for_tests() seeds `_orphan` + `_broadcast` (see
+        // db::init_for_tests). Add a real workspace so the user-facing
+        // surface is non-empty either way.
+        db::init_for_tests();
+        ensure_project(
+            "real-ws-projects-ops",
+            "/tmp/k2so-projects-ops-test",
+            "RealOne",
+        );
+
+        // UI-facing surface: sentinels filtered out, real workspace present.
+        let visible = projects_list().expect("projects_list ok");
+        let visible_ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
+        assert!(
+            !visible_ids.contains(&"_orphan"),
+            "projects_list() must not leak the _orphan audit sentinel: {visible_ids:?}"
+        );
+        assert!(
+            !visible_ids.contains(&"_broadcast"),
+            "projects_list() must not leak the _broadcast audit sentinel: {visible_ids:?}"
+        );
+        assert!(
+            visible_ids.contains(&"real-ws-projects-ops"),
+            "real workspace must still appear in projects_list(): {visible_ids:?}"
+        );
+
+        // Internal surface: the raw Project::list() STILL returns the
+        // sentinels (internal callers depend on a complete row set).
+        let db_handle = db::shared();
+        let conn = db_handle.lock();
+        let raw_ids: Vec<String> = Project::list(&conn)
+            .expect("Project::list ok")
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        drop(conn);
+        assert!(
+            raw_ids.iter().any(|id| id == "_orphan"),
+            "Project::list() must still return the _orphan sentinel for internal callers: {raw_ids:?}"
+        );
+        assert!(
+            raw_ids.iter().any(|id| id == "_broadcast"),
+            "Project::list() must still return the _broadcast sentinel for internal callers: {raw_ids:?}"
+        );
+
+        // The two surfaces differ by EXACTLY the two sentinels.
+        let mut only_in_raw: Vec<&String> = raw_ids
+            .iter()
+            .filter(|id| !visible_ids.contains(&id.as_str()))
+            .collect();
+        only_in_raw.sort();
+        assert_eq!(
+            only_in_raw,
+            vec![&"_broadcast".to_string(), &"_orphan".to_string()],
+            "projects_list() and Project::list() must differ by exactly the two audit sentinels"
+        );
+
+        delete_project("real-ws-projects-ops");
+    }
 }

@@ -553,6 +553,14 @@ pub(crate) fn seed_agent_presets(conn: &Connection) -> Result<()> {
 /// never duplicates. Paths/names are human-readable tags — they're
 /// never dereferenced as filesystem paths, but showing them in a
 /// `k2so projects` listing should be obvious.
+/// Project ids reserved for internal audit-feed routing. These rows
+/// exist in `projects` purely to satisfy the `activity_feed.project_id`
+/// FK (see [`seed_audit_sentinels`]) and must NEVER surface in the
+/// user-facing workspace list. UI-facing surfaces filter them out;
+/// internal callers (heartbeat/agent scanning, dedup/import checks,
+/// migrations) see every row via `Project::list`.
+pub(crate) const AUDIT_SENTINEL_IDS: &[&str] = &["_orphan", "_broadcast"];
+
 pub(crate) fn seed_audit_sentinels(conn: &Connection) -> Result<()> {
     let sentinels: &[(&str, &str, &str)] = &[
         ("_orphan", "_orphan", "Orphan audit bucket"),
