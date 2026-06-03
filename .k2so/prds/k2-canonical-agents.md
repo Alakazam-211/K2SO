@@ -273,17 +273,28 @@ Each button label gates on `detect_canonical_state` (for canonical) / skill-pres
 
 ---
 
-## 11. Related work — Agent Skills settings section refresh (§I dependency)
+## 11. Related work — rename "Agent Skills" → "Canonical Agent Flow" + refresh (§I dependency)
 
-The existing **Agent Skills** settings section — `src/renderer/components/Settings/sections/AgentSkillsSection.tsx` — needs updating to reflect the **post-`agents/`-removal reality**: each workspace has a **single agent under `.k2so/agent/`** + skills under `.k2so/skills/` (no more `.k2so/agents/<name>/`).
+The existing **Agent Skills** settings section — `src/renderer/components/Settings/sections/AgentSkillsSection.tsx` — is **renamed to "Canonical Agent Flow"** and rewritten to reflect the **post-`agents/`-removal reality**: each workspace has a **single agent under `.k2so/agent/`** + skills under `.k2so/skills/` (no more `.k2so/agents/<name>/`).
+
+**Rename (locked):** the section title/label (and any nav entry pointing at it) becomes **"Canonical Agent Flow"**. The page is no longer a "list of skills shipped to tiers of agents" — it is the **explainer + control surface for how this workspace's canonical setup works**: how the harness files (`CLAUDE.md`, `GEMINI.md`, …) point back to the one canonical **`.k2so/agent/AGENT.md`**, and the two routes that produce that state.
+
+**The corrected mental model the page must teach:**
+- **`.k2so/agent/AGENT.md` is THE canonical source (Model A).** Per-harness files are **mirrors** of it — NOT the other way around. (This corrects the old diagram/copy that implied `SKILL.md` was canonical — see §4 and the `AgentContextDiagram` reword in §7.)
+- **Two routes produce the canonical state, both opt-in:**
+  - **Skill route** (K2 Canonical Agent) → safe **copies** of `AGENT.md` into the chosen harness files (backup + manifest, byte-reversible; §6). Recommended.
+  - **Checkbox route** (`harness_fanout_enabled`) → ongoing **programmatic fan-out via symlinks** pointing back to the canonical artifact (the kept-and-gated legacy machinery; §4).
+  - In both routes the harness files are **derived from `.k2so/agent/AGENT.md`** — the page should say that plainly, and show per-harness whether each is a copy, a symlink, or unmanaged (fed by `detect_canonical_state`, §5.2).
 
 Current state worth noting (verified):
 - The section is a **four-tab tier picker** (`SkillTier = manager | k2so_agent | agent_template | custom_agent`, `:18`; tabs `:27-32`) with locked auto-layers per tier (`LOCKED_LAYERS` `:47-78`) and user layers stored under `~/.k2so/templates/` (`:240`).
 - Its mental model is the **old multi-agent tree** (per-tier "shipped to that specific kind of agent", `:205`; `AGENT_SKILLS_MANIFEST` `:10-16`). Post-removal there is **one** agent per workspace; the four-tier framing overstates the structure.
 
 Required changes (keep it **simple** to build user confidence):
+- **Rename to "Canonical Agent Flow"** (title, nav label, any string constant).
 - Reframe around **one agent + a flat skills list** under `.k2so/skills/`, surfacing the three opt-in skills of this PRD (Workspace Manager / K2 Agent / K2 Canonical Agent) as first-class entries.
 - Drop / simplify the per-tier "kind of agent" framing now that the workspace IS one agent.
+- Make the **canonical relationship explicit**: `.k2so/agent/AGENT.md` → mirrored out to harness files (copy via skill, symlink via checkbox), with the live per-harness state shown.
 - The **K2 Canonical Agent plan/manifest preview (§9.2) must be visually consistent with this refreshed section** — same card/border/typography idiom (the `border + bg-elevated` blocks, `:232`, `:249`).
 
 This is a **dependency** of build order 3-4, not a blocker for the gate flip (build order 0).
