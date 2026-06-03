@@ -54,6 +54,22 @@ interface DaemonBootStatus {
   detail: string
 }
 
+/**
+ * Lowest daemon PROTOCOL this client can talk to. The daemon ships
+ * `boot_status.rs` PROTOCOL = 1; a remote may run a different MARKETING
+ * version, so the remote policy range-checks protocol instead of an
+ * exact version-string match. Bump this only on a breaking wire change.
+ */
+const MIN_COMPATIBLE_PROTOCOL = 1
+
+/** Soft-reconnect cadence (K2 Connect step #4). After a remote host
+ *  connects, poll its health at this interval so a tunnel drop is
+ *  detected and surfaced as the dimmed overlay. */
+const REMOTE_HEALTH_POLL_MS = 4000
+/** Upper bound for the exponential reconnect backoff once a connected
+ *  remote drops — avoids hammering a flaky tunnel. */
+const REMOTE_RECONNECT_MAX_MS = 8000
+
 /** The gate's verdict for a single poll. */
 type GateDecision =
   | { kind: 'accept' }
@@ -81,7 +97,7 @@ interface AcceptancePolicy {
  * must NOT reuse it — a remote daemon can be a different version. See the
  * file header.
  */
-function localPairedPolicy(expectedVersion: string | null): AcceptancePolicy {
+export function localPairedPolicy(expectedVersion: string | null): AcceptancePolicy {
   return {
     decide(status: DaemonBootStatus | null): GateDecision {
       if (!status) {
@@ -98,6 +114,39 @@ function localPairedPolicy(expectedVersion: string | null): AcceptancePolicy {
       if (status.phase !== 'ready') {
         // Correct daemon, still finishing first-boot migrations. Show the
         // user what's happening instead of a blank screen.
+        return { kind: 'migrating', detail: status.detail }
+      }
+      return { kind: 'accept' }
+    },
+  }
+}
+
+/**
+ * Remote (K2 Connect step #4) policy: a hosted/self-hosted daemon
+ * legitimately runs a DIFFERENT marketing version than this app, so we
+ * must NOT require version-string equality (that's localPairedPolicy's
+ * auto-update guard, scoped to 'local'). Instead range-check the wire
+ * `protocol` (>= MIN_COMPATIBLE_PROTOCOL) AND require `phase === 'ready'`.
+ *
+ * A daemon too old to speak our protocol (or one with no /boot-status →
+ * null) keeps the gate waiting rather than mounting against an
+ * incompatible wire format.
+ */
+export function remoteHostPolicy(): AcceptancePolicy {
+  return {
+    decide(status: DaemonBootStatus | null): GateDecision {
+      if (!status) {
+        // Unreachable / no /boot-status route — keep retrying (the
+        // soft-reconnect overlay surfaces this for a remote host).
+        return { kind: 'wait', reason: 'remote-unreachable' }
+      }
+      if (status.protocol < MIN_COMPATIBLE_PROTOCOL) {
+        return {
+          kind: 'wait',
+          reason: `remote protocol ${status.protocol} < min ${MIN_COMPATIBLE_PROTOCOL}`,
+        }
+      }
+      if (status.phase !== 'ready') {
         return { kind: 'migrating', detail: status.detail }
       }
       return { kind: 'accept' }
@@ -158,7 +207,16 @@ export function ConnectionGate(): React.ReactElement {
   const [decision, setDecision] = useState<GateDecision>({ kind: 'wait', reason: 'starting' })
   const [attempts, setAttempts] = useState(0)
   const [AppModule, setAppModule] = useState<AppComponent | null>(null)
-  const policyRef = useRef<AcceptancePolicy | null>(null)
+  // Cache the resolved app version so we don't re-invoke Tauri on every
+  // host switch. The chosen POLICY, however, is rebuilt per host kind
+  // (local vs remote) — see ensurePolicy.
+  const appVersionRef = useRef<string | null | undefined>(undefined)
+  // K2 Connect step #4 (soft reconnect): for a REMOTE host that has
+  // already connected once this session, a transient drop should dim +
+  // overlay the last view rather than blank the app. We track the
+  // host-key that has reached 'accept' at least once. Local is never
+  // soft-reconnected (the blank is correct for the auto-update race).
+  const [connectedOnceKey, setConnectedOnceKey] = useState<string | null>(null)
 
   // K2 Connect step #1: the gate is host-aware. `hostKey` changes when
   // the user picks a different daemon in the top-bar switcher → the
@@ -167,6 +225,7 @@ export function ConnectionGate(): React.ReactElement {
   // sockets re-open through the new host's creds).
   const activeHost = useConnectHostStore((s) => s.activeHost)
   const hostKey = activeHostKey(activeHost)
+  const isRemote = activeHost !== 'local'
 
   // Phase 1: resolve the app version once, then poll the ACTIVE host's
   // /boot-status until the acceptance policy says to mount. Re-runs when
@@ -174,6 +233,13 @@ export function ConnectionGate(): React.ReactElement {
   useEffect(() => {
     let cancelled = false
     let timeoutId: ReturnType<typeof setTimeout> | null = null
+    // Closure-local poll counter. `attempts` state is frozen at effect
+    // setup (deps = [hostKey]); this tracks attempts since the last
+    // accept for the soft-reconnect backoff curve.
+    let attemptsLocal = 0
+    // Has this host reached 'accept' at least once during THIS effect
+    // run? Gates the post-accept remote health-poll + soft backoff.
+    let acceptedOnce = false
 
     // A host switch must re-poll from scratch: drop any prior accept so
     // the overlay shows while the new host is contacted.
@@ -181,15 +247,20 @@ export function ConnectionGate(): React.ReactElement {
     setAttempts(0)
 
     const ensurePolicy = async (): Promise<AcceptancePolicy> => {
-      // KEEP the localPairedPolicy for now (step #1/#2). A SAME-VERSION
-      // second daemon passes it, which is how a remote is tested today.
-      // TODO(#4): inject a remote protocol-range policy when activeHost
-      // is a ConnectHost.
-      if (!policyRef.current) {
-        const version = await getAppVersion()
-        policyRef.current = localPairedPolicy(version)
+      // Select the policy by active-host KIND (K2 Connect step #4):
+      //   - 'local' → localPairedPolicy: exact version match (the
+      //     auto-update pairing guard — never mount the outgoing old
+      //     daemon mid-update).
+      //   - a ConnectHost → remoteHostPolicy: protocol range-check +
+      //     phase ready; a remote may run a different marketing version,
+      //     so version-string equality must NOT be required.
+      // Rebuilt per effect-run (host switch), so the right policy is
+      // always paired with the current host.
+      if (isRemote) return remoteHostPolicy()
+      if (appVersionRef.current === undefined) {
+        appVersionRef.current = await getAppVersion()
       }
-      return policyRef.current
+      return localPairedPolicy(appVersionRef.current)
     }
 
     const tick = async (): Promise<void> => {
@@ -202,9 +273,32 @@ export function ConnectionGate(): React.ReactElement {
       useConnectHostStore.getState().setConnectionStatus(
         next.kind === 'accept' ? 'connected' : 'connecting',
       )
-      if (next.kind === 'accept') return // stop polling; Phase 2 takes over
+      if (next.kind === 'accept') {
+        // Remember this host reached 'accept' at least once → a later
+        // drop becomes a SOFT reconnect (overlay) instead of a blank.
+        acceptedOnce = true
+        setConnectedOnceKey(hostKey)
+        attemptsLocal = 0
+        if (isRemote) {
+          // Remote: keep a slow health-poll alive so a tunnel drop is
+          // detected and surfaced as the soft-reconnect overlay (the App
+          // stays mounted). Local stops polling on accept — its only
+          // re-entry is an intentional auto-update/host-switch remount.
+          timeoutId = setTimeout(() => { void tick() }, REMOTE_HEALTH_POLL_MS)
+          return
+        }
+        return // local: stop polling; Phase 2 takes over
+      }
       setAttempts((a) => a + 1)
-      timeoutId = setTimeout(() => { void tick() }, 500)
+      attemptsLocal += 1
+      // Backoff: tight while first connecting; for a remote that has
+      // already connected once (soft reconnect) ease off exponentially so
+      // we don't hammer a flaky tunnel. Local keeps the tight cadence.
+      const backoff =
+        isRemote && acceptedOnce
+          ? Math.min(REMOTE_RECONNECT_MAX_MS, 500 * 2 ** Math.min(attemptsLocal, 5))
+          : 500
+      timeoutId = setTimeout(() => { void tick() }, backoff)
     }
 
     void tick()
@@ -213,6 +307,9 @@ export function ConnectionGate(): React.ReactElement {
       cancelled = true
       if (timeoutId !== null) clearTimeout(timeoutId)
     }
+    // isRemote is fully determined by hostKey (local key === 'local'),
+    // so hostKey alone re-runs this on every relevant change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hostKey])
 
   // Phase 2: once accepted, dynamically import App. Its import
@@ -230,6 +327,29 @@ export function ConnectionGate(): React.ReactElement {
     return () => { cancelled = true }
   }, [decision.kind])
 
+  // K2 Connect step #4 — soft reconnect. A REMOTE host that has already
+  // connected this session (App mounted) and then briefly drops should
+  // NOT blank the app: keep the last view mounted and dim a
+  // "Reconnecting to <label>…" overlay over it. Local — and a remote's
+  // FIRST connect — keep the full-screen blanking overlay (correct for
+  // the auto-update race / nothing-to-show-yet).
+  const softReconnecting =
+    activeHost !== 'local' &&
+    connectedOnceKey === hostKey &&
+    AppModule !== null &&
+    decision.kind !== 'accept'
+
+  if (softReconnecting) {
+    const App = AppModule
+    const label = activeHost.label
+    return (
+      <>
+        <App key={hostKey} />
+        <ReconnectOverlay label={label} />
+      </>
+    )
+  }
+
   if (decision.kind !== 'accept' || AppModule === null) {
     return <ConnectingOverlay decision={decision} attempts={attempts} />
   }
@@ -239,6 +359,44 @@ export function ConnectionGate(): React.ReactElement {
   // wholesale — every store, WS, and terminal pane re-initializes against
   // the new host's creds rather than clinging to the old socket.
   return <App key={hostKey} />
+}
+
+/** Dimmed, NON-blanking overlay shown over the last mounted view while a
+ *  previously-connected REMOTE host reconnects (K2 Connect step #4).
+ *  Pointer-events pass-through is intentionally OFF: we block input while
+ *  the daemon is unreachable so clicks don't queue against a dead socket. */
+function ReconnectOverlay({ label }: { label: string }): React.ReactElement {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 9999,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexDirection: 'column',
+        gap: '0.75rem',
+        background: 'rgba(10,10,10,0.55)',
+        backdropFilter: 'blur(2px)',
+        WebkitBackdropFilter: 'blur(2px)',
+        color: 'var(--color-text-primary, #e0e0e0)',
+        fontFamily: 'system-ui, -apple-system, sans-serif',
+        userSelect: 'none',
+        WebkitUserSelect: 'none',
+        cursor: 'progress',
+      }}
+    >
+      <div style={{ fontSize: '0.95rem', fontWeight: 500 }}>
+        Reconnecting to {label}…
+      </div>
+      <div style={{ fontSize: '0.8rem', opacity: 0.7 }}>
+        The connection dropped. Retrying automatically.
+      </div>
+    </div>
+  )
 }
 
 interface ConnectingOverlayProps {
