@@ -2,6 +2,11 @@ import React from 'react'
 import { useCallback, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { daemonCliGet } from '@/lib/daemon-cli'
+// Plan B — the keep-daemon-on-quit flag lives in the daemon's settings
+// store. The old `get/set_keep_daemon_on_quit` Tauri commands proxied
+// `/cli/settings/{get,update}`; route them through the host-aware
+// daemon-settings client instead so the toggle works against any daemon.
+import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
 import { useSettingsStore } from '@/stores/settings'
 import { useUpdateStore } from '@/stores/update'
 import { checkForUpdate } from '@/hooks/useUpdateChecker'
@@ -578,8 +583,11 @@ function KeepDaemonOnQuitRow(): React.JSX.Element {
   const [keep, setKeep] = useState<boolean>(true)
 
   useEffect(() => {
-    invoke<boolean>('get_keep_daemon_on_quit')
-      .then((v) => setKeep(v))
+    // The old `get_keep_daemon_on_quit` command read the daemon's full
+    // settings snapshot and pulled `keepDaemonOnQuit` (default true if
+    // absent). Mirror that read here.
+    settingsGet()
+      .then((s) => setKeep(s.keepDaemonOnQuit ?? true))
       .catch((e) => console.warn('[keep-daemon-on-quit]', e))
   }, [])
 
@@ -587,7 +595,10 @@ function KeepDaemonOnQuitRow(): React.JSX.Element {
     const next = !keep
     setKeep(next) // optimistic
     try {
-      await invoke('set_keep_daemon_on_quit', { keep: next })
+      // Partial settings update — the daemon deep-merges `keepDaemonOnQuit`.
+      // The old `set_keep_daemon_on_quit` command emitted NO cross-window
+      // sync event, so we mirror that (no `sync:settings` emit here).
+      await settingsUpdate({ keepDaemonOnQuit: next })
     } catch (e) {
       console.error('[keep-daemon-on-quit]', e)
       setKeep(!next) // revert

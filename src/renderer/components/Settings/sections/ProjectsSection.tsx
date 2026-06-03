@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, emit } from '@tauri-apps/api/event'
 import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
+import { agentDisplayName, setAgentDisplayName } from '@/lib/workspace-agent'
 import { useSettingsStore } from '@/stores/settings'
 import { useProjectsStore, type ProjectWithWorkspaces } from '@/stores/projects'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
@@ -815,7 +816,7 @@ function WorktreeFoldersOnDisk({
   useEffect(() => {
     let cancelled = false
     setLoading(true)
-    invoke<any[]>('git_worktrees', { path: project.path })
+    daemonCliGet<any[]>('git/worktrees', { path: project.path })
       .then((wts) => {
         if (!cancelled) {
           setDiskWorktrees(wts)
@@ -842,8 +843,14 @@ function WorktreeFoldersOnDisk({
   const handleReopen = async (wt: { path: string; branch: string }): Promise<void> => {
     setReopening(wt.path)
     try {
-      await invoke('git_reopen_worktree', {
-        projectId: project.id,
+      // POST body is camelCase: the daemon's ReopenWorktreeBody reads
+      // projectPath/worktreePath/branch. (The pre-migration invoke passed a
+      // `projectId` key that the Tauri command — which expects
+      // `project_path` — never consumed; the handler only needs the
+      // worktree path + branch and echoes project_path back, so we now send
+      // the correct project.path.)
+      await daemonCliPost('git/reopen-worktree', {
+        projectPath: project.path,
         worktreePath: wt.path,
         branch: wt.branch
       })
@@ -1019,7 +1026,7 @@ function ProjectDetail({
       setPrimaryAgentName('')
       return () => { cancelled = true }
     }
-    invoke<string>('k2so_workspace_agent_display_name', { projectPath: project.path })
+    agentDisplayName(project.path)
       .then((n) => { if (!cancelled) setPrimaryAgentName(n) })
       .catch((err) => {
         if (!cancelled) {
@@ -1965,7 +1972,7 @@ function StateSelector({ projectId, currentStateId }: { projectId: string; curre
   const [selectedId, setSelectedId] = useState(currentStateId || '')
 
   useEffect(() => {
-    invoke<StateData[]>('states_list').then(setStates).catch(() => {})
+    daemonCliGet<StateData[]>('states/list').then(setStates).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -2243,7 +2250,7 @@ function AgentDisplayNameField({
 
   useEffect(() => {
     let cancelled = false
-    invoke<string>('k2so_workspace_agent_display_name', { projectPath })
+    agentDisplayName(projectPath)
       .then((n) => { if (!cancelled) { setDraft(n); setSaved(n); setReady(true) } })
       .catch((e) => { if (!cancelled) { console.error('[display-name] read failed:', e); setReady(true) } })
     return () => { cancelled = true }
@@ -2272,7 +2279,7 @@ function AgentDisplayNameField({
     setError(null)
     setBusy(true)
     try {
-      await invoke('k2so_workspace_set_agent_display_name', { projectPath, name: candidate })
+      await setAgentDisplayName(projectPath, candidate)
       setDraft(candidate)
       setSaved(candidate)
       setFlash(true)

@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { emit } from '@tauri-apps/api/event'
-// Plan B — projects_update / workspaces_delete are host-aware daemon
-// data: route through the `/cli/*` HTTP layer. open_in_finder +
-// git_remove_worktree stay on Tauri invoke (host/git, out of scope).
-import { daemonCliPost } from '@/lib/daemon-cli'
+// Plan B — projects_update / workspaces_delete AND the daemon-data git +
+// states reads/mutations (states_list, git_remove_worktree) are host-aware:
+// route through the `/cli/*` HTTP layer (local OR remote). open_in_finder +
+// the k2so_agents_*/inbox/workspace_relations host calls stay on Tauri
+// invoke (host-only, out of scope).
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
 import { useSettingsStore } from '@/stores/settings'
@@ -63,7 +65,7 @@ export default function WorkspacePanel(): React.JSX.Element {
 
   // Fetch workspace states once
   useEffect(() => {
-    invoke<StateData[]>('states_list').then(setStates).catch(() => {})
+    daemonCliGet<StateData[]>('states/list').then(setStates).catch(() => {})
   }, [])
 
   // Use stable selectors — avoid creating new references on every store change
@@ -447,7 +449,7 @@ function WorktreeRow({
       // Remove git worktree from disk + remove from DB
       try {
         if (worktreePath) {
-          await invoke('git_remove_worktree', {
+          await daemonCliPost('git/remove-worktree', {
             projectPath,
             worktreePath,
             workspaceId,

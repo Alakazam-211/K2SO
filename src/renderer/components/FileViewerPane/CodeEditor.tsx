@@ -4,6 +4,11 @@ import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLi
 import { EditorState, Compartment, RangeSet, type Extension } from '@codemirror/state'
 import type { EditorSettingsBackend, EditorThemeId } from '@shared/types'
 import { invoke } from '@tauri-apps/api/core'
+// Plan B — git diff (for the gutter) is host-aware daemon data: route it
+// through the `/cli/git/*` HTTP layer (local OR remote). GET params are
+// snake_case (`path`, `file_path`). `format_file` stays on Tauri invoke
+// (host-only formatter).
+import { daemonCliGet } from '@/lib/daemon-cli'
 import { useSettingsStore } from '@/stores/settings'
 import { useCustomThemesStore } from '@/stores/custom-themes'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
@@ -1450,7 +1455,7 @@ export function CodeEditor({ code, filePath, onSave, onChange, onCursorChange, r
 
     const fetchDiff = async () => {
       try {
-        const hunks = await invoke<DiffHunk[]>('git_diff_file', { path: dirPath, filePath })
+        const hunks = await daemonCliGet<DiffHunk[]>('git/diff-file', { path: dirPath, file_path: filePath })
         const lineChanges = hunksToLineMap(hunks)
         const es = useSettingsStore.getState().editor
         const ext = buildGitGutterExtension(lineChanges, es.scrollbarAnnotations ?? true, es.diffStyle ?? 'gutter')

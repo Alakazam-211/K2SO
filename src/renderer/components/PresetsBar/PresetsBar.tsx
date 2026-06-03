@@ -1,7 +1,6 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import { usePresetsStore } from '@/stores/presets'
 import { useTabsStore } from '@/stores/tabs'
-import { invoke } from '@tauri-apps/api/core'
 import { showContextMenu } from '@/lib/context-menu'
 import AgentIcon from '@/components/AgentIcon/AgentIcon'
 
@@ -58,7 +57,15 @@ function useRunningPresetIds(): Set<string> {
 }
 
 export function PresetsBar({ cwd }: PresetsBarProps): React.JSX.Element | null {
-  const { presets, showPresetsBar, fetchPresets, launchPreset } = usePresetsStore()
+  const {
+    presets,
+    showPresetsBar,
+    fetchPresets,
+    launchPreset,
+    createPreset,
+    updatePreset,
+    reorderPresets,
+  } = usePresetsStore()
   const runningIds = useRunningPresetIds()
 
   const [form, setForm] = useState<InlineFormState>({
@@ -119,8 +126,7 @@ export function PresetsBar({ cwd }: PresetsBarProps): React.JSX.Element | null {
           const [moved] = sorted.splice(fromIdx, 1)
           const insertAt = dropI > fromIdx ? dropI - 1 : dropI
           sorted.splice(insertAt, 0, moved)
-          await invoke('presets_reorder', { ids: sorted.map((p) => p.id) })
-          fetchPresets()
+          await reorderPresets(sorted.map((p) => p.id))
         }
       }
 
@@ -132,7 +138,7 @@ export function PresetsBar({ cwd }: PresetsBarProps): React.JSX.Element | null {
 
     document.addEventListener('mousemove', handleMouseMove)
     document.addEventListener('mouseup', handleMouseUp)
-  }, [fetchPresets])
+  }, [reorderPresets])
 
   const formLabelRef = useRef<HTMLInputElement>(null)
 
@@ -193,13 +199,12 @@ export function PresetsBar({ cwd }: PresetsBarProps): React.JSX.Element | null {
           break
         }
         case 'disable': {
-          await invoke('presets_update', { id: presetId, enabled: 0 })
-          fetchPresets()
+          await updatePreset({ id: presetId, enabled: 0 })
           break
         }
       }
     },
-    [presets, launchPreset, cwd, fetchPresets]
+    [presets, launchPreset, cwd, updatePreset]
   )
 
   const openNewForm = useCallback(() => {
@@ -215,25 +220,24 @@ export function PresetsBar({ cwd }: PresetsBarProps): React.JSX.Element | null {
 
     try {
       if (form.editingId) {
-        await invoke('presets_update', {
+        await updatePreset({
           id: form.editingId,
           label: form.label.trim(),
           command: form.command.trim(),
           icon: form.icon.trim() || ''
         })
       } else {
-        await invoke('presets_create', {
+        await createPreset({
           label: form.label.trim(),
           command: form.command.trim(),
           icon: form.icon.trim() || undefined
         })
       }
       cancelForm()
-      fetchPresets()
     } catch (err) {
       console.error('Failed to save preset:', err)
     }
-  }, [form, cancelForm, fetchPresets])
+  }, [form, cancelForm, createPreset, updatePreset])
 
   const handleFormKeyDown = useCallback(
     (e: React.KeyboardEvent) => {

@@ -1,0 +1,61 @@
+// Plan B (Bulk-2) — host-aware client for the workspace primary-agent
+// display-name + resume-chat-args routes. These were the 3 daemon-proxy
+// commands in `commands/k2so_agents.rs` (each `cli_get`-ed the daemon then
+// fell back to an in-process k2so-core call if the daemon was unreachable).
+//
+// Moving them onto `daemonCli*` makes them work against ANY daemon (local
+// OR a remote K2 Connect host) instead of the localhost-pinned Tauri proxy.
+// The in-process fallback is intentionally dropped — the daemon is the
+// single source of truth (daemon-first); a renderer talking to a remote
+// daemon has no local k2so-core to fall back to anyway.
+//
+// Routes (confirmed against `crates/k2so-daemon/src/cli.rs`):
+//   GET /cli/workspace/agent-display-name?project=<path>      → {display_name}
+//   GET /cli/workspace/set-agent-display-name?project=&name=  → mutation (echo)
+//   GET /cli/workspace/resume-chat-args?project=<path>        → ResumeChatArgs
+//
+// NB: all three are GET routes in the daemon (set-agent-display-name is a
+// GET that mutates, matching the old `cli_get` proxy). The display-name body
+// field is snake_case `display_name`; resume-chat-args is camelCase.
+
+import { daemonCliGet } from '@/lib/daemon-cli'
+
+/** Resolve the workspace's primary-agent display name. Total — the daemon
+ *  always returns a string (display_name → name → project name fallback).
+ *  Returns '' if the daemon read fails so callers degrade gracefully. */
+export async function agentDisplayName(projectPath: string): Promise<string> {
+  const r = await daemonCliGet<{ display_name?: string }>(
+    'workspace/agent-display-name',
+    { project: projectPath },
+  )
+  return r?.display_name ?? ''
+}
+
+/** Set the workspace's primary-agent display name. The daemon rewrites
+ *  AGENT.md frontmatter, invalidates its cache, emits SyncProjects, and
+ *  pushes the new label to any live canonical session. (GET-with-mutation,
+ *  mirroring the old `cli_get` proxy — body is ignored.) */
+export async function setAgentDisplayName(
+  projectPath: string,
+  name: string,
+): Promise<void> {
+  await daemonCliGet('workspace/set-agent-display-name', {
+    project: projectPath,
+    name,
+  })
+}
+
+export interface ResumeChatArgs {
+  command: string
+  args: string[]
+  cwd: string
+  resumeSession?: string
+}
+
+/** Resolve the `claude --resume <session>` (or fresh `claude`) launch args
+ *  for the workspace's pinned chat tab. camelCase response. */
+export async function resumeChatArgs(projectPath: string): Promise<ResumeChatArgs> {
+  return daemonCliGet<ResumeChatArgs>('workspace/resume-chat-args', {
+    project: projectPath,
+  })
+}

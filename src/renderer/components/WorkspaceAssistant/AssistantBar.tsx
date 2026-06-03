@@ -1,5 +1,12 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+// Plan B — the assistant's git tools (stage/commit/worktree/info) are
+// host-aware daemon data: route them through the `/cli/git/*` HTTP layer
+// (local OR remote) instead of the localhost-pinned Tauri `git_*` invoke
+// proxy. GET params snake_case (`path`); POST bodies camelCase. The git
+// commands emit NO cross-window sync; `workspace_arrange` (window mgmt)
+// stays on Tauri invoke (host-only).
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { llmChat } from '@/lib/llmDaemonClient'
 import { settingsUpdate } from '@/lib/daemon-settings'
 import { useAssistantStore, type DebugPass, type InteractionLogEntry } from '../../stores/assistant'
@@ -378,28 +385,28 @@ async function executeToolCalls(toolCalls: ToolCall[]): Promise<string> {
         // ── Git tools ──────────────────────────────────────────────
 
         case 'stage_all': {
-          invoke('git_stage_all', { path: cwd }).catch(console.error)
+          daemonCliPost('git/stage-all', { path: cwd }).catch(console.error)
           results.push('Staged all changes')
           break
         }
 
         case 'stage_file': {
           const file = call.args.file as string
-          invoke('git_stage_file', { path: cwd, filePath: file }).catch(console.error)
+          daemonCliPost('git/stage', { path: cwd, filePath: file }).catch(console.error)
           results.push(`Staged ${file}`)
           break
         }
 
         case 'unstage_file': {
           const file = call.args.file as string
-          invoke('git_unstage_file', { path: cwd, filePath: file }).catch(console.error)
+          daemonCliPost('git/unstage', { path: cwd, filePath: file }).catch(console.error)
           results.push(`Unstaged ${file}`)
           break
         }
 
         case 'commit': {
           const message = call.args.message as string
-          invoke('git_commit', { path: cwd, message })
+          daemonCliPost('git/commit', { path: cwd, message })
             .then(() => useToastStore.getState().addToast(`Committed: ${message}`, 'success'))
             .catch((e) => useToastStore.getState().addToast(`Commit failed: ${e}`, 'error'))
           results.push(`Committed: ${message}`)
@@ -443,7 +450,7 @@ async function executeToolCalls(toolCalls: ToolCall[]): Promise<string> {
           const branch = call.args.branch as string
           const project = projectsStore.projects.find(p => p.id === projectsStore.activeProjectId)
           if (project) {
-            invoke('git_create_worktree', {
+            daemonCliPost('git/create-worktree', {
               projectPath: project.path,
               branch,
               projectId: project.id,
@@ -729,7 +736,7 @@ export default function AssistantBar(): React.JSX.Element | null {
       let isGitRepo = false
       try {
         if (workspacePath) {
-          const info = await invoke<{ isRepo: boolean }>('git_info', { path: workspacePath })
+          const info = await daemonCliGet<{ isRepo: boolean }>('git/info', { path: workspacePath })
           isGitRepo = info.isRepo
         }
       } catch { /* not a git repo */ }

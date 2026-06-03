@@ -8,6 +8,7 @@ import { TerminalPane } from '@/terminal-v2/TerminalPane'
 import { agentChatId } from '@/lib/terminal-id'
 import { getDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
 import { daemonCliGet } from '@/lib/daemon-cli'
+import { agentDisplayName, resumeChatArgs } from '@/lib/workspace-agent'
 
 interface AgentChatPaneProps {
   agentName: string
@@ -119,7 +120,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
 
   useEffect(() => {
     let cancelled = false
-    invoke<string>('k2so_workspace_agent_display_name', { projectPath })
+    agentDisplayName(projectPath)
       .then((n) => { if (!cancelled && n) setDisplayName(n) })
       .catch(() => { /* keep agentName as fallback */ })
     return () => { cancelled = true }
@@ -129,7 +130,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     let unlisten: (() => void) | null = null
     let cancelled = false
     listen('sync:projects', () => {
-      invoke<string>('k2so_workspace_agent_display_name', { projectPath })
+      agentDisplayName(projectPath)
         .then((n) => { if (n) setDisplayName(n) })
         .catch(() => {})
     }).then((u) => { if (cancelled) u(); else unlisten = u })
@@ -386,15 +387,9 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
       // saved session) — no system prompt, no WAKEUP body, no
       // `/compact`.
       try {
-        const result = await invoke<{
-          command: string
-          args: string[]
-          cwd: string
-          resumeSession?: string
-        }>('k2so_agents_resume_chat_args', {
-          projectPath,
-          agentName,
-        })
+        // agentName is unused by the route (keyed purely on projectPath,
+        // matching the old proxy command which ignored it).
+        const result = await resumeChatArgs(projectPath)
         if (!cancelled && result) {
           setLaunchConfig({
             command: result.command,

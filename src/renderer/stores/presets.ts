@@ -1,7 +1,29 @@
 import { create } from 'zustand'
-import { invoke } from '@tauri-apps/api/core'
+import { emit } from '@tauri-apps/api/event'
+// Plan B — agent presets are host-aware daemon data: route them through the
+// `/cli/presets/*` HTTP layer (local OR remote) instead of the
+// localhost-pinned Tauri `presets_*` invoke proxy. The old Tauri shims
+// (commands/agents.rs) emitted `sync:presets` from Rust on each mutation so
+// other windows re-fetch; we now re-emit that event from the renderer after
+// each successful mutation (see `emitPresetsChanged`).
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { useTabsStore, registerPresetsStore } from './tabs'
 import type { TerminalPane, Tab, PaneGroup, Item } from './tabs'
+
+/**
+ * Plan B cross-window sync: the old Tauri `presets_*` mutation commands
+ * emitted `sync:presets` from Rust so OTHER windows re-fetch their preset
+ * list. Now that the renderer talks to the daemon directly, that Rust-side
+ * emit no longer fires — so we emit the SAME event from the renderer after
+ * each successful mutation. `useWindowSync.ts` listens for it and calls
+ * `fetchPresets()`. Fire-and-forget; a failed emit (non-Tauri/web) is
+ * non-fatal — only cross-window refresh is affected.
+ */
+function emitPresetsChanged(): void {
+  void emit('sync:presets').catch((e) =>
+    console.warn('[presets] sync:presets emit failed:', e),
+  )
+}
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -22,6 +44,20 @@ interface PresetsState {
   fetchPresets: () => Promise<void>
   togglePresetsBar: () => void
   launchPreset: (presetId: string, cwd: string, mode: 'tab' | 'split') => void
+  // Mutations — each posts to the daemon then emits `sync:presets` on
+  // success and refreshes the local list (mirrors the old Tauri shims).
+  createPreset: (input: { label: string; command: string; icon?: string }) => Promise<void>
+  updatePreset: (input: {
+    id: string
+    label?: string
+    command?: string
+    icon?: string
+    enabled?: number
+    sortOrder?: number
+  }) => Promise<void>
+  deletePreset: (id: string) => Promise<void>
+  reorderPresets: (ids: string[]) => Promise<void>
+  resetPresetsToBuiltIns: () => Promise<void>
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -68,7 +104,7 @@ export const usePresetsStore = create<PresetsState>((set, get) => ({
 
   fetchPresets: async () => {
     try {
-      const result = await invoke<AgentPreset[]>('presets_list')
+      const result = await daemonCliGet<AgentPreset[]>('presets/list')
       set({ presets: result })
     } catch (err) {
       console.error('Failed to fetch presets:', err)
@@ -77,6 +113,38 @@ export const usePresetsStore = create<PresetsState>((set, get) => ({
 
   togglePresetsBar: () => {
     set((state) => ({ showPresetsBar: !state.showPresetsBar }))
+  },
+
+  // POST body is camelCase (the daemon's PresetsCreateBody/PresetsUpdateBody
+  // deserialize `sortOrder` etc.). Omit `icon` to leave it unset on create.
+  createPreset: async (input) => {
+    await daemonCliPost('presets/create', input)
+    emitPresetsChanged()
+    await get().fetchPresets()
+  },
+
+  updatePreset: async (input) => {
+    await daemonCliPost('presets/update', input)
+    emitPresetsChanged()
+    await get().fetchPresets()
+  },
+
+  deletePreset: async (id) => {
+    await daemonCliPost('presets/delete', { id })
+    emitPresetsChanged()
+    await get().fetchPresets()
+  },
+
+  reorderPresets: async (ids) => {
+    await daemonCliPost('presets/reorder', { ids })
+    emitPresetsChanged()
+    await get().fetchPresets()
+  },
+
+  resetPresetsToBuiltIns: async () => {
+    await daemonCliPost('presets/reset', {})
+    emitPresetsChanged()
+    await get().fetchPresets()
   },
 
   launchPreset: (presetId: string, cwd: string, mode: 'tab' | 'split') => {

@@ -1,5 +1,10 @@
 import { useState, useMemo, useCallback } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+// Plan B — git stage/unstage/commit are host-aware daemon data: route them
+// through the `/cli/git/*` HTTP layer (local OR remote) instead of the
+// localhost-pinned Tauri `git_*` invoke proxy. POST bodies are camelCase
+// (`filePath`). The old Tauri git commands emitted NO cross-window sync, so
+// the local `refetch()` after each mutation is the full contract.
+import { daemonCliPost } from '@/lib/daemon-cli'
 import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
 import { usePresetsStore, parseCommand } from '@/stores/presets'
@@ -55,26 +60,26 @@ export default function ChangesPanel(): React.JSX.Element {
 
   const handleStage = useCallback(async (filePath: string) => {
     if (!workspacePath) return
-    await invoke('git_stage_file', { path: workspacePath, filePath }).catch(console.error)
+    await daemonCliPost('git/stage', { path: workspacePath, filePath }).catch(console.error)
     refetch()
   }, [workspacePath, refetch])
 
   const handleUnstage = useCallback(async (filePath: string) => {
     if (!workspacePath) return
-    await invoke('git_unstage_file', { path: workspacePath, filePath }).catch(console.error)
+    await daemonCliPost('git/unstage', { path: workspacePath, filePath }).catch(console.error)
     refetch()
   }, [workspacePath, refetch])
 
   const handleStageAll = useCallback(async () => {
     if (!workspacePath) return
-    await invoke('git_stage_all', { path: workspacePath }).catch(console.error)
+    await daemonCliPost('git/stage-all', { path: workspacePath }).catch(console.error)
     refetch()
   }, [workspacePath, refetch])
 
   const handleUnstageAll = useCallback(async () => {
     if (!workspacePath) return
     for (const file of staged) {
-      await invoke('git_unstage_file', { path: workspacePath, filePath: file.path }).catch(console.error)
+      await daemonCliPost('git/unstage', { path: workspacePath, filePath: file.path }).catch(console.error)
     }
     refetch()
   }, [workspacePath, staged, refetch])
@@ -83,7 +88,7 @@ export default function ChangesPanel(): React.JSX.Element {
     if (!workspacePath || !commitMsg.trim() || staged.length === 0) return
     setCommitting(true)
     try {
-      await invoke('git_commit', { path: workspacePath, message: commitMsg.trim() })
+      await daemonCliPost('git/commit', { path: workspacePath, message: commitMsg.trim() })
       setCommitMsg('')
       refetch()
     } catch (e) {

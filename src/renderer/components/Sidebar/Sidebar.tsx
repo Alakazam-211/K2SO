@@ -581,7 +581,11 @@ function ProjectItem({
           { id: 'cancel-recycle', label: 'Cancel' }
         ])
         if (confirmId === 'do-recycle') {
-          await invoke('git_remove_worktree', {
+          // Plan B — git_remove_worktree moves to the host-aware daemon
+          // route (git cluster, Bulk-2). camelCase POST body; no
+          // cross-window sync emit (the old git command had none — the
+          // fetchProjects() below covers the workspaces-row delete).
+          await daemonCliPost('git/remove-worktree', {
             worktreePath: workspacePath,
             projectPath: project.path,
             workspaceId: workspaceId

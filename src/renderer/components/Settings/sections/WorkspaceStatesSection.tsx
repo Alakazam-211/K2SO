@@ -1,6 +1,12 @@
 import React from 'react'
 import { useCallback, useEffect, useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+// Plan B — workspace states are host-aware daemon data: route them through
+// the `/cli/states/*` HTTP layer (local OR remote) instead of the
+// localhost-pinned Tauri `states_*` invoke proxy. The old Tauri shims
+// (commands/states.rs) emitted NO cross-window sync event, so there is no
+// `emit(...)` to mirror here — `loadStates()` after each mutation is the
+// full contract.
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { CAP_STATES, CAP_LABELS, CAP_COLORS, CAPABILITIES, type StateData } from '@shared/constants/capabilities'
 import type { SettingEntry } from '../searchManifest'
 
@@ -17,7 +23,7 @@ export function WorkspaceStatesSection(): React.JSX.Element {
 
   const loadStates = useCallback(async () => {
     try {
-      const list = await invoke<StateData[]>('states_list')
+      const list = await daemonCliGet<StateData[]>('states/list')
       setStates(list)
     } catch (err) {
       console.error('[states] Failed to load:', err)
@@ -29,7 +35,7 @@ export function WorkspaceStatesSection(): React.JSX.Element {
   const handleSave = async (entry: StateData) => {
     try {
       if (creating) {
-        await invoke('states_create', {
+        await daemonCliPost('states/create', {
           name: entry.name,
           description: entry.description,
           capFeatures: entry.capFeatures,
@@ -40,7 +46,7 @@ export function WorkspaceStatesSection(): React.JSX.Element {
           heartbeat: entry.heartbeat === 1,
         })
       } else {
-        await invoke('states_update', {
+        await daemonCliPost('states/update', {
           id: entry.id,
           name: entry.name,
           description: entry.description,
@@ -62,7 +68,7 @@ export function WorkspaceStatesSection(): React.JSX.Element {
 
   const handleDelete = async (id: string) => {
     try {
-      await invoke('states_delete', { id })
+      await daemonCliPost('states/delete', { id })
       loadStates()
     } catch (err) {
       console.error('[states] Delete failed:', err)

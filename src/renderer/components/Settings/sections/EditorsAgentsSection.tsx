@@ -75,7 +75,15 @@ function DefaultAgentPickerInline({ presets }: { presets: { id: string; label: s
 }
 
 export function EditorsAgentsSection(): React.JSX.Element {
-  const { presets, fetchPresets } = usePresetsStore()
+  const {
+    presets,
+    fetchPresets,
+    createPreset,
+    updatePreset,
+    deletePreset,
+    reorderPresets,
+    resetPresetsToBuiltIns,
+  } = usePresetsStore()
   const projectSettings = useSettingsStore((s) => s.projectSettings)
   const updateProjectSetting = useSettingsStore((s) => s.updateProjectSetting)
   const [editors, setEditors] = useState<EditorDetected[]>([])
@@ -129,9 +137,8 @@ export function EditorsAgentsSection(): React.JSX.Element {
   }, [presetForm.visible])
 
   const handleTogglePreset = useCallback(async (id: string, currentEnabled: number) => {
-    await invoke('presets_update', { id, enabled: currentEnabled ? 0 : 1 })
-    fetchPresets()
-  }, [fetchPresets])
+    await updatePreset({ id, enabled: currentEnabled ? 0 : 1 })
+  }, [updatePreset])
 
   const handleEditPreset = useCallback((preset: typeof presets[number]) => {
     setPresetForm({
@@ -145,12 +152,11 @@ export function EditorsAgentsSection(): React.JSX.Element {
 
   const handleDeletePreset = useCallback(async (id: string) => {
     try {
-      await invoke('presets_delete', { id })
-      fetchPresets()
+      await deletePreset(id)
     } catch (err) {
       console.error('Failed to delete preset:', err)
     }
-  }, [fetchPresets])
+  }, [deletePreset])
 
   const openAddForm = useCallback(() => {
     setPresetForm({ visible: false, editingId: null, label: '', command: '', icon: '' })
@@ -167,25 +173,24 @@ export function EditorsAgentsSection(): React.JSX.Element {
     if (!presetForm.label.trim() || !presetForm.command.trim()) return
     try {
       if (presetForm.editingId) {
-        await invoke('presets_update', {
+        await updatePreset({
           id: presetForm.editingId,
           label: presetForm.label.trim(),
           command: presetForm.command.trim(),
           icon: presetForm.icon.trim() || ''
         })
       } else {
-        await invoke('presets_create', {
+        await createPreset({
           label: presetForm.label.trim(),
           command: presetForm.command.trim(),
           icon: presetForm.icon.trim() || undefined
         })
       }
       cancelForm()
-      fetchPresets()
     } catch (err) {
       console.error('Failed to save preset:', err)
     }
-  }, [presetForm, cancelForm, fetchPresets])
+  }, [presetForm, cancelForm, createPreset, updatePreset])
 
   const handleFormKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
@@ -198,9 +203,8 @@ export function EditorsAgentsSection(): React.JSX.Element {
   }, [submitForm, cancelForm])
 
   const handleResetBuiltIns = useCallback(async () => {
-    await invoke('presets_reset_built_ins')
-    fetchPresets()
-  }, [fetchPresets])
+    await resetPresetsToBuiltIns()
+  }, [resetPresetsToBuiltIns])
 
   const handlePresetReorderMouseDown = useCallback((e: React.MouseEvent, idx: number) => {
     if (e.button !== 0) return
@@ -244,8 +248,7 @@ export function EditorsAgentsSection(): React.JSX.Element {
           const [moved] = sorted.splice(fromIdx, 1)
           const insertAt = dropIdx > fromIdx ? dropIdx - 1 : dropIdx
           sorted.splice(insertAt, 0, moved)
-          await invoke('presets_reorder', { ids: sorted.map((p) => p.id) })
-          fetchPresets()
+          await reorderPresets(sorted.map((p) => p.id))
         }
       }
 
@@ -257,7 +260,7 @@ export function EditorsAgentsSection(): React.JSX.Element {
 
     document.addEventListener('mousemove', handleMouseMove)
     document.addEventListener('mouseup', handleMouseUp)
-  }, [fetchPresets])
+  }, [reorderPresets])
 
   const editorApps = editors.filter((e) => e.type === 'editor')
   const terminalApps = editors.filter((e) => e.type === 'terminal')

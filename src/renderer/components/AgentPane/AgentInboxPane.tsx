@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { agentDisplayName } from '@/lib/workspace-agent'
 import { useTabsStore } from '@/stores/tabs'
 
 // ── Types ───────────────────────────────────────────────────────────────
@@ -216,7 +217,7 @@ export function AgentInboxPane({ agentName, projectPath }: AgentInboxPaneProps):
   useEffect(() => {
     let cancelled = false
     if (isWorkspaceBoard) { setDisplayName(agentName); return }
-    invoke<string>('k2so_workspace_agent_display_name', { projectPath })
+    agentDisplayName(projectPath)
       .then((n) => { if (!cancelled && n) setDisplayName(n) })
       .catch(() => { /* keep agentName as fallback */ })
     return () => { cancelled = true }
@@ -231,7 +232,7 @@ export function AgentInboxPane({ agentName, projectPath }: AgentInboxPaneProps):
     let unlisten: (() => void) | null = null
     let cancelled = false
     listen('sync:projects', () => {
-      invoke<string>('k2so_workspace_agent_display_name', { projectPath })
+      agentDisplayName(projectPath)
         .then((n) => { if (n) setDisplayName(n) })
         .catch(() => {})
     }).then((u) => { if (cancelled) u(); else unlisten = u })

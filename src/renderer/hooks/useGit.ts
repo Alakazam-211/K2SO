@@ -1,5 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+// Plan B — git status/diff are host-aware daemon data: route them through
+// the `/cli/git/*` HTTP layer (local OR remote) instead of the
+// localhost-pinned Tauri `git_*` invoke proxy. GET params are snake_case
+// (`path`); the JSON response shapes match the Rust structs as-is.
+import { daemonCliGet } from '@/lib/daemon-cli'
 import { GIT_POLL_INTERVAL } from '@shared/constants'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -49,7 +53,7 @@ export function useGitInfo(projectPath?: string): UseGitInfoResult {
 
     try {
       setLoading((prev) => (prev ? prev : true))
-      const result = await invoke<GitInfo>('git_info', { path: projectPath })
+      const result = await daemonCliGet<GitInfo>('git/info', { path: projectPath })
       setData(result)
       setError(null)
     } catch (e) {
@@ -91,7 +95,7 @@ export function useGitChanges(projectPath?: string): UseGitChangesResult {
 
     try {
       setLoading((prev) => (prev ? prev : true))
-      const result = await invoke<ChangedFile[]>('git_changes', { path: projectPath })
+      const result = await daemonCliGet<ChangedFile[]>('git/changes', { path: projectPath })
       setData(result)
       setError(null)
     } catch (e) {

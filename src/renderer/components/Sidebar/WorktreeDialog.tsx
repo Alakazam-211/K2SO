@@ -1,5 +1,12 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+// Plan B — git branch list + worktree create are host-aware daemon data:
+// route them through the `/cli/git/*` HTTP layer (local OR remote) instead
+// of the localhost-pinned Tauri `git_*` invoke proxy. GET params snake_case
+// (`path`); POST body camelCase (`projectPath`/`existingBranch`). The daemon
+// writes the workspaces row + returns `{workspaceId,path,branch}`. The old
+// Tauri git command emitted NO cross-window sync (optimistic local update
+// is the contract).
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
 
@@ -57,7 +64,7 @@ export default function WorktreeDialog({
     requestAnimationFrame(() => inputRef.current?.focus())
 
     // Fetch available branches
-    invoke<BranchList>('git_branches', { path: projectPath })
+    daemonCliGet<BranchList>('git/branches', { path: projectPath })
       .then((result) => {
         setBranches(result.local.filter((b) => b !== result.current))
       })
@@ -86,8 +93,8 @@ export default function WorktreeDialog({
     setError(null)
 
     try {
-      const result = await invoke<{ workspaceId: string; path: string; branch: string }>(
-        'git_create_worktree',
+      const result = await daemonCliPost<{ workspaceId: string; path: string; branch: string }>(
+        'git/create-worktree',
         {
           projectPath,
           branch: branchName,

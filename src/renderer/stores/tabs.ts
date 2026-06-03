@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
+import { agentDisplayName } from '@/lib/workspace-agent'
 import { terminalKill } from '@/lib/terminal-daemon'
 import type { MosaicNode, MosaicDirection } from 'react-mosaic-component'
 import { RESUMABLE_CLI_TOOLS } from '@shared/constants'
@@ -687,7 +688,8 @@ export function ensurePinnedAgentTabForMode(
     }
     if (!agentName) {
       try {
-        agentName = await invoke<string>('k2so_workspace_agent_display_name', { projectPath })
+        agentName = await agentDisplayName(projectPath)
+        if (!agentName) throw new Error('empty display name')
       } catch {
         // As an absolute last resort use the project path basename so
         // we never emit an empty routing key. The daemon will refuse

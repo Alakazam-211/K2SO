@@ -1,5 +1,11 @@
 import { useState, useEffect, useCallback } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+// Plan B — git branch/diff/merge/worktree ops are host-aware daemon data:
+// route them through the `/cli/git/*` HTTP layer (local OR remote) instead
+// of the localhost-pinned Tauri `git_*` invoke proxy. GET params are
+// snake_case (`base_branch`/`head_branch`); POST bodies are camelCase. The
+// old Tauri git commands emitted NO cross-window sync, so the explicit
+// `fetchProjects()` after cleanup is the full contract.
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { useProjectsStore } from '@/stores/projects'
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -65,12 +71,12 @@ export default function MergeDialog(): React.JSX.Element | null {
     setLoading(true)
 
     // Get the current branch to diff against
-    invoke<{ currentBranch: string }>('git_info', { path: projectPath })
+    daemonCliGet<{ currentBranch: string }>('git/info', { path: projectPath })
       .then((info) => {
-        return invoke<FileDiffSummary[]>('git_diff_between_branches', {
+        return daemonCliGet<FileDiffSummary[]>('git/diff-between', {
           path: projectPath,
-          baseBranch: info.currentBranch,
-          headBranch: branch,
+          base_branch: info.currentBranch,
+          head_branch: branch,
         })
       })
       .then((result) => {
@@ -90,7 +96,7 @@ export default function MergeDialog(): React.JSX.Element | null {
       const worktreePath = workspace?.worktreePath
 
       if (worktreePath) {
-        await invoke('git_remove_worktree', {
+        await daemonCliPost('git/remove-worktree', {
           projectPath,
           worktreePath,
           workspaceId,
@@ -99,7 +105,7 @@ export default function MergeDialog(): React.JSX.Element | null {
       }
 
       // Delete the branch
-      await invoke('git_delete_branch', { path: projectPath, branch }).catch((e) => console.warn('[merge-dialog]', e))
+      await daemonCliPost('git/delete-branch', { path: projectPath, branch }).catch((e) => console.warn('[merge-dialog]', e))
 
       await fetchProjects()
     } catch (e) {
@@ -112,7 +118,7 @@ export default function MergeDialog(): React.JSX.Element | null {
     setError(null)
 
     try {
-      const result = await invoke<MergeResult>('git_merge_branch', {
+      const result = await daemonCliPost<MergeResult>('git/merge-branch', {
         path: projectPath,
         branch,
       })
@@ -134,7 +140,7 @@ export default function MergeDialog(): React.JSX.Element | null {
   }, [projectPath, branch, workspaceId, cleanupWorktree])
 
   const handleAbortMerge = useCallback(async () => {
-    await invoke('git_abort_merge', { path: projectPath }).catch(console.error)
+    await daemonCliPost('git/abort-merge', { path: projectPath }).catch(console.error)
     close()
   }, [projectPath, close])
 

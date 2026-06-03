@@ -86,6 +86,9 @@ export interface AppSettingsResponse {
   lastActiveProjectId: string | null
   lastActiveWorkspaceId: string | null
   editor: EditorSettingsBackend
+  // Optional: the daemon's `/cli/settings/get` includes this flag, but
+  // older snapshots / partial responses may omit it. Read defensively.
+  keepDaemonOnQuit?: boolean
 }
 
 export interface EditorSettingsBackend {

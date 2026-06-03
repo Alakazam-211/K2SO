@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback } from 'react'
-import { invoke } from '@tauri-apps/api/core'
 import { emit } from '@tauri-apps/api/event'
-// Plan B — projects_update / workspaces_delete are host-aware daemon
-// data: route through the `/cli/*` HTTP layer. `git_remove_worktree`
-// stays on Tauri invoke (git cluster, Bulk-2).
-import { daemonCliPost } from '@/lib/daemon-cli'
+// Plan B — projects_update / workspaces_delete AND the git cluster
+// (git_changes read + git_remove_worktree mutation) are host-aware daemon
+// data: route through the `/cli/*` HTTP layer (local OR remote). GET params
+// snake_case (`path`); POST bodies camelCase. The git commands emitted NO
+// cross-window sync, so the explicit `sync:projects` emits here are for the
+// projects/workspaces mutations, not git.
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { useProjectsStore, type ProjectWithWorkspaces } from '../../stores/projects'
 import { useActiveAgentsStore } from '@/stores/active-agents'
 import AgentCloseDialog from '@/components/AgentCloseDialog/AgentCloseDialog'
@@ -43,7 +45,7 @@ export default function DisableWorktreesDialog({
       for (const ws of worktrees) {
         if (!ws.worktreePath) continue
         try {
-          const changes = await invoke<any[]>('git_changes', { path: ws.worktreePath })
+          const changes = await daemonCliGet<any[]>('git/changes', { path: ws.worktreePath })
           if (!cancelled && changes.length > 0) {
             setHasUnmerged(true)
             return
@@ -110,7 +112,8 @@ export default function DisableWorktreesDialog({
         for (const ws of worktrees) {
           if (ws.worktreePath) {
             try {
-              await invoke('git_remove_worktree', {
+              await daemonCliPost('git/remove-worktree', {
+                projectPath: project.path,
                 worktreePath: ws.worktreePath,
                 workspaceId: ws.id
               })
