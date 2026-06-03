@@ -23,12 +23,83 @@
 //! Public facade ([`start_tunnel`] / [`stop_tunnel`] / [`tunnel_status`])
 //! is what the daemon's `/cli/tunnel/*` routes call.
 
+use serde::{Deserialize, Serialize};
+
 pub mod config;
 pub mod connector;
 pub mod render;
 
 pub use config::TunnelConfig;
 pub use connector::{FrpcBinary, TunnelStatus};
+
+/// Redacted view of the tunnel config for the UI. NEVER carries the
+/// secret token — only `tokenSet`. Field names are camelCase to match
+/// the renderer's `TunnelConfigView` interface.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelConfigView {
+    pub server_addr: String,
+    pub server_port: u16,
+    pub subdomain: String,
+    pub token_set: bool,
+    pub public_url: Option<String>,
+}
+
+impl From<&TunnelConfig> for TunnelConfigView {
+    fn from(c: &TunnelConfig) -> Self {
+        Self {
+            server_addr: c.server_addr.clone(),
+            server_port: c.server_port,
+            subdomain: c.subdomain.clone(),
+            token_set: !c.token.trim().is_empty(),
+            public_url: c.public_url(),
+        }
+    }
+}
+
+/// Partial config update from the UI. Absent fields leave the stored
+/// value untouched; a blank `token` is ignored so re-saving the other
+/// fields can't wipe the secret.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelConfigUpdate {
+    pub server_addr: Option<String>,
+    pub server_port: Option<u16>,
+    pub subdomain: Option<String>,
+    pub token: Option<String>,
+}
+
+/// Read the stored tunnel config as a redacted view (token stays in the
+/// daemon — only `tokenSet` crosses the wire).
+pub fn get_config_view() -> Result<TunnelConfigView, String> {
+    Ok((&config::load()?).into())
+}
+
+/// Apply a partial config update, persist it, and return the redacted
+/// view. A blank/absent token is ignored so the secret survives re-saves.
+pub fn set_config(upd: TunnelConfigUpdate) -> Result<TunnelConfigView, String> {
+    let cfg = config::update(|c| {
+        if let Some(a) = upd.server_addr {
+            if !a.trim().is_empty() {
+                c.server_addr = a.trim().to_string();
+            }
+        }
+        if let Some(p) = upd.server_port {
+            if p > 0 {
+                c.server_port = p;
+            }
+        }
+        if let Some(s) = upd.subdomain {
+            c.subdomain = s.trim().to_string();
+        }
+        if let Some(t) = upd.token {
+            if !t.trim().is_empty() {
+                c.token = t.trim().to_string();
+            }
+        }
+    })?;
+    Ok((&cfg).into())
+}
 
 /// Start the tunnel using the stored config (auto-locating `frpc`).
 ///

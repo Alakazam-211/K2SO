@@ -196,6 +196,10 @@ async fn handle_one_request(
             // crate::cli::dispatch.
             | "/cli/tunnel/start"
             | "/cli/tunnel/stop"
+            // GET reads the redacted config (tokenSet bool, never the
+            // secret); POST sets token/subdomain/server. Claimed here for
+            // both methods; the handler branches on `is_post`.
+            | "/cli/tunnel/config"
             // Phase 2 Unit 5 — Claude Auth mutating routes. POST
             // (not GET) so they're not idempotent-cached by any
             // future proxy and so they parallel Unit 1's pattern
@@ -834,6 +838,53 @@ async fn handle_one_request(
             let resp = match k2so_core::tunnel::stop_tunnel() {
                 Ok(()) => crate::cli::CliResponse::ok_json(r#"{"ok":true}"#.to_string()),
                 Err(e) => crate::cli::CliResponse::bad_request(e),
+            };
+            super::http::send_response(&mut *stream, resp.status, resp.content_type, &resp.body)
+                .await;
+        }
+        // GET/POST /cli/tunnel/config — read or set the K2 Connect tunnel
+        // config. GET returns a REDACTED view (tokenSet bool, never the
+        // secret token); POST applies a partial update and persists
+        // ~/.k2so/tunnel.json. This is what the desktop K2 Connect page
+        // calls to BIND a chosen subdomain (token + subdomain) before
+        // `start`. GET must NOT read a body (read_post_body blocks on a
+        // bodyless keep-alive GET); only POST drains the body.
+        "/cli/tunnel/config" => {
+            if !super::http::token_ok(&query, state.token.as_str()) {
+                if is_post {
+                    let _ = super::http::read_post_body(&mut *stream, &mut buf).await;
+                }
+                super::http::send_response(
+                    &mut *stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return DispatchOutcome::Done;
+            }
+            let resp = if is_post {
+                let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
+                match serde_json::from_slice::<k2so_core::tunnel::TunnelConfigUpdate>(&body_bytes) {
+                    Ok(upd) => match k2so_core::tunnel::set_config(upd) {
+                        Ok(view) => crate::cli::CliResponse::ok_json(
+                            serde_json::to_string(&view)
+                                .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
+                        ),
+                        Err(e) => crate::cli::CliResponse::bad_request(e),
+                    },
+                    Err(e) => {
+                        crate::cli::CliResponse::bad_request(format!("invalid JSON body: {e}"))
+                    }
+                }
+            } else {
+                match k2so_core::tunnel::get_config_view() {
+                    Ok(view) => crate::cli::CliResponse::ok_json(
+                        serde_json::to_string(&view)
+                            .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
+                    ),
+                    Err(e) => crate::cli::CliResponse::bad_request(e),
+                }
             };
             super::http::send_response(&mut *stream, resp.status, resp.content_type, &resp.body)
                 .await;
