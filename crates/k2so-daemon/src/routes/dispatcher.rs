@@ -189,6 +189,13 @@ async fn handle_one_request(
             // intermediaries.
             | "/cli/companion/set-password"
             | "/cli/companion/disconnect-session"
+            // K2 Connect tunnel — mutating control routes. Method-gated
+            // per-handler below (the top-level dispatch lets a GET
+            // through on POST-allowlisted routes; see
+            // feedback_post_only_route_guards). Status is a GET via
+            // crate::cli::dispatch.
+            | "/cli/tunnel/start"
+            | "/cli/tunnel/stop"
             // Phase 2 Unit 5 — Claude Auth mutating routes. POST
             // (not GET) so they're not idempotent-cached by any
             // future proxy and so they parallel Unit 1's pattern
@@ -759,6 +766,76 @@ async fn handle_one_request(
             let result =
                 crate::companion_routes::handle_companion_disconnect_session(&body_bytes);
             super::http::send_response(&mut *stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/tunnel/start — K2 Connect tunnel.
+        //
+        // Spawns/supervises the `frpc` child that dials the hosted frps
+        // server, exposing THIS daemon at https://<user>.k2.dev. The
+        // optional `subdomain` query param overrides the stored config's
+        // requested label; the live daemon port (`state.port`) is the
+        // exposed `localPort` when the config doesn't pin one.
+        //
+        // Method gate: explicit `require_post` — the top-level dispatch
+        // lets a GET through on POST-allowlisted routes, and we must
+        // never let a curl GET launch a tunnel (see
+        // feedback_post_only_route_guards).
+        "/cli/tunnel/start" => {
+            if !super::http::require_post(&mut *stream, &mut buf, is_post).await { return DispatchOutcome::Done; }
+            if !super::http::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                super::http::send_response(
+                    &mut *stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return DispatchOutcome::Done;
+            }
+            // No JSON body — params ride the query string. Drain to flush.
+            let _ = super::http::read_post_body(&mut *stream, &mut buf).await;
+            let params = super::http::parse_params(&path, &query);
+            let subdomain = params
+                .get("subdomain")
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty());
+            let daemon_port = state.port;
+            let result = tokio::task::spawn_blocking(move || {
+                k2so_core::tunnel::start_tunnel(subdomain, daemon_port)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("worker join: {e}")));
+            let resp = match result {
+                Ok(status) => crate::cli::CliResponse::ok_json(
+                    serde_json::to_string(&status)
+                        .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
+                ),
+                Err(e) => crate::cli::CliResponse::bad_request(e),
+            };
+            super::http::send_response(&mut *stream, resp.status, resp.content_type, &resp.body)
+                .await;
+        }
+        // POST /cli/tunnel/stop — stop the supervised frpc child.
+        "/cli/tunnel/stop" => {
+            if !super::http::require_post(&mut *stream, &mut buf, is_post).await { return DispatchOutcome::Done; }
+            if !super::http::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                super::http::send_response(
+                    &mut *stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return DispatchOutcome::Done;
+            }
+            let _ = super::http::read_post_body(&mut *stream, &mut buf).await;
+            let resp = match k2so_core::tunnel::stop_tunnel() {
+                Ok(()) => crate::cli::CliResponse::ok_json(r#"{"ok":true}"#.to_string()),
+                Err(e) => crate::cli::CliResponse::bad_request(e),
+            };
+            super::http::send_response(&mut *stream, resp.status, resp.content_type, &resp.body)
                 .await;
         }
         // POST /cli/claude-auth/refresh-now — Phase 2 Unit 5.

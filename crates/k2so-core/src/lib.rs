@@ -95,6 +95,11 @@ pub mod skill_layers;
 pub mod skills;
 pub mod terminal;
 pub mod themes;
+// K2 Connect tunnel connector (open/MIT client side): renders an frpc
+// config + supervises the `frpc` child that dials our hosted frps so the
+// local daemon is reachable at https://<user>.k2.dev. See module docs +
+// the proprietary `k2-connect` repo for the server contract.
+pub mod tunnel;
 pub mod wake;
 pub mod whats_new;
 

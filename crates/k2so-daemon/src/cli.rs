@@ -469,6 +469,15 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         "/cli/companion/status" => {
             CliResponse::ok_json(k2so_core::companion::companion_status().to_string())
         }
+
+        // ── K2 Connect tunnel status (read-only) ────────────────────
+        // start/stop are POST-allowlisted in the dispatcher (mutating);
+        // status is a cheap GET reporting running? + the predicted
+        // public URL (https://<subdomain>.k2.dev).
+        "/cli/tunnel/status" => CliResponse::ok_json(
+            serde_json::to_string(&k2so_core::tunnel::tunnel_status())
+                .unwrap_or_else(|_| r#"{"running":false}"#.to_string()),
+        ),
         "/cli/companion/presets" => match k2so_core::companion::cli_routes::list_presets() {
             Ok(body) => CliResponse::ok_json(body),
             Err(e) => CliResponse::bad_request(e),
