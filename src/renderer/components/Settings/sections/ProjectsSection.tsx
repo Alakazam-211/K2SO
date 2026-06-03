@@ -34,7 +34,7 @@ export const PROJECTS_MANIFEST: SettingEntry[] = [
   { id: 'projects.list', section: 'projects', label: 'Workspaces', description: 'All registered projects + focus groups', keywords: ['workspaces', 'projects', 'focus groups'] },
   { id: 'projects.add', section: 'projects', label: 'Add Workspace', description: 'Register a new project directory', keywords: ['add', 'new', 'workspace', 'project', 'folder'] },
   { id: 'projects.focus-groups', section: 'projects', label: 'Focus Groups', description: 'Organize workspaces into tabbed folders', keywords: ['focus', 'groups', 'tabs'] },
-  { id: 'projects.project-context', section: 'projects', label: 'Project Context', description: 'Shared .k2so/PROJECT.md injected into every agent', keywords: ['project context', 'project.md', 'claude.md', 'shared'] },
+  { id: 'projects.workspace-knowledge', section: 'projects', label: 'Workspace Knowledge', description: 'Shared .k2so/PROJECT.md injected into every agent', keywords: ['workspace knowledge', 'project context', 'project.md', 'shared'] },
   { id: 'projects.heartbeat', section: 'projects', label: 'Heartbeat Schedule', description: 'Scheduled / hourly / off per-project heartbeat mode', keywords: ['heartbeat', 'schedule', 'cron', 'hourly', 'scheduled'] },
   { id: 'projects.agents', section: 'projects', label: 'Project Agents', description: 'Custom agent personas + wake-up files per workspace', keywords: ['agent', 'persona', 'wakeup', 'create'] },
   { id: 'projects.worktrees', section: 'projects', label: 'Worktree Folders', description: 'Enable/disable per-agent git worktrees', keywords: ['worktree', 'git', 'branch'] },
@@ -1078,13 +1078,7 @@ function ProjectDetail({
     return (
       <SectionErrorBoundary>
         <div className="absolute inset-0 overflow-hidden bg-[var(--color-bg)]">
-          {agentEditorName === '__project_context__' ? (
-            <ProjectContextEditor
-              projectPath={project.path}
-              projectName={project.name}
-              onClose={() => setAgentEditorOpen(false)}
-            />
-          ) : agentEditorName === '__claude_md__' ? (
+          {agentEditorName === '__claude_md__' ? (
             <ClaudeMdEditor
               projectPath={project.path}
               projectName={project.name}
@@ -1304,16 +1298,17 @@ function ProjectDetail({
           </div>
         )}
 
-        {/* Workspace Knowledge — the canonical source under .k2so/. Fan-out
-            into harness files (CLAUDE.md / AGENTS.md / …) is OPT-IN
-            (canonical-agents PRD §4): run the K2 Canonical Agent for safe
-            copies, or enable the harness-fan-out checkbox for symlinks. */}
+        {/* Workspace Knowledge — edits the canonical .k2so/PROJECT.md
+            (shared project knowledge injected into every agent at launch).
+            Regenerates the workspace SKILL.md on close. This is the single
+            PROJECT.md editor (the redundant "Project Context" block was
+            removed). */}
         <div className="pt-3 border-t border-[var(--color-border)]">
           <div className="flex items-center justify-between">
             <div>
               <span className="text-xs text-[var(--color-text-secondary)]">Workspace Knowledge</span>
               <p className="text-[9px] text-[var(--color-text-muted)] mt-0.5">
-                Canonical <span className="font-mono">SKILL.md</span> under <span className="font-mono">.k2so/</span>. When harness fan-out is enabled (opt-in), it mirrors into Claude, OpenCode, Pi, and the AGENTS.md + Copilot marker paths.
+                Edits <span className="font-mono">.k2so/PROJECT.md</span> — shared project knowledge (tech stack, conventions, key directories) injected into every agent at launch.
               </p>
             </div>
             <button
@@ -1505,6 +1500,7 @@ function ProjectDetail({
           <div className="pt-2 border-t border-[var(--color-border)]">
             <CanonicalAgentButton
               probes={canonicalProbes}
+              projectPath={project.path}
               onOpen={(mode) => setCanonicalModalMode(mode)}
             />
           </div>
@@ -1519,14 +1515,15 @@ function ProjectDetail({
               and the main settings column stays focused on workspace
               identity/mode/worktree setup. See the aside below. */}
 
-          {/* Manager block + Project Context — gated to !== 'off'.
-              In 0.39.0h Skills was promoted out of ProjectAgentsPanel
-              to its own top-level SettingsGroup (always visible).
-              What's left in ProjectAgentsPanel (Manager + Project
-              Context) is agent-mode-specific content, so hide it
-              when the workspace's agent mode is 'off'. */}
-          {(project.agentMode || 'off') !== 'off' && (
-            <div className="pt-2 border-t border-[var(--color-border)]">
+          {/* Workspace Manager block — gated to manager modes only.
+              ProjectAgentsPanel's only remaining content is the Manager
+              section (Skills was promoted out in 0.39.0h; the Project
+              Context block was removed — it duplicated the always-on
+              "Workspace Knowledge" editor above). So render the panel AND
+              its top divider only for manager workspaces; other modes
+              would otherwise show an empty panel under an orphaned line. */}
+          {((project.agentMode || 'off') === 'manager' || project.agentMode === 'coordinator' || project.agentMode === 'pod') && (
+            <div className="pt-2">
               <ProjectAgentsPanel projectPath={project.path} onOpenEditor={(name) => { setAgentEditorName(name); setAgentEditorOpen(true) }} />
             </div>
           )}
@@ -2008,151 +2005,6 @@ function StateSelector({ projectId, currentStateId }: { projectId: string; curre
   )
 }
 
-// ── Project Context Editor (AIFileEditor for .k2so/PROJECT.md) ──────
-
-function ProjectContextEditor({ projectPath, projectName, onClose }: { projectPath: string; projectName: string; onClose: () => void }): React.JSX.Element {
-  const [content, setContent] = useState('')
-  const [previewMode, setPreviewMode] = useState<'preview' | 'edit'>('preview')
-  const [previewScale, setPreviewScale] = useState(100)
-  const cssScale = Math.round(previewScale * 0.7)
-
-  const filePath = `${projectPath}/.k2so/PROJECT.md`
-  const watchDir = `${projectPath}/.k2so`
-
-  // Resolve the user's default AI agent command
-  const defaultAgent = useSettingsStore((s) => s.defaultAgent)
-  const presets = usePresetsStore((s) => s.presets)
-  const agentCommand = useMemo(() => {
-    const preset = presets.find((p) => p.id === defaultAgent) || presets.find((p) => p.enabled)
-    if (!preset) return null
-    return parseCommand(preset.command)
-  }, [defaultAgent, presets])
-
-  // Load content
-  useEffect(() => {
-    daemonCliGet<{ content: string }>('fs/read-file', { path: filePath })
-      .then((r) => setContent(r.content))
-      .catch(() => setContent(''))
-  }, [filePath])
-
-  const handleFileChange = useCallback((c: string) => setContent(c), [])
-
-  const systemPrompt = useMemo(() => [
-    `You're helping the user define shared project context for their AI agent workspace.`,
-    ``,
-    `Project: "${projectName}"`,
-    `File: .k2so/PROJECT.md`,
-    ``,
-    `This file is injected into EVERY agent's CLAUDE.md at launch.`,
-    `It should contain project-wide knowledge that all agents need:`,
-    ``,
-    `• About This Project — what the codebase does, what problem it solves`,
-    `• Tech Stack — languages, frameworks, databases, infrastructure`,
-    `• Key Directories — important paths and what lives in them`,
-    `• Conventions — code style, commit format, PR process, branch naming`,
-    `• External Systems — issue trackers, CI dashboards, staging environments`,
-    ``,
-    `Edit PROJECT.md in the current directory. The user sees a live preview on the right.`,
-    ``,
-    `Current contents:`,
-    content,
-  ].join('\n'), [projectName, content])
-
-  const terminalCommand = agentCommand?.command
-  const terminalArgs = useMemo(() => {
-    if (!agentCommand) return undefined
-    const baseArgs = [...agentCommand.args]
-    if (agentCommand.command === 'claude') {
-      return [
-        ...baseArgs,
-        '--append-system-prompt', systemPrompt,
-        `Open and read PROJECT.md in the current directory. This defines shared context for all agents in "${projectName}". Start by asking about their tech stack and project structure.`,
-      ]
-    }
-    return baseArgs
-  }, [agentCommand, systemPrompt, projectName])
-
-  return (
-    <AIFileEditor
-      filePath={filePath}
-      watchDir={watchDir}
-      cwd={watchDir}
-      command={terminalCommand}
-      args={terminalArgs}
-      title={`Project Context: ${projectName}`}
-      instructions={`Editing .k2so/PROJECT.md — shared context injected into all agents at launch.`}
-      warningText="Changes here affect all agents in this workspace."
-      onFileChange={handleFileChange}
-      onClose={onClose}
-      preview={
-        <div className="h-full flex flex-col">
-          <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--color-border)] flex-shrink-0">
-            <div className="text-xs text-[var(--color-text-muted)]">
-              <span className="font-medium text-[var(--color-text-primary)]">PROJECT.md</span>
-              <span className="mx-2">&middot;</span>
-              <span>Shared agent context</span>
-            </div>
-            <div className="flex items-center gap-2 flex-shrink-0">
-              {previewMode === 'preview' && (
-                <div className="flex items-center gap-0.5">
-                  <button
-                    onClick={() => setPreviewScale((s) => Math.max(50, s - 10))}
-                    className="w-5 h-5 flex items-center justify-center text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] bg-[var(--color-bg-elevated)] border border-[var(--color-border)] no-drag cursor-pointer"
-                  >
-                    −
-                  </button>
-                  <span className="text-[9px] tabular-nums text-[var(--color-text-muted)] w-7 text-center">{previewScale}%</span>
-                  <button
-                    onClick={() => setPreviewScale((s) => Math.min(200, s + 10))}
-                    className="w-5 h-5 flex items-center justify-center text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] bg-[var(--color-bg-elevated)] border border-[var(--color-border)] no-drag cursor-pointer"
-                  >
-                    +
-                  </button>
-                </div>
-              )}
-              <div className="flex gap-0.5">
-                {(['preview', 'edit'] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    onClick={() => setPreviewMode(mode)}
-                    className={`px-2 py-1 text-[10px] font-medium transition-colors no-drag cursor-pointer ${
-                      previewMode === mode
-                        ? 'bg-[var(--color-accent)] text-white'
-                        : 'bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] border border-[var(--color-border)]'
-                    }`}
-                  >
-                    {mode === 'preview' ? 'Preview' : 'Edit'}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-          {previewMode === 'preview' ? (
-            <div className="flex-1 overflow-auto p-4">
-              <div className="markdown-content" style={{ fontSize: `${cssScale}%` }}>
-                <Markdown remarkPlugins={[remarkGfm]}>
-                  {content || '*No content yet. Use the AI assistant to set up your project context.*'}
-                </Markdown>
-              </div>
-            </div>
-          ) : (
-            <div className="flex-1 overflow-hidden">
-              <CodeEditor
-                code={content}
-                filePath={filePath}
-                onSave={async (c) => {
-                  try { await daemonCliPost('fs/write-file', { path: filePath, content: c }) } catch {}
-                }}
-                onChange={(c) => setContent(c)}
-              />
-            </div>
-          )}
-        </div>
-      }
-    />
-  )
-}
-
 // ── Workspace Wake-up Editor — REMOVED in 0.32.6 ──────
 // `.k2so/WAKEUP.md` retired; manager wake content now lives in the
 // per-row `triage` heartbeat's WAKEUP.md (see Heartbeats panel).
@@ -2208,11 +2060,11 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
     `File: .k2so/PROJECT.md (source)`,
     `Path: ${filePath}`,
     ``,
-    `This is the SOURCE file. K2SO compiles it (plus each agent's AGENT.md)`,
-    `into per-agent SKILL.md files, then propagates that content into every`,
-    `CLI harness file (CLAUDE.md, AGENTS.md, GEMINI.md, .cursor/rules/k2so.mdc,`,
-    `.goosehints, .opencode/agent/k2so.md, .pi/skills/k2so/SKILL.md, etc.).`,
-    `Edit here once; the regen pipeline updates everywhere on save.`,
+    `This is the SOURCE. K2SO compiles it (plus the agent's AGENT.md) into the`,
+    `canonical .k2so/skills/<name>/SKILL.md on save. Mirroring this content out`,
+    `into the CLI harness files (CLAUDE.md, GEMINI.md, .cursor/rules, AGENTS.md,`,
+    `etc.) is OPT-IN per workspace — it only happens if harness fan-out is`,
+    `enabled or the user runs the K2 Canonical Agent. Edit here once regardless.`,
     ``,
     `Good content for this file:`,
     `• Project overview — what this codebase does`,
@@ -2222,9 +2074,9 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
     `• Build & test — how to build, run tests, deploy`,
     `• Important notes — gotchas, known issues, things to watch out for`,
     ``,
-    `Do NOT include agent-specific role/persona content — that lives in each`,
-    `agent's AGENT.md (one per agent under .k2so/agents/<name>/AGENT.md) and`,
-    `the user can edit it via Settings → Workspaces → "Manage Persona".`,
+    `Do NOT include agent-specific role/persona content — that lives in the`,
+    `agent's AGENT.md (.k2so/agent/AGENT.md) and the user can edit it via`,
+    `Settings → Workspaces → "Manage Persona".`,
     ``,
     `Current contents:`,
     content,
@@ -2915,28 +2767,8 @@ function ProjectAgentsPanel({ projectPath, onOpenEditor }: { projectPath: string
         </div>
       )}
 
-      {/* Project Context */}
-      <div>
-        <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mb-1">
-          Project Context
-        </h3>
-        <div className="border border-[var(--color-border)] px-3 py-2">
-          <div className="flex items-center justify-between">
-            <div className="flex-1 min-w-0 mr-3">
-              <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed">
-                Shared knowledge about this codebase that all agents receive at launch — tech stack, conventions, key directories.
-              </p>
-            </div>
-            <button
-              onClick={() => onOpenEditor('__project_context__')}
-              className="px-2 py-0.5 text-[10px] font-medium text-[var(--color-accent)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 border border-[var(--color-accent)]/30 transition-colors no-drag cursor-pointer flex-shrink-0"
-              title="Edit shared project context"
-            >
-              Manage Project Context
-            </button>
-          </div>
-        </div>
-      </div>
+      {/* Project Context section removed — it edited the same .k2so/PROJECT.md
+          as "Workspace Knowledge" (workspace settings, always-on). One editor. */}
 
       {/* Workspace Wake-up retired in 0.32.6. Its content migrated to the
           per-workspace `triage` heartbeat row (edit via the Heartbeats
