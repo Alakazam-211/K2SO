@@ -81,12 +81,14 @@ export default function TopBar({
         minHeight: TOPBAR_HEIGHT
       }}
     >
-      {/* Left: traffic lights spacer + K2SO branding + primary sidebar toggle */}
+      {/* Left: traffic lights spacer + K2 branding + primary sidebar toggle.
+          Top-bar wordmark only — the OS menu bar / app name (tauri.conf.json
+          productName) stays "K2SO" until the 0.40.0 full rename. */}
       <div className="flex items-center gap-2" style={{ minWidth: 130 }}>
         {/* Traffic lights occupy ~70px on macOS */}
         <div style={{ width: 70 }} />
-        {/* App name */}
-        <span className="text-[10px] font-bold tracking-widest text-[var(--color-text-muted)] uppercase flex-shrink-0">K2SO</span>
+        {/* App name (in-app wordmark) */}
+        <span className="text-[10px] font-bold tracking-widest text-[var(--color-text-muted)] uppercase flex-shrink-0">K2</span>
         {/* K2 Connect server switcher (This Mac / saved servers / add) */}
         <ServerSwitcher />
         {/* Primary sidebar toggle */}
