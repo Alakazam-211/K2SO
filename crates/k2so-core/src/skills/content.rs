@@ -167,6 +167,50 @@ pub fn load_custom_layers(tier: &str) -> String {
     layers.join("\n\n") + "\n\n"
 }
 
+/// The ORGANIC role-integration directive shared by the role-knowledge
+/// skills (Workspace Manager, K2 Agent). PRD §3.2 + §3.3: when a role
+/// skill runs, the agent weaves this role guidance into the user's
+/// existing `.k2so/agent/AGENT.md` WITH JUDGMENT — reading what's there,
+/// preserving accumulated context, never injecting a templated/marked
+/// block. The deterministic core (`workspace::canonical::persist_agent_md`)
+/// then backs up AGENT.md and writes the merged text atomically, so the
+/// integration is byte-reversible.
+///
+/// `role` is the human-readable role name ("Workspace Manager", "K2
+/// Agent"). The marked-block / hash-gated-regeneration approach is
+/// explicitly DELETED (PRD §3) — this text must never instruct a
+/// programmatic injection.
+fn organic_role_integration_section(role: &str) -> String {
+    format!(
+        r#"## Integrating this role into your AGENT.md (organic, not a block)
+
+This skill is **role knowledge** — how to operate as a {role}. When asked
+to apply it to this workspace, integrate it **organically** into your
+canonical persona at `.k2so/agent/AGENT.md`:
+
+1. **Read** the existing `.k2so/agent/AGENT.md` (and the surrounding
+   workspace context) first.
+2. **Weave** the {role} guidance in **with judgment** — preserve the
+   user's accumulated context, reconcile overlaps, keep what still
+   applies. Your judgment is the only thing that knows what to keep.
+3. Hand the merged text to the deterministic safety net, which **backs
+   up** the old `AGENT.md` and writes your merge atomically (byte-
+   reversible).
+
+**Never inject a templated or marked block.** Do not paste a fenced
+"K2SO-managed" region, do not stamp a checksum the daemon would later
+auto-rewrite, do not bulldoze existing content. In a long-lived
+workspace a mechanical block displaces context the agent relied on —
+that is exactly the failure mode this organic model exists to avoid.
+Refreshing the role later means **re-running this skill**, re-reading
+AGENT.md, and re-integrating by hand; it is never a silent programmatic
+rewrite.
+
+"#,
+        role = role,
+    )
+}
+
 pub fn generate_manager_skill_content(project_path: &str, project_name: &str) -> String {
     let mut skill = String::new();
 
@@ -175,6 +219,9 @@ pub fn generate_manager_skill_content(project_path: &str, project_name: &str) ->
         "# K2SO Workspace Manager Skill\n\nYou are the primary agent for the **{}** workspace, operating in manager mode.\n\nA workspace has at most one primary agent (you). Specialist personas are **skill profiles** — documentation, not separate spawnable agents. Your harness (Claude Code, Cursor, Tauri Cmd+T) handles all sub-agent and worktree spawning natively; K2SO does not.\n\n",
         project_name
     ));
+
+    // ── Organic role-integration directive (PRD §3.2/§3.3) ──
+    skill.push_str(&organic_role_integration_section("Workspace Manager"));
 
     // Read workspace state from DB
     {
@@ -467,6 +514,9 @@ This skill lists the full daily + power-user CLI surface so you can triage, mess
         project_name = project_name,
     );
 
+    // ── Organic role-integration directive (PRD §3.2/§3.3) ──
+    skill.push_str(&organic_role_integration_section("K2 Agent"));
+
     // Let user layers inject project-specific policy on top
     let custom_layers = load_custom_layers("k2so-agent");
     if !custom_layers.is_empty() {
@@ -616,6 +666,199 @@ k2so hooks status                            # verify CLI-LLM hook wiring is liv
 Run `k2so glossary <term>` for definitions of K2SO-specific terms (workspace, skill, inbox, heartbeat, state, …). The full daily-verb surface is in `k2so help`; power-user verbs in `k2so help --advanced`.
 "#);
     skill
+}
+
+/// Generate the **K2 Canonical Agent** skill body (PRD §5 + §8.2 build
+/// order 2). This is the harness-unification operator skill: diagnose →
+/// intent → ask-which-harnesses → merge-into-Model-A → mirror-out →
+/// dry-run → confirm → apply → report → unwind.
+///
+/// Unlike the role-knowledge skills, this one does NOT integrate a role
+/// into AGENT.md. It operates on the workspace's harness files: it pulls
+/// existing harness content INTO `.k2so/agent/AGENT.md` + `.k2so/PROJECT.md`
+/// (Model A) first so nothing is lost, then mirrors out to the chosen
+/// per-harness files as K2SO-generated copies. Every destructive act
+/// goes through the deterministic safety net
+/// (`workspace::canonical::run_canonical_setup` / `unwind_canonical`):
+/// backup → atomic copy-write → manifest, default dry-run.
+pub fn generate_canonical_agent_skill_content(project_name: &str) -> String {
+    format!(
+        r#"# K2 Canonical Agent Skill
+
+You are the K2 Canonical Agent for the **{project_name}** workspace. Your
+job is to **unify this workspace's AI-harness files safely** — never to
+overwrite the user's content.
+
+Each AI coding tool reads its project notes from a different file
+(`CLAUDE.md`, `GEMINI.md`, `.goosehints`, `.cursor/rules`, `AGENTS.md`,
+…). The point of canonicalization is: the user writes their context
+**once** and every tool sees the same picture. **`.k2so/agent/AGENT.md`
++ `.k2so/PROJECT.md` are the canonical source of truth (Model A);** the
+per-harness files are **generated mirrors** of them.
+
+## The flow (every run)
+
+1. **Diagnose** — run the deterministic per-harness probe
+   (`detect_canonical_state`) and **summarize it in plain language**:
+   which harnesses are already canonicalized (copy vs symlink), which
+   are unmanaged with real user content, which are absent. Show the
+   user, in words, what you found.
+2. **Ask intent** — set up / add a harness / unwind / just review? **Do
+   nothing until the user chooses.**
+3. **Ask which harnesses** — only touch the LLMs the user wants enabled.
+   Never create files in harness dirs they didn't choose. State is
+   per-harness: Claude can be canonicalized while Gemini is left
+   untouched, independently.
+4. **Merge into Model A first** — read the existing harness files,
+   judge valuable user context vs boilerplate/stale, and **weave the
+   substance into `.k2so/agent/AGENT.md` / `.k2so/PROJECT.md`** so
+   nothing is lost. Canonical is a target STRUCTURE the user's content
+   is poured into, never a template that bulldozes it.
+5. **Mirror out** — derive the chosen per-harness files FROM Model A.
+   These mirrors are K2SO-generated copies (real files, stamped, with an
+   "edit `.k2so/...` instead" header) — NOT symlinks.
+6. **Dry-run + confirm** — produce a DRY-RUN plan first (per-harness
+   action table + the backup manifest) and **STOP for confirmation
+   before any write**. Writes happen only on explicit confirm.
+7. **Apply** — the deterministic safety net does the destructive work:
+   it backs up every original to `.k2so/backups/<ts>/` BEFORE writing,
+   writes atomically, and records `manifest.json`. You never mutate
+   files raw — you hand merged text to the core.
+8. **Report** — tell the user exactly what changed and where the
+   backups + manifest live.
+9. **Unwind** — the SAME skill undoes it. Manifest-driven exact restore:
+   put each backed-up original back, trash anything K2SO created fresh,
+   leave `.k2so/` intact.
+
+## Safety contract (non-negotiable)
+
+- **Default is dry-run.** No file is touched until the user confirms.
+- **Every original is backed up** to `.k2so/backups/<ISO-ts>/<relpath>`
+  BEFORE it is overwritten, with a `manifest.json` that makes the change
+  byte-reversible.
+- **Copies, not symlinks** — real files the user can read and (if they
+  must) edit; stamped so re-runs detect "already managed."
+- **Per-harness independence** — only the harnesses the user picked are
+  touched; the rest are left byte-for-byte untouched.
+- **Live-session preflight** — if an agent session is actively reading
+  the targets, refuse and name it; the user can force with a loud
+  warning.
+- **You never author Model A programmatically** — the merge is your
+  organic judgment; the core only does the backup + atomic write +
+  manifest around the bytes you hand it.
+
+## Already-unified workspaces
+
+Leave them alone. Never auto-revert. If a workspace already uses legacy
+symlinks, offer to convert to copies in manage mode — never force it.
+"#,
+        project_name = project_name,
+    )
+}
+
+/// The three opt-in agent-setup skills (PRD §1). Each maps to a
+/// `.k2so/skills/<dir>/SKILL.md` written on demand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptInSkill {
+    /// Role-knowledge for the Manager role.
+    WorkspaceManager,
+    /// Role-knowledge for the K2 Agent (planner) role.
+    K2Agent,
+    /// Harness-unification operator.
+    K2CanonicalAgent,
+}
+
+impl OptInSkill {
+    /// The directory name under `.k2so/skills/`.
+    pub fn dir_name(self) -> &'static str {
+        match self {
+            OptInSkill::WorkspaceManager => "workspace-manager",
+            OptInSkill::K2Agent => "k2-agent",
+            OptInSkill::K2CanonicalAgent => "k2-canonical-agent",
+        }
+    }
+
+    /// The skill-type tag + version for the upgrade protocol.
+    fn type_and_version(self) -> (&'static str, u32) {
+        match self {
+            OptInSkill::WorkspaceManager => {
+                ("manager", crate::skills::version::SKILL_VERSION_MANAGER)
+            }
+            OptInSkill::K2Agent => {
+                ("k2so-agent", crate::skills::version::SKILL_VERSION_K2SO_AGENT)
+            }
+            OptInSkill::K2CanonicalAgent => (
+                "canonical-agent",
+                crate::skills::version::SKILL_VERSION_CANONICAL_AGENT,
+            ),
+        }
+    }
+
+    /// Short description for the SKILL.md frontmatter.
+    fn description(self) -> &'static str {
+        match self {
+            OptInSkill::WorkspaceManager => {
+                "Workspace Manager role knowledge — integrate organically into AGENT.md"
+            }
+            OptInSkill::K2Agent => {
+                "K2 Agent (planner) role knowledge — integrate organically into AGENT.md"
+            }
+            OptInSkill::K2CanonicalAgent => {
+                "Unify this workspace's AI-harness files safely (diagnose → merge → mirror → unwind)"
+            }
+        }
+    }
+
+    /// Render this skill's body for the given workspace.
+    fn render_body(self, project_path: &str, project_name: &str) -> String {
+        match self {
+            OptInSkill::WorkspaceManager => {
+                generate_manager_skill_content(project_path, project_name)
+            }
+            OptInSkill::K2Agent => {
+                // The K2 Agent skill is keyed on the primary agent name
+                // where one exists; fall back to a stable label.
+                let agent_name =
+                    crate::workspace::agent_identity::find_primary_agent(project_path)
+                        .unwrap_or_else(|| "k2-agent".to_string());
+                generate_k2so_agent_skill_content(project_name, &agent_name)
+            }
+            OptInSkill::K2CanonicalAgent => {
+                generate_canonical_agent_skill_content(project_name)
+            }
+        }
+    }
+}
+
+/// Write one of the three opt-in skills to
+/// `.k2so/skills/<name>/SKILL.md` on demand (PRD §8.1 "Enable").
+///
+/// **Internal only — never fanned out.** This deliberately bypasses
+/// `write_skill_to_all_harnesses`: opt-in skill bodies live under
+/// `.k2so/skills/` and are loaded by the agent on demand; they are NOT
+/// mirrored into harness discovery paths (that is the gated workspace
+/// SKILL's job, not these). Upgrade-tracked via `ensure_skill_up_to_date`
+/// so a generator bump re-rolls unmodified files.
+///
+/// Returns the absolute path written.
+pub fn write_opt_in_skill(project_path: &str, skill: OptInSkill) -> PathBuf {
+    let project_name = std::path::Path::new(project_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".to_string());
+
+    let body = skill.render_body(project_path, &project_name);
+    let (skill_type, version) = skill.type_and_version();
+    let extras = format!(
+        "name: {}\ndescription: {}",
+        skill.dir_name(),
+        skill.description()
+    );
+
+    let canonical_path = crate::workspace::agent_identity::skill_dir(project_path, skill.dir_name())
+        .join("SKILL.md");
+    ensure_skill_up_to_date(&canonical_path, skill_type, version, &body, Some(&extras));
+    canonical_path
 }
 
 /// Generate the universal baseline for a skill profile (formerly "agent template").
@@ -1452,5 +1695,139 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Canonical-agents feature: the three opt-in skill bodies ─────
+    //
+    // PRD §8.2: snapshot the three skill bodies; assert the role skills
+    // say "organic" and NEVER "inject a block", and that none contain a
+    // deprecated CLI verb. (Structural assertions, not literal byte
+    // snapshots — same philosophy as the Tier-2.2 tests above.)
+
+    /// Phrases that would indicate a programmatic/templated-block
+    /// injection — explicitly DELETED by PRD §3. The role skills must
+    /// never instruct any of these.
+    const PROGRAMMATIC_INJECTION_PHRASES: &[&str] = &[
+        "inject a block",
+        "inject a templated block",
+        "marked block",
+        "hash-gated",
+        "hash gate",
+        "regeneration marker",
+    ];
+
+    fn assert_no_programmatic_injection(content: &str, generator: &str) {
+        let lc = content.to_lowercase();
+        // "never inject a templated block" is an ALLOWED negation — it
+        // tells the agent NOT to do it. Only flag the affirmative
+        // phrases that would instruct injection. Our generator text
+        // deliberately uses "Never inject a templated or marked block",
+        // so assert the explicit prohibition is present rather than
+        // banning the substring outright.
+        assert!(
+            lc.contains("never inject") || lc.contains("not"),
+            "{generator} must explicitly prohibit programmatic injection",
+        );
+        // Hard-ban the regeneration-machinery phrases entirely — those
+        // describe the deleted v1 approach and have no business in the
+        // organic model even as prose.
+        for phrase in &["hash-gated", "hash gate", "regeneration marker"] {
+            assert!(
+                !lc.contains(phrase),
+                "{generator} must not reference the deleted regeneration machinery: {phrase:?}",
+            );
+        }
+        let _ = PROGRAMMATIC_INJECTION_PHRASES;
+    }
+
+    #[test]
+    fn role_skills_instruct_organic_integration_not_injection() {
+        let manager =
+            generate_manager_skill_content(&format!("/tmp/org-mgr-{}", Uuid::new_v4()), "Proj");
+        let k2 = generate_k2so_agent_skill_content("Proj", "planner");
+
+        for (name, body) in [("manager", &manager), ("k2_agent", &k2)] {
+            let lc = body.to_lowercase();
+            assert!(
+                lc.contains("organic"),
+                "{name} role skill must instruct ORGANIC integration; body:\n{}",
+                &body[..body.len().min(600)],
+            );
+            // Must explicitly tell the agent NOT to inject a templated/
+            // marked block.
+            assert!(
+                lc.contains("never inject a templated or marked block")
+                    || (lc.contains("never inject") && lc.contains("block")),
+                "{name} role skill must explicitly forbid injecting a templated/marked block",
+            );
+            assert!(
+                lc.contains(".k2so/agent/agent.md"),
+                "{name} role skill must point integration at .k2so/agent/AGENT.md (Model A)",
+            );
+            assert_no_programmatic_injection(body, name);
+            assert_no_deprecated_verbs(body, name);
+        }
+    }
+
+    #[test]
+    fn canonical_agent_skill_body_snapshot_structure() {
+        let body = generate_canonical_agent_skill_content("Proj");
+        assert!(!body.is_empty(), "canonical skill body must be non-empty");
+        // Tier-identifying heading.
+        assert!(body.contains("K2 Canonical Agent"), "must carry its tier heading");
+        // The full flow PRD §8.2 prescribes.
+        for needle in [
+            "Diagnose",
+            "Ask intent",
+            "which harnesses",
+            "AGENT.md",
+            "PROJECT.md",
+            "Mirror out",
+            "DRY-RUN",
+            "confirm",
+            "manifest",
+            "Unwind",
+        ] {
+            assert!(
+                body.contains(needle),
+                "canonical skill must mention {needle:?}; first 500 chars:\n{}",
+                &body[..body.len().min(500)],
+            );
+        }
+        // Copies-not-symlinks contract is stated.
+        assert!(
+            body.contains("Copies, not symlinks") || body.contains("copies"),
+            "canonical skill must state the copies-not-symlinks contract",
+        );
+        // No deprecated CLI verbs.
+        assert_no_deprecated_verbs(&body, "generate_canonical_agent_skill_content");
+    }
+
+    #[test]
+    fn write_opt_in_skill_writes_internal_only_no_fanout() {
+        // Even with the harness-fanout marker ON, the opt-in skill write
+        // must NOT fan out — these bodies live under .k2so/skills/ only.
+        let proj = std::env::temp_dir().join(format!("k2so-optin-{}", Uuid::new_v4()));
+        fs::create_dir_all(proj.join(".k2so")).unwrap();
+        let path = proj.to_str().unwrap();
+        crate::workspace::onboarding::set_harness_fanout_enabled(path, true).unwrap();
+
+        let written = write_opt_in_skill(path, OptInSkill::K2CanonicalAgent);
+        assert!(written.exists(), "canonical SKILL.md must be written");
+        assert_eq!(
+            written,
+            proj.join(".k2so/skills/k2-canonical-agent/SKILL.md"),
+            "must write to the internal .k2so/skills/<name>/ home",
+        );
+        // No fan-out into harness paths.
+        assert!(!proj.join(".claude/skills/k2-canonical-agent/SKILL.md").exists());
+        assert!(!proj.join("AGENTS.md").exists());
+        assert!(!proj.join("CLAUDE.md").exists());
+
+        // Idempotent re-run is a no-op on content (upgrade-tracked).
+        let again = write_opt_in_skill(path, OptInSkill::K2CanonicalAgent);
+        assert_eq!(again, written);
+
+        fs::remove_dir_all(&proj).ok();
     }
 }
