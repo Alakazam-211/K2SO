@@ -1127,6 +1127,16 @@ mod migration_safety_tests {
             "# K2SO\n\nTauri workspace manager. Rust backend + React 19 frontend.\n",
         )
         .unwrap();
+        // Canonical-agents gate: user-visible harness fan-out is OFF by
+        // default. These migration-safety tests exercise the LEGACY
+        // fan-out / teardown path (kept-and-gated), so opt that
+        // workspace IN explicitly — the symlink ingest + teardown they
+        // assert on only runs when the marker is present.
+        crate::workspace::onboarding::set_harness_fanout_enabled(
+            proj.to_str().unwrap(),
+            true,
+        )
+        .unwrap();
         proj
     }
 

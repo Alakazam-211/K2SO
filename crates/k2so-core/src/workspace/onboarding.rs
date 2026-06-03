@@ -100,6 +100,71 @@ pub fn is_harness_management_skipped(project_path: &str) -> bool {
     skip_flag_path(project_path).exists()
 }
 
+// ── Harness-fanout permission marker (the opt-IN switch) ────────────
+
+/// Marker filename — written by `set_harness_fanout_enabled(true)` and
+/// checked by `harness_fanout_enabled` before any user-visible harness
+/// fan-out (symlinks into `.claude/` / `.opencode/` / `.pi/`, root
+/// CLAUDE.md / GEMINI.md / etc., marker-injection into AGENTS.md /
+/// copilot-instructions.md).
+///
+/// This is the positive opt-IN that replaces the old always-on
+/// behavior: as of the canonical-agents feature, harness fan-out is
+/// **off by default**. The canonical `.k2so/skills/<name>/SKILL.md`
+/// still always generates (heartbeats + agent launches depend on it);
+/// only the fan-out into user-visible harness paths is gated.
+///
+/// Filesystem-first / daemon-first: the marker under `.k2so/` is the
+/// authoritative source of truth. The Settings UI may mirror it into
+/// the `projects` DB row for fast listing, but the marker wins.
+pub const HARNESS_FANOUT_FLAG_FILENAME: &str = ".harness-fanout-enabled";
+
+/// Absolute path to the harness-fanout opt-in marker for a project.
+pub fn harness_fanout_flag_path(project_path: &str) -> PathBuf {
+    PathBuf::from(project_path)
+        .join(".k2so")
+        .join(HARNESS_FANOUT_FLAG_FILENAME)
+}
+
+/// Whether user-visible harness fan-out is enabled for this workspace.
+///
+/// Default is **false** (off by default). Returns true only when the
+/// positive `.k2so/.harness-fanout-enabled` marker is present.
+///
+/// **Legacy alias:** the presence of `.k2so/.skip-harness-management`
+/// always FORCES `false`, regardless of the opt-in marker — a user who
+/// explicitly skipped harness management before this feature keeps that
+/// posture even if some path later writes the opt-in marker. The skip
+/// flag is the harder override.
+pub fn harness_fanout_enabled(project_path: &str) -> bool {
+    // Legacy skip flag is the harder override — its presence forces off.
+    if is_harness_management_skipped(project_path) {
+        return false;
+    }
+    harness_fanout_flag_path(project_path).exists()
+}
+
+/// Set (or clear) the harness-fanout opt-in marker. Idempotent.
+///
+/// Writing the marker does NOT clear the legacy `.skip-harness-management`
+/// flag — callers that want fan-out fully on must also call
+/// `unskip_harness_management`. (Keeping them independent lets the
+/// legacy skip remain the harder, explicit "never touch my files"
+/// override.)
+pub fn set_harness_fanout_enabled(project_path: &str, enabled: bool) -> Result<(), String> {
+    let flag = harness_fanout_flag_path(project_path);
+    if enabled {
+        if let Some(parent) = flag.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("create .k2so/: {e}"))?;
+        }
+        atomic_write_str(&flag, "")
+            .map_err(|e| format!("write harness-fanout flag: {e}"))?;
+    } else if flag.exists() {
+        fs::remove_file(&flag).map_err(|e| format!("remove harness-fanout flag: {e}"))?;
+    }
+    Ok(())
+}
+
 /// Drop the skip flag. Idempotent — repeated calls just rewrite
 /// the (empty) marker file.
 pub fn skip_harness_management(project_path: &str) -> Result<(), String> {
@@ -376,6 +441,58 @@ mod tests {
         assert!(is_harness_management_skipped(&path));
         unskip_harness_management(&path).unwrap();
         assert!(!is_harness_management_skipped(&path));
+        fs::remove_dir_all(&p).ok();
+    }
+
+    #[test]
+    fn harness_fanout_disabled_by_default() {
+        let p = temp_project();
+        let path = p.to_string_lossy().to_string();
+        // Off by default — no marker present.
+        assert!(
+            !harness_fanout_enabled(&path),
+            "fan-out must be OFF by default for a fresh workspace",
+        );
+        fs::remove_dir_all(&p).ok();
+    }
+
+    #[test]
+    fn harness_fanout_marker_round_trip() {
+        let p = temp_project();
+        let path = p.to_string_lossy().to_string();
+        assert!(!harness_fanout_enabled(&path));
+        set_harness_fanout_enabled(&path, true).unwrap();
+        assert!(
+            harness_fanout_enabled(&path),
+            "fan-out must be ON after setting the opt-in marker",
+        );
+        set_harness_fanout_enabled(&path, false).unwrap();
+        assert!(
+            !harness_fanout_enabled(&path),
+            "fan-out must be OFF after clearing the opt-in marker",
+        );
+        fs::remove_dir_all(&p).ok();
+    }
+
+    #[test]
+    fn legacy_skip_flag_forces_fanout_off_even_when_enabled() {
+        let p = temp_project();
+        let path = p.to_string_lossy().to_string();
+        // Opt in to fan-out…
+        set_harness_fanout_enabled(&path, true).unwrap();
+        assert!(harness_fanout_enabled(&path), "sanity: opt-in marker enables fan-out");
+        // …but the legacy skip flag is the harder override.
+        skip_harness_management(&path).unwrap();
+        assert!(
+            !harness_fanout_enabled(&path),
+            "legacy .skip-harness-management must FORCE fan-out off even with the opt-in marker present",
+        );
+        // Removing the skip flag restores the opt-in state.
+        unskip_harness_management(&path).unwrap();
+        assert!(
+            harness_fanout_enabled(&path),
+            "clearing the skip flag restores the opt-in fan-out state",
+        );
         fs::remove_dir_all(&p).ok();
     }
 

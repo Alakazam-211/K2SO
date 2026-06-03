@@ -178,11 +178,18 @@ pub fn write_skill_to_all_harnesses(
         Some(&extras),
     );
 
-    // Skip-harness-management gate — the user opted out of K2SO
-    // touching CLAUDE.md / GEMINI.md / .cursor/rules / etc. Canonical
-    // SKILL above is still authoritative for K2SO's own use; we just
-    // don't fan out to the user-visible harness paths.
-    if crate::workspace::onboarding::is_harness_management_skipped(project_path) {
+    // Harness-fanout gate (canonical-agents feature): user-visible
+    // fan-out is OFF BY DEFAULT. We only symlink/marker-inject into
+    // CLAUDE.md / GEMINI.md / .cursor/rules / .claude/ / .opencode/ /
+    // .pi/ / AGENTS.md / copilot-instructions.md when the per-workspace
+    // opt-in marker (`.k2so/.harness-fanout-enabled`) is present. The
+    // legacy `.k2so/.skip-harness-management` flag still forces this
+    // false (handled inside `harness_fanout_enabled`).
+    //
+    // The canonical `.k2so/skills/<name>/SKILL.md` write ABOVE this
+    // gate always runs — heartbeats and agent launches depend on it.
+    // Only the user-visible fan-out is gated.
+    if !crate::workspace::onboarding::harness_fanout_enabled(project_path) {
         return;
     }
 
@@ -339,6 +346,95 @@ mod tests {
         assert!(s.contains("new content"));
         assert!(!s.contains("old content"));
         std::fs::remove_file(&tmp).ok();
+    }
+
+    fn scratch_project() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "k2so-writer-gate-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4(),
+        ));
+        std::fs::create_dir_all(dir.join(".k2so")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn canonical_skill_still_generates_when_fanout_gated_off() {
+        // Gate is OFF by default (no opt-in marker). The canonical
+        // `.k2so/skills/<name>/SKILL.md` MUST still be written —
+        // heartbeats + agent launches depend on it — while NO harness
+        // fan-out happens.
+        let proj = scratch_project();
+        let path = proj.to_str().unwrap();
+
+        write_skill_to_all_harnesses(
+            path,
+            "k2so-test",
+            "agent-template",
+            1,
+            "test desc",
+            "# Body\n\nHello.\n",
+            true, // request shared markers — must still be suppressed by the gate
+        );
+
+        // Canonical internal SKILL.md is written regardless of the gate.
+        assert!(
+            proj.join(".k2so/skills/k2so-test/SKILL.md").exists(),
+            "canonical SKILL.md must always generate even with fan-out off",
+        );
+
+        // NO user-visible harness fan-out happened (gate off by default).
+        assert!(
+            !proj.join(".claude/skills/k2so-test/SKILL.md").exists(),
+            "no Claude fan-out when gate off",
+        );
+        assert!(!proj.join(".opencode/agent/k2so-test.md").exists(), "no OpenCode fan-out");
+        assert!(!proj.join(".pi/skills/k2so-test/SKILL.md").exists(), "no Pi fan-out");
+        assert!(!proj.join("AGENTS.md").exists(), "no AGENTS.md marker injection");
+        assert!(
+            !proj.join(".github/copilot-instructions.md").exists(),
+            "no copilot-instructions marker injection",
+        );
+
+        std::fs::remove_dir_all(&proj).ok();
+    }
+
+    #[test]
+    fn fanout_happens_when_opt_in_marker_present() {
+        // Flip the per-workspace opt-in marker ON, then the same call
+        // must fan out into every harness path.
+        let proj = scratch_project();
+        let path = proj.to_str().unwrap();
+        crate::workspace::onboarding::set_harness_fanout_enabled(path, true).unwrap();
+
+        write_skill_to_all_harnesses(
+            path,
+            "k2so-test",
+            "agent-template",
+            1,
+            "test desc",
+            "# Body\n\nHello.\n",
+            true,
+        );
+
+        assert!(
+            proj.join(".k2so/skills/k2so-test/SKILL.md").exists(),
+            "canonical SKILL.md present",
+        );
+        // Symlinked harness targets now exist.
+        assert!(
+            proj.join(".claude/skills/k2so-test/SKILL.md").exists(),
+            "Claude fan-out present when opt-in marker set",
+        );
+        assert!(proj.join(".opencode/agent/k2so-test.md").exists(), "OpenCode fan-out present");
+        assert!(proj.join(".pi/skills/k2so-test/SKILL.md").exists(), "Pi fan-out present");
+        assert!(proj.join("AGENTS.md").exists(), "AGENTS.md marker injected");
+        assert!(
+            proj.join(".github/copilot-instructions.md").exists(),
+            "copilot-instructions marker injected",
+        );
+
+        std::fs::remove_dir_all(&proj).ok();
     }
 
     #[test]

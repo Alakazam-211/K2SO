@@ -41,7 +41,7 @@ use crate::skills::writer::{
 use crate::workspace::agent_identity::{
     agent_dir, agent_type_for, agents_dir, find_primary_agent, parse_frontmatter,
 };
-use crate::workspace::onboarding::is_harness_management_skipped;
+use crate::workspace::onboarding::harness_fanout_enabled;
 use crate::workspace::wake_prompts::strip_frontmatter;
 use crate::fs_atomic::{self, atomic_symlink, atomic_write_str, log_if_err};
 use crate::log_debug;
@@ -280,9 +280,17 @@ pub fn write_workspace_skill_file_with_body(project_path: &str, base_body: Optio
     // Step 5: Append fresh SOURCE regions
     append_workspace_source_regions(project_path, preserved_freeform.as_deref());
 
-    // Steps 6 + 7: fan out
+    // Steps 6 + 7: fan out — gated OFF BY DEFAULT (canonical-agents
+    // feature). The root SKILL/CLAUDE.md symlinks, AGENTS.md /
+    // copilot-instructions.md marker injection, and the harness
+    // discovery-target fan-out only run when the per-workspace opt-in
+    // marker is present. The canonical `.k2so/skills/k2so/SKILL.md`
+    // (written in Step 4 above) always generates regardless — only the
+    // user-visible fan-out below is gated. Legacy
+    // `.skip-harness-management` still forces this off (inside
+    // `harness_fanout_enabled`).
     let canonical = PathBuf::from(project_path).join(".k2so/skills/k2so/SKILL.md");
-    if !is_harness_management_skipped(project_path) {
+    if harness_fanout_enabled(project_path) {
         if let Ok(full) = fs::read_to_string(&canonical) {
             let injection_body = strip_frontmatter(&full).trim().to_string();
             let root = PathBuf::from(project_path);
