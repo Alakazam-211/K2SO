@@ -16,13 +16,14 @@
 import React, { useState } from 'react'
 import {
   useConnectHostStore,
-  isLocalHostname,
-  rememberToken,
+  rememberPassword,
+  forgetPassword,
   forgetToken,
+  loginToHost,
   type ConnectHost,
   type ConnectionStatus,
 } from '@/stores/connect-host'
-import { validateConnectHost } from '@/lib/connect-validate'
+import { parseServerUrl, isValidUsername } from '@/lib/connect-validate'
 import type { SettingEntry } from '../searchManifest'
 
 export const CONNECTIONS_MANIFEST: SettingEntry[] = [
@@ -45,15 +46,23 @@ function statusColor(status: ConnectionStatus): string {
 type DraftHost = {
   id: string | null // null = creating a new host
   label: string
-  hostname: string
-  port: string
-  token: string
-  secure: boolean
+  /** Raw "K2 Server URL" field (e.g. https://rosson.k2.dev); parsed on
+   *  save via parseServerUrl into hostname/secure/port. */
+  url: string
+  username: string
+  password: string
   remember: boolean
 }
 
 function emptyDraft(): DraftHost {
-  return { id: null, label: '', hostname: '', port: '', token: '', secure: false, remember: false }
+  return { id: null, label: '', url: '', username: '', password: '', remember: false }
+}
+
+/** Reconstruct the URL field from a saved host for the edit form. */
+function hostToUrl(h: ConnectHost): string {
+  const scheme = h.secure ? 'https' : 'http'
+  const authority = h.secure && h.port === 443 ? h.hostname : `${h.hostname}:${h.port}`
+  return `${scheme}://${authority}`
 }
 
 export function ConnectionsSection(): React.JSX.Element {
@@ -67,110 +76,90 @@ export function ConnectionsSection(): React.JSX.Element {
   const [draft, setDraft] = useState<DraftHost | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [secureTouched, setSecureTouched] = useState(false)
-  const [portTouched, setPortTouched] = useState(false)
 
   const beginAdd = (): void => {
     setError(null)
-    setSecureTouched(false)
-    setPortTouched(false)
     setDraft(emptyDraft())
   }
 
   const beginEdit = (h: ConnectHost): void => {
     setError(null)
-    setSecureTouched(true)
-    setPortTouched(true)
     setDraft({
       id: h.id,
       label: h.label,
-      hostname: h.hostname,
-      port: String(h.port),
-      // We never read the token back out of the keychain into a form
-      // field; leave it blank. An empty token on save = "leave the
-      // remembered token as-is" (see save()).
-      token: '',
-      secure: h.secure,
+      url: hostToUrl(h),
+      username: h.username ?? '',
+      // We never read the password back out of the keychain into a form
+      // field; leave it blank. An empty password on save = "leave the
+      // remembered password as-is" (see save()).
+      password: '',
       remember: h.remember,
-    })
-  }
-
-  // Re-derive secure/port defaults from the hostname unless overridden:
-  // non-local → secure + 443; local/LAN → plain.
-  const onHostnameChange = (next: string): void => {
-    if (!draft) return
-    const local = isLocalHostname(next)
-    setDraft({
-      ...draft,
-      hostname: next,
-      secure: secureTouched ? draft.secure : !local,
-      port: portTouched ? draft.port : !local ? '443' : draft.port,
     })
   }
 
   const save = async (): Promise<void> => {
     if (!draft) return
-    const portNum = Number(draft.port)
     if (!draft.label.trim()) {
       setError('Label is required')
       return
     }
-    if (!draft.hostname.trim()) {
-      setError('Hostname is required')
+    const parsed = parseServerUrl(draft.url)
+    if (!parsed.ok) {
+      setError(parsed.reason)
       return
     }
-    if (!Number.isInteger(portNum) || portNum <= 0 || portNum > 65535) {
-      setError('Port must be 1–65535')
+    const username = draft.username.trim()
+    if (!isValidUsername(username)) {
+      setError('Username must be 2+ chars: lowercase letters, numbers, _ or -.')
       return
     }
+    const passwordEntered = draft.password // do NOT trim — passwords may have edge whitespace
 
     const id = draft.id ?? `host-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const existing = draft.id ? hosts.find((h) => h.id === draft.id) : undefined
-    const tokenEntered = draft.token.trim()
 
-    // Validate ONLY when a token was entered (a blank token on an edit
-    // keeps the existing remembered one untouched — no re-validation).
-    if (tokenEntered) {
+    const host: ConnectHost = {
+      id,
+      label: draft.label.trim(),
+      hostname: parsed.hostname,
+      port: parsed.port,
+      username,
+      // Preserve any live in-memory session token across an edit; a fresh
+      // login (below) overwrites it. New hosts start token-less.
+      token: existing?.token ?? '',
+      secure: parsed.secure,
+      remember: draft.remember,
+      lastConnectedAt: existing?.lastConnectedAt ?? null,
+    }
+
+    // When a password was entered, verify the credentials by logging in
+    // now (connect-users #617). A blank password on an EDIT keeps the
+    // remembered one untouched (no re-login). loginToHost commits the
+    // session token + lastConnectedAt into the store on success.
+    if (passwordEntered) {
       setBusy(true)
       setError(null)
-      const candidate: ConnectHost = {
-        id,
-        label: draft.label.trim(),
-        hostname: draft.hostname.trim(),
-        port: portNum,
-        token: tokenEntered,
-        secure: draft.secure,
-        remember: draft.remember,
-        lastConnectedAt: existing?.lastConnectedAt ?? null,
-      }
-      const result = await validateConnectHost(candidate, tokenEntered)
+      addHost(host) // make the host known so loginToHost can update it by id
+      const result = await loginToHost(host, passwordEntered)
       setBusy(false)
       if (!result.ok) {
         setError(result.reason)
         return
       }
-    }
-
-    const host: ConnectHost = {
-      id,
-      label: draft.label.trim(),
-      hostname: draft.hostname.trim(),
-      port: portNum,
-      // Keep the entered token in memory; if blank on edit, preserve the
-      // existing in-memory token so we don't blank an active connection.
-      token: tokenEntered || existing?.token || '',
-      secure: draft.secure,
-      remember: draft.remember,
-      lastConnectedAt: existing?.lastConnectedAt ?? null,
-    }
-    addHost(host)
-
-    // Keychain side: remember writes (only when we actually have a token
-    // to store); un-remember forgets it.
-    if (draft.remember && (tokenEntered || host.token)) {
-      await rememberToken(id, tokenEntered || host.token)
-    } else if (!draft.remember) {
-      await forgetToken(id)
+      // Keychain side: remember the password when asked; else forget it.
+      if (draft.remember) {
+        await rememberPassword(id, passwordEntered)
+      } else {
+        await forgetPassword(id)
+        await forgetToken(id)
+      }
+    } else {
+      // Edit with no new password: just persist the non-secret fields.
+      addHost(host)
+      if (!draft.remember) {
+        await forgetPassword(id)
+        await forgetToken(id)
+      }
     }
 
     setDraft(null)
@@ -264,39 +253,35 @@ export function ConnectionsSection(): React.JSX.Element {
             {draft.id ? 'Edit server' : 'Add server'}
           </div>
           <input className={inputCls} placeholder="Label (e.g. Hetzner box)" value={draft.label} onChange={(e) => setDraft({ ...draft, label: e.target.value })} />
-          <div className="flex gap-2">
-            <input className={inputCls} placeholder="hostname (e.g. rosson.k2.dev)" value={draft.hostname} onChange={(e) => onHostnameChange(e.target.value)} />
-            <input
-              className={inputCls}
-              style={{ maxWidth: 80 }}
-              placeholder="port"
-              value={draft.port}
-              onChange={(e) => {
-                setPortTouched(true)
-                setDraft({ ...draft, port: e.target.value })
-              }}
-            />
-          </div>
+          <input
+            className={inputCls}
+            placeholder="K2 Server URL (e.g. https://rosson.k2.dev)"
+            value={draft.url}
+            onChange={(e) => setDraft({ ...draft, url: e.target.value })}
+          />
+          <input
+            className={inputCls}
+            placeholder="Username"
+            autoComplete="username"
+            value={draft.username}
+            onChange={(e) => setDraft({ ...draft, username: e.target.value })}
+          />
           <input
             className={inputCls}
             type="password"
-            placeholder={draft.id ? 'Password (leave blank to keep saved)' : 'Password / token'}
-            value={draft.token}
-            onChange={(e) => setDraft({ ...draft, token: e.target.value })}
+            autoComplete="off"
+            placeholder={draft.id ? 'Password (leave blank to keep saved)' : 'Password'}
+            value={draft.password}
+            onChange={(e) => setDraft({ ...draft, password: e.target.value })}
           />
-          <label className="flex items-center gap-2 text-[11px] text-[var(--color-text-secondary)]" data-settings-id="connections.remember-password">
+          <label className="flex items-center gap-2 text-[11px] text-[var(--color-text-secondary)] cursor-pointer select-none" data-settings-id="connections.remember-password">
             <input
               type="checkbox"
-              checked={draft.secure}
-              onChange={(e) => {
-                setSecureTouched(true)
-                setDraft({ ...draft, secure: e.target.checked })
-              }}
+              className="peer sr-only"
+              checked={draft.remember}
+              onChange={(e) => setDraft({ ...draft, remember: e.target.checked })}
             />
-            Secure (TLS)
-          </label>
-          <label className="flex items-center gap-2 text-[11px] text-[var(--color-text-secondary)]">
-            <input type="checkbox" checked={draft.remember} onChange={(e) => setDraft({ ...draft, remember: e.target.checked })} />
+            <span className="w-3.5 h-3.5 flex-shrink-0 border border-[var(--color-border)] bg-[var(--color-bg-surface)] peer-checked:bg-[var(--color-accent)] peer-checked:border-[var(--color-accent)]" />
             Remember password (OS keychain)
           </label>
           {error && <div className="text-[10px] text-red-400">{error}</div>}

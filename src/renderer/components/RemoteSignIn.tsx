@@ -1,81 +1,113 @@
-// RemoteSignIn — the full-screen sign-in for a saved K2 server that has
-// no remembered token (or a rejected/expired one). PRD §1:
+// RemoteSignIn — the full-screen sign-in for a saved K2 server with no
+// live session token (or a rejected/expired one). connect-users (#617):
 //
-//   "Token not remembered (or remembered-but-rejected/expired) →
+//   "Password not remembered (or remembered-but-rejected/expired) →
 //    full-screen sign-in for that specific server (pre-filled label +
-//    address, focus the password field), then connect."
+//    address + username, focus the password field), then connect."
 //
 // Mounted by ConnectionGate when `pendingSignIn` is set on the
 // connect-host store. On success it:
-//   - validates host+token via /boot-status (validateHost)
-//   - sets the in-memory token on the host (setHostToken)
-//   - if "Remember password" → writes the token to the OS keychain
-//     (rememberToken) and persists remember:true; else forgets it
+//   - exchanges {username, password} for a session token via
+//     loginToHost (POST /cli/auth/login) — which commits the session
+//     token into the store + caches it to the keychain
+//   - if "Remember password" → caches the PASSWORD to the OS keychain
+//     (rememberPassword) and persists remember:true; else forgets it
 //   - selectHost(host) to commit the switch (gate re-polls + mounts)
 //
-// Remembered hosts never reach here — they auto-sign-in silently.
+// If the password is already remembered, we auto-login on mount without
+// prompting.
 
 import React, { useEffect, useRef, useState } from 'react'
 import {
   useConnectHostStore,
-  rememberToken,
-  forgetToken,
+  rememberPassword,
+  resolvePassword,
+  forgetPassword,
+  loginToHost,
   type ConnectHost,
 } from '@/stores/connect-host'
-import { validateConnectHost } from '@/lib/connect-validate'
 
 export function RemoteSignIn({ host }: { host: ConnectHost }): React.JSX.Element {
   const selectHost = useConnectHostStore((s) => s.selectHost)
   const addHost = useConnectHostStore((s) => s.addHost)
-  const setHostToken = useConnectHostStore((s) => s.setHostToken)
   const cancelSignIn = useConnectHostStore((s) => s.cancelSignIn)
 
-  const [token, setToken] = useState('')
+  const [password, setPassword] = useState('')
   // Default the remember toggle to the host's saved intent.
   const [remember, setRemember] = useState(host.remember)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const passwordRef = useRef<HTMLInputElement | null>(null)
 
-  // Focus the password field on mount (PRD: "focus the password field").
-  useEffect(() => {
-    passwordRef.current?.focus()
-  }, [])
-
   const address = host.secure && host.port === 443
     ? host.hostname
     : `${host.hostname}:${host.port}`
 
+  // Shared login path used by both the auto-login effect and the submit
+  // handler. On success commits + switches; on failure surfaces the
+  // reason and (for auto-login) leaves the form for manual entry.
+  const doLogin = async (pw: string, rememberPw: boolean): Promise<boolean> => {
+    const result = await loginToHost(host, pw)
+    if (!result.ok) {
+      setError(result.reason)
+      return false
+    }
+    // loginToHost committed the session token + lastConnectedAt into the
+    // store. Persist remember intent + the keychain side.
+    const refreshed = useConnectHostStore.getState().hosts.find((h) => h.id === host.id)
+    const updated: ConnectHost = {
+      ...(refreshed ?? host),
+      token: result.token,
+      remember: rememberPw,
+      lastConnectedAt: Date.now(),
+    }
+    addHost(updated) // re-persists the (token-less) list with remember + lastConnectedAt
+    if (rememberPw) {
+      await rememberPassword(host.id, pw)
+    } else {
+      await forgetPassword(host.id)
+    }
+    // Switch — the gate re-polls against the new host and mounts on accept.
+    selectHost(updated)
+    return true
+  }
+
+  // Auto-login if the password was remembered; otherwise focus the field
+  // for manual entry. (connect-users #617: "If the password was
+  // remembered, auto-login without prompting.")
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      if (host.remember) {
+        const pw = await resolvePassword(host.id)
+        if (cancelled) return
+        if (pw) {
+          setBusy(true)
+          const ok = await doLogin(pw, true)
+          if (cancelled) return
+          if (ok) return // switched away — overlay will unmount
+          // Remembered password was rejected/expired → fall through to
+          // manual entry.
+          setBusy(false)
+        }
+      }
+      passwordRef.current?.focus()
+    })()
+    return () => { cancelled = true }
+    // host id is the stable identity; doLogin closes over `host` which is
+    // stable for a given pendingSignIn render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [host.id])
+
   const submit = async (): Promise<void> => {
-    if (!token.trim()) {
-      setError('Enter the server password / token.')
+    if (!password) {
+      setError('Enter the server password.')
       return
     }
     setBusy(true)
     setError(null)
-    const result = await validateConnectHost(host, token.trim())
-    if (!result.ok) {
-      setError(result.reason)
-      setBusy(false)
-      return
-    }
-    // Commit the token into the in-memory host so daemon-ws.ts uses it.
-    setHostToken(host.id, token.trim())
-    // Persist remember intent + the keychain side.
-    const updated: ConnectHost = {
-      ...host,
-      token: token.trim(),
-      remember,
-      lastConnectedAt: Date.now(),
-    }
-    addHost(updated) // re-persists the (token-less) list with remember + lastConnectedAt
-    if (remember) {
-      await rememberToken(host.id, token.trim())
-    } else {
-      await forgetToken(host.id)
-    }
-    // Switch — the gate re-polls against the new host and mounts on accept.
-    selectHost(updated)
+    const ok = await doLogin(password, remember)
+    if (!ok) setBusy(false)
   }
 
   return (
@@ -118,15 +150,37 @@ export function RemoteSignIn({ host }: { host: ConnectHost }): React.JSX.Element
           </div>
         </div>
 
+        {host.username && (
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 5, fontSize: '0.78rem', opacity: 0.85 }}>
+            Username
+            <input
+              type="text"
+              value={host.username}
+              readOnly
+              autoComplete="username"
+              style={{
+                padding: '0.5rem 0.65rem',
+                fontSize: '0.85rem',
+                borderRadius: 4,
+                border: '1px solid var(--color-border, rgba(255,255,255,0.15))',
+                background: 'var(--color-bg, rgba(0,0,0,0.3))',
+                color: 'inherit',
+                outline: 'none',
+                opacity: 0.7,
+              }}
+            />
+          </label>
+        )}
+
         <label style={{ display: 'flex', flexDirection: 'column', gap: 5, fontSize: '0.78rem', opacity: 0.85 }}>
           Password
           <input
             ref={passwordRef}
             type="password"
-            value={token}
+            value={password}
             disabled={busy}
-            onChange={(e) => setToken(e.target.value)}
-            placeholder="Server token / password"
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="Server password"
             autoComplete="off"
             style={{
               padding: '0.5rem 0.65rem',

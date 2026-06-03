@@ -15,6 +15,20 @@
 // working unchanged.
 
 import { getDaemonWs, invalidateDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
+import { useConnectHostStore } from '@/stores/connect-host'
+
+/**
+ * connect-users (#617) session expiry: a 401 from a REMOTE host means its
+ * cached session token expired. Drop it + re-trigger the full-screen
+ * sign-in (the store no-ops for 'local' or a non-active host). Surfacing
+ * the sign-in is enough — we deliberately do NOT auto-retry the request.
+ */
+function handleRemoteUnauthorized(res: Response): void {
+  if (res.status !== 401) return
+  const active = useConnectHostStore.getState().activeHost
+  if (active === 'local') return
+  useConnectHostStore.getState().expireSession(active.id)
+}
 
 /**
  * GET /cli/<route>?<params>&token=<token>.
@@ -44,6 +58,7 @@ export async function daemonCliGet<T = unknown>(
     search.set('token', creds.token)
     const url = `${daemonHttpBase(creds)}/cli/${route}?${search.toString()}`
     const res = await fetch(url, { method: 'GET' })
+    handleRemoteUnauthorized(res)
     return parseDaemonResponse<T>(res)
   })
 }
@@ -67,6 +82,7 @@ export async function daemonCliPost<T = unknown>(
       headers: { 'Content-Type': 'application/json' },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     })
+    handleRemoteUnauthorized(res)
     return parseDaemonResponse<T>(res)
   })
 }

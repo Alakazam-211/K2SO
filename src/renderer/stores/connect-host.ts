@@ -45,6 +45,18 @@ import { invoke } from '@tauri-apps/api/core'
 export const K2_CONNECT_KEYCHAIN_SERVICE = 'com.k2so.connect.host-token'
 
 /**
+ * Keychain service name for a remembered remote-host PASSWORD. Distinct
+ * from the session-token service above: the password is the long-lived
+ * credential the user types once; the token is the short-lived session
+ * bearer obtained from `POST /cli/auth/login`. When "remember password"
+ * is on we persist the password here (keyed by host id) so connect-time
+ * auto-login needs no prompt; the session token still lives under
+ * {@link K2_CONNECT_KEYCHAIN_SERVICE}. Neither ever touches
+ * connect-hosts.json.
+ */
+export const K2_CONNECT_PASSWORD_KEYCHAIN_SERVICE = 'com.k2so.connect.host-password'
+
+/**
  * A saved K2 server the client can connect to. Mirrors the Phase 3 PRD
  * §E.3 schema (with the §3 correction that the token does NOT live in
  * the persisted JSON — it goes to the keychain in step #3; for now it's
@@ -57,6 +69,15 @@ export interface ConnectHost {
   label: string
   /** Hostname or IP of the daemon (no scheme, no port). */
   hostname: string
+  /**
+   * Account username for `POST /cli/auth/login` (connect-users, #617).
+   * NON-SECRET — persists to connect-hosts.json alongside hostname/port.
+   * Optional for backward-compat with hosts saved before connect-users
+   * (those used a raw host token and have no username); a remote added
+   * via the connect-users flow always has one. The local host never has
+   * a username (it uses the daemon token).
+   */
+  username?: string
   /** Daemon port. For a secure hosted remote this is typically 443
    *  (and the port is omitted from the built URL). */
   port: number
@@ -69,15 +90,25 @@ export interface ConnectHost {
    */
   secure: boolean
   /**
-   * Auth token (rides as `?token=`). SECRET — never persisted to
-   * localStorage. Held in memory for the session; step #3 moves the
-   * remembered variant to the OS keychain.
+   * SESSION token (rides as `?token=`). SECRET — never persisted to
+   * localStorage or connect-hosts.json. Held in memory for the session.
+   *
+   * connect-users (#617): for a connect-users host this is the bearer
+   * returned by `POST /cli/auth/login {username,password}` → it is NOT
+   * the user's password. It's obtained at connect time (see
+   * {@link loginToHost}) and cached in the keychain under
+   * {@link K2_CONNECT_KEYCHAIN_SERVICE} via {@link rememberToken}.
+   * A 401 from any `/cli/*` call means it expired → drop + re-login.
+   *
+   * Legacy hosts (no username) still carry a raw host token here.
    */
   token: string
   /**
-   * "Remember password" toggle. When true, step #3 will persist the
-   * token to the keychain. Until then this only records intent; the
-   * token is memory-only regardless.
+   * "Remember password" toggle. When true the user's PASSWORD persists
+   * to the keychain (under {@link K2_CONNECT_PASSWORD_KEYCHAIN_SERVICE})
+   * so connect-time auto-login needs no prompt; the session token is
+   * also cached. When false, the password is entered each connect via
+   * RemoteSignIn and never persisted.
    */
   remember: boolean
   /** Epoch ms of the last successful connect, or null if never. */
@@ -150,6 +181,14 @@ interface ConnectHostState {
   hydrateFromDisk: () => Promise<void>
   /** Open the full-screen sign-in for `host` (no/expired token). */
   requestSignIn: (host: ConnectHost) => void
+  /**
+   * connect-users (#617) session expiry: a `/cli/*` call to a remote host
+   * returned 401, so its cached session token is stale. Drop the
+   * in-memory + keychain session token (NOT the remembered password) and
+   * re-trigger the full-screen sign-in for that host. No-op for 'local'
+   * or a host id that isn't the active remote (a stale 401 from a prior
+   * host must not interrupt the current one). */
+  expireSession: (hostId: string) => void
   /** Dismiss the full-screen sign-in without switching. */
   cancelSignIn: () => void
   /**
@@ -202,6 +241,9 @@ function isPersistedHost(h: unknown): h is PersistedHost {
     typeof o.label === 'string' &&
     typeof o.hostname === 'string' &&
     typeof o.port === 'number' &&
+    // `username` optional (connect-users #617; absent on legacy raw-token
+    // hosts). Reject only an explicitly wrong type.
+    (o.username === undefined || typeof o.username === 'string') &&
     typeof o.remember === 'boolean' &&
     // `secure` optional for backward-compat (loadHosts defaults it to
     // false); reject only an explicitly wrong type.
@@ -281,6 +323,135 @@ export async function forgetToken(hostId: string): Promise<void> {
   }
 }
 
+// ── Keychain helpers (remembered-PASSWORD persistence) ──────────────────
+// connect-users (#617): when "remember password" is on we cache the
+// user's login password (NOT the session token) so connect-time
+// auto-login needs no prompt. Same Tauri-only / best-effort contract as
+// the token helpers, under a DISTINCT service so a host can have a
+// remembered password and a separate cached session token.
+
+/** Store a host's login password in the keychain under its id. */
+export async function rememberPassword(hostId: string, password: string): Promise<void> {
+  try {
+    await invoke('k2_secret_set', {
+      service: K2_CONNECT_PASSWORD_KEYCHAIN_SERVICE,
+      account: hostId,
+      secret: password,
+    })
+  } catch {
+    /* keychain unavailable — user re-enters the password next connect */
+  }
+}
+
+/** Resolve a host's remembered login password from the keychain, or null. */
+export async function resolvePassword(hostId: string): Promise<string | null> {
+  try {
+    const secret = await invoke<string | null>('k2_secret_get', {
+      service: K2_CONNECT_PASSWORD_KEYCHAIN_SERVICE,
+      account: hostId,
+    })
+    return secret ?? null
+  } catch {
+    return null
+  }
+}
+
+/** Forget a host's remembered login password (toggle-off / host removal). */
+export async function forgetPassword(hostId: string): Promise<void> {
+  try {
+    await invoke('k2_secret_delete', {
+      service: K2_CONNECT_PASSWORD_KEYCHAIN_SERVICE,
+      account: hostId,
+    })
+  } catch {
+    /* idempotent — a missing entry is fine */
+  }
+}
+
+// ── Login (connect-users #617) ───────────────────────────────────────────
+
+/** Build `<scheme>://<host>[:<port>]` for a host, matching daemon-ws.ts:
+ *  secure+443 omits the port; everything else carries it. */
+function hostBaseUrl(host: Pick<ConnectHost, 'hostname' | 'port' | 'secure'>): string {
+  const scheme = host.secure ? 'https' : 'http'
+  const authority = host.secure && host.port === 443 ? host.hostname : `${host.hostname}:${host.port}`
+  return `${scheme}://${authority}`
+}
+
+/** Result of {@link loginToHost}. On success the session token is also
+ *  committed into the store (setHostToken) so daemon-ws.ts uses it. */
+export type LoginResult =
+  | { ok: true; token: string }
+  | { ok: false; reason: string }
+
+/** Daemon `POST /cli/auth/login` success body. */
+interface LoginResponse {
+  token: string
+  username: string
+  expiresAt: number
+}
+
+/**
+ * Exchange `{username, password}` for a session token via
+ * `POST <host>/cli/auth/login` (connect-users #617). On 200 the returned
+ * session token is committed to the host (setHostToken) and the host's
+ * lastConnectedAt is stamped, then cached to the keychain via
+ * rememberToken so daemon-ws.ts / a fresh boot can reuse it. A 401 (or
+ * any non-2xx) surfaces a friendly reason WITHOUT mutating state.
+ *
+ * The PASSWORD is NOT persisted here — the caller (Add-server /
+ * RemoteSignIn) decides whether to rememberPassword based on the
+ * "remember" toggle. This helper only deals in the session token.
+ */
+export async function loginToHost(
+  host: ConnectHost,
+  password: string,
+  timeoutMs = 8000,
+): Promise<LoginResult> {
+  const username = host.username?.trim() ?? ''
+  if (!username) {
+    return { ok: false, reason: 'This server has no username configured.' }
+  }
+  const url = `${hostBaseUrl(host)}/cli/auth/login`
+  let resp: Response
+  try {
+    resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+  } catch {
+    return { ok: false, reason: `Couldn't reach ${host.hostname}. Check the address and your network.` }
+  }
+  if (resp.status === 401) {
+    return { ok: false, reason: 'Invalid username or password.' }
+  }
+  if (!resp.ok) {
+    return { ok: false, reason: `Server returned ${resp.status}. It may not be a K2 server.` }
+  }
+  let body: LoginResponse
+  try {
+    body = (await resp.json()) as LoginResponse
+  } catch {
+    return { ok: false, reason: 'Server response was not a valid login.' }
+  }
+  if (typeof body.token !== 'string' || body.token.length === 0) {
+    return { ok: false, reason: 'Server did not return a session token.' }
+  }
+  // Commit the session token into the store + stamp lastConnectedAt so
+  // daemon-ws.ts (which reads activeHost.token) picks it up, and cache it
+  // to the keychain for a silent next connect.
+  const store = useConnectHostStore.getState()
+  store.setHostToken(host.id, body.token)
+  const existing = store.hosts.find((h) => h.id === host.id)
+  if (existing) {
+    store.addHost({ ...existing, token: body.token, lastConnectedAt: Date.now() })
+  }
+  await rememberToken(host.id, body.token)
+  return { ok: true, token: body.token }
+}
+
 export const useConnectHostStore = create<ConnectHostState>((set, get) => ({
   activeHost: 'local',
   hosts: loadHosts(),
@@ -298,6 +469,19 @@ export const useConnectHostStore = create<ConnectHostState>((set, get) => ({
     set({ pendingSignIn: host })
   },
 
+  expireSession: (hostId) => {
+    const { activeHost, hosts } = get()
+    // Only act when the EXPIRED host is the active remote — a late 401
+    // from a host we already switched away from must not hijack the UI.
+    if (activeHost === 'local' || activeHost.id !== hostId) return
+    // Drop the dead session token in memory + keychain (keep the
+    // remembered password so RemoteSignIn can offer auto-login).
+    const cleared = hosts.map((h) => (h.id === hostId ? { ...h, token: '' } : h))
+    const clearedActive: ActiveHost = { ...activeHost, token: '' }
+    void forgetToken(hostId)
+    set({ hosts: cleared, activeHost: clearedActive, pendingSignIn: clearedActive })
+  },
+
   cancelSignIn: () => {
     set({ pendingSignIn: null })
   },
@@ -307,13 +491,33 @@ export const useConnectHostStore = create<ConnectHostState>((set, get) => ({
       get().selectHost('local')
       return
     }
-    // A usable in-memory token (resolved from the keychain on boot, or
-    // set during a prior sign-in this session) → switch silently.
+    // A usable in-memory session token (resolved from the keychain on
+    // boot, or set during a prior login this session) → switch silently.
     if (hostOrLocal.token && hostOrLocal.token.length > 0) {
       get().selectHost(hostOrLocal)
       return
     }
-    // No token → full-screen sign-in for this specific host.
+    // connect-users (#617): no live session token, but if the user
+    // remembered their PASSWORD we can auto-login without prompting.
+    // Only applies to connect-users hosts (those have a username).
+    if (hostOrLocal.username && hostOrLocal.username.length > 0) {
+      void resolvePassword(hostOrLocal.id).then(async (pw) => {
+        if (pw) {
+          const result = await loginToHost(hostOrLocal, pw)
+          if (result.ok) {
+            // loginToHost committed the session token; re-read the host so
+            // selectHost carries it, then switch silently.
+            const refreshed = get().hosts.find((h) => h.id === hostOrLocal.id)
+            get().selectHost(refreshed ?? { ...hostOrLocal, token: result.token })
+            return
+          }
+        }
+        // No remembered password, or it was rejected/expired → prompt.
+        get().requestSignIn(hostOrLocal)
+      })
+      return
+    }
+    // Legacy raw-token host with no token → full-screen sign-in.
     get().requestSignIn(hostOrLocal)
   },
 
@@ -335,8 +539,10 @@ export const useConnectHostStore = create<ConnectHostState>((set, get) => ({
     const { hosts, activeHost } = get()
     const next = hosts.filter((h) => h.id !== id)
     persistHosts(next)
-    // Drop any remembered token from the keychain too (best-effort).
+    // Drop any remembered session token AND password from the keychain
+    // too (best-effort).
     void forgetToken(id)
+    void forgetPassword(id)
     // If we removed the currently-active host, fall back to local.
     const nextActive: ActiveHost =
       activeHost !== 'local' && activeHost.id === id ? 'local' : activeHost

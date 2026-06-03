@@ -166,12 +166,16 @@ mod tests {
         let _g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = tmp_home("rt");
         let _home = HomeGuard::set(&dir);
-        let payload = r#"[{"id":"host-1","label":"Hetzner","hostname":"rosson.k2.dev","port":443,"secure":true,"remember":true,"lastConnectedAt":null}]"#;
+        // connect-users (#617): `username` is a non-secret field that
+        // persists here alongside hostname/port (the password + session
+        // token stay in the keychain).
+        let payload = r#"[{"id":"host-1","label":"Hetzner","hostname":"rosson.k2.dev","port":443,"username":"rosson","secure":true,"remember":true,"lastConnectedAt":null}]"#;
         connect_hosts_write(payload.to_string()).unwrap();
         let back = connect_hosts_read().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&back).unwrap();
         assert_eq!(parsed[0]["id"], serde_json::json!("host-1"));
         assert_eq!(parsed[0]["hostname"], serde_json::json!("rosson.k2.dev"));
+        assert_eq!(parsed[0]["username"], serde_json::json!("rosson"));
         let _ = fs::remove_dir_all(&dir);
     }
 

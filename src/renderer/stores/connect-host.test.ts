@@ -92,6 +92,7 @@ function makeHost(overrides: Partial<ConnectHost> = {}): ConnectHost {
     label: 'Test box',
     hostname: '192.168.1.50',
     port: 47800,
+    username: 'tester',
     token: 'secret-token-abc',
     secure: false,
     remember: false,

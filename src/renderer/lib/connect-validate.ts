@@ -85,6 +85,51 @@ export async function validateHost(
   return { ok: true, version: status.version, protocol: status.protocol }
 }
 
+/**
+ * Parse a user-entered K2 server URL (connect-users #617) into the
+ * hostname / secure / port fields a ConnectHost needs. Accepts a bare
+ * host (`rosson.k2.dev`) — defaulted to `https://` — or a full URL
+ * (`https://rosson.k2.dev`, `http://192.168.1.5:47800`).
+ *
+ *   - scheme `https` (or absent) → secure:true, port defaults to 443
+ *   - scheme `http`              → secure:false, port defaults to 80
+ *   - an explicit `:port` always wins over the scheme default
+ */
+export type ParsedServerUrl =
+  | { ok: true; hostname: string; secure: boolean; port: number }
+  | { ok: false; reason: string }
+
+export function parseServerUrl(raw: string): ParsedServerUrl {
+  const trimmed = raw.trim()
+  if (!trimmed) return { ok: false, reason: 'Enter the K2 server URL.' }
+  // Default to https:// when no scheme is given so a bare `sub.k2.dev`
+  // works (the common hosted case).
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
+  let u: URL
+  try {
+    u = new URL(withScheme)
+  } catch {
+    return { ok: false, reason: "That doesn't look like a valid URL." }
+  }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') {
+    return { ok: false, reason: 'URL must start with https:// or http://.' }
+  }
+  const hostname = u.hostname
+  if (!hostname) return { ok: false, reason: 'URL is missing a hostname.' }
+  const secure = u.protocol === 'https:'
+  const port = u.port ? Number(u.port) : secure ? 443 : 80
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    return { ok: false, reason: 'Port must be 1–65535.' }
+  }
+  return { ok: true, hostname, secure, port }
+}
+
+/** Username rule for connect-users (#617): lowercase alphanumerics plus
+ *  `_`/`-`, at least 2 chars — mirrors the daemon's account-name rule. */
+export function isValidUsername(username: string): boolean {
+  return /^[a-z0-9_-]{2,}$/.test(username.trim())
+}
+
 /** Convenience: validate using a saved ConnectHost + an explicit token
  *  (the user may be re-entering a rejected/expired one). */
 export function validateConnectHost(
