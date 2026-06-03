@@ -57,12 +57,19 @@ export const K2_CONNECT_MANIFEST: SettingEntry[] = [
   { id: 'k2-connect.server-addr', section: 'k2-connect', label: 'Tunnel Server Address', description: 'The K2 Connect frps endpoint', keywords: ['server', 'frps', 'address', 'hetzner', 'endpoint'] },
   { id: 'k2-connect.start-stop', section: 'k2-connect', label: 'Start / Stop Tunnel', description: 'Expose this device at a public URL', keywords: ['start', 'stop', 'tunnel', 'expose', 'connect'] },
   { id: 'k2-connect.auto-start', section: 'k2-connect', label: 'Re-launch tunnel on restart', description: 'Automatically start this tunnel when the daemon restarts', keywords: ['auto', 'autostart', 'restart', 'reconnect', 'boot', 'relaunch'] },
+  { id: 'k2-connect.users', section: 'k2-connect', label: 'Users / Access', description: 'People you allow to connect in to this device’s daemon', keywords: ['users', 'access', 'people', 'login', 'password', 'connect in', 'multi-user', 'allow', 'invite'] },
 ]
 
 interface TunnelStatus {
   running: boolean
   public_url: string | null
   frpc_installed: boolean
+}
+
+interface K2User {
+  username: string
+  createdAt?: string | null
+  disabled: boolean
 }
 
 interface TunnelConfigView {
@@ -94,6 +101,35 @@ async function tunnelPost(suffix: string, body?: unknown): Promise<Response> {
   const send = async (): Promise<Response> => {
     const creds = await getDaemonWs()
     return fetch(`${daemonHttpBase(creds)}/cli/tunnel/${suffix}?token=${creds.token}`, {
+      method: 'POST',
+      headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    })
+  }
+  const res = await send()
+  if (res.status !== 403) return res
+  invalidateDaemonWs()
+  return send()
+}
+
+// ── Users / Access (owner-gated /cli/users/*) ──────────────────────────
+// Same stale-token-retry shape as tunnelGet/tunnelPost: the LOCAL daemon
+// creds from getDaemonWs() carry the owner token these routes require.
+async function userGet(suffix: string): Promise<Response> {
+  const send = async (): Promise<Response> => {
+    const creds = await getDaemonWs()
+    return fetch(`${daemonHttpBase(creds)}/cli/users${suffix}?token=${creds.token}`, { method: 'GET' })
+  }
+  const res = await send()
+  if (res.status !== 403) return res
+  invalidateDaemonWs()
+  return send()
+}
+
+async function userPost(suffix: string, body?: unknown): Promise<Response> {
+  const send = async (): Promise<Response> => {
+    const creds = await getDaemonWs()
+    return fetch(`${daemonHttpBase(creds)}/cli/users${suffix}?token=${creds.token}`, {
       method: 'POST',
       headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -169,6 +205,23 @@ export function K2ConnectSection(): React.JSX.Element {
   const [boundMsg, setBoundMsg] = useState<string | null>(null)
   const [showAdvanced, setShowAdvanced] = useState(false)
 
+  // ── Users / Access state ──────────────────────────────────────────────
+  const [users, setUsers] = useState<K2User[]>([])
+  const [usersLoaded, setUsersLoaded] = useState(false)
+  const [newUsername, setNewUsername] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [addBusy, setAddBusy] = useState(false)
+  const [addError, setAddError] = useState<string | null>(null)
+  const [addedMsg, setAddedMsg] = useState<string | null>(null)
+  const [usersError, setUsersError] = useState<string | null>(null)
+  // username currently revealing its reset-password input
+  const [resetFor, setResetFor] = useState<string | null>(null)
+  const [resetPassword, setResetPassword] = useState('')
+  const [resetBusy, setResetBusy] = useState(false)
+  const [resetMsg, setResetMsg] = useState<string | null>(null)
+  // username currently pending a remove confirm
+  const [removeConfirm, setRemoveConfirm] = useState<string | null>(null)
+
   // Load config + status on mount, then poll status while mounted.
   useEffect(() => {
     void (async () => {
@@ -184,6 +237,7 @@ export function K2ConnectSection(): React.JSX.Element {
         }
       } catch { /* ignore */ }
       void refreshStatus()
+      void refreshUsers()
     })()
     // Restore the account session from the keychain (independent of the
     // tunnel-config load above — must NOT block it).
@@ -213,6 +267,104 @@ export function K2ConnectSection(): React.JSX.Element {
       const res = await tunnelGet('status')
       if (res.ok) setStatus((await res.json()) as TunnelStatus)
     } catch { /* ignore */ }
+  }
+
+  // ── Users / Access actions ────────────────────────────────────────────
+  const refreshUsers = async (): Promise<void> => {
+    try {
+      const res = await userGet('')
+      if (res.ok) {
+        const data = (await res.json()) as { users?: K2User[] }
+        setUsers(Array.isArray(data.users) ? data.users : [])
+        setUsersError(null)
+      } else {
+        setUsersError(await errText(res))
+      }
+    } catch (e) {
+      setUsersError(e instanceof Error ? e.message : 'Failed to load users')
+    } finally {
+      setUsersLoaded(true)
+    }
+  }
+
+  const addUser = async (): Promise<void> => {
+    const username = newUsername.trim().toLowerCase()
+    const pw = newPassword
+    if (!username || !pw) return
+    setAddBusy(true)
+    setAddError(null)
+    setAddedMsg(null)
+    try {
+      const res = await userPost('/add', { username, password: pw })
+      if (!res.ok) {
+        setAddError(await errText(res))
+        return
+      }
+      setNewUsername('')
+      setNewPassword('')
+      setAddedMsg(`Added — share these credentials with the user.`)
+      setTimeout(() => setAddedMsg(null), 4000)
+      await refreshUsers()
+    } catch (e) {
+      setAddError(e instanceof Error ? e.message : 'Failed to add user')
+    } finally {
+      setAddBusy(false)
+    }
+  }
+
+  const submitReset = async (username: string): Promise<void> => {
+    if (!resetPassword) return
+    setResetBusy(true)
+    setUsersError(null)
+    try {
+      const res = await userPost('/set-password', { username, password: resetPassword })
+      if (!res.ok) {
+        setUsersError(await errText(res))
+        return
+      }
+      setResetFor(null)
+      setResetPassword('')
+      setResetMsg(`Password reset for ${username}.`)
+      setTimeout(() => setResetMsg(null), 4000)
+      await refreshUsers()
+    } catch (e) {
+      setUsersError(e instanceof Error ? e.message : 'Failed to reset password')
+    } finally {
+      setResetBusy(false)
+    }
+  }
+
+  const toggleDisabled = async (username: string, disabled: boolean): Promise<void> => {
+    // Optimistic flip with revert-on-failure.
+    setUsers((prev) => prev.map((u) => (u.username === username ? { ...u, disabled } : u)))
+    setUsersError(null)
+    try {
+      const res = await userPost('/set-disabled', { username, disabled })
+      if (!res.ok) {
+        setUsers((prev) => prev.map((u) => (u.username === username ? { ...u, disabled: !disabled } : u)))
+        setUsersError(await errText(res))
+        return
+      }
+      await refreshUsers()
+    } catch (e) {
+      setUsers((prev) => prev.map((u) => (u.username === username ? { ...u, disabled: !disabled } : u)))
+      setUsersError(e instanceof Error ? e.message : 'Failed to update user')
+    }
+  }
+
+  const removeUser = async (username: string): Promise<void> => {
+    setUsersError(null)
+    try {
+      const res = await userPost('/remove', { username })
+      if (!res.ok) {
+        setUsersError(await errText(res))
+        return
+      }
+      setRemoveConfirm(null)
+      await refreshUsers()
+    } catch (e) {
+      setUsersError(e instanceof Error ? e.message : 'Failed to remove user')
+    }
   }
 
   const saveConfig = async (): Promise<void> => {
@@ -655,6 +807,179 @@ export function K2ConnectSection(): React.JSX.Element {
             </SettingsGroup>
           )}
         </div>
+
+        {/* ── Users / Access — owner-gated multi-user list (task #617) ──── */}
+        <SettingsGroup title="Users / Access">
+          <div data-settings-id="k2-connect.users" className="space-y-3">
+            <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed">
+              People you allow to connect IN to this device&apos;s daemon. You set each
+              person&apos;s username + initial password; they sign in from their K2 app (or
+              change their own password at <span className="font-mono">https://&lt;sub&gt;.k2.dev</span>).
+              You can&apos;t view a password after setting it — only reset it.
+            </p>
+
+            {/* Add-user form */}
+            <form
+              className="flex flex-col gap-2"
+              onSubmit={(e) => {
+                e.preventDefault()
+                void addUser()
+              }}
+            >
+              <div className="flex gap-1.5">
+                <input
+                  className={inputCls}
+                  style={{ maxWidth: 150 }}
+                  placeholder="username"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  value={newUsername}
+                  onChange={(e) => setNewUsername(e.target.value)}
+                />
+                <input
+                  className={inputCls}
+                  style={{ maxWidth: 180 }}
+                  type="password"
+                  autoComplete="new-password"
+                  placeholder="initial password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                />
+                <button
+                  type="submit"
+                  disabled={addBusy || !newUsername.trim() || !newPassword}
+                  className="px-3 py-1 text-[11px] text-white bg-[var(--color-accent)] hover:opacity-90 no-drag cursor-pointer disabled:opacity-60"
+                >
+                  {addBusy ? 'Adding…' : 'Add user'}
+                </button>
+              </div>
+              {addError && (
+                <div className="text-[10px] text-red-400 px-2 py-1 border border-red-400/20 bg-red-400/5">{addError}</div>
+              )}
+              {addedMsg && <div className="text-[10px] text-green-400">{addedMsg}</div>}
+            </form>
+
+            {usersError && (
+              <div className="text-[10px] text-red-400 px-2 py-1 border border-red-400/20 bg-red-400/5">{usersError}</div>
+            )}
+            {resetMsg && <div className="text-[10px] text-green-400">{resetMsg}</div>}
+
+            {/* User list */}
+            {usersLoaded && users.length === 0 ? (
+              <div className="text-[10px] text-[var(--color-text-muted)] py-1">
+                No users yet — add one above.
+              </div>
+            ) : (
+              <div className="divide-y divide-[var(--color-border)]">
+                {users.map((u) => (
+                  <div key={u.username} className="py-2 space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="flex items-center gap-2 min-w-0">
+                        <span className="text-xs text-[var(--color-text-primary)] font-mono truncate">{u.username}</span>
+                        {u.disabled && (
+                          <span className="text-[8px] uppercase tracking-wider font-semibold px-1.5 py-0.5 bg-[var(--color-text-muted)]/15 text-[var(--color-text-muted)]">
+                            disabled
+                          </span>
+                        )}
+                      </span>
+                      <div className="flex items-center gap-3 flex-shrink-0">
+                        {/* Disable / Enable — peer-checked checkbox (matches auto-start) */}
+                        <label className="flex items-center gap-1.5 cursor-pointer select-none no-drag">
+                          <input
+                            type="checkbox"
+                            checked={!u.disabled}
+                            onChange={(e) => void toggleDisabled(u.username, !e.target.checked)}
+                            className="peer sr-only"
+                          />
+                          <span
+                            aria-hidden="true"
+                            className="w-3 h-3 flex-shrink-0 flex items-center justify-center border transition-colors border-[var(--color-border)] bg-[var(--color-bg-elevated)] peer-checked:bg-[var(--color-accent)] peer-checked:border-[var(--color-accent)] peer-focus-visible:ring-1 peer-focus-visible:ring-[var(--color-accent)]"
+                          >
+                            {!u.disabled && (
+                              <svg viewBox="0 0 12 12" className="w-2.5 h-2.5" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M2.5 6.5 L5 9 L9.5 3.5" />
+                              </svg>
+                            )}
+                          </span>
+                          <span className="text-[10px] text-[var(--color-text-secondary)]">Enabled</span>
+                        </label>
+                        <button
+                          onClick={() => {
+                            setResetFor((cur) => (cur === u.username ? null : u.username))
+                            setResetPassword('')
+                          }}
+                          className="text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] hover:underline no-drag cursor-pointer"
+                        >
+                          Reset password
+                        </button>
+                        {removeConfirm === u.username ? (
+                          <span className="flex items-center gap-1.5">
+                            <button
+                              onClick={() => void removeUser(u.username)}
+                              className="text-[10px] text-red-400 hover:underline no-drag cursor-pointer"
+                            >
+                              Confirm remove
+                            </button>
+                            <button
+                              onClick={() => setRemoveConfirm(null)}
+                              className="text-[10px] text-[var(--color-text-muted)] hover:underline no-drag cursor-pointer"
+                            >
+                              Cancel
+                            </button>
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => setRemoveConfirm(u.username)}
+                            className="text-[10px] text-[var(--color-text-muted)] hover:text-red-400 hover:underline no-drag cursor-pointer"
+                          >
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    {resetFor === u.username && (
+                      <form
+                        className="flex items-center gap-1.5"
+                        onSubmit={(e) => {
+                          e.preventDefault()
+                          void submitReset(u.username)
+                        }}
+                      >
+                        <input
+                          className={inputCls}
+                          style={{ maxWidth: 180 }}
+                          type="password"
+                          autoComplete="new-password"
+                          placeholder="new password"
+                          value={resetPassword}
+                          onChange={(e) => setResetPassword(e.target.value)}
+                        />
+                        <button
+                          type="submit"
+                          disabled={resetBusy || !resetPassword}
+                          className="px-3 py-1 text-[11px] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)] no-drag cursor-pointer disabled:opacity-60"
+                        >
+                          {resetBusy ? 'Saving…' : 'Set password'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setResetFor(null)
+                            setResetPassword('')
+                          }}
+                          className="text-[10px] text-[var(--color-text-muted)] hover:underline no-drag cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </form>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </SettingsGroup>
       </div>
     </div>
   )
