@@ -889,7 +889,9 @@ export function K2ConnectSection(): React.JSX.Element {
                     Min length
                     <input
                       className={inputCls}
-                      style={{ maxWidth: 56 }}
+                      // color-scheme: dark renders the native number-stepper
+                      // carrots light/white instead of the default dark.
+                      style={{ maxWidth: 56, colorScheme: 'dark' }}
                       type="number"
                       min={4}
                       max={128}
