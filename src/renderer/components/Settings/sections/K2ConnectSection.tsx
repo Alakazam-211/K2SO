@@ -540,6 +540,47 @@ export function K2ConnectSection(): React.JSX.Element {
 
         {error && <div className="text-[10px] text-red-400 px-3 py-1.5 border border-red-400/20 bg-red-400/5">{error}</div>}
 
+        {/* ── Auto-start toggle (left) + Start/Stop (right), one row,
+            above the Advanced/manual config ──────────────────────────── */}
+        <div className="flex items-center justify-between gap-3" data-settings-id="k2-connect.start-stop">
+          <label className="flex items-center gap-2 cursor-pointer select-none no-drag">
+            <input
+              type="checkbox"
+              checked={autoStart}
+              onChange={(e) => void toggleAutoStart(e.target.checked)}
+              className="peer sr-only"
+            />
+            <span
+              aria-hidden="true"
+              className="w-3 h-3 flex-shrink-0 flex items-center justify-center border transition-colors border-[var(--color-border)] bg-[var(--color-bg-elevated)] peer-checked:bg-[var(--color-accent)] peer-checked:border-[var(--color-accent)] peer-focus-visible:ring-1 peer-focus-visible:ring-[var(--color-accent)]"
+            >
+              {autoStart && (
+                <svg viewBox="0 0 12 12" className="w-2.5 h-2.5" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M2.5 6.5 L5 9 L9.5 3.5" />
+                </svg>
+              )}
+            </span>
+            <span className="text-xs text-[var(--color-text-secondary)]">Re-launch this tunnel on restart</span>
+          </label>
+          {running ? (
+            <button
+              onClick={() => void stopTunnel()}
+              disabled={busy}
+              className="px-3 py-1 text-[11px] text-white bg-red-500/80 hover:bg-red-500 no-drag cursor-pointer disabled:opacity-60"
+            >
+              Stop tunnel
+            </button>
+          ) : (
+            <button
+              onClick={() => void startTunnel()}
+              disabled={busy}
+              className="px-3 py-1 text-[11px] text-white bg-[var(--color-accent)] hover:opacity-90 no-drag cursor-pointer disabled:opacity-60"
+            >
+              Start tunnel
+            </button>
+          )}
+        </div>
+
         {/* ── Advanced / manual config (fallback) ──────────────────── */}
         <div>
           <button
@@ -609,40 +650,6 @@ export function K2ConnectSection(): React.JSX.Element {
           )}
         </div>
 
-        {/* ── Auto-start on restart ────────────────────────────────── */}
-        <label className="flex items-center gap-2 cursor-pointer select-none no-drag">
-          <input
-            type="checkbox"
-            checked={autoStart}
-            onChange={(e) => void toggleAutoStart(e.target.checked)}
-            className="accent-[var(--color-accent)] w-3.5 h-3.5 cursor-pointer"
-          />
-          <span className="text-xs text-[var(--color-text-secondary)]">
-            Re-launch this tunnel on restart
-          </span>
-        </label>
-
-        <div className="flex items-center gap-2" data-settings-id="k2-connect.start-stop">
-          <div className="ml-auto flex items-center gap-2">
-            {running ? (
-              <button
-                onClick={() => void stopTunnel()}
-                disabled={busy}
-                className="px-3 py-1 text-[11px] text-white bg-red-500/80 hover:bg-red-500 no-drag cursor-pointer disabled:opacity-60"
-              >
-                Stop tunnel
-              </button>
-            ) : (
-              <button
-                onClick={() => void startTunnel()}
-                disabled={busy}
-                className="px-3 py-1 text-[11px] text-white bg-[var(--color-accent)] hover:opacity-90 no-drag cursor-pointer disabled:opacity-60"
-              >
-                Start tunnel
-              </button>
-            )}
-          </div>
-        </div>
 
         <div className="text-[10px] text-[var(--color-text-muted)] space-y-1">
           <p>1. Sign in to k2.dev above and pick a subdomain you own (e.g. <span className="font-mono">alice</span>).</p>
