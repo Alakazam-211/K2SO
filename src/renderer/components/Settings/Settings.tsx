@@ -179,7 +179,9 @@ export default function Settings(): React.JSX.Element {
       {/* Content area */}
       <div
         className={`flex-1 min-h-0 relative ${
-          activeSection === 'projects'
+          activeSection === 'projects' ||
+          activeSection === 'k2-connect' ||
+          activeSection === 'connections'
             ? 'overflow-hidden p-0'
             : activeSection === 'dictation-lab'
               ? 'overflow-hidden p-6'
@@ -202,17 +204,22 @@ export default function Settings(): React.JSX.Element {
           </SectionErrorBoundary>
         )}
         {(activeSection === 'k2-connect' || activeSection === 'connections') && (
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-8 xl:gap-0 items-start">
-            <SectionErrorBoundary>
-              <div className="xl:pr-8">
+          <div className="flex h-full min-h-0">
+            {/* Left pane: K2 Connect (host/expose). Scrolls independently. */}
+            <div className="flex-1 min-w-0 overflow-y-auto p-6">
+              <SectionErrorBoundary>
                 <K2ConnectSection />
-              </div>
-            </SectionErrorBoundary>
-            <SectionErrorBoundary>
-              <div className="xl:pl-8 xl:border-l xl:border-[var(--color-border)]">
+              </SectionErrorBoundary>
+            </div>
+            {/* Right pane: Connections (servers you connect to). The
+                border-l is a full-height divider because both flex panes
+                stretch to the container's h-full (mirrors the Workspaces
+                settings layout). */}
+            <div className="flex-1 min-w-0 overflow-y-auto p-6 border-l border-[var(--color-border)]">
+              <SectionErrorBoundary>
                 <ConnectionsSection />
-              </div>
-            </SectionErrorBoundary>
+              </SectionErrorBoundary>
+            </div>
           </div>
         )}
         {activeSection === 'projects' && (
