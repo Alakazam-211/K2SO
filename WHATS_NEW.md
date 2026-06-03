@@ -3,6 +3,27 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.16 — K2 Connect: reach your workspace from anywhere
+
+K2SO can now expose your daemon at your own **`https://<you>.k2.dev`**
+address, so you can reach this machine from another computer.
+
+Sign in to your k2.dev account right in **Settings → K2 Connect**, pick a
+subdomain you own, and hit **Start** — your machine goes live over a secure
+tunnel. It can re-launch the tunnel automatically when the daemon restarts,
+and if the same subdomain is already running on another device it's greyed
+out so the two don't clash (swapping asks first).
+
+Decide **who** can connect in: under **Users / Access** add people with a
+username + an initial password (you set it once and can reset it, but never
+see it again), choose your password rules (length, special characters), and
+they manage their own password in a browser at your `k2.dev` address. To
+connect *to* another machine, add it under **Connections** with its URL,
+username, and password.
+
+Settings → K2 Connect and Connections are now a single page, and the
+K2 Companion page points you to the mobile app.
+
 ## 0.39.15 — No more phantom "audit bucket" projects in the sidebar
 
 New users no longer see two confusing entries — **"Orphan audit bucket"**
