@@ -26,7 +26,7 @@
 
 import React, { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { getDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
+import { getDaemonWs, daemonHttpBase, invalidateDaemonWs } from '@/kessel/daemon-ws'
 import type { SettingEntry } from '../searchManifest'
 import { SettingRow, SettingsGroup, SettingDropdown } from '../controls/SettingControls'
 import {
@@ -56,6 +56,7 @@ export const K2_CONNECT_MANIFEST: SettingEntry[] = [
   { id: 'k2-connect.token', section: 'k2-connect', label: 'K2 Connect Token', description: 'Bearer token for the frpc tunnel', keywords: ['token', 'tunnel', 'frpc', 'auth', 'bearer'] },
   { id: 'k2-connect.server-addr', section: 'k2-connect', label: 'Tunnel Server Address', description: 'The K2 Connect frps endpoint', keywords: ['server', 'frps', 'address', 'hetzner', 'endpoint'] },
   { id: 'k2-connect.start-stop', section: 'k2-connect', label: 'Start / Stop Tunnel', description: 'Expose this device at a public URL', keywords: ['start', 'stop', 'tunnel', 'expose', 'connect'] },
+  { id: 'k2-connect.auto-start', section: 'k2-connect', label: 'Re-launch tunnel on restart', description: 'Automatically start this tunnel when the daemon restarts', keywords: ['auto', 'autostart', 'restart', 'reconnect', 'boot', 'relaunch'] },
 ]
 
 interface TunnelStatus {
@@ -70,20 +71,38 @@ interface TunnelConfigView {
   subdomain: string
   tokenSet: boolean
   publicUrl: string | null
+  autoStart: boolean
 }
 
+// The daemon rotates ~/.k2so/daemon.token on every restart; getDaemonWs()
+// caches the local creds per app session and only re-fetches on WS
+// failure, so HTTP /cli/* calls can keep sending a stale token → 403
+// until a manual window reload. Wrap each request so a 403 invalidates
+// the creds cache, re-resolves fresh creds, and retries exactly once.
 async function tunnelGet(suffix: string): Promise<Response> {
-  const creds = await getDaemonWs()
-  return fetch(`${daemonHttpBase(creds)}/cli/tunnel/${suffix}?token=${creds.token}`, { method: 'GET' })
+  const send = async (): Promise<Response> => {
+    const creds = await getDaemonWs()
+    return fetch(`${daemonHttpBase(creds)}/cli/tunnel/${suffix}?token=${creds.token}`, { method: 'GET' })
+  }
+  const res = await send()
+  if (res.status !== 403) return res
+  invalidateDaemonWs()
+  return send()
 }
 
 async function tunnelPost(suffix: string, body?: unknown): Promise<Response> {
-  const creds = await getDaemonWs()
-  return fetch(`${daemonHttpBase(creds)}/cli/tunnel/${suffix}?token=${creds.token}`, {
-    method: 'POST',
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  })
+  const send = async (): Promise<Response> => {
+    const creds = await getDaemonWs()
+    return fetch(`${daemonHttpBase(creds)}/cli/tunnel/${suffix}?token=${creds.token}`, {
+      method: 'POST',
+      headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    })
+  }
+  const res = await send()
+  if (res.status !== 403) return res
+  invalidateDaemonWs()
+  return send()
 }
 
 async function errText(res: Response): Promise<string> {
@@ -133,6 +152,7 @@ export function K2ConnectSection(): React.JSX.Element {
   const [subdomain, setSubdomain] = useState('')
   const [token, setToken] = useState('')
   const [tokenSet, setTokenSet] = useState(false)
+  const [autoStart, setAutoStart] = useState(false)
   const [status, setStatus] = useState<TunnelStatus | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -160,6 +180,7 @@ export function K2ConnectSection(): React.JSX.Element {
           setServerPort(String(cfg.serverPort || DEFAULT_SERVER_PORT))
           setSubdomain(cfg.subdomain || '')
           setTokenSet(cfg.tokenSet)
+          setAutoStart(cfg.autoStart ?? false)
         }
       } catch { /* ignore */ }
       void refreshStatus()
@@ -263,6 +284,27 @@ export function K2ConnectSection(): React.JSX.Element {
       setError(e instanceof Error ? e.message : 'Stop failed')
     } finally {
       setBusy(false)
+    }
+  }
+
+  // Toggle the daemon-side "re-launch on restart" opt-in. POSTs only
+  // { autoStart } so the saved token / subdomain are untouched. Optimistic
+  // flip with revert-on-failure.
+  const toggleAutoStart = async (next: boolean): Promise<void> => {
+    setAutoStart(next)
+    setError(null)
+    try {
+      const res = await tunnelPost('config', { autoStart: next })
+      if (!res.ok) {
+        setAutoStart(!next) // revert
+        setError(await errText(res))
+        return
+      }
+      const cfg = (await res.json()) as TunnelConfigView
+      setAutoStart(cfg.autoStart ?? next)
+    } catch (e) {
+      setAutoStart(!next) // revert
+      setError(e instanceof Error ? e.message : 'Failed to update auto-start')
     }
   }
 
@@ -566,6 +608,19 @@ export function K2ConnectSection(): React.JSX.Element {
             </SettingsGroup>
           )}
         </div>
+
+        {/* ── Auto-start on restart ────────────────────────────────── */}
+        <label className="flex items-center gap-2 cursor-pointer select-none no-drag">
+          <input
+            type="checkbox"
+            checked={autoStart}
+            onChange={(e) => void toggleAutoStart(e.target.checked)}
+            className="accent-[var(--color-accent)] w-3.5 h-3.5 cursor-pointer"
+          />
+          <span className="text-xs text-[var(--color-text-secondary)]">
+            Re-launch this tunnel on restart
+          </span>
+        </label>
 
         <div className="flex items-center gap-2" data-settings-id="k2-connect.start-stop">
           <div className="ml-auto flex items-center gap-2">

@@ -102,6 +102,7 @@ mod tests {
             token: "tok_secret".to_string(),
             subdomain: "rosson".to_string(),
             local_port: Some(57839),
+            ..Default::default()
         }
     }
 

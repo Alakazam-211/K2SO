@@ -43,6 +43,8 @@ pub struct TunnelConfigView {
     pub subdomain: String,
     pub token_set: bool,
     pub public_url: Option<String>,
+    /// Re-launch this tunnel on daemon boot (camelCase `autoStart`).
+    pub auto_start: bool,
 }
 
 impl From<&TunnelConfig> for TunnelConfigView {
@@ -53,6 +55,7 @@ impl From<&TunnelConfig> for TunnelConfigView {
             subdomain: c.subdomain.clone(),
             token_set: !c.token.trim().is_empty(),
             public_url: c.public_url(),
+            auto_start: c.auto_start,
         }
     }
 }
@@ -67,6 +70,7 @@ pub struct TunnelConfigUpdate {
     pub server_port: Option<u16>,
     pub subdomain: Option<String>,
     pub token: Option<String>,
+    pub auto_start: Option<bool>,
 }
 
 /// Read the stored tunnel config as a redacted view (token stays in the
@@ -96,6 +100,9 @@ pub fn set_config(upd: TunnelConfigUpdate) -> Result<TunnelConfigView, String> {
             if !t.trim().is_empty() {
                 c.token = t.trim().to_string();
             }
+        }
+        if let Some(a) = upd.auto_start {
+            c.auto_start = a;
         }
     })?;
     Ok((&cfg).into())

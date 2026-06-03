@@ -600,11 +600,79 @@ async fn async_main() {
     boot_status::set_ready();
     log_debug!("[daemon] boot complete — phase=ready");
 
+    // K2 Connect — re-launch the frpc tunnel on boot when the user opted
+    // in (tunnel.json `auto_start: true`) AND the config is connectable.
+    // Runs AFTER the readiness gate so frpc proxies a fully-booted daemon.
+    // Detached + fully fault-isolated: it can never block or crash boot
+    // (see `maybe_autostart_tunnel`).
+    maybe_autostart_tunnel(port);
+
     // Keep the process alive until shutdown; the accept loop runs as its
     // own task (spawned above). A Ctrl+C during the migration sweep was
     // buffered on `main_shutdown_rx`, so this returns promptly then too.
     let _ = main_shutdown_rx.recv().await;
     log_debug!("[daemon] async_main exiting");
+}
+
+/// K2 Connect tunnel first-boot autostart. Mirrors
+/// [`companion_host::maybe_autostart`]: when the user opted in
+/// (`~/.k2so/tunnel.json` `auto_start: true`) and the stored config is
+/// connectable (token + server present), re-launch the `frpc` tunnel for
+/// the saved subdomain so the daemon is reachable at `<sub>.k2.dev`
+/// after a restart without the user reopening Settings.
+///
+/// Fault isolation contract — this MUST NOT block or crash boot:
+///   * The actual work runs on a detached `tokio::spawn` task, so the
+///     boot path returns immediately.
+///   * The blocking `frpc` spawn runs inside `spawn_blocking` so it never
+///     stalls a runtime worker.
+///   * Every failure mode (load error, frpc-not-installed, spawn error,
+///     join error) is logged at info/warn and swallowed — never panics.
+///   * A missing / non-`auto_start` / non-connectable config is a silent
+///     no-op (the common case).
+fn maybe_autostart_tunnel(daemon_port: u16) {
+    tokio::spawn(async move {
+        // Cheap read of the opt-in flag off the boot path.
+        let cfg = match k2so_core::tunnel::config::load() {
+            Ok(c) => c,
+            Err(e) => {
+                log_debug!("[daemon/tunnel] auto-start: skipped (load tunnel.json failed: {e})");
+                return;
+            }
+        };
+        if !cfg.auto_start {
+            return; // not opted in — the common case, no log noise
+        }
+        if !cfg.is_connectable() {
+            log_debug!(
+                "[daemon/tunnel] auto-start enabled but config not connectable (missing token/server) — skipping"
+            );
+            return;
+        }
+
+        log_debug!("[daemon/tunnel] auto-start: launching frpc tunnel on daemon port {daemon_port}");
+        // frpc spawn blocks; isolate it on the blocking pool so it can't
+        // stall a runtime worker. `start_tunnel(None, …)` uses the saved
+        // subdomain from tunnel.json.
+        let join = tokio::task::spawn_blocking(move || {
+            k2so_core::tunnel::start_tunnel(None, daemon_port)
+        })
+        .await;
+
+        match join {
+            Ok(Ok(st)) => log_debug!(
+                "[daemon/tunnel] auto-started: running={} url={:?}",
+                st.running,
+                st.public_url
+            ),
+            Ok(Err(e)) => log_debug!(
+                "[daemon/tunnel] auto-start failed (tunnel not running; daemon unaffected): {e}"
+            ),
+            Err(e) => log_debug!(
+                "[daemon/tunnel] auto-start task panicked/cancelled (daemon unaffected): {e}"
+            ),
+        }
+    });
 }
 
 /// Re-claim `~/.k2so/heartbeat.port` if something else has stomped it.

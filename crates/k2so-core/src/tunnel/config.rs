@@ -14,7 +14,8 @@
 //!   "server_port": 7000,
 //!   "token": "<k2so-bearer>",
 //!   "subdomain": "rosson",
-//!   "local_port": 57839
+//!   "local_port": 57839,
+//!   "auto_start": false
 //! }
 //! ```
 //!
@@ -68,6 +69,13 @@ pub struct TunnelConfig {
     /// connector fills it with the live daemon port at start time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_port: Option<u16>,
+
+    /// Opt-in: re-launch this tunnel automatically on daemon boot. When
+    /// true AND the config [`is_connectable`](TunnelConfig::is_connectable),
+    /// the daemon starts `frpc` for the saved subdomain once it's ready.
+    /// Defaults false so a fresh / un-opted config never auto-dials.
+    #[serde(default)]
+    pub auto_start: bool,
 }
 
 fn default_server_host() -> String {
@@ -86,6 +94,7 @@ impl Default for TunnelConfig {
             token: String::new(),
             subdomain: String::new(),
             local_port: None,
+            auto_start: false,
         }
     }
 }
@@ -202,6 +211,18 @@ mod tests {
         assert_eq!(cfg.server_port, 7000);
         assert!(cfg.token.is_empty());
         assert!(cfg.local_port.is_none());
+        assert!(!cfg.auto_start, "auto_start must default off");
+    }
+
+    #[test]
+    fn auto_start_defaults_false_when_absent_from_json() {
+        // A pre-auto_start tunnel.json (no field) must deserialize with
+        // auto_start = false — never silently auto-dial after an upgrade.
+        let cfg: TunnelConfig =
+            serde_json::from_str(r#"{"token":"tok","subdomain":"rosson"}"#)
+                .expect("parse legacy config");
+        assert!(!cfg.auto_start);
+        assert_eq!(cfg.token, "tok");
     }
 
     #[test]
@@ -237,6 +258,7 @@ mod tests {
                 token: "tok_secret".to_string(),
                 subdomain: "rosson".to_string(),
                 local_port: Some(57839),
+                auto_start: true,
             };
             save(&cfg).expect("save");
             let back = load().expect("load");
