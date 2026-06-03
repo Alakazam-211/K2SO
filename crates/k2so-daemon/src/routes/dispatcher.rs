@@ -407,6 +407,27 @@ async fn handle_one_request(
             .to_string();
             super::http::send_response(&mut *stream, "200 OK", "application/json", &body).await;
         }
+        // GET / and GET /account — the ONLY browser-facing HTML the daemon
+        // serves: a tiny self-contained self-service account page for
+        // connect-users (log in → change password) reached at
+        // `https://<sub>.k2.dev`. Unauthenticated to LOAD (it's a login
+        // form); its fetches hit the token-gated /cli/auth/* routes.
+        //
+        // Safe to mount at bare `/`: the K2 app talks only to /cli/*, /ping,
+        // /health, /boot-status, and the /events WS — never `/`, which
+        // previously fell through to the 404 arm. POST/other methods to `/`
+        // still 404 via the catch-all.
+        "/" | "/account" if !is_post => {
+            let _ = stream.read(&mut buf).await;
+            let html = crate::connect_users_routes::account_page_html();
+            super::http::send_response(
+                &mut *stream,
+                "200 OK",
+                "text/html; charset=utf-8",
+                &html,
+            )
+            .await;
+        }
         "/status" => {
             let _ = stream.read(&mut buf).await;
             // Token-gated. Returns a small JSON blob describing the
@@ -1005,6 +1026,38 @@ async fn handle_one_request(
             } else {
                 crate::cli::CliResponse::forbidden()
             };
+            super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
+        }
+        // POST /cli/auth/change-password — SELF-SERVICE (connect-user
+        // only). Authorized by the connect-user's SESSION token (the
+        // extended `token_ok` accepts it), and the actual username is
+        // resolved here from `validate_session`. The OWNER (daemon token,
+        // no session) resolves to None → handle_change_password returns a
+        // generic 401: this route is for connect-users changing their OWN
+        // password, not the owner. POST-gated. argon2 verify+re-hash is
+        // slow → spawn_blocking.
+        "/cli/auth/change-password" => {
+            if !super::http::require_post(&mut *stream, &mut buf, is_post).await { return DispatchOutcome::Done; }
+            let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
+            let tok = super::http::extract_token(&query).unwrap_or("").to_string();
+            // Owner token does NOT resolve to a connect-user; only a live
+            // session does. Resolve before the blocking hop.
+            let username = if !tok.is_empty() && tok == state.token.as_str() {
+                None
+            } else {
+                k2so_core::connect_users::validate_session(&tok)
+            };
+            let r = tokio::task::spawn_blocking(move || {
+                crate::connect_users_routes::handle_change_password(username, &body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse::internal_error(format!("worker join: {e}")));
+            // Fixed delay on the 401 path mirrors /cli/auth/login so the
+            // self-service form can't be used as a faster brute-force
+            // oracle than login itself.
+            if r.status.starts_with("401") {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
             super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
         }
         // POST /cli/claude-auth/refresh-now — Phase 2 Unit 5.

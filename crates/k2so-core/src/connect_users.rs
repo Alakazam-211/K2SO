@@ -39,6 +39,13 @@ use serde::{Deserialize, Serialize};
 /// means a daemon restart also ends the session early.
 const SESSION_TTL_DAYS: i64 = 30;
 
+/// Brute-force lockout policy: this many consecutive failed password
+/// attempts for one username triggers a lockout.
+const LOCKOUT_THRESHOLD: u32 = 3;
+
+/// How long a username stays locked once the threshold is hit.
+const LOCKOUT_DURATION_MINUTES: i64 = 15;
+
 /// A provisioned connect-user account. Persisted to
 /// `~/.k2so/connect-users.json`. The `password_hash` is an argon2id
 /// PHC string and is NEVER exposed off-disk (see [`ConnectUserView`]).
@@ -346,6 +353,154 @@ fn build_dummy_hash() -> String {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Brute-force lockout (in-memory, per-username)
+// ─────────────────────────────────────────────────────────────────────
+
+/// Per-username failed-attempt + lockout state. In-memory only (resets
+/// on daemon restart, which is acceptable — a restart is rare and the
+/// worst case is an attacker getting their counter reset, still bounded
+/// by the slow argon2 verify + the route-layer fixed delay).
+#[derive(Debug, Clone, Default)]
+struct LockEntry {
+    /// Consecutive failed password attempts since the last success/clear.
+    failed_count: u32,
+    /// If `Some`, the username is locked until this instant. While locked,
+    /// attempts are rejected WITHOUT checking the password and do NOT
+    /// extend the lock.
+    locked_until: Option<DateTime<Utc>>,
+}
+
+fn locks() -> &'static Mutex<HashMap<String, LockEntry>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, LockEntry>>> = OnceLock::new();
+    LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lock_locks() -> std::sync::MutexGuard<'static, HashMap<String, LockEntry>> {
+    locks().lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// The outcome of a credential check routed through the lockout gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginOutcome {
+    /// Credentials verified; the lockout counter has been cleared.
+    Ok,
+    /// Username is currently locked; the password was NOT checked.
+    LockedOut,
+    /// Wrong credentials (unknown user, disabled, or bad password). The
+    /// failure has been recorded and may have just triggered a lockout.
+    BadCreds,
+}
+
+/// Verify `password` for `username` THROUGH the brute-force lockout gate.
+/// This is the single entry point the login + change-password paths use
+/// so the policy can never be bypassed.
+///
+/// Policy:
+/// - If the username is currently locked (`now < locked_until`): return
+///   `LockedOut` WITHOUT verifying the password and WITHOUT extending the
+///   lock (a locked attempt doesn't push the deadline out).
+/// - Otherwise verify the password via [`verify`]:
+///   - On success: clear the entry, return `Ok`.
+///   - On failure: increment `failed_count`; at [`LOCKOUT_THRESHOLD`] set
+///     `locked_until = now + LOCKOUT_DURATION` and reset the count to 0,
+///     then return `BadCreds`.
+///
+/// Lockout is keyed by the *normalized* username so casing can't be used
+/// to dodge the counter. An un-normalizable username can never match a
+/// stored account; it's keyed under its lossy lowercase form so repeated
+/// junk still gets rate-limited rather than silently uncounted.
+pub fn check_and_record(username: &str, password: &str) -> LoginOutcome {
+    let key = normalize_username(username).unwrap_or_else(|_| username.trim().to_ascii_lowercase());
+
+    // First: are we currently locked? Hold the lock only long enough to
+    // read; release before the (slow) argon2 verify.
+    {
+        let mut map = lock_locks();
+        if let Some(entry) = map.get_mut(&key) {
+            match entry.locked_until {
+                Some(until) if Utc::now() < until => return LoginOutcome::LockedOut,
+                Some(_) => {
+                    // Lock expired — clear it and let this attempt proceed
+                    // with a fresh counter.
+                    entry.locked_until = None;
+                    entry.failed_count = 0;
+                }
+                None => {}
+            }
+        }
+    }
+
+    // Not locked: do the real (slow) verify outside the lock.
+    let ok = verify(username, password);
+
+    let mut map = lock_locks();
+    if ok {
+        map.remove(&key);
+        LoginOutcome::Ok
+    } else {
+        let entry = map.entry(key).or_default();
+        entry.failed_count += 1;
+        if entry.failed_count >= LOCKOUT_THRESHOLD {
+            entry.locked_until = Some(Utc::now() + Duration::minutes(LOCKOUT_DURATION_MINUTES));
+            entry.failed_count = 0;
+        }
+        LoginOutcome::BadCreds
+    }
+}
+
+/// Result of a self-service password change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangePasswordOutcome {
+    /// Password changed; all of the user's sessions were revoked.
+    Ok,
+    /// Current password was wrong (routed through the lockout gate) OR the
+    /// username is currently locked. Generic — the route must not reveal
+    /// which.
+    BadCurrent,
+    /// New password failed validation (e.g. too short).
+    WeakNew,
+}
+
+/// Minimum length for a self-service new password.
+const MIN_NEW_PASSWORD_LEN: usize = 8;
+
+/// Self-service password change for an authenticated connect-user.
+/// Verifies `current` THROUGH the lockout gate (so a self-service form
+/// can't be used to brute-force the current password), validates the new
+/// password length, then [`set_password`] (which re-hashes AND revokes
+/// every live session for the user, forcing a re-login everywhere).
+pub fn change_password(username: &str, current: &str, new: &str) -> ChangePasswordOutcome {
+    match check_and_record(username, current) {
+        LoginOutcome::Ok => {}
+        LoginOutcome::LockedOut | LoginOutcome::BadCreds => {
+            return ChangePasswordOutcome::BadCurrent
+        }
+    }
+    if new.len() < MIN_NEW_PASSWORD_LEN {
+        return ChangePasswordOutcome::WeakNew;
+    }
+    // set_password re-hashes and revokes ALL of this user's sessions
+    // (including the one that authorized this call) → forced re-login.
+    match set_password(username, new) {
+        Ok(()) => ChangePasswordOutcome::Ok,
+        // The user was resolved from a live session, so the account
+        // exists; a failure here is an unexpected store error. Treat as a
+        // generic bad-current rather than leaking internals.
+        Err(_) => ChangePasswordOutcome::BadCurrent,
+    }
+}
+
+/// Whether `username` is currently locked out. Read-only; used by callers
+/// that want to surface a hint without attempting a verify.
+pub fn is_locked(username: &str) -> bool {
+    let key = normalize_username(username).unwrap_or_else(|_| username.trim().to_ascii_lowercase());
+    match lock_locks().get(&key).and_then(|e| e.locked_until) {
+        Some(until) => Utc::now() < until,
+        None => false,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Sessions (in-memory singleton)
 // ─────────────────────────────────────────────────────────────────────
 
@@ -561,6 +716,127 @@ mod tests {
     fn unknown_token_validates_to_none() {
         with_temp_home(|| {
             assert_eq!(validate_session("deadbeef"), None);
+        });
+    }
+
+    #[test]
+    fn lockout_after_three_fails_rejects_even_correct_password() {
+        with_temp_home(|| {
+            add_user("lock1", "rightpass").expect("add");
+            // Three wrong attempts → locked.
+            assert_eq!(check_and_record("lock1", "x"), LoginOutcome::BadCreds);
+            assert_eq!(check_and_record("lock1", "x"), LoginOutcome::BadCreds);
+            assert_eq!(check_and_record("lock1", "x"), LoginOutcome::BadCreds);
+            assert!(is_locked("lock1"), "3 fails must lock");
+            // Now even the CORRECT password is rejected as LockedOut
+            // (and the password is not even checked).
+            assert_eq!(
+                check_and_record("lock1", "rightpass"),
+                LoginOutcome::LockedOut,
+                "locked account rejects correct password without checking"
+            );
+        });
+    }
+
+    #[test]
+    fn success_before_threshold_clears_failed_count() {
+        with_temp_home(|| {
+            add_user("lock2", "rightpass").expect("add");
+            assert_eq!(check_and_record("lock2", "x"), LoginOutcome::BadCreds);
+            assert_eq!(check_and_record("lock2", "x"), LoginOutcome::BadCreds);
+            // Success on the 3rd attempt clears the counter.
+            assert_eq!(check_and_record("lock2", "rightpass"), LoginOutcome::Ok);
+            assert!(!is_locked("lock2"));
+            // Two more fails should NOT lock (counter was reset).
+            assert_eq!(check_and_record("lock2", "x"), LoginOutcome::BadCreds);
+            assert_eq!(check_and_record("lock2", "x"), LoginOutcome::BadCreds);
+            assert!(!is_locked("lock2"), "counter must have reset on success");
+        });
+    }
+
+    #[test]
+    fn locked_attempt_does_not_extend_lock_and_expiry_clears() {
+        with_temp_home(|| {
+            add_user("lock3", "rightpass").expect("add");
+            for _ in 0..LOCKOUT_THRESHOLD {
+                assert_eq!(check_and_record("lock3", "x"), LoginOutcome::BadCreds);
+            }
+            assert!(is_locked("lock3"));
+            // Manually force the lock to have already expired, simulating
+            // the 15-minute window elapsing.
+            {
+                let mut map = lock_locks();
+                let e = map.get_mut("lock3").expect("entry");
+                e.locked_until = Some(Utc::now() - Duration::seconds(1));
+            }
+            assert!(!is_locked("lock3"), "expired lock reads as unlocked");
+            // After expiry the correct password works again and clears
+            // the entry.
+            assert_eq!(check_and_record("lock3", "rightpass"), LoginOutcome::Ok);
+        });
+    }
+
+    #[test]
+    fn change_password_happy_path_revokes_sessions() {
+        with_temp_home(|| {
+            add_user("chp1", "oldpassword").expect("add");
+            let tok = create_session("chp1");
+            assert_eq!(validate_session(&tok), Some("chp1".to_string()));
+            assert_eq!(
+                change_password("chp1", "oldpassword", "newpassword"),
+                ChangePasswordOutcome::Ok
+            );
+            assert!(verify("chp1", "newpassword"));
+            assert!(!verify("chp1", "oldpassword"));
+            assert_eq!(
+                validate_session(&tok),
+                None,
+                "change-password must revoke existing sessions"
+            );
+        });
+    }
+
+    #[test]
+    fn change_password_wrong_current_is_bad_current() {
+        with_temp_home(|| {
+            add_user("chp2", "oldpassword").expect("add");
+            assert_eq!(
+                change_password("chp2", "WRONG", "newpassword"),
+                ChangePasswordOutcome::BadCurrent
+            );
+            // Password unchanged.
+            assert!(verify("chp2", "oldpassword"));
+        });
+    }
+
+    #[test]
+    fn change_password_short_new_is_weak() {
+        with_temp_home(|| {
+            add_user("chp3", "oldpassword").expect("add");
+            assert_eq!(
+                change_password("chp3", "oldpassword", "short"),
+                ChangePasswordOutcome::WeakNew
+            );
+            assert!(verify("chp3", "oldpassword"), "weak-new must not change pw");
+        });
+    }
+
+    #[test]
+    fn change_password_through_lockout_locks_after_three_wrong_current() {
+        with_temp_home(|| {
+            add_user("chp4", "oldpassword").expect("add");
+            for _ in 0..LOCKOUT_THRESHOLD {
+                assert_eq!(
+                    change_password("chp4", "WRONG", "newpassword"),
+                    ChangePasswordOutcome::BadCurrent
+                );
+            }
+            assert!(is_locked("chp4"), "self-service form is subject to lockout");
+            // Even the correct current password is now rejected.
+            assert_eq!(
+                change_password("chp4", "oldpassword", "newpassword"),
+                ChangePasswordOutcome::BadCurrent
+            );
         });
     }
 

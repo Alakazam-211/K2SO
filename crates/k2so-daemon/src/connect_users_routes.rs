@@ -146,8 +146,15 @@ pub fn handle_login(body: &[u8]) -> CliResponse {
         Ok(r) => r,
         Err(_) => return login_failed(),
     };
-    if !connect_users::verify(&req.username, &req.password) {
-        return login_failed();
+    // Route every credential check through the brute-force lockout gate
+    // (3 consecutive fails → 15-minute per-username lockout). The 401 it
+    // returns is the SAME generic body whether the creds were wrong or
+    // the account is currently locked — no user/lock enumeration.
+    match connect_users::check_and_record(&req.username, &req.password) {
+        connect_users::LoginOutcome::Ok => {}
+        connect_users::LoginOutcome::BadCreds | connect_users::LoginOutcome::LockedOut => {
+            return login_failed();
+        }
     }
     // verify() lowercases internally; issue the session under the
     // canonical username so whoami/echo is stable.
@@ -165,6 +172,254 @@ pub fn handle_login(body: &[u8]) -> CliResponse {
         })
         .to_string(),
     )
+}
+
+/// Render the self-service account HTML page. Self-contained: inline CSS
+/// + vanilla JS, NO build step, NO external assets. Served same-origin so
+/// `fetch('/cli/auth/login')` + `fetch('/cli/auth/change-password')` hit
+/// THIS daemon at `https://<sub>.k2.dev`.
+///
+/// The `<sub>` in the heading is the configured tunnel subdomain (read
+/// from `k2so_core::tunnel::config::load().subdomain`), falling back to
+/// "this server" when unset/unreadable.
+pub fn account_page_html() -> String {
+    let sub = k2so_core::tunnel::config::load()
+        .ok()
+        .map(|c| c.subdomain)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "this server".to_string());
+    // Escape the subdomain for safe HTML text interpolation (it's a
+    // validated label, but belt-and-suspenders).
+    let sub = sub
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    format!(
+        r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>K2 account</title>
+<style>
+  :root {{ color-scheme: dark; }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0d1117; color: #e6edf3;
+  }}
+  .card {{
+    width: min(380px, calc(100vw - 32px));
+    background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+    padding: 28px 26px; box-shadow: 0 10px 40px rgba(0,0,0,.5);
+  }}
+  h1 {{ font-size: 17px; font-weight: 600; margin: 0 0 4px; }}
+  .sub {{ color: #8b949e; font-size: 13px; margin: 0 0 20px; }}
+  label {{ display: block; font-size: 12px; color: #8b949e; margin: 14px 0 5px; }}
+  input {{
+    width: 100%; padding: 9px 11px; border-radius: 7px;
+    border: 1px solid #30363d; background: #0d1117; color: #e6edf3; font-size: 14px;
+  }}
+  input:focus {{ outline: none; border-color: #1f6feb; box-shadow: 0 0 0 3px rgba(31,111,235,.3); }}
+  button {{
+    width: 100%; margin-top: 20px; padding: 10px; border: 0; border-radius: 7px;
+    background: #238636; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
+  }}
+  button:hover {{ background: #2ea043; }}
+  button:disabled {{ opacity: .6; cursor: default; }}
+  .msg {{ margin-top: 14px; font-size: 13px; min-height: 18px; }}
+  .msg.err {{ color: #f85149; }}
+  .msg.ok {{ color: #3fb950; }}
+  .hidden {{ display: none; }}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Log in to manage your account for <code>{sub}</code></h1>
+    <p class="sub">Enter your K2 Connect credentials.</p>
+
+    <form id="loginForm">
+      <label for="u">Username</label>
+      <input id="u" name="username" autocomplete="username" autocapitalize="none" autocorrect="off" required>
+      <label for="p">Password</label>
+      <input id="p" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit" id="loginBtn">Log in</button>
+      <div class="msg err" id="loginMsg"></div>
+    </form>
+
+    <form id="changeForm" class="hidden">
+      <p class="sub" id="who"></p>
+      <label for="cp">Current password</label>
+      <input id="cp" type="password" autocomplete="current-password" required>
+      <label for="np">New password</label>
+      <input id="np" type="password" autocomplete="new-password" minlength="8" required>
+      <label for="np2">Confirm new password</label>
+      <input id="np2" type="password" autocomplete="new-password" minlength="8" required>
+      <button type="submit" id="changeBtn">Change password</button>
+      <div class="msg" id="changeMsg"></div>
+    </form>
+  </div>
+
+<script>
+  // Session token lives only in memory (JS var), never localStorage.
+  let token = null;
+
+  const loginForm = document.getElementById('loginForm');
+  const changeForm = document.getElementById('changeForm');
+  const loginMsg = document.getElementById('loginMsg');
+  const changeMsg = document.getElementById('changeMsg');
+
+  loginForm.addEventListener('submit', async (e) => {{
+    e.preventDefault();
+    loginMsg.textContent = '';
+    const btn = document.getElementById('loginBtn');
+    btn.disabled = true;
+    try {{
+      const res = await fetch('/cli/auth/login', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{
+          username: document.getElementById('u').value,
+          password: document.getElementById('p').value,
+        }}),
+      }});
+      if (!res.ok) {{
+        loginMsg.textContent = 'Invalid username or password.';
+        return;
+      }}
+      const data = await res.json();
+      token = data.token;
+      document.getElementById('who').textContent = 'Signed in as ' + (data.username || '');
+      loginForm.classList.add('hidden');
+      changeForm.classList.remove('hidden');
+      document.getElementById('cp').focus();
+    }} catch (_) {{
+      loginMsg.textContent = 'Network error. Try again.';
+    }} finally {{
+      btn.disabled = false;
+    }}
+  }});
+
+  changeForm.addEventListener('submit', async (e) => {{
+    e.preventDefault();
+    changeMsg.className = 'msg';
+    changeMsg.textContent = '';
+    const np = document.getElementById('np').value;
+    const np2 = document.getElementById('np2').value;
+    if (np !== np2) {{
+      changeMsg.className = 'msg err';
+      changeMsg.textContent = 'New passwords do not match.';
+      return;
+    }}
+    if (np.length < 8) {{
+      changeMsg.className = 'msg err';
+      changeMsg.textContent = 'New password must be at least 8 characters.';
+      return;
+    }}
+    const btn = document.getElementById('changeBtn');
+    btn.disabled = true;
+    try {{
+      const res = await fetch('/cli/auth/change-password?token=' + encodeURIComponent(token), {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ currentPassword: document.getElementById('cp').value, newPassword: np }}),
+      }});
+      if (res.ok) {{
+        changeMsg.className = 'msg ok';
+        changeMsg.textContent = 'Password changed. Please log in again.';
+        // All sessions (including this one) are revoked server-side.
+        token = null;
+        setTimeout(() => {{
+          changeForm.reset();
+          changeForm.classList.add('hidden');
+          loginForm.reset();
+          loginForm.classList.remove('hidden');
+          loginMsg.textContent = '';
+        }}, 1800);
+      }} else if (res.status === 400) {{
+        changeMsg.className = 'msg err';
+        changeMsg.textContent = 'New password must be at least 8 characters.';
+      }} else {{
+        changeMsg.className = 'msg err';
+        changeMsg.textContent = 'Current password incorrect, or too many attempts. Try again later.';
+      }}
+    }} catch (_) {{
+      changeMsg.className = 'msg err';
+      changeMsg.textContent = 'Network error. Try again.';
+    }} finally {{
+      btn.disabled = false;
+    }}
+  }});
+</script>
+</body>
+</html>"##,
+        sub = sub
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct ChangePasswordReq {
+    #[serde(rename = "currentPassword")]
+    current_password: String,
+    #[serde(rename = "newPassword")]
+    new_password: String,
+}
+
+/// `POST /cli/auth/change-password` `{currentPassword,newPassword}`.
+///
+/// Authorized as the CONNECT-USER (their session token, resolved to a
+/// `username` by the dispatcher via `validate_session`). The OWNER
+/// (daemon token, no session → no username) cannot use this route — it's
+/// for connect-users changing their OWN password. The dispatcher passes
+/// `Some(username)` only for a live session; `None` → generic 401.
+///
+/// Flow (in `connect_users::change_password`): verify `currentPassword`
+/// THROUGH the same brute-force lockout gate as login, require
+/// `newPassword` length >= 8, then re-hash + revoke ALL the user's
+/// sessions (forced re-login everywhere). Returns `{"success":true}` or a
+/// generic 400/401 that never reveals whether the current password was
+/// wrong vs. the account locked.
+pub fn handle_change_password(username: Option<String>, body: &[u8]) -> CliResponse {
+    // No session-resolved username → not a connect-user (owner or bad
+    // token). Generic 401; don't hint that the route exists for others.
+    let username = match username {
+        Some(u) => u,
+        None => {
+            return CliResponse {
+                status: "401 Unauthorized",
+                content_type: "application/json",
+                body: r#"{"error":"unauthorized"}"#.to_string(),
+            }
+        }
+    };
+    let req: ChangePasswordReq = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(_) => {
+            return CliResponse {
+                status: "400 Bad Request",
+                content_type: "application/json",
+                body: r#"{"error":"invalid request"}"#.to_string(),
+            }
+        }
+    };
+    match connect_users::change_password(&username, &req.current_password, &req.new_password) {
+        connect_users::ChangePasswordOutcome::Ok => {
+            CliResponse::ok_json(r#"{"success":true}"#.to_string())
+        }
+        connect_users::ChangePasswordOutcome::WeakNew => CliResponse {
+            status: "400 Bad Request",
+            content_type: "application/json",
+            body: r#"{"error":"new password must be at least 8 characters"}"#.to_string(),
+        },
+        connect_users::ChangePasswordOutcome::BadCurrent => CliResponse {
+            // Generic 401 — same whether the current password was wrong or
+            // the account is currently locked out.
+            status: "401 Unauthorized",
+            content_type: "application/json",
+            body: r#"{"error":"unauthorized"}"#.to_string(),
+        },
+    }
 }
 
 /// `GET /cli/auth/whoami` (authorized — owner OR connect-user) →
@@ -216,5 +471,21 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert_eq!(v["owner"], serde_json::json!(false));
         assert_eq!(v["username"], serde_json::json!("alice"));
+    }
+
+    #[test]
+    fn change_password_owner_no_username_is_401() {
+        // Owner (daemon token) resolves to no session username → barred.
+        let r = handle_change_password(
+            None,
+            br#"{"currentPassword":"x","newPassword":"longenough"}"#,
+        );
+        assert_eq!(r.status, "401 Unauthorized");
+    }
+
+    #[test]
+    fn change_password_malformed_body_is_400() {
+        let r = handle_change_password(Some("alice".to_string()), b"not json");
+        assert_eq!(r.status, "400 Bad Request");
     }
 }
