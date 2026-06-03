@@ -6,7 +6,7 @@ import { useSettingsStore } from '../../stores/settings'
 import { useActiveAgentsStore } from '../../stores/active-agents'
 import { useTabsStore } from '../../stores/tabs'
 import { useCommandPaletteStore } from '../../stores/command-palette'
-import { useAddWorkspaceDialogStore, type WorkspacePreviewEntry } from '../../stores/add-workspace-dialog'
+import { useAddWorkspaceDialogStore } from '../../stores/add-workspace-dialog'
 import { useRemoveWorkspaceDialogStore } from '../../stores/remove-workspace-dialog'
 import { useGitInfo, useGitChanges } from '../../hooks/useGit'
 import { invoke } from '@tauri-apps/api/core'
@@ -156,21 +156,11 @@ export default function IconRail(): React.JSX.Element {
   const handleAddProject = useCallback(async () => {
     const folderPath = await invoke<string | null>('projects_pick_folder')
     if (!folderPath) return
-    // Preview what K2SO will do to the workspace before committing. If the
-    // preview fails (e.g. permissions), fall through to the add — the add
-    // itself has no destructive effects since skill generation runs on
-    // next boot.
-    let preview: WorkspacePreviewEntry[] = []
-    try {
-      preview = await invoke<WorkspacePreviewEntry[]>('k2so_agents_preview_workspace_ingest', {
-        projectPath: folderPath,
-      })
-    } catch (err) {
-      console.warn('[add-workspace] preview failed, continuing without it:', err)
-    }
+    // Harness fan-out is off by default (canonical-agents PRD §4), so the
+    // add has no destructive effects — no consent preview needed. The
+    // confirmation dialog simply names the workspace before committing.
     useAddWorkspaceDialogStore.getState().open({
       path: folderPath,
-      preview,
       onConfirm: async () => {
         await addProject(folderPath)
         // Trigger the skill write immediately so the user sees the effect

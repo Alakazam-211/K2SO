@@ -1048,9 +1048,15 @@ pub fn run() {
             commands::k2so_agents::k2so_agents_get_profile,
             commands::k2so_agents::k2so_agents_regenerate_workspace_skill,
             commands::k2so_agents::k2so_onboarding_scan,
-            commands::k2so_agents::k2so_onboarding_adopt,
-            commands::k2so_agents::k2so_onboarding_skip,
+            // `k2so_onboarding_adopt` / `k2so_onboarding_skip` removed with
+            // the canonical-agents PRD (§7): consent gate is gone now that
+            // harness fan-out is off by default.
             commands::k2so_agents::k2so_onboarding_start_fresh,
+            // Canonical Agent Flow (canonical-agents PRD §4 / §5.2 / §8.1).
+            commands::k2so_agents::k2so_harness_fanout_enabled,
+            commands::k2so_agents::k2so_set_harness_fanout_enabled,
+            commands::k2so_agents::k2so_detect_canonical_state,
+            commands::k2so_agents::k2so_write_opt_in_skill,
             // Back-compat aliases — retained during the 0.33.0 rename window so
             // stale React `invoke()` names keep working until every call site
             // has migrated to the canonical new names above.

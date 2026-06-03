@@ -675,40 +675,15 @@ pub fn k2so_onboarding_scan(
     k2so_core::workspace::onboarding::scan_harness_files(&project_path)
 }
 
-/// Adopt one of the detected harness files as the seed for
-/// `.k2so/PROJECT.md`, then run the workspace regen pipeline so the
-/// new PROJECT.md content fans out to every harness symlink in one
-/// pass. Source file is archived to `.k2so/migration/` and removed
-/// from its original location (so the regen's existing migration
-/// helpers don't re-import the same body a second time).
-#[tauri::command]
-pub fn k2so_onboarding_adopt(
-    project_path: String,
-    source_path: String,
-) -> Result<k2so_core::workspace::onboarding::AdoptionOutcome, String> {
-    let outcome = k2so_core::workspace::onboarding::adopt_harness_as_project_md(
-        &project_path,
-        std::path::Path::new(&source_path),
-    )?;
-    // Run regen so PROJECT.md content propagates to every harness
-    // file. Errors are reported but don't fail the adopt itself —
-    // the seed is already on disk.
-    if let Err(e) = k2so_agents_regenerate_workspace_skill(project_path) {
-        eprintln!("[onboarding] regen after adopt failed: {}", e);
-    }
-    Ok(outcome)
-}
-
-/// User-facing label: "Do it later." Drops a flag file at
-/// `.k2so/.skip-harness-management` so subsequent regens skip the
-/// harness-fanout step (CLAUDE.md / GEMINI.md / .cursor/rules / etc.
-/// stay untouched). K2SO still writes its internal SKILL.md so
-/// heartbeats and agent launches keep working. Reversible — a
-/// future settings surface can call the unskip path.
-#[tauri::command]
-pub fn k2so_onboarding_skip(project_path: String) -> Result<(), String> {
-    k2so_core::workspace::onboarding::skip_harness_management(&project_path)
-}
+// `k2so_onboarding_adopt` / `k2so_onboarding_skip` removed with the
+// canonical-agents PRD (§7 Removal Catalog). With harness fan-out off by
+// default, the Skip-before-regen flag is meaningless and the single-file
+// "adopt into PROJECT.md" is replaced by the K2 Canonical Agent's richer
+// organic MERGE step (which weaves harness content into Model A's
+// AGENT.md/PROJECT.md, then mirrors out). Core helpers
+// (`skip_harness_management` / `adopt_harness_as_project_md`) are kept for
+// the daemon CLI routes and as a legacy alias; only the Tauri wrappers and
+// their consent-page caller are gone.
 
 /// User-facing "Start Fresh" option. No special logic — just runs
 /// the regen pipeline, which already archives any pre-existing
@@ -722,6 +697,65 @@ pub fn k2so_onboarding_start_fresh(project_path: String) -> Result<(), String> {
     // cleared so the regen actually performs the harness fanout.
     k2so_core::workspace::onboarding::unskip_harness_management(&project_path)?;
     k2so_agents_regenerate_workspace_skill(project_path).map(|_| ())
+}
+
+// ── Canonical Agent Flow (canonical-agents PRD §4 / §5.2 / §11) ──────────
+//
+// Thin wrappers around the canonical-agents core (`k2so_core::workspace`).
+// Logic lives in core so the daemon CLI and Tauri share one implementation
+// (matching the existing onboarding-toggle pattern above — direct
+// Tauri→core, no extra daemon round-trip). The renderer's Settings
+// permission checkbox + the Agent-section button labels consume these.
+
+/// Read the per-workspace harness fan-out permission marker
+/// (`harness_fanout_enabled`, PRD §4). Off by default; legacy
+/// `.skip-harness-management` forces it false. Drives the Settings
+/// checkbox state.
+#[tauri::command]
+pub fn k2so_harness_fanout_enabled(project_path: String) -> bool {
+    k2so_core::workspace::onboarding::harness_fanout_enabled(&project_path)
+}
+
+/// Set the per-workspace harness fan-out permission marker (PRD §4).
+/// Checking it enables ongoing programmatic fan-out (symlinks) derived
+/// from `.k2so/agent/AGENT.md`; unchecking it stops new fan-out.
+#[tauri::command]
+pub fn k2so_set_harness_fanout_enabled(
+    project_path: String,
+    enabled: bool,
+) -> Result<(), String> {
+    k2so_core::workspace::onboarding::set_harness_fanout_enabled(&project_path, enabled)
+}
+
+/// Probe per-harness canonical state WITHOUT mutating anything
+/// (`detect_canonical_state`, PRD §5.2). Feeds the per-harness state
+/// display in the Canonical Agent Flow settings section + the canonical
+/// button label ("Set up …" vs "Manage / Undo").
+#[tauri::command]
+pub fn k2so_detect_canonical_state(
+    project_path: String,
+) -> Vec<k2so_core::workspace::canonical::HarnessProbe> {
+    k2so_core::workspace::canonical::detect_canonical_state(&project_path)
+}
+
+/// Write one of the three opt-in skills to `.k2so/skills/<name>/SKILL.md`
+/// on demand (PRD §8.1 "Enable"). `skill` is one of
+/// `workspace-manager` | `k2-agent` | `k2-canonical-agent` (the
+/// [`k2so_core::skills::content::OptInSkill::dir_name`] values). Returns
+/// the absolute path written so the UI can confirm it landed.
+#[tauri::command]
+pub fn k2so_write_opt_in_skill(
+    project_path: String,
+    skill: String,
+) -> Result<String, String> {
+    let opt_in = match skill.as_str() {
+        "workspace-manager" => k2so_core::skills::content::OptInSkill::WorkspaceManager,
+        "k2-agent" => k2so_core::skills::content::OptInSkill::K2Agent,
+        "k2-canonical-agent" => k2so_core::skills::content::OptInSkill::K2CanonicalAgent,
+        other => return Err(format!("unknown opt-in skill: {other}")),
+    };
+    let path = k2so_core::skills::content::write_opt_in_skill(&project_path, opt_in);
+    Ok(path.to_string_lossy().to_string())
 }
 
 /// Remove or disable the workspace SKILL.md + CLAUDE.md symlink
