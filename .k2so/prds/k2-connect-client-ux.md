@@ -20,9 +20,10 @@
 
 1. **Keychain-backed remember** (above) — secure auto-sign-in.
 2. **Soft reconnect, not a blank screen.** The current ConnectionGate hard-blanks while (re)connecting (correct for the local auto-update race). For a **remote** that briefly drops, render a dimmed "Reconnecting to `<host>`…" overlay over the last view, with backoff — don't blank the app.
-3. **"You're on a remote" cue** — a `🌐 <host>` chip / subtle top-bar tint whenever the active host is remote. Remote = a *different filesystem*; this prevents "why did my files change?" confusion.
+3. **"You're on a remote" cue** — a `🌐 <host>` chip / subtle top-bar tint whenever the active host is remote. Remote = a *different filesystem*; this prevents "why did my files change?" confusion. The chip carries the live latency readout (below).
 4. **Graceful expiry → targeted re-auth.** A rejected remembered token drops into the full-screen sign-in for *just that one server*, place preserved.
-5. **Per-server status dot + latency** in the switcher and Settings (connected / connecting / offline).
+5. **Live latency readout in the top bar.** Show round-trip ping to the active remote (e.g. `42 ms`) right in the top bar beside the host chip, color-coded (green < ~80 ms · amber ~80–200 ms · red > ~200 ms). This is the at-a-glance answer to "**why does it feel slow?**" — a bad tunnel/route shows up as a red ping rather than a mysteriously sluggish app, so users blame the network, not K2. Also surface the dot + latency per-server in the switcher and Settings (connected / connecting / offline). **This Mac** = sub-ms, shown as "local" or hidden.
+   - **Measurement:** prefer a lightweight **WS ping frame** RTT (reuses the live socket, no HTTP overhead, and reflects the *actual* data-path latency the user feels); fall back to periodic `/boot-status` RTT. Cadence every few seconds; show a rolling value, not jittery per-sample. The tunnel path (frpc→frps→Caddy) adds real hops, so this readout genuinely reflects the hosted-tier experience.
 6. **Forward-compat for real accounts.** Token-paste now; "Sign in with K2 account" slots into the same sign-in page once the k2.dev dashboard/Stripe exists (issues per-device tokens). Optional "reconnect to last server on launch" setting; default = start on This Mac.
 
 ## 3. Architecture seams (from the connection-layer map, verified)
