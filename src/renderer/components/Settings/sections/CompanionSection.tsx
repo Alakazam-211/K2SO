@@ -232,7 +232,7 @@ export function CompanionSection(): React.JSX.Element {
   return (
     <div className="max-w-xl">
       <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-1 flex items-center gap-2">
-        Mobile Companion
+        K2 Companion
         <span
           className="text-[8px] uppercase tracking-wider font-semibold px-1.5 py-0.5 bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
           title="This feature is in beta — interface and behavior may change"

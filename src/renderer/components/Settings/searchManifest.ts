@@ -103,7 +103,7 @@ export const SECTION_LABELS: Record<SettingsSection, string> = {
   'editors-agents': 'Editors & Agents',
   keybindings: 'Keybindings',
   timer: 'Timer',
-  companion: 'Mobile Companion',
+  companion: 'K2 Companion',
 }
 
 /** Suppress unused-type warning since IndexedEntry is reserved for future optimization. */

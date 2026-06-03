@@ -30,7 +30,7 @@ const SECTIONS: { id: SettingsSection; label: string; agenticOnly?: boolean }[] 
   { id: 'terminal', label: 'Terminal' },
   { id: 'code-editor', label: 'Code Editor' },
   { id: 'editors-agents', label: 'Editors & Agents' },
-  { id: 'companion', label: 'Mobile Companion' },
+  { id: 'companion', label: 'K2 Companion' },
   { id: 'wake-scheduler', label: 'Heartbeats', agenticOnly: true },
   { id: 'keybindings', label: 'Keybindings' },
   { id: 'timer', label: 'Timer' },
