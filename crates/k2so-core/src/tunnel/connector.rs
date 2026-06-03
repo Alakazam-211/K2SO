@@ -163,6 +163,13 @@ pub struct TunnelStatus {
     pub local_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_addr: Option<String>,
+    /// Whether an `frpc` binary can be resolved (PATH + common install
+    /// dirs). Computed with the SAME [`resolve_frpc`] the connector uses
+    /// to launch, so the UI's "frpc not installed" hint can never
+    /// disagree with whether a tunnel can actually start. Always emitted
+    /// (no skip) so the client never sees `undefined` and mis-renders the
+    /// warning.
+    pub frpc_installed: bool,
 }
 
 impl TunnelStatus {
@@ -173,6 +180,7 @@ impl TunnelStatus {
             subdomain: None,
             local_port: None,
             server_addr: None,
+            frpc_installed: resolve_frpc(&FrpcBinary::Auto).is_ok(),
         }
     }
 }
@@ -282,6 +290,7 @@ fn status_from(st: &ConnectorState) -> TunnelStatus {
         subdomain: (!sub.is_empty()).then(|| sub.to_string()),
         local_port: Some(st.resolved_local_port),
         server_addr: Some(st.cfg.server_addr.clone()),
+        frpc_installed: resolve_frpc(&FrpcBinary::Auto).is_ok(),
     }
 }
 
