@@ -581,7 +581,13 @@ export function K2ConnectSection(): React.JSX.Element {
           )}
         </div>
 
-        {/* ── Advanced / manual config (fallback) ──────────────────── */}
+        <div className="text-[10px] text-[var(--color-text-muted)] space-y-1">
+          <p>1. Sign in to k2.dev above and pick a subdomain you own (e.g. <span className="font-mono">alice</span>).</p>
+          <p>2. Start the tunnel — your daemon becomes reachable at <span className="font-mono">https://&lt;sub&gt;.k2.dev</span>.</p>
+          <p>3. Add that address as a server on another computer (Settings → Connections), or pair the K2 Companion app.</p>
+        </div>
+
+        {/* ── Advanced / manual config (fallback) — below the instructions ── */}
         <div>
           <button
             onClick={() => setShowAdvanced((v) => !v)}
@@ -648,13 +654,6 @@ export function K2ConnectSection(): React.JSX.Element {
               </div>
             </SettingsGroup>
           )}
-        </div>
-
-
-        <div className="text-[10px] text-[var(--color-text-muted)] space-y-1">
-          <p>1. Sign in to k2.dev above and pick a subdomain you own (e.g. <span className="font-mono">alice</span>).</p>
-          <p>2. Start the tunnel — your daemon becomes reachable at <span className="font-mono">https://&lt;sub&gt;.k2.dev</span>.</p>
-          <p>3. Add that address as a server on another computer (Settings → Connections), or pair the K2 Companion app.</p>
         </div>
       </div>
     </div>
