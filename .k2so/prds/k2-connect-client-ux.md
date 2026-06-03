@@ -44,3 +44,14 @@
 
 ## 5. Sequencing note
 Build starts **after the canonical-agents Wave 2 frontend is cherry-picked** — both touch the Settings sections area (Wave 2 renames AgentSkillsSection → "Canonical Agent Flow"; this adds a Connections section). Avoid concurrent-frontend cherry-pick conflicts.
+
+## 6. The "K2 Connect" Settings section — the HOST / expose side (NEW, Rosson 2026-06-03)
+This is the OTHER direction from the switcher/Connections (§1–5, which is the *client* — connecting OUT to remote servers). **"K2 Connect" is where a device logs into its K2 Connect account and exposes ITS OWN server at a subdomain it owns** — the GUI front-end for the daemon tunnel connector (`k2so tunnel start/stop/status`, `~/.k2so/tunnel.json`, routes `GET /cli/tunnel/status` · `POST /cli/tunnel/start?subdomain=` · `POST /cli/tunnel/stop`).
+
+- **New Settings section "K2 Connect"** (sibling of "Connections"). Nav id stable.
+- **Account login** to K2 Connect → yields the bearer token used in the frpc `[metadatas].token`. Users may **own MULTIPLE subdomains** under `k2.dev` (e.g. `rosson`, `rosson-work`).
+- **Subdomain selector** — pick which owned subdomain this server registers as. Server canonicalizes to `{user}` today; multi-subdomain ownership requires the control plane to map a token → set of allowed labels (server work, below).
+- **Configure the connection layer** — server addr (default `178.156.232.105:7000`), exposed local port (the daemon's), **Start / Stop tunnel**, live **status** + the public URL `https://<sub>.k2.dev`.
+- **MVP (buildable now, no server changes):** manual **token + subdomain** entry written to `tunnel.json`, + Start/Stop/Status wired to the existing `/cli/tunnel/*` routes. Surfaces the "frpc not installed" error from the connector with an install hint.
+- **Full (DEPENDS ON PROPRIETARY CONTROL-PLANE API — not built):** real account login + **list of owned subdomains** needs control-plane `/account` + `/subdomains` endpoints (multi-subdomain ownership, billing). Flag as the server-side follow-up; the MVP token+subdomain form stands in until then.
+- **Companion rename (done):** "Mobile Companion" → **"K2 Companion"** (prep for the LocalXpose BYO migration).
