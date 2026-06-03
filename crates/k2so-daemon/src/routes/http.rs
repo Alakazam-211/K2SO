@@ -13,16 +13,55 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-/// Parse `token=<value>` out of a URL-encoded query string and compare
-/// against the expected value. No full urlencoded decoding — the token
-/// is always 32 hex chars so there's nothing to decode.
-pub(crate) fn token_ok(query: &str, expected: &str) -> bool {
+/// Extract the raw `token=<value>` from a URL-encoded query string. No
+/// full urlencoded decoding — the token is always hex so there's nothing
+/// to decode. Returns the first `token=` value seen (the contract callers
+/// depend on when a malformed query duplicates the key).
+pub(crate) fn extract_token(query: &str) -> Option<&str> {
     for pair in query.split('&') {
         if let Some(v) = pair.strip_prefix("token=") {
-            return v == expected;
+            return Some(v);
         }
     }
-    false
+    None
+}
+
+/// True iff the request's `?token=` is the OWNER token (the local daemon
+/// token, `state.token`). This is the STRICT gate — owner-only routes
+/// (user management + tunnel control) MUST use this, NOT [`token_ok`],
+/// so an authenticated connect-user can't escalate.
+///
+/// K2SO #617: connect-user sessions deliberately do NOT satisfy this.
+pub(crate) fn token_is_owner(query: &str, owner_token: &str) -> bool {
+    extract_token(query) == Some(owner_token)
+}
+
+/// The shared authorization gate for the bulk of `/cli/*` routes.
+///
+/// K2SO #617: a request is authorized when its `?token=` is EITHER the
+/// OWNER token (`owner_token`, == `state.token`) OR a live connect-user
+/// session token (validated in-memory by
+/// [`k2so_core::connect_users::validate_session`]). This is what lets a
+/// remote connect-user — who logged in over the public tunnel with a
+/// username+password and holds a session token — actually USE the daemon.
+///
+/// Owner-only routes (ALL `/cli/users/*` + tunnel start/stop/config-POST)
+/// must NOT use this; they use [`token_is_owner`] so a connect-user is
+/// barred from user management + tunnel control.
+pub(crate) fn token_ok(query: &str, owner_token: &str) -> bool {
+    let Some(tok) = extract_token(query) else {
+        return false;
+    };
+    // Empty token never authorizes (matches pre-#617 behavior: an empty
+    // value must not slip through against a non-empty owner token, and an
+    // empty session token is never issued).
+    if tok.is_empty() {
+        return false;
+    }
+    if tok == owner_token {
+        return true;
+    }
+    k2so_core::connect_users::validate_session(tok).is_some()
 }
 
 /// Reassemble a full `path?query` URL and hand off to k2so_core's
@@ -174,6 +213,38 @@ pub(crate) async fn require_post(stream: &mut TcpStream, buf: &mut [u8], is_post
         "405 Method Not Allowed",
         "application/json",
         r#"{"error":"POST required"}"#,
+    )
+    .await;
+    false
+}
+
+/// OWNER-only authorization guard for the strict `/cli/*` routes (user
+/// management + tunnel control). Returns `true` when the request's
+/// `?token=` is the owner token and the caller should continue; returns
+/// `false` after draining the peeked request and sending `403 Forbidden`,
+/// in which case the caller MUST early-return.
+///
+/// K2SO #617: this is deliberately distinct from the [`token_ok`] gate
+/// used by the rest of `/cli/*`. A connect-user's session token passes
+/// `token_ok` (general daemon access) but fails this — so a connect-user
+/// can USE the daemon yet cannot manage users or control the host's
+/// tunnel. The 403 body matches the shared shape every other gate emits
+/// so clients key off one error string.
+pub(crate) async fn require_owner(
+    stream: &mut TcpStream,
+    buf: &mut [u8],
+    query: &str,
+    owner_token: &str,
+) -> bool {
+    if token_is_owner(query, owner_token) {
+        return true;
+    }
+    let _ = stream.read(buf).await;
+    send_response(
+        stream,
+        "403 Forbidden",
+        "application/json",
+        r#"{"error":"invalid or missing token"}"#,
     )
     .await;
     false

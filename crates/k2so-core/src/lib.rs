@@ -43,6 +43,10 @@ pub mod companion;
 // remove`. Not workspace-scoped — operates on `workspace_relations`
 // linking two projects together.
 pub mod connections;
+// K2SO #617: connect-user accounts (username+password, owner-provisioned)
+// + in-memory login sessions. The auth boundary for the PUBLIC K2 Connect
+// tunnel surface. See module docs.
+pub mod connect_users;
 // Headless-friendly daemon lifecycle abstractions (label, plist
 // generation, launchctl arg vectors). Shared between Tauri's
 // `daemon_install` / `daemon_restart` commands and K2 Connect's

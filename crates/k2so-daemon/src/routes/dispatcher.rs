@@ -200,6 +200,15 @@ async fn handle_one_request(
             // secret); POST sets token/subdomain/server. Claimed here for
             // both methods; the handler branches on `is_post`.
             | "/cli/tunnel/config"
+            // K2SO #617 — connect-user management (OWNER-ONLY, gated by
+            // require_owner in the handlers below) + the PUBLIC login
+            // route. All carry credentials/usernames in the JSON body so
+            // they're never URL-logged. Method-gated per-handler below.
+            | "/cli/users/add"
+            | "/cli/users/remove"
+            | "/cli/users/set-password"
+            | "/cli/users/set-disabled"
+            | "/cli/auth/login"
             // Phase 2 Unit 5 — Claude Auth mutating routes. POST
             // (not GET) so they're not idempotent-cached by any
             // future proxy and so they parallel Unit 1's pattern
@@ -786,15 +795,11 @@ async fn handle_one_request(
         // feedback_post_only_route_guards).
         "/cli/tunnel/start" => {
             if !super::http::require_post(&mut *stream, &mut buf, is_post).await { return DispatchOutcome::Done; }
-            if !super::http::token_ok(&query, state.token.as_str()) {
-                let _ = stream.read(&mut buf).await;
-                super::http::send_response(
-                    &mut *stream,
-                    "403 Forbidden",
-                    "application/json",
-                    r#"{"error":"invalid or missing token"}"#,
-                )
-                .await;
+            // OWNER-ONLY (K2SO #617): starting the tunnel exposes the
+            // host's daemon publicly. A connect-user (who reaches the
+            // daemon THROUGH the tunnel) must never control it. Strict
+            // `require_owner` — a connect-user session token is rejected.
+            if !super::http::require_owner(&mut *stream, &mut buf, &query, state.token.as_str()).await {
                 return DispatchOutcome::Done;
             }
             // No JSON body — params ride the query string. Drain to flush.
@@ -823,15 +828,9 @@ async fn handle_one_request(
         // POST /cli/tunnel/stop — stop the supervised frpc child.
         "/cli/tunnel/stop" => {
             if !super::http::require_post(&mut *stream, &mut buf, is_post).await { return DispatchOutcome::Done; }
-            if !super::http::token_ok(&query, state.token.as_str()) {
-                let _ = stream.read(&mut buf).await;
-                super::http::send_response(
-                    &mut *stream,
-                    "403 Forbidden",
-                    "application/json",
-                    r#"{"error":"invalid or missing token"}"#,
-                )
-                .await;
+            // OWNER-ONLY (K2SO #617): same rationale as /cli/tunnel/start
+            // — a connect-user must not tear down the host's tunnel.
+            if !super::http::require_owner(&mut *stream, &mut buf, &query, state.token.as_str()).await {
                 return DispatchOutcome::Done;
             }
             let _ = super::http::read_post_body(&mut *stream, &mut buf).await;
@@ -850,7 +849,17 @@ async fn handle_one_request(
         // `start`. GET must NOT read a body (read_post_body blocks on a
         // bodyless keep-alive GET); only POST drains the body.
         "/cli/tunnel/config" => {
-            if !super::http::token_ok(&query, state.token.as_str()) {
+            // Auth split (K2SO #617): POST MUTATES the host's tunnel
+            // binding (token + subdomain) → OWNER-ONLY. GET returns a
+            // redacted, read-only view → authorized (a connect-user may
+            // read it). So: POST gates on `token_is_owner`, GET on the
+            // extended `token_ok`. A connect-user POSTing here gets 403.
+            let authorized = if is_post {
+                super::http::token_is_owner(&query, state.token.as_str())
+            } else {
+                super::http::token_ok(&query, state.token.as_str())
+            };
+            if !authorized {
                 if is_post {
                     let _ = super::http::read_post_body(&mut *stream, &mut buf).await;
                 }
@@ -888,6 +897,115 @@ async fn handle_one_request(
             };
             super::http::send_response(&mut *stream, resp.status, resp.content_type, &resp.body)
                 .await;
+        }
+        // ── K2SO #617 — connect-user management (OWNER-ONLY) ────────────
+        //
+        // All four `/cli/users/*` routes manage the public-tunnel auth
+        // boundary, so they gate on the STRICT `require_owner` (owner
+        // token only) — NOT the extended `token_ok`. A connect-user's
+        // session token passes `token_ok` for general daemon access but
+        // is barred here: a connect-user must never manage accounts.
+        // POST-gated per feedback_post_only_route_guards.
+        "/cli/users/add" => {
+            if !super::http::require_post(&mut *stream, &mut buf, is_post).await { return DispatchOutcome::Done; }
+            if !super::http::require_owner(&mut *stream, &mut buf, &query, state.token.as_str()).await {
+                return DispatchOutcome::Done;
+            }
+            let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
+            // argon2 hashing is intentionally slow; run off the accept loop.
+            let r = tokio::task::spawn_blocking(move || {
+                crate::connect_users_routes::handle_add(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse::internal_error(format!("worker join: {e}")));
+            super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/users/remove" => {
+            if !super::http::require_post(&mut *stream, &mut buf, is_post).await { return DispatchOutcome::Done; }
+            if !super::http::require_owner(&mut *stream, &mut buf, &query, state.token.as_str()).await {
+                return DispatchOutcome::Done;
+            }
+            let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
+            let r = crate::connect_users_routes::handle_remove(&body_bytes);
+            super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/users/set-password" => {
+            if !super::http::require_post(&mut *stream, &mut buf, is_post).await { return DispatchOutcome::Done; }
+            if !super::http::require_owner(&mut *stream, &mut buf, &query, state.token.as_str()).await {
+                return DispatchOutcome::Done;
+            }
+            let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
+            // argon2 re-hash — spawn_blocking.
+            let r = tokio::task::spawn_blocking(move || {
+                crate::connect_users_routes::handle_set_password(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse::internal_error(format!("worker join: {e}")));
+            super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
+        }
+        "/cli/users/set-disabled" => {
+            if !super::http::require_post(&mut *stream, &mut buf, is_post).await { return DispatchOutcome::Done; }
+            if !super::http::require_owner(&mut *stream, &mut buf, &query, state.token.as_str()).await {
+                return DispatchOutcome::Done;
+            }
+            let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
+            let r = crate::connect_users_routes::handle_set_disabled(&body_bytes);
+            super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
+        }
+        // GET /cli/users — list accounts (redacted views; no hashes).
+        // OWNER-ONLY (read-side of user management). `require_owner`
+        // drains+403s a non-owner; a GET needs no body.
+        "/cli/users" => {
+            if !super::http::require_owner(&mut *stream, &mut buf, &query, state.token.as_str()).await {
+                return DispatchOutcome::Done;
+            }
+            let _ = stream.read(&mut buf).await;
+            let r = crate::connect_users_routes::handle_list();
+            super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
+        }
+        // ── K2SO #617 — connect-user auth entry ─────────────────────────
+        //
+        // POST /cli/auth/login — PUBLIC (NO token gate). This is how a
+        // remote connect-user trades username+password for a session
+        // token over the tunnel. On failure it returns a generic 401 and
+        // we add a fixed delay (below) to blunt online brute force.
+        // POST-gated so a stray GET can't probe credentials.
+        "/cli/auth/login" => {
+            if !super::http::require_post(&mut *stream, &mut buf, is_post).await { return DispatchOutcome::Done; }
+            let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
+            // argon2 verify is slow + happens regardless of outcome
+            // (anti-enumeration) — spawn_blocking off the accept loop.
+            let r = tokio::task::spawn_blocking(move || {
+                crate::connect_users_routes::handle_login(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse::internal_error(format!("worker join: {e}")));
+            // Fixed failure delay: slow brute-force without a full rate
+            // limiter (deferred). Only on the 401 path so successful
+            // logins stay snappy. The argon2 work already adds ~tens of
+            // ms; this stacks a deterministic floor on top.
+            if r.status.starts_with("401") {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
+        }
+        // GET /cli/auth/whoami — AUTHORIZED (owner OR connect-user). Lets
+        // a client confirm its session + learn whether it's the owner.
+        // We resolve identity here: owner token first, then a live
+        // connect-user session. An unrecognized token is rejected.
+        "/cli/auth/whoami" => {
+            let _ = stream.read(&mut buf).await;
+            let tok = super::http::extract_token(&query).unwrap_or("");
+            let r = if !tok.is_empty() && tok == state.token.as_str() {
+                crate::connect_users_routes::handle_whoami(None, true)
+            } else if let Some(username) =
+                k2so_core::connect_users::validate_session(tok)
+            {
+                crate::connect_users_routes::handle_whoami(Some(username), false)
+            } else {
+                crate::cli::CliResponse::forbidden()
+            };
+            super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
         }
         // POST /cli/claude-auth/refresh-now — Phase 2 Unit 5.
         // No body required (the refresh token comes from the local

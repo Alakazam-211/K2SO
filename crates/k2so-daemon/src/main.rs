@@ -44,6 +44,7 @@ mod cli;
 mod cli_response;
 mod companion_host;
 mod companion_routes;
+mod connect_users_routes;
 mod db_routes;
 mod events;
 mod fs_routes;
