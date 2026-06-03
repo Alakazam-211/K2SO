@@ -86,7 +86,7 @@ export default function ServerSwitcher(): React.JSX.Element {
     }
   }, [open])
 
-  const activeLabel = activeHost === 'local' ? 'This Mac' : activeHost.label
+  const activeLabel = activeHost === 'local' ? 'Local' : activeHost.label
 
   const pick = useCallback(
     (h: 'local' | ConnectHost) => {
@@ -119,9 +119,9 @@ export default function ServerSwitcher(): React.JSX.Element {
         <div
           className="absolute left-0 top-7 z-50 min-w-[220px] rounded border border-[var(--color-border)] bg-[var(--color-bg-surface)] shadow-lg py-1 text-[12px]"
         >
-          {/* This Mac — always first */}
+          {/* Local — always first */}
           <SwitcherRow
-            label="This Mac"
+            label="Local"
             active={activeHost === 'local'}
             statusDot={activeHost === 'local' ? connectionStatus : null}
             onClick={() => pick('local')}
