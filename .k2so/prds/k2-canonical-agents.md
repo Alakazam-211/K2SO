@@ -81,7 +81,13 @@ Refresh is **opt-in, agent-driven, never silent**. When the role guidance improv
 
 ## 4. Off by default + the gate (LOCKED, carried from v1)
 
-The auto-symlink fan-out is gated behind a per-workspace setting, default **false**. New AND existing workspaces get **no** automatic symlinking on boot / agent-create / agent-launch / regen.
+The auto-symlink fan-out is gated behind a per-workspace **permission checkbox** (`harness_fanout_enabled`), default **false**. New AND existing workspaces get **no** automatic symlinking on boot / agent-create / agent-launch / regen unless the box is checked.
+
+**Two opt-in routes to canonical (neither automatic):** (1) **run the K2 Canonical Agent skill** — agent-driven, organic, graceful (recommended); or (2) **check the permission box** — ongoing *programmatic* management (the kept-and-gated fan-out, for users who want it hands-off). The fan-out code is **kept and gated, NOT deleted** — the checkbox is its on-switch.
+
+**Canonical-source correction (locked):** the programmatic fan-out must compose from **`.k2so/agent/AGENT.md`** (the canonical source, Model A), NOT the buried `.k2so/skills/<name>/SKILL.md` the old system composed. The old `SKILL.md`-as-canonical is a genuine bug — it is what the Agent Skills **context diagram** currently shows — and must be corrected in **both** the composition logic **and** the diagram (`AgentContextDiagram` should show `AGENT.md` as the canonical artifact the harness files mirror).
+
+**The consent page is still removed** — replaced by this settings checkbox + the skill offer.
 
 - **Setting:** `harness_fanout_enabled: bool` (default false). Filesystem-first source of truth (a `.k2so/`-internal marker), daemon-first per project invariants; the Settings UI may mirror it in the `projects` DB row for fast listing (marker authoritative).
 - The canonical `.k2so/skills/<name>/SKILL.md` **still always generates** internally (heartbeats and agent launches depend on it). Only the **user-visible fan-out into harness dirs / root** is gated off.
@@ -144,7 +150,7 @@ The **same** skill sets up AND unwinds. Unwind is **manifest-driven exact restor
 
 ### 5.7 Existing users — left untouched
 - **Leave already-unified workspaces untouched. No auto-revert.**
-- One-time migration (sentinel-gated, like `migrations/mod.rs`): workspaces detected as **already unified** (any `HARNESS_WORKSPACE_FILES` root target is a symlink resolving under `.k2so/skills/`) → `harness_fanout_enabled = true` (keep regenerating their symlinks so nothing breaks). Everyone else / `Skipped` / `Unmanaged` / **new** → `false`.
+- One-time migration (sentinel-gated, like `migrations/mod.rs`): **auto-check the permission box (`harness_fanout_enabled = true`) for existing workspaces that have an enabled agent** — **Workspace Manager, K2 Agent, or Custom Agent** — because those users are already accustomed to the programmatic behavior; nothing changes for them and they can uncheck it later. **New workspaces, and any without an enabled agent → `false`** (the gentle opt-in default). Keyed on "has an enabled agent" (a cleaner signal than the filesystem "already-unified symlink" guess).
 - The new copy-based skill is available to everyone; already-symlinked users can optionally convert to copies, never forced.
 
 ---
