@@ -210,6 +210,7 @@ export function K2ConnectSection(): React.JSX.Element {
   const [usersLoaded, setUsersLoaded] = useState(false)
   const [newUsername, setNewUsername] = useState('')
   const [newPassword, setNewPassword] = useState('')
+  const [showNewPassword, setShowNewPassword] = useState(false)
   const [addBusy, setAddBusy] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
   const [addedMsg, setAddedMsg] = useState<string | null>(null)
@@ -837,15 +838,29 @@ export function K2ConnectSection(): React.JSX.Element {
                   value={newUsername}
                   onChange={(e) => setNewUsername(e.target.value)}
                 />
-                <input
-                  className={inputCls}
-                  style={{ maxWidth: 180 }}
-                  type="password"
-                  autoComplete="new-password"
-                  placeholder="initial password"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                />
+                <div className="relative" style={{ maxWidth: 180 }}>
+                  <input
+                    className={`${inputCls} w-full pr-7`}
+                    type={showNewPassword ? 'text' : 'password'}
+                    autoComplete="new-password"
+                    placeholder="initial password"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPassword((v) => !v)}
+                    title={showNewPassword ? 'Hide password' : 'Show password'}
+                    aria-label={showNewPassword ? 'Hide password' : 'Show password'}
+                    className="absolute inset-y-0 right-1.5 flex items-center text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] no-drag cursor-pointer"
+                  >
+                    {showNewPassword ? (
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                    ) : (
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                    )}
+                  </button>
+                </div>
                 <button
                   type="submit"
                   disabled={addBusy || !newUsername.trim() || !newPassword}
