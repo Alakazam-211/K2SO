@@ -467,6 +467,15 @@ async fn async_main() {
     // agent + custom from the start).
     run_correct_auto_pin_filter_migration();
 
+    // Canonical-agents feature — harness fan-out is now OFF by default.
+    // One-shot opt-in: write the `.k2so/.harness-fanout-enabled` marker
+    // for every existing workspace that has an enabled agent, so
+    // upgraders who relied on the old always-on fan-out keep it. New /
+    // no-enabled-agent workspaces stay false. Gated by code_migrations;
+    // no-op for fresh installs (the gentle off-by-default posture is
+    // already correct there). No auto-revert.
+    run_enable_fanout_for_enabled_agents_migration();
+
     // Phase 2 Unit 4 — workspace_layouts one-shot migration moved
     // from `src-tauri/src/lib.rs::migrate_workspace_layouts_to_db`.
     // Reads `~/.k2so/settings.json#workspaceLayouts`, inserts each
@@ -900,6 +909,65 @@ fn run_correct_auto_pin_filter_migration() {
     log_debug!(
         "[daemon/migrations] correct_auto_pin_filter_0_39_1: unpinned {} workspaces",
         outcome.unpinned_count
+    );
+}
+
+/// Canonical-agents feature — daemon-side runner for
+/// `enable_fanout_for_enabled_agents_v1`.
+///
+/// Harness fan-out is now OFF by default. This one-shot migration writes
+/// the `.k2so/.harness-fanout-enabled` opt-in marker for every existing
+/// workspace that has an ENABLED agent (manager / agent / custom), so
+/// upgraders who relied on the old always-on behavior keep it. New
+/// workspaces and any without an enabled agent stay false (the gentle
+/// opt-in default). No auto-revert. Keyed on `projects.agent_mode`.
+///
+/// Reads the DB for `(path, agent_mode)` rows, then writes the FS marker
+/// per qualifying workspace. Gated by the `code_migrations` table so it
+/// runs once per DB. Errors are best-effort (logged) — boot must not
+/// fail.
+fn run_enable_fanout_for_enabled_agents_migration() {
+    use k2so_core::migrations::enable_fanout_for_enabled_agents_v1 as mig;
+
+    let needs_run = {
+        let db_arc = k2so_core::db::shared();
+        let conn = db_arc.lock();
+        !k2so_core::db::has_code_migration_applied(&conn, mig::MIGRATION_ID)
+    };
+    if !needs_run {
+        return;
+    }
+
+    // Snapshot (path, agent_mode) rows; drop the lock before touching
+    // the filesystem markers.
+    let rows: Vec<(String, String)> = {
+        let db_arc = k2so_core::db::shared();
+        let conn = db_arc.lock();
+        k2so_core::db::schema::Project::list(&conn)
+            .map(|rows| rows.into_iter().map(|p| (p.path, p.agent_mode)).collect())
+            .unwrap_or_default()
+    };
+
+    let outcome = mig::run(
+        rows.iter()
+            .map(|(p, m)| (p.as_str(), m.as_str())),
+    );
+
+    {
+        let db_arc = k2so_core::db::shared();
+        let conn = db_arc.lock();
+        k2so_core::db::mark_code_migration_applied(
+            &conn,
+            mig::MIGRATION_ID,
+            Some(&format!(
+                "opted {} enabled-agent workspaces into harness fan-out",
+                outcome.enabled_count
+            )),
+        );
+    }
+    log_debug!(
+        "[daemon/migrations] enable_fanout_for_enabled_agents_v1: opted {} enabled-agent workspaces in; future boots will skip",
+        outcome.enabled_count
     );
 }
 

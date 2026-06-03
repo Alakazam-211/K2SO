@@ -25,3 +25,10 @@ pub mod auto_pin_existing_agents_0_39_0;
 // already ran the buggy 0.39.0 version of auto_pin_existing_agents.
 // Unpins manager / coordinator / pod workspaces.
 pub mod correct_auto_pin_filter_0_39_1;
+// `enable_fanout_for_enabled_agents_v1` — canonical-agents feature.
+// Harness fan-out is now OFF by default; this one-shot migration writes
+// the `.k2so/.harness-fanout-enabled` opt-in marker for every existing
+// workspace that has an ENABLED agent (manager / agent / custom), so
+// upgraders relying on the old always-on behavior keep it. New / no-
+// enabled-agent workspaces stay false. No auto-revert.
+pub mod enable_fanout_for_enabled_agents_v1;
