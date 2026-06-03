@@ -124,7 +124,8 @@ interface TunnelConfigView {
 async function tunnelGet(suffix: string): Promise<Response> {
   const send = async (): Promise<Response> => {
     const creds = await getDaemonWs()
-    return fetch(`${daemonHttpBase(creds)}/cli/tunnel/${suffix}?token=${creds.token}`, { method: 'GET' })
+    const sep = suffix.includes('?') ? '&' : '?'
+    return fetch(`${daemonHttpBase(creds)}/cli/tunnel/${suffix}${sep}token=${creds.token}`, { method: 'GET' })
   }
   const res = await send()
   if (res.status !== 403) return res
@@ -135,7 +136,8 @@ async function tunnelGet(suffix: string): Promise<Response> {
 async function tunnelPost(suffix: string, body?: unknown): Promise<Response> {
   const send = async (): Promise<Response> => {
     const creds = await getDaemonWs()
-    return fetch(`${daemonHttpBase(creds)}/cli/tunnel/${suffix}?token=${creds.token}`, {
+    const sep = suffix.includes('?') ? '&' : '?'
+    return fetch(`${daemonHttpBase(creds)}/cli/tunnel/${suffix}${sep}token=${creds.token}`, {
       method: 'POST',
       headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
       body: body !== undefined ? JSON.stringify(body) : undefined,
