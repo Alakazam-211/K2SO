@@ -62,3 +62,6 @@ pub mod skills;
 // Linux Secret Service / Windows Credential Manager via the `keyring`
 // crate. Tokens NEVER touch connect-hosts.json.
 pub mod secrets;
+// K2 Connect — client address book persistence (`~/.k2so/connect-hosts.json`,
+// non-secret host list only). Tokens live in the keychain (see `secrets`).
+pub mod connect_hosts;

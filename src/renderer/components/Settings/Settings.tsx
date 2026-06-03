@@ -11,6 +11,7 @@ import { EditorsAgentsSection, EDITORS_AGENTS_MANIFEST } from './sections/Editor
 import { KeybindingsSection, KEYBINDINGS_MANIFEST } from './sections/KeybindingsSection'
 import { TimerSection, TIMER_MANIFEST } from './sections/TimerSection'
 import { CompanionSection, COMPANION_MANIFEST } from './sections/CompanionSection'
+import { ConnectionsSection, CONNECTIONS_MANIFEST } from './sections/ConnectionsSection'
 import { ProjectsSection, PROJECTS_MANIFEST } from './sections/ProjectsSection'
 import { WorkspaceStatesSection, WORKSPACE_STATES_MANIFEST } from './sections/WorkspaceStatesSection'
 import { AgentSkillsSection, AGENT_SKILLS_MANIFEST } from './sections/AgentSkillsSection'
@@ -30,6 +31,7 @@ const SECTIONS: { id: SettingsSection; label: string; agenticOnly?: boolean }[] 
   { id: 'terminal', label: 'Terminal' },
   { id: 'code-editor', label: 'Code Editor' },
   { id: 'editors-agents', label: 'Editors & Agents' },
+  { id: 'connections', label: 'Connections' },
   { id: 'companion', label: 'K2 Companion' },
   { id: 'wake-scheduler', label: 'Heartbeats', agenticOnly: true },
   { id: 'keybindings', label: 'Keybindings' },
@@ -72,6 +74,7 @@ export default function Settings(): React.JSX.Element {
       ...KEYBINDINGS_MANIFEST,
       ...TIMER_MANIFEST,
       ...COMPANION_MANIFEST,
+      ...CONNECTIONS_MANIFEST,
       ...WAKE_SCHEDULER_MANIFEST,
       ...PERMISSIONS_MANIFEST,
       ...DICTATION_LAB_MANIFEST,
@@ -194,6 +197,11 @@ export default function Settings(): React.JSX.Element {
         {activeSection === 'companion' && (
           <SectionErrorBoundary>
             <CompanionSection />
+          </SectionErrorBoundary>
+        )}
+        {activeSection === 'connections' && (
+          <SectionErrorBoundary>
+            <ConnectionsSection />
           </SectionErrorBoundary>
         )}
         {activeSection === 'projects' && (

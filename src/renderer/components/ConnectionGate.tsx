@@ -44,6 +44,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { getDaemonWs, invalidateDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
 import { useConnectHostStore } from '@/stores/connect-host'
+import { RemoteSignIn } from './RemoteSignIn'
 
 /** Shape of the daemon's GET /boot-status response. `detail` is free-text
  *  for the UI only — never branch on it. */
@@ -226,6 +227,17 @@ export function ConnectionGate(): React.ReactElement {
   const activeHost = useConnectHostStore((s) => s.activeHost)
   const hostKey = activeHostKey(activeHost)
   const isRemote = activeHost !== 'local'
+  // K2 Connect step #3: a host the user picked that needs a password
+  // (no remembered/expired token). Rendered as the full-screen sign-in.
+  const pendingSignIn = useConnectHostStore((s) => s.pendingSignIn)
+
+  // K2 Connect step #3: hydrate the saved address book + resolve
+  // remembered tokens from the keychain ONCE at boot, before any remote
+  // auto-sign-in can fire. Local boot is unaffected (default activeHost
+  // is 'local', and hydration only fills the hosts[] list + tokens).
+  useEffect(() => {
+    void useConnectHostStore.getState().hydrateFromDisk()
+  }, [])
 
   // Phase 1: resolve the app version once, then poll the ACTIVE host's
   // /boot-status until the acceptance policy says to mount. Re-runs when
@@ -339,6 +351,12 @@ export function ConnectionGate(): React.ReactElement {
     AppModule !== null &&
     decision.kind !== 'accept'
 
+  // K2 Connect step #3 — full-screen sign-in for a picked host with no
+  // remembered/valid token. Rendered ON TOP of the current view (the
+  // last-mounted App if there is one, else the connecting overlay) so the
+  // user's place is preserved while they re-auth a single server.
+  const signInOverlay = pendingSignIn ? <RemoteSignIn host={pendingSignIn} /> : null
+
   if (softReconnecting) {
     const App = AppModule
     const label = activeHost.label
@@ -346,19 +364,30 @@ export function ConnectionGate(): React.ReactElement {
       <>
         <App key={hostKey} />
         <ReconnectOverlay label={label} />
+        {signInOverlay}
       </>
     )
   }
 
   if (decision.kind !== 'accept' || AppModule === null) {
-    return <ConnectingOverlay decision={decision} attempts={attempts} />
+    return (
+      <>
+        <ConnectingOverlay decision={decision} attempts={attempts} />
+        {signInOverlay}
+      </>
+    )
   }
 
   const App = AppModule
   // Key by the active host so switching daemons unmounts + remounts App
   // wholesale — every store, WS, and terminal pane re-initializes against
   // the new host's creds rather than clinging to the old socket.
-  return <App key={hostKey} />
+  return (
+    <>
+      <App key={hostKey} />
+      {signInOverlay}
+    </>
+  )
 }
 
 /** Dimmed, NON-blanking overlay shown over the last mounted view while a

@@ -104,6 +104,7 @@ export const SECTION_LABELS: Record<SettingsSection, string> = {
   keybindings: 'Keybindings',
   timer: 'Timer',
   companion: 'K2 Companion',
+  connections: 'Connections',
 }
 
 /** Suppress unused-type warning since IndexedEntry is reserved for future optimization. */

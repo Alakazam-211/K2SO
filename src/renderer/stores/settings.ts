@@ -11,7 +11,7 @@ import {
   settingsReset,
 } from '@/lib/daemon-settings'
 
-export type SettingsSection = 'general' | 'terminal' | 'code-editor' | 'editors-agents' | 'keybindings' | 'projects' | 'timer' | 'workspace-states' | 'agent-skills' | 'heartbeats' | 'companion' | 'wake-scheduler' | 'permissions' | 'dictation-lab'
+export type SettingsSection = 'general' | 'terminal' | 'code-editor' | 'editors-agents' | 'keybindings' | 'projects' | 'timer' | 'workspace-states' | 'agent-skills' | 'heartbeats' | 'companion' | 'wake-scheduler' | 'permissions' | 'dictation-lab' | 'connections' | 'k2-connect'
 
 export interface TerminalSettings {
   fontFamily: string

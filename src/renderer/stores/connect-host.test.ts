@@ -44,10 +44,44 @@ const storage = new MemoryStorage()
 // Install before importing the store (module-load `loadHosts()` reads it).
 vi.stubGlobal('localStorage', storage)
 
+// ── Mock the Tauri invoke bridge ─────────────────────────────────────────
+// The store calls `invoke` for connect_hosts_{read,write} + k2_secret_*.
+// In vitest there's no Tauri runtime, so we mock it: a fake keychain Map
+// + a fake connect-hosts.json string, asserting the store's read/write
+// contract and the keychain hydration path.
+const fakeKeychain = new Map<string, string>()
+let fakeHostsFile = '[]'
+const invokeMock = vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
+  switch (cmd) {
+    case 'connect_hosts_read':
+      return fakeHostsFile
+    case 'connect_hosts_write':
+      fakeHostsFile = args!.json as string
+      return undefined
+    case 'k2_secret_set':
+      fakeKeychain.set(`${args!.service}:${args!.account}`, args!.secret as string)
+      return undefined
+    case 'k2_secret_get':
+      return fakeKeychain.get(`${args!.service}:${args!.account}`) ?? null
+    case 'k2_secret_delete':
+      fakeKeychain.delete(`${args!.service}:${args!.account}`)
+      return undefined
+    default:
+      throw new Error(`unexpected invoke: ${cmd}`)
+  }
+})
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (cmd: string, args?: Record<string, unknown>) => invokeMock(cmd, args),
+}))
+
 import {
   useConnectHostStore,
   __resetConnectHostStoreForTests,
   CONNECT_HOSTS_STORAGE_KEY,
+  K2_CONNECT_KEYCHAIN_SERVICE,
+  rememberToken,
+  resolveToken,
+  forgetToken,
   isLocalHostname,
   type ConnectHost,
 } from './connect-host'
@@ -69,6 +103,9 @@ function makeHost(overrides: Partial<ConnectHost> = {}): ConnectHost {
 describe('connect-host store', () => {
   beforeEach(() => {
     storage.clear()
+    fakeKeychain.clear()
+    fakeHostsFile = '[]'
+    invokeMock.mockClear()
     __resetConnectHostStoreForTests()
   })
 
@@ -185,6 +222,72 @@ describe('connect-host store', () => {
     // the contract by reconstructing what loadHosts produces.
     const rehydrated = parsed.map((h) => ({ ...h, token: '' }))
     expect(rehydrated[0].token).toBe('')
+  })
+
+  // ── Tauri persistence (connect-hosts.json) ──────────────────────────
+  it('addHost writes the token-less list to connect-hosts.json via Tauri', () => {
+    useConnectHostStore.getState().addHost(makeHost({ token: 'super-secret' }))
+    // The file write must have happened and must be token-less.
+    expect(invokeMock).toHaveBeenCalledWith('connect_hosts_write', expect.any(Object))
+    expect(fakeHostsFile).not.toContain('super-secret')
+    expect(fakeHostsFile).not.toContain('token')
+    const parsed = JSON.parse(fakeHostsFile) as Array<Record<string, unknown>>
+    expect(parsed[0].label).toBe('Test box')
+  })
+
+  // ── setHostToken ─────────────────────────────────────────────────────
+  it('setHostToken updates the in-memory token on the host AND the active host', () => {
+    const host = makeHost({ id: 'h1', token: '' })
+    useConnectHostStore.getState().addHost(host)
+    useConnectHostStore.getState().selectHost(host)
+    useConnectHostStore.getState().setHostToken('h1', 'fresh-token')
+    expect(useConnectHostStore.getState().hosts[0].token).toBe('fresh-token')
+    const active = useConnectHostStore.getState().activeHost
+    expect(active !== 'local' && active.token).toBe('fresh-token')
+  })
+
+  // ── Keychain helpers ─────────────────────────────────────────────────
+  it('rememberToken / resolveToken / forgetToken round-trip via the keychain', async () => {
+    await rememberToken('host-x', 'tok-123')
+    expect(fakeKeychain.get(`${K2_CONNECT_KEYCHAIN_SERVICE}:host-x`)).toBe('tok-123')
+    expect(await resolveToken('host-x')).toBe('tok-123')
+    await forgetToken('host-x')
+    expect(await resolveToken('host-x')).toBeNull()
+  })
+
+  it('resolveToken returns null for a host with no remembered token', async () => {
+    expect(await resolveToken('never-set')).toBeNull()
+  })
+
+  // ── hydrateFromDisk ──────────────────────────────────────────────────
+  it('hydrateFromDisk loads the file list and resolves remembered tokens from the keychain', async () => {
+    // Seed a durable file with two hosts: one remembered, one not.
+    fakeHostsFile = JSON.stringify([
+      { id: 'remembered', label: 'Hetzner', hostname: 'rosson.k2.dev', port: 443, secure: true, remember: true, lastConnectedAt: 1 },
+      { id: 'forgotten', label: 'LAN box', hostname: '10.0.0.5', port: 47800, secure: false, remember: false, lastConnectedAt: null },
+    ])
+    fakeKeychain.set(`${K2_CONNECT_KEYCHAIN_SERVICE}:remembered`, 'kc-token')
+
+    await useConnectHostStore.getState().hydrateFromDisk()
+
+    const hosts = useConnectHostStore.getState().hosts
+    expect(hosts.map((h) => h.id).sort()).toEqual(['forgotten', 'remembered'])
+    const remembered = hosts.find((h) => h.id === 'remembered')!
+    const forgotten = hosts.find((h) => h.id === 'forgotten')!
+    // Remembered host's token came back from the keychain...
+    expect(remembered.token).toBe('kc-token')
+    // ...the non-remembered host stays token-less.
+    expect(forgotten.token).toBe('')
+  })
+
+  it('hydrateFromDisk does NOT resolve a token for a non-remembered host', async () => {
+    fakeHostsFile = JSON.stringify([
+      { id: 'h', label: 'x', hostname: 'h', port: 443, secure: true, remember: false, lastConnectedAt: null },
+    ])
+    // Even if a stray keychain entry exists, remember:false must not pull it.
+    fakeKeychain.set(`${K2_CONNECT_KEYCHAIN_SERVICE}:h`, 'should-not-load')
+    await useConnectHostStore.getState().hydrateFromDisk()
+    expect(useConnectHostStore.getState().hosts[0].token).toBe('')
   })
 })
 

@@ -1151,6 +1151,10 @@ pub fn run() {
             commands::secrets::k2_secret_set,
             commands::secrets::k2_secret_get,
             commands::secrets::k2_secret_delete,
+            // K2 Connect — client address book (non-secret host list)
+            // persisted to ~/.k2so/connect-hosts.json.
+            commands::connect_hosts::connect_hosts_read,
+            commands::connect_hosts::connect_hosts_write,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {
