@@ -9,6 +9,7 @@ import { useReviewQueueStore } from '@/stores/review-queue'
 import { useRunningAgentsStore } from '@/stores/running-agents'
 import { useActiveAgentsStore } from '@/stores/active-agents'
 import TimerButton from '@/components/Timer/TimerButton'
+import ServerSwitcher from './ServerSwitcher'
 
 interface TopBarProps {
   projectName?: string
@@ -86,6 +87,8 @@ export default function TopBar({
         <div style={{ width: 70 }} />
         {/* App name */}
         <span className="text-[10px] font-bold tracking-widest text-[var(--color-text-muted)] uppercase flex-shrink-0">K2SO</span>
+        {/* K2 Connect server switcher (This Mac / saved servers / add) */}
+        <ServerSwitcher />
         {/* Primary sidebar toggle */}
         <button
           onClick={onTogglePrimarySidebar}
