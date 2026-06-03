@@ -202,12 +202,16 @@ export default function Settings(): React.JSX.Element {
           </SectionErrorBoundary>
         )}
         {(activeSection === 'k2-connect' || activeSection === 'connections') && (
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-8 items-start">
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-8 xl:gap-0 items-start">
             <SectionErrorBoundary>
-              <K2ConnectSection />
+              <div className="xl:pr-8">
+                <K2ConnectSection />
+              </div>
             </SectionErrorBoundary>
             <SectionErrorBoundary>
-              <ConnectionsSection />
+              <div className="xl:pl-8 xl:border-l xl:border-[var(--color-border)]">
+                <ConnectionsSection />
+              </div>
             </SectionErrorBoundary>
           </div>
         )}

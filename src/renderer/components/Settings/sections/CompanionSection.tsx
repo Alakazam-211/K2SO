@@ -1,232 +1,67 @@
-import React from 'react'
-import { useEffect, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { getDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
-// Phase 2 Unit 7a — settings live in the daemon. The companion
-// tunnel control endpoints (`/cli/companion/{start,stop,status,...}`)
-// landed in Unit 1; the settings read/write now follows the same
-// direct-daemon pattern.
-import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
+import { useSettingsStore } from '@/stores/settings'
 import type { SettingEntry } from '../searchManifest'
 
-// Phase 2 Unit 1 — Companion tunnel lifecycle now lives in
-// k2so-daemon (`/cli/companion/*`). The Tauri-side
-// `companion_start`/`companion_stop`/`companion_status`/
-// `companion_set_password`/`companion_disconnect_session` commands
-// were deleted along with `src-tauri/src/commands/companion.rs`.
-//
-// Helpers below call the daemon directly so the Settings panel
-// keeps working with no `invoke` shim in the middle. The settings
-// reads/writes (username, ngrok token, etc.) still go through
-// Tauri's `settings_*` commands — that migration is Unit 7.
+// K2 Companion (task #615) — the mobile app and K2 Connect now share ONE
+// tunnel (the frpc reverse tunnel exposed by K2 Connect at <sub>.k2.dev).
+// The phone pairs to the same public URL the daemon is exposed at, so
+// Companion no longer runs its own ngrok tunnel. This section is now just
+// (a) a link to install the mobile app and (b) a live read of the K2
+// Connect tunnel status (GET /cli/tunnel/status), reusing the same
+// direct-daemon fetch pattern as K2ConnectSection.tsx.
 
-interface CompanionStatus {
+// Real App Store listing found on https://k2so.sh ("Mobile — Available Now").
+const APP_DOWNLOAD_URL = 'https://apps.apple.com/us/app/k2so/id6762076766'
+
+interface TunnelStatus {
   running: boolean
-  tunnelUrl?: string | null
-  connectedClients?: number
-  wsClients?: number
-  sessions?: Array<{ token: string; remoteAddr: string; createdAt: string }>
+  public_url: string | null
+  frpc_installed: boolean
 }
 
-async function daemonGet(pathSuffix: string): Promise<Response> {
+async function tunnelStatus(): Promise<TunnelStatus> {
   const creds = await getDaemonWs()
-  return fetch(
-    `${daemonHttpBase(creds)}/cli/companion/${pathSuffix}?token=${creds.token}`,
+  const res = await fetch(
+    `${daemonHttpBase(creds)}/cli/tunnel/status?token=${creds.token}`,
     { method: 'GET' },
   )
-}
-
-async function daemonPostJson(
-  pathSuffix: string,
-  body: unknown,
-): Promise<Response> {
-  const creds = await getDaemonWs()
-  return fetch(
-    `${daemonHttpBase(creds)}/cli/companion/${pathSuffix}?token=${creds.token}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    },
-  )
-}
-
-async function companionStatus(): Promise<CompanionStatus> {
-  const res = await daemonGet('status')
-  if (!res.ok) throw new Error(`companion status ${res.status}`)
-  return (await res.json()) as CompanionStatus
-}
-
-async function companionStart(): Promise<string> {
-  const res = await daemonGet('start')
-  const text = await res.text()
-  if (!res.ok) {
-    let msg = text
-    try {
-      const parsed = JSON.parse(text)
-      if (parsed && typeof parsed.error === 'string') msg = parsed.error
-    } catch {
-      /* keep raw text */
-    }
-    throw new Error(msg || `companion start ${res.status}`)
-  }
-  // Response shape: {"ok":true,"url":"..."}
-  try {
-    const parsed = JSON.parse(text)
-    if (parsed && typeof parsed.url === 'string') return parsed.url
-  } catch {
-    /* fall through */
-  }
-  return text
-}
-
-async function companionStop(): Promise<void> {
-  const res = await daemonGet('stop')
-  if (!res.ok) throw new Error(`companion stop ${res.status}`)
-}
-
-async function companionSetPassword(password: string): Promise<void> {
-  const res = await daemonPostJson('set-password', { password })
-  if (!res.ok) {
-    const body = await res.text()
-    throw new Error(body || `companion set-password ${res.status}`)
-  }
-}
-
-async function companionDisconnectSession(token: string): Promise<void> {
-  const res = await daemonPostJson('disconnect-session', { sessionToken: token })
-  if (!res.ok) throw new Error(`companion disconnect ${res.status}`)
+  if (!res.ok) throw new Error(`tunnel status ${res.status}`)
+  return (await res.json()) as TunnelStatus
 }
 
 export const COMPANION_MANIFEST: SettingEntry[] = [
-  { id: 'companion.enable', section: 'companion', label: 'Enable Companion', description: 'Start the ngrok tunnel for the K2SO mobile companion app', keywords: ['mobile', 'companion', 'remote', 'ngrok', 'tunnel'] },
-  { id: 'companion.auto-start', section: 'companion', label: 'Start on Launch', description: 'Auto-connect when K2SO opens', keywords: ['auto', 'launch', 'startup'] },
-  { id: 'companion.allow-remote-spawn', section: 'companion', label: 'Allow Remote Spawn', description: 'Permit mobile app to launch arbitrary terminals (off by default)', keywords: ['spawn', 'terminal', 'command', 'security', 'remote', 'execute'] },
-  { id: 'companion.username', section: 'companion', label: 'Username', description: 'Username the mobile app authenticates with', keywords: ['username', 'auth', 'login'] },
-  { id: 'companion.password', section: 'companion', label: 'Password', description: 'Password the mobile app authenticates with', keywords: ['password', 'auth', 'login'] },
-  { id: 'companion.ngrok-token', section: 'companion', label: 'ngrok Auth Token', description: 'Required for the remote tunnel', keywords: ['ngrok', 'token', 'tunnel', 'auth'] },
-  { id: 'companion.ngrok-domain', section: 'companion', label: 'Custom Domain', description: 'Paid ngrok plans (e.g. myapp.ngrok.app)', keywords: ['domain', 'ngrok', 'url'] },
-  { id: 'companion.sessions', section: 'companion', label: 'Active Sessions', description: 'Connected mobile companion clients', keywords: ['sessions', 'connected', 'disconnect', 'client'] },
+  { id: 'companion.get-app', section: 'companion', label: 'Get the K2 mobile app', description: 'Install the K2 Companion app on your phone', keywords: ['mobile', 'companion', 'app', 'download', 'install', 'iphone', 'ios', 'app store'] },
+  { id: 'companion.status', section: 'companion', label: 'K2 Connect Status', description: 'Whether your daemon is reachable for the mobile app', keywords: ['status', 'tunnel', 'connect', 'reachable', 'subdomain', 'k2.dev', 'pair'] },
 ]
 
 export function CompanionSection(): React.JSX.Element {
-  const [enabled, setEnabled] = useState(false)
-  const [autoStart, setAutoStart] = useState(false)
-  const [allowRemoteSpawn, setAllowRemoteSpawn] = useState(false)
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
-  const [passwordSet, setPasswordSet] = useState(false)
-  const [ngrokToken, setNgrokToken] = useState('')
-  const [ngrokDomain, setNgrokDomain] = useState('')
-  const [tunnelUrl, setTunnelUrl] = useState<string | null>(null)
-  const [connectedClients, setConnectedClients] = useState(0)
-  const [sessions, setSessions] = useState<Array<{ token: string; remoteAddr: string; createdAt: string }>>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [urlCopied, setUrlCopied] = useState(false)
+  const [status, setStatus] = useState<TunnelStatus | null>(null)
 
   useEffect(() => {
-    const load = async () => {
+    let cancelled = false
+    const refresh = async () => {
       try {
-        const settings = await settingsGet()
-        const c = (settings as any)?.companion || {}
-        setUsername(c.username || '')
-        // Post-0.32.12 the hash itself moves to Keychain and passwordHash is
-        // blanked; `passwordSet` is the durable indicator. Fall back to the
-        // legacy field for installs that haven't migrated yet.
-        setPasswordSet(!!(c.passwordSet || c.passwordHash))
-        setNgrokToken(c.ngrokAuthToken || '')
-        setNgrokDomain(c.ngrokDomain || '')
-        setAutoStart(c.autoStart || false)
-        setAllowRemoteSpawn(!!c.allowRemoteSpawn)
-      } catch { /* ignore */ }
-      try {
-        const status = await companionStatus()
-        if (status.running) {
-          setEnabled(true)
-          if (status.tunnelUrl) {
-            setTunnelUrl(status.tunnelUrl)
-            setConnectedClients(status.connectedClients || 0)
-            setSessions(status.sessions || [])
-          }
-        } else {
-          setEnabled(false)
-        }
-      } catch { /* ignore */ }
+        const s = await tunnelStatus()
+        if (!cancelled) setStatus(s)
+      } catch {
+        /* ignore — leave previous status / null */
+      }
     }
-    load()
+    void refresh()
+    const interval = setInterval(() => void refresh(), 5000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
   }, [])
 
-  useEffect(() => {
-    // Poll companion status — runs always when autoStart is on (to detect auto-started companion)
-    // or when enabled (to track running companion)
-    if (!enabled && !autoStart) return
-    const interval = setInterval(async () => {
-      try {
-        const status = await companionStatus()
-        if (!status.running) {
-          if (enabled) {
-            // Tunnel genuinely stopped
-            setEnabled(false)
-            setTunnelUrl(null)
-            setConnectedClients(0)
-            setSessions([])
-          }
-        } else {
-          // Companion is running — make sure UI reflects it
-          if (!enabled) setEnabled(true)
-          if (status.tunnelUrl) {
-            setTunnelUrl(status.tunnelUrl)
-            setConnectedClients(status.connectedClients || 0)
-            setSessions(status.sessions || [])
-          }
-        }
-      } catch { /* ignore */ }
-    }, 5000)
-    return () => clearInterval(interval)
-  }, [enabled, autoStart])
+  const running = status?.running ?? false
+  const publicUrl = status?.public_url ?? null
+  const connected = running && !!publicUrl
 
-  const handleToggle = async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      if (enabled) {
-        await companionStop()
-        setEnabled(false)
-        setTunnelUrl(null)
-        setConnectedClients(0)
-        setSessions([])
-        await settingsUpdate({ companion: { enabled: false } })
-      } else {
-        await settingsUpdate({
-          companion: { enabled: true, username, ngrokAuthToken: ngrokToken }
-        })
-        const url = await companionStart()
-        setEnabled(true)
-        setTunnelUrl(url)
-      }
-    } catch (err: any) {
-      setError(typeof err === 'string' ? err : err?.message || 'Failed')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const handleSetPassword = async () => {
-    if (!password) return
-    try {
-      await companionSetPassword(password)
-      setPasswordSet(true)
-      setPassword('')
-    } catch (err: any) {
-      setError(typeof err === 'string' ? err : 'Failed to set password')
-    }
-  }
-
-  const handleDisconnect = async (token: string) => {
-    try {
-      await companionDisconnectSession(token)
-      setSessions((prev) => prev.filter((s) => s.token !== token))
-    } catch { /* ignore */ }
+  const goToK2Connect = () => {
+    useSettingsStore.getState().setSection('k2-connect')
   }
 
   return (
@@ -240,155 +75,76 @@ export function CompanionSection(): React.JSX.Element {
           beta
         </span>
       </h2>
-      <p className="text-[10px] text-[var(--color-text-muted)] mb-3">
-        Access your K2SO agents remotely through the companion app. Requires an ngrok account.
+      <p className="text-[10px] text-[var(--color-text-muted)] mb-4">
+        Reach your K2 agents from your phone. The mobile app pairs to the same
+        public address K2 Connect exposes this daemon at — one tunnel, both
+        clients. No separate setup here.
       </p>
 
-      {/* Deprecation notice — the mobile app pairing surface predates
-          the daemon-first / multi-heartbeat architecture and needs a
-          rewrite against the new session model before it can ship
-          again. The settings here still work for users on 0.29.x who
-          have a paired companion, but new pairings won't connect
-          against current K2SO builds. */}
-      <div className="flex items-start gap-2 mb-4 px-3 py-2 border border-amber-400/30 bg-amber-400/5">
-        <span className="text-amber-400 text-sm leading-none flex-shrink-0 mt-0.5">&#9888;</span>
-        <div className="text-[10px] text-amber-300/80 leading-relaxed">
-          <strong className="text-amber-300">Mobile app support paused.</strong>{' '}
-          K2SO <span className="font-mono">0.29.x</span> is the last version that
-          fully supports the mobile companion app. The settings on this page still
-          work for ngrok tunnel + auth setup, but the mobile app itself isn&apos;t
-          compatible with the current K2SO session model. Full mobile support is
-          coming back in a later release.
+      {/* ── Get the app ───────────────────────────────────────────── */}
+      <div
+        className="mb-4 px-3 py-3 border border-[var(--color-border)]"
+        data-settings-id="companion.get-app"
+      >
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-xs text-[var(--color-text-primary)]">Get the K2 mobile app</div>
+            <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
+              Install K2 Companion on your phone, then pair it to your daemon&apos;s
+              public address (shown below).
+            </p>
+          </div>
+          <a
+            href={APP_DOWNLOAD_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="flex-shrink-0 px-3 py-1 text-[11px] text-white bg-[var(--color-accent)] hover:opacity-90 no-drag cursor-pointer"
+          >
+            Get the app
+          </a>
         </div>
       </div>
 
-      <div className="flex items-center gap-2 mb-4 px-3 py-2 border border-[var(--color-border)]">
-        <span className="w-2 h-2 flex-shrink-0" style={{ backgroundColor: tunnelUrl ? '#22c55e' : enabled ? '#eab308' : '#6b7280' }} />
-        <span className="text-xs text-[var(--color-text-secondary)]">
-          {tunnelUrl ? `Connected (${connectedClients} client${connectedClients !== 1 ? 's' : ''})` : enabled ? 'Connecting...' : 'Not running'}
-        </span>
-        {tunnelUrl && (
-          <div className="flex items-center gap-1.5 ml-auto">
-            <span className="text-[10px] text-[var(--color-text-muted)] font-mono truncate max-w-[200px]">{tunnelUrl}</span>
-            <button
-              onClick={() => {
-                navigator.clipboard.writeText(tunnelUrl).then(() => {
-                  setUrlCopied(true)
-                  setTimeout(() => setUrlCopied(false), 1500)
-                }).catch(() => {})
-              }}
-              className={`text-[10px] no-drag cursor-pointer ${urlCopied ? 'text-green-400' : 'text-[var(--color-accent)] hover:underline'}`}
+      {/* ── K2 Connect status (live) ──────────────────────────────── */}
+      <div data-settings-id="companion.status">
+        {connected ? (
+          <div className="px-3 py-3 border border-green-500/30 bg-green-500/5">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 flex-shrink-0 rounded-full" style={{ backgroundColor: '#22c55e' }} />
+              <span className="text-xs text-[var(--color-text-secondary)]">Connected</span>
+            </div>
+            <p className="text-[10px] text-[var(--color-text-muted)] mt-2 leading-relaxed">
+              Your daemon is reachable at the address below. Open the K2 app and
+              pair to it.
+            </p>
+            <a
+              href={publicUrl!}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-block mt-1.5 text-xs text-[var(--color-accent)] hover:underline font-mono break-all no-drag cursor-pointer"
             >
-              {urlCopied ? 'Copied!' : 'Copy'}
+              {publicUrl}
+            </a>
+          </div>
+        ) : (
+          <div className="px-3 py-3 border border-[var(--color-border)]">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 flex-shrink-0 rounded-full" style={{ backgroundColor: '#6b7280' }} />
+              <span className="text-xs text-[var(--color-text-secondary)]">K2 Connect isn&apos;t running</span>
+            </div>
+            <p className="text-[10px] text-[var(--color-text-muted)] mt-2 leading-relaxed">
+              The mobile app reaches this daemon through the K2 Connect tunnel.
+              Start it to get a <span className="font-mono">https://&lt;sub&gt;.k2.dev</span> address
+              you can pair to.
+            </p>
+            <button
+              onClick={goToK2Connect}
+              className="mt-2 text-[11px] text-[var(--color-accent)] hover:underline no-drag cursor-pointer"
+            >
+              Set up K2 Connect →
             </button>
           </div>
         )}
-      </div>
-
-      {error && <div className="text-[10px] text-red-400 mb-3 px-3 py-1.5 border border-red-400/20 bg-red-400/5">{error}</div>}
-
-      <div className="space-y-0">
-        <div className="flex items-center justify-between py-2.5 border-b border-[var(--color-border)]">
-          <span className="text-xs text-[var(--color-text-secondary)]">Enable Companion</span>
-          <button onClick={handleToggle} disabled={loading} className={`w-7 h-3.5 flex items-center transition-colors no-drag cursor-pointer flex-shrink-0 ${enabled ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'} ${loading ? 'opacity-50' : ''}`}>
-            <span className={`w-2.5 h-2.5 bg-white block transition-transform ${enabled ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
-          </button>
-        </div>
-
-        <div className="flex items-center justify-between py-2.5 border-b border-[var(--color-border)]">
-          <div>
-            <span className="text-xs text-[var(--color-text-secondary)]">Start on Launch</span>
-            <p className="text-[10px] text-[var(--color-text-muted)]">Automatically connect when K2SO opens</p>
-          </div>
-          <button
-            onClick={() => {
-              const next = !autoStart
-              setAutoStart(next)
-              settingsUpdate({ companion: { autoStart: next } }).catch(() => {})
-            }}
-            className={`w-7 h-3.5 flex items-center transition-colors no-drag cursor-pointer flex-shrink-0 ${autoStart ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'}`}
-          >
-            <span className={`w-2.5 h-2.5 bg-white block transition-transform ${autoStart ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
-          </button>
-        </div>
-
-        <div className="flex items-center justify-between py-2.5 border-b border-[var(--color-border)]">
-          <div>
-            <span className="text-xs text-[var(--color-text-secondary)]">Allow Remote Spawn</span>
-            <p className="text-[10px] text-[var(--color-text-muted)]">
-              Permit the mobile app to launch new terminals running arbitrary commands.
-              Off by default — if the tunnel is compromised, leaving this off limits the
-              blast radius to reading existing terminals. Restart the companion after changing.
-            </p>
-          </div>
-          <button
-            onClick={() => {
-              const next = !allowRemoteSpawn
-              setAllowRemoteSpawn(next)
-              settingsUpdate({ companion: { allowRemoteSpawn: next } }).catch(() => {})
-            }}
-            className={`w-7 h-3.5 flex items-center transition-colors no-drag cursor-pointer flex-shrink-0 ${allowRemoteSpawn ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border)]'}`}
-          >
-            <span className={`w-2.5 h-2.5 bg-white block transition-transform ${allowRemoteSpawn ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
-          </button>
-        </div>
-
-        <div className="flex items-center justify-between py-2.5 border-b border-[var(--color-border)]">
-          <span className="text-xs text-[var(--color-text-secondary)]">Username</span>
-          <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} onBlur={() => settingsUpdate({ companion: { username } }).catch(() => {})} placeholder="Enter username" className="w-48 px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag" />
-        </div>
-
-        <div className="flex items-center justify-between py-2.5 border-b border-[var(--color-border)]">
-          <div>
-            <span className="text-xs text-[var(--color-text-secondary)]">Password</span>
-            {passwordSet && <span className="ml-2 text-[10px] text-green-400">Set</span>}
-          </div>
-          <div className="flex items-center gap-1.5">
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleSetPassword() }} placeholder={passwordSet ? '••••••••' : 'Enter password'} className="w-36 px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag" />
-            {password && <button onClick={handleSetPassword} className="px-2 py-1 text-[10px] text-white bg-[var(--color-accent)] hover:opacity-90 no-drag cursor-pointer">Save</button>}
-          </div>
-        </div>
-
-        <div className="flex items-center justify-between py-2.5 border-b border-[var(--color-border)]">
-          <span className="text-xs text-[var(--color-text-secondary)]">ngrok Auth Token</span>
-          <input type="password" value={ngrokToken} onChange={(e) => setNgrokToken(e.target.value)} onBlur={() => settingsUpdate({ companion: { ngrokAuthToken: ngrokToken } }).catch(() => {})} placeholder="Enter ngrok token" className="w-48 px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag" />
-        </div>
-
-        <div className="flex items-center justify-between py-2.5 border-b border-[var(--color-border)]">
-          <div>
-            <span className="text-xs text-[var(--color-text-secondary)]">Custom Domain</span>
-            <p className="text-[10px] text-[var(--color-text-muted)]">Paid plans only (e.g. myapp.ngrok.app)</p>
-          </div>
-          <input type="text" value={ngrokDomain} onChange={(e) => setNgrokDomain(e.target.value)} onBlur={() => settingsUpdate({ companion: { ngrokDomain: ngrokDomain } }).catch(() => {})} placeholder="Optional" className="w-48 px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag" />
-        </div>
-      </div>
-
-      {sessions.length > 0 && (
-        <div className="mt-6">
-          <h3 className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mb-2">Active Sessions</h3>
-          <div className="border border-[var(--color-border)]">
-            {sessions.map((session) => (
-              <div key={session.token} className="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)] last:border-b-0">
-                <div className="flex items-center gap-2">
-                  <span className="w-1.5 h-1.5 bg-green-400 flex-shrink-0" />
-                  <span className="text-xs text-[var(--color-text-primary)] font-mono">{session.remoteAddr}</span>
-                  <span className="text-[10px] text-[var(--color-text-muted)]">
-                    {(() => { const ago = Math.floor((Date.now() - new Date(session.createdAt).getTime()) / 60000); return ago < 1 ? 'just now' : ago < 60 ? `${ago}m ago` : `${Math.floor(ago / 60)}h ago` })()}
-                  </span>
-                </div>
-                <button onClick={() => handleDisconnect(session.token)} className="text-[10px] text-red-400 hover:text-red-300 no-drag cursor-pointer">Disconnect</button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <div className="mt-6 text-[10px] text-[var(--color-text-muted)] space-y-1">
-        <p>1. Create a <span className="text-[var(--color-accent)]">paid</span> account at <span className="text-[var(--color-accent)]">ngrok.com</span> (Personal plan or higher) and copy your auth token.</p>
-        <p>2. Set a username and password for the companion app to authenticate.</p>
-        <p>3. Enable the toggle — K2SO will create a secure tunnel and show you the URL.</p>
-        <p>4. Enter the URL in the K2SO companion app on your phone.</p>
-        <p className="text-[var(--color-text-muted)] opacity-70 mt-2">A paid ngrok account is required for a stable connection. Free tier tunnels disconnect after a short period of inactivity.</p>
       </div>
     </div>
   )
