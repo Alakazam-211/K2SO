@@ -55,3 +55,10 @@ This is the OTHER direction from the switcher/Connections (§1–5, which is the
 - **MVP (buildable now, no server changes):** manual **token + subdomain** entry written to `tunnel.json`, + Start/Stop/Status wired to the existing `/cli/tunnel/*` routes. Surfaces the "frpc not installed" error from the connector with an install hint.
 - **Full (DEPENDS ON PROPRIETARY CONTROL-PLANE API — not built):** real account login + **list of owned subdomains** needs control-plane `/account` + `/subdomains` endpoints (multi-subdomain ownership, billing). Flag as the server-side follow-up; the MVP token+subdomain form stands in until then.
 - **Companion rename (done):** "Mobile Companion" → **"K2 Companion"** (prep for the LocalXpose BYO migration).
+
+### 6.1 One expose plane — K2 Companion collapses to "download + pair" (Rosson 2026-06-03)
+K2 Companion (mobile) and K2 Connect (desktop-remote) reach the **same daemon over the same tunnel** (`<sub>.k2.dev`). So the **server/tunnel config lives ONCE** on the K2 Connect host page (§6). Therefore:
+- **K2 Companion settings page → collapses to "Get the mobile app" (App Store / Google Play links) + a pairing affordance** (the `<sub>.k2.dev` + token already set in K2 Connect; QR/code to pair). **No separate tunnel config on the Companion page.**
+- **Retire the legacy standalone ngrok Companion tunnel** (`CompanionSection.tsx` "Enable Companion" ngrok lifecycle) — the mobile app rides the unified K2 Connect tunnel.
+- **BYO / LocalXpose** = a tunnel-*provider* option on the same expose plane, NOT a separate Companion tunnel.
+- Mental model: **expose once → reach it from desktop (K2 Connect switcher) or phone (K2 Companion app).** Task #615. (Separate from the in-flight Connections + K2-Connect-host-page build.)
