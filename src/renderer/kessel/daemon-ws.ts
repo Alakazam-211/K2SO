@@ -19,6 +19,13 @@
 // daemon may have been briefly unavailable (e.g. a reinstall).
 
 import { invoke } from '@tauri-apps/api/core'
+import { useConnectHostStore } from '@/stores/connect-host'
+
+/** Loopback host the local bundled daemon always binds. When the active
+ *  host is 'local' the resolved creds carry exactly this — so every URL
+ *  built from `creds.host` is byte-identical to the pre-host-aware code
+ *  that hardcoded `127.0.0.1`. */
+const LOCAL_HOST = '127.0.0.1'
 
 export type DaemonWsState =
   | { state: 'available'; port: number; token: string }
@@ -27,6 +34,9 @@ export type DaemonWsState =
 export interface DaemonWsAvailable {
   port: number
   token: string
+  /** Daemon host. `'127.0.0.1'` for the local daemon (byte-identical to
+   *  before); the active ConnectHost's hostname when remote. */
+  host: string
 }
 
 interface RawResponse {
@@ -45,11 +55,30 @@ export function invalidateDaemonWs(): void {
   cached = null
 }
 
-/** Resolve to {port, token}. First call actually hits the backend;
- *  subsequent calls return the cached promise synchronously (modulo
- *  the await). Rejects with a message when the daemon isn't reachable —
- *  the reject invalidates the cache so recovery is just a retry. */
+/** Resolve to {port, token, host}. Host-aware (K2 Connect step #1):
+ *
+ *   - `activeHost === 'local'` → resolves via the Tauri `daemon_ws_url`
+ *     command EXACTLY as before, with `host: '127.0.0.1'`. The result is
+ *     cached per app session (the local daemon's creds are stable).
+ *   - `activeHost` is a ConnectHost → resolves directly from the saved
+ *     `{hostname, port, token}`. NOT cached against the local-creds
+ *     `cached` promise, because the active host can change at runtime;
+ *     deriving from the store each call keeps switches instant.
+ *
+ * Rejects with a message when the local daemon isn't reachable — the
+ * reject invalidates the local cache so recovery is just a retry. */
 export function getDaemonWs(): Promise<DaemonWsAvailable> {
+  const active = useConnectHostStore.getState().activeHost
+  if (active !== 'local') {
+    // Remote host: derive creds directly from the store. No Tauri
+    // invoke, no shared cache (a switch back to local must not return
+    // stale remote creds and vice-versa).
+    return Promise.resolve({
+      port: active.port,
+      token: active.token,
+      host: active.hostname,
+    })
+  }
   if (cached) return cached
   cached = (async () => {
     let res: RawResponse
@@ -63,9 +92,30 @@ export function getDaemonWs(): Promise<DaemonWsAvailable> {
       cached = null
       throw new Error(`daemon not reachable: ${res.reason ?? 'unknown'}`)
     }
-    return { port: res.port, token: res.token }
+    return { port: res.port, token: res.token, host: LOCAL_HOST }
   })()
   return cached
+}
+
+/**
+ * Build a daemon HTTP URL from resolved creds. Centralizes the
+ * `http://<host>:<port>` construction so call sites don't hardcode
+ * `127.0.0.1`. `path` should start with `/` (e.g. `/boot-status`,
+ * `/cli/sessions/v2/spawn`). For local, `creds.host === '127.0.0.1'`
+ * so the output is byte-identical to the old literals.
+ *
+ * TODO(#4): remotes reached over the k2.dev tunnel terminate TLS at
+ * Caddy → those will want `https://`. Direct-IP LAN remotes stay
+ * `http://`. Scheme selection lands with the remote AcceptancePolicy.
+ */
+export function daemonHttpBase(creds: DaemonWsAvailable): string {
+  return `http://${creds.host}:${creds.port}`
+}
+
+/** Build a daemon WS URL base (`ws://<host>:<port>`). See
+ *  {@link daemonHttpBase}; same TLS caveat (TODO #4 → `wss://`). */
+export function daemonWsBase(creds: DaemonWsAvailable): string {
+  return `ws://${creds.host}:${creds.port}`
 }
 
 /** Fire-and-forget warm-up. Safe to call from app mount; errors are
