@@ -21,6 +21,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import {
   useConnectHostStore,
+  isLocalHostname,
   type ConnectHost,
   type ConnectionStatus,
 } from '@/stores/connect-host'
@@ -222,7 +223,24 @@ function AddServerForm({ onDone }: { onDone: () => void }): React.JSX.Element {
   const [port, setPort] = useState('')
   const [token, setToken] = useState('')
   const [remember, setRemember] = useState(false)
+  // Secure (TLS) — default ON for non-local hostnames (e.g.
+  // rosson.k2.dev → wss://), OFF for localhost/LAN. Tracks the hostname
+  // until the user toggles it by hand (then `secureTouched` pins it).
+  const [secure, setSecure] = useState(false)
+  const [secureTouched, setSecureTouched] = useState(false)
+  // Likewise the port auto-fills to 443 for a secure non-local host
+  // until the user types one.
+  const [portTouched, setPortTouched] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Re-derive secure/port defaults from the hostname unless the user has
+  // overridden them. Non-local → secure + 443; local → plain.
+  const onHostnameChange = (next: string): void => {
+    setHostname(next)
+    const local = isLocalHostname(next)
+    if (!secureTouched) setSecure(!local)
+    if (!portTouched) setPort(!local ? '443' : '')
+  }
 
   const submit = (): void => {
     const portNum = Number(port)
@@ -244,6 +262,7 @@ function AddServerForm({ onDone }: { onDone: () => void }): React.JSX.Element {
       hostname: hostname.trim(),
       port: portNum,
       token: token.trim(),
+      secure,
       remember,
       lastConnectedAt: null,
     }
@@ -272,14 +291,17 @@ function AddServerForm({ onDone }: { onDone: () => void }): React.JSX.Element {
           className={inputCls}
           placeholder="hostname"
           value={hostname}
-          onChange={(e) => setHostname(e.target.value)}
+          onChange={(e) => onHostnameChange(e.target.value)}
         />
         <input
           className={inputCls}
           style={{ maxWidth: 70 }}
           placeholder="port"
           value={port}
-          onChange={(e) => setPort(e.target.value)}
+          onChange={(e) => {
+            setPortTouched(true)
+            setPort(e.target.value)
+          }}
         />
       </div>
       <input
@@ -288,6 +310,17 @@ function AddServerForm({ onDone }: { onDone: () => void }): React.JSX.Element {
         value={token}
         onChange={(e) => setToken(e.target.value)}
       />
+      <label className="flex items-center gap-1.5 text-[11px] text-[var(--color-text-secondary)]">
+        <input
+          type="checkbox"
+          checked={secure}
+          onChange={(e) => {
+            setSecureTouched(true)
+            setSecure(e.target.checked)
+          }}
+        />
+        Secure (TLS)
+      </label>
       <label className="flex items-center gap-1.5 text-[11px] text-[var(--color-text-secondary)]">
         <input
           type="checkbox"

@@ -42,8 +42,17 @@ export interface ConnectHost {
   label: string
   /** Hostname or IP of the daemon (no scheme, no port). */
   hostname: string
-  /** Daemon port. */
+  /** Daemon port. For a secure hosted remote this is typically 443
+   *  (and the port is omitted from the built URL). */
   port: number
+  /**
+   * TLS (K2 Connect step #4). When true, daemon-ws.ts builds
+   * `https://`/`wss://` URLs and omits port 443 — for a hosted tunnel
+   * like `rosson.k2.dev` where Caddy terminates TLS. Defaults to true
+   * for non-local hostnames added via the switcher; false for
+   * localhost/LAN direct-IP. Non-secret, so it persists to localStorage.
+   */
+  secure: boolean
   /**
    * Auth token (rides as `?token=`). SECRET — never persisted to
    * localStorage. Held in memory for the session; step #3 moves the
@@ -63,6 +72,21 @@ export interface ConnectHost {
 /** The non-secret shape we persist to localStorage (everything except
  *  `token`). */
 type PersistedHost = Omit<ConnectHost, 'token'>
+
+/** A loopback / LAN-localhost hostname speaks plain HTTP — never TLS.
+ *  Used to pick the `secure` default when adding a host: non-local
+ *  hostnames (e.g. `rosson.k2.dev`) default to secure (TLS via the
+ *  tunnel), localhost/127.0.0.1/::1 default to plain. */
+export function isLocalHostname(hostname: string): boolean {
+  const h = hostname.trim().toLowerCase()
+  return (
+    h === 'localhost' ||
+    h === '127.0.0.1' ||
+    h === '::1' ||
+    h === '[::1]' ||
+    h === '0.0.0.0'
+  )
+}
 
 export type ActiveHost = 'local' | ConnectHost
 
@@ -118,7 +142,10 @@ function loadHosts(): ConnectHost[] {
     if (!Array.isArray(parsed)) return []
     return parsed
       .filter((h): h is PersistedHost => isPersistedHost(h))
-      .map((h) => ({ ...h, token: '' }))
+      // `secure` may be absent in entries persisted before step #4 —
+      // default to false (plain http/ws) so old saved hosts keep their
+      // prior behaviour. Token is never persisted; starts empty.
+      .map((h) => ({ ...h, secure: h.secure ?? false, token: '' }))
   } catch {
     return []
   }
@@ -133,6 +160,9 @@ function isPersistedHost(h: unknown): h is PersistedHost {
     typeof o.hostname === 'string' &&
     typeof o.port === 'number' &&
     typeof o.remember === 'boolean' &&
+    // `secure` optional for backward-compat (loadHosts defaults it to
+    // false); reject only an explicitly wrong type.
+    (o.secure === undefined || typeof o.secure === 'boolean') &&
     (o.lastConnectedAt === null || typeof o.lastConnectedAt === 'number')
   )
 }

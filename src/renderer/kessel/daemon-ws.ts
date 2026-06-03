@@ -37,6 +37,17 @@ export interface DaemonWsAvailable {
   /** Daemon host. `'127.0.0.1'` for the local daemon (byte-identical to
    *  before); the active ConnectHost's hostname when remote. */
   host: string
+  /**
+   * TLS (K2 Connect step #4). When true the URL helpers emit
+   * `https://`/`wss://` and OMIT the port when it's 443 — so a hosted
+   * remote like `rosson.k2.dev` (port 443, secure) becomes
+   * `wss://rosson.k2.dev`, with Caddy terminating TLS at the tunnel edge.
+   *
+   * Local is ALWAYS `false` (the loopback daemon speaks plain HTTP), as
+   * are non-secure / LAN direct-IP remotes — those stay `http://`/`ws://`,
+   * byte-identical to before.
+   */
+  secure: boolean
 }
 
 interface RawResponse {
@@ -73,10 +84,16 @@ export function getDaemonWs(): Promise<DaemonWsAvailable> {
     // Remote host: derive creds directly from the store. No Tauri
     // invoke, no shared cache (a switch back to local must not return
     // stale remote creds and vice-versa).
+    //
+    // step #3 (token): the remote host's OWN token rides on every
+    // request — call sites read `creds.token` (this value), so a remote
+    // never reuses the local daemon's token. The tunnel terminates TLS
+    // at Caddy, so the `?token=` query param is encrypted on the wire.
     return Promise.resolve({
       port: active.port,
       token: active.token,
       host: active.hostname,
+      secure: active.secure,
     })
   }
   if (cached) return cached
@@ -92,30 +109,44 @@ export function getDaemonWs(): Promise<DaemonWsAvailable> {
       cached = null
       throw new Error(`daemon not reachable: ${res.reason ?? 'unknown'}`)
     }
-    return { port: res.port, token: res.token, host: LOCAL_HOST }
+    // Local daemon is always plain HTTP on loopback — never TLS.
+    return { port: res.port, token: res.token, host: LOCAL_HOST, secure: false }
   })()
   return cached
 }
 
-/**
- * Build a daemon HTTP URL from resolved creds. Centralizes the
- * `http://<host>:<port>` construction so call sites don't hardcode
- * `127.0.0.1`. `path` should start with `/` (e.g. `/boot-status`,
- * `/cli/sessions/v2/spawn`). For local, `creds.host === '127.0.0.1'`
- * so the output is byte-identical to the old literals.
- *
- * TODO(#4): remotes reached over the k2.dev tunnel terminate TLS at
- * Caddy → those will want `https://`. Direct-IP LAN remotes stay
- * `http://`. Scheme selection lands with the remote AcceptancePolicy.
- */
-export function daemonHttpBase(creds: DaemonWsAvailable): string {
-  return `http://${creds.host}:${creds.port}`
+/** Append `:<port>` UNLESS the scheme's default port is implied — i.e.
+ *  a secure host on 443 is just `host` (so `rosson.k2.dev`, not
+ *  `rosson.k2.dev:443`). Plain-HTTP hosts always carry their port (the
+ *  local daemon binds an ephemeral high port; LAN remotes pick their
+ *  own), preserving byte-identical local URLs. */
+function authority(creds: DaemonWsAvailable): string {
+  if (creds.secure && creds.port === 443) return creds.host
+  return `${creds.host}:${creds.port}`
 }
 
-/** Build a daemon WS URL base (`ws://<host>:<port>`). See
- *  {@link daemonHttpBase}; same TLS caveat (TODO #4 → `wss://`). */
+/**
+ * Build a daemon HTTP URL base from resolved creds. Centralizes the
+ * `<scheme>://<host>[:<port>]` construction so call sites don't hardcode
+ * `127.0.0.1`. Append the path (starting with `/`, e.g. `/boot-status`,
+ * `/cli/sessions/v2/spawn`) at the call site.
+ *
+ * Scheme selection (K2 Connect step #4): a secure remote (e.g. the
+ * k2.dev tunnel, which terminates TLS at Caddy) emits `https://` and
+ * omits port 443; local and non-secure / LAN direct-IP remotes stay
+ * `http://` with their explicit port — byte-identical to the old
+ * hardcoded literals.
+ */
+export function daemonHttpBase(creds: DaemonWsAvailable): string {
+  const scheme = creds.secure ? 'https' : 'http'
+  return `${scheme}://${authority(creds)}`
+}
+
+/** Build a daemon WS URL base. `wss://` for a secure remote (port 443
+ *  omitted), `ws://` otherwise. See {@link daemonHttpBase}. */
 export function daemonWsBase(creds: DaemonWsAvailable): string {
-  return `ws://${creds.host}:${creds.port}`
+  const scheme = creds.secure ? 'wss' : 'ws'
+  return `${scheme}://${authority(creds)}`
 }
 
 /** Fire-and-forget warm-up. Safe to call from app mount; errors are

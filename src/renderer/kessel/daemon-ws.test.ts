@@ -38,19 +38,42 @@ import {
 } from '@/stores/connect-host'
 
 describe('daemon-ws URL helpers', () => {
-  it('daemonHttpBase builds http://host:port', () => {
-    expect(daemonHttpBase({ host: '127.0.0.1', port: 47800, token: 't' })).toBe(
+  it('daemonHttpBase builds http://host:port for non-secure', () => {
+    expect(daemonHttpBase({ host: '127.0.0.1', port: 47800, token: 't', secure: false })).toBe(
       'http://127.0.0.1:47800',
     )
-    expect(daemonHttpBase({ host: 'box.example', port: 9000, token: 't' })).toBe(
+    expect(daemonHttpBase({ host: 'box.example', port: 9000, token: 't', secure: false })).toBe(
       'http://box.example:9000',
     )
   })
 
-  it('daemonWsBase builds ws://host:port', () => {
-    expect(daemonWsBase({ host: '127.0.0.1', port: 47800, token: 't' })).toBe(
+  it('daemonWsBase builds ws://host:port for non-secure', () => {
+    expect(daemonWsBase({ host: '127.0.0.1', port: 47800, token: 't', secure: false })).toBe(
       'ws://127.0.0.1:47800',
     )
+  })
+
+  // K2 Connect step #4 — TLS scheme selection.
+  it('secure remote on 443 → https/wss with the port OMITTED', () => {
+    const creds = { host: 'rosson.k2.dev', port: 443, token: 't', secure: true }
+    expect(daemonHttpBase(creds)).toBe('https://rosson.k2.dev')
+    expect(daemonWsBase(creds)).toBe('wss://rosson.k2.dev')
+    // The shape a live socket builds.
+    expect(`${daemonWsBase(creds)}/cli/sessions/grid`).toBe(
+      'wss://rosson.k2.dev/cli/sessions/grid',
+    )
+  })
+
+  it('secure remote on a NON-443 port keeps the explicit port', () => {
+    const creds = { host: 'box.example', port: 8443, token: 't', secure: true }
+    expect(daemonHttpBase(creds)).toBe('https://box.example:8443')
+    expect(daemonWsBase(creds)).toBe('wss://box.example:8443')
+  })
+
+  it('local is never secure → byte-identical ws://127.0.0.1:port', () => {
+    const creds = { host: '127.0.0.1', port: 47800, token: 't', secure: false }
+    expect(daemonWsBase(creds)).toBe('ws://127.0.0.1:47800')
+    expect(daemonHttpBase(creds)).toBe('http://127.0.0.1:47800')
   })
 })
 
@@ -62,22 +85,23 @@ describe('getDaemonWs host-awareness', () => {
     invalidateDaemonWs()
   })
 
-  it('local: invokes daemon_ws_url and carries host 127.0.0.1', async () => {
+  it('local: invokes daemon_ws_url and carries host 127.0.0.1 (secure:false)', async () => {
     invokeMock.mockResolvedValue({ state: 'available', port: 47800, token: 'local-tok' })
     const creds = await getDaemonWs()
     expect(invokeMock).toHaveBeenCalledWith('daemon_ws_url')
-    expect(creds).toEqual({ port: 47800, token: 'local-tok', host: '127.0.0.1' })
+    expect(creds).toEqual({ port: 47800, token: 'local-tok', host: '127.0.0.1', secure: false })
     // The resulting URL is byte-identical to the old hardcoded literal.
     expect(`${daemonHttpBase(creds)}/boot-status`).toBe('http://127.0.0.1:47800/boot-status')
   })
 
-  it('remote: derives creds from the active ConnectHost, no invoke', async () => {
+  it('remote (non-secure): derives creds from the active ConnectHost, no invoke', async () => {
     const host = {
       id: 'r1',
       label: 'Remote',
       hostname: '10.0.0.9',
       port: 51234,
       token: 'remote-tok',
+      secure: false,
       remember: false,
       lastConnectedAt: null,
     }
@@ -87,19 +111,44 @@ describe('getDaemonWs host-awareness', () => {
     invalidateDaemonWs()
     const creds = await getDaemonWs()
     expect(invokeMock).not.toHaveBeenCalled()
-    expect(creds).toEqual({ port: 51234, token: 'remote-tok', host: '10.0.0.9' })
+    expect(creds).toEqual({ port: 51234, token: 'remote-tok', host: '10.0.0.9', secure: false })
     expect(`${daemonWsBase(creds)}/cli/sessions/grid`).toBe(
       'ws://10.0.0.9:51234/cli/sessions/grid',
     )
   })
 
-  it('switching back to local resumes the invoke path', async () => {
+  it('remote (secure): carries secure:true and its OWN token; builds wss://', async () => {
+    const host = {
+      id: 'r2',
+      label: 'Hosted',
+      hostname: 'rosson.k2.dev',
+      port: 443,
+      token: 'hosted-tok',
+      secure: true,
+      remember: true,
+      lastConnectedAt: null,
+    }
+    useConnectHostStore.getState().selectHost(host)
+    invalidateDaemonWs()
+    const creds = await getDaemonWs()
+    expect(invokeMock).not.toHaveBeenCalled()
+    // step #3: the remote's OWN token rides, not the local daemon's.
+    expect(creds.token).toBe('hosted-tok')
+    expect(creds.secure).toBe(true)
+    // step #4: 443 omitted; wss scheme; token as ?token= over TLS.
+    expect(`${daemonWsBase(creds)}/cli/sessions/grid?token=${creds.token}`).toBe(
+      'wss://rosson.k2.dev/cli/sessions/grid?token=hosted-tok',
+    )
+  })
+
+  it('switching back to local resumes the invoke path (secure:false)', async () => {
     const host = {
       id: 'r1',
       label: 'Remote',
       hostname: '10.0.0.9',
       port: 51234,
       token: 'remote-tok',
+      secure: false,
       remember: false,
       lastConnectedAt: null,
     }
@@ -112,5 +161,6 @@ describe('getDaemonWs host-awareness', () => {
     const creds = await getDaemonWs()
     expect(invokeMock).toHaveBeenCalledWith('daemon_ws_url')
     expect(creds.host).toBe('127.0.0.1')
+    expect(creds.secure).toBe(false)
   })
 })

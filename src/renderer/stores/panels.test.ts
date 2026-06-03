@@ -77,7 +77,7 @@ vi.mock('./toast', () => ({
 // retry paths). With daemon-settings fully mocked, this is overkill but
 // safe.
 vi.mock('@/kessel/daemon-ws', () => ({
-  getDaemonWs: vi.fn(() => Promise.resolve({ port: 0, token: '', host: '127.0.0.1' })),
+  getDaemonWs: vi.fn(() => Promise.resolve({ port: 0, token: '', host: '127.0.0.1', secure: false })),
   invalidateDaemonWs: vi.fn(),
   daemonHttpBase: (c: { host: string; port: number }) => `http://${c.host}:${c.port}`,
   daemonWsBase: (c: { host: string; port: number }) => `ws://${c.host}:${c.port}`,

@@ -34,7 +34,7 @@ import {
   keyEventToSequence,
   naturalTextEditingSequence,
 } from '@/lib/key-mapping'
-import { getDaemonWs, invalidateDaemonWs, daemonHttpBase, daemonWsBase } from '../kessel/daemon-ws'
+import { getDaemonWs, invalidateDaemonWs, daemonHttpBase, daemonWsBase, type DaemonWsAvailable } from '../kessel/daemon-ws'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import { useTabsStore } from '@/stores/tabs'
 import { useWindowFocusStore } from '@/stores/window-focus'
@@ -705,7 +705,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       // request error, not a transient unreachability.
       const BOOT_DEADLINE_MS = 10_000
       const __t_boot_start = performance.now()
-      let creds: { port: number; token: string; host: string } | null = null
+      let creds: DaemonWsAvailable | null = null
       let spawn: {
         sessionId: string
         agentName: string
@@ -880,7 +880,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       sessionIdRef.current !== sessionId ||
       appliedVisibleRef.current !== true
 
-    let creds: { port: number; token: string; host: string } | null = null
+    let creds: DaemonWsAvailable | null = null
     try {
       creds = await getDaemonWs()
     } catch {

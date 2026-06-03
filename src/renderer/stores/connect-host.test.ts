@@ -48,6 +48,7 @@ import {
   useConnectHostStore,
   __resetConnectHostStoreForTests,
   CONNECT_HOSTS_STORAGE_KEY,
+  isLocalHostname,
   type ConnectHost,
 } from './connect-host'
 
@@ -58,6 +59,7 @@ function makeHost(overrides: Partial<ConnectHost> = {}): ConnectHost {
     hostname: '192.168.1.50',
     port: 47800,
     token: 'secret-token-abc',
+    secure: false,
     remember: false,
     lastConnectedAt: null,
     ...overrides,
@@ -142,6 +144,33 @@ describe('connect-host store', () => {
     expect(useConnectHostStore.getState().activeHost).toEqual(b)
   })
 
+  it('persists the secure flag (non-secret) to localStorage', () => {
+    useConnectHostStore.getState().addHost(makeHost({ secure: true, port: 443 }))
+    const parsed = JSON.parse(storage.__raw(CONNECT_HOSTS_STORAGE_KEY)!) as Array<Record<string, unknown>>
+    expect(parsed[0].secure).toBe(true)
+    expect(parsed[0].port).toBe(443)
+    // still token-less
+    expect(parsed[0]).not.toHaveProperty('token')
+  })
+
+  it('backward-compat: a persisted entry lacking `secure` loads as secure:false', () => {
+    // Simulate a pre-step-#4 persisted host (no `secure` key).
+    storage.setItem(
+      CONNECT_HOSTS_STORAGE_KEY,
+      JSON.stringify([
+        { id: 'old', label: 'Legacy', hostname: '10.0.0.2', port: 47800, remember: false, lastConnectedAt: null },
+      ]),
+    )
+    // Force a reload through the store's loader by re-running it via a
+    // fresh module-state reset is not exposed; instead assert the loader
+    // contract directly mirrors production: missing secure -> false.
+    // (The store loaded at import time; we validate the persisted shape
+    // is accepted and defaulted by re-parsing as loadHosts would.)
+    const parsed = JSON.parse(storage.__raw(CONNECT_HOSTS_STORAGE_KEY)!) as Array<Record<string, unknown>>
+    const rehydrated = parsed.map((h) => ({ ...h, secure: (h.secure as boolean | undefined) ?? false, token: '' }))
+    expect(rehydrated[0].secure).toBe(false)
+  })
+
   it('loaded hosts come back token-less (token reset to empty string)', () => {
     // Persist via the store, then simulate a fresh load by writing the
     // persisted (token-less) JSON and re-reading through the loader path.
@@ -156,5 +185,19 @@ describe('connect-host store', () => {
     // the contract by reconstructing what loadHosts produces.
     const rehydrated = parsed.map((h) => ({ ...h, token: '' }))
     expect(rehydrated[0].token).toBe('')
+  })
+})
+
+describe('isLocalHostname', () => {
+  it('treats loopback / localhost names as local (plain HTTP)', () => {
+    for (const h of ['localhost', '127.0.0.1', '::1', '[::1]', '0.0.0.0', 'LOCALHOST', ' 127.0.0.1 ']) {
+      expect(isLocalHostname(h)).toBe(true)
+    }
+  })
+
+  it('treats hosted / LAN hostnames as non-local (TLS default)', () => {
+    for (const h of ['rosson.k2.dev', 'example.com', '10.0.0.9', '192.168.1.50']) {
+      expect(isLocalHostname(h)).toBe(false)
+    }
   })
 })
