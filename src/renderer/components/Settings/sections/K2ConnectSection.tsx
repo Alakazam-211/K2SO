@@ -948,10 +948,9 @@ export function K2ConnectSection(): React.JSX.Element {
                 void addUser()
               }}
             >
-              <div className="flex gap-1.5">
+              <div className="flex gap-1.5 w-full">
                 <input
-                  className={inputCls}
-                  style={{ maxWidth: 150 }}
+                  className={`${inputCls} flex-1 min-w-0`}
                   placeholder="username"
                   autoCapitalize="none"
                   autoCorrect="off"
@@ -959,7 +958,7 @@ export function K2ConnectSection(): React.JSX.Element {
                   value={newUsername}
                   onChange={(e) => setNewUsername(e.target.value)}
                 />
-                <div className="relative" style={{ maxWidth: 180 }}>
+                <div className="relative flex-1 min-w-0">
                   <input
                     className={`${inputCls} w-full pr-7`}
                     type={showNewPassword ? 'text' : 'password'}
@@ -985,7 +984,7 @@ export function K2ConnectSection(): React.JSX.Element {
                 <button
                   type="submit"
                   disabled={addBusy || !newUsername.trim() || !newPassword}
-                  className="px-3 py-1 text-[11px] text-white bg-[var(--color-accent)] hover:opacity-90 no-drag cursor-pointer disabled:opacity-60"
+                  className="flex-shrink-0 px-3 py-1 text-[11px] text-white bg-[var(--color-accent)] hover:opacity-90 no-drag cursor-pointer disabled:opacity-60"
                 >
                   {addBusy ? 'Adding…' : 'Add user'}
                 </button>
