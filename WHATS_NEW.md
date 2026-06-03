@@ -3,6 +3,14 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.17 — K2 Connect sign-in fix
+
+Fixes a "Load Failed" error when signing in to your k2.dev account (and
+when connecting to a remote machine) in the packaged app. The production
+build was blocking the secure connections K2 Connect needs; signing in,
+loading your subdomains, and connecting to another machine over
+`https://<you>.k2.dev` all work now.
+
 ## 0.39.16 — K2 Connect: reach your workspace from anywhere
 
 K2SO can now expose your daemon at your own **`https://<you>.k2.dev`**
