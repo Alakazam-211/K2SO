@@ -14,7 +14,7 @@
 // existing `try/catch` blocks around the old `invoke(...)` calls keep
 // working unchanged.
 
-import { getDaemonWs, invalidateDaemonWs } from '@/kessel/daemon-ws'
+import { getDaemonWs, invalidateDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
 
 /**
  * GET /cli/<route>?<params>&token=<token>.
@@ -34,15 +34,15 @@ export async function daemonCliGet<T = unknown>(
   params?: Record<string, string | number | boolean | undefined | null>,
 ): Promise<T> {
   return withConnRetry(async () => {
-    const { port, token } = await getDaemonWs()
+    const creds = await getDaemonWs()
     const search = new URLSearchParams()
     if (params) {
       for (const [k, v] of Object.entries(params)) {
         if (v !== undefined && v !== null) search.set(k, String(v))
       }
     }
-    search.set('token', token)
-    const url = `http://127.0.0.1:${port}/cli/${route}?${search.toString()}`
+    search.set('token', creds.token)
+    const url = `${daemonHttpBase(creds)}/cli/${route}?${search.toString()}`
     const res = await fetch(url, { method: 'GET' })
     return parseDaemonResponse<T>(res)
   })
@@ -60,8 +60,8 @@ export async function daemonCliPost<T = unknown>(
   body?: unknown,
 ): Promise<T> {
   return withConnRetry(async () => {
-    const { port, token } = await getDaemonWs()
-    const url = `http://127.0.0.1:${port}/cli/${route}?token=${token}`
+    const creds = await getDaemonWs()
+    const url = `${daemonHttpBase(creds)}/cli/${route}?token=${creds.token}`
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

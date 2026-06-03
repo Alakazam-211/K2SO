@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { getDaemonWs } from '@/kessel/daemon-ws'
+import { getDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
 
 // Phase 2 Unit 5 — Claude Auth scheduler lives in k2so-daemon
 // (`/cli/claude-auth/*`). The Tauri-side `claude_auth_*` commands
@@ -31,17 +31,17 @@ interface ClaudeAuthStore {
 }
 
 async function daemonGet(pathSuffix: string): Promise<Response> {
-  const { port, token } = await getDaemonWs()
+  const creds = await getDaemonWs()
   return fetch(
-    `http://127.0.0.1:${port}/cli/claude-auth/${pathSuffix}?token=${token}`,
+    `${daemonHttpBase(creds)}/cli/claude-auth/${pathSuffix}?token=${creds.token}`,
     { method: 'GET' },
   )
 }
 
 async function daemonPost(pathSuffix: string): Promise<Response> {
-  const { port, token } = await getDaemonWs()
+  const creds = await getDaemonWs()
   return fetch(
-    `http://127.0.0.1:${port}/cli/claude-auth/${pathSuffix}?token=${token}`,
+    `${daemonHttpBase(creds)}/cli/claude-auth/${pathSuffix}?token=${creds.token}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

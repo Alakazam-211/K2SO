@@ -6,7 +6,7 @@ import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
 import { TerminalPane } from '@/terminal-v2/TerminalPane'
 import { agentChatId } from '@/lib/terminal-id'
-import { getDaemonWs } from '@/kessel/daemon-ws'
+import { getDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
 import { daemonCliGet } from '@/lib/daemon-cli'
 
 interface AgentChatPaneProps {
@@ -179,9 +179,9 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     // renderer to compute the wrong key when its mode→name mapping
     // disagreed with AGENT.md's `name:` field (C3PO 5c80bef1).
     try {
-      const { port, token } = await getDaemonWs()
+      const creds = await getDaemonWs()
       await fetch(
-        `http://127.0.0.1:${port}/cli/sessions/v2/close?token=${token}`,
+        `${daemonHttpBase(creds)}/cli/sessions/v2/close?token=${creds.token}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

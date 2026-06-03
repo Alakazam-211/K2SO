@@ -20,12 +20,12 @@
 // callers can update local store state from the response without a
 // follow-up read.
 
-import { getDaemonWs, invalidateDaemonWs } from '@/kessel/daemon-ws'
+import { getDaemonWs, invalidateDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
 import type { AppSettingsResponse } from '@shared/types'
 
 async function daemonUrl(path: string): Promise<string> {
-  const { port, token } = await getDaemonWs()
-  return `http://127.0.0.1:${port}${path}?token=${token}`
+  const creds = await getDaemonWs()
+  return `${daemonHttpBase(creds)}${path}?token=${creds.token}`
 }
 
 /** GET `/cli/settings/get` — full settings snapshot.

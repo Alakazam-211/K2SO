@@ -17,7 +17,7 @@
 // surfaced as plain `Error` instances so callers can `try/catch`
 // without parsing HTTP status codes themselves.
 
-import { getDaemonWs } from '@/kessel/daemon-ws'
+import { getDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
 
 export interface LlmStatus {
   loaded: boolean
@@ -44,9 +44,9 @@ export interface ChatResponse {
 }
 
 async function daemonGet(pathSuffix: string): Promise<Response> {
-  const { port, token } = await getDaemonWs()
+  const creds = await getDaemonWs()
   return fetch(
-    `http://127.0.0.1:${port}/cli/llm/${pathSuffix}?token=${token}`,
+    `${daemonHttpBase(creds)}/cli/llm/${pathSuffix}?token=${creds.token}`,
     { method: 'GET' },
   )
 }
@@ -55,9 +55,9 @@ async function daemonPostJson(
   pathSuffix: string,
   body: unknown,
 ): Promise<Response> {
-  const { port, token } = await getDaemonWs()
+  const creds = await getDaemonWs()
   return fetch(
-    `http://127.0.0.1:${port}/cli/llm/${pathSuffix}?token=${token}`,
+    `${daemonHttpBase(creds)}/cli/llm/${pathSuffix}?token=${creds.token}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

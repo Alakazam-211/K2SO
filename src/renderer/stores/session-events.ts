@@ -21,7 +21,7 @@
 // Cleanup: the returned `UnsubscribeFn` closes the socket, cancels
 // any pending backoff timer, and prevents further reconnect attempts.
 
-import { getDaemonWs, invalidateDaemonWs } from '@/kessel/daemon-ws'
+import { getDaemonWs, invalidateDaemonWs, daemonWsBase } from '@/kessel/daemon-ws'
 
 // ── Wire types ───────────────────────────────────────────────────────────
 
@@ -144,7 +144,7 @@ export function subscribeToWorkspaceSessionEvents(
 
   const openSocket = async (): Promise<void> => {
     if (stopped) return
-    let creds: { port: number; token: string }
+    let creds: { port: number; token: string; host: string }
     try {
       creds = await getDaemonWs()
     } catch (err) {
@@ -159,7 +159,7 @@ export function subscribeToWorkspaceSessionEvents(
 
     if (stopped) return
 
-    const url = `ws://127.0.0.1:${creds.port}/cli/sessions/events?path=${encodeURIComponent(projectPath)}&token=${encodeURIComponent(creds.token)}`
+    const url = `${daemonWsBase(creds)}/cli/sessions/events?path=${encodeURIComponent(projectPath)}&token=${encodeURIComponent(creds.token)}`
     let ws: WebSocket
     try {
       ws = new WebSocket(url)

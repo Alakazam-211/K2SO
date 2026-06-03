@@ -34,7 +34,7 @@ import {
   keyEventToSequence,
   naturalTextEditingSequence,
 } from '@/lib/key-mapping'
-import { getDaemonWs, invalidateDaemonWs } from '../kessel/daemon-ws'
+import { getDaemonWs, invalidateDaemonWs, daemonHttpBase, daemonWsBase } from '../kessel/daemon-ws'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import { useTabsStore } from '@/stores/tabs'
 import { useWindowFocusStore } from '@/stores/window-focus'
@@ -705,7 +705,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       // request error, not a transient unreachability.
       const BOOT_DEADLINE_MS = 10_000
       const __t_boot_start = performance.now()
-      let creds: { port: number; token: string } | null = null
+      let creds: { port: number; token: string; host: string } | null = null
       let spawn: {
         sessionId: string
         agentName: string
@@ -727,7 +727,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
           perfLog('spawn_fetch_start', { attempt: String(attempt) })
           const __t_spawn_fetch = performance.now()
           const spawnRes = await fetch(
-            `http://127.0.0.1:${creds.port}/cli/sessions/v2/spawn?token=${creds.token}`,
+            `${daemonHttpBase(creds)}/cli/sessions/v2/spawn?token=${creds.token}`,
             {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -880,7 +880,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       sessionIdRef.current !== sessionId ||
       appliedVisibleRef.current !== true
 
-    let creds: { port: number; token: string } | null = null
+    let creds: { port: number; token: string; host: string } | null = null
     try {
       creds = await getDaemonWs()
     } catch {
@@ -916,7 +916,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
         if (isStale()) return
         wsAttempt += 1
         const candidate = new WebSocket(
-          `ws://127.0.0.1:${creds.port}/cli/sessions/grid?session=${sessionId}&token=${creds.token}`,
+          `${daemonWsBase(creds)}/cli/sessions/grid?session=${sessionId}&token=${creds.token}`,
         )
         // Race: open vs. close-before-open. Browser fires both
         // `onerror` then `onclose` when a connection is rejected

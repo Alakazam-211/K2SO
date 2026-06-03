@@ -1,6 +1,6 @@
 import React from 'react'
 import { useEffect, useState } from 'react'
-import { getDaemonWs } from '@/kessel/daemon-ws'
+import { getDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
 // Phase 2 Unit 7a — settings live in the daemon. The companion
 // tunnel control endpoints (`/cli/companion/{start,stop,status,...}`)
 // landed in Unit 1; the settings read/write now follows the same
@@ -28,9 +28,9 @@ interface CompanionStatus {
 }
 
 async function daemonGet(pathSuffix: string): Promise<Response> {
-  const { port, token } = await getDaemonWs()
+  const creds = await getDaemonWs()
   return fetch(
-    `http://127.0.0.1:${port}/cli/companion/${pathSuffix}?token=${token}`,
+    `${daemonHttpBase(creds)}/cli/companion/${pathSuffix}?token=${creds.token}`,
     { method: 'GET' },
   )
 }
@@ -39,9 +39,9 @@ async function daemonPostJson(
   pathSuffix: string,
   body: unknown,
 ): Promise<Response> {
-  const { port, token } = await getDaemonWs()
+  const creds = await getDaemonWs()
   return fetch(
-    `http://127.0.0.1:${port}/cli/companion/${pathSuffix}?token=${token}`,
+    `${daemonHttpBase(creds)}/cli/companion/${pathSuffix}?token=${creds.token}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

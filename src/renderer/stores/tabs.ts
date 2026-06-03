@@ -6,7 +6,7 @@ import type { MosaicNode, MosaicDirection } from 'react-mosaic-component'
 import { RESUMABLE_CLI_TOOLS } from '@shared/constants'
 import { useSettingsStore } from '@/stores/settings'
 import { useTerminalSettingsStore, type TerminalRenderer } from '@/stores/terminal-settings'
-import { getDaemonWs } from '@/kessel/daemon-ws'
+import { getDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
 import { useHeartbeatSessionsStore } from '@/stores/heartbeat-sessions'
 // Phase 2.5 fix (finding #547) — retry the workspace-layouts load
 // when the daemon comes online after a slow boot.
@@ -149,9 +149,9 @@ function closeTerminalForRenderer(data: TerminalItemData): void {
 
 async function closeV2Session(agentName: string): Promise<void> {
   try {
-    const { port, token } = await getDaemonWs()
+    const creds = await getDaemonWs()
     const res = await fetch(
-      `http://127.0.0.1:${port}/cli/sessions/v2/close?token=${token}`,
+      `${daemonHttpBase(creds)}/cli/sessions/v2/close?token=${creds.token}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
