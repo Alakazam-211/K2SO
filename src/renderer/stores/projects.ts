@@ -1,5 +1,12 @@
 import { create } from 'zustand'
-import { invoke } from '@tauri-apps/api/core'
+import { emit } from '@tauri-apps/api/event'
+// Plan B — projects/workspaces/sections are host-aware daemon data: route
+// them through the `/cli/*` HTTP layer (local OR remote) instead of the
+// localhost-pinned Tauri `projects_*`/`workspaces_*`/`sections_*` invoke
+// proxy. The old Tauri shims emitted `sync:projects` from Rust on each
+// mutation so other windows re-fetch; we now re-emit that event from the
+// renderer after each successful mutation (see `emitProjectsChanged`).
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 // Phase 2 Unit 7a — settings live in the daemon.
 import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
 // Phase 2.5 fix (finding #547) — daemon-reconnect retry bus.
@@ -20,6 +27,22 @@ const _lastTouchMap = new Map<string, number>()
  *  switch can't overwrite real values with the user's pre-restore
  *  selection. See panels.ts for the longer rationale. */
 let hasLoadedFromDaemon = false
+
+/**
+ * Plan B cross-window sync: the old Tauri `projects_*` / `sections_*`
+ * mutation commands emitted `sync:projects` from Rust so OTHER windows
+ * (focus windows, second main window) re-fetch their project list. Now
+ * that the renderer talks to the daemon directly, that Rust-side emit no
+ * longer fires — so we emit the SAME event from the renderer after each
+ * successful mutation. `useWindowSync.ts` listens for it and calls
+ * `fetchProjects()`. Fire-and-forget; a failed emit (non-Tauri/web) is
+ * non-fatal — only cross-window refresh is affected.
+ */
+function emitProjectsChanged(): void {
+  void emit('sync:projects').catch((e) =>
+    console.warn('[projects] sync:projects emit failed:', e),
+  )
+}
 
 interface Workspace {
   id: string
@@ -100,15 +123,18 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   fetchProjects: async () => {
     try {
-      const projectList = await invoke<Project[]>('projects_list')
+      // GET query params are snake_case (the daemon reads `project_id`);
+      // the camelCase Project/Workspace/Section response shapes match the
+      // Rust structs' `#[serde(rename_all = "camelCase")]` so no remap.
+      const projectList = await daemonCliGet<Project[]>('projects/list')
 
       // Fetch workspaces and sections for each project
       const projectsWithWorkspaces: ProjectWithWorkspaces[] = await Promise.all(
         projectList.map(async (project: Project) => {
-          const ws = await invoke<Workspace[]>('workspaces_list', { projectId: project.id })
+          const ws = await daemonCliGet<Workspace[]>('workspaces/list', { project_id: project.id })
           let secs: WorkspaceSection[] = []
           try {
-            secs = await invoke<WorkspaceSection[]>('sections_list', { projectId: project.id })
+            secs = await daemonCliGet<WorkspaceSection[]>('sections/list', { project_id: project.id })
           } catch {
             // sections table might not exist yet
           }
@@ -212,7 +238,10 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     try {
       // Capture the new project's ID from the backend result (untagged enum:
       // NeedsGitInit has needsGitInit field, Project has id field)
-      const result = await invoke<Record<string, unknown>>('projects_add_from_path', { path })
+      const result = await daemonCliPost<Record<string, unknown>>('projects/add-from-path', { path })
+      // The old Tauri `projects_add_from_path` emitted `sync:projects`. A
+      // git-init-needed result short-circuits below WITHOUT a DB write, so
+      // only emit on the real add path (after fetchProjects, below).
 
       // Check if the folder needs git initialization
       if (result && 'needsGitInit' in result) {
@@ -234,6 +263,10 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
         tabsStore.clearAllTabs()
       }
 
+      // Mirror the old Tauri `projects_add_from_path` Rust-side
+      // `sync:projects` emit so other windows pick up the new project.
+      emitProjectsChanged()
+
       await get().fetchProjects()
 
       const state = get()
@@ -248,7 +281,12 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
         const targetGroupId = focusState.focusGroupsEnabled ? focusState.activeFocusGroupId : null
         if (targetGroupId) {
           try {
-            await invoke('focus_groups_assign_project', { projectId: newProject.id, focusGroupId: targetGroupId })
+            await daemonCliPost('focus-groups/assign', { projectId: newProject.id, focusGroupId: targetGroupId })
+            // The old Tauri `focus_groups_assign_project` emitted BOTH
+            // `sync:focus-groups` and `sync:projects` (the project's
+            // focusGroupId changed). Mirror both.
+            void emit('sync:focus-groups').catch(() => {})
+            emitProjectsChanged()
             // Optimistic local update so sidebar shows it immediately
             set({
               projects: get().projects.map((p) =>
@@ -298,10 +336,12 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
           tabsStore.clearBackgroundWorkspace(key)
         }
       }
-      // Delete saved layouts from DB
-      invoke('workspace_layout_delete', { projectId: id, workspaceId: null }).catch((e) => console.warn('[projects] workspace_layout_delete failed:', e))
+      // Delete saved layouts from DB (no sync emit — layouts aren't a
+      // cross-window-synced surface; the projects refresh below covers it).
+      daemonCliPost('workspace-layouts/delete', { projectId: id, workspaceId: null }).catch((e) => console.warn('[projects] workspace-layouts/delete failed:', e))
 
-      await invoke('projects_delete', { id })
+      await daemonCliPost('projects/delete', { id })
+      emitProjectsChanged()
 
       const state = get()
       if (state.activeProjectId === id) {
@@ -423,7 +463,8 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   reorderProjects: async (ids: string[]) => {
     try {
-      await invoke('projects_reorder', { ids })
+      await daemonCliPost('projects/reorder', { ids })
+      emitProjectsChanged()
       await get().fetchProjects()
     } catch (err) {
       console.error('[projects] reorderProjects failed:', err)
@@ -432,16 +473,21 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   renameProject: async (id: string, name: string) => {
     try {
-      await invoke('projects_update', { id, name })
+      await daemonCliPost('projects/update', { id, name })
+      emitProjectsChanged()
       await get().fetchProjects()
     } catch (err) {
       console.error('[projects] renameProject failed:', err)
     }
   },
 
+  // sections_* mutations did NOT emit a cross-window sync from the old
+  // Tauri shims (workspace_sections.rs has no `app.emit`), so no
+  // `emitProjectsChanged()` here — the local `fetchProjects()` refresh is
+  // the only contract.
   createSection: async (projectId: string, name: string, color?: string) => {
     try {
-      await invoke('sections_create', { projectId, name, color })
+      await daemonCliPost('sections/create', { projectId, name, color })
       await get().fetchProjects()
     } catch (err) {
       console.error('[projects] createSection failed:', err)
@@ -450,7 +496,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   deleteSection: async (id: string) => {
     try {
-      await invoke('sections_delete', { id })
+      await daemonCliPost('sections/delete', { id })
       await get().fetchProjects()
     } catch (err) {
       console.error('[projects] deleteSection failed:', err)
@@ -459,7 +505,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   renameSection: async (id: string, name: string) => {
     try {
-      await invoke('sections_update', { id, name })
+      await daemonCliPost('sections/update', { id, name })
       await get().fetchProjects()
     } catch (err) {
       console.error('[projects] renameSection failed:', err)
@@ -468,7 +514,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   updateSection: async (id: string, updates: { name?: string; color?: string | null; isCollapsed?: number }) => {
     try {
-      await invoke('sections_update', { id, ...updates })
+      await daemonCliPost('sections/update', { id, ...updates })
       await get().fetchProjects()
     } catch (err) {
       console.error('[projects] updateSection failed:', err)
@@ -477,7 +523,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   assignWorkspaceToSection: async (workspaceId: string, sectionId: string | null) => {
     try {
-      await invoke('sections_assign_workspace', { workspaceId, sectionId })
+      await daemonCliPost('sections/assign', { workspaceId, sectionId })
       await get().fetchProjects()
     } catch (err) {
       console.error('[projects] assignWorkspaceToSection failed:', err)
@@ -495,9 +541,10 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
         p.id === projectId ? { ...p, lastInteractionAt: Math.floor(now / 1000) } : p
       )
     }))
-    // Write to DB — await so subsequent fetchProjects picks up the value
+    // Write to DB — await so subsequent fetchProjects picks up the value.
+    // projects_touch_interaction did NOT emit a cross-window sync.
     try {
-      await invoke('projects_touch_interaction', { id: projectId })
+      await daemonCliPost('projects/touch-interaction', { id: projectId })
     } catch (err) {
       console.warn('[projects] touchInteraction failed:', err)
     }
@@ -505,7 +552,8 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   setManuallyActive: async (projectId: string, active: boolean) => {
     try {
-      await invoke('projects_update', { id: projectId, manuallyActive: active ? 1 : 0 })
+      await daemonCliPost('projects/update', { id: projectId, manuallyActive: active ? 1 : 0 })
+      emitProjectsChanged()
       await get().fetchProjects()
     } catch (err) {
       console.error('[projects] setManuallyActive failed:', err)
@@ -517,14 +565,13 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 useProjectsStore.getState().fetchProjects()
 
 // Phase 2.5 fix (finding #547): retry the load if the daemon
-// (re)connects after a failed initial fetch. Projects-list goes
-// through Tauri's `projects_list` invoke (which talks to the
-// shared SQLite DB, not the daemon HTTP surface), but the
-// last-active-session restore inside fetchProjects calls
-// `settingsGet()` — and a failure there causes the catch-all
-// `[projects] fetchProjects failed` log seen in the original
-// finding #547 repro. Re-running once the daemon's WS comes up
-// gets the user a real restore instead of "first project".
+// (re)connects after a failed initial fetch. Plan B — projects-list now
+// goes through the host-aware `daemonCliGet('projects/list')` HTTP layer
+// (local OR remote), and the last-active-session restore inside
+// fetchProjects calls `settingsGet()`; a failure in either causes the
+// catch-all `[projects] fetchProjects failed` log seen in the original
+// finding #547 repro. Re-running once the daemon's WS comes up gets the
+// user a real restore instead of "first project".
 onDaemonConnected(() => {
   if (hasLoadedFromDaemon) return
   useProjectsStore.getState().fetchProjects()

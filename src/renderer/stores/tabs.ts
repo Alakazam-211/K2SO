@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
-import { daemonCliGet } from '@/lib/daemon-cli'
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { terminalKill } from '@/lib/terminal-daemon'
 import type { MosaicNode, MosaicDirection } from 'react-mosaic-component'
 import { RESUMABLE_CLI_TOOLS } from '@shared/constants'
@@ -2666,15 +2666,18 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       // instead of restoring a stale session
       const { [key]: _, ...remaining } = state.workspaceLayouts
       set({ workspaceLayouts: remaining })
-      invoke('workspace_layout_delete', { projectId, workspaceId }).catch(() => {})
+      // POST body is camelCase (LayoutDeleteBody `#[serde(rename_all =
+      // "camelCase")]`); no cross-window sync — layouts aren't a synced
+      // surface (the old Tauri layout commands emitted nothing).
+      daemonCliPost('workspace-layouts/delete', { projectId, workspaceId }).catch(() => {})
       return
     }
 
     const layout = state.serializeCurrentLayout()
     set({ workspaceLayouts: { ...state.workspaceLayouts, [key]: layout } })
 
-    // Persist to SQLite
-    invoke('workspace_layout_save', {
+    // Persist to SQLite via the host-aware daemon route.
+    daemonCliPost('workspace-layouts/save', {
       projectId,
       workspaceId,
       layoutJson: JSON.stringify(layout),
@@ -2857,8 +2860,10 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       // Set key early so race-condition guards work
       set({ activeWorkspaceKey: key })
 
-      // Try loading from DB
-      invoke<string | null>('workspace_layout_load', { projectId, workspaceId })
+      // Try loading from DB. GET query params are snake_case (the daemon
+      // reads `project_id`/`workspace_id`); the route returns the layout
+      // JSON string or null (`Option<String>` serialized).
+      daemonCliGet<string | null>('workspace-layouts/load', { project_id: projectId, workspace_id: workspaceId })
         .then((json) => {
           // Guard: bail if user already switched to a different workspace
           if (get().activeWorkspaceKey !== key) return
@@ -2902,7 +2907,14 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
   loadWorkspaceSessionsFromDb: async () => {
     try {
-      const sessions = await invoke<Array<{ projectId: string, workspaceId: string, layoutJson: string }>>('workspace_layout_load_all')
+      // The daemon's `workspace-layouts/load-all` route serializes
+      // `db_ops::WorkspaceLayout` with `#[serde(rename_all = "camelCase")]`,
+      // emitting exactly `{ projectId, workspaceId, layoutJson }`. The old
+      // Tauri `workspace_layout_load_all` did an `Into::into` into a
+      // field-identical wrapper struct (also camelCase) — a pure rename
+      // with no shape change — so the raw daemon response already matches
+      // this type and needs NO post-fetch transform.
+      const sessions = await daemonCliGet<Array<{ projectId: string, workspaceId: string, layoutJson: string }>>('workspace-layouts/load-all')
       const layouts: Record<string, SerializedLayout> = {}
       for (const session of sessions) {
         try {
@@ -3162,7 +3174,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       // Delete saved session from DB so loadLayoutForWorkspace falls through to launchDefaultAgent
       const [projectId, workspaceId] = key.split(':')
       if (projectId && workspaceId) {
-        invoke('workspace_layout_delete', { projectId, workspaceId }).catch(() => {})
+        daemonCliPost('workspace-layouts/delete', { projectId, workspaceId }).catch(() => {})
       }
       return
     }
@@ -3253,7 +3265,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       const layout = state.serializeCurrentLayout()
       const [projectId, workspaceId] = activeKey.split(':')
       if (projectId && workspaceId) {
-        await invoke('workspace_layout_save', {
+        await daemonCliPost('workspace-layouts/save', {
           projectId,
           workspaceId,
           layoutJson: JSON.stringify(layout),
@@ -3266,7 +3278,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       const layout = serializeSnapshot(snapshot)
       const [projectId, workspaceId] = key.split(':')
       if (projectId && workspaceId) {
-        await invoke('workspace_layout_save', {
+        await daemonCliPost('workspace-layouts/save', {
           projectId,
           workspaceId,
           layoutJson: JSON.stringify(layout),
@@ -3319,7 +3331,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       const layout = state.serializeCurrentLayout()
       const [projectId, workspaceId] = state.activeWorkspaceKey.split(':')
       if (projectId && workspaceId) {
-        invoke('workspace_layout_save', {
+        daemonCliPost('workspace-layouts/save', {
           projectId,
           workspaceId,
           layoutJson: JSON.stringify(layout),
@@ -3372,7 +3384,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
     const [projectId, workspaceId] = workspaceKey.split(':')
     if (projectId && workspaceId) {
-      invoke('workspace_layout_save', {
+      daemonCliPost('workspace-layouts/save', {
         projectId,
         workspaceId,
         layoutJson: JSON.stringify(layout),

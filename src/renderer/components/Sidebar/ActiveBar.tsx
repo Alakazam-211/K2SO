@@ -4,7 +4,12 @@ import { useTabsStore } from '@/stores/tabs'
 import { useActiveAgentsStore } from '@/stores/active-agents'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
-import { invoke } from '@tauri-apps/api/core'
+import { emit } from '@tauri-apps/api/event'
+// Plan B — project mutations are host-aware daemon data: route through
+// the `/cli/projects/*` HTTP layer. `projects_update` re-emits
+// `sync:projects` for cross-window refresh; `touch-interaction-clear`
+// emitted no sync.
+import { daemonCliPost } from '@/lib/daemon-cli'
 import { showContextMenu } from '@/lib/context-menu'
 import ProjectAvatar from './ProjectAvatar'
 import { KeyCombo } from '@/components/KeySymbol'
@@ -306,8 +311,9 @@ export default function ActiveBar(): React.JSX.Element | null {
       const now = Math.floor(Date.now() / 1000)
       _activeBarMemory.delete(project.id)
       _dismissedProjects.set(project.id, now)
-      await invoke('projects_update', { id: project.id, manuallyActive: 0 })
-      await invoke('projects_touch_interaction_clear', { id: project.id }).catch((e) => console.warn('[active-bar]', e))
+      await daemonCliPost('projects/update', { id: project.id, manuallyActive: 0 })
+      void emit('sync:projects').catch(() => {})
+      await daemonCliPost('projects/touch-interaction-clear', { id: project.id }).catch((e) => console.warn('[active-bar]', e))
       // Clear background workspaces for this project (stashed terminals keep it visible)
       const tabsStore = useTabsStore.getState()
       for (const key of Object.keys(tabsStore.backgroundWorkspaces)) {

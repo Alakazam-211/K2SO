@@ -1,7 +1,7 @@
 import React from 'react'
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { listen } from '@tauri-apps/api/event'
+import { listen, emit } from '@tauri-apps/api/event'
 import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { useSettingsStore } from '@/stores/settings'
 import { useProjectsStore, type ProjectWithWorkspaces } from '@/stores/projects'
@@ -29,6 +29,19 @@ import { RoleSkillEditor } from './RoleSkillEditor'
 import { CanonicalAgentModal } from './CanonicalAgentModal'
 import { type HarnessProbe } from './canonicalState'
 import { RoleSkillButton, CanonicalAgentButton } from './CanonicalAgentButtons'
+
+/**
+ * Plan B cross-window sync: the old Tauri `projects_update` /
+ * `projects_detect_icon` / `projects_clear_icon` shims emitted
+ * `sync:projects` from Rust so other windows re-fetch. Now that these go
+ * through the host-aware daemon HTTP layer, re-emit the same event from
+ * the renderer after each successful mutation. Fire-and-forget.
+ */
+function emitProjectsChanged(): void {
+  void emit('sync:projects').catch((e) =>
+    console.warn('[projects-section] sync:projects emit failed:', e),
+  )
+}
 
 export const PROJECTS_MANIFEST: SettingEntry[] = [
   { id: 'projects.list', section: 'projects', label: 'Workspaces', description: 'All registered projects + focus groups', keywords: ['workspaces', 'projects', 'focus groups'] },
@@ -408,7 +421,8 @@ export function ProjectsSection(): React.JSX.Element {
     if (!clickedId) return
 
     if (clickedId === 'pin') {
-      await invoke('projects_update', { id: p.id, pinned: p.pinned ? 0 : 1 })
+      await daemonCliPost('projects/update', { id: p.id, pinned: p.pinned ? 0 : 1 })
+      emitProjectsChanged()
       await fetchProjects()
     } else if (clickedId.startsWith('move:')) {
       const groupId = clickedId.replace('move:', '')
@@ -450,7 +464,8 @@ export function ProjectsSection(): React.JSX.Element {
           onClick={async (e) => {
             e.stopPropagation()
             const newPinned = p.pinned ? 0 : 1
-            await invoke('projects_update', { id: p.id, pinned: newPinned })
+            await daemonCliPost('projects/update', { id: p.id, pinned: newPinned })
+            emitProjectsChanged()
             const store = useProjectsStore.getState()
             useProjectsStore.setState({
               projects: store.projects.map((proj) =>
@@ -1019,7 +1034,8 @@ function ProjectDetail({
   const handleDetectIcon = async (): Promise<void> => {
     setIconLoading(true)
     try {
-      await invoke('projects_detect_icon', { projectId: project.id })
+      await daemonCliPost('projects/detect-icon', { projectId: project.id })
+      emitProjectsChanged()
       await fetchProjects()
     } catch (err) {
       console.error('Icon detection failed:', err)
@@ -1050,7 +1066,8 @@ function ProjectDetail({
     setCropImage(null)
     setIconLoading(true)
     try {
-      await invoke('projects_update', { id: project.id, iconUrl: croppedDataUrl })
+      await daemonCliPost('projects/update', { id: project.id, iconUrl: croppedDataUrl })
+      emitProjectsChanged()
       await fetchProjects()
     } catch (err) {
       console.error('Icon save failed:', err)
@@ -1062,7 +1079,8 @@ function ProjectDetail({
   const handleClearIcon = async (): Promise<void> => {
     setIconLoading(true)
     try {
-      await invoke('projects_clear_icon', { projectId: project.id })
+      await daemonCliPost('projects/clear-icon', { projectId: project.id })
+      emitProjectsChanged()
       await fetchProjects()
     } catch (err) {
       console.error('Icon clear failed:', err)
@@ -1268,7 +1286,8 @@ function ProjectDetail({
               <button
                 key={color}
                 onClick={async () => {
-                  await invoke('projects_update', { id: project.id, color })
+                  await daemonCliPost('projects/update', { id: project.id, color })
+                  emitProjectsChanged()
                   await fetchProjects()
                 }}
                 className={`w-4 h-4 flex-shrink-0 no-drag cursor-pointer transition-transform ${
@@ -1426,7 +1445,8 @@ function ProjectDetail({
                       }).catch(console.error)
                     }
 
-                    await invoke('projects_update', { id: project.id, agentMode: mode })
+                    await daemonCliPost('projects/update', { id: project.id, agentMode: mode })
+                    emitProjectsChanged()
 
                     if (mode === 'agent' || mode === 'manager') {
                       await invoke('k2so_agents_regenerate_workspace_skill', {
@@ -1435,7 +1455,8 @@ function ProjectDetail({
                     }
 
                     if (mode === 'off' && project.heartbeatEnabled) {
-                      await invoke('projects_update', { id: project.id, heartbeatEnabled: 0 })
+                      await daemonCliPost('projects/update', { id: project.id, heartbeatEnabled: 0 })
+                      emitProjectsChanged()
                     }
 
                     await fetchProjects()
@@ -1954,7 +1975,8 @@ function StateSelector({ projectId, currentStateId }: { projectId: string; curre
   const handleChange = async (stateId: string) => {
     setSelectedId(stateId)
     try {
-      await invoke('projects_update', { id: projectId, stateId: stateId || '' })
+      await daemonCliPost('projects/update', { id: projectId, stateId: stateId || '' })
+      emitProjectsChanged()
       const store = useProjectsStore.getState()
       const updated = store.projects.map((p) =>
         p.id === projectId ? { ...p, stateId: stateId || null } : p

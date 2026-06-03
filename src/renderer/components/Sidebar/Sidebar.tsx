@@ -12,6 +12,11 @@ import { useCommandPaletteStore } from '@/stores/command-palette'
 import { useAddWorkspaceDialogStore } from '@/stores/add-workspace-dialog'
 import { useRemoveWorkspaceDialogStore } from '@/stores/remove-workspace-dialog'
 import { invoke } from '@tauri-apps/api/core'
+import { emit } from '@tauri-apps/api/event'
+// Plan B — daemon-data writes (nav-visible / project pins / workspace
+// delete) go through the host-aware `/cli/*` HTTP layer. Host-only ops
+// (open-in-finder/editor, open-focus-window) stay on Tauri `invoke`.
+import { daemonCliPost } from '@/lib/daemon-cli'
 import { showContextMenu } from '@/lib/context-menu'
 import { useGitInfo, useGitChanges } from '@/hooks/useGit'
 import ResizeHandle from './ResizeHandle'
@@ -34,8 +39,9 @@ function patchWorkspaceNavVisible(worktreeId: string, visible: boolean): void {
     ),
   }))
   useProjectsStore.setState({ projects: updated })
-  // Persist to DB asynchronously
-  invoke('workspace_set_nav_visible', { id: worktreeId, visible }).catch(() => {})
+  // Persist to DB asynchronously. camelCase POST body; no cross-window
+  // sync (the old `workspace_set_nav_visible` Tauri shim emitted none).
+  daemonCliPost('workspaces/set-nav-visible', { id: worktreeId, visible }).catch(() => {})
 }
 
 export function addNavWorktree(worktreeId: string): void {
@@ -555,8 +561,9 @@ function ProjectItem({
           ])
           return
         }
-        // Remove from DB only, keep files on disk
-        await invoke('workspaces_delete', { id: workspaceId })
+        // Remove from DB only, keep files on disk. workspaces_delete
+        // emitted no cross-window sync; fetchProjects refreshes locally.
+        await daemonCliPost('workspaces/delete', { id: workspaceId })
         await fetchProjects()
       } else if (clickedId === 'ws-recycle') {
         // Prevent recycling the last worktree
@@ -1011,14 +1018,17 @@ export default function Sidebar(): React.JSX.Element {
           await createSection(project.id, sectionName.trim())
         }
       } else if (clickedId === 'toggle-pin') {
-        await invoke('projects_update', { id: projectId, pinned: project.pinned ? 0 : 1 })
+        await daemonCliPost('projects/update', { id: projectId, pinned: project.pinned ? 0 : 1 })
+        void emit('sync:projects').catch(() => {})
         await fetchProjects()
       } else if (clickedId === 'toggle-active') {
-        await invoke('projects_update', { id: projectId, manuallyActive: project.manuallyActive ? 0 : 1 })
+        await daemonCliPost('projects/update', { id: projectId, manuallyActive: project.manuallyActive ? 0 : 1 })
+        void emit('sync:projects').catch(() => {})
         await fetchProjects()
       } else if (clickedId === 'active-24h') {
-        // Set lastInteractionAt to now — the Active Bar keeps projects with interaction < 24hrs
-        await invoke('projects_touch_interaction', { id: projectId })
+        // Set lastInteractionAt to now — the Active Bar keeps projects with
+        // interaction < 24hrs. projects_touch_interaction emitted no sync.
+        await daemonCliPost('projects/touch-interaction', { id: projectId })
         const store = useProjectsStore.getState()
         const updated = store.projects.map((p) =>
           p.id === projectId ? { ...p, lastInteractionAt: Math.floor(Date.now() / 1000) } : p

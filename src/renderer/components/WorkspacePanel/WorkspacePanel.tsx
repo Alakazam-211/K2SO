@@ -1,5 +1,10 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { emit } from '@tauri-apps/api/event'
+// Plan B — projects_update / workspaces_delete are host-aware daemon
+// data: route through the `/cli/*` HTTP layer. open_in_finder +
+// git_remove_worktree stay on Tauri invoke (host/git, out of scope).
+import { daemonCliPost } from '@/lib/daemon-cli'
 import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
 import { useSettingsStore } from '@/stores/settings'
@@ -250,7 +255,8 @@ export default function WorkspacePanel(): React.JSX.Element {
                     if (clickedId === null) return
                     const stateId = clickedId === '__none__' ? '' : clickedId
                     try {
-                      await invoke('projects_update', { id: activeProject.id, stateId: stateId || '' })
+                      await daemonCliPost('projects/update', { id: activeProject.id, stateId: stateId || '' })
+                      void emit('sync:projects').catch(() => {})
                       const store = useProjectsStore.getState()
                       const updated = store.projects.map((p) =>
                         p.id === activeProject.id ? { ...p, stateId: stateId || null } : p
@@ -429,7 +435,7 @@ function WorktreeRow({
       await invoke('projects_open_in_finder', { path: worktreePath })
     } else if (clickedId === 'close') {
       // Remove from DB, keep files on disk
-      await invoke('workspaces_delete', { id: workspaceId })
+      await daemonCliPost('workspaces/delete', { id: workspaceId })
       // Optimistic removal from store
       const state = useProjectsStore.getState()
       const updated = state.projects.map((p) => {
@@ -447,11 +453,11 @@ function WorktreeRow({
             workspaceId,
           })
         } else {
-          await invoke('workspaces_delete', { id: workspaceId })
+          await daemonCliPost('workspaces/delete', { id: workspaceId })
         }
       } catch {
         // If git remove fails, just delete the record
-        await invoke('workspaces_delete', { id: workspaceId })
+        await daemonCliPost('workspaces/delete', { id: workspaceId })
       }
       // Optimistic removal from store
       const state = useProjectsStore.getState()

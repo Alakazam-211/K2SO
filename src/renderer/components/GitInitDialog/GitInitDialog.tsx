@@ -3,7 +3,11 @@ import { useGitInitDialogStore } from '../../stores/git-init-dialog'
 import { useProjectsStore } from '../../stores/projects'
 import { useTabsStore } from '../../stores/tabs'
 import { useFocusGroupsStore } from '../../stores/focus-groups'
-import { invoke } from '@tauri-apps/api/core'
+import { emit } from '@tauri-apps/api/event'
+// Plan B — project add / focus-group assign are host-aware daemon data:
+// route through the `/cli/*` HTTP layer and re-emit the same cross-window
+// `sync:projects` / `sync:focus-groups` events the old Tauri shims fired.
+import { daemonCliPost } from '@/lib/daemon-cli'
 
 export default function GitInitDialog(): React.JSX.Element | null {
   const isOpen = useGitInitDialogStore((s) => s.isOpen)
@@ -52,7 +56,10 @@ export default function GitInitDialog(): React.JSX.Element | null {
       const targetGroupId = focusState.focusGroupsEnabled ? focusState.activeFocusGroupId : null
       if (targetGroupId) {
         try {
-          await invoke('focus_groups_assign_project', { projectId: newProject.id, focusGroupId: targetGroupId })
+          await daemonCliPost('focus-groups/assign', { projectId: newProject.id, focusGroupId: targetGroupId })
+          // assign emitted BOTH sync:focus-groups and sync:projects.
+          void emit('sync:focus-groups').catch(() => {})
+          void emit('sync:projects').catch(() => {})
           useProjectsStore.setState({
             projects: useProjectsStore.getState().projects.map((p) =>
               p.id === newProject.id ? { ...p, focusGroupId: targetGroupId } : p
@@ -82,7 +89,8 @@ export default function GitInitDialog(): React.JSX.Element | null {
     if (!path) return
     setIsPending(true)
     try {
-      await invoke('projects_init_git_and_open', { path, branch: branchName })
+      await daemonCliPost('projects/init-git-and-open', { path, branch: branchName })
+      void emit('sync:projects').catch(() => {})
       close()
       await selectNewProject()
     } catch (err: unknown) {
@@ -95,7 +103,8 @@ export default function GitInitDialog(): React.JSX.Element | null {
     if (!path) return
     setIsPending(true)
     try {
-      await invoke('projects_add_without_git', { path })
+      await daemonCliPost('projects/add-without-git', { path })
+      void emit('sync:projects').catch(() => {})
       close()
       await selectNewProject()
     } catch (err: unknown) {

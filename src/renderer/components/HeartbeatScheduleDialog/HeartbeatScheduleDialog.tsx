@@ -1,5 +1,10 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { emit } from '@tauri-apps/api/event'
+// Plan B — projects_update is host-aware daemon data; route through the
+// `/cli/projects/update` HTTP layer and re-emit `sync:projects`. The
+// `k2so_agents_*` calls are agent-control (out of scope), stay on invoke.
+import { daemonCliPost } from '@/lib/daemon-cli'
 import { useHeartbeatScheduleStore } from '@/stores/heartbeat-schedule'
 import { useProjectsStore } from '@/stores/projects'
 
@@ -229,7 +234,8 @@ export default function HeartbeatScheduleDialog(): React.JSX.Element | null {
     setSaving(true)
     try {
       const mode = tab === 'hourly' ? 'hourly' : 'scheduled'
-      await invoke('projects_update', { id: projectId, heartbeatMode: mode, heartbeatSchedule: scheduleJson })
+      await daemonCliPost('projects/update', { id: projectId, heartbeatMode: mode, heartbeatSchedule: scheduleJson })
+      void emit('sync:projects').catch(() => {})
       await invoke('k2so_agents_update_heartbeat_projects')
       try { await invoke('k2so_agents_install_heartbeat') } catch { /* may already be installed */ }
 
@@ -249,7 +255,8 @@ export default function HeartbeatScheduleDialog(): React.JSX.Element | null {
 
   const handleTurnOff = useCallback(async () => {
     if (!projectId) return
-    await invoke('projects_update', { id: projectId, heartbeatMode: 'off', heartbeatSchedule: '' })
+    await daemonCliPost('projects/update', { id: projectId, heartbeatMode: 'off', heartbeatSchedule: '' })
+    void emit('sync:projects').catch(() => {})
     await invoke('k2so_agents_update_heartbeat_projects')
     useProjectsStore.setState({
       projects: useProjectsStore.getState().projects.map((p) =>

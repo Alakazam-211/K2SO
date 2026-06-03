@@ -1,5 +1,10 @@
 import { useState, useEffect, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { emit } from '@tauri-apps/api/event'
+// Plan B — projects_update / workspaces_delete are host-aware daemon
+// data: route through the `/cli/*` HTTP layer. `git_remove_worktree`
+// stays on Tauri invoke (git cluster, Bulk-2).
+import { daemonCliPost } from '@/lib/daemon-cli'
 import { useProjectsStore, type ProjectWithWorkspaces } from '../../stores/projects'
 import { useActiveAgentsStore } from '@/stores/active-agents'
 import AgentCloseDialog from '@/components/AgentCloseDialog/AgentCloseDialog'
@@ -91,13 +96,15 @@ export default function DisableWorktreesDialog({
     try {
       if (selectedAction === 'conceal') {
         // Just disable worktreeMode — keep all workspace records
-        await invoke('projects_update', { id: project.id, worktreeMode: 0 })
+        await daemonCliPost('projects/update', { id: project.id, worktreeMode: 0 })
+        void emit('sync:projects').catch(() => {})
       } else if (selectedAction === 'close') {
         // Delete worktree workspace records, keep files on disk
         for (const ws of worktrees) {
-          await invoke('workspaces_delete', { id: ws.id })
+          await daemonCliPost('workspaces/delete', { id: ws.id })
         }
-        await invoke('projects_update', { id: project.id, worktreeMode: 0 })
+        await daemonCliPost('projects/update', { id: project.id, worktreeMode: 0 })
+        void emit('sync:projects').catch(() => {})
       } else if (selectedAction === 'recycle') {
         // Trash worktree folders + remove workspace records
         for (const ws of worktrees) {
@@ -109,13 +116,14 @@ export default function DisableWorktreesDialog({
               })
             } catch {
               // If git remove fails, just delete the record
-              await invoke('workspaces_delete', { id: ws.id })
+              await daemonCliPost('workspaces/delete', { id: ws.id })
             }
           } else {
-            await invoke('workspaces_delete', { id: ws.id })
+            await daemonCliPost('workspaces/delete', { id: ws.id })
           }
         }
-        await invoke('projects_update', { id: project.id, worktreeMode: 0 })
+        await daemonCliPost('projects/update', { id: project.id, worktreeMode: 0 })
+        void emit('sync:projects').catch(() => {})
       }
 
       await fetchProjects()

@@ -1,8 +1,13 @@
 import { create } from 'zustand'
-import { invoke } from '@tauri-apps/api/core'
-// Phase 2 Unit 7a — settings live in the daemon. `focus_groups_*`
-// invokes still exist (Unit 4 territory); only the settings invokes
-// move here.
+import { emit } from '@tauri-apps/api/event'
+// Plan B — focus groups are host-aware daemon data: route them through
+// the `/cli/focus-groups/*` HTTP layer (local OR remote) instead of the
+// localhost-pinned Tauri `focus_groups_*` invoke proxy. The old Tauri
+// shims emitted `sync:focus-groups` (and `sync:projects` for the assign
+// path) from Rust on each mutation; we re-emit those from the renderer
+// after each successful mutation (see `emitFocusGroupsChanged`).
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
+// Phase 2 Unit 7a — settings live in the daemon.
 import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
 // Phase 2.5 fix (finding #547) — daemon-reconnect retry bus.
 import { onDaemonConnected } from '@/lib/daemon-reconnect'
@@ -22,6 +27,21 @@ function shouldSuppressPersist(): boolean {
     '[focus-groups] persist suppressed: settings not yet loaded from daemon'
   )
   return true
+}
+
+/**
+ * Plan B cross-window sync: the old Tauri `focus_groups_*` mutation
+ * commands emitted `sync:focus-groups` from Rust so OTHER windows
+ * re-fetch. The assign command additionally emitted `sync:projects`
+ * (the project's focusGroupId changed). Now that the renderer talks to
+ * the daemon directly, those Rust-side emits no longer fire — so we emit
+ * the SAME events from the renderer after each successful mutation.
+ * Fire-and-forget; a failed emit (non-Tauri/web) is non-fatal.
+ */
+function emitFocusGroupsChanged(): void {
+  void emit('sync:focus-groups').catch((e) =>
+    console.warn('[focus-groups] sync:focus-groups emit failed:', e),
+  )
 }
 
 export interface FocusGroup {
@@ -56,7 +76,9 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
 
   fetchFocusGroups: async () => {
     try {
-      const groups = await invoke<FocusGroup[]>('focus_groups_list')
+      // camelCase FocusGroup response matches the Rust struct's
+      // `#[serde(rename_all = "camelCase")]`; no params on this GET.
+      const groups = await daemonCliGet<FocusGroup[]>('focus-groups/list')
       set({ focusGroups: groups })
     } catch (err) {
       console.error('[focus-groups] fetchFocusGroups failed:', err)
@@ -86,7 +108,8 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
 
   createFocusGroup: async (name: string, color?: string) => {
     try {
-      await invoke('focus_groups_create', { name, color })
+      await daemonCliPost('focus-groups/create', { name, color })
+      emitFocusGroupsChanged()
       await get().fetchFocusGroups()
       useToastStore.getState().addToast('Focus group created', 'success')
     } catch (err) {
@@ -106,7 +129,8 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
           settingsUpdate({ activeFocusGroupId: nextId }).catch((e) => console.warn('[focus-groups] settings_update failed:', e))
         }
       }
-      await invoke('focus_groups_delete', { id })
+      await daemonCliPost('focus-groups/delete', { id })
+      emitFocusGroupsChanged()
       await get().fetchFocusGroups()
     } catch (err) {
       console.error('[focus-groups] deleteFocusGroup failed:', err)
@@ -115,7 +139,8 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
 
   renameFocusGroup: async (id: string, name: string) => {
     try {
-      await invoke('focus_groups_update', { id, name })
+      await daemonCliPost('focus-groups/update', { id, name })
+      emitFocusGroupsChanged()
       await get().fetchFocusGroups()
     } catch (err) {
       console.error('[focus-groups] renameFocusGroup failed:', err)
@@ -124,7 +149,8 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
 
   updateFocusGroupColor: async (id: string, color: string | null) => {
     try {
-      await invoke('focus_groups_update', { id, color })
+      await daemonCliPost('focus-groups/update', { id, color })
+      emitFocusGroupsChanged()
       await get().fetchFocusGroups()
     } catch (err) {
       console.error('[focus-groups] updateFocusGroupColor failed:', err)
@@ -134,8 +160,9 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
   reorderFocusGroups: async (ids: string[]) => {
     try {
       for (let i = 0; i < ids.length; i++) {
-        await invoke('focus_groups_update', { id: ids[i], tabOrder: i })
+        await daemonCliPost('focus-groups/update', { id: ids[i], tabOrder: i })
       }
+      emitFocusGroupsChanged()
       await get().fetchFocusGroups()
     } catch (err) {
       console.error('[focus-groups] reorderFocusGroups failed:', err)
@@ -144,7 +171,14 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
 
   assignProjectToGroup: async (projectId: string, focusGroupId: string | null) => {
     try {
-      await invoke('focus_groups_assign_project', { projectId, focusGroupId })
+      await daemonCliPost('focus-groups/assign', { projectId, focusGroupId })
+      // The old Tauri `focus_groups_assign_project` emitted BOTH
+      // `sync:focus-groups` and `sync:projects` (the project's
+      // focusGroupId changed). Mirror both.
+      emitFocusGroupsChanged()
+      void emit('sync:projects').catch((e) =>
+        console.warn('[focus-groups] sync:projects emit failed:', e),
+      )
     } catch (err) {
       console.error('[focus-groups] assignProjectToGroup failed:', err)
     }

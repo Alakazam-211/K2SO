@@ -1,5 +1,8 @@
 import { useState, useEffect } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+// Plan B — project-icon lookup is host-aware daemon data: route through
+// the `/cli/projects/get-icon` HTTP layer (local OR remote) instead of
+// the localhost-pinned Tauri `projects_get_icon` invoke proxy.
+import { daemonCliGet } from '@/lib/daemon-cli'
 
 // Cache icon results across component instances
 const iconCache = new Map<string, { found: boolean; dataUrl: string | null }>()
@@ -54,7 +57,7 @@ export default function ProjectAvatar({
     }
 
     let cancelled = false
-    invoke<{ found: boolean; dataUrl: string | null }>('projects_get_icon', { path: projectPath, projectId })
+    daemonCliGet<{ found: boolean; dataUrl: string | null }>('projects/get-icon', { path: projectPath, project_id: projectId })
       .then((result) => {
         iconCache.set(projectPath, result)
         if (!cancelled && result.found && result.dataUrl) {
