@@ -51,6 +51,11 @@ pub mod skill_regen;
 // (symlink/scaffold helpers + preview + ingest + disable). Extracted
 // from `agents/workspace.rs`.
 pub mod harness;
+// Canonical-agents feature: per-harness state detection + the
+// deterministic safety net (backup + atomic-write + manifest, copies not
+// symlinks). The ONLY destructive surface for the K2 Canonical Agent +
+// role skills. See `.k2so/prds/k2-canonical-agents.md` §5–§6.
+pub mod canonical;
 // Phase 2.5d: workspace teardown (disconnect) — freeze or restore the
 // symlinks K2SO scaffolded. Extracted from `agents/workspace.rs`.
 pub mod teardown;

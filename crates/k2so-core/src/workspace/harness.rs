@@ -24,6 +24,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+// Canonical-agents safety net + detection live in the sibling
+// `canonical` module; re-export under `harness::` so the PRD-named
+// paths (`harness::run_canonical_setup` / `unwind_canonical` /
+// `persist_agent_md` / `detect_canonical_state`) resolve.
+pub use crate::workspace::canonical::{
+    detect_canonical_state, persist_agent_md, run_canonical_setup, unwind_canonical,
+    CanonicalSetupOpts, CanonicalSetupOutcome, HarnessFileState, HarnessProbe, PersistOpts,
+    SetupManifest, UnifiedForm,
+};
+
 use crate::skills::writer::force_symlink;
 use crate::workspace::wake_prompts::strip_frontmatter;
 use crate::fs_atomic::{atomic_write_str, log_if_err};
