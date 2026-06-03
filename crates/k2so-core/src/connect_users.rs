@@ -84,6 +84,85 @@ impl From<&ConnectUser> for ConnectUserView {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Password policy (K2SO #620)
+// ─────────────────────────────────────────────────────────────────────
+
+/// Owner-configurable, server-enforced complexity policy for connect-user
+/// passwords. Persisted alongside the user list in
+/// `~/.k2so/connect-users.json` under a top-level `policy` field. The
+/// default preserves the pre-#620 behavior (length-8, no character-class
+/// requirements) so existing stores load unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordPolicy {
+    /// Minimum password length. Clamped to a sane band on `set_policy`.
+    pub min_length: usize,
+    /// Require at least one non-alphanumeric character.
+    pub require_special: bool,
+    /// Require at least one ASCII digit.
+    pub require_number: bool,
+    /// Require at least one uppercase letter.
+    pub require_uppercase: bool,
+}
+
+impl Default for PasswordPolicy {
+    fn default() -> Self {
+        Self {
+            min_length: 8,
+            require_special: false,
+            require_number: false,
+            require_uppercase: false,
+        }
+    }
+}
+
+/// Lower/upper bounds the policy's `min_length` is clamped to on save so a
+/// misconfigured owner can't lock everyone out (too high) or disable the
+/// length floor entirely (too low).
+pub const POLICY_MIN_LENGTH_FLOOR: usize = 4;
+pub const POLICY_MIN_LENGTH_CEIL: usize = 128;
+
+/// Validate `pw` against `policy`, returning the FIRST unmet requirement as
+/// a human-readable message. `Ok(())` means the password satisfies every
+/// active rule. A "special" character is any non-alphanumeric character.
+pub fn validate_password(pw: &str, policy: &PasswordPolicy) -> Result<(), String> {
+    if pw.chars().count() < policy.min_length {
+        return Err(format!(
+            "Password must be at least {} characters.",
+            policy.min_length
+        ));
+    }
+    if policy.require_special && !pw.chars().any(|c| !c.is_alphanumeric()) {
+        return Err("Password must include a special character.".to_string());
+    }
+    if policy.require_number && !pw.chars().any(|c| c.is_ascii_digit()) {
+        return Err("Password must include a number.".to_string());
+    }
+    if policy.require_uppercase && !pw.chars().any(|c| c.is_uppercase()) {
+        return Err("Password must include an uppercase letter.".to_string());
+    }
+    Ok(())
+}
+
+/// Read the stored password policy (default when the store/file is absent
+/// or the field is missing).
+pub fn get_policy() -> PasswordPolicy {
+    load_store().map(|s| s.policy).unwrap_or_default()
+}
+
+/// Persist a new password policy, clamping `min_length` into
+/// `[POLICY_MIN_LENGTH_FLOOR, POLICY_MIN_LENGTH_CEIL]`.
+pub fn set_policy(mut policy: PasswordPolicy) -> Result<(), String> {
+    policy.min_length = policy
+        .min_length
+        .clamp(POLICY_MIN_LENGTH_FLOOR, POLICY_MIN_LENGTH_CEIL);
+    update_store(|store| {
+        store.policy = policy;
+        Ok(())
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Validation
 // ─────────────────────────────────────────────────────────────────────
 
@@ -156,11 +235,15 @@ fn restrict_mode(file: &Path) {
 #[cfg(not(unix))]
 fn restrict_mode(_file: &Path) {}
 
-/// On-disk shape: a flat list of accounts.
+/// On-disk shape: a flat list of accounts + the password policy.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Store {
     #[serde(default)]
     users: Vec<ConnectUser>,
+    /// K2SO #620: owner-configurable password policy. `default` so existing
+    /// files without the field still load (yielding the permissive default).
+    #[serde(default)]
+    policy: PasswordPolicy,
 }
 
 /// Load the store. A missing/empty file yields an empty store; a
@@ -231,6 +314,8 @@ pub fn add_user(username: &str, password: &str) -> Result<(), String> {
     }
     let hash = hash_password(password)?;
     update_store(|store| {
+        // Enforce the stored password policy (K2SO #620).
+        validate_password(password, &store.policy)?;
         if store.users.iter().any(|u| u.username == username) {
             return Err(format!("user '{username}' already exists"));
         }
@@ -268,6 +353,8 @@ pub fn set_password(username: &str, password: &str) -> Result<(), String> {
     }
     let hash = hash_password(password)?;
     update_store(|store| {
+        // Enforce the stored password policy (K2SO #620).
+        validate_password(password, &store.policy)?;
         let user = store
             .users
             .iter_mut()
@@ -277,6 +364,11 @@ pub fn set_password(username: &str, password: &str) -> Result<(), String> {
         Ok(())
     })?;
     revoke_user_sessions(&username);
+    // K2SO #620: an owner reset must immediately UNLOCK a stuck user —
+    // clear any lockout (failed_count/locked_until) so a correct login
+    // succeeds right away. (change_password already clears on success via
+    // check_and_record; this is specifically the owner-reset path.)
+    clear_lockout(&username);
     Ok(())
 }
 
@@ -449,7 +541,7 @@ pub fn check_and_record(username: &str, password: &str) -> LoginOutcome {
 }
 
 /// Result of a self-service password change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChangePasswordOutcome {
     /// Password changed; all of the user's sessions were revoked.
     Ok,
@@ -457,18 +549,17 @@ pub enum ChangePasswordOutcome {
     /// username is currently locked. Generic — the route must not reveal
     /// which.
     BadCurrent,
-    /// New password failed validation (e.g. too short).
-    WeakNew,
+    /// New password failed the policy. Carries the human-readable first
+    /// unmet requirement (K2SO #620) so the portal can surface it.
+    WeakNew(String),
 }
-
-/// Minimum length for a self-service new password.
-const MIN_NEW_PASSWORD_LEN: usize = 8;
 
 /// Self-service password change for an authenticated connect-user.
 /// Verifies `current` THROUGH the lockout gate (so a self-service form
 /// can't be used to brute-force the current password), validates the new
-/// password length, then [`set_password`] (which re-hashes AND revokes
-/// every live session for the user, forcing a re-login everywhere).
+/// password against the stored policy (K2SO #620), then [`set_password`]
+/// (which re-hashes AND revokes every live session for the user, forcing a
+/// re-login everywhere).
 pub fn change_password(username: &str, current: &str, new: &str) -> ChangePasswordOutcome {
     match check_and_record(username, current) {
         LoginOutcome::Ok => {}
@@ -476,8 +567,9 @@ pub fn change_password(username: &str, current: &str, new: &str) -> ChangePasswo
             return ChangePasswordOutcome::BadCurrent
         }
     }
-    if new.len() < MIN_NEW_PASSWORD_LEN {
-        return ChangePasswordOutcome::WeakNew;
+    // Enforce the stored policy (replaces the old hardcoded >= 8 check).
+    if let Err(msg) = validate_password(new, &get_policy()) {
+        return ChangePasswordOutcome::WeakNew(msg);
     }
     // set_password re-hashes and revokes ALL of this user's sessions
     // (including the one that authorized this call) → forced re-login.
@@ -488,6 +580,15 @@ pub fn change_password(username: &str, current: &str, new: &str) -> ChangePasswo
         // generic bad-current rather than leaking internals.
         Err(_) => ChangePasswordOutcome::BadCurrent,
     }
+}
+
+/// Clear any lockout state (failed_count + locked_until) for `username`.
+/// Keyed by the normalized username — same key `check_and_record`/`is_locked`
+/// use. Idempotent; a no-op when there's no entry. Used by the owner-reset
+/// path so a password reset immediately unlocks a stuck user.
+pub fn clear_lockout(username: &str) {
+    let key = normalize_username(username).unwrap_or_else(|_| username.trim().to_ascii_lowercase());
+    lock_locks().remove(&key);
 }
 
 /// Whether `username` is currently locked out. Read-only; used by callers
@@ -595,11 +696,11 @@ mod tests {
     #[test]
     fn add_user_then_verify_succeeds() {
         with_temp_home(|| {
-            add_user("Alice", "s3cret").expect("add");
+            add_user("Alice", "s3cretpass").expect("add");
             // Stored lowercased; verify is case-insensitive on the name.
-            assert!(verify("alice", "s3cret"));
-            assert!(verify("ALICE", "s3cret"));
-            assert!(!verify("alice", "wrong"));
+            assert!(verify("alice", "s3cretpass"));
+            assert!(verify("ALICE", "s3cretpass"));
+            assert!(!verify("alice", "wrongpass"));
         });
     }
 
@@ -609,16 +710,16 @@ mod tests {
             // No users provisioned at all.
             assert!(!verify("ghost", "whatever"));
             // Add one, then check a different unknown user still false.
-            add_user("real", "pw").expect("add");
-            assert!(!verify("nobody", "pw"));
+            add_user("real", "password").expect("add");
+            assert!(!verify("nobody", "password"));
         });
     }
 
     #[test]
     fn add_rejects_duplicate() {
         with_temp_home(|| {
-            add_user("bob", "pw1").expect("add");
-            let err = add_user("BOB", "pw2").expect_err("dup must reject");
+            add_user("bob", "password1").expect("add");
+            let err = add_user("BOB", "password2").expect_err("dup must reject");
             assert!(err.contains("already exists"), "got: {err}");
         });
     }
@@ -626,8 +727,8 @@ mod tests {
     #[test]
     fn add_rejects_invalid_username() {
         with_temp_home(|| {
-            assert!(add_user("x", "pw").is_err(), "too short");
-            assert!(add_user("bad name", "pw").is_err(), "space");
+            assert!(add_user("x", "password").is_err(), "too short");
+            assert!(add_user("bad name", "password").is_err(), "space");
             assert!(add_user("ok", "").is_err(), "empty password");
         });
     }
@@ -635,7 +736,7 @@ mod tests {
     #[test]
     fn list_users_redacts_hash() {
         with_temp_home(|| {
-            add_user("carol", "pw").expect("add");
+            add_user("carol", "password").expect("add");
             let views = list_users().expect("list");
             assert_eq!(views.len(), 1);
             assert_eq!(views[0].username, "carol");
@@ -650,12 +751,12 @@ mod tests {
     #[test]
     fn set_password_changes_credential_and_revokes_sessions() {
         with_temp_home(|| {
-            add_user("dave", "old").expect("add");
+            add_user("dave", "oldpassword").expect("add");
             let tok = create_session("dave");
             assert_eq!(validate_session(&tok), Some("dave".to_string()));
-            set_password("dave", "new").expect("set-password");
-            assert!(!verify("dave", "old"));
-            assert!(verify("dave", "new"));
+            set_password("dave", "newpassword").expect("set-password");
+            assert!(!verify("dave", "oldpassword"));
+            assert!(verify("dave", "newpassword"));
             assert_eq!(validate_session(&tok), None, "rotation must revoke session");
         });
     }
@@ -663,13 +764,13 @@ mod tests {
     #[test]
     fn set_disabled_blocks_login_and_revokes_sessions() {
         with_temp_home(|| {
-            add_user("eve", "pw").expect("add");
+            add_user("eve", "password").expect("add");
             let tok = create_session("eve");
             set_disabled("eve", true).expect("disable");
-            assert!(!verify("eve", "pw"), "disabled user must not verify");
+            assert!(!verify("eve", "password"), "disabled user must not verify");
             assert_eq!(validate_session(&tok), None, "disable must revoke session");
             set_disabled("eve", false).expect("re-enable");
-            assert!(verify("eve", "pw"), "re-enabled user verifies again");
+            assert!(verify("eve", "password"), "re-enabled user verifies again");
         });
     }
 
@@ -701,12 +802,12 @@ mod tests {
     #[test]
     fn remove_user_revokes_sessions() {
         with_temp_home(|| {
-            add_user("grace", "pw").expect("add");
+            add_user("grace", "password").expect("add");
             let tok = create_session("grace");
             assert_eq!(validate_session(&tok), Some("grace".to_string()));
             remove_user("grace").expect("remove");
             assert_eq!(validate_session(&tok), None, "remove must revoke session");
-            assert!(!verify("grace", "pw"), "removed user must not verify");
+            assert!(!verify("grace", "password"), "removed user must not verify");
             let err = remove_user("grace").expect_err("removing twice errors");
             assert!(err.contains("not found"), "got: {err}");
         });
@@ -815,7 +916,9 @@ mod tests {
             add_user("chp3", "oldpassword").expect("add");
             assert_eq!(
                 change_password("chp3", "oldpassword", "short"),
-                ChangePasswordOutcome::WeakNew
+                ChangePasswordOutcome::WeakNew(
+                    "Password must be at least 8 characters.".to_string()
+                )
             );
             assert!(verify("chp3", "oldpassword"), "weak-new must not change pw");
         });
@@ -845,5 +948,191 @@ mod tests {
         let t = new_token();
         assert_eq!(t.len(), 64, "32 bytes -> 64 hex chars");
         assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ── K2SO #620 — password policy ─────────────────────────────────────
+
+    #[test]
+    fn default_policy_preserves_legacy_behavior() {
+        let p = PasswordPolicy::default();
+        assert_eq!(p.min_length, 8);
+        assert!(!p.require_special);
+        assert!(!p.require_number);
+        assert!(!p.require_uppercase);
+    }
+
+    #[test]
+    fn policy_round_trips_in_store() {
+        with_temp_home(|| {
+            // Absent file → default.
+            assert_eq!(get_policy(), PasswordPolicy::default());
+            let want = PasswordPolicy {
+                min_length: 12,
+                require_special: true,
+                require_number: true,
+                require_uppercase: true,
+            };
+            set_policy(want.clone()).expect("set policy");
+            assert_eq!(get_policy(), want, "policy must round-trip on disk");
+            // Adding a user must NOT disturb the stored policy.
+            add_user("pol1", "Abcdef1!ghij").expect("add under policy");
+            assert_eq!(get_policy(), want, "policy survives a user mutation");
+        });
+    }
+
+    #[test]
+    fn set_policy_clamps_min_length() {
+        with_temp_home(|| {
+            set_policy(PasswordPolicy {
+                min_length: 1,
+                ..Default::default()
+            })
+            .expect("set");
+            assert_eq!(get_policy().min_length, POLICY_MIN_LENGTH_FLOOR);
+            set_policy(PasswordPolicy {
+                min_length: 9999,
+                ..Default::default()
+            })
+            .expect("set");
+            assert_eq!(get_policy().min_length, POLICY_MIN_LENGTH_CEIL);
+        });
+    }
+
+    #[test]
+    fn validate_password_enforces_each_rule_with_message() {
+        // Length.
+        let p = PasswordPolicy {
+            min_length: 10,
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_password("short", &p),
+            Err("Password must be at least 10 characters.".to_string())
+        );
+        assert!(validate_password("longenough!", &p).is_ok());
+
+        // Special.
+        let p = PasswordPolicy {
+            min_length: 4,
+            require_special: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_password("abcd1234", &p),
+            Err("Password must include a special character.".to_string())
+        );
+        assert!(validate_password("abcd!", &p).is_ok());
+
+        // Number.
+        let p = PasswordPolicy {
+            min_length: 4,
+            require_number: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_password("abcdef", &p),
+            Err("Password must include a number.".to_string())
+        );
+        assert!(validate_password("abc1", &p).is_ok());
+
+        // Uppercase.
+        let p = PasswordPolicy {
+            min_length: 4,
+            require_uppercase: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_password("abcdef", &p),
+            Err("Password must include an uppercase letter.".to_string())
+        );
+        assert!(validate_password("abcD", &p).is_ok());
+    }
+
+    #[test]
+    fn validate_password_reports_first_unmet_rule() {
+        // All rules on; a too-short pw must complain about LENGTH first.
+        let p = PasswordPolicy {
+            min_length: 12,
+            require_special: true,
+            require_number: true,
+            require_uppercase: true,
+        };
+        assert_eq!(
+            validate_password("aB1!", &p),
+            Err("Password must be at least 12 characters.".to_string())
+        );
+    }
+
+    #[test]
+    fn add_user_rejects_password_failing_policy() {
+        with_temp_home(|| {
+            set_policy(PasswordPolicy {
+                min_length: 10,
+                require_special: true,
+                ..Default::default()
+            })
+            .expect("set");
+            // Too short → length message.
+            let err = add_user("polA", "abc").expect_err("too short rejected");
+            assert_eq!(err, "Password must be at least 10 characters.");
+            // Long enough but no special char → special message.
+            let err = add_user("polA", "abcdefghij").expect_err("missing special rejected");
+            assert_eq!(err, "Password must include a special character.");
+            // Satisfies the policy → accepted.
+            add_user("polA", "abcdefghi!").expect("compliant add");
+        });
+    }
+
+    #[test]
+    fn change_password_rejects_password_failing_policy() {
+        with_temp_home(|| {
+            // Add under the default (permissive) policy, then tighten it.
+            add_user("polB", "oldpassword").expect("add");
+            set_policy(PasswordPolicy {
+                min_length: 8,
+                require_special: true,
+                ..Default::default()
+            })
+            .expect("set");
+            assert_eq!(
+                change_password("polB", "oldpassword", "newpassword"),
+                ChangePasswordOutcome::WeakNew(
+                    "Password must include a special character.".to_string()
+                )
+            );
+            assert!(verify("polB", "oldpassword"), "weak-new must not change pw");
+            // Compliant new password succeeds.
+            assert_eq!(
+                change_password("polB", "oldpassword", "newpass!"),
+                ChangePasswordOutcome::Ok
+            );
+            assert!(verify("polB", "newpass!"));
+        });
+    }
+
+    #[test]
+    fn owner_set_password_clears_lockout() {
+        with_temp_home(|| {
+            add_user("locked", "rightpass").expect("add");
+            // Drive the account into a lockout via the lockout path.
+            for _ in 0..LOCKOUT_THRESHOLD {
+                assert_eq!(check_and_record("locked", "x"), LoginOutcome::BadCreds);
+            }
+            assert!(is_locked("locked"), "must be locked after threshold");
+            // Even the correct password is rejected while locked.
+            assert_eq!(
+                check_and_record("locked", "rightpass"),
+                LoginOutcome::LockedOut
+            );
+            // Owner resets the password → lockout cleared immediately.
+            set_password("locked", "brandnewpw").expect("owner reset");
+            assert!(!is_locked("locked"), "owner reset must clear lockout");
+            // A correct login with the NEW password now succeeds right away.
+            assert_eq!(
+                check_and_record("locked", "brandnewpw"),
+                LoginOutcome::Ok,
+                "unlocked user logs in immediately after owner reset"
+            );
+        });
     }
 }

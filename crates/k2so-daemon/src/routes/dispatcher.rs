@@ -208,6 +208,9 @@ async fn handle_one_request(
             | "/cli/users/remove"
             | "/cli/users/set-password"
             | "/cli/users/set-disabled"
+            // K2SO #620 — owner-only password-policy write. GET (read) goes
+            // through the GET arm below; POST is method-gated per-handler.
+            | "/cli/users/policy"
             | "/cli/auth/login"
             // Self-service password change from the daemon-hosted account
             // portal — connect-user session in the body/query, POST so it's
@@ -976,6 +979,47 @@ async fn handle_one_request(
             let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
             let r = crate::connect_users_routes::handle_set_disabled(&body_bytes);
             super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
+        }
+        // ── K2SO #620 — password policy ─────────────────────────────────
+        //
+        // GET /cli/users/policy — AUTHORIZED (owner OR connect-user
+        // session). Lets the self-service portal read the active password
+        // requirements to render the hint + client-side validate. Resolve
+        // identity like /cli/auth/whoami: owner token first, then a live
+        // connect-user session; anything else → 403.
+        //
+        // POST /cli/users/policy — OWNER-ONLY (mutates the auth boundary's
+        // policy). `token_is_owner` gates it; a connect-user session is
+        // rejected. Method-gated below (top-level dispatch lets a GET
+        // through on POST-allowlisted routes — we branch on `is_post`).
+        "/cli/users/policy" => {
+            if is_post {
+                // OWNER-ONLY write.
+                if !super::http::require_owner(&mut *stream, &mut buf, &query, state.token.as_str()).await {
+                    return DispatchOutcome::Done;
+                }
+                let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
+                let r = crate::connect_users_routes::handle_set_policy(&body_bytes);
+                super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
+            } else {
+                // AUTHORIZED read (owner OR connect-user session).
+                let _ = stream.read(&mut buf).await;
+                let tok = super::http::extract_token(&query).unwrap_or("");
+                let authorized = (!tok.is_empty() && tok == state.token.as_str())
+                    || k2so_core::connect_users::validate_session(tok).is_some();
+                if !authorized {
+                    super::http::send_response(
+                        &mut *stream,
+                        "403 Forbidden",
+                        "application/json",
+                        r#"{"error":"invalid or missing token"}"#,
+                    )
+                    .await;
+                    return DispatchOutcome::Done;
+                }
+                let r = crate::connect_users_routes::handle_get_policy();
+                super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
+            }
         }
         // GET /cli/users — list accounts (redacted views; no hashes).
         // OWNER-ONLY (read-side of user management). `require_owner`

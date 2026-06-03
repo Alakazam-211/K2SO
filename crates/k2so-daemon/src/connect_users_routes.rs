@@ -113,6 +113,55 @@ pub fn handle_set_disabled(body: &[u8]) -> CliResponse {
     }
 }
 
+/// `GET /cli/users/policy` → `{minLength, requireSpecial, requireNumber,
+/// requireUppercase}` (camelCase). AUTHORIZED (owner OR connect-user
+/// session) so the self-service portal can read the active requirements.
+pub fn handle_get_policy() -> CliResponse {
+    let p = connect_users::get_policy();
+    CliResponse::ok_json(
+        serde_json::json!({
+            "minLength": p.min_length,
+            "requireSpecial": p.require_special,
+            "requireNumber": p.require_number,
+            "requireUppercase": p.require_uppercase,
+        })
+        .to_string(),
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct PolicyReq {
+    #[serde(rename = "minLength")]
+    min_length: usize,
+    #[serde(rename = "requireSpecial")]
+    require_special: bool,
+    #[serde(rename = "requireNumber")]
+    require_number: bool,
+    #[serde(rename = "requireUppercase")]
+    require_uppercase: bool,
+}
+
+/// `POST /cli/users/policy` `{minLength, requireSpecial, requireNumber,
+/// requireUppercase}` → `{"success":true}`. OWNER-ONLY (gated by
+/// require_owner at the dispatcher). `min_length` is clamped to a sane band
+/// by `connect_users::set_policy`.
+pub fn handle_set_policy(body: &[u8]) -> CliResponse {
+    let req: PolicyReq = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return CliResponse::bad_request(format!("invalid JSON body: {e}")),
+    };
+    let policy = connect_users::PasswordPolicy {
+        min_length: req.min_length,
+        require_special: req.require_special,
+        require_number: req.require_number,
+        require_uppercase: req.require_uppercase,
+    };
+    match connect_users::set_policy(policy) {
+        Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct LoginReq {
     username: String,
@@ -231,6 +280,7 @@ pub fn account_page_html() -> String {
   .msg {{ margin-top: 14px; font-size: 13px; min-height: 18px; }}
   .msg.err {{ color: #f85149; }}
   .msg.ok {{ color: #3fb950; }}
+  .hint {{ margin-top: 5px; font-size: 11px; color: #8b949e; min-height: 14px; }}
   .hidden {{ display: none; }}
 </style>
 </head>
@@ -254,6 +304,7 @@ pub fn account_page_html() -> String {
       <input id="cp" type="password" autocomplete="current-password" required>
       <label for="np">New password</label>
       <input id="np" type="password" autocomplete="new-password" minlength="8" required>
+      <div class="hint" id="pwHint"></div>
       <label for="np2">Confirm new password</label>
       <input id="np2" type="password" autocomplete="new-password" minlength="8" required>
       <button type="submit" id="changeBtn">Change password</button>
@@ -264,6 +315,9 @@ pub fn account_page_html() -> String {
 <script>
   // Session token lives only in memory (JS var), never localStorage.
   let token = null;
+  // Active password policy (K2SO #620), fetched after login. Default
+  // mirrors the server's permissive default until the fetch resolves.
+  let policy = {{ minLength: 8, requireSpecial: false, requireNumber: false, requireUppercase: false }};
 
   const loginForm = document.getElementById('loginForm');
   const changeForm = document.getElementById('changeForm');
@@ -280,6 +334,42 @@ pub fn account_page_html() -> String {
   function showLoggedOut() {{
     heading.textContent = 'Log in to manage your account for ' + SUB;
     if (loginSub) loginSub.classList.remove('hidden');
+  }}
+
+  const pwHint = document.getElementById('pwHint');
+  // Render the active requirements as a compact hint — only the active
+  // rules are listed.
+  function renderHint() {{
+    const parts = ['At least ' + policy.minLength + ' chars'];
+    if (policy.requireSpecial) parts.push('special char');
+    if (policy.requireNumber) parts.push('number');
+    if (policy.requireUppercase) parts.push('uppercase');
+    pwHint.textContent = parts.join(' · ');
+  }}
+  // Client-side validation mirroring the server (UX only — the server
+  // still enforces and a 400 surfaces). Returns null when OK, else the
+  // first unmet-requirement message.
+  function validatePw(pw) {{
+    if (pw.length < policy.minLength) return 'Password must be at least ' + policy.minLength + ' characters.';
+    if (policy.requireSpecial && !/[^A-Za-z0-9]/.test(pw)) return 'Password must include a special character.';
+    if (policy.requireNumber && !/[0-9]/.test(pw)) return 'Password must include a number.';
+    if (policy.requireUppercase && !/[A-Z]/.test(pw)) return 'Password must include an uppercase letter.';
+    return null;
+  }}
+  async function loadPolicy() {{
+    try {{
+      const res = await fetch('/cli/users/policy?token=' + encodeURIComponent(token));
+      if (res.ok) {{
+        const p = await res.json();
+        policy = {{
+          minLength: p.minLength || 8,
+          requireSpecial: !!p.requireSpecial,
+          requireNumber: !!p.requireNumber,
+          requireUppercase: !!p.requireUppercase,
+        }};
+      }}
+    }} catch (_) {{ /* keep default */ }}
+    renderHint();
   }}
 
   loginForm.addEventListener('submit', async (e) => {{
@@ -306,6 +396,9 @@ pub fn account_page_html() -> String {
       showLoggedIn();
       loginForm.classList.add('hidden');
       changeForm.classList.remove('hidden');
+      // Fetch + render the active password requirements before the user
+      // types a new password.
+      void loadPolicy();
       document.getElementById('cp').focus();
     }} catch (_) {{
       loginMsg.textContent = 'Network error. Try again.';
@@ -325,9 +418,10 @@ pub fn account_page_html() -> String {
       changeMsg.textContent = 'New passwords do not match.';
       return;
     }}
-    if (np.length < 8) {{
+    const pwErr = validatePw(np);
+    if (pwErr) {{
       changeMsg.className = 'msg err';
-      changeMsg.textContent = 'New password must be at least 8 characters.';
+      changeMsg.textContent = pwErr;
       return;
     }}
     const btn = document.getElementById('changeBtn');
@@ -353,7 +447,10 @@ pub fn account_page_html() -> String {
         }}, 1800);
       }} else if (res.status === 400) {{
         changeMsg.className = 'msg err';
-        changeMsg.textContent = 'New password must be at least 8 characters.';
+        // Server returns the active policy's first unmet requirement.
+        let m = 'New password does not meet the requirements.';
+        try {{ const d = await res.json(); if (d && d.error) m = d.error; }} catch (_) {{}}
+        changeMsg.textContent = m;
       }} else {{
         changeMsg.className = 'msg err';
         changeMsg.textContent = 'Current password incorrect, or too many attempts. Try again later.';
@@ -421,10 +518,10 @@ pub fn handle_change_password(username: Option<String>, body: &[u8]) -> CliRespo
         connect_users::ChangePasswordOutcome::Ok => {
             CliResponse::ok_json(r#"{"success":true}"#.to_string())
         }
-        connect_users::ChangePasswordOutcome::WeakNew => CliResponse {
+        connect_users::ChangePasswordOutcome::WeakNew(msg) => CliResponse {
             status: "400 Bad Request",
             content_type: "application/json",
-            body: r#"{"error":"new password must be at least 8 characters"}"#.to_string(),
+            body: serde_json::json!({ "error": msg }).to_string(),
         },
         connect_users::ChangePasswordOutcome::BadCurrent => CliResponse {
             // Generic 401 — same whether the current password was wrong or

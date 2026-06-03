@@ -72,6 +72,13 @@ interface K2User {
   disabled: boolean
 }
 
+interface PasswordPolicyView {
+  minLength: number
+  requireSpecial: boolean
+  requireNumber: boolean
+  requireUppercase: boolean
+}
+
 interface TunnelConfigView {
   serverAddr: string
   serverPort: number
@@ -223,6 +230,14 @@ export function K2ConnectSection(): React.JSX.Element {
   // username currently pending a remove confirm
   const [removeConfirm, setRemoveConfirm] = useState<string | null>(null)
 
+  // ── Password policy state (K2SO #620) ─────────────────────────────────
+  const [policyMinLength, setPolicyMinLength] = useState('8')
+  const [policyRequireSpecial, setPolicyRequireSpecial] = useState(false)
+  const [policyRequireNumber, setPolicyRequireNumber] = useState(false)
+  const [policyRequireUppercase, setPolicyRequireUppercase] = useState(false)
+  const [policySavedMsg, setPolicySavedMsg] = useState<string | null>(null)
+  const [policyError, setPolicyError] = useState<string | null>(null)
+
   // Load config + status on mount, then poll status while mounted.
   useEffect(() => {
     void (async () => {
@@ -239,6 +254,7 @@ export function K2ConnectSection(): React.JSX.Element {
       } catch { /* ignore */ }
       void refreshStatus()
       void refreshUsers()
+      void refreshPolicy()
     })()
     // Restore the account session from the keychain (independent of the
     // tunnel-config load above — must NOT block it).
@@ -285,6 +301,49 @@ export function K2ConnectSection(): React.JSX.Element {
       setUsersError(e instanceof Error ? e.message : 'Failed to load users')
     } finally {
       setUsersLoaded(true)
+    }
+  }
+
+  // ── Password policy (K2SO #620) ───────────────────────────────────────
+  const refreshPolicy = async (): Promise<void> => {
+    try {
+      const res = await userGet('/policy')
+      if (res.ok) {
+        const p = (await res.json()) as PasswordPolicyView
+        setPolicyMinLength(String(p.minLength ?? 8))
+        setPolicyRequireSpecial(!!p.requireSpecial)
+        setPolicyRequireNumber(!!p.requireNumber)
+        setPolicyRequireUppercase(!!p.requireUppercase)
+        setPolicyError(null)
+      }
+    } catch { /* ignore — keep defaults */ }
+  }
+
+  const savePolicy = async (): Promise<void> => {
+    setPolicyError(null)
+    setPolicySavedMsg(null)
+    const min = Number(policyMinLength)
+    if (!Number.isInteger(min) || min < 4 || min > 128) {
+      setPolicyError('Minimum length must be 4–128.')
+      return
+    }
+    try {
+      const res = await userPost('/policy', {
+        minLength: min,
+        requireSpecial: policyRequireSpecial,
+        requireNumber: policyRequireNumber,
+        requireUppercase: policyRequireUppercase,
+      })
+      if (!res.ok) {
+        setPolicyError(await errText(res))
+        return
+      }
+      setPolicySavedMsg('Saved')
+      setTimeout(() => setPolicySavedMsg(null), 1500)
+      // Re-read so the clamped min length is reflected.
+      await refreshPolicy()
+    } catch (e) {
+      setPolicyError(e instanceof Error ? e.message : 'Failed to save policy')
     }
   }
 
@@ -818,6 +877,66 @@ export function K2ConnectSection(): React.JSX.Element {
               change their own password at <span className="font-mono">https://&lt;sub&gt;.k2.dev</span>).
               You can&apos;t view a password after setting it — only reset it.
             </p>
+
+            {/* Password requirements (K2SO #620) — server-enforced policy */}
+            <div className="border border-[var(--color-border)] p-2.5 space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[11px] text-[var(--color-text-secondary)] font-medium">
+                  Password requirements
+                </span>
+                <span className="flex items-center gap-2">
+                  <label className="flex items-center gap-1.5 text-[10px] text-[var(--color-text-muted)]">
+                    Min length
+                    <input
+                      className={inputCls}
+                      style={{ maxWidth: 56 }}
+                      type="number"
+                      min={4}
+                      max={128}
+                      value={policyMinLength}
+                      onChange={(e) => setPolicyMinLength(e.target.value)}
+                    />
+                  </label>
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                {([
+                  ['special character', policyRequireSpecial, setPolicyRequireSpecial],
+                  ['number', policyRequireNumber, setPolicyRequireNumber],
+                  ['uppercase letter', policyRequireUppercase, setPolicyRequireUppercase],
+                ] as [string, boolean, (v: boolean) => void][]).map(([label, checked, setVal]) => (
+                  <label key={label} className="flex items-center gap-1.5 cursor-pointer select-none no-drag">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) => setVal(e.target.checked)}
+                      className="peer sr-only"
+                    />
+                    <span
+                      aria-hidden="true"
+                      className="w-3 h-3 flex-shrink-0 flex items-center justify-center border transition-colors border-[var(--color-border)] bg-[var(--color-bg-elevated)] peer-checked:bg-[var(--color-accent)] peer-checked:border-[var(--color-accent)] peer-focus-visible:ring-1 peer-focus-visible:ring-[var(--color-accent)]"
+                    >
+                      {checked && (
+                        <svg viewBox="0 0 12 12" className="w-2.5 h-2.5" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M2.5 6.5 L5 9 L9.5 3.5" />
+                        </svg>
+                      )}
+                    </span>
+                    <span className="text-[10px] text-[var(--color-text-secondary)]">Require {label}</span>
+                  </label>
+                ))}
+              </div>
+              <div className="flex items-center gap-2 pt-0.5">
+                <button
+                  onClick={() => void savePolicy()}
+                  className="px-3 py-1 text-[11px] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)] no-drag cursor-pointer"
+                >
+                  Save requirements
+                </button>
+                {policySavedMsg && <span className="text-[10px] text-green-400">{policySavedMsg}</span>}
+                {policyError && <span className="text-[10px] text-red-400">{policyError}</span>}
+              </div>
+            </div>
 
             {/* Add-user form */}
             <form
