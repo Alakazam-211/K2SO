@@ -209,6 +209,10 @@ async fn handle_one_request(
             | "/cli/users/set-password"
             | "/cli/users/set-disabled"
             | "/cli/auth/login"
+            // Self-service password change from the daemon-hosted account
+            // portal — connect-user session in the body/query, POST so it's
+            // never URL-logged. (Was missing here → 405'd before its arm.)
+            | "/cli/auth/change-password"
             // Phase 2 Unit 5 — Claude Auth mutating routes. POST
             // (not GET) so they're not idempotent-cached by any
             // future proxy and so they parallel Unit 1's pattern
