@@ -297,6 +297,97 @@ fn watchdog_decision(
     }
 }
 
+/// Stage the bundled `frpc` tunnel client (shipped as a Tauri
+/// externalBin sidecar at `Contents/MacOS/frpc`) out to
+/// `~/.k2so/bin/frpc`, where the daemon's `resolve_frpc` finds it.
+///
+/// We locate the sidecar next to the current executable — the same
+/// `current_exe().parent()` pattern used to find the bundled
+/// `k2so-daemon` — which works identically for a release bundle
+/// (`K2SO.app/Contents/MacOS/`) and for `tauri dev` (`target/debug/`).
+///
+/// Idempotent: only copies when the destination is missing or its bytes
+/// differ from the sidecar (so app upgrades that bump frpc re-stage).
+/// Fault-isolated: every failure is logged and swallowed — staging frpc
+/// must never block app startup. Writing the bytes with our own process
+/// (rather than the user downloading them) means the staged file carries
+/// no `com.apple.quarantine` flag, so Gatekeeper lets it execute.
+fn stage_bundled_frpc() {
+    // Locate the sidecar next to the running executable.
+    let sidecar = match std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("frpc")))
+    {
+        Some(p) if p.exists() => p,
+        Some(p) => {
+            log_debug!(
+                "[k2so] bundled frpc sidecar not found at {} — skipping stage \
+                 (dev build without externalBin, or older bundle)",
+                p.display()
+            );
+            return;
+        }
+        None => {
+            log_debug!("[k2so] could not resolve current_exe to find frpc sidecar");
+            return;
+        }
+    };
+
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => {
+            log_debug!("[k2so] no home dir; cannot stage frpc");
+            return;
+        }
+    };
+    let dest = home.join(".k2so/bin/frpc");
+
+    // Skip the copy when the staged bytes already match the sidecar.
+    if dest.exists() {
+        match (std::fs::read(&sidecar), std::fs::read(&dest)) {
+            (Ok(a), Ok(b)) if a == b => {
+                log_debug!("[k2so] frpc already staged at {} (up to date)", dest.display());
+                return;
+            }
+            (Ok(_), Ok(_)) => {
+                log_debug!("[k2so] staged frpc differs from bundle; re-staging");
+            }
+            // If we can't read one side, fall through and try to overwrite.
+            _ => {}
+        }
+    }
+
+    if let Some(parent) = dest.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            log_debug!("[k2so] failed to create {}: {e}", parent.display());
+            return;
+        }
+    }
+
+    if let Err(e) = std::fs::copy(&sidecar, &dest) {
+        log_debug!(
+            "[k2so] failed to stage frpc {} -> {}: {e}",
+            sidecar.display(),
+            dest.display()
+        );
+        return;
+    }
+
+    // Ensure the staged binary is executable (0755).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) =
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
+        {
+            log_debug!("[k2so] failed to chmod 0755 {}: {e}", dest.display());
+            return;
+        }
+    }
+
+    log_debug!("[k2so] staged bundled frpc -> {}", dest.display());
+}
+
 pub fn run() {
     // Ignore SIGPIPE so writing to a dead PTY returns EPIPE instead of
     // killing the entire process.
@@ -416,6 +507,22 @@ pub fn run() {
                 let _ = std::fs::create_dir_all(templates.join("agent-template"));
                 let _ = std::fs::create_dir_all(templates.join("custom-agent"));
             }
+
+            // Stage the bundled `frpc` tunnel client to ~/.k2so/bin/frpc so
+            // a fresh HOST machine needs zero manual setup for K2 Connect.
+            // The binary ships INSIDE the notarized app as a Tauri
+            // externalBin (sidecar in Contents/MacOS/frpc), so it's signed
+            // with our Developer ID + hardened runtime. Writing it out with
+            // our own process means no com.apple.quarantine flag, so
+            // Gatekeeper lets it run (unlike a network-downloaded binary).
+            //
+            // The daemon (a separate process) resolves ~/.k2so/bin/frpc via
+            // the existing `resolve_frpc` common-locations probe — no
+            // resolver change needed. Idempotent + fault-isolated: logs and
+            // continues on any failure, never blocks startup.
+            perf_timer!("startup_stage_frpc", {
+                stage_bundled_frpc();
+            });
 
             // 0.39.0 K2 Connect prep: the `legacy_agent_types_v1`
             // AGENT.md frontmatter rewrite (pod-member → agent-template,
@@ -1146,6 +1253,10 @@ pub fn run() {
             commands::daemon::daemon_ws_url,
             commands::daemon::get_keep_daemon_on_quit,
             commands::daemon::set_keep_daemon_on_quit,
+            // K2 Connect — point the host-unaware proxy commands
+            // (projects/git/agents/states/layouts/settings/timer …) at a
+            // remote daemon, or clear back to the local bundled daemon.
+            commands::daemon::set_active_daemon,
             // K2 Connect — cross-platform keychain for remembered
             // remote-host tokens (macOS/Linux/Windows via `keyring`).
             commands::secrets::k2_secret_set,

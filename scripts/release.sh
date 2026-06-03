@@ -181,11 +181,24 @@ codesign --force --options runtime --timestamp \
     --entitlements "$ENTITLEMENTS" \
     --sign "$SIGNING_IDENTITY" \
     "target/release/bundle/macos/K2SO.app/Contents/MacOS/k2so-daemon"
+# frpc tunnel sidecar (Tauri externalBin → Contents/MacOS/frpc). Re-sign
+# with hardened runtime so the binary the app stages to ~/.k2so/bin/frpc
+# is notarization-covered and runs without a Gatekeeper quarantine block.
+FRPC_BIN="target/release/bundle/macos/K2SO.app/Contents/MacOS/frpc"
+if [ -x "$FRPC_BIN" ]; then
+    codesign --force --options runtime --timestamp \
+        --sign "$SIGNING_IDENTITY" \
+        "$FRPC_BIN"
+    echo "  Signed frpc sidecar."
+else
+    echo "  WARNING: frpc sidecar not found at $FRPC_BIN — K2 Connect host" >&2
+    echo "  setup will require a manual frpc install. Did fetch-frpc.sh run?" >&2
+fi
 codesign --force --options runtime --timestamp \
     --entitlements "$ENTITLEMENTS" \
     --sign "$SIGNING_IDENTITY" \
     "target/release/bundle/macos/K2SO.app"
-echo "  Signed (main + daemon + bundle) with entitlements."
+echo "  Signed (main + daemon + frpc + bundle) with entitlements."
 
 # ── Step 4: Notarize app via ZIP ──
 echo ""

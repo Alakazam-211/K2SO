@@ -227,9 +227,34 @@ export function ConnectionGate(): React.ReactElement {
   const activeHost = useConnectHostStore((s) => s.activeHost)
   const hostKey = activeHostKey(activeHost)
   const isRemote = activeHost !== 'local'
+  // A remote host with NO session token must never be mounted: /boot-status
+  // is a PUBLIC route (no token gate), so the policy would happily 'accept'
+  // a tokenless remote — then App mounts and every host-aware / proxied
+  // call fires with an empty token and the daemon answers "Invalid or
+  // missing auth token". Treat a tokenless active remote as "needs
+  // sign-in" so we surface RemoteSignIn instead of mounting.
+  const remoteNeedsAuth =
+    activeHost !== 'local' && (!activeHost.token || activeHost.token.length === 0)
   // K2 Connect step #3: a host the user picked that needs a password
   // (no remembered/expired token). Rendered as the full-screen sign-in.
   const pendingSignIn = useConnectHostStore((s) => s.pendingSignIn)
+
+  // A tokenless active remote (e.g. an expired session restored from the
+  // address book, or a boot where the keychain token didn't resolve)
+  // drops into the full-screen sign-in rather than polling toward a mount
+  // it could never authenticate. Idempotent: requestSignIn no-ops if the
+  // same host is already pending.
+  useEffect(() => {
+    // `remoteNeedsAuth` already implies the active host is a remote with
+    // no token; re-read it from the store so the narrowing is explicit.
+    if (!remoteNeedsAuth) return
+    const host = useConnectHostStore.getState().activeHost
+    if (host !== 'local') {
+      useConnectHostStore.getState().requestSignIn(host)
+    }
+    // activeHost identity (via hostKey) + the token presence drive this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hostKey, remoteNeedsAuth])
 
   // K2 Connect step #3: hydrate the saved address book + resolve
   // remembered tokens from the keychain ONCE at boot, before any remote
@@ -276,6 +301,16 @@ export function ConnectionGate(): React.ReactElement {
     }
 
     const tick = async (): Promise<void> => {
+      // Never poll toward a mount we can't authenticate: a remote host
+      // with no session token must sign in first (the effect above opens
+      // RemoteSignIn). Park in 'wait' until a token lands — selectHost /
+      // setHostToken re-key this effect when the session is obtained.
+      if (remoteNeedsAuth) {
+        if (cancelled) return
+        setDecision({ kind: 'wait', reason: 'remote-needs-auth' })
+        useConnectHostStore.getState().setConnectionStatus('connecting')
+        return
+      }
       const policy = await ensurePolicy()
       const status = await fetchBootStatus()
       if (cancelled) return
@@ -319,10 +354,13 @@ export function ConnectionGate(): React.ReactElement {
       cancelled = true
       if (timeoutId !== null) clearTimeout(timeoutId)
     }
-    // isRemote is fully determined by hostKey (local key === 'local'),
-    // so hostKey alone re-runs this on every relevant change.
+    // isRemote is fully determined by hostKey (local key === 'local').
+    // `remoteNeedsAuth` is added so that OBTAINING a session token (same
+    // host, so hostKey is unchanged) re-runs the effect: the prior run
+    // parked in 'wait' and scheduled no further tick, so without this dep
+    // the gate would never resume polling toward 'accept'.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hostKey])
+  }, [hostKey, remoteNeedsAuth])
 
   // Phase 2: once accepted, dynamically import App. Its import
   // side-effects (store creation, eager fetches) run NOW for the first

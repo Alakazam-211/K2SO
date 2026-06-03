@@ -6,6 +6,9 @@ dist/
 # stale per-package builds from older checkouts.
 target/
 src-tauri/target/
+# Bundled frpc tunnel sidecar (Apache-2.0, fatedier/frp). Staged into the
+# build by scripts/fetch-frpc.sh; a ~14MB binary must not bloat the repo.
+src-tauri/binaries/
 *.dmg
 *.zip
 *.app

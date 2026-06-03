@@ -378,6 +378,49 @@ function hostBaseUrl(host: Pick<ConnectHost, 'hostname' | 'port' | 'secure'>): s
   return `${scheme}://${authority}`
 }
 
+/**
+ * Push the active host into the Tauri→daemon proxy layer so the
+ * HOST-UNAWARE `invoke('projects_list')`-style commands (which go through
+ * `DaemonClient`) route to the SAME daemon as the host-aware
+ * `daemonCli*`/WS calls. Without this the local-DB-backed proxy commands
+ * stay pinned to 127.0.0.1 while the user is connected to a remote host.
+ *
+ * Mapping (identical authority rules to {@link hostBaseUrl} / daemon-ws):
+ *   - `'local'`  → `base: null, token: null` → DaemonClient clears its
+ *     override and reads `~/.k2so/daemon.{port,token}` (byte-identical to
+ *     before).
+ *   - ConnectHost → `base: <scheme>://<authority>` (443 omitted for
+ *     secure), `token: <session token>`.
+ *
+ * Fired SYNCHRONOUSLY at the top of every action that changes `activeHost`
+ * (selectHost / expireSession / setHostToken), so the override is in place
+ * on the Rust side before the gate accepts and remounts `<App>` (which
+ * re-fires `fetchProjects()` and friends). The gate's first accept always
+ * costs at least one `/boot-status` round-trip, so this fire-and-forget
+ * invoke wins the race comfortably; we still guard against the
+ * tokenless-remote case (no token → clear to local) so a remote call can
+ * never fire without auth and earn an "Invalid or missing auth token".
+ *
+ * Best-effort + Tauri-only: no-ops (resolves) in the vitest/web env.
+ */
+function applyActiveDaemon(active: ActiveHost): void {
+  let base: string | null = null
+  let token: string | null = null
+  if (active !== 'local' && active.token && active.token.length > 0) {
+    base = hostBaseUrl(active)
+    token = active.token
+  }
+  // If a remote host has no usable token yet, fall through with
+  // base/token = null → DaemonClient stays on local rather than firing
+  // tokenless remote requests.
+  //
+  // `Promise.resolve(...)` wraps the invoke so a non-Tauri test double
+  // that returns a bare value (not a promise) can't blow up the `.catch`.
+  void Promise.resolve(invoke('set_active_daemon', { base, token })).catch(() => {
+    /* non-Tauri (vitest/web) or IPC failure — local stays the default */
+  })
+}
+
 /** Result of {@link loginToHost}. On success the session token is also
  *  committed into the store (setHostToken) so daemon-ws.ts uses it. */
 export type LoginResult =
@@ -459,6 +502,11 @@ export const useConnectHostStore = create<ConnectHostState>((set, get) => ({
   pendingSignIn: null,
 
   selectHost: (hostOrLocal) => {
+    // Point the Tauri→daemon proxy layer at the new host BEFORE flipping
+    // activeHost — flipping it drives the gate's re-poll → accept → <App>
+    // remount → fetchProjects(), so the override must already be in place
+    // so those proxy commands hit the right daemon.
+    applyActiveDaemon(hostOrLocal)
     // A switch immediately re-enters the connecting state; the gate
     // flips it to 'connected' once the new host accepts. Clears any
     // pending sign-in (we're committing to a host now).
@@ -479,6 +527,10 @@ export const useConnectHostStore = create<ConnectHostState>((set, get) => ({
     const cleared = hosts.map((h) => (h.id === hostId ? { ...h, token: '' } : h))
     const clearedActive: ActiveHost = { ...activeHost, token: '' }
     void forgetToken(hostId)
+    // The session token is now empty → clear the proxy override back to
+    // local so the host-unaware commands don't keep firing tokenless
+    // remote requests while the user re-signs-in.
+    applyActiveDaemon(clearedActive)
     set({ hosts: cleared, activeHost: clearedActive, pendingSignIn: clearedActive })
   },
 
@@ -558,6 +610,10 @@ export const useConnectHostStore = create<ConnectHostState>((set, get) => ({
       activeHost !== 'local' && activeHost.id === id
         ? { ...activeHost, token }
         : activeHost
+    // If we just set the token for the ACTIVE remote host (e.g. a silent
+    // re-login committed a fresh session token), refresh the proxy
+    // override so the host-unaware commands pick it up immediately.
+    if (active2 !== activeHost) applyActiveDaemon(active2)
     set({ hosts: hosts2, activeHost: active2 })
   },
 

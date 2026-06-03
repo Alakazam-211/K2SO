@@ -106,6 +106,11 @@ describe('getDaemonWs host-awareness', () => {
       lastConnectedAt: null,
     }
     useConnectHostStore.getState().selectHost(host)
+    // selectHost pushes the active daemon into the Tauri proxy layer via
+    // `invoke('set_active_daemon', …)`; that's expected. The assertion
+    // below is about getDaemonWs NOT invoking to resolve creds — so clear
+    // the mock after the switch to isolate the creds-resolution path.
+    invokeMock.mockClear()
     // Invalidate any cached local creds so we prove the remote path
     // doesn't fall back to invoke.
     invalidateDaemonWs()
@@ -129,6 +134,9 @@ describe('getDaemonWs host-awareness', () => {
       lastConnectedAt: null,
     }
     useConnectHostStore.getState().selectHost(host)
+    // Ignore the set_active_daemon push selectHost makes; assert only that
+    // creds resolution itself doesn't invoke.
+    invokeMock.mockClear()
     invalidateDaemonWs()
     const creds = await getDaemonWs()
     expect(invokeMock).not.toHaveBeenCalled()
@@ -153,6 +161,9 @@ describe('getDaemonWs host-awareness', () => {
       lastConnectedAt: null,
     }
     useConnectHostStore.getState().selectHost(host)
+    // Clear the set_active_daemon push so the remote-creds-resolution
+    // assertion below stays about getDaemonWs only.
+    invokeMock.mockClear()
     await getDaemonWs()
     expect(invokeMock).not.toHaveBeenCalled()
 

@@ -51,6 +51,8 @@ vi.stubGlobal('localStorage', storage)
 // contract and the keychain hydration path.
 const fakeKeychain = new Map<string, string>()
 let fakeHostsFile = '[]'
+/** Captures the last `set_active_daemon` payload the store pushed. */
+let lastSetActiveDaemon: { base: string | null; token: string | null } | null = null
 const invokeMock = vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
   switch (cmd) {
     case 'connect_hosts_read':
@@ -65,6 +67,11 @@ const invokeMock = vi.fn(async (cmd: string, args?: Record<string, unknown>) => 
       return fakeKeychain.get(`${args!.service}:${args!.account}`) ?? null
     case 'k2_secret_delete':
       fakeKeychain.delete(`${args!.service}:${args!.account}`)
+      return undefined
+    case 'set_active_daemon':
+      // K2 Connect host-aware proxy: selectHost/expireSession/setHostToken
+      // push the active daemon's base+token into the Tauri proxy layer.
+      lastSetActiveDaemon = (args ?? null) as { base: string | null; token: string | null } | null
       return undefined
     default:
       throw new Error(`unexpected invoke: ${cmd}`)
@@ -106,6 +113,7 @@ describe('connect-host store', () => {
     storage.clear()
     fakeKeychain.clear()
     fakeHostsFile = '[]'
+    lastSetActiveDaemon = null
     invokeMock.mockClear()
     __resetConnectHostStoreForTests()
   })
@@ -127,6 +135,69 @@ describe('connect-host store', () => {
 
     useConnectHostStore.getState().selectHost('local')
     expect(useConnectHostStore.getState().activeHost).toBe('local')
+  })
+
+  it('selectHost pushes the remote daemon base+token into the Tauri proxy', async () => {
+    // A secure hosted remote on 443 → base omits the port (https://host).
+    const host = makeHost({
+      hostname: 'reggie.k2.dev',
+      port: 443,
+      secure: true,
+      token: 'sess-tok-xyz',
+    })
+    useConnectHostStore.getState().selectHost(host)
+    // applyActiveDaemon fires the invoke without awaiting; flush microtasks.
+    await Promise.resolve()
+    expect(lastSetActiveDaemon).toEqual({ base: 'https://reggie.k2.dev', token: 'sess-tok-xyz' })
+
+    // A non-secure remote carries its explicit port.
+    const lan = makeHost({ id: 'lan', hostname: '10.0.0.5', port: 51234, secure: false, token: 'lan-tok' })
+    useConnectHostStore.getState().selectHost(lan)
+    await Promise.resolve()
+    expect(lastSetActiveDaemon).toEqual({ base: 'http://10.0.0.5:51234', token: 'lan-tok' })
+  })
+
+  it('selectHost(local) clears the proxy override back to local', async () => {
+    useConnectHostStore.getState().selectHost(makeHost({ token: 't' }))
+    await Promise.resolve()
+    useConnectHostStore.getState().selectHost('local')
+    await Promise.resolve()
+    expect(lastSetActiveDaemon).toEqual({ base: null, token: null })
+  })
+
+  it('a remote host with no token clears the proxy to local (never tokenless remote)', async () => {
+    useConnectHostStore.getState().selectHost(makeHost({ token: '' }))
+    await Promise.resolve()
+    // Empty token → base/token null so DaemonClient stays on local rather
+    // than firing tokenless remote requests (the "Invalid or missing auth
+    // token" guard).
+    expect(lastSetActiveDaemon).toEqual({ base: null, token: null })
+  })
+
+  it('expireSession clears the proxy override (dead session → local)', async () => {
+    const host = makeHost({ id: 'rx', token: 'live-tok' })
+    useConnectHostStore.getState().addHost(host)
+    useConnectHostStore.getState().selectHost(host)
+    await Promise.resolve()
+    expect(lastSetActiveDaemon).toEqual({ base: 'http://192.168.1.50:47800', token: 'live-tok' })
+
+    useConnectHostStore.getState().expireSession('rx')
+    await Promise.resolve()
+    expect(lastSetActiveDaemon).toEqual({ base: null, token: null })
+  })
+
+  it('setHostToken on the active remote refreshes the proxy override', async () => {
+    const host = makeHost({ id: 'rt', token: '' })
+    useConnectHostStore.getState().addHost(host)
+    useConnectHostStore.getState().selectHost(host)
+    await Promise.resolve()
+    // Tokenless active remote → proxy is cleared to local.
+    expect(lastSetActiveDaemon).toEqual({ base: null, token: null })
+
+    // A silent re-login commits a fresh session token for the active host.
+    useConnectHostStore.getState().setHostToken('rt', 'fresh-tok')
+    await Promise.resolve()
+    expect(lastSetActiveDaemon).toEqual({ base: 'http://192.168.1.50:47800', token: 'fresh-tok' })
   })
 
   it('addHost replaces an existing entry by id (no duplicates)', () => {

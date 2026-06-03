@@ -70,6 +70,31 @@ pub fn daemon_status() -> DaemonStatusResponse {
     }
 }
 
+/// Point the Tauri→daemon proxy layer (every `DaemonClient`, used by the
+/// `projects_list` / git / agents / states / layouts / settings / timer
+/// command modules) at a REMOTE K2 Connect daemon — or clear back to the
+/// local bundled daemon.
+///
+/// The renderer's connect-host store calls this whenever the active host
+/// changes:
+///   - remote host → `base` = the host's `<scheme>://<authority>` (no
+///     trailing slash, port 443 omitted for secure), `token` = the host's
+///     session token. ALL host-unaware `invoke('projects_list')`-style
+///     commands then route to the remote daemon.
+///   - `'local'` → both `null` → clears the override; commands fall back
+///     to `~/.k2so/daemon.{port,token}`, byte-identical to before.
+///
+/// Installing the override BEFORE the renderer remounts `<App>` (which
+/// re-fires `fetchProjects()`) is what keeps the local/remote data planes
+/// from crossing. Setting `base` without a `token` (or vice-versa) clears
+/// to local rather than installing a tokenless remote — the latter would
+/// surface as the daemon's "Invalid or missing auth token".
+#[tauri::command]
+pub fn set_active_daemon(base: Option<String>, token: Option<String>) -> Result<(), String> {
+    crate::daemon_client::set_active_daemon(base, token);
+    Ok(())
+}
+
 /// Locate the `k2so-daemon` binary bundled next to the current Tauri
 /// executable. Matches the search path used by the first-launch
 /// migration so Install / Reinstall operations agree on which binary

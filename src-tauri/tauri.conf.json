@@ -7,7 +7,7 @@
     "frontendDist": "../out/renderer",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "bun run vite:dev",
-    "beforeBuildCommand": "bun run vite:build"
+    "beforeBuildCommand": "bun run vite:build && ./scripts/fetch-frpc.sh"
   },
   "app": {
     "macOSPrivateApi": true,
@@ -48,7 +48,8 @@
       "minimumSystemVersion": "10.15",
       "entitlements": "./entitlements.plist"
     },
-    "resources": ["../cli/*"]
+    "resources": ["../cli/*"],
+    "externalBin": ["binaries/frpc"]
   },
   "plugins": {
     "updater": {
