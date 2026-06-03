@@ -28,6 +28,27 @@ tauri-plugin-deep-link = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 
+# Cross-platform OS keychain for K2 Connect remote-host tokens. Backs
+# the `k2_secret_{set,get,delete}` Tauri commands. Keyed by ConnectHost
+# id so a remembered remote token persists across restarts without ever
+# touching plaintext (`connect-hosts.json` holds only non-secret fields).
+#
+# Backends: macOS Keychain · Linux Secret Service · Windows Credential
+# Manager — so this is Linux-ready out of the box. The `apple-native`,
+# `windows-native`, and `sync-secret-service` features select the
+# native store per platform.
+#
+# LINUX DEPENDENCY: `sync-secret-service` talks to libsecret over D-Bus,
+# which requires the system `libsecret` runtime (package `libsecret-1-0`
+# on Debian/Ubuntu, `libsecret` on Fedora/Arch) AND a running Secret
+# Service provider (gnome-keyring / KWallet). Document this in the Linux
+# build/runtime notes when Linux packaging lands.
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
 cocoa = "0.26"

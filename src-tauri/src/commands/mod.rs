@@ -57,3 +57,8 @@ pub mod worktree;
 // Phase 2.5b follow-up — Tauri verbs for the workspace settings
 // "Skills" panel. Thin forwards to `k2so_core::skills::crud::*`.
 pub mod skills;
+// K2 Connect — cross-platform OS keychain bridge for remembered
+// remote-host tokens (`k2_secret_{set,get,delete}`). macOS Keychain /
+// Linux Secret Service / Windows Credential Manager via the `keyring`
+// crate. Tokens NEVER touch connect-hosts.json.
+pub mod secrets;

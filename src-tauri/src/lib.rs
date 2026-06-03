@@ -1146,6 +1146,11 @@ pub fn run() {
             commands::daemon::daemon_ws_url,
             commands::daemon::get_keep_daemon_on_quit,
             commands::daemon::set_keep_daemon_on_quit,
+            // K2 Connect — cross-platform keychain for remembered
+            // remote-host tokens (macOS/Linux/Windows via `keyring`).
+            commands::secrets::k2_secret_set,
+            commands::secrets::k2_secret_get,
+            commands::secrets::k2_secret_delete,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {
