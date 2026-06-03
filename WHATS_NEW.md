@@ -3,6 +3,18 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.18 — K2 Connect: actually drive the remote machine
+
+When you connect to another machine, K2 now shows **that machine's**
+workspaces, files, git, and agents — not your local ones. Previously the
+connection succeeded but most panels kept showing this computer; now the
+whole app follows the daemon you're connected to.
+
+Also fixes the "Invalid or missing auth token" error on connect (the app
+now waits for your sign-in before loading), and **bundles the tunnel client
+(`frpc`) inside K2** — a fresh host machine can start a secure tunnel with
+no manual install.
+
 ## 0.39.17 — K2 Connect sign-in fix
 
 Fixes a "Load Failed" error when signing in to your k2.dev account (and
