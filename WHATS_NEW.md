@@ -3,6 +3,15 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.15 — No more phantom "audit bucket" projects in the sidebar
+
+New users no longer see two confusing entries — **"Orphan audit bucket"**
+and **"Broadcast audit bucket"** — in the workspace sidebar. Those are
+internal bookkeeping items (they route the activity feed behind the
+scenes); they were never meant to look like workspaces you created. They
+now stay hidden from the project list while still doing their job
+internally.
+
 ## 0.39.14 — Pinned Chat/Inbox tabs always point at the right workspace
 
 Fixes a bug where a workspace's **pinned Chat and Inbox tabs** could stay
