@@ -128,6 +128,14 @@ interface AIFileEditorProps {
    * preview's in-memory buffer to the on-disk content.
    */
   onDiscardRequested?: () => void
+  /**
+   * When true, skip the saved-session resume entirely — the terminal
+   * always launches a FRESH agent session, ignoring `.last_editor_session`.
+   * The K2 Canonical Agent modal sets this: its setup/unwind ceremony is a
+   * one-shot that must not silently resume a stale prior conversation
+   * (canonical-agents PRD §9.2).
+   */
+  disableSessionResume?: boolean
 }
 
 // ── Component ────────────────────────────────────────────────────────
@@ -152,6 +160,7 @@ export function AIFileEditor({
   isDirty,
   onSaveRequested,
   onDiscardRequested,
+  disableSessionResume = false,
 }: AIFileEditorProps): React.JSX.Element {
   const terminalIdRef = useRef(`ai-editor-${crypto.randomUUID()}`)
   const [terminalReady, setTerminalReady] = useState(false)
@@ -180,8 +189,9 @@ export function AIFileEditor({
   useEffect(() => {
     let cancelled = false
     const resolve = async () => {
-      if (!command || command !== 'claude') {
-        // Non-Claude commands: use args as-is
+      if (!command || command !== 'claude' || disableSessionResume) {
+        // Non-Claude commands, or callers that opt out of resume (the
+        // canonical modal): use args as-is, never resume a prior session.
         setResolvedArgs(args)
         setArgsReady(true)
         return
@@ -206,7 +216,7 @@ export function AIFileEditor({
     }
     resolve()
     return () => { cancelled = true }
-  }, [command, args, cwd])
+  }, [command, args, cwd, disableSessionResume])
 
   // ── File watching + polling fallback ─────────────────────────────────
   // We watch every file the parent declared (via `files`) — not just the

@@ -25,6 +25,10 @@ import { SectionErrorBoundary } from '../SectionErrorBoundary'
 import type { SettingEntry } from '../searchManifest'
 import { HeartbeatsPanel, HistoryPanel, WakeupEditor, type HeartbeatRow } from './HeartbeatsSection'
 import { ContextLayersPreview } from './ContextLayersPreview'
+import { RoleSkillEditor } from './RoleSkillEditor'
+import { CanonicalAgentModal } from './CanonicalAgentModal'
+import { type HarnessProbe } from './canonicalState'
+import { RoleSkillButton, CanonicalAgentButton } from './CanonicalAgentButtons'
 
 export const PROJECTS_MANIFEST: SettingEntry[] = [
   { id: 'projects.list', section: 'projects', label: 'Workspaces', description: 'All registered projects + focus groups', keywords: ['workspaces', 'projects', 'focus groups'] },
@@ -962,6 +966,11 @@ function ProjectDetail({
   // Empty string while loading — children handle the loading state by
   // suspending their reads until the name is known.
   const [primaryAgentName, setPrimaryAgentName] = useState('')
+  // Canonical Agent Flow (canonical-agents PRD §9.2 / §9.3). The modal mode
+  // (setup vs manage/undo) and the per-harness detected state drive the
+  // canonical button label + which seed the modal launches with.
+  const [canonicalModalMode, setCanonicalModalMode] = useState<'setup' | 'manage' | null>(null)
+  const [canonicalProbes, setCanonicalProbes] = useState<HarnessProbe[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Close editor when project changes (user navigated away without using back button)
@@ -969,7 +978,20 @@ function ProjectDetail({
     setAgentEditorOpen(false)
     setAgentEditorName('')
     setWakeupEditingHb(null)
+    setCanonicalModalMode(null)
   }, [project.id])
+
+  // Detect per-harness canonical state (PRD §5.2) so the canonical button
+  // reads "Set up …" vs "Manage / Undo". Re-runs when the modal closes so a
+  // just-completed setup flips the label. Best-effort — a failure leaves the
+  // button in its default "Set up …" state.
+  useEffect(() => {
+    let cancelled = false
+    invoke<HarnessProbe[]>('k2so_detect_canonical_state', { projectPath: project.path })
+      .then((p) => { if (!cancelled) setCanonicalProbes(p) })
+      .catch((err) => { if (!cancelled) console.warn('[canonical-state] detect failed:', err) })
+    return () => { cancelled = true }
+  }, [project.path, canonicalModalMode])
 
   // Resolve the workspace's primary agent display name once per
   // project. Used by the WakeupEditor takeover (agentName prop) and
@@ -1068,6 +1090,20 @@ function ProjectDetail({
               projectName={project.name}
               onClose={() => setAgentEditorOpen(false)}
             />
+          ) : agentEditorName === '__workspace_manager__' ? (
+            <RoleSkillEditor
+              role="workspace-manager"
+              projectPath={project.path}
+              projectName={project.name}
+              onClose={() => setAgentEditorOpen(false)}
+            />
+          ) : agentEditorName === '__k2_agent__' ? (
+            <RoleSkillEditor
+              role="k2-agent"
+              projectPath={project.path}
+              projectName={project.name}
+              onClose={() => setAgentEditorOpen(false)}
+            />
           ) : (
             <AgentPersonaEditor
               agentName={agentEditorName}
@@ -1075,6 +1111,25 @@ function ProjectDetail({
               onClose={() => setAgentEditorOpen(false)}
             />
           )}
+        </div>
+      </SectionErrorBoundary>
+    )
+  }
+
+  // K2 Canonical Agent ceremony takeover (canonical-agents PRD §9.2). A
+  // distinct full-area takeover (NOT routed through agentEditorName) because
+  // it is a modal with the agent running + a structured plan/manifest
+  // renderer, not the single-file AIFileEditor the persona editors use.
+  if (canonicalModalMode) {
+    return (
+      <SectionErrorBoundary>
+        <div className="absolute inset-0 overflow-hidden bg-[var(--color-bg)]">
+          <CanonicalAgentModal
+            projectPath={project.path}
+            projectName={project.name}
+            mode={canonicalModalMode}
+            onClose={() => setCanonicalModalMode(null)}
+          />
         </div>
       </SectionErrorBoundary>
     )
@@ -1249,16 +1304,16 @@ function ProjectDetail({
           </div>
         )}
 
-        {/* Workspace Knowledge — canonical SKILL file all CLI harnesses read. */}
-        {/* Lives at .k2so/skills/k2so/SKILL.md and is symlinked to Claude, */}
-        {/* OpenCode, Pi, plus marker-injected into AGENTS.md + Copilot paths. */}
-        {/* One edit here propagates to every CLI LLM in the workspace. */}
+        {/* Workspace Knowledge — the canonical source under .k2so/. Fan-out
+            into harness files (CLAUDE.md / AGENTS.md / …) is OPT-IN
+            (canonical-agents PRD §4): run the K2 Canonical Agent for safe
+            copies, or enable the harness-fan-out checkbox for symlinks. */}
         <div className="pt-3 border-t border-[var(--color-border)]">
           <div className="flex items-center justify-between">
             <div>
               <span className="text-xs text-[var(--color-text-secondary)]">Workspace Knowledge</span>
               <p className="text-[9px] text-[var(--color-text-muted)] mt-0.5">
-                Canonical <span className="font-mono">SKILL.md</span> every CLI LLM reads — symlinked to Claude, OpenCode, Pi, and marker-injected into AGENTS.md + Copilot paths.
+                Canonical <span className="font-mono">SKILL.md</span> under <span className="font-mono">.k2so/</span>. When harness fan-out is enabled (opt-in), it mirrors into Claude, OpenCode, Pi, and the AGENTS.md + Copilot marker paths.
               </p>
             </div>
             <button
@@ -1421,6 +1476,38 @@ function ProjectDetail({
               <K2SOAgentPersonaButton projectPath={project.path} projectName={project.name} onOpenEditor={(name) => { setAgentEditorName(name); setAgentEditorOpen(true) }} />
             </div>
           )}
+
+          {/* ── Three opt-in agent-setup skills (canonical-agents PRD §9.3) ──
+              Role buttons gate on agent role; the canonical button is
+              ALWAYS shown — every mode incl. custom AND off — so it must
+              render OUTSIDE the ProjectAgentsPanel `!== 'off'` gate below. */}
+          {/* Workspace Manager — role = manager (manager|coordinator|pod). */}
+          {((project.agentMode || 'off') === 'manager' || project.agentMode === 'coordinator' || project.agentMode === 'pod') && (
+            <div className="pt-2 border-t border-[var(--color-border)]">
+              <RoleSkillButton
+                role="workspace-manager"
+                projectPath={project.path}
+                onOpen={() => { setAgentEditorName('__workspace_manager__'); setAgentEditorOpen(true) }}
+              />
+            </div>
+          )}
+          {/* K2 Agent — role = agent. */}
+          {(project.agentMode || 'off') === 'agent' && (
+            <div className="pt-2 border-t border-[var(--color-border)]">
+              <RoleSkillButton
+                role="k2-agent"
+                projectPath={project.path}
+                onOpen={() => { setAgentEditorName('__k2_agent__'); setAgentEditorOpen(true) }}
+              />
+            </div>
+          )}
+          {/* K2 Canonical Agent — ALWAYS, including custom and off. */}
+          <div className="pt-2 border-t border-[var(--color-border)]">
+            <CanonicalAgentButton
+              probes={canonicalProbes}
+              onOpen={(mode) => setCanonicalModalMode(mode)}
+            />
+          </div>
 
           {/* State selector — only when a mode is active */}
           {(project.agentMode || 'off') !== 'off' && (
@@ -2165,8 +2252,8 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
       command={terminalCommand}
       args={terminalArgs}
       title={`Workspace Knowledge: ${projectName}`}
-      instructions="Editing .k2so/PROJECT.md — the source for workspace knowledge. K2SO compiles this into every agent's SKILL.md and propagates to CLAUDE.md, AGENTS.md, GEMINI.md, .cursor/rules, .goosehints, etc. Regen runs automatically when you close this editor."
-      warningText="This is the source file for the workspace's shared knowledge. Edits compile into every CLI LLM harness on save."
+      instructions="Editing .k2so/PROJECT.md — the source for workspace knowledge. K2SO compiles this into the canonical SKILL.md. When harness fan-out is enabled (opt-in), it also mirrors out to CLAUDE.md, AGENTS.md, GEMINI.md, .cursor/rules, .goosehints, etc. Regen runs automatically when you close this editor."
+      warningText="This is the source file for the workspace's shared knowledge. When harness fan-out is enabled, edits mirror into every chosen CLI LLM harness on save."
       onFileChange={handleFileChange}
       onClose={handleClose}
       preview={
