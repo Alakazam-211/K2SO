@@ -14,6 +14,11 @@ mod font_renderer;
 // broadcast, no ring, no APC. Uses alacritty's built-in
 // EventLoop::spawn() rather than a custom reader.
 pub mod daemon_pty;
+// PATH enrichment for daemon-spawned children (issue #15). Computes
+// an augmented PATH (login-shell PATH ++ known install dirs ++
+// inherited launchd PATH) so agent CLIs in ~/.local/bin, homebrew,
+// nvm shims, etc. resolve by bare name instead of ENOENT.
+pub mod login_path;
 // Alacritty_v2 grid snapshot + delta wire types + serializers
 // (Phase A2). Shared between the daemon's WS endpoint (A3) and
 // the Tauri thin client (A5). Generic over `EventListener` so

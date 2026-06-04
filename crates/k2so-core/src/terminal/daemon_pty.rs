@@ -48,6 +48,7 @@ use tokio::sync::broadcast;
 
 use crate::log_debug;
 use crate::session::SessionId;
+use crate::terminal::login_path;
 
 /// Scrollback depth (in rows) retained by the daemon-side Term.
 /// Matches `session_stream_pty.rs`'s value so v2 sessions inherit
@@ -333,6 +334,28 @@ impl DaemonPtySession {
         // TERM_PROGRAM=K2SO) so v2 children render the same colors as
         // legacy children.
         let mut child_env = cfg.env.clone();
+
+        // Issue #15: PATH enrichment. The daemon runs under macOS
+        // launchd with a bare PATH (/usr/bin:/bin:/usr/sbin:/sbin),
+        // so children spawned by bare name (`claude`, `cursor`,
+        // `gemini`) can't find binaries in ~/.local/bin (the Claude
+        // native installer default), /opt/homebrew/bin, nvm shims,
+        // etc. — they ENOENT. Augment the child PATH with the union
+        // of the user's login-shell PATH, known install dirs, and the
+        // daemon's inherited PATH (helper is no-op / non-mutating on
+        // non-unix). Respect a caller-provided PATH: if `cfg.env`
+        // already set one explicitly, leave it untouched — only fill
+        // in the enriched value when the caller passed none (which is
+        // the common case: spawn.rs hands an empty env, so agents get
+        // the enriched PATH).
+        if !child_env.contains_key("PATH") {
+            let inherited = std::env::var("PATH").unwrap_or_default();
+            child_env.insert(
+                "PATH".to_string(),
+                login_path::augmented_path(&inherited),
+            );
+        }
+
         child_env
             .entry("TERM".to_string())
             .or_insert_with(|| "xterm-256color".to_string());
