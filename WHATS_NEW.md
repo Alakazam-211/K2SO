@@ -3,6 +3,14 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.21 — K2 Connect: the client fully mirrors the host
+
+When you connect to another machine, the **whole** app now reflects that
+host — workspaces, the active bar, pinned/active lists, whether focus
+groups are on, panels, custom themes, timer entries, and settings — instead
+of bleeding through your local machine's state. Your own client preferences
+(terminal look, file-tree options, window layout) correctly stay yours.
+
 ## 0.39.20 — K2 Connect: remote clients can read the host's data
 
 Fixes the bug where connecting to another machine showed *your* workspaces
