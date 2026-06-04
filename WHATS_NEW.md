@@ -3,6 +3,20 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.22 — Onboarding fixes + remote settings clarity
+
+- **Agents spawn out of the box.** The background daemon can now find
+  `claude`/`cursor`/`gemini` even when they're installed in `~/.local/bin`
+  (the native Claude installer), Homebrew, nvm, etc. — previously it only saw
+  a bare system PATH and failed with "command not found".
+- **No more stuck-on-Connecting after an update.** If K2SO was ever launched
+  straight from the mounted disk image, the daemon could get pinned to that
+  stale copy and never pair after upgrading. It now self-heals its path on the
+  next launch, and warns if you run it from the DMG instead of /Applications.
+- **Settings shows which server you're on.** While connected to another
+  machine, the top of Settings now displays (and lets you switch) the active
+  server.
+
 ## 0.39.21 — K2 Connect: the client fully mirrors the host
 
 When you connect to another machine, the **whole** app now reflects that
