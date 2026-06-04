@@ -3,6 +3,14 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.20 — K2 Connect: remote clients can read the host's data
+
+Fixes the bug where connecting to another machine showed *your* workspaces
+instead of the host's. The host daemon was refusing a connected user's
+session on every data read (workspaces, files, git), so the client silently
+fell back to showing local data. Now a connected client sees the host's
+workspaces, files, and git as intended. Update the **host** machine to 0.39.20.
+
 ## 0.39.19 — K2 Connect: driving a remote machine, done right
 
 Connecting to another machine now makes the **whole** app follow it —
