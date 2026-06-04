@@ -12,6 +12,8 @@ import { useHeartbeatSessionsStore } from '@/stores/heartbeat-sessions'
 // Phase 2.5 fix (finding #547) — retry the workspace-layouts load
 // when the daemon comes online after a slow boot.
 import { onDaemonConnected } from '@/lib/daemon-reconnect'
+// #625 — reset per-machine workspace-session state on a host switch.
+import { onActiveHostChange } from '@/stores/connect-host'
 import {
   subscribeToWorkspaceSessionEvents,
   type SessionAddedEvent,
@@ -4077,6 +4079,41 @@ onDaemonConnected(() => {
   if (hasLoadedWorkspaceSessions) return
   useTabsStore.getState().loadWorkspaceSessionsFromDb()
 })
+
+// #625 — host-switch reset of per-machine workspace-session state.
+//
+// `backgroundWorkspaces` / `workspaceLayouts` / `activeWorkspaceKey` are
+// keyed by LOCAL project/workspace IDs and were loaded ONCE at import via
+// `loadWorkspaceSessionsFromDb()` above. They (plus the module-level
+// `hasLoadedWorkspaceSessions` gate) are module singletons — they survive
+// the `<App key={hostKey}>` remount on a host switch. Without this reset,
+// after connecting to a REMOTE daemon the IconRail active section + Active
+// Bar rule 4 keep showing the LOCAL machine's stashed workspaces.
+//
+// On a real host CHANGE: clear the local-keyed state, drop the load gate,
+// and reload from the NEW host's daemon. `loadWorkspaceSessionsFromDb`
+// goes through the host-aware `daemonCli*` layer (reads `activeHost` at
+// call time), and `onActiveHostChange` fires AFTER `activeHost` has
+// flipped, so the reload targets the new host. Exported as a named fn so
+// a focused test can invoke it without a live store subscription.
+export function __resetWorkspaceSessionsForHostSwitch(): void {
+  hasLoadedWorkspaceSessions = false
+  useTabsStore.setState({
+    backgroundWorkspaces: {},
+    workspaceLayouts: {},
+    activeWorkspaceKey: null,
+  })
+  void useTabsStore.getState().loadWorkspaceSessionsFromDb()
+}
+
+onActiveHostChange(() => {
+  __resetWorkspaceSessionsForHostSwitch()
+})
+
+/** Test-only read of the module-level load gate (#625 reset assertions). */
+export function __hasLoadedWorkspaceSessionsForTests(): boolean {
+  return hasLoadedWorkspaceSessions
+}
 
 // Auto-save: subscribe to tab structure changes and persist to DB (debounced).
 // This provides crash resilience — lose at most ~1 second of tab changes.

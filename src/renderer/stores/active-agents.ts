@@ -14,6 +14,8 @@ import { usePresetsStore, parseCommand } from './presets'
 import { useSettingsStore } from './settings'
 import { KNOWN_AGENT_COMMANDS, AGENT_IDLE_THRESHOLD_MS } from '@shared/constants'
 import { agentChatId, worktreeChatId } from '@/lib/terminal-id'
+// #625 — reset agent pane state on a host switch.
+import { onActiveHostChange } from '@/stores/connect-host'
 
 export type PaneStatus = 'idle' | 'working' | 'permission' | 'review'
 
@@ -1110,3 +1112,40 @@ export function stopAgentPolling(): void {
   _agentStartTimes.clear()
   _launchRetries.clear()
 }
+
+// ── #625: host-switch reset of agent pane state ─────────────────────────
+//
+// `paneStatuses` / `paneProjectMap` / `agents` / `outputTimestamps` (store)
+// and `_hookEventAt` / `_agentStartTimes` / `_launchRetries` (module Maps)
+// are keyed by pane/terminal IDs that belong to the LOCAL machine's
+// workspaces (paneProjectMap maps pane → LOCAL projectId). As store/module
+// singletons they survive the `<App key={hostKey}>` remount on a host
+// switch, so after connecting to a REMOTE daemon `getProjectStatus` /
+// `getAggregateStatus` / `hasActiveAgents` would attribute the local box's
+// spinners to the remote — lighting the IconRail active dots and the
+// Active Bar `paneStatuses` read against the wrong host.
+//
+// On a real host CHANGE, wipe all of it: the new host's own polling +
+// lifecycle hooks repopulate it for the remote's panes. Pending local
+// retry timers are cancelled so a queued local triage can't fire against
+// the remote.
+export function __resetAgentStateForHostSwitch(): void {
+  for (const timer of _retryTimeouts) {
+    clearTimeout(timer)
+  }
+  _retryTimeouts.clear()
+  _hookEventAt.clear()
+  _agentStartTimes.clear()
+  _launchRetries.clear()
+  useActiveAgentsStore.setState({
+    agents: new Map(),
+    outputTimestamps: new Map(),
+    paneStatuses: new Map(),
+    paneProjectMap: new Map(),
+    backgroundSpawns: [],
+  })
+}
+
+onActiveHostChange(() => {
+  __resetAgentStateForHostSwitch()
+})

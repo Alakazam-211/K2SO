@@ -43,7 +43,7 @@
  */
 import React, { useEffect, useRef, useState } from 'react'
 import { getDaemonWs, invalidateDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
-import { useConnectHostStore } from '@/stores/connect-host'
+import { useConnectHostStore, activeHostKey } from '@/stores/connect-host'
 import { RemoteSignIn } from './RemoteSignIn'
 
 /** Shape of the daemon's GET /boot-status response. `detail` is free-text
@@ -197,12 +197,10 @@ async function fetchBootStatus(): Promise<DaemonBootStatus | null> {
 
 type AppComponent = React.ComponentType
 
-/** A stable identity for the active host — changes whenever the user
- *  switches daemons. Drives a gate re-poll + a clean App remount so all
- *  live sockets re-establish against the new host. */
-function activeHostKey(active: ReturnType<typeof useConnectHostStore.getState>['activeHost']): string {
-  return active === 'local' ? 'local' : `${active.id}:${active.hostname}:${active.port}`
-}
+// `activeHostKey` — the stable host identity that keys the <App> remount —
+// now lives in the connect-host store so the per-machine session stores
+// can reuse it without importing this React component (#625). Imported
+// above.
 
 export function ConnectionGate(): React.ReactElement {
   const [decision, setDecision] = useState<GateDecision>({ kind: 'wait', reason: 'starting' })

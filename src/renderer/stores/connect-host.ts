@@ -137,6 +137,50 @@ export function isLocalHostname(hostname: string): boolean {
 export type ActiveHost = 'local' | ConnectHost
 
 /**
+ * A stable string identity for the active host — `'local'` for This Mac,
+ * or `${id}:${hostname}:${port}` for a remote. Changes IFF the user
+ * switches daemons. ConnectionGate keys the `<App>` remount on this, and
+ * per-machine UI session stores (tabs.ts workspace sessions, ActiveBar
+ * memory maps, active-agents pane state) subscribe to detect a host
+ * CHANGE and reset their local-ID-keyed state so a remote host never
+ * shows the local machine's workspaces (#625).
+ *
+ * Lives here (not ConnectionGate) so the session stores can reuse it
+ * WITHOUT importing a React component — keeping the reset wiring free of
+ * an import cycle (connect-host imports nothing app-side).
+ */
+export function activeHostKey(active: ActiveHost): string {
+  return active === 'local' ? 'local' : `${active.id}:${active.hostname}:${active.port}`
+}
+
+/**
+ * Subscribe to ACTIVE-HOST CHANGES (not every store mutation). `onChange`
+ * fires only when {@link activeHostKey} actually differs from the prior
+ * value — never on the initial subscribe for the boot 'local' host, and
+ * never for unrelated mutations (token refresh, host-list edits) that
+ * leave the active host identity unchanged. Returns the zustand
+ * unsubscribe fn.
+ *
+ * This is the single seam the per-machine session stores hook to clear
+ * their local-ID-keyed state on a host switch (#625). It runs AFTER
+ * `activeHost` has already flipped, so any reload the callback triggers
+ * (e.g. `loadWorkspaceSessionsFromDb`) targets the NEW host via the
+ * host-aware daemon-cli layer.
+ */
+export function onActiveHostChange(
+  onChange: (nextKey: string, prevKey: string) => void,
+): () => void {
+  let lastKey = activeHostKey(useConnectHostStore.getState().activeHost)
+  return useConnectHostStore.subscribe((state) => {
+    const nextKey = activeHostKey(state.activeHost)
+    if (nextKey === lastKey) return
+    const prevKey = lastKey
+    lastKey = nextKey
+    onChange(nextKey, prevKey)
+  })
+}
+
+/**
  * Live connection state for the ACTIVE host, driven by ConnectionGate's
  * boot-status poll. The switcher renders a status dot from this.
  *   - 'connecting' → gate is polling / app not yet mounted (or switching)

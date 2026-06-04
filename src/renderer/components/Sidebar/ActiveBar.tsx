@@ -10,6 +10,8 @@ import { emit } from '@tauri-apps/api/event'
 // `sync:projects` for cross-window refresh; `touch-interaction-clear`
 // emitted no sync.
 import { daemonCliPost } from '@/lib/daemon-cli'
+// #625 — clear the local-ID-keyed Active Bar memory on a host switch.
+import { onActiveHostChange } from '@/stores/connect-host'
 import { showContextMenu } from '@/lib/context-menu'
 import ProjectAvatar from './ProjectAvatar'
 import { KeyCombo } from '@/components/KeySymbol'
@@ -76,6 +78,36 @@ function pruneExpiredDismissedProjects(now: number): void {
       _dismissedProjects.delete(id)
     }
   }
+}
+
+/**
+ * #625 — clear the Active Bar's local-ID-keyed session memory.
+ *
+ * `_activeBarMemory` and `_dismissedProjects` are module-level Maps keyed
+ * by LOCAL project IDs. As module singletons they survive the
+ * `<App key={hostKey}>` remount on a host switch, so after connecting to a
+ * REMOTE daemon rule 5 (`_activeBarMemory.has(p.id)`) and the dismiss gate
+ * would still reference the previous host's project IDs. Reset both on a
+ * real host CHANGE. Exported so a focused test can drive it directly.
+ */
+export function __resetActiveBarMemoryForHostSwitch(): void {
+  _activeBarMemory.clear()
+  _dismissedProjects.clear()
+}
+
+// Fires only on a real active-host change (never the initial 'local'),
+// AFTER `activeHost` has flipped. connect-host.ts imports nothing
+// app-side, so this subscription introduces no import cycle.
+onActiveHostChange(() => {
+  __resetActiveBarMemoryForHostSwitch()
+})
+
+/** Test-only inspection of the Active Bar memory maps (#625). */
+export function __activeBarMemoryForTests(): {
+  memory: Map<string, number>
+  dismissed: Map<string, number>
+} {
+  return { memory: _activeBarMemory, dismissed: _dismissedProjects }
 }
 
 /** Compute which projects appear in the Active Bar */
