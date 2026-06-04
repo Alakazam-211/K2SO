@@ -9,6 +9,8 @@ import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
 // Phase 2.5 fix (finding #547) — retry the initial load when the
 // daemon comes online after a slow boot or restart.
 import { onDaemonConnected } from '@/lib/daemon-reconnect'
+// #625 — re-init panel layout against the NEW host on a host switch.
+import { onActiveHostChange } from '@/stores/connect-host'
 
 type PanelTab = 'files' | 'changes' | 'history' | 'workspace'
 
@@ -283,4 +285,17 @@ usePanelsStore.getState().initFromSettings()
 onDaemonConnected(() => {
   if (hasLoadedFromDaemon) return
   usePanelsStore.getState().initFromSettings()
+})
+
+// #625 — on a real active-host CHANGE, drop BOTH load gates (mirroring
+// `__resetPanelsLoadGateForTests`) and re-init the panel layout from the
+// NEW host's daemon. `initFromSettings()` uses host-aware `settingsGet()`
+// (reads `activeHost` at call time), and `onActiveHostChange` fires AFTER
+// the flip, so this targets the new host. Resetting `hasLoadedFromDaemon`
+// re-arms the suppress-persist gate until the new host's baseline lands;
+// resetting `panelsInitialized` lets the one-time tab-migration persist
+// run once against the new host.
+onActiveHostChange(() => {
+  __resetPanelsLoadGateForTests()
+  void usePanelsStore.getState().initFromSettings()
 })

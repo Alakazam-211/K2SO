@@ -11,6 +11,8 @@ import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
 // Phase 2.5 fix (finding #547) — daemon-reconnect retry bus.
 import { onDaemonConnected } from '@/lib/daemon-reconnect'
+// #625 — re-init focus groups against the NEW host on a host switch.
+import { onActiveHostChange } from '@/stores/connect-host'
 import { useToastStore } from './toast'
 import { useProjectsStore } from './projects'
 
@@ -241,4 +243,16 @@ useFocusGroupsStore.getState().initFromSettings()
 onDaemonConnected(() => {
   if (hasLoadedFromDaemon) return
   useFocusGroupsStore.getState().initFromSettings()
+})
+
+// #625 — on a real active-host CHANGE, drop the load gate and re-init
+// (focusGroups + focusGroupsEnabled + activeFocusGroupId) from the NEW
+// host's daemon. `initFromSettings()` uses host-aware `settingsGet()` /
+// `daemonCliGet()` (reads `activeHost` at call time), and
+// `onActiveHostChange` fires AFTER the flip, so this targets the new host.
+// Resetting the gate keeps the suppress-persist invariant: writes are
+// blocked again until the new host's baseline lands.
+onActiveHostChange(() => {
+  hasLoadedFromDaemon = false
+  void useFocusGroupsStore.getState().initFromSettings()
 })

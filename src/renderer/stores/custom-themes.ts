@@ -4,6 +4,8 @@ import { parseCustomThemeJson, type ThemeColors } from '@/lib/editor-themes'
 import type { HighlightStyle } from '@codemirror/language'
 // Phase 2.5 fix (finding #547) — daemon-reconnect retry bus.
 import { onDaemonConnected } from '@/lib/daemon-reconnect'
+// #625 — reload custom themes against the NEW host on a host switch.
+import { onActiveHostChange } from '@/stores/connect-host'
 
 /** Phase 2.5 fix (finding #547) — flips to true once `loadCustomThemes`
  *  successfully fetches a theme list from the daemon. Used purely for
@@ -118,4 +120,13 @@ export const useCustomThemesStore = create<CustomThemesStore>((set, get) => ({
 onDaemonConnected(() => {
   if (hasLoadedFromDaemon) return
   useCustomThemesStore.getState().loadCustomThemes()
+})
+
+// #625 — on a real active-host CHANGE, drop the load gate and reload the
+// theme list from the NEW host's `~/.k2so/themes/`. `loadCustomThemes()`
+// uses host-aware `daemonCliGet()` (reads `activeHost` at call time), and
+// `onActiveHostChange` fires AFTER the flip, so this targets the new host.
+onActiveHostChange(() => {
+  hasLoadedFromDaemon = false
+  void useCustomThemesStore.getState().loadCustomThemes()
 })

@@ -11,6 +11,9 @@ import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
 // Phase 2.5 fix (finding #547) — daemon-reconnect retry bus.
 import { onDaemonConnected } from '@/lib/daemon-reconnect'
+// #625 — re-restore the active project/workspace against the NEW host on
+// a host switch.
+import { onActiveHostChange } from '@/stores/connect-host'
 import { useGitInitDialogStore } from './git-init-dialog'
 import { useToastStore } from './toast'
 import { useTabsStore, ensurePinnedAgentTabForMode } from './tabs'
@@ -575,4 +578,25 @@ useProjectsStore.getState().fetchProjects()
 onDaemonConnected(() => {
   if (hasLoadedFromDaemon) return
   useProjectsStore.getState().fetchProjects()
+})
+
+// #625 — on a real active-host CHANGE, re-run the active-project /
+// active-workspace restore against the NEW host. The projects LIST
+// already re-fetches on the `<App key={hostKey}>` remount, but this store
+// is a module singleton: its `activeProjectId` / `activeWorkspaceId`
+// survive the remount, so the restore branch inside `fetchProjects` (which
+// only runs when `!activeProjectId`) would be SKIPPED and the OLD host's
+// active selection would leak.
+//
+// We clear the active selection FIRST so the restore branch re-runs, and
+// drop `hasLoadedFromDaemon` so the early restore writes don't fire against
+// the new host before its baseline lands (fetchProjects flips the gate back
+// to true after a successful restore). `fetchProjects` reads `activeHost`
+// at call time via the host-aware `daemonCli*` / `settingsGet()` layer, and
+// `onActiveHostChange` fires AFTER the flip, so the restore targets the new
+// host's projects + its last-active selection.
+onActiveHostChange(() => {
+  hasLoadedFromDaemon = false
+  useProjectsStore.setState({ activeProjectId: null, activeWorkspaceId: null })
+  void useProjectsStore.getState().fetchProjects()
 })

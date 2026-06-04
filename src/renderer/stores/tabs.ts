@@ -4098,6 +4098,18 @@ onDaemonConnected(() => {
 // a focused test can invoke it without a live store subscription.
 export function __resetWorkspaceSessionsForHostSwitch(): void {
   hasLoadedWorkspaceSessions = false
+  // Cancel any pending layout-save debounce so a queued write keyed to the
+  // OLD host's workspace can't fire its `daemonCli*` persist against the
+  // NEW host after the flip.
+  if (persistDebounceTimer) {
+    clearTimeout(persistDebounceTimer)
+    persistDebounceTimer = null
+  }
+  // Tear down the active workspace's session-events WS to the OLD host so
+  // we don't keep a live subscription open against a daemon we've left.
+  // The new host's subscription is established when the next workspace is
+  // restored (subscribeForActiveWorkspace). Idempotent when no sub is open.
+  tearDownActiveWorkspaceSubscription()
   useTabsStore.setState({
     backgroundWorkspaces: {},
     workspaceLayouts: {},

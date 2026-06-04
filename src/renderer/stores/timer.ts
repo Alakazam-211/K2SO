@@ -12,6 +12,8 @@ import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
 import { daemonCliGet, daemonCliGetText, daemonCliPost } from '@/lib/daemon-cli'
 // Phase 2.5 fix (finding #547) — daemon-reconnect retry bus.
 import { onDaemonConnected } from '@/lib/daemon-reconnect'
+// #625 — re-init timer settings against the NEW host on a host switch.
+import { onActiveHostChange } from '@/stores/connect-host'
 
 /** Phase 2.5 fix (finding #547) — persist gate. See panels.ts. */
 let hasLoadedFromDaemon = false
@@ -543,4 +545,15 @@ useTimerStore.getState().initFromSettings()
 onDaemonConnected(() => {
   if (hasLoadedFromDaemon) return
   useTimerStore.getState().initFromSettings()
+})
+
+// #625 — on a real active-host CHANGE, drop the load gate and re-init
+// timer settings from the NEW host's daemon. `initFromSettings()` uses
+// host-aware `settingsGet()` / `daemonCliGet()` (reads `activeHost` at
+// call time), and `onActiveHostChange` fires AFTER the flip, so this
+// targets the new host. Resetting the gate re-arms the suppress-persist
+// invariant until the new host's baseline lands.
+onActiveHostChange(() => {
+  hasLoadedFromDaemon = false
+  void useTimerStore.getState().initFromSettings()
 })

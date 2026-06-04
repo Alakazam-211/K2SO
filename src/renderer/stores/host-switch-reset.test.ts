@@ -76,6 +76,14 @@ import {
 } from './tabs'
 import { __activeBarMemoryForTests } from '@/components/Sidebar/ActiveBar'
 import { useActiveAgentsStore } from './active-agents'
+// #625 — newly-wired daemon-backed stores that must re-fetch on a host
+// change so the client is a pure view of the active host's daemon.
+import { useSettingsStore } from './settings'
+import { useFocusGroupsStore } from './focus-groups'
+import { usePanelsStore, __resetPanelsLoadGateForTests } from './panels'
+import { useTimerStore } from './timer'
+import { useCustomThemesStore } from './custom-themes'
+import { useProjectsStore } from './projects'
 
 function makeRemoteHost(): ConnectHost {
   return {
@@ -176,5 +184,118 @@ describe('#625 host-switch resets per-machine UI session state', () => {
 
     expect(mem.memory.size).toBe(0)
     expect(useTabsStore.getState().activeWorkspaceKey).toBeNull()
+  })
+})
+
+// #625 — every REMAINING daemon-backed store must re-fetch/re-init on a
+// host change so the client shows the NEW host's data, not stale LOCAL
+// data left over from boot. Each case spies on the store's loader and
+// asserts: (a) NOT called on the initial 'local' subscribe (the boot load
+// already happened at module import, before the spy was installed),
+// (b) called exactly once on local → remote, (c) called again on the
+// switch BACK remote → local. Spying AFTER import means the import-time
+// boot init is never counted.
+describe('#625 host-switch re-fetches all remaining daemon-backed stores', () => {
+  beforeEach(() => {
+    __resetConnectHostStoreForTests() // activeHost back to 'local'
+    vi.restoreAllMocks()
+  })
+
+  it('settings.fetchSettings re-fires on a host change (and switch-back)', () => {
+    const spy = vi
+      .spyOn(useSettingsStore.getState(), 'fetchSettings')
+      .mockResolvedValue(undefined)
+
+    // Initial subscribe is already 'local'; no reset on the initial state.
+    expect(spy).not.toHaveBeenCalled()
+
+    useConnectHostStore.getState().selectHost(makeRemoteHost())
+    expect(spy).toHaveBeenCalledTimes(1)
+
+    useConnectHostStore.getState().selectHost('local')
+    expect(spy).toHaveBeenCalledTimes(2)
+  })
+
+  it('focus-groups.initFromSettings re-fires on a host change (and switch-back)', () => {
+    const spy = vi
+      .spyOn(useFocusGroupsStore.getState(), 'initFromSettings')
+      .mockResolvedValue(undefined)
+
+    expect(spy).not.toHaveBeenCalled()
+
+    useConnectHostStore.getState().selectHost(makeRemoteHost())
+    expect(spy).toHaveBeenCalledTimes(1)
+
+    useConnectHostStore.getState().selectHost('local')
+    expect(spy).toHaveBeenCalledTimes(2)
+  })
+
+  it('panels.initFromSettings re-fires + load gate is reset on a host change', () => {
+    // Pretend the LOCAL baseline already loaded (gate true) as it would be
+    // after the boot init.
+    __resetPanelsLoadGateForTests()
+    void usePanelsStore // referenced so the import isn't tree-shaken
+    const spy = vi
+      .spyOn(usePanelsStore.getState(), 'initFromSettings')
+      .mockResolvedValue(undefined)
+
+    expect(spy).not.toHaveBeenCalled()
+
+    useConnectHostStore.getState().selectHost(makeRemoteHost())
+    expect(spy).toHaveBeenCalledTimes(1)
+
+    useConnectHostStore.getState().selectHost('local')
+    expect(spy).toHaveBeenCalledTimes(2)
+  })
+
+  it('timer.initFromSettings re-fires on a host change (and switch-back)', () => {
+    const spy = vi
+      .spyOn(useTimerStore.getState(), 'initFromSettings')
+      .mockResolvedValue(undefined)
+
+    expect(spy).not.toHaveBeenCalled()
+
+    useConnectHostStore.getState().selectHost(makeRemoteHost())
+    expect(spy).toHaveBeenCalledTimes(1)
+
+    useConnectHostStore.getState().selectHost('local')
+    expect(spy).toHaveBeenCalledTimes(2)
+  })
+
+  it('custom-themes.loadCustomThemes re-fires on a host change (and switch-back)', () => {
+    const spy = vi
+      .spyOn(useCustomThemesStore.getState(), 'loadCustomThemes')
+      .mockResolvedValue(undefined)
+
+    expect(spy).not.toHaveBeenCalled()
+
+    useConnectHostStore.getState().selectHost(makeRemoteHost())
+    expect(spy).toHaveBeenCalledTimes(1)
+
+    useConnectHostStore.getState().selectHost('local')
+    expect(spy).toHaveBeenCalledTimes(2)
+  })
+
+  it('projects.fetchProjects re-fires + active selection clears so restore re-runs', () => {
+    // Seed an OLD-host active selection as if it survived the App remount.
+    useProjectsStore.setState({
+      activeProjectId: 'local-project-A',
+      activeWorkspaceId: 'local-ws-1',
+    })
+    const spy = vi
+      .spyOn(useProjectsStore.getState(), 'fetchProjects')
+      .mockResolvedValue(undefined)
+
+    expect(spy).not.toHaveBeenCalled()
+
+    useConnectHostStore.getState().selectHost(makeRemoteHost())
+    // Active selection cleared so the restore branch inside fetchProjects
+    // re-runs against the NEW host, and the loader re-fired.
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(useProjectsStore.getState().activeProjectId).toBeNull()
+    expect(useProjectsStore.getState().activeWorkspaceId).toBeNull()
+
+    useConnectHostStore.getState().selectHost('local')
+    expect(spy).toHaveBeenCalledTimes(2)
   })
 })

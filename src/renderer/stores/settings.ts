@@ -10,6 +10,9 @@ import {
   settingsUpdate,
   settingsReset,
 } from '@/lib/daemon-settings'
+// #625 — re-fetch settings against the NEW host on a host switch so the
+// client is a pure view of the active host's daemon.
+import { onActiveHostChange } from '@/stores/connect-host'
 
 export type SettingsSection = 'general' | 'terminal' | 'code-editor' | 'editors-agents' | 'keybindings' | 'projects' | 'timer' | 'workspace-states' | 'agent-skills' | 'heartbeats' | 'companion' | 'wake-scheduler' | 'permissions' | 'dictation-lab' | 'connections' | 'k2-connect'
 
@@ -331,6 +334,15 @@ export function getEffectiveKeybinding(
 
 // Initialize on import
 useSettingsStore.getState().fetchSettings()
+
+// #625 — on a real active-host CHANGE, re-fetch ALL app settings from the
+// NEW host's daemon. `fetchSettings()` does its own host-aware
+// `settingsGet()` (reads `activeHost` at call time) and `onActiveHostChange`
+// fires AFTER the flip, so this targets the new host. `_writeSeq` is a
+// write-safety counter and is intentionally NOT reset.
+onActiveHostChange(() => {
+  void useSettingsStore.getState().fetchSettings()
+})
 
 // Load custom editor themes from ~/.k2so/themes/ after settings are ready
 import('./custom-themes').then(({ useCustomThemesStore }) => {
